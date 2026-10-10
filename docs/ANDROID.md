@@ -297,7 +297,7 @@ clears, then dismisses remaining owned notices. An activity-stop notice has no a
 so waiting for its tag to empty would time out instead of re-arming.
 
 <!-- release-generate:campaign:start -->
-The v0.7.5 campaign qualified these scenarios only for its recorded candidate and devices. Each later candidate must pass them again on its exact signed bytes; historical evidence does not transfer. See the [release ledger](RELEASE_STATUS.md).
+The v0.7.5 qualification stays bound to its recorded candidate and devices. The v0.7.6 campaign must pass these scenarios again on its exact signed bytes before its matrix is qualified. See the [release ledger](RELEASE_STATUS.md).
 <!-- release-generate:campaign:end -->
 
 The complete checkpoint precedes effects and contains only an attempt UUID, identity binding hash,
