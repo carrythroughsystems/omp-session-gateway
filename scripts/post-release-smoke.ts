@@ -16,7 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defaultGatewayPaths, loadGatewayConfig } from "../apps/gateway/src/config.ts";
@@ -44,13 +44,47 @@ export function releaseSigningRepositories(repository: string, tag: string): str
     : ["carrythroughsystems/omp-session-gateway"];
 }
 
+// Finite predecessor-only exception; extending it requires a reviewed control change.
+// These immutable archive bytes retain their original keyless Cosign identity, not a claim
+// that GitHub build-provenance attestations were verified. No version range or runtime override.
+const HISTORICAL_PREDECESSORS: Readonly<Record<string, {
+  readonly archiveSha256: string;
+  readonly signerRepository: string;
+  readonly certificateIdentity: string;
+  readonly certificateOidcIssuer: string;
+}>> = {
+  "v0.7.5": {
+    archiveSha256: "171dec1a9902c934c99060b250f209cf627ce194d07da1412b35ad419c3ec57c",
+    signerRepository: "alphastorm/omp-session-gateway",
+    certificateIdentity: "https://github.com/alphastorm/omp-session-gateway/.github/workflows/signed-release.yml@refs/tags/v0.7.5",
+    certificateOidcIssuer: "https://token.actions.githubusercontent.com",
+  },
+};
+
+export function historicalPredecessor(repository: string, tag: string, archiveSha256: string) {
+  if (repository !== "carrythroughsystems/omp-session-gateway" && repository !== "alphastorm/omp-session-gateway") return undefined;
+  if (!Object.hasOwn(HISTORICAL_PREDECESSORS, tag)) return undefined;
+  const historical = HISTORICAL_PREDECESSORS[tag]!;
+  if (archiveSha256 !== historical.archiveSha256) throw new Error("historical predecessor archive digest differs from the finite allowlist");
+  return historical;
+}
+
 /** Historical signatures keep their original repository identity after a transfer. */
 export async function verifyReleaseSignatures(
   artifact: string,
   repository: string,
   tag: string,
   run: (argv: string[]) => Promise<unknown>,
+  predecessorArchiveSha256?: string,
 ): Promise<void> {
+  const historical = predecessorArchiveSha256 === undefined ? undefined : historicalPredecessor(repository, tag, predecessorArchiveSha256);
+  if (historical !== undefined) {
+    if (!releaseAssetNames(releaseVersion(tag)).attested.includes(basename(artifact))) throw new Error("historical predecessor asset is not in the release asset set");
+    await run(["cosign", "verify-blob", "--bundle", `${artifact}.sigstore.json`,
+      "--certificate-identity", historical.certificateIdentity,
+      "--certificate-oidc-issuer", historical.certificateOidcIssuer, artifact]);
+    return;
+  }
   const repositories = releaseSigningRepositories(repository, tag);
   let failure: unknown;
   for (const signer of repositories) {

@@ -75,6 +75,58 @@ test.each(["workflow", "ref", "issuer", "attestation"])("release verification re
   })).rejects.toThrow();
 });
 
+describe("historical predecessor provenance", () => {
+  const digest = "171dec1a9902c934c99060b250f209cf627ce194d07da1412b35ad419c3ec57c";
+  const repository = "carrythroughsystems/omp-session-gateway";
+  const archive = "omp-session-gateway-0.7.5-bun.tar";
+  const identity = "https://github.com/alphastorm/omp-session-gateway/.github/workflows/signed-release.yml@refs/tags/v0.7.5";
+
+  test("the allowlisted digest requires its original Cosign identity, not absent attestations", async () => {
+    const commands: string[][] = [];
+    await verifyReleaseSignatures(archive, repository, "v0.7.5", async argv => {
+      commands.push(argv);
+      if (argv[0] === "gh") throw new Error("historical attestation absent");
+      expect(argv[argv.indexOf("--certificate-identity") + 1]).toBe(identity);
+      expect(argv[argv.indexOf("--certificate-oidc-issuer") + 1]).toBe("https://token.actions.githubusercontent.com");
+      expect(argv[argv.indexOf("--bundle") + 1]).toBe(archive + ".sigstore.json");
+    }, digest);
+    expect(commands.map(argv => argv[0])).toEqual(["cosign"]);
+  });
+
+  test("a tampered digest refuses before signature execution", async () => {
+    const commands: string[][] = [];
+    await expect(verifyReleaseSignatures(archive, repository, "v0.7.5", async argv => {
+      commands.push(argv);
+    }, "0".repeat(64))).rejects.toThrow("historical predecessor archive digest");
+    expect(commands).toEqual([]);
+  });
+
+  test.each(["v0.7.6", "v0.7.5-prealpha.3", "v0.7.4"])("non-allowlisted %s still refuses a missing attestation", async tag => {
+    await expect(verifyReleaseSignatures(archive, repository, tag, async argv => {
+      if (argv[0] === "gh") throw new Error("attestation absent");
+    }, digest)).rejects.toThrow("attestation absent");
+  });
+
+  test("ordinary release verification cannot use the predecessor exception", async () => {
+    await expect(verifyReleaseSignatures(archive, repository, "v0.7.5", async argv => {
+      if (argv[0] === "gh") throw new Error("attestation absent");
+    })).rejects.toThrow("attestation absent");
+  });
+
+  test("the exception never admits an invalid Cosign signature", async () => {
+    await expect(verifyReleaseSignatures(archive, repository, "v0.7.5", async () => {
+      throw new Error("certificate refused");
+    }, digest)).rejects.toThrow("certificate refused");
+  });
+
+  test("the exception cannot authorize a different repository or asset", async () => {
+    await expect(verifyReleaseSignatures(archive, "foreign/gateway", "v0.7.5", async argv => {
+      if (argv[0] === "gh") throw new Error("attestation absent");
+    }, digest)).rejects.toThrow("attestation absent");
+    await expect(verifyReleaseSignatures("foreign.tar", repository, "v0.7.5", async () => {}, digest)).rejects.toThrow("historical predecessor asset");
+  });
+});
+
 test.skipIf(process.platform === "win32").each(["qualify-rollback.sh", "qualify-macos-host.sh", "provision-linux-qual.sh"])("%s uses the same closed historical signing policy", async script => {
   const source = await Bun.file(new URL(script, import.meta.url)).text();
   const policy = source.match(/release_signing_repositories\(\) \{[\s\S]*?\n\}/u)?.[0];

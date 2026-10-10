@@ -90,6 +90,56 @@ test("fresh attempts preserve the existing cut and incorporate new Unreleased fi
   expect(repeated).toEqual(result);
 });
 
+describe("historical predecessor receipt", () => {
+  // Adapt a complete fixture without changing the original recorded receipt or golden bytes.
+  const tree = Object.fromEntries(Object.entries(approveBefore).map(([path, bytes]) => [path, bytes.replaceAll("0.7.4", "0.7.6").replaceAll("0.7.3", "0.7.5")]));
+  const historical = JSON.parse(JSON.stringify(receipt).replaceAll("v0.7.4", "v0.7.6").replaceAll("v0.7.3", "v0.7.5"));
+  historical.predecessor.archiveSha256 = "171dec1a9902c934c99060b250f209cf627ce194d07da1412b35ad419c3ec57c";
+  const proof = historical.lanes.artifacts.evidence.predecessor;
+  proof.archiveSha256 = historical.predecessor.archiveSha256;
+  proof.githubAttestations = "historical-cosign";
+  proof.historicalSignature = {
+    archiveSha256: historical.predecessor.archiveSha256,
+    signerRepository: "alphastorm/omp-session-gateway",
+    certificateIdentity: "https://github.com/alphastorm/omp-session-gateway/.github/workflows/signed-release.yml@refs/tags/v0.7.5",
+    certificateOidcIssuer: "https://token.actions.githubusercontent.com",
+  };
+  const options: ReleaseGenerateOptions = { ...approveOptions, version: "v0.7.6", candidateTag: "v0.7.6-prealpha.1", receipt: historical };
+
+  test("approval truthfully projects the pinned predecessor's Cosign-only proof", () => {
+    const generated = generateRelease(tree, options);
+    expect(generated["docs/RELEASE_STATUS.md"]).toContain("v0.7.5 verified by digest-pinned historical Cosign bundles 3/3 (no GitHub build attestations)");
+  });
+
+  test.each(["signerRepository", "certificateIdentity", "certificateOidcIssuer", "archiveSha256"])("approval rejects a substituted historical %s", key => {
+    const invalid = structuredClone(historical);
+    invalid.lanes.artifacts.evidence.predecessor.historicalSignature[key] = "substituted";
+    expect(() => generateRelease(tree, { ...options, receipt: invalid })).toThrow("historical predecessor");
+  });
+
+  test("approval keeps candidate attestation checks strict", () => {
+    const invalid = structuredClone(historical);
+    invalid.lanes.artifacts.evidence.githubAttestations = "historical-cosign";
+    expect(() => generateRelease(tree, { ...options, receipt: invalid })).toThrow("GitHub attestations");
+  });
+
+  test("approval rejects a tampered predecessor digest or missing historical identity", () => {
+    const invalid = structuredClone(historical);
+    invalid.predecessor.archiveSha256 = invalid.lanes.artifacts.evidence.predecessor.archiveSha256 = "0".repeat(64);
+    expect(() => generateRelease(tree, { ...options, receipt: invalid })).toThrow("historical predecessor archive digest");
+    const missing = structuredClone(historical);
+    delete missing.lanes.artifacts.evidence.predecessor.historicalSignature;
+    expect(() => generateRelease(tree, { ...options, receipt: missing })).toThrow("historical predecessor");
+  });
+
+  test("approval refuses Cosign-only evidence for a non-allowlisted predecessor", () => {
+    const invalid = structuredClone(receipt) as typeof historical;
+    invalid.lanes.artifacts.evidence.predecessor.githubAttestations = "historical-cosign";
+    invalid.lanes.artifacts.evidence.predecessor.historicalSignature = proof.historicalSignature;
+    expect(() => generateRelease(approveBefore, { ...approveOptions, receipt: invalid })).toThrow("historical predecessor");
+  });
+});
+
 describe("fail closed without producing partial edits", () => {
   test("missing/duplicate markers and date", () => {
     const broken = { ...approveBefore, "docs/COMPATIBILITY.md": approveBefore["docs/COMPATIBILITY.md"]!.replace("release-generate:platforms:start", "missing") };

@@ -8,7 +8,7 @@ import { PRODUCT_VERSION as VERSION } from "./build-release.ts";
 import { runAdb, parseAndroidPackageVersion, readAndroidQualificationPin, requireAndroidDevicePreconditions, requireSingleDevice, resolveAndroidBrowserTarget } from "./android-device.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
 import { releaseVersion } from "./release-policy.ts";
-import { verifyReleaseSignatures } from "./post-release-smoke.ts";
+import { historicalPredecessor, verifyReleaseSignatures } from "./post-release-smoke.ts";
 import { fixtureModelError, OMP_FIXTURE_MODEL } from "./omp-fixture.ts";
 import { isSupportedOmpVersion, parseOmpVersion } from "./upstream-canary.ts";
 import { defaultLaneModules } from "./stable-lanes.ts";
@@ -799,15 +799,19 @@ function predecessorAssetDirectory(options: StableQualificationOptions): string 
 
 /**
  * Verifies one published release end to end: the signed tag, the exact asset set, GitHub release
- * state, checksums, and every attestation and Sigstore bundle. The candidate is a prerelease; the
- * predecessor must be the published stable that is GitHub Latest.
+ * state, checksums, and signatures. Candidates and non-allowlisted predecessors require every
+ * GitHub attestation; only a digest-pinned historical predecessor uses its original Cosign proof.
+ * The candidate is a prerelease; the predecessor must be the stable that is GitHub Latest.
  */
 export async function verifyRelease(
   tag: string,
   assetDirectory: string,
   stable: boolean,
   ghToken: string,
-): Promise<CandidateVerification> {
+): Promise<CandidateVerification & {
+  readonly githubAttestations: "3/3" | "historical-cosign";
+  readonly historicalSignature?: NonNullable<ReturnType<typeof historicalPredecessor>>;
+}> {
   const version = releaseVersion(tag);
   await runCommand(["git", "fetch", "origin", `refs/tags/${tag}:refs/tags/${tag}`], { timeoutMs: 120_000 });
   await runCommand(["git", "tag", "-v", tag], { timeoutMs: 120_000 });
@@ -833,17 +837,21 @@ export async function verifyRelease(
   );
   await runCommand(["shasum", "-a", "256", "-c", "SHA256SUMS"], { cwd: assetDirectory });
 
+  const archiveSha256 = sha256(await readFile(releaseArchivePath(assetDirectory, tag)));
+  const historicalSignature = stable ? historicalPredecessor(REPOSITORY, tag, archiveSha256) : undefined;
   for (const asset of attestedAssetNames(version)) {
     await verifyReleaseSignatures(join(assetDirectory, asset), REPOSITORY, tag, argv =>
       runCommand(argv, { timeoutMs: 300_000 }),
+      stable ? archiveSha256 : undefined,
     );
   }
-  const archiveSha256 = sha256(await readFile(releaseArchivePath(assetDirectory, tag)));
   const release = JSON.parse(
     await commandOutput(["gh", "release", "view", tag, "--repo", REPOSITORY, "--json", "url"]),
   ) as { url?: unknown };
   if (typeof release.url !== "string") throw new Error(`${tag} release URL is missing`);
-  return { tag, sourceCommit, archiveSha256, assetDirectory, releaseUrl: release.url };
+  return { tag, sourceCommit, archiveSha256, assetDirectory, releaseUrl: release.url,
+    githubAttestations: historicalSignature === undefined ? "3/3" : "historical-cosign",
+    ...(historicalSignature === undefined ? {} : { historicalSignature }) };
 }
 
 function assertSameRelease(recorded: CandidateIdentity | undefined, verified: CandidateIdentity, role: string): void {
@@ -2063,8 +2071,9 @@ async function runOwnedStableQualification(
           archiveSha256: predecessor.archiveSha256,
           signedTag: true,
           checksums: "passed",
-          githubAttestations: "3/3",
+          githubAttestations: predecessor.githubAttestations,
           sigstoreBundles: "3/3",
+          ...(predecessor.historicalSignature === undefined ? {} : { historicalSignature: predecessor.historicalSignature }),
         },
       };
       await checkpoint(evidence);
