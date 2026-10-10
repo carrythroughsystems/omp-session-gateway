@@ -10,9 +10,9 @@ than 18.1.20 lack this registry and are unsupported by the current gateway. The 
 requires Bun 1.4.0, TUN-mode Tailscale Serve, an exact login allowlist, and the one-time
 `collab.autoStart` setting below; native integration does not mean a bundled gateway or public access.
 
-`UPSTREAM.lock.json` records the exact engineering source baseline: `v18.8.3`, commit
-`3e3c488a58d294e3a10051da588628e2cfb9d35c`, tree
-`307c09c826aff7f0818c7aa19722c504646a49fd`. The minimum supported host version is distinct from
+`UPSTREAM.lock.json` records the exact engineering source baseline: `v18.8.9`, commit
+`fa5ff4a3a977a28b93d025f4cf50f046e019f18c`, tree
+`3017032181e2f9a11ee8269dabb963dc5acb4703`. The minimum supported host version is distinct from
 that exact host/source baseline. The embedded browser client has its own preserved
 [source and wire pins](../packages/collab-client/README.md), currently `v18.4.2`. The host-only
 baseline update does not import the `collab-web` Markdown-rendering changes upstream shipped in
@@ -34,7 +34,7 @@ Its source is `session.isStreaming`: true while running a turn, false while idle
 when omitted/null. It is not proof of successful completion or process exit. The parser validates
 this named extension. Other fields upstream adds under v1 are ignored rather than rejected and are
 never projected; a snapshot naming prompt/answer content is still refused (ADR-028).
-The minimum host version stayed unchanged when the engineering baseline later moved to v18.8.3.
+The minimum host version stayed unchanged when the engineering baseline later moved to v18.8.9.
 Mixed-version IPC tests do not qualify a new physical platform or full OMP version.
 
 The source activity extension projects known `busy` into browser metadata and supports stop alerts

@@ -15,6 +15,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Move the OMP engineering baseline to published v18.8.9 (#390), with pins derived by
+  `scripts/upstream-pins.ts`. Registry v1, discovery, the relay protocol, `collab.autoStart`, and
+  the collaboration host and `collab-web` sources are unchanged from v18.8.3; the relevant-path
+  changes add `/fork pane|window|tab` (can1357/oh-my-pi#13620) and `/dump anon`
+  (can1357/oh-my-pi#15077), which the gateway does not use. The embedded client remains at
+  v18.4.2. No qualification is claimed; published v0.7.5 stays bound to OMP v18.8.3.
 - The release driver lands an order only from `carrythroughsystems[bot]` on a `carrythrough/*`
   head: the delivery App's new name and branch prefix.
 
