@@ -858,6 +858,35 @@ published v0.7.4 remains qualified on v18.5.1.
 
 ---
 
+**Engineering baseline update (2026-10-10):** Accept published mainline v18.8.9
+(`fa5ff4a3a977a28b93d025f4cf50f046e019f18c`, tree `3017032181e2f9a11ee8269dabb963dc5acb4703`)
+as the host engineering pin (#390), with registry v1 and minimum host `18.1.20` unchanged.
+`scripts/upstream-pins.ts` derived every pin. Relative to v18.8.3, `packages/coding-agent/src/collab`
+(including `host.ts`, `registry.ts`, and `settings.ts`), `docs/collab.md`, `packages/collab-web`,
+and `packages/wire/src/index.ts` are byte-identical, so discovery files and their socket paths,
+registry v1, the relay protocol, and `collab.autoStart` behavior are unchanged. Merges
+`bf1b71aba7661ba6f6b557b7a223c714fd21ed6c` and `c25d7aba89736e04456c301d543e0202343faafa` name
+collab files in their first-parent diffs but leave them as at v18.8.3.
+[can1357/oh-my-pi#13620](https://github.com/can1357/oh-my-pi/pull/13620)
+(`be4acc5f44a1f3bbbe9446a9ac09c0172b59470b` through `c1d5701415544b7035f8e9c5f146bd324341e79d`)
+adds `ctx.ui.openTerminal()` and `/fork pane|window|tab` in `docs/extensions.md`,
+`modes/types.ts`, `extension-ui-controller.ts`, and `builtin-registry.ts`;
+[#15077](https://github.com/can1357/oh-my-pi/pull/15077)
+(`2616e32bed53579fb1dc36def292462b5e00fd12`) adds `/dump anon` to the collaboration slash
+commands; [#15058](https://github.com/can1357/oh-my-pi/pull/15058)
+(`61ad7d2b7486e4094830a55b209b3b57114a4b25`) and
+[#14908](https://github.com/can1357/oh-my-pi/pull/14908)
+(`428c97f28e9ff31ccfbb185e9472c5781dd81913`) change only TUI selector and `/wt` handler types;
+`bd0a8f72caff30d4807edce275be8479db849774` documents queued asides; and
+`6c99a355d64fe43e027b047ce97859a566afd760` plus the version bumps touch only `package.json`. The
+gateway reads and sends none of these. `@oh-my-pi/pi-wire` 18.8.9 changes only `tsp.ts`, and
+`@oh-my-pi/collab-web` stays 16.3.6; the embedded client keeps its v18.4.2 provenance and wire pin.
+
+This is source review only: no canary, candidate, or qualification is claimed for v18.8.9, and
+published v0.7.5 remains qualified on v18.8.3.
+
+---
+
 ## ADR-029 — Resume a backgrounded session by relaunching it, never by retaining its capability
 
 **Status:** Accepted

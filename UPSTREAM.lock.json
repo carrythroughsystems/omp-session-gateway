@@ -1,14 +1,14 @@
 {
   "$schema": "./schemas/upstream-lock.schema.json",
   "status": "pinned-main",
-  "observedAt": "2026-10-08",
+  "observedAt": "2026-10-10",
   "repository": "https://github.com/can1357/oh-my-pi",
-  "tag": "v18.8.3",
-  "commit": "3e3c488a58d294e3a10051da588628e2cfb9d35c",
-  "packageVersion": "18.8.3",
+  "tag": "v18.8.9",
+  "commit": "fa5ff4a3a977a28b93d025f4cf50f046e019f18c",
+  "packageVersion": "18.8.9",
   "packageVersions": {
-    "@oh-my-pi/pi-coding-agent": "18.8.3",
-    "@oh-my-pi/pi-wire": "18.8.3",
+    "@oh-my-pi/pi-coding-agent": "18.8.9",
+    "@oh-my-pi/pi-wire": "18.8.9",
     "@oh-my-pi/collab-web": "16.3.6"
   },
   "bunVersion": "1.4.0",
@@ -30,6 +30,7 @@
     "packages/collab-web/src/lib/client.ts"
   ],
   "notes": [
+    "Baseline moved to published mainline OMP v18.8.9 on 2026-10-10 (issue #390). Relative to v18.8.3, the relevant paths change in: upstream PR #13620's multiplexer terminal-launch series (be4acc5f44a1f3bbbe9446a9ac09c0172b59470b, 233badacec6ddc139ae12b48ce5698abe4a3a9f0, 76181b739b73d4e89634bd129863510bc9b103a1, 313e26b3816106bd901f0857d47296818834e5da, 43a47a3b27cf0a853afe0de492c00e38a4b42f86, 8d261e5ad757298430ef17c23ca876f80f69c3ea, b8243266088040f4db19438cc70e3b1282709433, c6a689728087e266e022872e75e0c018f104a3c7, 534cfc9432032dbe0ad3033e597739aa92115c5a, c1d5701415544b7035f8e9c5f146bd324341e79d), which adds ctx.ui.openTerminal() and `/fork pane|window|tab` in docs/extensions.md, modes/types.ts, extension-ui-controller.ts, and builtin-registry.ts; PR #15077 (2616e32bed53579fb1dc36def292462b5e00fd12), which adds the `/dump anon` subcommand to builtin-collaboration.ts and a TUI handler to modes/types.ts; PR #15058 (61ad7d2b7486e4094830a55b209b3b57114a4b25), an inline /omfg selector option in extension-ui-controller.ts and modes/types.ts; PR #14908 (428c97f28e9ff31ccfbb185e9472c5781dd81913), a worktree option on the TUI /wt handler type; bd0a8f72caff30d4807edce275be8479db849774, an extension-docs note on queued asides; 6c99a355d64fe43e027b047ce97859a566afd760 and the 18.8.4 through 18.8.9 version bumps in package.json; and merges bf1b71aba7661ba6f6b557b7a223c714fd21ed6c and c25d7aba89736e04456c301d543e0202343faafa, whose first-parent diffs name collab and collab-web files but leave them byte-identical to v18.8.3. None of these is read or sent by the gateway. packages/coding-agent/src/collab (host.ts, registry.ts, settings.ts), docs/collab.md, packages/wire/src/index.ts, and packages/collab-web are unchanged, so registry v1, discovery files and their socket paths, the relay protocol, and collab.autoStart behavior are unchanged; @oh-my-pi/pi-wire moves to 18.8.9 with changes confined to tsp.ts, and @oh-my-pi/collab-web stays 16.3.6. scripts/upstream-pins.ts derived the tag, commit, tree, package versions, and both native pins. No canary, candidate, or qualification is claimed for this engineering baseline; the minimum supported host stays 18.1.20, and published v0.7.5 qualification remains bound to v18.8.3.",
     "Baseline moved to published mainline OMP v18.8.3 on 2026-10-08 (issue #368). Relative to v18.5.1, the relevant paths change in: upstream PR #14714 (418bc4aa7f67cb58deb3d143153656fa23b0e7ba, v18.8.0), which mirrors events, entries, bus, state, and agents frames only while a guest is joined and serializes each replicated payload once, with welcome and snapshot-chunk frame fields, the packed relay envelope, and the registry publication path unchanged; PR #14715 (0b52c2ce96d75a7998dc2fbc4b6c24cbb04a0922) and f085ca82927e1c3a35b13b7b5e6a928abbfa568b, which change only the CLI guest's event dispatch and keep a switched replica's model; PR #14728 (2c2e93373c18ffadc2e1bcd6240cc5534716b4e5) and PR #14667 (91fef9247f8fcd1bb7f3b68123102ce9b6fc1888), collab-web render and Markdown performance changes the embedded client does not import; 75d643ed41ebbfd0c0fb760c7a959365c27384a0 and 355b5d9685529d337875d7d387ef53b1f32e7a72 (v18.8.1), which write generated session titles in the card form `<icon> <CODE>: <title>`, so an auto-titled host's registry sessionName may now start with an emoji or Nerd Fonts glyph and a code of up to six capitals, still a string well under the gateway's 256-code-point label bound; and TUI, model-kind, extension-docs, and version-bump commits in modes/types.ts, extension-ui-controller.ts, docs/extensions.md, and package.json that the gateway does not read. registry.ts, settings.ts, docs/collab.md, the slash commands, and packages/wire/src/index.ts are unchanged, so registry v1, discovery files and their socket paths, the relay protocol, and collab.autoStart behavior are unchanged; @oh-my-pi/pi-wire moves to 18.8.3 with changes confined to tsp.ts, and @oh-my-pi/collab-web stays 16.3.6. scripts/upstream-pins.ts derived the tag, commit, tree, package versions, and both native pins. No canary, candidate, or qualification is claimed for this engineering baseline; the minimum supported host stays 18.1.20, and published v0.7.4 qualification remains bound to v18.5.1.",
     "Baseline moved to published mainline OMP v18.5.1 on 2026-10-03. It is the first release carrying upstream PR #14112 (merge b1e84317b74f5171137fecec4e1c578128f3aa72; v18.5.0 predates it): a collab.autoStart launch whose relay is unreachable or times out now retries on the existing relaunch backoff, and the recovered room still publishes generation 1. Relative to v18.4.12, #14112 is the only change to the collab host and controller; guest.ts gives a CLI guest's replica its own session-ownership lease. registry.ts, settings.ts, packages/wire/src/index.ts, and packages/collab-web are unchanged, so registry v1 and the relay protocol are unchanged. Canary run 37140425389 passed all ten Linux stages and all seven supported Windows stages, with three intentional Windows keystroke-stage skips. The minimum supported host stays 18.1.20; published v0.7.3 qualification remains bound to v18.4.12, not this engineering baseline.",
     "Additive compatibility, 2026-09-23: accept optional busy activity from upstream PR #12844, merge 1eb2f51bb4d1a4324e46cdfad5c259be9b8ccee9, reported in published OMP 18.2.9. Missing/null is unknown.",
@@ -39,9 +40,9 @@
     "The embedded client keeps its collab-web provenance and npm pi-wire pin at v18.4.2. Upstream collab-web at v18.5.1 differs from v18.4.2 only in its changelog and the transcript/math.ts Markdown performance changes first shipped in v18.4.12; this host-only baseline update does not import them. Client provenance and local modifications remain recorded independently in packages/collab-client/upstream/UPSTREAM.json.",
     "scripts/upstream-pins.ts derived the tag, commit, tree, package versions, and both native pins. The Darwin arm64 native hashes identify the official 18.5.1 npm tarball and its pi_natives.darwin-arm64.node payload; the tarball matched the registry sha512 integrity and sha1 shasum before hashing. These measured source-build inputs are not a qualification result. The script requires every relevant path to exist at the tag: collab settings live in packages/coding-agent/src/collab/settings.ts, and the earlier packages/coding-agent/src/config/settings-schema.ts entry named a file upstream deleted before v18.4.2."
   ],
-  "tree": "307c09c826aff7f0818c7aa19722c504646a49fd",
+  "tree": "3017032181e2f9a11ee8269dabb963dc5acb4703",
   "darwinArm64Native": {
-    "tarballSha256": "67bc93ce1ede3097de4b42c07b5f0a3bc8fbc707d941a27368debb81c1d60455",
-    "binarySha256": "efce5da3bd67933b98288068fc9768acc02c5cdd0af0a897418f6d99a31fded9"
+    "tarballSha256": "ca17f70db6caf417710712aad077eb459070ac31d3eb79ab5163ea9ce1ad6edf",
+    "binarySha256": "76a98a98c7adbe5481e1ac3ede2b7c6c889443dc5edd10929854e1ebde10c1b7"
   }
 }

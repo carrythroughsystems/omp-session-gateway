@@ -1002,6 +1002,18 @@ Recorded 2026-10-03. Published-byte smoke passed against the stable source and d
 
 This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
 
+## Engineering baseline v18.8.9 — source pins only
+
+On 2026-10-10 (#390), `scripts/upstream-pins.ts` derived the stock OMP v18.8.9 source pin
+`fa5ff4a3a977a28b93d025f4cf50f046e019f18c`, tree `3017032181e2f9a11ee8269dabb963dc5acb4703`, and
+the Darwin arm64 and Windows x64 native hashes from official npm tarballs after verifying
+registry integrity. Source review from v18.8.3 found the collaboration host, registry, settings,
+`collab-web`, and `packages/wire/src/index.ts` unchanged, so registry v1, discovery, the relay
+protocol, and `collab.autoStart` are unchanged; can1357/oh-my-pi#13620 adds
+`/fork pane|window|tab` and can1357/oh-my-pi#15077 adds `/dump anon`, neither used by the gateway.
+The embedded client stays at v18.4.2. No canary, candidate, campaign, or platform qualification is
+claimed; the published matrix above is unchanged.
+
 ## Engineering baseline v18.8.3 — source pins only
 
 On 2026-10-08 (#368), `scripts/upstream-pins.ts` derived the stock OMP v18.8.3 source pin
