@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { type GatewayConfig, ensureRuntimeDirectories } from "./config.ts";
 import { serializedPathForms } from "./service.ts";
 
-export const GATEWAY_VERSION = "0.7.5";
+export const GATEWAY_VERSION = "0.7.6";
 const VERSION_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/u;
 const VERSION_NAME_PATTERN =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?-[0-9a-f]{12}$/u;

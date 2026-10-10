@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.7.6] — 2026-10-10
+
+This release uses stock OMP v18.8.9 as its engineering baseline. The 7 changelog entries below record the changes since v0.7.5. Historical receipts do not qualify these bytes.
+
 ### Added
 
 - Request a gateway release weekly on Mondays at 15:17 UTC after the exact-version stock OMP
