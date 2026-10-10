@@ -498,6 +498,24 @@ writes a private receipt (schema 3) under
 `~/.local/share/omp-session-gateway/qualification/<tag>/stable-qualification.json`. Retargeted
 scripts are not qualification evidence until these lanes run against the exact candidate.
 
+The predecessor verifier has one finite, committed historical exception in
+`scripts/post-release-smoke.ts`: `v0.7.5`, archive SHA256
+`171dec1a9902c934c99060b250f209cf627ce194d07da1412b35ad419c3ec57c`.
+Its archive, SBOM and checksums must verify against their retained keyless Cosign bundles with
+certificate identity
+`https://github.com/alphastorm/omp-session-gateway/.github/workflows/signed-release.yml@refs/tags/v0.7.5`
+and OIDC issuer `https://token.actions.githubusercontent.com`. There is no long-lived public key.
+The signed tag, exact asset set, published Latest state, checksums and actual archive digest
+remain mandatory. This exception acknowledges absent historical build-provenance attestations;
+it does not create replacement provenance or qualify any candidate. The receipt records
+`githubAttestations: "historical-cosign"` and the pinned original signing identity, and approval
+rechecks that evidence against the same finite allowlist. Candidates, normal publication smoke,
+and every non-allowlisted predecessor still require all three online GitHub build attestations.
+A changed historical digest or failed Cosign verification fails closed; an attestation outage
+never selects the exception. Extending the list is a reviewed control-policy change, not a
+runtime override. Preserve failed campaign receipts and the host lease during recovery; a new
+orchestrator commit cannot resume or rewrite a receipt bound to the old commit.
+
 Before spending a campaign, prove changed or previously failing lanes end to end in development
 mode at the exact orchestrator tree. In particular, run the expanded Push lane with the pinned Bun:
 `bun scripts/android-push-qualification.ts development <published archive>` (with the matching

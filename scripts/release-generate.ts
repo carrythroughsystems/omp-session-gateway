@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { assertStableReleaseQualification, releaseVersion } from "./release-policy.ts";
 import { externalCleanupCurrent, validateStableQualificationReceipt } from "./stable-qualification.ts";
+import { historicalPredecessor } from "./post-release-smoke.ts";
 
 const REPO = "https://github.com/carrythroughsystems/omp-session-gateway";
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
@@ -150,14 +151,23 @@ function qualification(receiptValue: unknown, candidateTag: string, tag: string,
   const artifacts = e("artifacts");
   equal(artifacts.sourceCommit, source, "artifact source");
   equal(artifacts.archiveSha256, archive, "artifact archive");
-  for (const proof of [artifacts, object(artifacts.predecessor, "verified predecessor")]) {
+  const verifiedPrevious = object(artifacts.predecessor, "verified predecessor");
+  for (const proof of [artifacts, verifiedPrevious]) {
     requireTrue(proof.signedTag, "signed tag");
     equal(proof.checksums, "passed", "checksums");
-    equal(proof.githubAttestations, "3/3", "GitHub attestations");
     equal(proof.sigstoreBundles, "3/3", "Sigstore bundles");
   }
-  const verifiedPrevious = object(artifacts.predecessor, "verified predecessor");
   for (const key of ["tag", "sourceCommit", "archiveSha256"]) equal(verifiedPrevious[key], predecessor[key], `verified predecessor ${key}`);
+  equal(artifacts.githubAttestations, "3/3", "GitHub attestations");
+  const historical = verifiedPrevious.githubAttestations === "historical-cosign";
+  if (historical) {
+    const expected = historicalPredecessor("carrythroughsystems/omp-session-gateway", previousTag, String(predecessor.archiveSha256));
+    if (expected === undefined) throw new Error("historical predecessor is not in the finite allowlist");
+    const identity = object(verifiedPrevious.historicalSignature, "historical predecessor signature");
+    for (const [key, value] of Object.entries(expected)) equal(identity[key], value, `historical predecessor ${key}`);
+  } else {
+    equal(verifiedPrevious.githubAttestations, "3/3", "GitHub attestations");
+  }
   const mac = e("macos"), android = e("android");
   const windows = object(e("windows").result, "Windows result");
   const windowsOmp = object(windows.omp, "Windows OMP");
@@ -196,7 +206,9 @@ function qualification(receiptValue: unknown, candidateTag: string, tag: string,
   const runId = number(e("debian").runId, "Debian run");
   equal(e("debian").conclusion, "success", "Debian run conclusion");
   const summaries: Record<typeof LANES[number], string> = {
-    artifacts: `Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; ${previousTag} verified the same way.`,
+    artifacts: historical
+      ? `Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; ${previousTag} verified by digest-pinned historical Cosign bundles 3/3 (no GitHub build attestations).`
+      : `Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; ${previousTag} verified the same way.`,
     debian: `Run ${runId} succeeded (${REPO}/actions/runs/${runId}); OS/kernel versions and migration counts are not exported.`,
     macos: `${text(mac.hardware, "Mac model")}, ${text(mac.os, "Mac OS")}; doctor ${text(mac.doctor, "doctor")}, rollback ${text(mac.rollbackInvariants, "rollback")}; native addon ${text(mac.nativeAddonSha256, "native addon", DIGEST)}.`,
     ompPublication: `Stock OMP ${baseline}; generation ${number(e("ompPublication").generation, "generation")}; publication, View/Control, new-generation/fork/resume and revocation.`,

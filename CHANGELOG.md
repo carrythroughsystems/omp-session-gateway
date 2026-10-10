@@ -30,6 +30,10 @@ This release uses stock OMP v18.8.9 as its engineering baseline. The 7 changelog
 
 ### Fixed
 
+- Verify only the exact digest-pinned v0.7.5 rollback predecessor using its retained original
+  Cosign identity when historical build attestations are absent. Record that proof truthfully
+  in qualification and approval; candidates and every other predecessor still require online
+  GitHub attestations. Changed historical bytes or a failed signature refuse qualification.
 - Run the release driver's detached jobs at interactive priority, as an operator's SSH session
   does. Its LaunchAgent ran as `Background`, then `Standard`, and every job it started inherited
   launchd's limits: on the Studio, `Standard` lowered their base priority from 31 to 20 and
