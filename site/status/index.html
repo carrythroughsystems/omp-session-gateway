@@ -6,14 +6,14 @@
 <meta name="theme-color" content="#060809">
 <title>OMP Session Gateway status — current qualified release and support boundary</title>
 <!-- release-generate:description:start -->
-<meta name="description" content="Stable v0.7.5 is published as immutable GitHub Latest. Stock OMP v18.8.3; exact candidate host/client evidence in the release ledger.">
+<meta name="description" content="v0.7.6 is qualified for stable promotion; publication is pending. Stock OMP v18.8.9; exact candidate host/client evidence in the release ledger.">
 <!-- release-generate:description:end -->
 <link rel="canonical" href="https://carrythroughsystems.github.io/omp-session-gateway/status/">
 <link rel="stylesheet" href="../site.css">
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
 <meta property="og:title" content="OMP Session Gateway status — current qualified release and support boundary">
 <!-- release-generate:og-description:start -->
-<meta property="og:description" content="Stable v0.7.5 is published as immutable GitHub Latest. Stock OMP v18.8.3; exact candidate host/client evidence in the release ledger.">
+<meta property="og:description" content="v0.7.6 is qualified for stable promotion; publication is pending. Stock OMP v18.8.9; exact candidate host/client evidence in the release ledger.">
 <!-- release-generate:og-description:end -->
 <meta property="og:image" content="https://carrythroughsystems.github.io/omp-session-gateway/og.png">
 <meta property="og:type" content="website">
@@ -34,22 +34,22 @@
 <main>
 <p class="eyebrow">Native OMP integration · release status</p>
 <!-- release-generate:status:start -->
-<h1>Stable v0.7.5</h1>
-<p class="lede">Stable v0.7.5 is published as immutable GitHub Latest. Release v0.7.5. Signed candidate v0.7.5-prealpha.2; source 98b101ed8b2459cf6d635a7390ed6f10faae75ed; archive SHA-256 06e76965c559b6bdf1b96539c65083dda6a03f5db08957ac4e445dc454a71a53. Published v0.7.4 remains the predecessor. Stock OMP v18.8.3 (3e3c488a58d294e3a10051da588628e2cfb9d35c), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the release ledger. The separate published-byte smoke passed; it does not expand the candidate matrix.</p>
+<h1>Qualified v0.7.6</h1>
+<p class="lede">v0.7.6 is qualified for stable promotion; publication is pending. Release v0.7.6. Signed candidate v0.7.6-prealpha.2; source 28fbdf57b1eab8437f2bba0cd1f753960cc3925f; archive SHA-256 96a78778608b1b232fd586abc012199c2cd10d6edb7b38a60f241d09720a89cd. Published v0.7.5 remains the predecessor. Stock OMP v18.8.9 (fa5ff4a3a977a28b93d025f4cf50f046e019f18c), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the release ledger. Stable publication and published-byte smoke are pending.</p>
 <table>
 <tr><th>Lane</th><th>Attempts</th><th>Exact evidence</th></tr>
-<tr><td>artifacts</td><td>2</td><td>Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; v0.7.4 verified the same way.</td></tr>
-<tr><td>debian</td><td>1</td><td>Run 37743587268 succeeded (https://github.com/alphastorm/omp-session-gateway/actions/runs/37743587268); OS/kernel versions and migration counts are not exported.</td></tr>
-<tr><td>macos</td><td>1</td><td>VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon efce5da3bd67933b98288068fc9768acc02c5cdd0af0a897418f6d99a31fded9.</td></tr>
-<tr><td>ompPublication</td><td>2</td><td>Stock OMP v18.8.3; generation 1; publication, View/Control, new-generation/fork/resume and revocation.</td></tr>
-<tr><td>android</td><td>1</td><td>Pixel 8 Pro, Android 17 build CP3A.261005.005, Chrome 154.0.8037.126; same-page unlock 7138 ms, Airplane 4036 ms, Doze 137 ms; 7/7 detectable; clean.</td></tr>
+<tr><td>artifacts</td><td>1</td><td>Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; v0.7.5 verified by digest-pinned historical Cosign bundles 3/3 (no GitHub build attestations).</td></tr>
+<tr><td>debian</td><td>1</td><td>Run 38093821367 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/38093821367); OS/kernel versions and migration counts are not exported.</td></tr>
+<tr><td>macos</td><td>1</td><td>VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon 76a98a98c7adbe5481e1ac3ede2b7c6c889443dc5edd10929854e1ebde10c1b7.</td></tr>
+<tr><td>ompPublication</td><td>1</td><td>Stock OMP v18.8.9; generation 1; publication, View/Control, new-generation/fork/resume and revocation.</td></tr>
+<tr><td>android</td><td>1</td><td>Pixel 8 Pro, Android 17 build CP3A.261005.005, Chrome 154.0.8037.126; same-page unlock 6991 ms, Airplane 6906 ms, Doze 123 ms; 7/7 detectable; clean.</td></tr>
 <tr><td>androidPush</td><td>1</td><td>Android 17, Chrome 154.0.8037.126, installed WebAPK; force-stop delivered_while_force_stopped, Doze delivered_after_doze_exit; outcomes are observed variants, not delivery guarantees.</td></tr>
 <tr><td>androidPushCleanup</td><td>1</td><td>Device, browser and fixture restored.</td></tr>
-<tr><td>deviceCloud</td><td>2</td><td>TestingBot real devices, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6); iPad (9th generation) (26.6, safari 26.6); Galaxy S26 (16.0.0, chrome 145.0.7632.159). Home Screen alerts do not qualify lock-screen presentation.</td></tr>
-<tr><td>deviceCloudCleanup</td><td>2</td><td>Restored.</td></tr>
-<tr><td>relay</td><td>1</td><td>1800 seconds, 2026-10-08T07:40:25.015Z–2026-10-08T08:10:25.030Z; 2 transitions, final phase live. Eight-hour endurance is not claimed.</td></tr>
-<tr><td>cleanup</td><td>2</td><td>Zero gateway processes, listeners and live OMP hosts.</td></tr>
-<tr><td>windows</td><td>1</td><td>Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.7.4 and fresh standard-account lifecycle; interactive logon, not unattended boot.</td></tr>
+<tr><td>deviceCloud</td><td>1</td><td>TestingBot real devices, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6); iPad (9th generation) (26.6, safari 26.6); Galaxy S26 (16.0.0, chrome 145.0.7632.159). Home Screen alerts do not qualify lock-screen presentation.</td></tr>
+<tr><td>deviceCloudCleanup</td><td>1</td><td>Restored.</td></tr>
+<tr><td>relay</td><td>1</td><td>1800 seconds, 2026-10-10T23:18:36.965Z–2026-10-10T23:48:36.978Z; 2 transitions, final phase live. Eight-hour endurance is not claimed.</td></tr>
+<tr><td>cleanup</td><td>1</td><td>Zero gateway processes, listeners and live OMP hosts.</td></tr>
+<tr><td>windows</td><td>1</td><td>Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.7.5 and fresh standard-account lifecycle; interactive logon, not unattended boot.</td></tr>
 <tr><td>windowsCleanup</td><td>1</td><td>Zero instances and firewalls; tailnet node deleted and access vault removed.</td></tr>
 </table>
 <!-- release-generate:status:end -->
@@ -73,7 +73,7 @@
 <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/COMPATIBILITY.md">compatibility matrix</a> ·
 <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md">release ledger</a> (authoritative where they disagree)</p>
 <!-- release-generate:verified:start -->
-<p class="verified">v0.7.5-prealpha.2: 2026-10-08T07:27:12.176Z–2026-10-08T10:40:17.842Z. All thirteen lanes passed. Publication and separate published-byte smoke passed. The approval driver must pass runtime comparison before merging; the campaign receipt alone does not prove that later comparison.</p>
+<p class="verified">v0.7.6-prealpha.2: 2026-10-10T23:05:18.721Z–2026-10-10T23:52:42.422Z. All thirteen lanes passed. Publication and published-byte smoke are pending. The approval driver must pass runtime comparison before merging; the campaign receipt alone does not prove that later comparison.</p>
 <!-- release-generate:verified:end -->
 <h2>Fork-era release history</h2>
 <p><a href="https://github.com/alphastorm/omp-session-gateway/releases/tag/v0.3.0">v0.3.0</a> was approved
