@@ -1,7 +1,7 @@
 <!-- release-generate:summary:start -->
 # OMP Session Gateway
 
-> Native integration with stock Oh My Pi (OMP) >=18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. Stable v0.7.5 is published as immutable GitHub Latest. The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun 1.4.0, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by OMP.
+> Native integration with stock Oh My Pi (OMP) >=18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. v0.7.6 is qualified for stable promotion; publication is pending. The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun 1.4.0, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by OMP.
 <!-- release-generate:summary:end -->
 
 ## Supported platforms
@@ -11,20 +11,20 @@
 ## Current qualification boundary
 
 <!-- release-generate:boundary:start -->
-Stable v0.7.5 is published as immutable GitHub Latest. [Release v0.7.5](https://github.com/alphastorm/omp-session-gateway/releases/tag/v0.7.5). Signed candidate v0.7.5-prealpha.2; source 98b101ed8b2459cf6d635a7390ed6f10faae75ed; archive SHA-256 06e76965c559b6bdf1b96539c65083dda6a03f5db08957ac4e445dc454a71a53. Published v0.7.4 remains the predecessor. Stock OMP v18.8.3 (3e3c488a58d294e3a10051da588628e2cfb9d35c), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
+v0.7.6 is qualified for stable promotion; publication is pending. [Release v0.7.6](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.6). Signed candidate v0.7.6-prealpha.2; source 28fbdf57b1eab8437f2bba0cd1f753960cc3925f; archive SHA-256 96a78778608b1b232fd586abc012199c2cd10d6edb7b38a60f241d09720a89cd. Published v0.7.5 remains the predecessor. Stock OMP v18.8.9 (fa5ff4a3a977a28b93d025f4cf50f046e019f18c), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
 
-- artifacts (2 attempts): Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; v0.7.4 verified the same way.
-- debian (1 attempt): Run 37743587268 succeeded (https://github.com/alphastorm/omp-session-gateway/actions/runs/37743587268); OS/kernel versions and migration counts are not exported.
-- macos (1 attempt): VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon efce5da3bd67933b98288068fc9768acc02c5cdd0af0a897418f6d99a31fded9.
-- ompPublication (2 attempts): Stock OMP v18.8.3; generation 1; publication, View/Control, new-generation/fork/resume and revocation.
-- android (1 attempt): Pixel 8 Pro, Android 17 build CP3A.261005.005, Chrome 154.0.8037.126; same-page unlock 7138 ms, Airplane 4036 ms, Doze 137 ms; 7/7 detectable; clean.
+- artifacts (1 attempt): Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; v0.7.5 verified by digest-pinned historical Cosign bundles 3/3 (no GitHub build attestations).
+- debian (1 attempt): Run 38093821367 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/38093821367); OS/kernel versions and migration counts are not exported.
+- macos (1 attempt): VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon 76a98a98c7adbe5481e1ac3ede2b7c6c889443dc5edd10929854e1ebde10c1b7.
+- ompPublication (1 attempt): Stock OMP v18.8.9; generation 1; publication, View/Control, new-generation/fork/resume and revocation.
+- android (1 attempt): Pixel 8 Pro, Android 17 build CP3A.261005.005, Chrome 154.0.8037.126; same-page unlock 6991 ms, Airplane 6906 ms, Doze 123 ms; 7/7 detectable; clean.
 - androidPush (1 attempt): Android 17, Chrome 154.0.8037.126, installed WebAPK; force-stop delivered_while_force_stopped, Doze delivered_after_doze_exit; outcomes are observed variants, not delivery guarantees.
 - androidPushCleanup (1 attempt): Device, browser and fixture restored.
-- deviceCloud (2 attempts): TestingBot real devices, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6); iPad (9th generation) (26.6, safari 26.6); Galaxy S26 (16.0.0, chrome 145.0.7632.159). Home Screen alerts do not qualify lock-screen presentation.
-- deviceCloudCleanup (2 attempts): Restored.
-- relay (1 attempt): 1800 seconds, 2026-10-08T07:40:25.015Z–2026-10-08T08:10:25.030Z; 2 transitions, final phase live. Eight-hour endurance is not claimed.
-- cleanup (2 attempts): Zero gateway processes, listeners and live OMP hosts.
-- windows (1 attempt): Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.7.4 and fresh standard-account lifecycle; interactive logon, not unattended boot.
+- deviceCloud (1 attempt): TestingBot real devices, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6); iPad (9th generation) (26.6, safari 26.6); Galaxy S26 (16.0.0, chrome 145.0.7632.159). Home Screen alerts do not qualify lock-screen presentation.
+- deviceCloudCleanup (1 attempt): Restored.
+- relay (1 attempt): 1800 seconds, 2026-10-10T23:18:36.965Z–2026-10-10T23:48:36.978Z; 2 transitions, final phase live. Eight-hour endurance is not claimed.
+- cleanup (1 attempt): Zero gateway processes, listeners and live OMP hosts.
+- windows (1 attempt): Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.7.5 and fresh standard-account lifecycle; interactive logon, not unattended boot.
 - windowsCleanup (1 attempt): Zero instances and firewalls; tailnet node deleted and access vault removed.
 
 The Mac guest does not qualify physical firmware, FileVault, Secure Boot or startup before login. Cloud devices qualify the browser, not phone-owned Tailscale identity; iPhone Home Screen alerts do not qualify lock-screen presentation. Gateway rollback does not switch OMP. Other hosts and browser builds remain outside this exact matrix. Portal Tunnel and self-hosted/proxied relays are unsupported.
