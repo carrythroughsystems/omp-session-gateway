@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 
-export const PRODUCT_VERSION = "0.7.6";
+export const PRODUCT_VERSION = "0.7.7";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultReleaseRoot = join(root, "dist", "release");
 const archiveBase = `omp-session-gateway-${PRODUCT_VERSION}-bun`;

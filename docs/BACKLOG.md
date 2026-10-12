@@ -2,7 +2,8 @@
 
 
 <!-- release-generate:release-task:start -->
-
+- Qualify and publish v0.7.7 with stock OMP v18.10.2; published v0.7.6 stays current stable.
+- Requalify attention and lifecycle scenarios on the exact signed candidate; historical evidence does not transfer.
 <!-- release-generate:release-task:end -->
 GitHub issues are the active work queue. [Release status](RELEASE_STATUS.md) records qualification;
 [the changelog](../CHANGELOG.md) records shipped work. This file keeps only open product direction.
