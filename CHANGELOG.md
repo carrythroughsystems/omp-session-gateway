@@ -6,6 +6,18 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- Move the OMP engineering baseline to published v18.10.2 (#398), with pins derived by
+  `scripts/upstream-pins.ts`. Registry v1, the discovery file format, the relay protocol,
+  `collab.autoStart`, and the collaboration `host.ts`, `settings.ts`, and `collab-web` sources
+  are unchanged from v18.8.9. The registry moves onto native IPC with the same request and
+  response lines and relocates overlong sockets under `/tmp/omp-<euid>`
+  (can1357/oh-my-pi@a608a9ca07); host relay
+  pings (can1357/oh-my-pi#14387) and `ctx.annotations` (can1357/oh-my-pi#15260) change nothing the
+  gateway reads or sends. The embedded client remains at v18.4.2. No qualification is claimed;
+  published v0.7.6 stays bound to OMP v18.8.9.
+
 ## [v0.7.6] — 2026-10-10
 
 This release uses stock OMP v18.8.9 as its engineering baseline. The 8 changelog entries below record the changes since v0.7.5. Historical receipts do not qualify these bytes.

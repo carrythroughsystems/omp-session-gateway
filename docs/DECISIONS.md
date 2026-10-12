@@ -887,6 +887,38 @@ published v0.7.5 remains qualified on v18.8.3.
 
 ---
 
+**Engineering baseline update (2026-10-12):** Accept published mainline v18.10.2
+(`c8913466dd7bf92040de911f8e00e30b8f4e48a2`, tree `bbe0b2fa461fc34bf45cb544432a24e767f155ec`)
+as the host engineering pin (#398), with registry v1 and minimum host `18.1.20` unchanged.
+`scripts/upstream-pins.ts` derived every pin. Relative to v18.8.9, `host.ts`, `settings.ts`,
+`docs/collab.md`, `packages/collab-web`, and `packages/wire/src/index.ts` are byte-identical, so
+the discovery file format, registry v1, the relay protocol, and `collab.autoStart` behavior are
+unchanged. `a608a9ca07c9443634e80d877d61c602099dab91` moves `registry.ts` onto the pi-natives
+`IpcServer`/`IpcConnection` transport: each query is still one newline-terminated JSON request
+and one newline-terminated JSON response, the socket stays `<dir>/<entryId>.sock` at mode 0600
+beside a new `<entryId>.sock.bind.lock`, an overlong path moves from `/tmp/omp-collab-<hash>` to
+the owner-only `/tmp/omp-<euid>`, Windows pipes become `\\.\pipe\omp-<entryId>-<hash>`, and the
+host refuses peers running as another user. The gateway reads the endpoint verbatim, reads only
+`.json` names, already requires an owner-private directory and a 0600 socket, and queries as the
+publishing user, so it reads and sends the same bytes.
+[can1357/oh-my-pi#14387](https://github.com/can1357/oh-my-pi/pull/14387)
+(merge `ae88edd36cb31a5004fd8e3f70ede57dbf33812d`) adds host relay WebSocket pings and a
+silent-socket reconnect without a new relay message;
+[#15260](https://github.com/can1357/oh-my-pi/pull/15260)
+(merge `d8e57c951927fbb01326f9e5330a1185e5f49520`) adds `ctx.annotations` and `supportsEditor`
+in `docs/extensions.md` and `extension-ui-controller.ts`;
+[#11798](https://github.com/can1357/oh-my-pi/pull/11798)
+(merge `80cf9110c9b0c0847d598abe32de8caa3ac2c671`) documents command-backed extension providers;
+`25d28798d9db70b72e33c37178c20cacfb601851` removes two TUI composer methods from `modes/types.ts`;
+and the version bumps touch only `package.json`. The gateway reads and sends none of these.
+`@oh-my-pi/pi-wire` 18.10.2 changes only `tsp.ts`, and `@oh-my-pi/collab-web` stays 16.3.6; the
+embedded client keeps its v18.4.2 provenance and wire pin.
+
+This is source review only: no canary, candidate, or qualification is claimed for v18.10.2, and
+published v0.7.6 remains qualified on v18.8.9.
+
+---
+
 ## ADR-029 — Resume a backgrounded session by relaunching it, never by retaining its capability
 
 **Status:** Accepted
