@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.7.7] — 2026-10-12
+
+This release uses stock OMP v18.10.2 as its engineering baseline. The 1 changelog entry below records the changes since v0.7.6. Historical receipts do not qualify these bytes.
+
 ### Changed
 
 - Move the OMP engineering baseline to published v18.10.2 (#398), with pins derived by

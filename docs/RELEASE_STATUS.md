@@ -1,14 +1,21 @@
 # Release status
 
 <!-- release-generate:current:start -->
+## v0.7.7 preparation — not yet qualified or published
+
+**Prepared:** 2026-10-12. This release uses stock OMP v18.10.2 as its engineering baseline. The 1 changelog entry below records the changes since v0.7.6. Historical receipts do not qualify these bytes.
+
+- Planned qualification: Debian 13 x86-64; macOS 27.0 (26A428) arm64 in a Virtualization.framework guest (VirtualMac2,1, ADR-033); a disposable Windows Server 2025 host (the Administrator lifecycle and a fresh standard-user install); Chrome on the physical Pixel 10 Pro, including its background-Push lane; and real iPhone, iPad, and Galaxy devices in TestingBot's cloud. Every lane must pass against these exact signed bytes before stable promotion; the plan is not evidence.
+
+Published v0.7.6 remains the predecessor and current stable. The planned candidate tag is `v0.7.7-prealpha.1`; no qualification or publication is claimed. The stable lock stays unchanged until approval.
+<!-- release-generate:current:end -->
+
 ## Mainline v0.7.6 — published stable
 
-<!-- release-generate:publication:start -->
 **Updated:** 2026-10-10. [v0.7.6](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.6) was published at **2026-10-11T00:23:22Z** and is GitHub Latest. [Signed release workflow](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/38098167507).
 
 **Stable source:** `d0964b48276a21fa1f235a14029856f4438b5025`.<br>
 **Stable archive SHA-256:** `417b69aa86a78891d6a45da7911091f26c0586ae38b69607ef76966136abf03e`.
-<!-- release-generate:publication:end -->
 
 **Candidate:** [v0.7.6-prealpha.2](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.6-prealpha.2).<br>
 **Source:** `28fbdf57b1eab8437f2bba0cd1f753960cc3925f`.<br>
@@ -461,7 +468,6 @@ Schema 3 campaign 2026-10-10T23:05:18.721Z–2026-10-10T23:52:42.422Z; orchestra
 
 **Runtime equivalence gate:** the approval driver must compare a clean stable-channel build with the qualified candidate before merging. The receipt does not prove that later build comparison. Only release-info.json, SBOM.spdx.json, STABLE_RELEASE.lock.json and schemas/stable-release.schema.json may differ.
 
-<!-- release-generate:smoke:start -->
 ### Published-byte Studio/Pixel verification
 
 Recorded 2026-10-10. Published-byte smoke passed against the stable source and digest above. Stock OMP 18.8.9, binary SHA-256 `32990111e8a2f43f2cd17c4a74ed290063bc9a94884bb2744f6ce7877f796070`; app asset `/assets/app.5c4a35b3f50f.js`.
@@ -501,8 +507,6 @@ Recorded 2026-10-10. Published-byte smoke passed against the stable source and d
 ```
 
 This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
-<!-- release-generate:smoke:end -->
-<!-- release-generate:current:end -->
 
 ## Mainline v0.7.5 — published stable
 

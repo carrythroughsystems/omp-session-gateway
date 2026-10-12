@@ -268,7 +268,7 @@ The implemented `triage_verified` and `stale_taps_verified` phases run after `cl
 and before `force_stop_verified`.
 
 <!-- release-generate:campaign:start -->
-The v0.7.6 campaign qualified these scenarios only for its recorded candidate and devices. Each later candidate must pass them again on its exact signed bytes; historical evidence does not transfer. See the [release ledger](RELEASE_STATUS.md).
+The v0.7.6 qualification stays bound to its recorded candidate and devices. The v0.7.7 campaign must pass these scenarios again on its exact signed bytes before its matrix is qualified. See the [release ledger](RELEASE_STATUS.md).
 <!-- release-generate:campaign:end -->
 
 On 2026-10-01, a development run of the whole lane passed every phase,
