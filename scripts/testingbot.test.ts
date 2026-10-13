@@ -113,13 +113,26 @@ describe("TestingBot credentials through the 1Password service account", () => {
       const failure = await readTestingBotCredentials(tokenFile).catch((error: unknown) => String(error));
       expect(failure).toContain("op whoami exited 1: [ERROR] synthetic: invalid service account token");
       expect(failure).not.toContain("not a service account");
+      expect(failure).not.toContain("host-fault");
     });
 
-    test("an op that never exits is reported as a timeout", async () => {
-      await fakeOp("exec sleep 10");
+    test("a timed-out identity probe reports a host fault and the installed-path recovery", async () => {
+      await fakeOp("trap '' TERM\nexec sleep 10");
       const failure = await readTestingBotCredentials(tokenFile, (argv, environment) => runOp(argv, environment, 200)).catch((error: unknown) => String(error));
       expect(failure).toContain("op whoami did not exit within 0.2 s");
       expect(failure).not.toContain("not a service account");
+      expect(failure).toContain("host-fault");
+      expect(failure).toContain("hardlink");
+      expect(failure).toContain("brew reinstall --cask 1password-cli");
+      expect(failure).not.toContain(TOKEN);
+    });
+
+    test("an externally signalled identity probe is not misreported as an exec timeout", async () => {
+      await fakeOp("kill -TERM $$");
+      const failure = await readTestingBotCredentials(tokenFile).catch((error: unknown) => String(error));
+      expect(failure).toContain("terminated by SIGTERM");
+      expect(failure).not.toContain("did not exit within");
+      expect(failure).not.toContain("hardlink");
     });
   });
 });

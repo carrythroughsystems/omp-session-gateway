@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Classify a timed-out 1Password identity probe as a host fault with the macOS installed-path
+  recovery recipe. Kill an unresponsive probe at its 30-second deadline, distinguish external
+  signals from timeouts, and preserve the release driver's explicit new-candidate retry gate.
+
 ## [v0.7.7] — 2026-10-12
 
 This release uses stock OMP v18.10.2 as its engineering baseline. The 1 changelog entry below records the changes since v0.7.6. Historical receipts do not qualify these bytes.
