@@ -390,6 +390,21 @@ after a fix on main selects the next prealpha only after the previous lease is r
 is not permission to abandon cloud/device resources. Failed receipts stay unchanged. Public
 verification failures also leave the write intent for diagnosis; immutable tags are never moved.
 
+A 1Password identity-probe deadline is a host-fault diagnostic, not a wrong-account verdict.
+The probe kills its child after 30 seconds. If the installed macOS executable hangs, an operator
+can re-exec the same inode through a hardlink or run `brew reinstall --cask 1password-cli`;
+confirm `op --account my.1password.com --version` under the release account, then rerun the
+exact candidate's credential-bearing preflight. A passing manual preflight has no durable
+candidate-bound retry receipt and does not clear `diagnostic-required`. The retry gate compares
+main's SHA for inequality with `failedMain`, not changed paths or ancestry; separate source and
+policy authority still apply. Retain the failed job and receipts, land the reviewed fix, and
+request the same exact OMP version again. If release controls change, the job-free setup review
+must also explicitly retire the failed selection's old policy binding: archive its state only
+after confirming no pending intent/outbox, stable publication, active job or owned host lease,
+then select the new request under the reviewed installed policy. Updating the checkout alone
+leaves the old binding and holds preparation. The next selection uses the next prealpha; never
+overwrite a completed campaign job or its evidence.
+
 To stop new work immediately:
 
 ```sh

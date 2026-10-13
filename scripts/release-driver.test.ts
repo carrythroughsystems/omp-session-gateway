@@ -351,6 +351,17 @@ test("diagnostic rerequest requires a new green dispatch, main fix, and recovere
   if (step.operation !== "idle") { expect(step.patch?.candidate).toBe("v0.7.5-prealpha.2"); expect(step.patch?.candidateCommit).toBeUndefined(); }
 });
 
+test("a later passing observation cannot erase a diagnostic host fault or restart the failed candidate", async () => {
+  const fake = new FakeDriver();
+  fake.state = { ...state("diagnostic-required"), failedMain: fake.repo.main, candidateCommit: "b".repeat(40), candidateDigest: "c".repeat(64) };
+  fake.repo.campaign = { status: "passed", detail: "later preflight passed after host-fault repair" };
+  const before = structuredClone(fake.state);
+  expect((await tick(fake, config)).operation).toBe("idle");
+  expect(fake.state).toEqual(before);
+  expect(fake.saves).toBe(0);
+  expect(fake.performed).toEqual([]);
+});
+
 test("a retry request on a new tracking issue for the same version re-selects the failed release", () => {
   // v0.7.5: order #369's "Closes #368" closed the request when it merged; the retry request opened #374.
   const failed = { ...state("diagnostic-required"), failedMain: "a".repeat(40), candidateCommit: "b".repeat(40) };
