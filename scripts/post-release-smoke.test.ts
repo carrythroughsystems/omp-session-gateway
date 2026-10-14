@@ -10,6 +10,7 @@ import {
   assertFixtureOwnership,
   assertWebApkActiveTask,
   awaitWebApkActiveTask,
+  awaitWebApkAppTarget,
   assertReleaseArchiveIdentity,
   createSmokeLabel,
   enableOmpAutoStart,
@@ -430,6 +431,68 @@ describe("physical Android release target", () => {
     }
     expect(isWebApkAppTarget({ type: "service_worker", url: `${origin}/` }, origin)).toBe(false);
   });
+  test("the WebAPK page target check resolves when the target appears on the third poll", async () => {
+    const origin = "https://gateway.example.ts.net";
+    let clock = 0;
+    let reads = 0;
+    const pauses: number[] = [];
+    await awaitWebApkAppTarget(async () => {
+      reads++;
+      return reads < 3
+        ? [{ type: "page", title: "Starting", url: "about:blank" }]
+        : [{ type: "page", title: "OMP Sessions", url: `${origin}/` }];
+    }, origin, {
+      now: () => clock,
+      sleep: async milliseconds => { pauses.push(milliseconds); clock += milliseconds; },
+    });
+    expect(reads).toBe(3);
+    expect(clock).toBe(2_000);
+    expect(pauses).toEqual([1_000, 1_000]);
+  });
+
+  test("the WebAPK page target check fails closed at its deadline with sanitized last targets", async () => {
+    const origin = "https://gateway.example.ts.net";
+    const capabilityTitle = `#${"s".repeat(16)}.${"x".repeat(43)}`;
+    let clock = 100;
+    let reads = 0;
+    const pauses: number[] = [];
+    const failure = await awaitWebApkAppTarget(async () => {
+      reads++;
+      return reads === 1
+        ? [{ type: "page", title: "Earlier target", url: "about:blank" }]
+        : [
+          { type: "page", title: "Waiting\u001b\u202e for WebAPK", url: "https://user:password@other.example.ts.net/private/path?token=query-secret#fragment-secret" },
+          { type: "page", title: capabilityTitle, url: "invalid URL with secret" },
+        ];
+    }, origin, {
+      now: () => clock,
+      sleep: async milliseconds => { pauses.push(milliseconds); clock += milliseconds; },
+      deadlineMs: 2_500,
+      intervalMs: 1_000,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain("installed WebAPK did not render the OMP Sessions origin");
+    expect(message).toContain("https://other.example.ts.net/[redacted]?[redacted]#[redacted]");
+    expect(message).toContain("Waiting for WebAPK");
+    expect(message).toContain('"title":"[redacted]"');
+    for (const withheld of ["Earlier target", "user", "password", "private/path", "query-secret", "fragment-secret", "invalid URL with secret", capabilityTitle, "\u001b", "\u202e"]) {
+      expect(message).not.toContain(withheld);
+    }
+    expect(reads).toBe(4);
+    expect(clock).toBe(2_600);
+    expect(pauses).toEqual([1_000, 1_000, 500]);
+  });
+
+  test("rejects WebAPK page targets carrying a query or hash", () => {
+    const origin = "https://gateway.example.ts.net";
+    for (const route of ["/", "/client/"]) {
+      for (const suffix of ["?unexpected=1", "#unexpected"]) {
+        expect(isWebApkAppTarget({ type: "page", title: "OMP Sessions", url: `${origin}${route}${suffix}` }, origin)).toBe(false);
+      }
+    }
+  });
+
   test("parses exact app binding and explicit old-fixture acknowledgement", () => {
     expect(
       parseAndroidCollabSmokeArgs([
