@@ -1,10 +1,14 @@
 # Upgrade and rollback lane
 
 <!-- release-generate:predecessor:start -->
+## v0.7.7 predecessor compatibility
+
+The selected predecessor is published v0.7.6. Gateway rollback does not change the separately running OMP process. This release uses stock OMP v18.10.2; retained-runtime selection does not restore the predecessor's OMP baseline. After a v0.7.7 install, `rollback --to` selects only runtimes pruning retained. VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon b137c1ff0cb7eeb6b4f97ea10e7869779f8db33d9e9edb16d04c1250597b900d. Windows history-selected restoration passed. Preserve configuration and readiness state. Earlier predecessors retain the compatibility limits below; their receipts do not qualify this candidate.
+<!-- release-generate:predecessor:end -->
+
 ## v0.7.6 predecessor compatibility
 
 The selected predecessor is published v0.7.5. Gateway rollback does not change the separately running OMP process. This release uses stock OMP v18.8.9; retained-runtime selection does not restore the predecessor's OMP baseline. After a v0.7.6 install, `rollback --to` selects only runtimes pruning retained. VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon 76a98a98c7adbe5481e1ac3ede2b7c6c889443dc5edd10929854e1ebde10c1b7. Windows history-selected restoration passed. Preserve configuration and readiness state. Earlier predecessors retain the compatibility limits below; their receipts do not qualify this candidate.
-<!-- release-generate:predecessor:end -->
 
 ## v0.7.5 predecessor compatibility
 
