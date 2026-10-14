@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Poll for the installed WebAPK's DevTools page target before judging the published-byte smoke render, with a fail-closed deadline and sanitized timeout diagnostics.
+
 ## [v0.7.7] — 2026-10-13
 
 This release uses stock OMP v18.10.2 as its engineering baseline. The 2 changelog entries below record the changes since v0.7.6. Historical receipts do not qualify these bytes.

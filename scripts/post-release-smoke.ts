@@ -30,6 +30,7 @@ import { downloadReleaseAssets } from "./release-download.ts";
 import { releaseVersion } from "./release-policy.ts";
 import { requireAndroidDevicePreconditions, requireSingleDevice, runAdb, type AndroidAdbCommand } from "./android-device.ts";
 import { fixtureModelError, OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
+import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Published under alphastorm through v0.7.5 (2026-10-08T16:38:49Z), captured 2026-10-09.
@@ -1033,8 +1034,14 @@ async function chooseLoopbackPort(): Promise<number> {
   });
 }
 
+interface WebApkTarget {
+  readonly type?: string;
+  readonly title?: string;
+  readonly url?: string;
+}
+
 export function isWebApkAppTarget(
-  target: { readonly type?: string; readonly title?: string; readonly url?: string },
+  target: WebApkTarget,
   origin: string,
 ): boolean {
   if (target.type !== "page" || target.url === undefined || !URL.canParse(target.url)) return false;
@@ -1043,6 +1050,56 @@ export function isWebApkAppTarget(
   return url.origin === origin &&
     (url.pathname === "/" || url.pathname === "/client/") &&
     url.username === "" && url.password === "" && url.search === "" && url.hash === "";
+}
+
+function webApkTargetDetails(targets: readonly WebApkTarget[]): string {
+  return JSON.stringify(targets.map(target => {
+    let url = "[invalid URL]";
+    if (target.url !== undefined && URL.canParse(target.url)) {
+      const parsed = new URL(target.url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        // Only the capability-free app routes are safe to retain in smoke diagnostics.
+        const path = parsed.pathname === "/" || parsed.pathname === "/client/" ? parsed.pathname : "/[redacted]";
+        url = `${parsed.origin}${path}${parsed.search ? "?[redacted]" : ""}${parsed.hash ? "#[redacted]" : ""}`;
+      } else {
+        url = `${parsed.protocol}[redacted]`;
+      }
+    }
+    const title = target.title ?? "";
+    return {
+      url: url.slice(0, 512),
+      title: findCapabilityLeaks(title).length > 0 ? "[redacted]" : title.normalize("NFC")
+        .replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/gu, "").trim().slice(0, 256),
+    };
+  }));
+}
+
+/** The standalone task can become active before Chrome registers its app page target. */
+export async function awaitWebApkAppTarget(
+  listTargets: () => Promise<WebApkTarget[]>,
+  origin: string,
+  {
+    now = Date.now,
+    sleep: pause = sleep,
+    deadlineMs = 30_000,
+    intervalMs = 1_000,
+  }: {
+    readonly now?: () => number;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
+    readonly deadlineMs?: number;
+    readonly intervalMs?: number;
+  } = {},
+): Promise<void> {
+  const deadline = now() + deadlineMs;
+  let targets = await listTargets();
+  for (;;) {
+    const current = now();
+    if (current <= deadline && targets.some(target => isWebApkAppTarget(target, origin))) return;
+    if (current >= deadline) break;
+    await pause(Math.min(intervalMs, deadline - current));
+    targets = await listTargets();
+  }
+  throw new Error(`installed WebAPK did not render the OMP Sessions origin; last targets: ${webApkTargetDetails(targets)}`);
 }
 
 async function verifyInstalledWebApk(origin: string): Promise<void> {
@@ -1071,12 +1128,11 @@ async function verifyInstalledWebApk(origin: string): Promise<void> {
   const port = await chooseLoopbackPort();
   await device("forward", `tcp:${port}`, "localabstract:chrome_devtools_remote");
   await runWithRestoration("WebAPK verification", async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-    if (!response.ok) throw new Error("WebAPK DevTools target list was unavailable");
-    const targets = (await response.json()) as Array<{ type?: string; title?: string; url?: string }>;
-    if (!targets.some(target => isWebApkAppTarget(target, origin))) {
-      throw new Error("installed WebAPK did not render the OMP Sessions origin");
-    }
+    await awaitWebApkAppTarget(async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+      if (!response.ok) throw new Error("WebAPK DevTools target list was unavailable");
+      return (await response.json()) as WebApkTarget[];
+    }, origin);
   }, [() => device("forward", "--remove", `tcp:${port}`)]);
 }
 
