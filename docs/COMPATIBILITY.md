@@ -97,7 +97,7 @@ v18.5.1 is the first release that retries an automatic start whose relay is unre
 out ([operator settings](OMP_INTEGRATION.md#1-operator-settings)).
 
 <!-- release-generate:release:start -->
-v0.7.7 is qualified for stable promotion; publication is pending. [Release v0.7.7](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.7). Signed candidate v0.7.7-prealpha.2; source c8da6e07cc62b7b855c509037a827f082b564c69; archive SHA-256 c63b893f163bc6ef1c77c42556645932dc76252b6fefce2b9dcbe21a91eb5705. Published v0.7.6 remains the predecessor. Stock OMP v18.10.2 (c8913466dd7bf92040de911f8e00e30b8f4e48a2), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
+Stable v0.7.7 is published as immutable GitHub Latest. [Release v0.7.7](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.7). Signed candidate v0.7.7-prealpha.2; source c8da6e07cc62b7b855c509037a827f082b564c69; archive SHA-256 c63b893f163bc6ef1c77c42556645932dc76252b6fefce2b9dcbe21a91eb5705. Published v0.7.6 remains the predecessor. Stock OMP v18.10.2 (c8913466dd7bf92040de911f8e00e30b8f4e48a2), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
 <!-- release-generate:release:end -->
 
 The qualified scope includes the retained-Mac new-generation/fork/resume transitions and Pixel
