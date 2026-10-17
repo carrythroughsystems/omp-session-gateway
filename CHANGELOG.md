@@ -25,6 +25,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
   policy, package READMEs, and runbook introductions; the site home page, `llms.txt`, and all
   four site pages gain a Docs link. `scripts/docs-links.test.ts` fails on any relative Markdown
   link or heading fragment that does not resolve.
+- Visual QA of the README on GitHub's desktop and phone renders: the install step is now one
+  copyable block (`tar`, `cd`, `install`, `serve-guidance`, shared with Operations) instead of
+  archive names in prose; the supported-platforms table shows the qualified OMP commit as a short
+  SHA linked to the exact upstream commit so the table no longer scrolls sideways on a phone; the
+  settings-sheet capture appears once, beside the background-alerts bullet. `release-generate`
+  approve emits the linked short commit.
 
 ### Fixed
 
