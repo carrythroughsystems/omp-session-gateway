@@ -15,13 +15,14 @@ Implemented states:
 - explicit Settings-based Push v2 opt-in with Private/Session/Preview detail and exact-request routing;
 - privacy/security guidance.
 
-Passkey enrollment and per-Control WebAuthn verification are not implemented; ADR-008 remains a
-proposal. Background Web Push and specialized attention remain outside the v0.4.0 qualified core
-matrix. See the [release ledger](../../docs/RELEASE_STATUS.md).
+Background alerts (Web Push) are opt-in per device from the Settings sheet; see
+[Compatibility](../../docs/COMPATIBILITY.md#platforms-and-browsers) for exact qualified
+combinations and evidence. Passkey enrollment and per-Control WebAuthn verification are not
+implemented.
 
-The worker's update path still has the [ADR-018 pending-launch reservation gap](../../docs/DECISIONS.md#current-implementation-audit--2026-09-14):
-the page defers its own reload, but worker activation can navigate a launch still at `/` before
-it mounts `/client/`. The accepted requirement to protect pending launches remains unchanged.
+Service workers never navigate open pages during activation or notification clicks: activating a
+new worker claims clients in place (`clients.claim()`), and each open page reloads itself only when
+it is idle with no pending launch, routed notification, or mounted collaboration client.
 
 The dashboard receives metadata only. It must not render transcripts, prefetch capabilities, or implement the OMP collaboration protocol.
 

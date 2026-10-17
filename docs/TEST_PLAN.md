@@ -1,10 +1,10 @@
 # Test plan
 
-This plan names behavioral contracts and acceptance scenarios, not a claim that every scenario
-has passed on every platform. Published mainline releases use stock OMP’s native registry/controller; the
-exact signed-candidate matrix, separate published-byte smoke, and remaining qualification gaps
-are recorded in the [release ledger](RELEASE_STATUS.md). Historical fork-era receipts do not
-qualify the mainline integration.
+This test plan is for maintainers and contributors running automated verification and release
+qualification. It defines behavioral contracts and acceptance scenarios; in the current stable
+release (`v0.7.4`), every qualification lane and the post-release published-byte smoke passed.
+Exact hardware combinations and lane receipts are recorded in [Compatibility](COMPATIBILITY.md) and
+[Release status](RELEASE_STATUS.md); historical fork-era receipts do not transfer.
 
 ## Activity extension scenarios
 
@@ -576,10 +576,10 @@ listener, event and history counts are not measured.
   title), revocation, and owned-fixture cleanup evidence;
 - documentation tells users how to revoke a lost phone and rotate the gateway-only readiness token;
 - record the exact signed-candidate matrix and limitations in the [release ledger](RELEASE_STATUS.md).
-  From 0.6.0 the matrix includes the Windows host and background Web Push lanes. Specialized
-  attention and lifecycle (branch/resume) now have executable lane coverage; development passes are
-  tested evidence, and qualification requires the next passed campaign on the exact signed
-  candidate. No fork-era qualification result transfers.
+  From 0.6.0 the matrix includes the Windows host and background Web Push lanes, from 0.6.2 the
+  real-device cloud lane, and from 0.7.2 specialized attention triage/delayed taps and lifecycle
+  transitions; each release qualifies them on its exact signed candidate. No fork-era qualification
+  result transfers.
 
 Android recovery milliseconds measure elapsed time from the disruption ending to the first
 completed same-page, ready-directory probe, probing immediately and then waiting 250 ms between
@@ -612,8 +612,8 @@ depends on a third-party service being reachable.
 Separately, `upstream-canary.yml` runs `canary` and `canary-windows` daily, by dispatch, and on
 pull requests touching its workflow, scripts, fixture, or registry reader. It runs the ten stages
 listed under Mainline OMP with the strict Windows projection; it is not an every-PR gate and never
-substitutes for signed-candidate qualification. The expanded Windows lifecycle path still awaits
-CI proof; local macOS evidence is recorded in [LIFECYCLE_BRANCH_RESUME.md](LIFECYCLE_BRANCH_RESUME.md).
+substitutes for signed-candidate qualification. Both Linux and Windows canary lanes run daily in CI;
+exact stage coverage and local macOS evidence are recorded in [LIFECYCLE_BRANCH_RESUME.md](LIFECYCLE_BRANCH_RESUME.md).
 
 The browser lane gates because it holds the only executable proof of contracts that span the
 gateway/vendored-client boundary. `apps/web/e2e/software-keyboard.e2e.ts` is the worked example:

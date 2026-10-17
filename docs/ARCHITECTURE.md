@@ -111,7 +111,7 @@ in place, keeping a collaboration already open at the tapped authority. With no 
 none that accepts within three seconds, it opens `/collab/:instanceId?request=:requestId`, which
 the app synchronously scrubs before the same revalidation (ADR-017 amendment). Valid taps use the
 ordinary generation-bound, no-store, in-memory launch flow; stale taps never launch. Background
-delivery remains best effort and outside the v0.4.0 qualified core matrix.
+delivery remains best effort; see [COMPATIBILITY.md](COMPATIBILITY.md#platforms-and-browsers) for the qualified Android WebAPK and iPhone Home Screen app scope.
 
 The registry alone detects known busy-to-idle edges on a continuing identity/generation. Retained
 polls remove only activity knowledge without extending TTL. Its private stop event shares the
@@ -212,7 +212,7 @@ OMP remains unaware of this browser-routing metadata.
 ### 2.4 View or Control launch
 
 1. The user taps **View** or **Control**.
-2. The shipped same-document client marks the launch pending in page memory before loading its assets and requesting a capability. The URL changes to `/client/` only at mount; the ADR-018 reservation gap above remains unresolved.
+2. The shipped same-document client increments `pendingLaunches` in page memory before loading its assets and requesting a capability, and changes the URL to `/client/` at mount. Because service-worker activation claims clients without navigating them and the page defers its `controllerchange` reload while a launch, routed notification, or collaboration is active, a worker upgrade never interrupts an in-flight launch.
 3. The PWA performs a same-origin `POST /api/v1/sessions/:instanceId/launch` with the observed generation and desired mode.
 4. The gateway verifies Tailscale identity, application allowlist, Origin, fetch metadata, content type, rate limits, generation, freshness, and mode availability.
 5. The launch broker queries OMP for the exact generation and role, revalidates current state, and
@@ -267,8 +267,8 @@ flowchart TB
 A malicious process running as the same desktop OS user is outside the intended threat boundary; it can generally read the user's files or interfere with OMP directly. OS permissions and per-host query tokens still reduce accidents and cross-user access but are not a sandbox against same-user malware.
 
 A compromised or unlocked phone with valid tailnet identity is also capable of requesting sessions
-until the device is revoked. WebAuthn user verification is proposed in ADR-008, not implemented in
-v0.4.0; it is not an additional Control gate operators can rely on today.
+until the device is revoked. WebAuthn user verification is proposed in ADR-008 and not implemented;
+it is not an additional Control gate operators can rely on today.
 
 ## 4. Why not process scanning or terminal automation?
 
@@ -308,3 +308,28 @@ private deep imports, process inspection, or a second collaboration controller.
   capability is fetched again at resume time, never retained — which is why a reload, whose heap is
   gone, still lands on the directory instead.
 - Browser push service unavailable or delivery delayed: the dashboard and collaboration paths continue normally; alerts are best effort and never bypass current-state validation.
+
+## 6. Installation transactions
+
+### 6.1 Staging, readiness proof, and activation
+
+`omp-gateway install` snapshots any existing `config.json`, validates the prior managed service and runtime, and refuses to proceed while an unmanaged service or an authenticated foreground listener occupies the prior or requested loopback endpoint. When upgrading an existing configuration, it preserves an omitted `--port`, `http.hostname`, `auth.trustIdentityWithoutTailnetDevice`, `registry` settings, and explicitly authored `omp` overrides without freezing home-derived defaults into `config.json`, and avoids rewriting unchanged configuration bytes. It removes any retired `publisher-token` left in the private config directory. An unreadable or missing `readiness-token` is repaired only when the prior service is inactive and its loopback endpoint is unoccupied.
+
+The installer stages the runtime payload into `<stateDir>/installation/versions/<version>-<sha256-12>` and writes `installation.json` recording the version, full payload SHA-256 digest, and `"readinessProtocol": "instance-v1"`. Reinstalling an already-staged payload revalidates its manifest and content hash in place.
+
+Unless `--no-start` is passed, `install` generates a one-time 256-bit base64url `--readiness-instance` nonce, writes and starts the current-user service with that argument, and polls `GET /api/v1/health` with `X-OMP-Readiness-Challenge` (15-second budget on Linux and macOS; 60-second budget on Windows to accommodate cold PowerShell ACL verification). The daemon proves readiness by returning an HMAC-SHA256 over `<challenge>\0<instance>` keyed by `readiness-token`; a generic `{"status":"ready"}` response or a prior process using the same token without the expected instance nonce is rejected. Only after readiness succeeds does the installer advance `installation/current.json` and append the version directory to `installation/history.json` (bounded to 64 entries and 4,096 bytes). If configuration, service registration, startup, readiness, or pointer activation fails, `install` restores the prior `config.json`, service definition, running state, and verified runtime.
+
+### 6.2 Staged-runtime pruning
+
+After a readiness-proven `install` commits `current.json` and `history.json`, `pruneSupersededRuntimes` removes superseded version directories under `<stateDir>/installation/versions`:
+
+- **Retention set:** the active runtime plus the two most recent **distinct** predecessors in `history.json` (three distinct activations total, so `A → B → A` consumes two slots, not three), the recorded predecessor selected by plain `rollback`, and any version directory referenced by the on-disk service definition in raw, XML-escaped, or JSON-escaped form.
+- **Eligibility and safety:** only entries under the private `versions` root matching a recognized `<version>-<hex12>` directory or `.prune-<uuid>` marker are touched. Foreign names, non-directories, symlinks (including inside a payload), and unreadable or invalid installation metadata are left alone.
+- **Two-phase removal and bounds:** each victim is first renamed inside `versions/` to `.prune-<uuid>` so it can never be selected as a rollback target, then recursively unlinked. Each pass inspects at most 4,096 `versions/` entries and at most 4,096 entries per payload across at most 32 directory levels; interrupted or oversized removals are finished by a subsequent readiness-proven install.
+- **Non-fatal accounting:** pruning never runs on a failed install, `install --no-start`, `rollback`, or `uninstall`. Cleanup errors are counted in `Staged runtimes: retained <n>, removed <n>, failed <n>` and never fail or revert a committed installation.
+
+### 6.3 Rollback, token rotation, and uninstall
+
+- **`rollback [--to <version-dir>]`:** resolves the previous distinct entry in `history.json` (or the requested retained directory), revalidates its manifest and payload digest, rewrites the user service definition, verifies authenticated loopback readiness when the service is active, and updates `current.json` and `history.json`. If the target fails readiness, `rollback` rebuilds the service definition from the unchanged `current.json` runtime and verifies its readiness before reporting failure.
+- **`rotate-readiness-token`:** verifies service ownership and the active runtime before atomically replacing `readiness-token` (refusing non-file paths or unsafe parent directories). If the active service cannot restart and prove readiness on the fresh token, the CLI stops the service fail-closed and keeps the fresh token rather than restoring the potentially exposed token.
+- **`uninstall [--no-stop]`:** derives the fixed current-user service definition path without parsing `config.json`, stops the service, and removes its autostart registration while preserving `config.json`, `readiness-token`, `push.json`, and staged runtimes. `--no-stop` is accepted only when the service is already inactive.

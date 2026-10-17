@@ -1,4 +1,67 @@
-# Upgrade and rollback lane
+# Upgrade and rollback
+
+Use these procedures to update a running gateway, switch back to a retained predecessor runtime, or cross the `v0.3.0` → `v0.4.0+` architecture boundary. For exact qualified host and client combinations and release evidence, see [COMPATIBILITY.md](COMPATIBILITY.md) and [RELEASE_STATUS.md](RELEASE_STATUS.md).
+
+## Upgrade the gateway
+
+Mainline-to-mainline (`v0.4.0` and later) upgrades run in place over the active user service. Download and verify the new release archive ([Verify a published build](RELEASE.md#verify-a-published-build)), then run `install` with your production `--origin` and `--allow` values:
+
+```sh
+tar -xf omp-session-gateway-*-bun.tar
+cd omp-session-gateway-*-bun
+bun apps/gateway/src/cli.js install \
+  --origin https://host.tailnet.ts.net \
+  --allow you@example.com
+bun apps/gateway/src/cli.js status
+bun apps/gateway/src/cli.js doctor
+```
+
+On Windows, run the same steps in PowerShell, one command per line:
+
+```powershell
+tar -xf (Get-Item omp-session-gateway-*-bun.tar).Name
+cd omp-session-gateway-*-bun
+bun apps/gateway/src/cli.js install --origin https://host.tailnet.ts.net --allow you@example.com
+bun apps/gateway/src/cli.js status
+bun apps/gateway/src/cli.js doctor
+```
+
+The installer validates your existing `config.json`, preserves an omitted `--port`, `http.hostname`, `registry` settings, authored `omp` overrides, `readiness-token`, and Web Push state, and switches `installation/current.json` only after the new service passes its authenticated loopback readiness check. If startup or readiness fails, the installer restores the prior configuration, service definition, and verified runtime automatically.
+
+## Roll back to a retained predecessor
+
+To switch the active user service back to the previous activated runtime without re-extracting an archive, run `rollback` from any verified extraction root (or the currently installed CLI):
+
+```sh
+bun apps/gateway/src/cli.js rollback
+```
+
+To select a specific retained version directory under `<stateDir>/installation/versions/`, pass `--to`:
+
+```sh
+bun apps/gateway/src/cli.js rollback --to <version>-<digest12>
+```
+
+Each readiness-proven `install` keeps the active runtime plus the two most recent distinct predecessors in `installation/history.json` (plus any divergent version named by the on-disk service definition) and prunes older or never-activated staged directories. `rollback` itself never prunes, so you can switch back and forth between the active release and its predecessor; if you need a version that was already pruned, verify and `install` its release archive again.
+
+## Recover across the v0.3.0 boundary
+
+Releases `v0.3.0` and earlier used a separate `publisher-token` and cannot answer the mainline readiness proof, so an in-place upgrade over a running `v0.3.0` service is refused. Before installing `v0.4.0` or later over `v0.3.0`, stop and unregister the old service using its own CLI:
+
+```sh
+bun omp-session-gateway-0.3.0-bun/apps/gateway/src/cli.js uninstall
+```
+
+Keep your existing configuration and staged runtimes in place, then run the new release's [standard `install` command](OPERATIONS.md#2-cli-and-daemon-installation) with your `--origin` and `--allow` values. The installer mints `readiness-token`, retires `publisher-token`, and starts the new service; restart any running `omp` processes under stock mainline OMP `>= 18.1.20` with `collab.autoStart` enabled.
+
+Returning from `v0.4.0+` to `v0.3.0` also requires a stopped transition rather than `omp-gateway rollback`: run `uninstall` with the current CLI, restore a `v0.3.0`-compatible `config.json` if you added mainline-only `omp` fields, and run `install` from the verified `v0.3.0` archive (which mints a fresh `publisher-token`).
+
+## What rollback never does
+
+- **Never downgrades, restarts, or reconfigures `omp`:** running OMP processes keep the code and `collab.autoStart` setting they started with.
+- **Never rewrites `config.json` or rotates `readiness-token`:** both remain unchanged across `rollback` and `rollback --to`.
+- **Never edits Tailscale Serve mappings or tailnet policy:** your external HTTPS origin and allowlist remain in effect.
+- **Never restores `publisher-token` or `v0.3.0` compatibility:** pointer rollback only switches between retained mainline gateway runtimes (`v0.4.0+`).
 
 <!-- release-generate:predecessor:start -->
 ## v0.7.7 predecessor compatibility
@@ -55,94 +118,60 @@ collaboration client and on Windows reads a failed scheduled-task query as a sto
 (#301); v0.6.2 cannot be installed or run from a standard Windows account (#293, #294), and v0.6.0
 cannot enable background alerts on iPhone or iPad (#274).
 
-## Staged-runtime retention from v0.5.2
+## v0.7.0 predecessor compatibility
 
-After a successful install/upgrade proves the new runtime ready and commits both `current.json`
-and activation history, automatic cleanup keeps the active version plus the two most recent
-distinct predecessors (three distinct activations). Repeated activations such as A → B → A do
-not consume extra retention slots. The recorded predecessor selected by plain `rollback` is
-protected, as is any different version named by the installed service definition. Everything
-else under the versions root with a recognized runtime-directory name is eligible for removal,
-including never-activated staging and versions older than the history file.
+The selected predecessor is published v0.6.3. Gateway rollback does not change the separately
+running OMP process. Rolling back restores v0.6.3's embedded collaboration client, built from OMP
+18.3.0's `collab-web` with React's development build, and its zoom into the composer when iOS
+Safari focuses it on an iPad or a landscape phone (#305). On Windows, v0.6.3 reads any
+scheduled-task query failure other than a missing task as a stopped gateway, so its `status`,
+`stop`, readiness-token rotation, `install --no-start`, and `uninstall` can act on a running
+gateway as if it had stopped (#301). Both versions install and run from a standard (non-elevated)
+Windows account. After a v0.7.0 install, `rollback --to` can select only the runtimes pruning
+retained. v0.6.2, further back, cannot be installed or run from a standard Windows account (#293,
+#294), and v0.6.0 cannot enable background alerts on iPhone or iPad (#274).
 
-`rollback --to <version-directory>` selects only a retained, installed directory. A pruned target
-still fails with “version that is not installed”; restore an older release from its separately
-retained verified archive and matching configuration instead. Rollback itself does not prune,
-so the ordinary predecessor/candidate oscillation remains available. Uninstall retains its
-existing data-preservation behavior. Failed/reverted installs and `install --no-start` never
-prune; a stopped installation has not proved readiness.
+## v0.6.3 predecessor compatibility
 
-Cleanup never fails or reverts a successful install. Its numeric summary reports protected,
-removed, and failed cleanup counts. Removal first renames a victim to a private `.prune-<uuid>`
-name that cannot be a rollback target, then removes it; a later successful ready install cleans
-up leftover markers. Only the private versions root is eligible. Symlinks, foreign names, and
-unsafe metadata are refused. A pass examines at most 4,096 versions-root entries and, separately,
-4,096 payload entries within 32 nested levels; failures or these bounds can leave additional
-payloads for a later install. Service definitions are recognized in raw, XML-escaped, and
-JSON-escaped form, so installation paths containing `&`, `<`, `>`, or `"` still prune.
+The selected predecessor is published v0.6.2. Gateway rollback does not change the separately
+running OMP process. v0.6.2 cannot be installed or run from a standard (non-elevated) Windows
+account: its install fails on `SeSecurityPrivilege` (#293) and then on registering the logon task
+(#294). Rolling back to it on Windows therefore needs an elevated install. There, its `status` and
+`doctor` read a standard user's running gateway as stopped over SSH, and its stop can return before
+the gateway's process exits. Linux and macOS behavior does not differ between the two. After a
+v0.6.3 install, `rollback --to` can select only the runtimes pruning retained. v0.6.0, further back,
+cannot enable background alerts on iPhone or iPad: it rejects WebKit's push subscription, which
+leaves out a null `expirationTime` (#274).
 
-The qualification rollback targets remain inside this policy: the macOS host lane delegates to
-`qualify-rollback.sh`, whose predecessor install, candidate upgrade, and predecessor reinstall
-all use `--no-start` and therefore never prune. The Linux migration/recovery lane installs the
-predecessor before the candidate; the predecessor is then its recorded rollback target. Its
-stopped `--to`/plain-rollback walk and later active rollback/reinstall loops alternate only those
-two versions, which remain retained on every successful ready install. These are policy
-compatibility statements, not new qualification results.
+## v0.6.2 predecessor compatibility
 
-## Mainline cutover and rollback boundary
+The selected predecessor is published v0.6.1. Gateway rollback does not change the separately
+running OMP process. The two signed archives hold the same 50 files and differ only in version
+strings and release metadata, so rollback changes no gateway, PWA, or collaboration-client
+behavior. After a v0.6.2 install, `rollback --to` can select only the runtimes pruning retained.
+v0.6.0, one step further back, cannot enable background alerts on iPhone or iPad: it rejects
+WebKit's push subscription, which leaves out a null `expirationTime` (#274).
 
-Published stable v0.4.0 uses stock OMP `>= 18.1.20` and `collab.autoStart` only, following
-[PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). Install mainline on PATH and restart participating OMP processes; a gateway
-upgrade cannot replace code already loaded in a fork-era process. The gateway now only reads OMP
-discovery and never stores capabilities.
+## v0.6.1 predecessor compatibility
 
-The new gateway configuration adds `omp.discoveryDir` and `omp.queryTimeoutMs`;
-`registry.heartbeatSeconds` becomes the poll interval. `readiness-token` and
-`rotate-readiness-token` serve gateway/CLI readiness only. Installation removes the legacy
-fork-era `publisher-token`; it is not retained as an OMP credential.
+The selected predecessor is published v0.6.0. Gateway rollback does not change the separately
+running OMP process. v0.6.0 cannot enable background alerts on iPhone or iPad: it rejects WebKit's
+push subscription, which leaves out a null `expirationTime`, so the alerts control reads unavailable
+(#274). Chrome includes the field and is unaffected. After a v0.6.1 install, `rollback --to` can
+select only the runtimes pruning retained. v0.5.3, one step further back, also sends every push
+with a per-session Web Push `Topic`, which FCM limits to a burst of about 20 messages per device,
+and on Windows it can exit at logon without listening when its private-ACL helper starts slowly.
 
-A runtime-pointer rollback does not switch OMP, restore old configuration, or restore the deleted
-fork-era credential. Earlier gateways may reject the new `omp` section and require their own
-publication architecture. Retain matching non-capability configuration and verified historical
-artifacts privately; use that release’s installer and instructions for deliberate recovery. Do not
-point a fork-era daemon at mainline discovery or claim transparent mixed-version operation.
+## v0.6.0 predecessor compatibility
 
-For the `v0.3.0` → `v0.4.0` boundary, stop and unregister the predecessor with its own signed
-archive’s `uninstall` command before the new install. From the directory containing the verified,
-extracted v0.3.0 archive, using persistent Bun 1.4.0:
-
-```sh
-bun omp-session-gateway-0.3.0-bun/apps/gateway/src/cli.js uninstall
-```
-
-Do not delete its configuration or staged runtimes. Continue with the
-[verified v0.4.0 installation](OPERATIONS.md#2-cli-and-daemon-installation), supplying the
-deployment’s existing `--origin` and `--allow` values. Preserve non-capability configuration
-privately in place; do not copy publisher/readiness tokens or OMP discovery credentials into
-a migration bundle. Later mainline-to-mainline reinstalls retain the normal active-service path.
-
-Recovery to `v0.3.0` is similarly deliberate: stop and unregister the candidate with its own CLI,
-restore the retained predecessor-compatible private config if it was changed, then reinstall the
-verified `v0.3.0` archive. Its installer mints a new publisher credential; no retired credential
-is copied into a recovery bundle or restored. This proves gateway lifecycle recovery only.
-Collaboration under the old gateway still requires its matching fork-era OMP and settings, which
-this mainline release does not install. A runtime-pointer rollback alone is not that recovery.
-
-**Mainline stopped-predecessor recovery passed** for the explicit `v0.3.0` →
-`v0.4.0-prealpha.1` pair: Debian passed 69/69 migration/recovery invariants and `Mac14,3` /
-macOS 26.6.1 arm64 passed 23/23 rollback invariants. See the [release ledger](RELEASE_STATUS.md)
-for signed-artifact and run bindings. This proves the matching-CLI uninstall/reinstall gateway
-recovery described above, not an automatic OMP switch or credential restoration. The existing
-20/20 results below remain historical and are not proof of this architecture-crossing transition.
-A new candidate must qualify its exact predecessor and recovery path without mutating unrelated
-services, OMP processes, or discovery files.
-
-The published v0.4.0 local upgrade and subsequent physical-Android smoke also passed using the
-stopped matching-v0.3.0-CLI transition. Configuration stayed unchanged in place, the retired
-publisher token was removed, and the existing local OMP 18.1.21 was not replaced. This local
-result does not widen the exact OMP 18.1.20 candidate matrix; see the
-[release ledger](RELEASE_STATUS.md#published-byte-local-installation-and-android-smoke), including
-the unresolved initial Control-upgrade failure.
+The selected predecessor is published v0.5.3. Gateway rollback does not change the separately
+running OMP process. v0.5.3 sends every push with a per-session Web Push `Topic`, which FCM limits
+to a burst of about 20 messages per device, so background alerts can lag for minutes after busy
+activity; an Android alert cleared moments after it appeared can also stay on screen. On Windows,
+v0.5.3 can exit at logon without listening when its private-ACL helper starts slowly, as right
+after install, and it then stays down until the next logon. After a v0.6.0 install,
+`rollback --to` can select only the runtimes pruning retained. v0.5.2, one step further back, also
+renders OMP 18.3.0's `wait` tool calls as generic tool cards.
 
 ## Fork-era lane and evidence archive
 

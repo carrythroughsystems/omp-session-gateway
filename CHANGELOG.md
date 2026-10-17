@@ -6,6 +6,26 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- Rewrite the README, public site home page, and operator and user documentation reader-first.
+  The README leads with the product promise, demo, a three-step quickstart, everyday use, the
+  privacy model, and a two-column supported-platforms table, and drops release-ledger prose,
+  fork-era history, and the architecture diagram. New `docs/README.md` indexes every document by
+  task (use, trust, build on, dated records) and new `docs/USAGE.md` explains the directory,
+  View and Control, Needs you, hold and hide, background alerts, app installation, and error
+  states from the phone holder's point of view. `docs/OPERATIONS.md` keeps its numbered headings
+  but reads as a task guide with a configuration table, doctor check list, and
+  troubleshooting-by-symptom table; installer transaction internals move to
+  `docs/ARCHITECTURE.md`. `docs/UPGRADE_ROLLBACK.md` opens with upgrade, rollback, boundary
+  recovery, and what rollback never does, and restores the v0.6.0–v0.7.0 predecessor sections the
+  release ledger links. `docs/COMPATIBILITY.md` leads with the support table and a plain
+  current claim. Stale current-state claims (v0.4.0 status, Windows and background Web Push
+  "not yet qualified", the ADR-018 worker-navigation gap) are corrected across the root security
+  policy, package READMEs, and runbook introductions; the site home page, `llms.txt`, and all
+  four site pages gain a Docs link. `scripts/docs-links.test.ts` fails on any relative Markdown
+  link or heading fragment that does not resolve.
+
 ### Fixed
 
 - Poll for the installed WebAPK's DevTools page target before judging the published-byte smoke render, with a fail-closed deadline and sanitized timeout diagnostics.

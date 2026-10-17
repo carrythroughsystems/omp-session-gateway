@@ -4,11 +4,9 @@
 <!-- release-generate:release-task:start -->
 
 <!-- release-generate:release-task:end -->
-GitHub issues are the active work queue. [Release status](RELEASE_STATUS.md) records qualification;
+GitHub issues are the active work queue. [Compatibility](COMPATIBILITY.md) and
+[Release status](RELEASE_STATUS.md) record current support and qualification;
 [the changelog](../CHANGELOG.md) records shipped work. This file keeps only open product direction.
-
-The latest stable release ships native stock-OMP integration. Exact evidence and remaining limits
-live in the [release ledger](RELEASE_STATUS.md).
 
 ## Current
 

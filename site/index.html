@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#060809">
-<title>OMP Session Gateway — every live OMP session, one private mobile page</title>
-<meta name="description" content="Native integration with stock OMP 18.1.20+: discover live terminal sessions and open OMP's encrypted View/Control client from your phone. No fork or custom OMP build; private Tailscale access.">
+<title>OMP Session Gateway — every live OMP session, one private page</title>
+<meta name="description" content="Keep using Oh My Pi in your terminal. OMP Session Gateway lists your collaboration-enabled sessions, shows which need you, and opens OMP's encrypted View or Control client from your phone over Tailscale Serve.">
 <link rel="canonical" href="https://carrythroughsystems.github.io/omp-session-gateway/">
 <link rel="stylesheet" href="site.css">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<meta property="og:title" content="OMP Session Gateway — every live OMP session, one private mobile page">
-<meta property="og:description" content="Works with stock OMP 18.1.20+. Keep using your terminal; discover sessions and open OMP's encrypted View/Control client from your phone. One-time setup, no fork, private tailnet only.">
+<meta property="og:title" content="OMP Session Gateway — every live OMP session, one private page">
+<meta property="og:description" content="Keep using Oh My Pi in your terminal. Discover live sessions, see which need you, and open OMP's encrypted View or Control client from your phone — no QR scans, copied links, or per-session setup.">
 <meta property="og:image" content="https://carrythroughsystems.github.io/omp-session-gateway/og.png">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://carrythroughsystems.github.io/omp-session-gateway/">
@@ -20,7 +20,7 @@
  "name": "OMP Session Gateway",
  "applicationCategory": "DeveloperApplication",
  "operatingSystem": "Linux, macOS, Windows (gateway host); any modern browser, including Android, iOS, and iPadOS (client)",
- "description": "Native integration with stock Oh My Pi 18.1.20+: a private directory and just-in-time View/Control broker for collaboration-enabled terminal sessions, in any modern browser, using OMP's own encrypted client and Tailscale Serve. No custom OMP build.",
+ "description": "Every live Oh My Pi session on one private page in any modern browser. Lists collaboration-enabled terminal sessions, highlights which need you, and opens OMP's encrypted View or Control client over Tailscale Serve.",
  "url": "https://carrythroughsystems.github.io/omp-session-gateway/",
  "codeRepository": "https://github.com/carrythroughsystems/omp-session-gateway",
  "license": "https://github.com/carrythroughsystems/omp-session-gateway/blob/main/LICENSE"}
@@ -32,6 +32,7 @@
   <a class="brand" href="">OMP Session Gateway</a>
   <nav>
       <a href="" aria-current="page">Overview</a>
+      <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a>
       <a href="compare/">Compare</a>
       <a href="status/">Status</a>
       <a href="security/">Security</a>
@@ -46,35 +47,21 @@ sessions on one private page, on your phone or any modern browser. See which nee
 tap View or Control to open OMP's own encrypted client — no QR scans, copied links, or per-session setup.</p>
 
 <div class="receipt">
-<strong>Stock OMP. One-time setup.</strong><br>
-Enable <code>collab.autoStart</code>, install the gateway with Bun <code>1.4.0</code>, and configure
-Tailscale Serve. Then start sessions with plain <code>omp</code>. No custom OMP build or
-gateway-specific OMP plugin. Use it from modern browsers, and install it as a PWA on platforms that
-support installation.
+<strong>Stock OMP 18.1.20+. One-time setup.</strong><br>
+Enable <code>collab.autoStart</code>, install the gateway with Bun <code>1.4.0</code>, and expose it over tailnet HTTPS with Tailscale Serve — then start sessions with plain <code>omp</code>.
 <div class="verified"><a href="https://github.com/carrythroughsystems/omp-session-gateway/releases/latest">Latest stable release</a> ·
-Linux, macOS, and Windows hosts; Chrome, Edge, Firefox, and Safari, tested in CI ·
-qualified on Debian/macOS hosts and a Pixel ·
-<a href="status/">exact matrix and limits</a> ·
-<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md">release evidence</a></div>
+Linux, macOS, and Windows hosts · Chrome, Edge, Firefox, Safari ·
+<a href="status/">qualified on real hardware</a> —
+<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/COMPATIBILITY.md">exact matrix and limits</a></div>
 </div>
-
 <a class="cta" href="https://github.com/carrythroughsystems/omp-session-gateway#build-and-run">Get started</a>
 <a class="cta secondary" href="https://github.com/carrythroughsystems/omp-session-gateway/releases/latest">Download the stable release</a>
 
 <figure>
 <img src="product-flow.png" width="1600" height="980" alt="Three-step product flow: discover every live OMP session automatically, triage the oldest request that needs attention, and open the exact encrypted OMP collaboration session with View or Control.">
 <figcaption>Captured from the built PWA and pinned collaboration client with seeded synthetic fixtures — no real
-sessions, hosts, accounts, or capabilities. This synthetic product demo is not release or attention
-qualification; <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/media/README.md">capture provenance</a>.</figcaption>
+sessions, hosts, accounts, or capabilities. <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/media/README.md">Capture provenance</a>.</figcaption>
 </figure>
-
-<p>The founder-approved relay gate for mainline releases is 30 minutes, not eight hours: eight-hour endurance was
-not rerun or claimed, and residual prolonged-operation risk is accepted. No bounded-memory-growth
-claim is made. Windows is qualified as Windows Server 2025 x86-64, started at interactive logon.
-Other Windows versions are supported and CI-tested but not qualified. Background Web Push is
-qualified on the Pixel only, with force-stop and Doze outcomes recorded as observed variants,
-never guaranteed delivery. Specialized attention, branch/resume, and new media qualification
-remain outside the qualified core claim.</p>
 
 <h2>Use it when</h2>
 <ul>
@@ -90,29 +77,19 @@ from a phone across many agents (<code>oh-my-portal</code>), or an established m
 what makes the recommendation credible.</p>
 
 <h2>OMP handles collaboration. The gateway makes it easy to find.</h2>
-<p>Stock OMP <code>&gt;= 18.1.20</code> publishes its own private host registry. Set
-<code>collab.autoStart</code> to <code>view</code> or <code>control</code> and start plain <code>omp</code>;
-no gateway-specific OMP build or publisher credential is needed. The loopback-only
-<code>omp-gatewayd</code> reads OMP discovery and queries each host for metadata.
-Tailscale Serve exposes the gateway listener to allowlisted tailnet identities
-over tailnet HTTPS, and the <strong>OMP Sessions</strong> PWA lists every live process as bounded metadata.
-Tapping <strong>View</strong> or <strong>Control</strong> fetches one <code>no-store</code> capability and hands
-off to OMP's end-to-end-encrypted relay; the gateway never stores or renders transcripts.
-Full detail: <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/ARCHITECTURE.md">architecture</a> ·
+<p>Stock OMP <code>&gt;= 18.1.20</code> publishes a private local registry when
+<code>collab.autoStart</code> is set to <code>view</code> or <code>control</code>. The loopback-only
+<code>omp-gatewayd</code> daemon reads that registry, Tailscale Serve exposes the directory to your
+allowlisted tailnet login over HTTPS, and tapping <strong>View</strong> or <strong>Control</strong>
+fetches the link for OMP's encrypted client at that moment and never stores it; the gateway never
+stores or renders transcripts. Full detail:
+<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/ARCHITECTURE.md">architecture</a> ·
 <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/PROTOCOL.md">protocol</a> ·
 <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md">operations</a>.</p>
-<h2>Fork-era release history</h2>
-<p><code>v0.3.0</code>, approved 2026-09-09 with patched OMP <code>v18.1.14</code>, qualified Debian 13
-x86-64, macOS 26.6.1 arm64, and Chrome 152 on Android 17 (Pixel 10 Pro). Its
-<code>28,800&nbsp;s</code> relay endurance and runtime-equivalent signed candidate
-<code>v0.3.0-prealpha.3</code> remain historical evidence; none transfers to mainline.
-Crossing this architecture boundary requires the matching old CLI to uninstall the stopped
-gateway before reinstalling; do not import credential bundles. Gateway rollback does not switch OMP.</p>
 </main>
 <footer>
   Community project; not affiliated with or endorsed by the Oh My Pi maintainers.
-  Evidence lives in the <a href="https://github.com/carrythroughsystems/omp-session-gateway">repository</a>:
-  every claim on this site is bound to a versioned release ledger entry.
+  Source and documentation live in the <a href="https://github.com/carrythroughsystems/omp-session-gateway">repository</a>.
 </footer>
 </body>
 </html>

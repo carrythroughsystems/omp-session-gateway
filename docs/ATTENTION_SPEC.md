@@ -1,9 +1,10 @@
 # Needs-attention and notification detail contract
 
-Normative implementation contract for the Couch Flow directory, authoritative ask loop, and
-per-device background alerts. Read with [ARCHITECTURE.md](ARCHITECTURE.md) and ADR-019,
-ADR-026, and ADR-027 in [DECISIONS.md](DECISIONS.md); this document specifies their metadata,
-push, and privacy behavior.
+This specification is for maintainers and contributors implementing or qualifying the Couch Flow
+directory, authoritative ask loop, and per-device background alerts. The contract below is shipped
+and qualified in the current stable release (`v0.7.4`); see [Compatibility](COMPATIBILITY.md) and
+[Release status](RELEASE_STATUS.md) for exact device evidence, and read with
+[ARCHITECTURE.md](ARCHITECTURE.md) and ADR-019, ADR-026, and ADR-027 in [DECISIONS.md](DECISIONS.md).
 
 ## Product boundary
 
@@ -211,8 +212,8 @@ worker messages, browser storage, caches, logs, and diagnostics.
 The first checklist records pre-cutover implementation acceptance, including **fork-era** layout
 and leak-suite evidence, not transferred mainline qualification. The physical background-Push
 checklist below records signed-candidate evidence separately. Specialized triage and delayed-tap
-qualification for v0.7.3 remains pending its campaign; the v0.7.2 evidence stays bound to that
-release, and implementation and development runs alone do not qualify a candidate.
+acceptance passed in the v0.7.4 campaign; each release requalifies those phases on its exact signed
+candidate, and implementation or development runs alone do not qualify a candidate.
 The [release ledger](RELEASE_STATUS.md) is authoritative.
 
 - [x] Whole-mode queue, FIFO `Up next`, boolean fallback, whole-row actions, and no manual Refresh.
@@ -254,8 +255,8 @@ rewarms Chrome before releasing that connection, then verifies the restored pref
 
 The qualifying campaign of every stable release since v0.6.0 passed the twelve checks above
 through its `androidPush` lane. Failed earlier attempts are recorded in the ledger. The latest is
-[v0.7.1](RELEASE_STATUS.md#mainline-v071--published-stable), on the Pixel 10 Pro,
-Android 17 build `CP3A.260905.009`, Chrome `154.0.8037.57`. The lane's detail, attention-tap,
+[v0.7.4](RELEASE_STATUS.md), on the Pixel 10 Pro,
+Android 17 build `CP3A.260905.009`, Chrome `154.0.8037.126`. The lane's detail, attention-tap,
 activity-stop, stale-generation, clear, force-stop, permission, lock/resume, network, Doze,
 forbidden-sink, and restoration phases map to these checks. The campaign rows record delivery,
 tap/clear behavior, observed force-stop/Doze variants, ten detectable clean sinks, and restored
@@ -264,13 +265,15 @@ guarantee background delivery.
 
 ### Specialized triage and delayed-tap acceptance — qualification pending
 
+The checkboxes below reset for each candidate release; `v0.7.4` passed all of them in the physical
+background-Push lane, as recorded in [`RELEASE_STATUS.md`](RELEASE_STATUS.md).
+
 The implemented `triage_verified` and `stale_taps_verified` phases run after `clear_verified`
 and before `force_stop_verified`.
 
 <!-- release-generate:campaign:start -->
 The v0.7.7 campaign qualified these scenarios only for its recorded candidate and devices. Each later candidate must pass them again on its exact signed bytes; historical evidence does not transfer. See the [release ledger](RELEASE_STATUS.md).
 <!-- release-generate:campaign:end -->
-
 On 2026-10-01, a development run of the whole lane passed every phase,
 these two included, with no re-arm, and restored the phone. It ran against the installed v0.7.1
 gateway with stock OMP 18.4.8 fixtures on the Pixel 10 Pro, Android 17, Chrome `154.0.8037.57`.

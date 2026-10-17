@@ -14,6 +14,38 @@ installers here; propose general-purpose controller/registry changes upstream. R
 For ordinary installation, use the [published stable archive](docs/OPERATIONS.md#2-cli-and-daemon-installation).
 A source checkout is for development and is not signed-artifact qualification.
 
+## Build from source
+
+Use Bun 1.4.0 in this checkout. A source build does not inherit the signed release's qualification.
+
+```sh
+bun install --frozen-lockfile
+bun run check
+
+# Loopback-only development mode
+bun apps/gateway/src/cli.ts serve \
+  --dev-localhost \
+  --port 4317 \
+  --origin http://127.0.0.1:4317
+```
+
+For a source-based production install, run `bun run build`, then use the installation commands in `README.md` with `apps/gateway/src/cli.ts` instead of the archive's `.js` entry point. `bun run release:build` builds the deterministic Bun-runtime archive and checksum manifest; it does not qualify or publish that build.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `apps/gateway` | Loopback daemon, OMP discovery/query reader, launch broker, HTTP API, CLI, services, and diagnostics |
+| `apps/web` | Mobile session directory PWA and no-secret service worker |
+| `packages/protocol` | Runtime-validated OMP discovery/query and browser contracts |
+| `packages/collab-client` | Pinned OMP `collab-web` source and in-memory bootstrap patch |
+| `scripts/build-web.ts` | Reproducible hashed PWA/client asset build |
+| `scripts/build-release.ts` | Deterministic Bun-runtime release archive and SHA-256 manifest |
+| `scripts/post-release-smoke.ts` | Published-byte local Mac/physical-Android smoke with owned-fixture cleanup |
+| `docs/media` | Canonical README media plus its seeded-fixture capture provenance |
+| `docs/` | Architecture, protocol, security, operations, compatibility, and release evidence |
+| `UPSTREAM.lock.json` | Exact OMP source and package baseline |
+
 ## Development workflow
 
 1. Open or select a focused [GitHub issue](https://github.com/carrythroughsystems/omp-session-gateway/issues).

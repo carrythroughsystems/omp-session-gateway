@@ -5,11 +5,12 @@ Pinned integration of OMP's existing `packages/collab-web` source at tag `v18.4.
 `16.3.6`; `@oh-my-pi/pi-wire` is pinned exactly to `18.4.2`. Its wire source is unchanged
 from the previous engineering baseline; no collaboration protocol or relay framing changes.
 
-These are browser-client provenance pins, not the OMP host prerequisite. The gateway consumes
-the native registry/controller in stock OMP `>= 18.1.20` without a fork, custom OMP build, or
-gateway-specific OMP plugin. Its root `UPSTREAM.lock.json` records the separate host/source
-baseline; the two pins happen to name the same tag but move independently. See
-[OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for qualification and deployment scope.
+These are browser-client provenance pins, independent of both the minimum supported OMP host
+version (`>= 18.1.20`) and the root `UPSTREAM.lock.json` engineering host baseline (`v18.5.1`).
+The gateway consumes the native registry and controller in stock OMP `>= 18.1.20` without a fork,
+custom OMP build, or gateway-specific OMP plugin, while this package pins the embedded browser
+client at `v18.4.2`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
+deployment scope.
 
 The local patch passes the capability directly into the root `App` component. The installed PWA
 mounts that component in its current document so Android standalone navigation does not depend on
@@ -30,7 +31,7 @@ now upstream code. Snapshot chunks now buffer inside upstream's guest replica an
 on the final chunk or promised entry count, with live entries appended after the snapshot and
 finished stream ghosts cleared even when their entries arrive mid-snapshot. The transcript stays
 mounted and the last published rows remain visible during resynchronization, replacing the local
-first-paint gate. Upstream's separate committed-tool scan avoids rescanning the full transcript on
+first-paint hold. Upstream's separate committed-tool scan avoids rescanning the full transcript on
 each streamed token.
 
 The local explicit `Show earlier` window remains: newest 150 entries initially, 300 more per tap,

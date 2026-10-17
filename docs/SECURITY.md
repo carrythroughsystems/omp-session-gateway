@@ -1,5 +1,10 @@
 # Security design and threat model
 
+This document is for operators, contributors, and auditors reviewing the threat model, trust
+boundaries, and security invariants of OMP Session Gateway. For installation, Tailscale Serve
+setup, and lost-phone recovery, see [Operations](OPERATIONS.md). To report a vulnerability
+privately, follow the [security policy](../SECURITY.md).
+
 ## 1. Security objective
 
 OMP Session Gateway safely brokers existing OMP collaboration bearer capabilities from local OMP processes to one authorized mobile user without persisting or broadly exposing those capabilities.
@@ -110,11 +115,11 @@ accepts inbound tailnet connections and dials `localhost` to service them. The g
 genuine loopback peer for traffic that originated on another machine, and trusts the caller's
 `Tailscale-User-Login` verbatim. Serve is not in that path and cannot overwrite anything.
 
-This was demonstrated on 2026-08-21 against a qualification host running `v0.1.0-prealpha.17` with
-its listener correctly bound to `127.0.0.1:4317` only. From a *different* tailnet node,
-`http://<node-tailnet-ip>:4317/api/v1/sessions` returned `403` with no header and **`200` with a
-forged `Tailscale-User-Login` naming an allowlisted account**. The same probes against a host running
-the normal TUN-mode client are refused outright on both its tailnet and LAN addresses.
+On a host running userspace-mode `tailscaled` with its listener bound to `127.0.0.1:4317` only, a
+probe from a different tailnet node to `http://<node-tailnet-ip>:4317/api/v1/sessions` reaches the
+loopback listener directly and can supply a forged `Tailscale-User-Login` header unless the gateway
+verifies the host's tailnet interface. On a host running the normal TUN-mode client, direct probes
+to the gateway port on tailnet and LAN addresses are refused outright.
 
 Userspace mode is not exotic: it is the usual way to run Tailscale in a container, on many VPS
 images, and on headless servers, which are exactly the hosts an operator is most likely to automate.
@@ -381,10 +386,11 @@ Minimum guidance:
 - keep tailnet grants narrow;
 - persist no session capability in the PWA.
 
-Proposed stronger Control protection — ADR-008, not implemented in v0.4.0:
+Proposed stronger Control protection (WebAuthn, not currently implemented):
 
-There is no current passkey enrollment or per-launch WebAuthn gate. The following remains a future
-contract, not a substitute for device revocation, lock, or tailnet policy:
+Passkey enrollment and per-launch WebAuthn verification are not currently implemented. If added in
+a future release, they must enforce the following contract and still do not replace device
+revocation, screen lock, or tailnet policy:
 
 - enroll a WebAuthn credential with user verification;
 - require a fresh assertion for each Control launch or a very short verified window;
@@ -419,11 +425,10 @@ Test infrastructure must fail when a known canary appears in logs, files, Playwr
 
 ### Real-device cloud qualification
 
-The stable campaign's `deviceCloud` lane (ADR-032) opens View and Control on TestingBot's real
-devices, so a vendor-operated phone briefly holds a live capability. Only qualification sessions on
-the retained Mac's candidate gateway are opened there: the campaign's live OMP session and the lane's
-own fixture, both with a synthetic model key and no user data, and both revoked when the campaign
-stops them. The boundary:
+Cloud-device qualification opens View and Control on TestingBot's real devices, so a vendor-operated
+phone briefly holds a live capability. Only isolated qualification sessions on a candidate gateway
+are opened there: the qualification live OMP session and the lane's own fixture, both with a
+synthetic model key and no user data, and both revoked when the run stops them. The boundary:
 
 - TestingBot's tunnel fetches whatever its devices request from the machine it runs on. Run as
   shipped, it would reach that machine's loopback, where a gateway trusts identity headers, its LAN,
@@ -450,12 +455,11 @@ stops them. The boundary:
   fails if one contains either session's live View or Control link, or any 16-character segment of
   one, or kept video or screenshots. The links it compares against are fetched through the gateway's
   own launch contract and exist only in the orchestrator's memory for that comparison.
-- The TestingBot key and secret come from the read-only 1Password service account. The token reaches
-  only each `op` child's environment, never argv, and no ambient `OP_ACCOUNT` applies. The credentials
-  reach only the tunnel's environment and in-memory request headers, never receipts or logs.
+- TestingBot credentials are supplied only through child-process environment variables and in-memory
+  request headers, never command-line arguments, receipts, or logs.
 - The iPhone turns background alerts off before its session ends. If its attempt fails first, the
-  subscription stays on the candidate gateway until Mac cleanup uninstalls the gateway, and the
-  alerts sent to it meanwhile carry only session metadata.
+  subscription stays on the candidate gateway until qualification cleanup uninstalls the gateway,
+  and any alerts sent meanwhile carry only session metadata.
 
 ### Manual `/collab` is outside this boundary
 
@@ -465,9 +469,8 @@ is not a defect there and this project cannot change it.
 
 The consequence is that anything recording an OMP terminal captures a live, unexpired capability:
 session transcripts, terminal recorders, CI logs of a PTY, and supervised process managers that
-retain stdout. Observed directly on 2026-08-19, when a `/collab` issued inside a supervised scratch
-session wrote a control link into that supervisor's log; the session was stopped and the capability
-revoked within seconds.
+retain stdout. If `/collab` runs inside a recorded or supervised session, stop the session to
+revoke the printed link.
 
 This is the sharpest argument for the gateway's model rather than a gap in it. The gateway never
 renders a capability: the session list is metadata-only, a capability is fetched just-in-time after

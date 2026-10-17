@@ -1,5 +1,12 @@
 # Windows qualification
 
+This runbook is for maintainers running Windows release qualification and reviewing the Windows host
+test lanes. For normal Windows installation, follow the
+[operations guide](OPERATIONS.md#2-cli-and-daemon-installation). Windows x86-64 build 26100 (Server
+2025) at interactive logon — from an Administrator or a standard account — is qualified in the
+current stable release (`v0.7.4`); see [Compatibility](COMPATIBILITY.md) and
+[Release status](RELEASE_STATUS.md).
+
 ## Mainline Windows: tested evidence and the remaining delta — 2026-09-24
 
 Stock OMP `>= 18.1.20` is the current prerequisite; [PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). Configure only
@@ -33,12 +40,13 @@ readiness token. That was a one-time rehearsal of the published bytes, not a sta
 **What this closes.** Before these lanes, the gateway had never queried a real stock OMP over the
 named pipe OMP publishes on Windows; hosted CI covered only the gateway's own service lifecycle.
 
-**What still separates Windows from the qualified release matrix.** An exact signed gateway
-candidate and mainline OMP binary through install, reboot with no pre-login listener, interactive
-login and automatic start, `doctor`, rotation, upgrade, rollback, and uninstall, with TUN-mode
-Tailscale Serve and a physical client. Hosted runners cannot reboot into a login session, so this
-stays a release-lane requirement. Windows starts the gateway at interactive logon (`LogonTrigger`),
-not at unattended boot.
+**Why hosted CI does not replace the signed-artifact Windows lane (automated from v0.6.0 below).**
+Qualifying a release requires an exact signed gateway candidate and mainline OMP binary through
+install, reboot with no pre-login listener, interactive login and automatic start, `doctor`,
+rotation, upgrade, rollback, and uninstall, with TUN-mode Tailscale Serve and a physical client.
+Hosted runners cannot reboot into a login session, so the automated signed-artifact lane below runs
+on a disposable Server 2025 VM for each stable release. Windows starts the gateway at interactive
+logon (`LogonTrigger`), not at unattended boot.
 
 ## Automated signed-artifact lane
 
@@ -657,9 +665,9 @@ Remaining to advertise Windows:
    path itself passed 13/13, the remaining isolated patch fixtures passed, and the production binary
    published and revoked correctly, but a hung fixture is not a green full-suite claim.
 
-`Windows host lifecycle` therefore remains **PARTIAL for release**, but no longer because #90 or
-reboot/login behavior is unknown. These are Windows-promotion requirements only; Windows is outside
-the advertised beta matrix.
+At the 2026-08-21 fork-era beta cut, `Windows host lifecycle` remained **PARTIAL for release** for
+that beta campaign; mainline campaigns from `v0.6.0` onward automate and pass the full
+signed-artifact Windows lane above.
 
 Beta itself uses the command-complete, versioned v17.4.1 patch route documented in
 `patches/oh-my-pi/README.md`. Upstreaming and paired packaging are not beta gates. This scope choice

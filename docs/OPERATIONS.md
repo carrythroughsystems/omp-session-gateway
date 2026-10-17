@@ -2,47 +2,26 @@
 
 ## 1. One-time prerequisites
 
-- stock mainline OMP `>= 18.1.20` on PATH;
-- Bun 1.4.0 installed at a persistent path for the gateway runtime;
-- Tailscale installed and signed into the same tailnet on the desktop and Android phone, with
-  TUN-mode networking on the gateway host (not userspace networking);
-- tailnet HTTPS/DNS enabled as required by Tailscale Serve;
-- a tailnet policy restricting the gateway host’s HTTPS service to the intended user/device posture;
-- a browser/host combination qualified for the exact gateway artifact before claiming support.
+- Stock mainline OMP `>= 18.1.20` on `PATH`.
+- Bun `1.4.0` installed at a persistent path for the gateway service.
+- Tailscale installed and signed in to the same tailnet on the gateway host and your phone, with TUN-mode networking on the gateway host (not userspace networking).
+- Tailnet HTTPS and MagicDNS enabled for Tailscale Serve.
+- A tailnet access policy granting only your intended users HTTPS access to the gateway host (example in [`../examples/tailscale-policy.hujson`](../examples/tailscale-policy.hujson)).
 
-[PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). Stock OMP is sufficient: set
-`collab.autoStart` once, then use plain `omp`. The gateway only reads OMP’s discovery directory
-and queries each host. No fork, custom OMP build, gateway-specific OMP plugin, or shared
-publication credential is needed. Install the separate gateway service once.
+Initial Tailscale login, gateway installation, and `collab.autoStart` configuration happen once; after setup, starting `omp` requires no extra command per session.
 
-**Install the [latest stable release](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest).**
-Its qualification, publication, and published-byte checks are recorded in the
-[release ledger](RELEASE_STATUS.md) and its changes in the [changelog](../CHANGELOG.md); use the
-[compatibility policy](COMPATIBILITY.md) for its support limits. Published `v0.3.0` and `v0.2.1`
-retain their **fork-era** patched OMP v18.1.14 and v17.4.1 evidence respectively; use each tag’s
-matching instructions for those artifacts. Gateway rollback alone neither switches OMP nor
-restores fork-era configuration.
-
-The system is zero-effort per OMP session, not zero-effort to install. Initial Tailscale login,
-gateway installation, and OMP configuration happen once.
-
-For v1 header-based authorization, the Android source must be a user-authenticated Tailscale device. Tagged source devices do not receive the user identity header used by the default auth mode.
+Keep your phone or browser device user-owned: tagged source devices carry no `Tailscale-User-Login` identity header and are denied by default authorization.
 
 ## 2. CLI and daemon installation
 
-Use the published Bun-runtime archive, not a source checkout or candidate tag, for normal
-installation. Follow [Verify a published build](RELEASE.md#verify-a-published-build) before
-extracting or executing it. For recovery or rollback to a release published before the repository
-transfer, keep its original `alphastorm/omp-session-gateway` signing identity even though downloads
-come from `carrythroughsystems/omp-session-gateway`. The verification runbook selects it only for
-the closed historical tag set captured on 2026-10-09 (through v0.7.5); later tags require the new
-owner. Never substitute the download URL for the certificate or attestation source identity.
+Download the latest release archive from [GitHub Releases](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest) and follow [Verify a published build](RELEASE.md#verify-a-published-build) before extracting or running it. Releases published before the repository moved to `carrythroughsystems` (the closed tag set through v0.7.5) were signed under the original `alphastorm/omp-session-gateway` identity; the verification runbook selects that identity for those tags only. Never substitute the download URL for the certificate or attestation source identity.
 
-**Upgrading from a fork-era gateway?** Complete the matching-old-CLI stopped-service step below
-first. Do not run the new installer over an active fork-era service.
+**Warnings before you run `install`:**
+- If you are upgrading from v0.3.0 or earlier (releases that used `publisher-token`), stop and unregister that service with its own CLI first ([UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md#recover-across-the-v030-boundary)).
+- Run as your normal desktop user, never `root`.
+- Keep `bun` at the persistent path used during `install`; the user service executes that exact path.
 
-From the directory containing the verified download, run as the desktop user, not root. Replace
-the example origin and login with the deployment’s exact Tailscale HTTPS origin and allowlist:
+From the directory containing the verified archive on Linux or macOS, replace the example origin and login with your exact Tailscale HTTPS origin and login:
 
 ```sh
 tar -xf omp-session-gateway-*-bun.tar
@@ -53,8 +32,7 @@ bun apps/gateway/src/cli.js install \
 bun apps/gateway/src/cli.js serve-guidance
 ```
 
-On Windows, run the same steps in PowerShell, one command per line; Windows 10 and later include
-`tar`:
+On Windows, run the same steps in PowerShell, one command per line:
 
 ```powershell
 tar -xf (Get-Item omp-session-gateway-*-bun.tar).Name
@@ -63,413 +41,212 @@ bun apps/gateway/src/cli.js install --origin https://host.tailnet.ts.net --allow
 bun apps/gateway/src/cli.js serve-guidance
 ```
 
-The archive contains one bundled JavaScript CLI and static web assets, not separate native
-`omp-gateway` and `omp-gatewayd` binaries. Both package command names refer to that CLI. The
-installer stages the verified payload in private, content-addressed storage, creates or retains
-the gateway-only readiness token, registers the current-user service, starts it, and requires
-authenticated readiness before activating the runtime. It prints Serve guidance; it does not
-configure Tailscale, validate tailnet policy, install OMP, or change OMP settings.
+The installer validates or writes your private configuration, stages the verified runtime under your user state directory, creates or retains the local readiness token, registers and starts the current-user service, and waits for an authenticated loopback readiness check before activating the runtime. It prints the `tailscale serve` command for your origin; it does not configure Tailscale, edit tailnet policy, or change OMP settings.
 
-**Apply the printed private Serve command and the [tailnet policy](#6-tailnet-access-policy)
-before running `doctor`.** Inspect `tailscale serve status` and keep Funnel disabled. Then, from
-the same extraction root:
+**Apply the printed Serve command and the [tailnet policy](#6-tailnet-access-policy) before running `doctor`.** Confirm `tailscale serve status` and keep Funnel disabled, then run from the same extraction directory:
 
 ```sh
 bun apps/gateway/src/cli.js status
 bun apps/gateway/src/cli.js doctor
 ```
 
-Open the configured HTTPS origin only after these checks pass; finish the allowed/denied-device
-checks below. The service records the Bun executable used during install: keep Bun 1.4.0 at that
-persistent path. The installer does not create a shell shortcut. Below, `omp-gateway <command>`
-means `bun apps/gateway/src/cli.js <command>` from this verified extraction root; keep the
-matching archive for recovery.
+The archive ships one bundled JavaScript CLI (`apps/gateway/src/cli.js`) plus static web assets, and does not install a shell alias. Below, `omp-gateway <command>` means `bun apps/gateway/src/cli.js <command>` from the verified extraction root:
 
-An upgrade reads and validates the existing private configuration first.
-Continue passing the production `--origin` and `--allow` values on install and upgrade. An omitted
-`--port` preserves the existing port; hostname, identity-trust, registry settings, and explicitly
-authored `omp` overrides are retained. Omitted OMP fields remain derived rather than being pinned
-to the installer's home directory.
-A malformed existing configuration fails closed instead of being replaced with defaults. The
-readiness token is retained, and an unchanged configuration is not rewritten. Installation removes
-the legacy fork-era publication token; this is not a reversible credential migration.
+- `omp-gateway status` — Print JSON reporting whether the user service is installed, active, ready on loopback, and aligned with `current.json`.
+- `omp-gateway doctor` — Run all 18 local, Tailscale Serve, identity, PWA, discovery, and relay checks and exit non-zero if any check fails.
+- `omp-gateway doctor --bundle [--output <path>]` — Write a redacted `omp-gateway-diagnostics.tar` containing only boolean check results and version/platform metadata.
+- `omp-gateway rotate-readiness-token` — Replace the local readiness token and restart the active user service on the new token.
+- `omp-gateway rollback [--to <version-dir>]` — Switch the active service back to the previous installed runtime (or a named retained version directory) and verify readiness.
+- `omp-gateway uninstall [--no-stop]` — Stop the user service and remove its autostart registration while keeping `config.json`, `readiness-token`, and staged runtimes.
 
-Starting with v0.5.2, a successful, readiness-proven install/upgrade also prunes superseded staged
-runtimes after committing `installation/current.json` and `installation/history.json`. It keeps
-the active runtime and the two most recent **distinct** predecessors in activation history
-(three distinct activations total), including the predecessor plain `rollback` selects. If the
-installed service definition names a different runtime, that runtime is additionally protected.
-Older versions, versions predating history, and staged-but-never-activated versions outside this
-set are removed. `rollback --to <version-directory>` can only select versions still retained;
-keep verified release archives separately for deliberate recovery to an older release.
+Each successful install keeps the active runtime plus the two most recent distinct predecessors in activation history and prunes older staged versions. `rollback --to <version-dir>` can only select a retained version, so keep verified release archives separately if you may need to recover to an older release.
 
-Pruning is best-effort: install prints numeric retained/removed/failed counts and cleanup errors
-never fail or revert the successful installation. It never runs on a failed install, on
-`install --no-start` (which proves no readiness), during rollback, or during uninstall. A victim
-is first renamed inside the private versions root to a non-version `.prune-<uuid>` marker; the
-next successful ready install finishes interrupted removals. Foreign names, non-directory
-entries, symlinks (including within a payload), and unsafe or unrecognized installation metadata
-are left alone. Each pass examines at most 4,096 versions-root entries and, separately, 4,096
-payload entries, descending at most 32 levels, so an interrupted removal that fits is always
-finished; oversized payloads or filesystem failures can leave extra payloads for a later install.
-The retained count describes runtimes protected by the policy, not failed/deferred removals.
-
-**First fork-era → mainline upgrade:** retain the predecessor's signed archive and private
-configuration, then run that archive's `uninstall` command before installing this gateway.
-Uninstall stops and unregisters its owned service without removing config or installed runtimes.
-An active fork-era service cannot prove readiness with the new token, so an in-place active
-upgrade is refused rather than weakening readiness authentication. The stopped upgrade creates
-the new readiness credential and retires `publisher-token`. Use the explicit recovery procedure
-in [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md) to return across that boundary.
-
-Service mechanisms (qualification is limited to the exact release matrix):
-
-- Linux: systemd user service named `omp-session-gateway.service`; Debian 13 x86-64 is qualified,
-  not every Linux distribution or non-systemd host;
-- macOS: LaunchAgent under the current user; starts after that user logs in, not at unattended boot;
-- Windows: current-user scheduled task that starts at that user's interactive logon, not at
-  unattended boot; Windows Server 2025 x86-64 is qualified
-  ([Windows qualification](WINDOWS_QUALIFICATION.md)), and other versions are supported and
-  CI-tested (service lifecycle on every change, a daily stock-OMP named-pipe canary).
-
-Operator commands:
-
-```text
-omp-gateway status
-omp-gateway doctor
-omp-gateway doctor --bundle
-omp-gateway rotate-readiness-token
-omp-gateway uninstall
-```
-
-Uninstall does not edit OMP settings or Tailscale policy. Normal uninstall derives the fixed
-current-user service path without parsing application config, stops the service, and removes its
-autostart registration even when config is absent or malformed. `uninstall --no-stop` is accepted
-only when the service is already inactive; it refuses an active service rather than orphaning a
-daemon. Serve mappings and local config/token state remain separate, explicit cleanup steps.
-
-Install snapshots the prior private config, validates any existing managed service/runtime, rejects
-authenticated foreground listeners on both the prior and requested endpoints, stages a
-content-addressed runtime, and verifies its manifest and payload digest. It starts that exact CLI
-with a one-time readiness-instance nonce and advances the current pointer only after a
-readiness-token HMAC bound to that nonce succeeds. A generic loopback
-`{"status":"ready"}` response and a same-token prior process are insufficient. If config, service
-registration, startup, readiness, or pointer activation fails, install restores the prior config,
-service state, and verified runtime. An unavailable token is repaired only while the prior service
-is inactive and its loopback endpoint is unoccupied.
-
-Readiness-token rotation validates the managed runtime before replacing the token. If the service
-cannot restart on the fresh token, the fresh token remains authoritative and the service is
-stopped; the prior potentially exposed token is never restored. Repair the failure, then rerun the
-normal install command to restore service registration. Mutation commands reject unknown options,
-missing values, and misspelled safety flags before changing state.
+| OS | Service name | Starts when | Qualified on |
+|---|---|---|---|
+| Linux | `omp-session-gateway.service` (`~/.config/systemd/user/omp-session-gateway.service`) | Current-user `systemd` manager starts (`default.target`) | Debian 13 x86-64 |
+| macOS | `omp-session-gateway` (`~/Library/LaunchAgents/omp-session-gateway.plist`) | Current user logs in to the desktop (`RunAtLoad`, not unattended boot) | macOS 27 arm64 (`VirtualMac2,1` Virtualization.framework guest, not bare metal) |
+| Windows | `omp-session-gateway` scheduled task (`%LOCALAPPDATA%\OMP Session Gateway\omp-session-gateway-task.xml`) | Installing user logs on interactively (`InteractiveToken`, not unattended boot) | Windows x86-64 build 26100 (Server 2025), Administrator or standard account |
 
 ## 3. Paths
 
-The gateway’s private config directory contains `config.json` and `readiness-token`; its private
-state directory holds the managed runtime and optional push state. Use the installed CLI’s
-configuration/diagnostics rather than assuming an OMP path from a gateway runtime directory.
-Capabilities are never stored in any of these paths.
+The gateway keeps its private configuration and state separate from OMP's discovery directory and never writes capabilities to disk:
 
-OMP separately owns `~/.omp/run/collab-hosts`. `PI_CONFIG_DIR` changes the `.omp` directory name
-relative to the home directory. The gateway reads each discovery file’s `endpoint` verbatim because
-OMP can relocate long socket paths. Never delete or repair entries from the gateway.
+- **Gateway config directory** (`config.json`, `readiness-token`, and on Windows `omp-session-gateway-task.xml`): `${XDG_CONFIG_HOME:-~/.config}/omp-session-gateway` on Linux and macOS; `%LOCALAPPDATA%\OMP Session Gateway` on Windows.
+- **Gateway state directory** (`installation/current.json`, `installation/history.json`, `installation/versions/<version>-<digest>`, and `push.json`): `${XDG_STATE_HOME:-~/.local/state}/omp-session-gateway` on Linux and macOS; `%LOCALAPPDATA%\OMP Session Gateway\state` on Windows.
+- **OMP discovery directory** (owned by OMP, read-only to the gateway): `~/.omp/run/collab-hosts`, or `~/.<PI_CONFIG_DIR>/run/collab-hosts` when `PI_CONFIG_DIR` is set.
+
+The gateway reads each discovery file's `endpoint` field verbatim because OMP can relocate long Unix socket paths. Never delete or edit files inside OMP's discovery directory from the gateway.
 
 ## 4. Gateway configuration
 
-`install --origin https://host.tailnet.ts.net --allow you@example.com` creates the private gateway
-configuration. The mainline integration adds these fields:
+`install --origin https://host.tailnet.ts.net --allow you@example.com` creates or updates `config.json`:
 
-| Field | Default | Meaning |
-|---|---|---|
-| `omp.discoveryDir` | OMP discovery directory resolved as above | Explicit directory override for the reader. |
-| `omp.queryTimeoutMs` | `1500` | Per-host query deadline in milliseconds. |
-| `registry.heartbeatSeconds` | `10` | Discovery poll interval in seconds, not a publisher heartbeat. |
-| `registry.ttlSeconds` | `35` | Retention of an existing card during transient query failure. |
+| Field | Default | Bounds | Meaning |
+|---|---|---|---|
+| `http.hostname` | `"127.0.0.1"` | `"127.0.0.1"` or `"::1"` | Loopback bind address; non-loopback addresses are rejected. |
+| `http.port` | `4317` | `1`–`65535` | Loopback HTTP port proxied by Tailscale Serve. |
+| `http.publicOrigin` | Set by `--origin` | Exact `https://` origin in production | External Tailscale Serve origin (exact `http://` loopback origin in `dev-localhost` mode). |
+| `auth.mode` | `"tailscale-serve"` | `"tailscale-serve"` or `"dev-localhost"` | Production Tailscale Serve identity check or local development mode. |
+| `auth.allowedLogins` | Set by `--allow` | 1+ entries (`1`–`320` chars, no `*`) | Lowercased `Tailscale-User-Login` values allowed to access the gateway. |
+| `omp.discoveryDir` | `~/.omp/run/collab-hosts` | Absolute path, no NUL bytes | Explicit discovery path override when the service does not inherit a custom `PI_CONFIG_DIR`. |
+| `omp.queryTimeoutMs` | `1500` | `250`–`10000` | Per-host deadline in milliseconds for one `snapshot` or `link` query. |
+| `registry.heartbeatSeconds` | `10` | `2`–`60` | Seconds between discovery polls of OMP's host directory. |
+| `registry.ttlSeconds` | `35` | `5`–`300`, and `> 2 × heartbeatSeconds` | Seconds an existing session card is kept during transient query failures. |
+| `registry.maxSessions` | `100` | `1`–`1000` | Maximum concurrent hosts tracked in the in-memory registry. |
 
-TTL must exceed twice the poll interval. Only `ENOENT`/`ECONNREFUSED` proves a queried host dead;
-timeouts, permission/resource errors, and wire errors retain the card until TTL expiry. A host
-absent from discovery is removed. An absent discovery directory is valid when no hosts are sharing.
+Only `ENOENT` or `ECONNREFUSED` proves a queried OMP host has exited; timeouts, permission or resource errors, and wire errors retain the card until `registry.ttlSeconds` expires. A host absent from OMP's discovery directory is removed on the next poll, and an absent discovery directory is valid when no sessions are sharing.
 
-Validate strictly and fail closed. Reject wildcard listen addresses in production, wildcard
-identities, unsafe paths, unknown fields, and invalid poll/TTL combinations.
+Configuration parsing fails closed on unknown keys, wildcard addresses or logins, non-private file permissions, or invalid poll/TTL combinations.
 
 ## 5. Tailscale Serve
 
-After the gateway service is healthy on loopback, configure a persistent private HTTPS proxy. Ask the
-installed CLI for the command matching the configured public origin:
+Print the exact Serve command for your configured `--origin` and `--port`:
 
-```bash
-omp-gateway serve-guidance
+```sh
+bun apps/gateway/src/cli.js serve-guidance
 ```
 
-For a default HTTPS origin it prints a command equivalent to:
+For a default port-443 HTTPS origin and loopback port `4317`, run:
 
-```bash
+```sh
 tailscale serve --bg --https=443 http://127.0.0.1:4317
 ```
 
-An origin such as `https://host.tailnet.ts.net:8443` produces `--https=8443`; `doctor` requires the
-exact configured external host and port plus the exact loopback target. Check `tailscale serve
---help` on the installed version, apply the printed private Serve mapping, and inspect `tailscale
-serve status`. Never execute `tailscale funnel` or enable public exposure.
+If your `--origin` uses `:8443`, `serve-guidance` prints `--https=8443`. Confirm the mapping and verify that Funnel is off:
 
-The gateway remains loopback-only after Serve is configured. `doctor` fails for a mismatched Serve
-host, external port, loopback proxy, non-loopback listener, or active Funnel mapping.
+```sh
+tailscale serve status
+tailscale funnel status
+```
 
-Tailscale Serve removes spoofed incoming identity headers before adding trusted tailnet identity
-headers. The backend still requires the exact expected header and application allowlist. Direct
-loopback callers can forge those headers; the supported v1 host is therefore a user-controlled
-workstation with no mutually untrusted local accounts.
+**Never run `tailscale funnel` or expose the gateway to the public Internet.**
+
+The daemon stays bound to loopback behind Tailscale Serve. Serve strips incoming identity headers and adds `Tailscale-User-Login` for user-owned tailnet devices; because local loopback processes can forge headers directly, the supported host is a single-user workstation with no untrusted local accounts.
 
 ## 6. Tailnet access policy
 
 ### Access policy and identities
 
-Use [Tailscale Serve](https://tailscale.com/kb/1312/serve) over tailnet HTTPS as the only remote
-path; never enable Funnel. Keep the TUN-mode gateway backend on loopback behind Serve. Serve
-removes caller-supplied identity headers and supplies `Tailscale-User-Login` for user-owned source
-devices. The gateway compares that login with its exact application allowlist; network access
-alone is not authorization. A tagged **destination** gateway is appropriate, but keep the phone
-**user-owned**: tagged sources have no user identity header and are denied, even if their network
-grant permits HTTPS. See the [deployment matrix](COMPATIBILITY.md#deployment-dependency-matrix).
-
-Merge [the example policy](../examples/tailscale-policy.hujson), not a replacement tailnet policy.
-Replace its placeholder login in both `tagOwners` and `src`; separately configure the same intended
-login in the gateway allowlist. [Tags](https://tailscale.com/kb/1068/tags) identify service devices,
-and `tagOwners` controls who may assign them, not who may connect. Applying a tag replaces a
-device’s user identity. Restrict ownership of `tag:omp-session-gateway` and assign that tag only to
-the intended gateway node; audit any additional tags, whose permissions also apply.
-
-Prefer [grants over legacy ACLs](https://tailscale.com/docs/reference/grants-vs-acls) for new rules.
-Both can coexist; migrating unrelated rules is not required. The example uses the documented
-[grant syntax](https://tailscale.com/docs/reference/syntax/grants): an exact user in `src`,
-`tag:omp-session-gateway` in `dst`, and `tcp:443` in `ip`. If the configured Serve HTTPS port is
-8443, use `tcp:8443` instead; never grant remote access to backend port 4317. An existing legacy
-ACL expresses the same path with `action: "accept"`, that user in `src`, `proto: "tcp"`, and
-`"tag:omp-session-gateway:443"` in `dst`
-([policy syntax](https://tailscale.com/docs/reference/syntax/policy-file)).
-
-Grants are additive, not ordered deny rules: a narrower rule does not override a broader grant.
-Review **all** grants and legacy ACLs for overlapping access, including the initial
-[allow-all policy](https://tailscale.com/kb/1018/acls). Remove or narrow such access as appropriate
-before relying on the example. An exact user source permits that user’s matching devices, not
-just one phone; the optional posture below narrows a class of devices, not a unique handset.
-Keep the gateway’s own source permissions minimal: do not grant it broad access to other tailnet
-nodes merely because it serves the phone. Inventory any separately needed administration paths;
-the HTTPS grant is not a reason to add SSH, subnet routing, or exit-node privileges. This is a
-tailnet access policy, not a substitute for host hardening or a general Internet egress firewall.
-
-### Device admission: approval or Tailnet Lock
-
-Choose deliberately between the following admission controls. **Current Tailscale documentation
-says device approval and Tailnet Lock are mutually exclusive**
-([Tailnet Lock limitations](https://tailscale.com/kb/1226/tailnet-lock#limitations)). Neither
-replaces network policy, ongoing device maintenance, or the gateway application allowlist.
-
-- **[Device approval](https://tailscale.com/kb/1099/device-approval):** enable it in the admin
-  console’s Device management settings; review the new gateway and phone in Machines before
-  approving them. A device marked **Needs approval** cannot send or receive tailnet traffic.
-  Pre-approved auth keys bypass this manual review, so treat their issuance as an admission
-  decision. Approval is for the device, not each subsequent user/node on shared hardware, and is
-  not proof of current patch level or protection from a compromised already-approved phone.
-- **[Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock):** trusted signing nodes sign node
-  keys; peers verify signatures rather than trusting the coordination server alone to introduce
-  new nodes. Plan at least two separately protected signing nodes, as the documented setup
-  requires, and securely retain the initialization-time disablement secrets outside those nodes.
-  Lock keys remain on their devices, so compromising a signer can compromise that authority.
-  Do not make the gateway the only recovery dependency.
-
-  For a new user-owned Android phone, sign in normally, locate its **Locked out** entry in
-  Machines, verify the device, select the signing dialog’s CLI tab, and run its generated
-  `tailscale lock sign` command on a trusted Linux, macOS, or Windows signing node. Android
-  currently cannot act as a signer; the phone can still be a signed member. Sign a new gateway
-  node using the same reviewed workflow. An unsigned node remains locked out even if its user
-  and network rule would otherwise allow access. Normal reauthentication after a signed node
-  key expires rotates its signature automatically; it does not require manual re-signing.
-
-  Document custody and recovery before enabling Lock: retain access to another trusted signer;
-  use the documented compromised-key revocation workflow if a signer is compromised (nodes
-  signed by a revoked key need fresh signatures). Disabling Lock requires a disablement secret.
-  Providing one to Tailscale support at initialization is optional and delegates that recovery
-  authority; if you lose the secrets and did not provide one to support, the documentation warns
-  the tailnet cannot be recovered. Lock is not a health check, per-request user verification, or
-  a cure for an already compromised signed phone.
-
-### Node key expiry and renewal
-
-[Key expiry](https://tailscale.com/kb/1028/key-expiry) limits how long a device can remain
-authenticated without reauthentication. When its key expires, connections to/from that endpoint
-stop working. A long-running gateway daemon can remain locally healthy while its Serve path is
-unreachable; an expired phone loses tailnet access even though its installed PWA still exists.
-Do not treat either failure as a reason to enable Funnel or relax the allowlist.
-
-Check the actual expiry setting for **both** devices in Machines. First-time tagged-device
-authentication disables key expiry by default; do not assume the gateway renews periodically.
-For an unattended gateway, explicitly choose between disabled expiry with a revocation plan and
-enabled expiry with scheduled reauthentication and alternate local access. Prefer retaining
-expiry on the user-owned phone and reauthenticate in its Tailscale client when required.
-Disabling expiry improves availability but removes that periodic authentication boundary; expiry
-is not immediate lost-device revocation and does not replace the application allowlist.
-
-For CLI-equipped hosts, the documented renewal command is `tailscale up --force-reauth` (with
-privilege elevation if required). It can disconnect the host: do not run it over the only SSH/RDP
-path without alternate access. For an already-expired node, an administrator can use **Temporarily
-extend key** in Machines to obtain a 30-minute recovery window, then complete reauthentication.
-Verify the Serve mapping and allowed-phone access afterwards.
-
-### Optional source-device posture
-
-[Device posture](https://tailscale.com/kb/1288/device-posture) adds source conditions to a
-network rule. Define named `posture:` entries in the top-level `postures` object and reference
-them with the grant’s `srcPosture` array. Every condition within one posture must match; any one
-of multiple named postures in `srcPosture` can match. A required unset attribute does not match.
-An explicit `srcPosture` replaces, rather than adds to, `defaultSrcPosture`, so preserve any
-existing baseline requirements when adapting the example.
-
-The example’s commented alternative restricts the same user-to-gateway HTTPS grant to Android
-sources on the stable Tailscale release track. **Replace** the original grant; adding the
-restricted grant alongside the unrestricted one leaves the original access intact. The variant
-is an illustration, not a claim that Android plus stable means patched, managed, or uncompromised.
-
-Available default attributes are `node:os`, `node:osVersion`, `node:tsVersion`,
-`node:tsReleaseTrack`, `node:tsAutoUpdate`, and `node:tsStateEncrypted`
-([attribute reference](https://tailscale.com/kb/1288/device-posture#default-attributes)). Choose
-OS/client version floors from your maintenance policy and check actual values in each machine’s
-**Device Postures** section before enforcing them. `node:tsAutoUpdate` refers only to Tailscale’s
-built-in updater: App Store/Google Play updates report false, so requiring true would exclude
-those clients. `node:tsStateEncrypted` concerns Tailscale client state, not whole-device disk
-encryption. Third-party MDM/EDR, custom, and geolocation attributes have separate integration and
-plan requirements; do not assume they exist on a personal phone.
-
-Posture checks apply to the **source**, not the destination: the phone grant does not attest the
-gateway host’s security. Maintain that host independently. Tailscale documents that source
-posture restrictions do not apply to shared/external devices or devices behind subnet routers
-in the same way as direct nodes within the tailnet; those paths can still be admitted by
-matching network rules. Do not share this gateway externally or introduce such paths as a
-posture workaround. Device sharing can also supply external user identity headers
-([Serve identity](https://tailscale.com/kb/1312/serve#identity-headers)); the exact application
-allowlist remains mandatory. The gateway neither reads nor enforces posture: Tailscale does.
-
-### Validate the combined controls
-
-Validate the merged example and any posture variant in the admin console’s policy preview
-([Access controls → Preview rules](https://tailscale.com/docs/features/tailnet-policy-file/manage-tailnet-policies#preview-changes));
-inspect effective permissions and add policy tests for intended allowed/denied paths. Syntax
-acceptance or preview is not an end-to-end proof of device posture or gateway authorization.
-From separate devices, verify both:
-
-- successful HTTPS directory access from the intended user-owned phone after admission,
-  renewal, and any required posture checks;
-- denial for unauthorized sources and, when posture is enabled, a nonmatching source, with no
-  overlapping unrestricted rule. A tagged source allowed through the network must still fail
-  gateway authorization; an unlisted user must also fail the application allowlist.
-
-For failures, inspect admission/signature state, key expiry, effective network rules and reported
-source posture before changing application authorization. Run `doctor` after restoring the
-supported Serve path; it does not audit these tailnet controls. Keep lost-phone response in
-[section 10](#10-lost-phone-and-revocation): these controls do not retract a capability already
-issued or disconnect an established OMP relay session.
-
-## 7. OMP configuration
-
-See `examples/omp-settings.jsonc`:
+Use [Tailscale Serve](https://tailscale.com/kb/1312/serve) over tailnet HTTPS as the only remote path and merge [`../examples/tailscale-policy.hujson`](../examples/tailscale-policy.hujson) into your tailnet policy file:
 
 ```jsonc
 {
-  "collab": {
-    "autoStart": "control"
-  }
+  "tagOwners": {
+    "tag:omp-session-gateway": ["you@example.com"]
+  },
+  "grants": [
+    {
+      "src": ["you@example.com"],
+      "dst": ["tag:omp-session-gateway"],
+      "ip": ["tcp:443"]
+    }
+  ]
 }
 ```
 
-The upstream-safe default remains `off`. A conservative deployment can choose `view` and retain manual full-control collaboration for occasional use.
+Replace `you@example.com` with the exact login passed to `--allow`, and use `tcp:8443` if your Serve origin uses port `8443` (never grant remote access to loopback port `4317`). [Tags](https://tailscale.com/kb/1068/tags) identify service hosts and strip user identity, so assign `tag:omp-session-gateway` only to the gateway host and keep your phone **user-owned** ([deployment matrix](COMPATIBILITY.md#deployment-dependency-matrix)). Prefer [grants over legacy ACLs](https://tailscale.com/docs/reference/grants-vs-acls) ([grant syntax](https://tailscale.com/docs/reference/syntax/grants), [policy syntax](https://tailscale.com/docs/reference/syntax/policy-file)), and remove or narrow broader rules such as the default [allow-all policy](https://tailscale.com/kb/1018/acls) because grants are additive.
 
-Set it with `omp config set collab.autoStart control` (or `view`), then start interactive sessions
-with plain `omp`. No other OMP setting is required for gateway discovery.
+### Device admission: approval or Tailnet Lock
+
+Choose one admission control for new tailnet nodes; **[Device approval](https://tailscale.com/kb/1099/device-approval) and [Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock) are mutually exclusive** ([Tailnet Lock limitations](https://tailscale.com/kb/1226/tailnet-lock#limitations)):
+
+- **Device approval:** Enable in the admin console under Device management and manually approve the gateway host and phone in Machines before they can exchange tailnet traffic; treat pre-approved auth keys as admission decisions.
+- **Tailnet Lock:** Maintain at least two separately protected signing nodes, store initialization disablement secrets offline, and sign the user-owned phone and gateway node with `tailscale lock sign` from a desktop signer (Android cannot act as a signer).
+
+### Node key expiry and renewal
+
+[Key expiry](https://tailscale.com/kb/1028/key-expiry) disconnects an expired host or phone until it reauthenticates; never enable Funnel or widen `--allow` to work around an expired key. Check expiry for both machines in the admin console: tagged gateway nodes default to disabled expiry, while user-owned phones should keep expiry enabled and reauthenticate in the Tailscale app. To renew a CLI host, run `tailscale up --force-reauth` when you have local or alternate access (or use **Temporarily extend key** in Machines for a 30-minute recovery window), then recheck `tailscale serve status`.
+
+### Optional source-device posture
+
+You can optionally narrow the grant to specific client attributes with [Device posture](https://tailscale.com/kb/1288/device-posture) (`srcPosture` in [`../examples/tailscale-policy.hujson`](../examples/tailscale-policy.hujson)) by replacing—not adding alongside—the unrestricted grant. Check actual values in Machines before enforcing default attributes (`node:os`, `node:osVersion`, `node:tsVersion`, `node:tsReleaseTrack`, `node:tsAutoUpdate`, `node:tsStateEncrypted`; see [attribute reference](https://tailscale.com/kb/1288/device-posture#default-attributes)), and note that App Store and Google Play builds report `node:tsAutoUpdate` as `false`. Tailscale enforces posture on direct tailnet sources while the gateway enforces its `--allow` login list on [Serve identity](https://tailscale.com/kb/1312/serve#identity-headers); do not share the gateway node externally.
+
+### Validate the combined controls
+
+Preview your merged policy in [Access controls → Preview rules](https://tailscale.com/docs/features/tailnet-policy-file/manage-tailnet-policies#preview-changes), then run this 3-step live check:
+
+1. **Allowed user device:** Open the HTTPS Serve origin on your allowed user-owned phone or browser and confirm the session directory loads.
+2. **Denied user device:** Open the HTTPS Serve origin from a device signed in as a different user (or blocked by policy) and confirm the request is blocked by Tailscale or denied (`403` / identity denied) by the gateway.
+3. **Tagged source device:** Connect from a tagged device (`tag:...`) and confirm the gateway denies access because no `Tailscale-User-Login` header is present.
+
+## 7. OMP configuration
+
+Enable automatic collaboration sharing once in OMP (`examples/omp-settings.jsonc`):
+
+```sh
+omp config set collab.autoStart control
+omp config get collab.autoStart
+```
+
+Use `view` instead of `control` if you want read-only remote access by default, or `omp config set collab.autoStart off` to restore the upstream default. Running `omp` processes keep the setting loaded at process start, so start a new `omp` session after changing `collab.autoStart`.
+
+Participating sessions publish owner-only discovery files under `~/.omp/run/collab-hosts` (or `~/.<PI_CONFIG_DIR>/run/collab-hosts`). See [OMP_INTEGRATION.md](OMP_INTEGRATION.md#1-operator-settings).
 
 ## 8. Android/PWA installation
 
-1. Join the Android device to the allowed tailnet identity.
-2. Open the Tailscale Serve HTTPS URL in a supported browser.
-3. Verify the authenticated identity shown by the PWA.
-4. Install **OMP Sessions** to the home screen.
-5. Test View and Control against a disposable OMP session.
-6. Verify browser reload returns to the directory and does not reconnect from stored capability state.
+Open your Tailscale Serve HTTPS origin in a supported browser, confirm your Tailscale login is shown, and install **OMP Sessions**:
 
-Do not ask the user to bookmark or copy an individual OMP collaboration link.
+- **Android and desktop Chromium (Chrome, Edge):** Open the browser menu and select **Install app** / **Add to Home screen**.
+- **iPhone and iPad (Safari):** Tap **Share → Add to Home Screen**; background alerts on iOS and iPadOS 16.4+ require opening the installed Home Screen app.
+- **macOS Safari:** Choose **File → Add to Dock**.
+- **Desktop Firefox:** Use directly in a browser tab (Firefox has no web-app install).
+
+Reloading always returns to the session directory by design; never bookmark or copy an individual collaboration link. See [Install as an app](USAGE.md#install-as-an-app) and [Background alerts](USAGE.md#background-alerts).
 
 ## 9. Updates
 
-- pin the collab-web integration to an exact OMP commit and record it in `UPSTREAM.lock.json` and the compatibility matrix;
-- run parser/client compatibility fixtures before updating OMP;
-- support explicit protocol versions and a safe rolling-upgrade overlap where practical;
-- gateway restart begins empty and the next poll rediscovers live mainline hosts;
-- rotate the readiness token after suspected local exposure or ownership/permission failure;
-  Rotation atomically replaces an unsafe regular-file/symlink leaf inside the verified private
-  config directory, but refuses an unsafe parent or non-file token path.
-- verify release checksums and provenance before replacing the gateway runtime payload;
-- retain matching gateway configuration and OMP versions for any planned rollback.
+To update the gateway to a newer release:
 
-An OMP process keeps code loaded at process start. Restart fork-era OMP processes under mainline
-at cutover; a gateway upgrade cannot retrofit them. Changing `collab.autoStart` does not rerun
-initialization in an existing session either. Once mainline OMP has published a host, gateway
-restarts require no per-session command. Avoid manual `/collab` in recorded terminals because OMP
-deliberately prints its bearer links.
+1. Download and verify the new release archive ([Verify a published build](RELEASE.md#verify-a-published-build)).
+2. Extract the archive and run the same `install` command with your production `--origin` and `--allow` flags.
+3. The installer preserves your existing port (when `--port` is omitted), `registry` settings, authored `omp` overrides, `readiness-token`, and Web Push subscriptions, and switches the active runtime only after authenticated readiness passes.
+4. Run `bun apps/gateway/src/cli.js status` and `bun apps/gateway/src/cli.js doctor` from the new extraction directory.
+
+Running `omp` sessions do not need to be restarted across a gateway update; the next discovery poll repopulates the directory within `registry.heartbeatSeconds` (default 10 s). If you need to revert, `omp-gateway rollback` (or `rollback --to <version-dir>`) restores a retained gateway runtime and preserves `config.json` and `readiness-token`, but never downgrades or restarts `omp`. See [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md).
 
 ## 10. Lost phone and revocation
 
-If the phone is lost or compromised:
+If a phone or browser device with tailnet access is lost or compromised:
 
-1. remove or expire the Android device in Tailscale;
-2. revoke relevant identity-provider sessions when appropriate;
-3. narrow or temporarily disable the tailnet grant;
-4. stop the gateway with its matching CLI’s `uninstall` command if directory access must be
-   disabled immediately; this does not disconnect an already-established OMP relay session;
-5. stop/restart OMP collaboration hosts to rotate room capabilities;
-6. rotate the readiness token only when local desktop exposure is suspected—it does not revoke an
-   OMP query token or a remote collaboration room.
-
-WebAuthn Control protection is not implemented;
-[ADR-008](DECISIONS.md#adr-008--optional-webauthn-gate-not-native-biometrics) remains a proposal.
-Do not rely on a separate biometric or credential-enrollment gate for revocation.
+1. **Remove or expire the device in Tailscale** (Machines console) and revoke identity-provider sessions if the account itself may be exposed.
+2. **Tighten or disable the user grant** in your tailnet policy if other devices on that login should also be blocked. To stop all directory access on the host immediately, run `omp-gateway uninstall`.
+3. **Stop active OMP collaboration rooms** by exiting participating `omp` processes or running `/collab stop` in each session. Blocking tailnet or gateway access prevents **future** directory and launch requests, but an already-open relay session stays connected until the OMP host closes the room.
+4. **Keep `readiness-token` unless the workstation itself was exposed.** `omp-gateway rotate-readiness-token` only rotates the local CLI health secret on the host; it does not revoke OMP host tokens or active relay rooms.
+5. **Run `omp-gateway doctor`** from the workstation once access is restored to verify the gateway and Serve configuration.
 
 ## 11. `doctor` and diagnostics bundle
 
-`omp-gateway doctor` checks:
+`omp-gateway doctor` prints a JSON report with 18 boolean checks and exits non-zero if any check is `false`:
 
-- daemon and autostart state;
-- loopback-only listener;
-- private readiness-token permissions and OMP discovery readability;
-- Tailscale connectivity and Serve mapping;
-- absence of Funnel exposure;
-- trusted identity header flow through Serve;
-- allowed-login match;
-- PWA, manifest, CSP, and service-worker availability;
-- relay DNS/TLS connectivity without creating or logging a real capability;
-- `sessionHealth` without exposing capabilities;
-- config validation and `compatibility`: the `omp` on PATH reports at least 18.1.20;
-- `discoveryReadable`: OMP discovery is absent or readable, owned by the current user, and not a symlink.
+- **Local configuration and files:** `config` (valid private `config.json`), `permissions` (private `readiness-token` and usable discovery path), `discoveryReadable` (`omp.discoveryDir` is absent or a private owner-only directory without symlinks), `assets` (built web assets present on disk), `compatibility` (`omp --version` on `PATH` is `>= 18.1.20`).
+- **Daemon and service:** `daemon` (loopback HMAC readiness proof succeeds), `serviceInstalled` (user service definition exists), `serviceActive` (user service is running).
+- **Loopback and Tailscale boundary:** `listenerLoopbackOnly` (bound to `127.0.0.1` or `::1` with a local TUN tailnet address), `loopbackTrustSound` (kernel TUN device present, not userspace networking), `tailscaleConnected` (`tailscale status` reports `Running`), `serveMapping` (`tailscale serve` proxies the exact `http.publicOrigin` host and port to the exact loopback origin), `funnelDisabled` (Tailscale Funnel is off).
+- **End-to-end Serve and relay health:** `identityAllowed` (authenticated `GET /api/v1/sessions` over the public Serve origin returns `200` with `Cache-Control: no-store`), `sessionHealth` (every listed session has a valid `lastSeenAt` timestamp), `pwa` (`/`, `/manifest.webmanifest`, and `/service-worker.js` return `200`), `securityHeaders` (`Content-Security-Policy` includes `default-src 'self'`), `relay` (outbound `HEAD` to `https://my.omp.sh` succeeds without creating a capability).
 
-`doctor` checks the configured host and an allowed HTTPS metadata request; it is not an
-independent tailnet-policy audit or proof that an unauthorized device is denied. Complete both
-[tailnet access checks](#6-tailnet-access-policy). It also does not establish a signed-artifact or
-native-platform qualification: qualification must exercise the real host/query/launch path
-against the exact gateway candidate.
-Even in development mode, `doctor` fails unless it can query Tailscale and prove Funnel is disabled.
+Note that `doctor` tests the host and an allowed metadata request from the workstation; it does not prove that unauthorized or tagged devices are denied. Complete the 3-step live check in [Validate the combined controls](#validate-the-combined-controls).
 
-`doctor --bundle` writes a deterministic `omp-gateway-diagnostics.tar` (or the path supplied with `--output`) and refuses to overwrite an existing file. Its manifest lists every included field. The archive excludes capabilities, tokens, authorization/identity headers, transcripts, prompts, tool output, full paths, browser storage, raw logs, tailnet DNS names, and account identities.
+To create a redacted support archive without overwriting an existing file:
 
-Never ask a user to paste a collaboration link into an issue.
+```sh
+bun apps/gateway/src/cli.js doctor --bundle
+```
+
+Pass `--output <path>` to choose a custom filename. The archive (`omp-gateway-diagnostics.tar`) contains only `doctor.json` (product and protocol versions, OS/architecture, and the 18 boolean check results) and `manifest.json`. It excludes capabilities, tokens, headers, logins, tailnet names, session titles, paths, transcripts, browser storage, and raw logs. Never paste a collaboration link or token into an issue.
+
+### Troubleshooting by symptom
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| No sessions appear in the directory | `collab.autoStart` is `off`, the `omp` session started before `collab.autoStart` was set, `omp` on `PATH` is older than `18.1.20`, or `omp.discoveryDir` does not match `PI_CONFIG_DIR`. | Run `omp config get collab.autoStart` (set `control` or `view` and start a new `omp` process), check `omp --version`, and confirm `compatibility` and `discoveryReadable` are `true` in `omp-gateway doctor`. |
+| Access denied (`403`) or missing identity | The phone or browser is a tagged device (`tag:...`), is signed in as a login not listed in `--allow`, or is connecting to port `4317` without Tailscale Serve. | Sign in to Tailscale on the phone with a user account, open the `https://` Serve origin, and rerun `omp-gateway install --origin <https-origin> --allow <login>` if your login changed. |
+| `loopbackTrustSound: false` (and `listenerLoopbackOnly: false`) | `tailscaled` on the gateway host runs in `--tun=userspace-networking` mode without a kernel TUN interface, so loopback peer identity cannot be trusted. | Reconfigure Tailscale on the host to use kernel TUN mode, restart Tailscale, and re-run `omp-gateway doctor`. |
+| `serveMapping: false` (Serve host or port mismatch) | `tailscale serve` is not configured, proxies to the wrong loopback port, or uses an external HTTPS port that does not match `http.publicOrigin`. | Run `omp-gateway serve-guidance`, execute the printed `tailscale serve --bg ...` command, check `tailscale serve status`, and verify `funnelDisabled: true` in `omp-gateway doctor`. |
+| "Request changed" or "Session ended" when tapping a card or notification | The OMP session advanced to a new generation, the ask was already answered at the desktop, or the `omp` process exited before the tap completed. | Return to the session directory and tap the updated card if the session is still running. |
+| Directory shows stale cards (`Gateway unavailable` / `Desktop unreachable`) vs session shows `Relay unavailable` | A stale directory means the phone cannot reach `omp-gatewayd` over Tailscale Serve (host asleep, daemon stopped, or tailnet offline); `Relay unavailable` means the directory works but the browser or host cannot reach `https://my.omp.sh`. | For a stale directory, wake the host and check Tailscale and `omp-gateway status`; for `Relay unavailable`, check `relay` in `omp-gateway doctor` and verify outbound HTTPS to `https://my.omp.sh`. |
+| Android stays unreachable after sleep or a Wi-Fi / cellular change | Android Chrome can wedge its network stack after a radio transition even after connectivity returns; after 45 seconds of visible failure, **OMP Sessions** shows recovery help. | Tap **Try again**; if it remains unreachable after 45 seconds, force-stop or swipe closed Chrome / **OMP Sessions** and reopen **OMP Sessions**. |
+| Background alerts are blocked or unavailable | Browser notification permission is denied, **OMP Sessions** is open in a regular Safari tab on iPhone/iPad instead of installed to the Home Screen, or push registration failed. | On iPhone or iPad, use Safari **Share → Add to Home Screen** and open the Home Screen app; open **Settings** in **OMP Sessions**, enable **Background alerts**, and allow notifications in browser/OS settings. |
+| Page returned to the directory after an update or reload | Capabilities live only in page memory and are never persisted; a service-worker update reloads an idle directory (or applies after you leave an active session). | Tap **View** or **Open request** in the directory to request a fresh capability. |
 
 ## 12. Self-hosted relay mode
 
-Self-hosted/proxied relays are outside current support. The following are qualification
-requirements for a separately designed deployment, not a supported installation recipe:
-
-- deploy a pinned compatible OMP relay;
-- use private DNS/TLS and explicit relay allowlisting;
-- configure OMP and the browser client consistently;
-- run multi-hour WebSocket, Android sleep/resume, network switch, and reconnect tests;
-- document metadata, backup, upgrade, and availability responsibilities;
-- never silently fall back to the public relay.
+Self-hosted and proxied collaboration relays are unsupported. Qualifying a custom relay requires a dedicated threat model, private DNS/TLS with explicit allowlisting across OMP and the embedded client, and multi-hour WebSocket, sleep/resume, and network-transition soak testing through the exact proxy path. A custom relay deployment must never silently fall back to the public relay.
