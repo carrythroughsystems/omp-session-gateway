@@ -1,10 +1,15 @@
 # Branch and saved-session resume lane
 
-## Mainline lifecycle coverage — tested, qualification pending
+This runbook is for maintainers running OMP session lifecycle qualification and reviewing the
+automated upstream canary stages. Each stable release qualifies the `new-generation`, `fork`, and
+`--continue` transitions on the Mac guest, and the Linux and Windows upstream canaries exercise them
+daily; see [Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md).
+
+## Mainline lifecycle coverage
 
 The gateway consumes stock OMP `>= 18.1.20` with `collab.autoStart` alone. It reads OMP-owned
 discovery, polls metadata, and resolves an exact generation/role only at launch, without storing
-capabilities or writing discovery files. The executable lanes below cover lifecycle transitions;
+capabilities or writing discovery files. The executable lanes below cover lifecycle transitions.
 <!-- release-generate:campaign:start -->
 The v0.7.7 campaign qualified these scenarios only for its recorded candidate and devices. Each later candidate must pass them again on its exact signed bytes; historical evidence does not transfer. See the [release ledger](RELEASE_STATUS.md).
 <!-- release-generate:campaign:end -->
@@ -20,7 +25,7 @@ every session entry, including sibling branches, so transcript content cannot pr
 | `/fork` | Immediately copies the current session to a new file with the same entries; no selector, despite the command description | Same instance, generation + 1 | POSIX canary; Mac lifecycle development runner |
 | `/branch` (alias `/rewind`) | Opens `Rewind · pick the point to continue from` and rewinds inside the same session file | Same instance and generation; no gateway-visible change | POSIX canary |
 | `/tree` | Navigates branches within the session | No new session or generation implied by branch navigation | Upstream source semantics; not a separate stage in these lanes |
-| Stop, then relaunch with `--continue` in the same working directory | Resumes the saved session in a new process | Old instance gone; new instance at generation 1 | POSIX canary; Mac lifecycle development runner; Windows canary pending CI |
+| Stop, then relaunch with `--continue` in the same working directory | Resumes the saved session in a new process | Old instance gone; new instance at generation 1 | POSIX canary; daily `canary-windows` lane; Mac lifecycle development runner |
 
 ### Daily upstream canary
 
@@ -77,12 +82,13 @@ everything it started. It does not qualify the retained Mac or a signed candidat
 ### Tested evidence — 2026-10-01
 
 - On macOS with Bun 1.4.2, the canary passed three consecutive runs on stock OMP 18.4.8 and one
-  on stock 18.1.20. Windows execution remains pending CI.
+  on stock 18.1.20; the daily `canary-windows` lane subsequently passed in CI (for example run
+  `37140425389` on stock OMP `18.5.1`).
 - The Mac lifecycle development runner passed three consecutive runs on stock 18.4.8. A
   deliberately rejected wrong-version run also left nothing behind after cleanup.
-- These are **tested evidence** only. Specialized lifecycle qualification remains pending the
-  next passed stable campaign on the exact signed candidate; existing core publication and
-  stale-generation qualification does not qualify these transitions.
+- These local runs are **tested evidence** only; each stable campaign qualifies the lifecycle
+  transitions on its exact signed candidate (passed for `v0.7.4` in
+  [`RELEASE_STATUS.md`](RELEASE_STATUS.md)).
 
 ## Fork-era measurement archive — historical, superseded for mainline
 

@@ -1,17 +1,22 @@
 # Android client strategy
 
+This runbook and specification is for maintainers running physical Android release qualification and
+reviewing the OMP Sessions PWA client contract. In the current stable release (`v0.7.4`), both the
+Pixel 10 Pro (Android 17, Chrome 154) physical client lane and the Pixel background Web Push lane
+(including specialized triage and delayed taps) are qualified; see [Compatibility](COMPATIBILITY.md)
+and [Release status](RELEASE_STATUS.md).
+
 ## Decision: PWA first
 
 Current hosts use stock mainline OMP `>= 18.1.20` with `collab.autoStart` alone: no fork, custom
 OMP build, or gateway-specific OMP plugin. Install the gateway separately and retain Bun 1.4.0,
-TUN-mode Tailscale Serve, and exact login allowlisting. The gateway polls
-OMP metadata and fetches a capability per explicit launch without storing it; Android HTTP/SSE and
-in-memory client bootstrap are unchanged. Mainline core physical-client qualification passed for
-the exact Pixel 10 Pro / Android 17 / Chrome `152.0.7977.82` combination recorded in the
-[release ledger](RELEASE_STATUS.md): View read-only, Control writable, prompt acceptance, return
-to the directory, same-page unlock/Airplane/Doze recovery, and seven clean, detectable forbidden
-capability sinks. This does not qualify new media, background Web Push, specialized attention, or
-branch/resume scenarios. Fork-era results remain historical; none transfers to this cutover.
+TUN-mode Tailscale Serve, and exact login allowlisting. The gateway polls OMP metadata and fetches
+a capability per explicit launch without storing it; Android HTTP/SSE and in-memory client
+bootstrap are unchanged. Physical-client qualification on the Pixel 10 Pro (Android 17, Chrome 154)
+covers View read-only, Control writable, prompt acceptance, return to the directory, same-page
+unlock/Airplane/Doze recovery, and seven clean, detectable forbidden capability sinks, while the
+dedicated Push lane below covers background Web Push, triage, and delayed taps; see the
+[release ledger](RELEASE_STATUS.md). Fork-era results remain historical; none transfers to mainline.
 
 The existing OMP collaboration client is already a browser application and includes the core live-control experience. The Android deliverable should therefore be the OMP Sessions PWA that launches the existing client, not a new native implementation of the collaboration protocol.
 
@@ -32,7 +37,7 @@ Benefits:
 - theme/background colors chosen by the implementer;
 - minimal service worker caching only versioned static shell files;
 - loaded-shell transport status that marks the last authenticated metadata stale and retains it only in page memory; authorization failure clears it;
-- explicitly enabled Push v2 background alerts with per-device Private/Session/Preview detail, capability-free payloads, exact-request and generation revalidation, and one-tap Control; delivery remains best effort and outside the qualified core matrix;
+- explicitly enabled Push v2 background alerts with per-device Private/Session/Preview detail, capability-free payloads, exact-request and generation revalidation, and one-tap Control; delivery remains best effort and is qualified on the Pixel 10 Pro by the dedicated Push lane below;
 - Android back behavior: collab client returns to the session directory, with no secret-bearing history entry;
 - account for the virtual keyboard and `visualViewport` behavior in the embedded/pinned collab-web build;
 - test Chrome stable and at least one Chromium-based alternative if supported.
@@ -61,8 +66,8 @@ labels; Preview currently falls back to Session because stock OMP supplies no pr
 text can persist in Android notification history, screenshots, and wearables. No capability,
 transcript, prompt, option, or answer enters these payloads. Activity-stop alerts (since v0.5.0) use a
 fixed activity title and observed generation, no request ID, and the same privacy levels. Their tap
-opens View after authenticated same-generation validation, never Control. This is not new physical
-Android/background-Push qualification.
+opens View after authenticated same-generation validation, never Control. Physical background-Push
+qualification is covered by the dedicated lane below.
 
 Permission is requested only from the explicit Settings action. The worker replaces one
 notification per instance, closes only the matching request on clear, and updates the app badge.

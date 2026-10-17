@@ -6,7 +6,7 @@
 
 ## Supported platforms
 
-- Supported and tested in CI on every change (the stock-OMP canaries run daily): Linux, macOS, and Windows gateway hosts; Chrome and Chromium, Edge through Chromium, Firefox, Safari/WebKit, and Android; iPhone and iPad as a WebKit browser, emulated in CI. Supported is not qualified: qualification is the exact hardware matrix below. Lanes: portable-source (Ubuntu, macOS, Windows), browser-core (Chromium, Firefox, WebKit, iPhone-class WebKit), browser-notifications (Pixel sizes), windows-service-lifecycle, canary and canary-windows.
+- Tested in CI on every change (with daily stock-OMP canaries on Linux and Windows): Linux, macOS, and Windows gateway hosts; Chrome/Chromium, Edge, Firefox, Safari/WebKit, and Android; iPhone and iPad as a WebKit browser. Supported is not hardware-qualified; qualification is the exact matrix below.
 
 ## Current qualification boundary
 
@@ -32,17 +32,19 @@ The Mac guest does not qualify physical firmware, FileVault, Secure Boot or star
 
 ## Fork-era release history
 
-- v0.3.0 requires its exact patched OMP v18.1.14 and matching historical instructions. Its qualification does not transfer to the mainline architecture.
+- Published v0.3.0 requires its exact patched OMP v18.1.14 and historical instructions; none of its qualification transfers to mainline.
 
 ## Canonical documents
 
-- [README](https://github.com/carrythroughsystems/omp-session-gateway#readme): problem, user experience, build and run, how it compares
+- [README](https://github.com/carrythroughsystems/omp-session-gateway#readme): overview, quickstart, supported platforms, and limits
+- [Documentation index](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md): all guides and records by task
+- [Usage](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/USAGE.md): everyday directory states, triage actions, and background alerts
 - [Compatibility](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/COMPATIBILITY.md): qualified host/client/OMP combinations and support policy
 - [Release status](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md): per-candidate qualification evidence, authoritative where docs disagree
 - [Security](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/SECURITY.md): threat model, capability handling, acceptance gates
 - [Architecture](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/ARCHITECTURE.md): trust boundaries and components
 - [Protocol](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/PROTOCOL.md): IPC and HTTP contracts
-- [Operations](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md): install, Tailscale Serve, doctor, upgrade
+- [Operations](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md): install, Tailscale Serve, doctor, updates, revocation, and troubleshooting
 - [OMP integration](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OMP_INTEGRATION.md): stock mainline discovery/query contract, supported settings, and exact qualification boundary
 - [Stable release lock](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/STABLE_RELEASE.lock.json) and [upstream lock](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/UPSTREAM.lock.json): machine-readable current claim
 

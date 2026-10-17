@@ -2,8 +2,7 @@
 
 ## Project status
 
-OMP Session Gateway v0.4.0 is the current qualified stable release and works with stock OMP
-`>= 18.1.20` through its native discovery/query contract. No OMP fork or custom build is required. Use only the exact host/client/deployment combinations advertised in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md); do not expose the loopback backend directly, enable Tailscale Funnel, use Portal Tunnel or another forwarder, or treat an unqualified platform or background Web Push as supported.
+Use the [latest stable release](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest) with stock OMP `>= 18.1.20`. No OMP fork or custom build is required. Check [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for supported and hardware-qualified host, browser, and device combinations. Never expose the loopback listener directly, never enable Tailscale Funnel, and do not route traffic through Portal Tunnel or another forwarder.
 
 ## Reporting a vulnerability
 
@@ -34,16 +33,8 @@ These are goals, not a service-level guarantee for a volunteer project.
 
 ## Security design
 
-The detailed threat model, trust boundaries, and release gates are in [`docs/SECURITY.md`](docs/SECURITY.md). Changes to authentication, capability handling, IPC, browser storage, logging, or OMP lifecycle must update that document and include security-focused tests.
+The detailed threat model, trust boundaries, and security invariants are in [`docs/SECURITY.md`](docs/SECURITY.md). Changes to authentication, capability handling, IPC, browser storage, logging, or OMP lifecycle must update that document and include security-focused tests.
 
 ## Supported versions
 
-Use the [current stable release](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest).
-The [compatibility policy](docs/COMPATIBILITY.md) defines the exact supported host/client/deployment
-matrix; the [release ledger](docs/RELEASE_STATUS.md) records its evidence and known limitations.
-The minimum OMP version is not qualification of every later version or platform.
-
-Older releases retain their own historical prerequisites. In particular, v0.3.0 is a fork-era
-migration/rollback predecessor, not the current recommended install; crossing that boundary
-requires the [stopped recovery procedure](docs/UPGRADE_ROLLBACK.md), and gateway rollback does not
-switch OMP. Please report suspected vulnerabilities in any version privately.
+Security fixes ship in the [current stable release](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest); see [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for supported and hardware-qualified combinations. Older releases keep their own instructions and prerequisites — follow [`docs/UPGRADE_ROLLBACK.md`](docs/UPGRADE_ROLLBACK.md) when upgrading or rolling back, and note that gateway rollback does not switch the OMP executable. Please report suspected vulnerabilities in any version privately.

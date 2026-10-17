@@ -66,11 +66,7 @@ Sober and exact. Sentence case everywhere except mono eyebrows. No emoji, no
 exclamation marks. Security claims stated as invariants ("Capabilities are
 requested only when you tap an action."). Keep the standing disclaimer:
 "Community project; not affiliated with OMP." Describe stock mainline OMP `>= 18.1.20` as the
-prerequisite, not a gateway-specific build. Use only the exact qualified mainline core matrix in
-the [release ledger](RELEASE_STATUS.md) and [compatibility policy](COMPATIBILITY.md): Windows only
-as Windows Server 2025 at interactive logon, and background Web Push only on the Pixel. Keep
-specialized attention and branch/resume outside that claim. Label fork-era release/host/client
-results as history rather than reusing their support badges.
+prerequisite, not a gateway-specific build.
 
 ## Message hierarchy
 
@@ -83,9 +79,10 @@ results as history rather than reusing their support badges.
    `collab.autoStart` once, and configure TUN-mode Tailscale Serve with an exact
    user allowlist and Funnel disabled. Then start participating sessions with
    plain `omp`. Say "no per-session link copying", not "no setup".
-4. **Evidence and limits:** link the published release, exact qualification matrix,
-   and known limits beside support claims. Stable does not mean every platform or
-   workflow is qualified. Separate synthetic product media from live qualification evidence.
+4. **Evidence and limits:** link [Compatibility](COMPATIBILITY.md) for supported and qualified
+   platforms and known limits; separate synthetic product media from hardware evidence.
+
+README hierarchy: promise → demo → how it works → build and run → using it → private by design → supported platforms → docs.
 
 ## Asset inventory
 
@@ -119,7 +116,7 @@ Manifest snippet:
 ]
 ```
 
-README: use `assets/banner.png` at top (it is dark-mode native and acceptable
+README banner: use `assets/banner.png` at top (it is dark-mode native and acceptable
 on light GitHub). `<meta name="theme-color" content="#060809">`.
 
 ## PWA UI system ("OMP Sessions")

@@ -1,31 +1,29 @@
 # Linux qualification lane
 
-For normal use, install the [current published stable](OPERATIONS.md#2-cli-and-daemon-installation).
-This document records maintainer qualification evidence, not a requirement to provision a cloud
-host or build a custom OMP. Native discovery is supplied by stock OMP.
+This runbook is for maintainers running the Debian Linux release qualification lane. For normal
+Linux installation, follow the [operations guide](OPERATIONS.md#2-cli-and-daemon-installation).
+Debian 13 (trixie) x86-64 is qualified in the current stable release (`v0.7.4`); see
+[Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md).
 
 ## Mainline qualification — Debian core lane passed
 
-The current workflow is on-demand and requires an exact signed candidate tag; it does not run a
-weekly schedule or fall back to a historical fork-era candidate. The mainline `0.4.0` campaign
-uses `v0.3.0` as its explicit gateway predecessor and measures stopped-service recovery across
-the architecture boundary. Historical scheduled-run instructions below remain archival only.
+The current workflow (`droplet-qualification.yml`) is on-demand and requires an exact signed
+candidate tag; it does not run a weekly schedule or fall back to a historical fork-era candidate.
+Current source requires stock OMP `>= 18.1.20` with `collab.autoStart` alone: the gateway reads
+discovery and queries hosts without a publisher socket or stored capabilities.
 
-Current source requires stock OMP `>= 18.1.20`, with `collab.autoStart` alone.
-[PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). The gateway reads discovery and queries hosts; it does not own a publisher
-socket or store capabilities. Signed candidate `v0.4.0-prealpha.1` passed the Debian 13 (trixie)
-x86-64 lane on Linux `6.12.94+deb13-amd64` with stock OMP `18.1.20` and Bun `1.4.0` in
-[run 34830668687](https://github.com/alphastorm/omp-session-gateway/actions/runs/34830668687).
-The run passed 69/69 migration/recovery invariants, real generation-1 View/Control publication
-and revocation, persistence, tagged-identity denial/exposure, uninstall, and destruction of the
-droplet and ephemeral SSH key. See the [release ledger](RELEASE_STATUS.md) for exact candidate
-and source bindings.
+Each stable campaign runs this disposable Debian 13 (trixie) x86-64 lane against its exact signed
+candidate and published predecessor (`v0.7.4-prealpha.1` against `v0.7.3` with stock OMP `18.5.1`
+and Bun `1.4.0` for `v0.7.4`). At the first mainline cutover, signed candidate `v0.4.0-prealpha.1`
+passed on Linux `6.12.94+deb13-amd64` with stock OMP `18.1.20` and Bun `1.4.0` against predecessor
+`v0.3.0` in [run 34830668687](https://github.com/alphastorm/omp-session-gateway/actions/runs/34830668687),
+covering 69/69 migration/recovery invariants, generation-1 View/Control publication and revocation,
+reboot/lingering persistence, tagged-identity denial/exposure, uninstall, and droplet/SSH-key
+teardown. Every campaign's run receipt is recorded in the [release ledger](RELEASE_STATUS.md).
 
-This is not a Debian `doctor` 18/18 claim: the early result was 13/18 before the OMP build and
-from a tagged identity. Positive allowed-user HTTPS was measured on the Mac/Pixel, not the
-tagged Debian CI caller. No historical test count, lifecycle pass, patched-binary result,
-signature, or release receipt below is mainline proof; other Linux variants are not qualified
-by this Debian result.
+This is not a Debian `doctor` 18/18 claim: the tagged droplet's self-probe through Serve has no user
+identity, while positive allowlisted HTTPS is measured from the user-owned Mac and Pixel. Other
+Linux distributions and init systems are not qualified by this Debian result.
 
 ## Fork-era procedure and evidence archive
 

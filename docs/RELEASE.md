@@ -1,30 +1,17 @@
 # Release process
 
+This document is the maintainer runbook for building, qualifying, promoting, and publishing OMP
+Session Gateway releases. If you are installing or updating a gateway, you only need
+[Verify a published build](#verify-a-published-build) and the
+[installation guide](OPERATIONS.md#2-cli-and-daemon-installation).
+
 ## Pre-alpha, alpha, beta, and stable artifacts
 
-The repository produces Bun-runtime candidates and publishes only the exact support claim proven
-by their signed-artifact qualification. Current source requires stock mainline OMP `>= 18.1.20`;
-[PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). Configure `collab.autoStart` alone and launch
-plain `omp`. The gateway reads discovery and queries hosts, with no OMP patch set or separate
-activation route. It fetches capabilities only per launch and never stores them.
-
-For the current published stable and normal installation, use
-[Installation and operations](OPERATIONS.md#2-cli-and-daemon-installation), not the maintainer
-qualification commands below. The exact qualified candidate, promoted stable artifact,
-host/client matrix, and post-release evidence are recorded in the
-[release ledger](RELEASE_STATUS.md). Candidate approval does not imply stable publication or a
-passed published-byte smoke. Fork-era locks and receipts cannot authorize the changed runtime bytes.
-
-The remote boundary remains TUN-mode Tailscale Serve with an exact allowlist and Funnel disabled.
-Portal Tunnel, userspace networking, public forwarding, and self-hosted/proxied relays remain
-outside the core claim. From 0.6.0 every stable campaign also qualifies a Windows Server 2025 host
-and background Web Push on the Pixel (ADR-031). From 0.6.2 it also qualifies iPhone, iPad, and
-Android browsers on TestingBot's real cloud devices (ADR-032). A minimum OMP
-version does not qualify every future release or platform.
-
-Gateway rollback does not switch OMP, restore the previous configuration, or restore the removed
-fork-era publication credential. Qualify the selected predecessor and architecture-crossing
-recovery explicitly; see [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md).
+The repository builds Bun-runtime release candidates (`pre-alpha`) and promotes a candidate to
+`stable` (GitHub Latest) only after its signed archive passes the full hardware and device-cloud
+qualification matrix. For the current published release, supported platforms, and recorded lane
+receipts, see [Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md); for
+predecessor rollback boundaries, see [Upgrade and rollback](UPGRADE_ROLLBACK.md).
 
 ## Mainline stable release procedure
 

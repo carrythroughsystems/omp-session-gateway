@@ -2,45 +2,40 @@
 
 ## Supported prerequisite
 
-Use stock mainline OMP `>= 18.1.20`. [PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20).
-The integration is native to stock OMP: no fork, custom OMP build, or gateway-specific OMP plugin
-is required. The separately installed gateway consumes OMP's supported local registry; it does not
-patch OMP, import private controller APIs, or install a second OMP executable. Releases earlier
-than 18.1.20 lack this registry and are unsupported by the current gateway. The deployment still
-requires Bun 1.4.0, TUN-mode Tailscale Serve, an exact login allowlist, and the one-time
-`collab.autoStart` setting below; native integration does not mean a bundled gateway or public access.
+Use stock mainline OMP `>= 18.1.20`. The integration is native to stock OMP: no fork, custom OMP
+build, or gateway-specific OMP plugin is required. The separately installed gateway consumes OMP's
+local registry; it does not patch OMP, import private controller APIs, or install a second OMP
+executable. Releases earlier than `18.1.20` lack this registry and are unsupported. Deployment
+requires Bun `1.4.0`, TUN-mode Tailscale Serve, an exact login allowlist, and the one-time
+`collab.autoStart` setting below.
 
-`UPSTREAM.lock.json` records the exact engineering source baseline: `v18.10.2`, commit
-`c8913466dd7bf92040de911f8e00e30b8f4e48a2`, tree
-`bbe0b2fa461fc34bf45cb544432a24e767f155ec`. The minimum supported host version is distinct from
-that exact host/source baseline. The embedded browser client has its own preserved
-[source and wire pins](../packages/collab-client/README.md), currently `v18.4.2`. The host-only
-baseline update does not import the `collab-web` Markdown-rendering changes upstream shipped in
-v18.4.12 or the render-coalescing changes it shipped in v18.8.0
-([can1357/oh-my-pi#14728](https://github.com/can1357/oh-my-pi/pull/14728)); do not conflate the embedded client pins with the host minimum or engineering baseline.
+| Surface | Pin or contract | Notes |
+|---|---|---|
+| Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
+| Engineering host baseline | `v18.10.2` (`c8913466dd7bf92040de911f8e00e30b8f4e48a2`) | Exact OMP source and tree (`bbe0b2fa461fc34bf45cb544432a24e767f155ec`) in `UPSTREAM.lock.json` |
+| Embedded browser client | `v18.4.2` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.4.2`) | Independent browser-client provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); it does not import the `collab-web` Markdown-rendering changes upstream shipped in v18.4.12 or the render-coalescing changes in v18.8.0 ([can1357/oh-my-pi#14728](https://github.com/can1357/oh-my-pi/pull/14728)) |
+| Gateway runtime | Bun `1.4.0` | Required runtime for the CLI, daemon, and release archives |
 
-The current published stable and its exact qualified matrix are recorded in the
-[compatibility policy](COMPATIBILITY.md); per-candidate receipts, limits, and published-byte checks
-are in the [release ledger](RELEASE_STATUS.md). A candidate is qualified against the exact baseline
-above with Bun 1.4.0, which does not qualify every later OMP release; no fork-era qualification
-transfers.
+For the current published release and its qualified hardware matrix, see
+[Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md).
 
 ## Additive activity compatibility
 
-The #219 fix, shipped in v0.5.0, accepts `busy` from OMP 18.2.9 while retaining older hosts in
-the same directory. Upstream [PR #12844](https://github.com/can1357/oh-my-pi/pull/12844), merge
-`1eb2f51bb4d1a4324e46cdfad5c259be9b8ccee9`, adds this optional field without changing registry v1.
-Its source is `session.isStreaming`: true while running a turn, false while idle, and unknown
-when omitted/null. It is not proof of successful completion or process exit. The parser validates
-this named extension. Other fields upstream adds under v1 are ignored rather than rejected and are
-never projected; a snapshot naming prompt/answer content is still refused (ADR-028).
-The minimum host version stayed unchanged when the engineering baseline later moved to v18.10.2.
-Mixed-version IPC tests do not qualify a new physical platform or full OMP version.
+Under registry v1, the gateway validates the fields it reads and ignores unknown additive fields
+(ADR-028). Any snapshot naming prompt, question, options, prefill, answer, requestId, or count is
+refused. The minimum host version stayed unchanged when the engineering baseline later moved to
+v18.10.2.
 
-The source activity extension projects known `busy` into browser metadata and supports stop alerts
-through the existing opt-in Push channel. Older hosts remain unknown and cannot produce stop
-alerts. The exact trigger and View-only tap semantics are in
-[ATTENTION_SPEC.md](ATTENTION_SPEC.md#activity-stop-notifications); no extra OMP setting is needed.
+Hosts from OMP `18.2.9` onward (upstream
+[PR #12844](https://github.com/can1357/oh-my-pi/pull/12844)) may include optional boolean `busy`
+(`session.isStreaming`): `true` while running a turn, `false` while idle, and unknown when omitted
+or `null`. Older hosts remain visible in the same directory with unknown activity. `busy` is not
+proof of successful task completion or process exit.
+
+Known `busy` activity is projected into browser metadata and drives opt-in activity-stop alerts
+through the existing Push v2 channel. Older hosts remain unknown and do not produce stop alerts.
+See [ATTENTION_SPEC.md](ATTENTION_SPEC.md#activity-stop-notifications) for the exact trigger and
+View-only tap semantics; no extra OMP setting is needed.
 
 ## 1. Operator settings
 
@@ -67,18 +62,17 @@ startup after session initialization and publishes its own local discovery entry
 discovers the host on its next poll, whether OMP or the gateway started first. Manual collaboration
 commands remain OMP’s responsibility and require no gateway integration hook.
 
-OMP publishes only after its relay opens the room. From 18.5.1, an automatic start whose relay is
-unreachable or times out retries at once and then backs off from 1 to 60 seconds, and the
-recovered room still publishes generation 1
-([can1357/oh-my-pi#14112](https://github.com/can1357/oh-my-pi/pull/14112)). A relay that refuses
-the room is not retried. Earlier releases make one attempt: if it fails, the session shows
-`Collab auto-start failed` and stays out of the session list until `/collab`, a session switch,
-or a restart.
+OMP publishes only after its relay opens the room. From OMP `18.5.1` onward, an automatic start
+whose relay is unreachable or times out retries immediately and then backs off from 1 to 60
+seconds, and the recovered room still publishes generation 1. A relay that refuses the room is not
+retried. Earlier `18.1.20`–`18.5.0` releases make one startup attempt: if it fails, the session
+shows `Collab auto-start failed` and stays out of the session list until `/collab`, a session
+switch, or a restart.
 
-At cutover, restart a process launched from an older OMP under mainline; changing an executable
-on disk does not replace code already loaded into a running process. Enabling auto-start also
-does not rerun initialization in an existing session. Manual `/collab` prints capabilities, so do
-not run it in a recorded or supervised terminal.
+Enabling `collab.autoStart` or upgrading the `omp` executable on disk applies to newly started
+`omp` processes; already-running sessions keep their loaded process state until restarted. Manual
+`/collab` prints bearer capabilities to the terminal, so do not run it in a recorded or supervised
+session.
 
 ## 2. Discovery and per-host queries
 
@@ -109,7 +103,7 @@ queries the endpoint directly and never shells out to a link-printing command.
 ## 3. Polling and lifecycle
 
 `startHostPoller` coalesces concurrent rounds and reconciles observed metadata with retained
-hosts. `registry.heartbeatSeconds` is now the poll interval (default 10 seconds);
+hosts. `registry.heartbeatSeconds` is the poll interval (default 10 seconds);
 `registry.ttlSeconds` defaults to 35 seconds and must exceed twice that interval.
 
 Only `ENOENT`/`ECONNREFUSED` proves a queried host dead. Timeouts, `EMFILE`, `EACCES`, and
@@ -143,21 +137,18 @@ boolean only.
 
 `omp.discoveryDir` defaults to the OMP directory above; `omp.queryTimeoutMs` defaults to 1500.
 The gateway’s `readiness-token` proves managed loopback readiness only and is not sent to OMP.
-`doctor` checks that `omp` on PATH reports at least 18.1.20 (`compatibility`), verifies discovery
-is absent or safely readable (`discoveryReadable`), and reports `sessionHealth`. It no longer
-qualifies a patched source tree or staged OMP patch.
+`doctor` checks that `omp` on PATH reports at least `18.1.20` (`compatibility`), verifies discovery
+is absent or safely readable (`discoveryReadable`), and reports `sessionHealth`.
 
 ## 6. Client and qualification boundary
 
-The gateway still embeds the pinned OMP `collab-web` integration and in-memory bootstrap. The
+The gateway embeds the pinned OMP `collab-web` integration with in-memory capability bootstrap. The
 photo composer uses existing encrypted v3 image prompts; it does not add a gateway media endpoint
-or alter the discovery/query contract. Client changes and a mainline minimum do not by themselves
-prove relay endurance, response replay, native host behavior, or physical Android behavior.
+or alter the discovery/query contract.
 
-The migration’s behavioral proof belongs to `apps/gateway/test/omp-registry.test.ts`. Release
-qualification must exercise the actual mainline binary, View/Control launch and refusal, host
-replacement and stop, gateway restart, transient query failures, capability non-persistence, and
-the exact client/relay path. See [TEST_PLAN.md](TEST_PLAN.md), [COMPATIBILITY.md](COMPATIBILITY.md),
-and the current mainline evidence and separate fork-era archive in
-[RELEASE_STATUS.md](RELEASE_STATUS.md).
+Behavioral coverage for the registry reader and broker lives in
+`apps/gateway/test/omp-registry.test.ts`. Release qualification exercises the stock OMP binary,
+View/Control launch and refusal, host replacement and stop, gateway restart, transient query
+failures, capability non-persistence, and the client/relay path; see [TEST_PLAN.md](TEST_PLAN.md),
+[COMPATIBILITY.md](COMPATIBILITY.md), and [RELEASE_STATUS.md](RELEASE_STATUS.md).
 

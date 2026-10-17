@@ -19,58 +19,46 @@ web-app installation. The gateway runs on the computer that runs OMP.
 | iPhone and iPad | Tested as a browser | `browser-core` WebKit with iPhone-class emulation | iPhone 17 Pro (26.5, safari 26.5); iPad (9th generation) (26.6, safari 26.6) |
 <!-- release-generate:platforms:end -->
 
-**Supported** means every listed lane stays green (on each change, the canaries daily) and bug
-reports are accepted. **Qualified on hardware** names what a signed release passed on real
-machines, in [Current claim](#current-claim) and the [release ledger](RELEASE_STATUS.md), except
-the explicitly named retained macOS guest under ADR-033. Hosted
-runners and browser engines are not physical devices, so neither column stands in for the other;
-see the [status vocabulary](#status-vocabulary).
+### What the words mean
+
+**Tested** means a named CI lane runs on hosted runners or browser engines. **Supported** means
+every listed lane stays green (on each change, and canaries daily) and bug reports are accepted.
+**Qualified** names what a signed release passed on real hardware or named cloud devices in
+[Current claim](#current-claim) and the [release ledger](RELEASE_STATUS.md), plus the retained
+macOS Virtualization.framework guest under ADR-033; see [Status vocabulary](#status-vocabulary).
 
 - **Installing as a PWA.** Chromium browsers install from the browser menu on desktop and Android.
   Safari installs with Add to Home Screen on iPhone and iPad, and Add to Dock on macOS. Desktop
   Firefox has no web-app install; it works in a tab.
-- **Background alerts** (Web Push) are qualified in full only on the Pixel with Chrome on Android,
-  where force-stop and forced Doze outcomes are observed variants, never guaranteed delivery. iPhone
-  and iPad offer them only to a Home Screen app (iOS and iPadOS 16.4+); v0.6.0 and earlier cannot
-  enable them there because WebKit omits a null `expirationTime` from the subscription (#274); the
-  fix ships in v0.6.1. Playwright's WebKit has no push service, so the compatibility lane runs
-  desktop WebKit without service workers and does not test WebKit push. From v0.6.2, a cloud iPhone
-  also qualifies enabling alerts in the Home Screen app, delivery with the app in the background,
-  and the tap into Control, but not lock-screen presentation (ADR-032).
+- **Background alerts** (Web Push) are qualified in full on a physical Pixel with Chrome on Android,
+  where force-stop and forced Doze outcomes are observed variants rather than guaranteed delivery. On
+  iPhone and iPad (iOS and iPadOS 16.4+), Safari offers Web Push to a Home Screen app; a cloud iPhone
+  qualifies enabling alerts in the Home Screen app, delivery with the app in the background, and the
+  tap into Control, without a lock-screen claim (ADR-032).
 - **Browser versions.** The client uses CSS `color-mix()`, `:has()`, and dynamic viewport units, so
-  browsers older than roughly Chrome and Edge 111, Firefox 121, and Safari 16.2 render incorrectly.
+  browsers older than Chrome and Edge 111, Firefox 121, and Safari 16.2 render incorrectly.
 - **Windows** starts the gateway at interactive logon, not at unattended boot.
-
-## v0.5.0 compatibility correction
-
-Published v0.4.2 rejects the additive `busy` field emitted by OMP 18.2.9 and can hide live sessions
-(#219). The v0.5.0 parser fix accepts validated booleans and preserves absent/null as unknown.
-Mixed current/legacy host discovery and View/Control are covered by real local IPC regression tests.
-This does not advance the pinned baseline, native/client versions, or exact qualification matrix.
-
-v0.5.0 stop alerts use the presence of valid activity metadata, not an OMP version guess.
-Older hosts keep ordinary directory/ask behavior with unknown activity. Push state and v2
-attention/clear remain compatible; older workers cannot interpret stops until activation and
-the browser may substitute a generic background-update notification. Open or refresh the PWA
-after upgrading before relying on stop alerts.
-This does not qualify physical background delivery or imply successful task completion.
 
 ## Current claim
 
-The current Mac qualification is the Virtualization.framework guest (VirtualMac2,1), not its
-physical host (ADR-033). Historical v0.7.2 Mac17,14 evidence remains unchanged in the release ledger.
-The guest does not exercise physical firmware, FileVault unlock, Secure Boot, power loss, physical sleep/wake, or physical device drivers (ADR-033); guest reboot and console-login recovery do not qualify a bare-metal Mac or startup before login.
+<!-- release-generate:release:start -->
+Stable v0.7.7 is published as immutable GitHub Latest. [Release v0.7.7](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.7). Signed candidate v0.7.7-prealpha.2; source c8da6e07cc62b7b855c509037a827f082b564c69; archive SHA-256 c63b893f163bc6ef1c77c42556645932dc76252b6fefce2b9dcbe21a91eb5705. Published v0.7.6 remains the predecessor. Stock OMP v18.10.2 (c8913466dd7bf92040de911f8e00e30b8f4e48a2), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
+<!-- release-generate:release:end -->
 
-Stock mainline OMP `>= 18.1.20` is the supported host prerequisite for the current checkout.
-Earlier releases are unsupported because this local registry does not exist in them.
-[PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in
-[v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). Set `collab.autoStart`
-only and start participating sessions with plain `omp`; no gateway-specific OMP build is required.
-From v0.5.2 the gateway ignores fields OMP adds under registry v1 and validates only the fields it
-reads (ADR-028); a registry version bump or a changed type for a field it reads still needs a
-gateway change. The current checkout's engineering baseline is v18.10.2 (`UPSTREAM.lock.json`);
-the qualified matrix below records the exact qualification of the release named next and changes
-only when a candidate built from a newer baseline qualifies.
+The current Mac host qualification runs in a Virtualization.framework guest (`VirtualMac2,1`),
+which does not exercise bare-metal firmware, FileVault unlock, physical sleep/wake, or startup
+before login (ADR-033). The qualified scope includes the Mac-guest new-generation/fork/resume
+transitions and Pixel Push triage/stale-tap scenarios recorded in the campaign, not arbitrary
+attention or lifecycle behavior on every platform; see [attention acceptance](ATTENTION_SPEC.md)
+and [lifecycle coverage](LIFECYCLE_BRANCH_RESUME.md).
+
+Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit
+`4999b98bd5`) is the minimum supported host version: set `collab.autoStart`
+([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
+plain `omp`. The current engineering and qualified host baseline is `v18.10.2`
+(`UPSTREAM.lock.json`), while the embedded browser client pin remains `v18.4.2`. Under registry v1,
+the gateway validates only the fields it reads and ignores unknown additive fields (ADR-028); a
+registry version bump or a changed type on a consumed field still requires a gateway update.
 
 v18.10.2 (`c8913466dd7bf92040de911f8e00e30b8f4e48a2`) keeps registry v1, the discovery file
 format and query contract, the relay protocol, and `collab.autoStart` behavior unchanged from
@@ -86,25 +74,9 @@ WebSocket pings without a new relay message, and
 `ctx.annotations` for extensions, which the gateway neither reads nor sends. As in v18.8.3, upstream
 [can1357/oh-my-pi#14714](https://github.com/can1357/oh-my-pi/pull/14714) stops mirroring frames
 while no guest is joined, and a generated `sessionName` may carry a title-card prefix
-([OMP integration](OMP_INTEGRATION.md#3-polling-and-lifecycle)). No canary, candidate, or
-qualification is claimed for v18.10.2; the matrix below stays bound to v18.8.9.
-
-The v18.5.1 [upstream canary](https://github.com/alphastorm/omp-session-gateway/actions/runs/37140425389)
-passed all ten Linux stages and all seven supported Windows stages on 2026-10-03. Windows
-intentionally skips `new-generation`, `fork`, and `branch-rewind`. This is compatibility
-evidence, not signed-artifact or macOS qualification. The embedded client retains v18.4.2.
-v18.5.1 is the first release that retries an automatic start whose relay is unreachable or times
-out ([operator settings](OMP_INTEGRATION.md#1-operator-settings)).
-
-<!-- release-generate:release:start -->
-Stable v0.7.7 is published as immutable GitHub Latest. [Release v0.7.7](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.7). Signed candidate v0.7.7-prealpha.2; source c8da6e07cc62b7b855c509037a827f082b564c69; archive SHA-256 c63b893f163bc6ef1c77c42556645932dc76252b6fefce2b9dcbe21a91eb5705. Published v0.7.6 remains the predecessor. Stock OMP v18.10.2 (c8913466dd7bf92040de911f8e00e30b8f4e48a2), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
-<!-- release-generate:release:end -->
-
-The qualified scope includes the retained-Mac new-generation/fork/resume transitions and Pixel
-Push triage/stale-tap scenarios recorded in this campaign, not arbitrary attention or lifecycle
-behavior on every platform. Development runs remain tested evidence only. See
-[attention acceptance](ATTENTION_SPEC.md) and
-[lifecycle coverage and pending Windows CI](LIFECYCLE_BRANCH_RESUME.md).
+([OMP integration](OMP_INTEGRATION.md#3-polling-and-lifecycle)). From OMP `18.5.1`, an automatic
+start whose relay is unreachable or times out is retried
+([operator settings](OMP_INTEGRATION.md#1-operator-settings)).
 
 <!-- release-generate:qualification:start -->
 | Surface | Current contract | Qualification |
@@ -128,25 +100,17 @@ behavior on every platform. Development runs remain tested evidence only. See
 The gateway only reads OMP discovery, polls metadata, and fetches capabilities per launch without
 storing them. The minimum version is an integration contract, not proof that every later release
 or platform has been tested. No fork-era qualification, signed receipt, or endurance result
-transfers to this architecture. Current source/package pins live in `UPSTREAM.lock.json`.
-
-Every mainline release so far renewed a founder-approved fresh 30-minute signed-candidate relay
-check in place of the eight-hour gate; the release ledger records each window. Other release gates
-remain intact.
-Eight-hour endurance is not rerun or claimed;
-prolonged-operation risk remains an accepted limitation rather than transferred historical proof.
+transfers to this architecture. Current source/package pins live in `UPSTREAM.lock.json`. Each
+release records a fresh 30-minute relay check; eight-hour endurance is not claimed.
 
 The Linux ARM64 source-checkout job stages the published platform native package at the
-`UPSTREAM.lock.json` version
-and runs upstream's `registry.test.ts`, `registry-smoke.test.ts`, and `host-registry.test.ts`.
-It gates only the discovery/query contract consumed by the gateway, not unrelated upstream
-collaboration suites or full repository checks. The required Windows job gates gateway contracts,
-ACLs, and service lifecycle only. In [run 34818847249](https://github.com/alphastorm/omp-session-gateway/actions/runs/34818847249),
-native staging succeeded, but upstream's graceful SIGTERM fixture received exit 143 rather than
-0, followed by a Bun 1.4.0 crash during registry tests. Real OMP-to-gateway discovery on Windows
-is exercised by the `canary-windows` lane, which drives stock OMP's named pipe through the
-unchanged reader, and each stable campaign's signed-artifact Windows lane qualifies Windows Server
-2025 x86-64 at interactive logon ([WINDOWS_QUALIFICATION.md](WINDOWS_QUALIFICATION.md), ADR-031).
+`UPSTREAM.lock.json` version and runs upstream's `registry.test.ts`, `registry-smoke.test.ts`, and
+`host-registry.test.ts`. It gates only the discovery/query contract consumed by the gateway, not
+unrelated upstream collaboration suites or full repository checks. The required Windows job gates
+gateway contracts, ACLs, and service lifecycle only. Real OMP-to-gateway discovery on Windows is
+exercised by the `canary-windows` lane, which drives stock OMP's named pipe through the unchanged
+reader, and each stable campaign's signed-artifact Windows lane qualifies Windows Server 2025
+x86-64 at interactive logon ([WINDOWS_QUALIFICATION.md](WINDOWS_QUALIFICATION.md), ADR-031).
 
 ## Fork-era published-release history
 
@@ -225,6 +189,20 @@ explicit, and the 0.2 campaign adds its own row:
 
 [`RELEASE_STATUS.md`](RELEASE_STATUS.md) is the source of truth for evidence and release decisions.
 This document defines the supported boundary. Where they disagree, the ledger is authoritative.
+
+## v0.5.0 compatibility correction
+
+Published v0.4.2 rejects the additive `busy` field emitted by OMP 18.2.9 and can hide live sessions
+(#219). The v0.5.0 parser fix accepts validated booleans and preserves absent/null as unknown.
+Mixed current/legacy host discovery and View/Control are covered by real local IPC regression tests.
+This does not advance the pinned baseline, native/client versions, or exact qualification matrix.
+
+v0.5.0 stop alerts use the presence of valid activity metadata, not an OMP version guess.
+Older hosts keep ordinary directory/ask behavior with unknown activity. Push state and v2
+attention/clear remain compatible; older workers cannot interpret stops until activation and
+the browser may substitute a generic background-update notification. Open or refresh the PWA
+after upgrading before relying on stop alerts.
+This does not qualify physical background delivery or imply successful task completion.
 
 ## Status vocabulary
 
@@ -322,7 +300,7 @@ Three compatibility surfaces change independently:
 
 | Surface | Current version | Current behavior |
 |---|---|---|
-| Gateway client of OMP discovery/query | 1, mainline OMP `>= 18.1.20` | Strict discovery and reply validation; snapshot polling and per-launch link resolution. |
+| Gateway client of OMP discovery/query | 1, mainline OMP `>= 18.1.20` | Validates consumed discovery and reply fields and ignores unknown additive v1 fields; snapshot polling and per-launch link resolution. |
 | PWA to gateway HTTP API | `/api/v1` | Metadata-only list/SSE; generation-bound launch plus `409 mode_unavailable`. |
 | Pinned OMP browser client | Exact source/provenance in the client lock | In-memory bootstrap; not a claim to support arbitrary client/wire combinations. |
 
@@ -369,7 +347,7 @@ unchanged browser or relay behavior does not inherit these passes.
 
 | Dependency or mode | Current state | Compatibility statement |
 |---|---|---|
-| Tailscale Serve over tailnet HTTPS | Required production architecture. Advertised evidence includes macOS-hosted Serve on macOS 26.5.2/26.6.1 arm64; supplemental Windows Server 2025 source acceptance used Authenticode-valid Tailscale `1.102.3`, TUN mode, and passed `doctor` 17/17. No Tailscale version range is qualified. | The signed-candidate identity matrix is closed for the advertised hosts: tagged/no-user identity denied, real non-allowlisted identity denied, real allowlisted identity admitted, forged headers ignored, direct backend addresses refused, and Funnel disabled. Windows repeats only the allowed self-node/Serve half in unsigned source acceptance and therefore gains no support claim. Direct loopback spoofing remains outside the explicitly single-user v1 trust boundary, and the full identity evidence must repeat on every newly advertised host. |
+| Tailscale Serve over tailnet HTTPS | Required production architecture. Advertised evidence includes macOS-hosted Serve on macOS 26.5.2/26.6.1 arm64; supplemental Windows Server 2025 source acceptance used Authenticode-valid Tailscale `1.102.3`, TUN mode, and passed `doctor` 17/17. No Tailscale version range is qualified. | The signed-candidate identity matrix is closed for the advertised hosts: tagged/no-user identity denied, real non-allowlisted identity denied, real allowlisted identity admitted, forged headers ignored, direct backend addresses refused, and Funnel disabled. Mainline campaigns from v0.6.0 also qualify the signed-artifact Windows Server 2025 path through Serve. Direct loopback spoofing remains outside the explicitly single-user v1 trust boundary, and the full identity evidence must repeat on every newly advertised host. |
 | User-owned Tailscale source identity | Designed identity-header mode | One exact user-owned login — the operator's own — was observed through Serve and allowlisted for qualification; no broader identity or device support is claimed. The login itself is deliberately not reproduced here: the only login written into this file is a placeholder in a reserved TLD, so nothing readable here is ever authenticable. A denial by a *different real person's* login has never been measured and cannot be produced by a single-account tailnet. |
 | Tagged Tailscale source device | Unsupported, and now measured | Serve populates user identity headers only for user-owned source devices, so a request proxied from a tagged source arrives with no user identity and the `tailscale-serve` auth mode must fail closed. Measured on droplet a node carrying `tag:omp-session-gateway`, confirmed by both `tailscale status` and `tailscale whois`, which reported no user profile and a tag list: `403` through Serve on `/api/v1/sessions` and on `/`. A tagged phone would need a separately designed app-capabilities or equivalent authentication mode; do not silently weaken authentication to accommodate one. |
 | Any other forwarder onto the gateway's loopback port | Unsupported; a complete authentication bypass | A tunnel, reverse proxy, port forward, container publish, or SSH `-L` that terminates remote traffic and relays it to `127.0.0.1:<port>` presents a loopback peer, satisfying the first authorization check, and then forwards whatever `Tailscale-User-Login` the remote caller chose. Tailscale Serve is safe here only because it overwrites caller-supplied identity headers; nothing else in this design does. See [`SECURITY.md`](SECURITY.md) §4 and [#74](https://github.com/alphastorm/omp-session-gateway/issues/74). |

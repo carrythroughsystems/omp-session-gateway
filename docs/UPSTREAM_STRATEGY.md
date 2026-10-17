@@ -12,8 +12,7 @@ OMP plugin, or downstream OMP patch set is required or maintained by this integr
 [PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). Stock mainline OMP `>= 18.1.20` provides
 the shared controller, opt-in `collab.autoStart`, local discovery/query registry, and
 `omp collab list` / `omp collab link` commands. Earlier releases lack this registry and are
-unsupported by the current gateway. This supersedes the fork prerequisite accepted in ADR-024;
-ADR-028 records the cutover without rewriting the fork-era decisions or qualification evidence.
+unsupported by the current gateway.
 
 The gateway reads discovery and queries host snapshots, then resolves a link only for an explicit
 launch. It never writes OMP’s discovery directory, receives unsolicited OMP publications, or
@@ -42,11 +41,8 @@ stores capabilities. The private readiness token belongs only to gateway/CLI rea
 - Preserve the liveness distinction: only `ENOENT`/`ECONNREFUSED` proves a queried host dead.
 - Exercise start, stop, switch, branch, resume, and gateway restart against the real mainline host.
 - Verify link formats through the pinned upstream parser without recording links.
-- Repeat exact signed-artifact host/client/relay qualification before making a release claim.
-  Mainline core qualification passed for the exact candidate and matrix in the
-  [release ledger](RELEASE_STATUS.md), including the Windows host and Pixel background Web Push
-  lanes from 0.6.0; no fork-era result transfers. Specialized attention and branch/resume remain
-  outside that qualified claim.
+- Qualify each release against its pinned upstream baseline; see
+  [Compatibility](COMPATIBILITY.md) for exact supported and qualified combinations.
 
 ## Communication
 
