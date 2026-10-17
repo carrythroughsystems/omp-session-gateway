@@ -63,10 +63,6 @@ Works with stock [OMP 18.1.20+](https://github.com/can1357/oh-my-pi/releases/tag
   <img src="docs/media/03-open-request.png" alt="OMP's encrypted collaboration client opened on the exact request that was waiting for input" width="300"><br>
   <sub><strong>Open request:</strong> one tap opens OMP's own encrypted collaboration client.</sub>
 </p>
-<p>
-  <img src="docs/media/04-notification-settings.png" alt="OMP Sessions settings sheet with a Background alerts section, per-device Private, Session, and Preview notification detail levels, Session selected as the default, and a Disable background alerts toggle" width="300"><br>
-  <sub><strong>Background alerts:</strong> opt-in per-device notifications with Private, Session, or Preview detail.</sub>
-</p>
 
 </details>
 
@@ -90,16 +86,18 @@ Start participating sessions with plain `omp` after changing this setting; alrea
 
 ### 2. Install the gateway
 
-Download and [verify the published archive](docs/RELEASE.md#verify-a-published-build), then extract `omp-session-gateway-<version>-bun.tar` and enter `omp-session-gateway-<version>-bun/`. If you are upgrading from v0.3.0 or earlier, stop and uninstall that release with its own CLI first following [Upgrade and rollback](docs/UPGRADE_ROLLBACK.md).
+Download and [verify the published archive](docs/RELEASE.md#verify-a-published-build). If you are upgrading from v0.3.0 or earlier, stop and uninstall that release with its own CLI first following [Upgrade and rollback](docs/UPGRADE_ROLLBACK.md). Then, from the download directory:
 
 ```sh
+tar -xf omp-session-gateway-*-bun.tar
+cd omp-session-gateway-*-bun
 bun apps/gateway/src/cli.js install \
   --origin https://host.tailnet.ts.net \
   --allow you@example.com
 bun apps/gateway/src/cli.js serve-guidance
 ```
 
-On Windows PowerShell, run each command on one line without `\` continuations; see [Operations](docs/OPERATIONS.md#2-cli-and-daemon-installation) for exact PowerShell steps. Run the Tailscale Serve command printed by `serve-guidance` and grant your login HTTPS access to the host in your tailnet policy ([example](examples/tailscale-policy.hujson)), then check the installation:
+On Windows PowerShell, use the [PowerShell steps in Operations](docs/OPERATIONS.md#2-cli-and-daemon-installation) instead (one line per command, no `\` continuations). Run the Tailscale Serve command printed by `serve-guidance` and grant your login HTTPS access to the host in your tailnet policy ([example](examples/tailscale-policy.hujson)), then check the installation:
 
 ```sh
 bun apps/gateway/src/cli.js doctor
@@ -148,7 +146,7 @@ Read the full [threat model](docs/SECURITY.md) or [report a vulnerability privat
 | Android | A physical Pixel (Chrome on Android), including background alerts; a cloud Samsung Galaxy |
 | iPhone & iPad | A cloud iPhone and iPad on Safari; iPhone background alerts in the Home Screen app (not the lock screen) |
 | Desktop Chrome, Edge, Firefox, Safari | CI only (Chromium, Firefox, and WebKit engines) |
-| Exact qualified OMP | `v18.10.2`, commit `c8913466dd7bf92040de911f8e00e30b8f4e48a2`; Bun `1.4.0` |
+| Exact qualified OMP | `v18.10.2` ([`c8913466dd`](https://github.com/can1357/oh-my-pi/commit/c8913466dd7bf92040de911f8e00e30b8f4e48a2)); Bun `1.4.0` |
 
 Every row is **supported**: tested in CI on each change, bug reports accepted. **Qualified** names the exact hardware, OS, and browser versions verified for the latest release — see [Platforms and browsers](docs/COMPATIBILITY.md#platforms-and-browsers) and [Current claim](docs/COMPATIBILITY.md#current-claim).
 

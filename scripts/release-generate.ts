@@ -348,7 +348,9 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
     const rollback = markerContent(get("docs/UPGRADE_ROLLBACK.md"), "predecessor");
     const current = `## ${tag} predecessor compatibility\n\nThe selected predecessor is published ${previous}. Gateway rollback does not change the separately running OMP process. This release uses stock OMP ${q.baseline}; retained-runtime selection does not restore the predecessor's OMP baseline. After a ${tag} install, \`rollback --to\` selects only runtimes pruning retained. ${q.lanes.find(l => l.name === "macos")!.summary} Windows history-selected restoration passed. Preserve configuration and readiness state. Earlier predecessors retain the compatibility limits below; their receipts do not qualify this candidate.`;
     out["docs/UPGRADE_ROLLBACK.md"] = get("docs/UPGRADE_ROLLBACK.md").replace(releaseMarker("predecessor", rollback), `${releaseMarker("predecessor", current)}\n\n${rollback}`);
-    out["README.md"] = replaceOne(get("README.md"), /\| Exact qualified OMP \|[^\n]+/u, `| Exact qualified OMP | \`${q.baseline}\`, commit \`${q.commit}\`; Bun \`${q.bun}\` |`);
+    // The README table must fit a phone: show the abbreviated commit and link the exact one.
+    const upstreamRepository = text(upstream.repository, "upstream repository", /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u);
+    out["README.md"] = replaceOne(get("README.md"), /\| Exact qualified OMP \|[^\n]+/u, `| Exact qualified OMP | \`${q.baseline}\` ([\`${q.commit.slice(0, 10)}\`](${upstreamRepository}/commit/${q.commit})); Bun \`${q.bun}\` |`);
     let matrix = markerContent(get("docs/COMPATIBILITY.md"), "platforms");
     for (const [surface, detail] of Object.entries(q.matrix)) {
       const pattern = new RegExp(`^\\| ${escapePattern(surface)} \\|([^\\n]+)\\|$`, "mu");
