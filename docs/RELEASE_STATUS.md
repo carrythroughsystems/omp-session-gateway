@@ -1998,6 +1998,19 @@ Recorded 2026-10-03. Published-byte smoke passed against the stable source and d
 
 This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
 
+## Engineering baseline v18.12.3 — source pins only
+
+On 2026-10-19 (#409), `scripts/upstream-pins.ts` derived the stock OMP v18.12.3 source pin
+`53a0377db6845e0dae606146130766ec92d407fd`, tree `51822a49a4cc7eebabdb1e848c79f8aa873deb40`, and
+the Darwin arm64 and Windows x64 native hashes from official npm tarballs after verifying
+registry integrity. Source review from v18.10.2 found registry v1, the discovery file format and
+socket paths, the relay protocol, and `collab.autoStart` unchanged; can1357/oh-my-pi#15680 adds
+an optional `runtime` field to session entries, can1357/oh-my-pi#15467 changes a CLI guest's
+prompt-cache key, and can1357/oh-my-pi#12730 changes a `collab-web` eval renderer the embedded
+client does not import, none of which changes what the gateway reads or sends. The embedded
+client stays at v18.4.2. No canary, candidate, campaign, or platform qualification is claimed;
+the published matrix above is unchanged.
+
 ## Engineering baseline v18.10.2 — source pins only
 
 On 2026-10-12 (#398), `scripts/upstream-pins.ts` derived the stock OMP v18.10.2 source pin

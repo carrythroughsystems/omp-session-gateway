@@ -55,23 +55,30 @@ and [lifecycle coverage](LIFECYCLE_BRANCH_RESUME.md).
 Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit
 `4999b98bd5`) is the minimum supported host version: set `collab.autoStart`
 ([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
-plain `omp`. The current engineering and qualified host baseline is `v18.10.2`
-(`UPSTREAM.lock.json`), while the embedded browser client pin remains `v18.4.2`. Under registry v1,
-the gateway validates only the fields it reads and ignores unknown additive fields (ADR-028); a
-registry version bump or a changed type on a consumed field still requires a gateway update.
+plain `omp`. The current engineering baseline is `v18.12.3` (`UPSTREAM.lock.json`) and the
+qualified host baseline is `v18.10.2`, while the embedded browser client pin remains `v18.4.2`.
+Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
+fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
+gateway update.
 
-v18.10.2 (`c8913466dd7bf92040de911f8e00e30b8f4e48a2`) keeps registry v1, the discovery file
+v18.12.3 (`53a0377db6845e0dae606146130766ec92d407fd`) keeps registry v1, the discovery file
 format and query contract, the relay protocol, and `collab.autoStart` behavior unchanged from
-v18.8.9: the collaboration host, settings, `collab-web`, and `packages/wire/src/index.ts` are
-byte-identical between the two tags. Upstream
+v18.10.2: the collaboration host, registry, settings, collaboration slash commands,
+`docs/collab.md`, `collab-web` `app.tsx` and `lib/client.ts`, and `packages/wire/src/index.ts`
+are byte-identical between the two tags.
+[can1357/oh-my-pi#15680](https://github.com/can1357/oh-my-pi/pull/15680) adds an optional
+`runtime` build identity to session entries, including replicated ones, which the gateway never
+reads and the embedded client does not consume;
+[can1357/oh-my-pi#15467](https://github.com/can1357/oh-my-pi/pull/15467) changes only a CLI
+guest's prompt-cache key; and the remaining changes touch the TUI approval dialog, extension
+plan-review hooks, and a `collab-web` eval renderer the embedded client does not import. The
+gateway neither reads nor sends any of them. Since v18.10.2, upstream
 [`a608a9ca07`](https://github.com/can1357/oh-my-pi/commit/a608a9ca07c9443634e80d877d61c602099dab91)
-moves the registry onto native IPC with the same one-line JSON request and response, a 0600
+serves the registry over native IPC with the same one-line JSON request and response, a 0600
 socket, overlong paths relocated under the owner-only `/tmp/omp-<euid>`, and same-user peers
-only; the gateway reads the published endpoint verbatim, so its queries are unchanged.
-[can1357/oh-my-pi#14387](https://github.com/can1357/oh-my-pi/pull/14387) adds host relay
-WebSocket pings without a new relay message, and
-[can1357/oh-my-pi#15260](https://github.com/can1357/oh-my-pi/pull/15260) adds
-`ctx.annotations` for extensions, which the gateway neither reads nor sends. As in v18.8.3, upstream
+only; the gateway reads the published endpoint verbatim, so its queries are unchanged. No canary,
+candidate, or qualification is claimed for v18.12.3; the matrix below stays bound to v18.10.2.
+As in v18.8.3, upstream
 [can1357/oh-my-pi#14714](https://github.com/can1357/oh-my-pi/pull/14714) stops mirroring frames
 while no guest is joined, and a generated `sessionName` may carry a title-card prefix
 ([OMP integration](OMP_INTEGRATION.md#3-polling-and-lifecycle)). From OMP `18.5.1`, an automatic
