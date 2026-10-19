@@ -8,6 +8,15 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Move the OMP engineering baseline to published v18.12.3 (#409), with pins derived by
+  `scripts/upstream-pins.ts`. Registry v1, the discovery file format and socket paths, the relay
+  protocol, `collab.autoStart`, and the collaboration `host.ts`, `registry.ts`, `settings.ts`,
+  and `packages/wire/src/index.ts` sources are unchanged from v18.10.2. Session entries gain an
+  optional `runtime` build identity (can1357/oh-my-pi#15680), a CLI guest's prompt-cache key
+  changes (can1357/oh-my-pi#15467), and the `collab-web` eval renderer changes
+  (can1357/oh-my-pi#12730); none changes what the gateway reads or sends. The embedded client
+  remains at v18.4.2. No qualification is claimed; published v0.7.7 stays bound to OMP v18.10.2.
+
 - Rewrite the README, public site home page, and operator and user documentation reader-first.
   The README leads with the product promise, demo, a three-step quickstart, everyday use, the
   privacy model, and a two-column supported-platforms table, and drops release-ledger prose,

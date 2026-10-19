@@ -919,6 +919,39 @@ published v0.7.6 remains qualified on v18.8.9.
 
 ---
 
+**Engineering baseline update (2026-10-19):** Accept published mainline v18.12.3
+(`53a0377db6845e0dae606146130766ec92d407fd`, tree `51822a49a4cc7eebabdb1e848c79f8aa873deb40`)
+as the host engineering pin (#409), with registry v1 and minimum host `18.1.20` unchanged.
+`scripts/upstream-pins.ts` derived every pin. Relative to v18.10.2, `host.ts`, `registry.ts`,
+`settings.ts`, `docs/collab.md`, `builtin-registry.ts`, `builtin-collaboration.ts`,
+`collab-web` `app.tsx` and `lib/client.ts`, and `packages/wire/src/index.ts` are byte-identical,
+so the discovery file format, socket paths, registry v1, the relay protocol, and
+`collab.autoStart` behavior are unchanged.
+[can1357/oh-my-pi#15680](https://github.com/can1357/oh-my-pi/pull/15680)
+(merge `8b161bf5cf7a5d833216574846f319d8d818e3c7`) records the writing omp build as an optional
+`runtime` object on session entries and keeps it on the replication placeholder in
+`replication-shrink.ts`; the gateway never reads relay entries and the embedded client does not
+consume the field. [#15467](https://github.com/can1357/oh-my-pi/pull/15467)
+(merge `1ea9a1aa8729e5a402ab884d0eec583347cab165`) changes a CLI guest replica's prompt-cache key
+in `guest.ts`. [#12730](https://github.com/can1357/oh-my-pi/pull/12730)
+(merge `f73fa983031992cd8964c00a7df53f6f6cd6fd74`) and
+`e404beb2c1b1a798afc3578876ce35a7cef3c6a9` change the `collab-web` eval renderer, which the
+embedded client does not import. #14250, #15548, #15550, #15552, #15642, #16049,
+`1b727a9fcc3e7b9ad87f6a8d5098df15bebea376`, and `a89329f303334fbcbd06b003438739b4f170c53c`
+add extension plan-review hooks and rework the TUI approval dialog; #8655, #15036, #15262,
+#15631, #15820, and #16234 change other TUI and extension surfaces in `modes/types.ts` and
+`docs/extensions.md`; and the version bumps touch only `package.json`. #15820's branch added a
+`runActive` snapshot field to `host.ts` and `packages/wire/src/index.ts`
+(`4ea618bef687d71a00e5cbc280d3c62b608996fc`) and removed it again
+(`7e7cdb1b4fb107be7b577b02e8b2b34300a145fa`). The gateway reads and sends none of these.
+`@oh-my-pi/pi-wire` 18.12.3 changes only `tsp.ts`, and `@oh-my-pi/collab-web` stays 16.3.6; the
+embedded client keeps its v18.4.2 provenance and wire pin.
+
+This is source review only: no canary, candidate, or qualification is claimed for v18.12.3, and
+published v0.7.7 remains qualified on v18.10.2.
+
+---
+
 ## ADR-029 — Resume a backgrounded session by relaunching it, never by retaining its capability
 
 **Status:** Accepted
