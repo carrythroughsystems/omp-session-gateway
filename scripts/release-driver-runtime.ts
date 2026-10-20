@@ -113,7 +113,7 @@ export function campaignAvailabilityObservation(
   let scope: CampaignInfrastructureHold["scope"] = "preflight";
   if (receipt !== undefined && Object.values(receipt.lanes).some(lane => lane.attempts !== 0 || lane.status !== "pending" || lane.evidence !== undefined)) {
     assertDeviceCloudResumeEligible(receipt, { tag: state.candidate, previousTag: state.previousStable!, orchestratorCommit: state.candidateCommit!, macHost });
-    if (receipt.candidate?.sourceCommit !== state.candidateCommit || receipt.candidate.archiveSha256 !== state.candidateDigest) throw new Error("held receipt differs from the selected candidate");
+    if (receipt.candidate === undefined || receipt.candidate.sourceCommit !== state.candidateCommit || receipt.candidate.archiveSha256 !== state.candidateDigest) throw new Error("held receipt differs from the selected candidate");
     const recorded = parseDeviceCloudHold(receipt.lanes.deviceCloud.evidence?.availabilityHold);
     if (holds.some(hold => hold.stage === "allocation" && JSON.stringify(hold) !== JSON.stringify(recorded))) throw new Error("stable outcome differs from held allocation evidence");
     scope = "receipt";
@@ -323,7 +323,7 @@ export class StudioDriver implements DriverPort {
       assertDeviceCloudResumeEligible(receipt, {
         tag: state.candidate, previousTag: state.previousStable!, orchestratorCommit: state.candidateCommit!, macHost: this.env.OMP_STABLE_MAC_HOST ?? "",
       });
-      if (receipt.candidate?.sourceCommit !== state.candidateCommit || receipt.candidate.archiveSha256 !== state.candidateDigest) throw new Error("held receipt candidate changed");
+      if (receipt.candidate === undefined || receipt.candidate.sourceCommit !== state.candidateCommit || receipt.candidate.archiveSha256 !== state.candidateDigest) throw new Error("held receipt candidate changed");
       const archived = await jsonFile<StableQualificationReceipt>(join(this.jobDirectory("campaign", state), "held-qualification.json"));
       if (archived === undefined || JSON.stringify(archived) !== JSON.stringify(receipt)) throw new Error("held receipt differs from its immutable completed-job snapshot");
     } else {

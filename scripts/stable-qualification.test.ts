@@ -978,7 +978,7 @@ describe("publication lifecycle receipt", () => {
     expect(lane).toMatchObject({ status: "passed", evidence: { revoked: true, lifecycle: lifecycleEvidence } });
     const failed = await finishLiveQualification([hold], lane, async () => {}, async () => {}, async () => { throw new Error("lifecycle failed"); }).catch((error: unknown) => error);
     expect(deviceCloudHolds(failed)).toBeUndefined();
-    expect(lane.status).toBe("failed");
+    expect(lane).toMatchObject({ status: "failed" });
   });
   test("cloud-only resume preserves passed publication evidence byte-for-byte", async () => {
     const receipt = availabilityReceipt();
