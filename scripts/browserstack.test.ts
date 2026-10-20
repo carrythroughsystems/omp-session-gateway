@@ -4,18 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserStackApi, BROWSERSTACK_LOCAL, browserStackCapabilities, browserStackEntitlement, browserStackLocalArguments,
-  browserStackModel, canonicalBrowserStackLocalIdentity, readBrowserStackCredentials, stopBrowserStackLocal,
+  browserStackModel, canonicalBrowserStackLocalIdentity, ownedLocalProcesses, prepareBrowserStackLocal, readBrowserStackCredentials, stopBrowserStackLocal,
 } from "./browserstack.ts";
 import { attestAllocation } from "./device-cloud-qualification.ts";
 import { requireLoopbackListeners } from "./device-cloud-common.ts";
 import type { CloudArtifact, CloudRecordRemoval, TestRecord } from "./device-cloud-common.ts";
+import pins from "./browserstack-pins.json";
 
 const credentials = { username: "synthetic-browserstack-user", accessKey: "synthetic-browserstack-key" };
 const id = "a".repeat(40), build = "b".repeat(40);
 const apiOrigin = "https://api.browserstack.com/automate";
 const artifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/console.txt?synthetic=true`;
 const nestedArtifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/nested.txt?synthetic=true`;
-const video = `https://automate.browserstack.com/sessions/${id}/video`;
+const video = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/video.mp4`;
 const record = {
   hashed_id: id, build_hashed_id: build, status: "done", device: "iPad 10th", os: "ios", os_version: "27.0",
   browser: "ipad", video_url: video, browser_console_logs_url: artifact,
@@ -27,8 +28,10 @@ function provider(options: {
   raw?: string; log?: string; logType?: string; missingLogs?: boolean; videoStatus?: number; media?: boolean; large?: boolean;
   deletionFails?: boolean; deletionUnverified?: boolean; lingering?: boolean; changed?: boolean;
   initiallyAbsent?: boolean; disappearsAfter?: number;
+  postDeleteLog?: string; postDeleteSessionRaw?: string;
 } = {}) {
   let deleted = false;
+  let acknowledged = false, lateLogRead = false, lateSessionRead = false;
   let signedAbsent = false, postDeleteReads = 0;
   const calls: { method: string; url: string; authorization: boolean }[] = [];
   const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -40,8 +43,18 @@ function provider(options: {
       deleted = !options.deletionUnverified;
       return Response.json({ status: "ok" });
     }
-    if (url === `${apiOrigin}/sessions/${id}.json`) return deleted ? new Response("absent", { status: 404 }) : new Response(options.raw ?? JSON.stringify({ automation_session: record }), { headers: { "content-type": "application/json" } });
+    if (url === `${apiOrigin}/sessions/${id}.json`) {
+      if (deleted && options.postDeleteSessionRaw !== undefined && !lateSessionRead) {
+        lateSessionRead = true;
+        return new Response(options.postDeleteSessionRaw, { headers: { "content-type": "application/json" } });
+      }
+      return deleted ? new Response("absent", { status: 404 }) : new Response(options.raw ?? JSON.stringify({ automation_session: record }), { headers: { "content-type": "application/json" } });
+    }
     if (url.startsWith(`${apiOrigin}/sessions/${id}/`)) {
+      if (deleted && url.endsWith("/logs") && options.postDeleteLog !== undefined && !lateLogRead) {
+        lateLogRead = true;
+        return new Response(options.postDeleteLog, { headers: { "content-type": "application/json" } });
+      }
       if (deleted) return new Response("absent", { status: 404 });
       if (url.endsWith("/logs") && !options.missingLogs) return new Response(options.large ? "x".repeat(2_000_001) : options.log ?? "synthetic command record", { headers: { "content-type": options.logType ?? "text/plain" } });
       if (url.endsWith("/consolelogs")) return new Response("No messages were logged", { headers: { "content-type": "text/plain" } });
@@ -52,7 +65,7 @@ function provider(options: {
         (options.disappearsAfter !== undefined && ++postDeleteReads > options.disappearsAfter)))) return new Response("absent", { status: 404 });
       return new Response(deleted && options.changed ? "changed after audit" : "No messages were logged", { headers: { "content-type": "text/plain" } });
     }
-    if (url === nestedArtifact) return deleted ? new Response("absent", { status: 404 }) : new Response("Nested synthetic log", { headers: { "content-type": "text/plain" } });
+    if (pins.artifactOrigins.some(origin => url === `${origin}/${id}/nested.txt?synthetic=true`)) return deleted ? new Response("absent", { status: 404 }) : new Response("Nested synthetic log", { headers: { "content-type": "text/plain" } });
     if (url === video) {
       if (options.media) return new Response("synthetic-media", { headers: { "content-type": "video/mp4" } });
       return new Response("<Error><Code>AccessDenied</Code><Message>s3:ListBucket</Message></Error>", { status: options.videoStatus ?? 403, headers: { "content-type": "application/xml" } });
@@ -65,6 +78,8 @@ function provider(options: {
   const inspected: TestRecord[] = [];
   const removal: CloudRecordRemoval = {
     get artifacts() { return artifacts; },
+    get deleted() { return acknowledged; },
+    markDeleted: async () => { acknowledged = true; },
     remember: async values => { artifacts = structuredClone([...values]); },
     inspect: async value => { inspected.push(value); },
   };
@@ -75,6 +90,13 @@ function provider(options: {
 }
 
 describe("BrowserStack fixed policy inputs", () => {
+  test("pins disjoint storage and dashboard origins", () => {
+    expect(pins.artifactOrigins).toEqual([
+      "https://api.browserstack.com", "https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com", "https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com",
+    ]);
+    expect(pins.dashboardOrigins).toEqual(["https://automate.browserstack.com"]);
+    expect(new Set([...pins.artifactOrigins, ...pins.dashboardOrigins]).size).toBe(4);
+  });
   test("requires the observed Mobile plan and exactly five group/team parallels", async () => {
     let body = { automate_plan: "Automate Mobile", parallel_sessions_max_allowed: 5, team_parallel_sessions_max_allowed: 5 };
     const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json(body), { preconnect: () => {} }));
@@ -170,6 +192,87 @@ test.skipIf(process.platform === "win32")("Local ownership canonicalizes symlink
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test.skipIf(process.platform === "win32")("Local ownership includes retitled descendants and orphans without argv, but excludes PID reuse", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "omp-bs-lineage-"));
+  try {
+    const binary = join(directory, "BrowserStackLocal");
+    await writeFile(binary, "synthetic", { mode: 0o700 });
+    const identity = { directory, binary, identifier: "omp-dc-bs-1234abcd" };
+    const canonical = await canonicalBrowserStackLocalIdentity(identity);
+    await writeFile(join(directory, "processes.json"), JSON.stringify([{ pid: 101, started: "launch" }, { pid: 105, started: "old" }]), { mode: 0o600 });
+    const snapshot = async () => [
+      { pid: 101, parentPid: 1, started: "launch", cwd: canonical.directory, executableFiles: [canonical.binary] },
+      { pid: 102, parentPid: 101, started: "child", cwd: "/elsewhere", executableFiles: ["/other/helper"] },
+      { pid: 103, parentPid: 1, started: "orphan", cwd: canonical.directory, executableFiles: [canonical.binary] },
+      { pid: 104, parentPid: 1, started: "other", cwd: "/other/attempt", executableFiles: [canonical.binary] },
+      { pid: 105, parentPid: 1, started: "reused", cwd: "/other", executableFiles: ["/other/helper"] },
+    ];
+    expect(await ownedLocalProcesses(identity, snapshot)).toEqual([101, 102, 103]);
+    const saved = JSON.parse(await readFile(join(directory, "processes.json"), "utf8"));
+    expect(saved.map((value: { pid: number }) => value.pid)).toEqual([101, 102, 103]);
+    expect((await lstat(join(directory, "processes.json"))).mode & 0o777).toBe(0o600);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("Local stop proves not-started with absent binary/directory and is idempotent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "omp-bs-not-started-"));
+  try {
+    const identity = { directory: join(root, "never-created"), binary: join(root, "missing-cache", "BrowserStackLocal"), identifier: "omp-dc-bs-1234abcd" };
+    let now = 0;
+    const runtime = { processes: (options: typeof identity) => ownedLocalProcesses(options, async () => []),
+      kill: () => { throw new Error("must not signal an unowned process"); }, now: () => now,
+      pause: async (milliseconds: number) => { now += milliseconds; } };
+    await stopBrowserStackLocal(identity, runtime);
+    await stopBrowserStackLocal(identity, runtime);
+    expect(await Bun.file(identity.directory).exists()).toBe(false);
+    await expect(ownedLocalProcesses(identity, async () => [{
+      pid: 100, parentPid: 1, started: "other", cwd: "/other/attempt",
+      executableFiles: [join(await realpath(root), "missing-cache", "BrowserStackLocal")],
+    }])).rejects.toThrow("absence cannot be proved");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Local preparation checkpoints only after binary and directory exist", async () => {
+  const root = await mkdtemp(join(tmpdir(), "omp-bs-prepare-"));
+  try {
+    const identity = { directory: join(root, "attempt"), binary: join(root, "BrowserStackLocal"), identifier: "omp-dc-bs-1234abcd" };
+    let checkpoints = 0;
+    await expect(prepareBrowserStackLocal(identity, async () => { checkpoints++; }, async () => { throw new Error("download failed"); })).rejects.toThrow("download failed");
+    expect(checkpoints).toBe(0);
+    expect(await Bun.file(identity.directory).exists()).toBe(false);
+    await writeFile(identity.binary, "synthetic", { mode: 0o700 });
+    await prepareBrowserStackLocal(identity, async () => {
+      expect((await lstat(identity.directory)).isDirectory()).toBe(true);
+      expect(await Bun.file(identity.binary).exists()).toBe(true);
+      checkpoints++;
+    }, async () => identity.binary);
+    expect(checkpoints).toBe(1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform !== "darwin")("real process ownership finds and stops a retitled child without reading argv", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "omp-bs-process-proof-"));
+  const child = Bun.spawn([process.execPath, "-e", "process.title='synthetic-retitled-worker';console.log('ready');setInterval(()=>{},1000);"], {
+    cwd: directory, stdin: "ignore", stdout: "pipe", stderr: "ignore",
+  });
+  try {
+    const reader = child.stdout.getReader();
+    const ready = await reader.read();
+    reader.releaseLock();
+    expect(new TextDecoder().decode(ready.value)).toContain("ready");
+    const identity = { directory, binary: process.execPath, identifier: "omp-dc-bs-1234abcd" };
+    expect(await ownedLocalProcesses(identity)).toContain(child.pid);
+    await stopBrowserStackLocal(identity);
+    await child.exited;
+    expect(await Bun.file(join(directory, "processes.json")).exists()).toBe(false);
+    await stopBrowserStackLocal(identity);
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 15_000);
+
 describe("BrowserStack allocation attestation", () => {
   const ipad = { capabilities: { platformName: "iOS", browserName: "safari", deviceName: "iPad 10th" }, browser: { family: "ipad", browser: "safari", browserVersion: "27.0", os: "27.0", model: "" }, vendorRecord: { device: "iPad 10th", os: "ios", osVersion: "27.0", browser: "ipad" } } as const;
   const samsung = { capabilities: { platformName: "Android", browserName: "chrome", deviceName: "synthetic-serial" }, browser: { family: "android", browser: "chrome", browserVersion: "152.0.7977.54", os: "16.0.0", model: "SM-S942B" }, vendorRecord: { device: "Samsung Galaxy S26", os: "android", osVersion: "16.0", browser: "chrome_android" } } as const;
@@ -231,7 +334,67 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(source).not.toMatch(/\bJSON\s*\.\s*parse\s*\(/u);
     expect(source).not.toMatch(/\bvendorJson\s*\(/u);
     expect(source).not.toMatch(/\.\s*json\s*\(/u);
-    expect([...source.matchAll(/\bparseRetainedVendorJson\s*\(/gu)]).toHaveLength(5);
+    expect([...source.matchAll(/\bparseRetainedVendorJson\s*\(/gu)]).toHaveLength(6);
+    expect(source).not.toMatch(/\.command\.includes\("BrowserStackLocal"\)/u);
+  });
+  const placements: [string, (value: string) => unknown][] = [];
+  for (const field of ["logs", "insights", "reason"]) for (let depth = 0; depth < 6; depth++) {
+    placements.push([`${field}/${depth}`, value => {
+      let nested: unknown = value;
+      for (let level = 0; level < depth; level++) nested = level % 2 === 0 ? [null, { child: nested }] : { arbitrary: nested };
+      return { ...record, [field]: nested };
+    }]);
+  }
+  test.each(placements)("class invariant: storage URL at %s is fetched, privately inventoried and absence-checked", async (_name, place) => {
+    for (const origin of pins.artifactOrigins) {
+      const nested = `${origin}/${id}/nested.txt?synthetic=true`;
+      const fixture = provider({ raw: JSON.stringify({ automation_session: place(nested) }) });
+      await fixture.audit();
+      expect(fixture.removal.artifacts.some(item => item.url === nested)).toBe(true);
+      expect(fixture.calls.filter(call => call.url === nested)).toHaveLength(1);
+      await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+      expect(fixture.calls.filter(call => call.url === nested)).toHaveLength(2);
+      expect(fixture.calls.filter(call => call.url === nested).every(call => !call.authorization)).toBe(true);
+      restore?.();
+    }
+  });
+  test.each(placements)("class invariant: unreviewed origin anywhere at %s fails closed", async (_name, place) => {
+    const fixture = provider({ raw: JSON.stringify({ automation_session: place(`https://unreviewed.example/${id}/opaque`) }) });
+    await expect(fixture.audit()).rejects.toThrow("unreviewed");
+    expect(fixture.calls).toHaveLength(1);
+  });
+  test("only top-level dashboard presentation fields are counted and never fetched", async () => {
+    const browserUrl = `https://automate.browserstack.com/dashboard/v2/sessions/${id}`;
+    const publicUrl = `https://automate.browserstack.com/dashboard/v2/public-build/${build}/sessions/${id}`;
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, browser_url: browserUrl, public_url: publicUrl } }) });
+    expect((await fixture.audit())?.dashboardReferences).toBe(2);
+    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    expect(fixture.calls.some(call => call.url === browserUrl || call.url === publicUrl)).toBe(false);
+    expect(fixture.removal.artifacts.some(item => item.url.startsWith(pins.dashboardOrigins[0]!))).toBe(false);
+    restore?.();
+    const misplaced = provider({ raw: JSON.stringify({ automation_session: { ...record, insights: { browser_url: browserUrl } } }) });
+    await expect(misplaced.audit()).rejects.toThrow("unreviewed");
+  });
+  test.each(["session", "log"] as const)("post-DELETE %s bodies are scanned raw plus canonical before absence", async surface => {
+    const marker = "SYNTHETIC-LATE-RETAINED-CONTENT";
+    const json = JSON.stringify(surface === "session" ? { automation_session: { ...record, reason: marker } } : { late: marker }).replace("SYNTHETIC", "\\u0053YNTHETIC");
+    const fixture = provider(surface === "session" ? { postDeleteSessionRaw: json } : { postDeleteLog: json });
+    await fixture.audit();
+    let incident = false;
+    await fixture.api.deleteRecord(id, { ...fixture.removal, inspect: async record => {
+      await fixture.removal.inspect(record);
+      if (record.text.includes(marker.slice(4, 20))) incident = true;
+    } }, fixture.clock);
+    expect(incident).toBe(true);
+    expect(fixture.inspected.some(record => record.text.includes("\\u0053YNTHETIC") && record.text.includes(marker))).toBe(true);
+  });
+  test("duplicate post-DELETE JSON is raw-scanned before rejecting its discarded content", async () => {
+    const marker = "SYNTHETIC-LATE-DUPLICATE-CONTENT";
+    const fixture = provider({ postDeleteLog: `{"step":"${marker}","step":"clean"}` });
+    await fixture.audit();
+    await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow();
+    expect(fixture.inspected.some(record => record.text.includes(marker))).toBe(true);
+    expect(fixture.removal.deleted).toBe(true);
   });
   test("audits raw and canonical metadata, text and referenced logs without forwarding auth", async () => {
     const raw = JSON.stringify({ automation_session: { ...record, reason: "SYNTHETIC-CLOUD-LINK" } }).replace("SYNTHETIC", "\\u0053YNTHETIC");
@@ -282,8 +445,7 @@ describe("BrowserStack complete retention and deletion", () => {
     await fixture.audit();
     expect(fixture.removal.artifacts.map(item => item.url)).toContain(artifact);
     await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
-    expect(fixture.inspected).toHaveLength(2);
-    expect(fixture.inspected[0]?.text).toBe(changed ? "changed after audit" : "No messages were logged");
+    expect(fixture.inspected.filter(record => record.text === (changed ? "changed after audit" : "No messages were logged"))).toHaveLength(2);
   });
   test("a fresh process retains private references after DELETE and must recheck their absence", async () => {
     const fixture = provider({ initiallyAbsent: true, lingering: true, changed: true });
@@ -306,7 +468,7 @@ describe("BrowserStack complete retention and deletion", () => {
     const fixture = provider({ lingering: true, changed });
     await fixture.audit();
     await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow();
-    expect(fixture.inspected[0]?.text).toBe("changed after audit");
+    expect(fixture.inspected.some(record => record.text === "changed after audit")).toBe(true);
   });
   test("unverified removal fails and a transport-ambiguous DELETE is not replayed", async () => {
     const fixture = provider({ deletionFails: true });
@@ -315,20 +477,23 @@ describe("BrowserStack complete retention and deletion", () => {
     await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow("could not be verified");
     expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
   });
-  test("missing inventory still deletes for confidentiality but can never claim restoration", async () => {
+  test("fresh deletion reconstructs an inventory from the complete strictly parsed record", async () => {
     const fixture = provider();
-    await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow("inventory");
+    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    expect(fixture.removal.artifacts).toHaveLength(2);
     expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
   });
   test.each([
     { value: { error: "unknown error", screenshot: "opaque-base64-screenshot" } },
-    { value: { screen: "data:image/png;base64,synthetic" } },
     { visual_log: { opaque: "retained" } },
-    { output: "https://media.example/opaque.webm" },
     { screenshots: 1 },
   ])("failed-command media is not limited to familiar screenshot URLs: %j", async log => {
     const fixture = provider({ log: JSON.stringify(log), logType: "application/json" });
     expect((await fixture.audit())?.screenshots).toBe(1);
+  });
+  test.each(["data:image/png;base64,synthetic", "https://media.example/opaque.webm"])("an unreviewed media URL fails closed: %s", async url => {
+    const fixture = provider({ log: JSON.stringify({ value: { screen: url } }), logType: "application/json" });
+    await expect(fixture.audit()).rejects.toThrow("unreviewed");
   });
   test.each([{ marker: null }, { marker: false }, { marker: "" }, { marker: [] }])("documented empty media markers are not retained content: %j", async ({ marker }) => {
     const fixture = provider({ log: JSON.stringify({ screenshot: marker, video: marker, visual: marker }), logType: "application/json" });

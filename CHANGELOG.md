@@ -27,6 +27,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Persist signed artifact inventories only in private recovery progress, require every artifact
   absent before restoration, and re-audit crash cleanup or count unaudited deletions explicitly.
   Detect opaque failed-command media and canonicalize Local ownership through symlinked paths.
+  Walk all nested JSON URLs with pinned artifact/dashboard classifications, scan post-audit API
+  bodies, preserve monotonic cleanup stages and retain recovery dependencies on release failure.
+  Identify retitled Local descendants by PID/birth lineage, not argv; prepare before owning a tunnel.
   Keep signed-log expiry limits explicit and refuse the fallback entitlement from 2027-10-20
   without a reviewed renewal. Public-page development probes do not qualify a release.
 

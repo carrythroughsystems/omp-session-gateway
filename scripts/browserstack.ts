@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import { createReadStream, openSync, writeSync, type ReadStream } from "node:fs";
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isRecord } from "../packages/collab-client/upstream/src/tool-render/util.ts";
 import {
-  boundedVendorText, readCloudCredentials, runOp, listProcesses, listeningAddresses, requireLoopbackListeners,
+  boundedVendorText, readCloudCredentials, runOp, listeningAddresses, requireLoopbackListeners,
   type CloudDevice, type TestRecord, type OpRunner, type CloudArtifact, type CloudRecordRemoval,
 } from "./device-cloud-common.ts";
 import { readProvider } from "./provider-read.ts";
@@ -28,12 +28,10 @@ const RECORD_FIELDS = [
   "browser_url", "public_url", "video_url", "insights", ...ARTIFACT_FIELDS,
 ] as const;
 /** Official API examples plus the exact authenticated account surfaces observed 2026-10-20. */
-const ARTIFACT_ORIGINS: Record<string, true> = {
-  "https://automate.browserstack.com": true,
-  "https://api.browserstack.com": true,
-  "https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com": true,
-  "https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com": true,
-};
+const ARTIFACT_ORIGINS = new Set(pins.artifactOrigins);
+const DASHBOARD_ORIGINS = new Set(pins.dashboardOrigins);
+
+export class BrowserStackAuditFailure extends Error {}
 
 export interface BrowserStackCredentials { readonly username: string; readonly accessKey: string }
 export async function readBrowserStackCredentials(tokenFile: string, op: OpRunner = runOp): Promise<BrowserStackCredentials> {
@@ -64,7 +62,6 @@ export function browserStackCapabilities(target: "ipad" | "android", device: Clo
 }
 
 const MEDIA_URL = /(?:data:(?:image|video)\/|https?:[^\s"'<>]*(?:\/(?:screenshots?|video)(?:[/?]|$)|\.(?:png|jpe?g|webp|gif|avif|svg|bmp|ico|mp4|webm|mov|m4v)(?:[?#]|$)))/iu;
-const ARTIFACT_KEY = /(?:log|profiling|terminal|artifact).*url|screenshot|video|visual|^screen$/iu;
 
 /** Closed disabled markers; opaque screenshot payloads count too, not only familiar URLs. */
 function retainedMedia(value: unknown, key = ""): boolean {
@@ -85,18 +82,68 @@ function retainedContent(raw: string, contentType: string | null): { text: strin
 }
 
 export function validateBrowserStackArtifacts(sessionId: string, artifacts: readonly CloudArtifact[]): void {
-  if (!BROWSERSTACK_SESSION_ID.test(sessionId) || artifacts.length > 64) throw new Error("invalid BrowserStack artifact inventory");
+  if (!BROWSERSTACK_SESSION_ID.test(sessionId) || artifacts.length > 64) throw new BrowserStackAuditFailure("invalid BrowserStack artifact inventory");
   const seen = new Set<string>();
   for (const artifact of artifacts) {
     if (!isRecord(artifact) || Object.keys(artifact).sort().join(",") !== "buildId,kind,url" ||
       typeof artifact.url !== "string" || artifact.url.length > 8192 || typeof artifact.buildId !== "string" ||
-      !BROWSERSTACK_SESSION_ID.test(artifact.buildId) || (artifact.kind !== "text" && artifact.kind !== "media") || seen.has(artifact.url)) throw new Error("invalid BrowserStack artifact inventory");
+      !BROWSERSTACK_SESSION_ID.test(artifact.buildId) || (artifact.kind !== "text" && artifact.kind !== "media") || seen.has(artifact.url)) throw new BrowserStackAuditFailure("invalid BrowserStack artifact inventory");
     let parsed: URL;
-    try { parsed = new URL(artifact.url); } catch { throw new Error("invalid BrowserStack artifact reference"); }
-    if (!Object.hasOwn(ARTIFACT_ORIGINS, parsed.origin) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
-      (!parsed.pathname.includes(sessionId) && !parsed.pathname.includes(artifact.buildId))) throw new Error("unreviewed BrowserStack artifact reference");
+    try { parsed = new URL(artifact.url); } catch { throw new BrowserStackAuditFailure("invalid BrowserStack artifact reference"); }
+    if (!ARTIFACT_ORIGINS.has(parsed.origin) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
+      (!parsed.pathname.includes(sessionId) && !parsed.pathname.includes(artifact.buildId))) throw new BrowserStackAuditFailure("unreviewed BrowserStack artifact reference");
     seen.add(artifact.url);
   }
+}
+
+/** One discovery rule for metadata, JSON logs and post-DELETE bodies; never field projections. */
+export function browserStackReferences(sessionId: string, buildId: string, value: unknown, sessionMetadata = false): {
+  artifacts: CloudArtifact[]; dashboardReferences: number;
+} {
+  const artifacts: CloudArtifact[] = [];
+  const dashboards = new Set<string>();
+  const walk = (value: unknown, key = "", depth = 0): void => {
+    if (typeof value === "string") {
+      let url: URL;
+      try { url = new URL(value); } catch { return; }
+      if (DASHBOARD_ORIGINS.has(url.origin) && sessionMetadata && depth === 1 && (key === "browser_url" || key === "public_url") &&
+        url.username === "" && url.password === "" && url.hash === "") { dashboards.add(value); return; }
+      const artifact: CloudArtifact = { url: value, buildId, kind: /screenshot|video|visual|^screen$/iu.test(key) || MEDIA_URL.test(value) ? "media" : "text" };
+      // Any URL outside the two reviewed origin sets (or misusing a dashboard field) fails.
+      validateBrowserStackArtifacts(sessionId, [artifact]);
+      const previous = artifacts.find(item => item.url === value);
+      if (previous === undefined) artifacts.push(artifact);
+      else if (previous.kind !== artifact.kind) throw new BrowserStackAuditFailure("BrowserStack artifact classification changed");
+    } else if (Array.isArray(value)) {
+      for (const item of value) walk(item, key, depth + 1);
+    } else if (isRecord(value)) {
+      for (const [name, item] of Object.entries(value)) walk(item, name, depth + 1);
+    }
+  };
+  walk(value);
+  validateBrowserStackArtifacts(sessionId, artifacts);
+  return { artifacts, dashboardReferences: dashboards.size };
+}
+
+function mergeArtifacts(sessionId: string, artifacts: CloudArtifact[], added: readonly CloudArtifact[]): void {
+  for (const artifact of added) {
+    const previous = artifacts.find(item => item.url === artifact.url);
+    if (previous === undefined) artifacts.push(artifact);
+    else if (previous.kind !== artifact.kind || previous.buildId !== artifact.buildId) throw new BrowserStackAuditFailure("BrowserStack artifact identity changed");
+  }
+  validateBrowserStackArtifacts(sessionId, artifacts);
+}
+
+function sessionPayload(raw: string, sessionId: string): Record<string, unknown> {
+  const payload = parseRetainedVendorJson(raw);
+  if (!isRecord(payload) || Object.keys(payload).join(",") !== "automation_session" || !isRecord(payload.automation_session) || payload.automation_session.hashed_id !== sessionId) throw new BrowserStackAuditFailure("BrowserStack returned an invalid allocation record");
+  return payload.automation_session;
+}
+
+function retainedSession(record: Record<string, unknown>, raw: string): TestRecord {
+  if (Object.keys(record).some(field => !(RECORD_FIELDS as readonly string[]).includes(field))) throw new BrowserStackAuditFailure("BrowserStack returned an unreviewed retained-record field");
+  return { complete: record.status !== "running", text: `${raw}\n${JSON.stringify(record)}`, video: false,
+    screenshots: Object.entries(record).some(([key, value]) => key !== "video_url" && retainedMedia(value, key)) ? 1 : 0 };
 }
 
 export class BrowserStackApi {
@@ -145,9 +192,7 @@ export class BrowserStackApi {
     if (response.status === 404) { await response.body?.cancel(); return undefined; }
     if (!response.ok) { await response.body?.cancel(); throw new Error(`BrowserStack allocation read failed with HTTP ${response.status}`); }
     const raw = await boundedVendorText(response, "BrowserStack");
-    const payload = parseRetainedVendorJson(raw);
-    if (!isRecord(payload) || Object.keys(payload).join(",") !== "automation_session" || !isRecord(payload.automation_session) || payload.automation_session.hashed_id !== sessionId) throw new Error("BrowserStack returned an invalid allocation record");
-    return { record: payload.automation_session, raw };
+    return { record: sessionPayload(raw, sessionId), raw };
   }
 
   async allocation(sessionId: string): Promise<Record<string, unknown>> {
@@ -159,7 +204,7 @@ export class BrowserStackApi {
   async #artifact(url: string, sessionId: string, buildId: string): Promise<Response> {
     let parsed: URL;
     try { parsed = new URL(url); } catch { throw new Error("invalid BrowserStack artifact reference"); }
-    if (!Object.hasOwn(ARTIFACT_ORIGINS, parsed.origin) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
+    if (!ARTIFACT_ORIGINS.has(parsed.origin) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
       (!parsed.pathname.includes(sessionId) && !parsed.pathname.includes(buildId))) throw new Error("unreviewed BrowserStack artifact reference");
     // Signed references carry their own authorization. Never forward account authorization here.
     return readProvider(() => fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(30_000) }));
@@ -172,38 +217,20 @@ export class BrowserStackApi {
     if (record.status === "running") return { complete: false, text: "", video: false, screenshots: 0 };
     if (Object.keys(record).some(field => !(RECORD_FIELDS as readonly string[]).includes(field))) throw new Error("BrowserStack returned an unreviewed retained-record field");
     if (!["done", "failed", "timeout", "passed"].includes(String(record.status)) || typeof record.build_hashed_id !== "string" || !BROWSERSTACK_SESSION_ID.test(record.build_hashed_id)) throw new Error("BrowserStack record has unknown finalization state");
-    const texts = [raw, JSON.stringify(record)];
+    const metadata = retainedSession(record, raw);
+    const texts = [metadata.text];
     const artifacts: CloudArtifact[] = [];
-    const inventory = async (json: unknown, key = ""): Promise<void> => {
-      if (typeof json === "string") {
-        let url: URL;
-        try { url = new URL(json); } catch { return; }
-        if (url.protocol !== "https:" && url.protocol !== "http:") return;
-        if (ARTIFACT_KEY.test(key)) validateBrowserStackArtifacts(sessionId, [{ url: json, buildId: record.build_hashed_id as string, kind: "text" }]);
-        if (Object.hasOwn(ARTIFACT_ORIGINS, url.origin) && (url.pathname.includes(sessionId) || url.pathname.includes(record.build_hashed_id as string))) {
-          const kind = /screenshot|video|visual|^screen$/iu.test(key) || MEDIA_URL.test(json) ? "media" : "text";
-          if (!artifacts.some(artifact => artifact.url === json)) {
-            artifacts.push({ url: json, buildId: record.build_hashed_id as string, kind });
-            validateBrowserStackArtifacts(sessionId, artifacts);
-            await remember?.([...artifacts]);
-          }
-        }
-      } else if (Array.isArray(json)) {
-        for (const item of json) await inventory(item, key);
-      } else if (isRecord(json)) {
-        for (const [name, item] of Object.entries(json)) await inventory(item, name);
-      }
+    let dashboardReferences = 0;
+    const inventory = async (json: unknown, sessionMetadata = false): Promise<void> => {
+      const found = browserStackReferences(sessionId, record.build_hashed_id as string, json, sessionMetadata);
+      mergeArtifacts(sessionId, artifacts, found.artifacts);
+      dashboardReferences += found.dashboardReferences;
+      await remember?.([...artifacts]);
     };
-    for (const field of [...ARTIFACT_FIELDS, "video_url"]) {
-      const url = record[field];
-      if (url === undefined || url === null || url === "") continue;
-      if (typeof url !== "string") throw new Error("BrowserStack returned an invalid artifact reference");
-      validateBrowserStackArtifacts(sessionId, [{ url, buildId: record.build_hashed_id, kind: field === "video_url" ? "media" : "text" }]);
-      await inventory(url, field);
-    }
+    await inventory(record, true);
     if (typeof record.video_url !== "string" || record.video_url === "") throw new Error("BrowserStack returned no video retention indicator");
-    let screenshots = Object.entries(record).some(([key, value]) => key !== "video_url" && retainedMedia(value, key)) ? 1 : 0;
-    let bytes = Buffer.byteLength(raw) + Buffer.byteLength(texts[1]!);
+    let screenshots = metadata.screenshots;
+    let bytes = Buffer.byteLength(metadata.text);
     if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
     const append = async (raw: string, contentType: string | null = null) => {
       const content = retainedContent(raw, contentType);
@@ -240,23 +267,61 @@ export class BrowserStackApi {
       await append(text, contentType);
     }
     const text = texts.join("\n");
-    return { complete: true, text, video, screenshots };
+    return { complete: true, text, video, screenshots, dashboardReferences };
   }
 
   /** DELETE is never retried; only subsequent absence reads are bounded/retried. */
   async deleteRecord(sessionId: string, removal: CloudRecordRemoval, clock: { now(): number; pause(milliseconds: number): Promise<void> } = { now: Date.now, pause: Bun.sleep }): Promise<void> {
     validateBrowserStackArtifacts(sessionId, removal.artifacts);
     const artifacts = [...removal.artifacts];
+    let buildId = artifacts[0]?.buildId;
+    const readBody = async (response: Response): Promise<string> => {
+      try { return await boundedVendorText(response, "BrowserStack"); }
+      catch { throw new BrowserStackAuditFailure("BrowserStack retained body could not be read within its audit bound"); }
+    };
+    const discover = async (json: unknown, sessionMetadata = false) => {
+      if (buildId === undefined) return;
+      mergeArtifacts(sessionId, artifacts, browserStackReferences(sessionId, buildId, json, sessionMetadata).artifacts);
+      await removal.remember([...artifacts]);
+    };
+    const inspect = async (response: Response, session = false): Promise<void> => {
+      const contentType = response.headers.get("content-type") ?? "";
+      if (/^(?:image|video)\//iu.test(contentType)) {
+        await response.body?.cancel();
+        await removal.inspect({ complete: false, text: "", video: true, screenshots: 0 });
+        return;
+      }
+      const raw = await readBody(response);
+      // Scan even malformed/duplicate JSON before parsing; a later 404 cannot erase a hit.
+      await removal.inspect({ complete: false, text: raw, video: false, screenshots: 0 });
+      if (session && response.status === 200) {
+        const record = sessionPayload(raw, sessionId);
+        if (typeof record.build_hashed_id !== "string" || !BROWSERSTACK_SESSION_ID.test(record.build_hashed_id)) throw new BrowserStackAuditFailure("BrowserStack record has invalid build identity");
+        buildId = record.build_hashed_id;
+        await removal.inspect(retainedSession(record, raw));
+        await discover(record, true);
+      } else {
+        const content = retainedContent(raw, contentType);
+        if (content.text !== raw || content.media) await removal.inspect({ complete: false, text: content.text !== raw ? content.text : "", video: false, screenshots: content.media ? 1 : 0 });
+        if (content.json !== undefined) await discover(content.json);
+      }
+    };
     const existing = await this.#get(`/sessions/${sessionId}.json`);
-    await existing.body?.cancel();
+    await inspect(existing, true);
     if (existing.status !== 200 && existing.status !== 404) throw new Error("BrowserStack record cleanup state is unknown");
-    if (existing.status === 200 && !this.#removalStarted.has(sessionId)) {
+    if (existing.status === 200 && !removal.deleted && !this.#removalStarted.has(sessionId)) {
       this.#removalStarted.add(sessionId);
       const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE", headers: { authorization: this.#authorization }, redirect: "error", signal: AbortSignal.timeout(30_000) });
       if (response.status !== 200) { await response.body?.cancel(); throw new Error(`BrowserStack record deletion failed with HTTP ${response.status}`); }
-      const result = parseRetainedVendorJson(await boundedVendorText(response, "BrowserStack"));
+      const raw = await readBody(response);
+      await removal.inspect({ complete: false, text: raw, video: false, screenshots: 0 });
+      const result = parseRetainedVendorJson(raw);
+      await removal.inspect({ complete: false, text: `${raw}\n${JSON.stringify(result)}`, video: false, screenshots: retainedMedia(result) ? 1 : 0 });
+      await discover(result);
       if (!isRecord(result) || result.status !== "ok") throw new Error("BrowserStack record deletion was not acknowledged");
+      await removal.markDeleted();
     }
+    if (existing.status === 404) await removal.markDeleted();
     // Confidentiality still requires DELETE when a crash lost the inventory. Never claim
     // restoration afterward: without the references their signed objects cannot be verified.
     if (artifacts.length === 0) throw new Error("BrowserStack retained artifact inventory is unavailable");
@@ -265,7 +330,7 @@ export class BrowserStackApi {
       let absent = true;
       for (const suffix of [".json", ...LOG_SURFACES.map(surface => `/${surface}`)]) {
         const check = await this.#get(`/sessions/${sessionId}${suffix}`);
-        await check.body?.cancel();
+        await inspect(check, suffix === ".json");
         if (check.status !== 404) absent = false;
       }
       if (absent) break;
@@ -275,11 +340,12 @@ export class BrowserStackApi {
     for (const artifact of artifacts) {
       for (;;) {
         const check = await this.#artifact(artifact.url, sessionId, artifact.buildId);
-        if (check.status === 404) { await check.body?.cancel(); break; }
+        if (check.status === 404) { await inspect(check); break; }
         if (artifact.kind === "media" && check.status === 403) {
-          const denial = await boundedVendorText(check, "BrowserStack");
+          const denial = await readBody(check);
+          await removal.inspect({ complete: false, text: denial, video: false, screenshots: 0 });
           if (denial.includes("<Code>AccessDenied</Code>") && denial.includes("s3:ListBucket")) break;
-          throw new Error("BrowserStack retained media absence is unknown");
+          throw new BrowserStackAuditFailure("BrowserStack retained media absence is unknown");
         }
         const contentType = check.headers.get("content-type") ?? "";
         if (check.status !== 200) { await check.body?.cancel(); throw new Error("BrowserStack retained signed artifact state is unknown"); }
@@ -287,26 +353,8 @@ export class BrowserStackApi {
           await check.body?.cancel();
           await removal.inspect({ complete: true, text: "", video: true, screenshots: 0 });
         } else {
-          if (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType)) { await check.body?.cancel(); throw new Error("BrowserStack retained signed artifact format is unknown"); }
-          const content = retainedContent(await boundedVendorText(check, "BrowserStack"), contentType);
-          await removal.inspect({ complete: true, text: content.text, video: false, screenshots: content.media ? 1 : 0 });
-          const discover = (value: unknown, key = ""): void => {
-            if (typeof value === "string") {
-              let url: URL;
-              try { url = new URL(value); } catch { return; }
-              if (url.protocol !== "https:" && url.protocol !== "http:") return;
-              if (ARTIFACT_KEY.test(key)) validateBrowserStackArtifacts(sessionId, [{ url: value, buildId: artifact.buildId, kind: "text" }]);
-              if (Object.hasOwn(ARTIFACT_ORIGINS, url.origin) && (url.pathname.includes(sessionId) || url.pathname.includes(artifact.buildId)) && !artifacts.some(item => item.url === value)) {
-                artifacts.push({ url: value, buildId: artifact.buildId, kind: /screenshot|video|visual|^screen$/iu.test(key) || MEDIA_URL.test(value) ? "media" : "text" });
-              }
-            } else if (Array.isArray(value)) { for (const item of value) discover(item, key); }
-            else if (isRecord(value)) { for (const [name, item] of Object.entries(value)) discover(item, name); }
-          };
-          if (content.json !== undefined) {
-            discover(content.json);
-            validateBrowserStackArtifacts(sessionId, artifacts);
-            await removal.remember([...artifacts]);
-          }
+          await inspect(check);
+          if (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType)) throw new BrowserStackAuditFailure("BrowserStack retained signed artifact format is unknown");
         }
         if (clock.now() >= deadline) throw new Error("BrowserStack retained signed artifact absence could not be verified");
         await clock.pause(2_000);
@@ -339,20 +387,89 @@ export function browserStackLocalArguments(options: BrowserStackLocalOptions): s
     "--include-hosts", ...options.hosts];
 }
 
-async function ownedLocalProcesses(options: BrowserStackLocalIdentity): Promise<number[]> {
-  // Local rewrites process titles and can respawn a child during shutdown. The attempt's
-  // unique private cwd plus exact executable identify even a child whose argv was rewritten.
-  const identity = await canonicalBrowserStackLocalIdentity(options);
-  const candidates = (await listProcesses()).filter(entry => entry.command.includes("BrowserStackLocal"));
-  const owned: number[] = [];
-  for (const candidate of candidates) {
-    const child = Bun.spawn(["lsof", "-a", "-p", String(candidate.pid), "-d", "cwd,txt", "-F", "n"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const [text, status] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-    if (status !== 0 && status !== 1) throw new Error("could not verify BrowserStack Local process ownership");
-    const files = text.split("\n");
-    if (files.includes(`n${identity.binary}`) && files.includes(`n${identity.directory}`)) owned.push(candidate.pid);
+interface LocalProcessIdentity { readonly pid: number; readonly started: string }
+export interface BrowserStackLocalProcess extends LocalProcessIdentity {
+  readonly parentPid: number;
+  readonly cwd?: string;
+  readonly executableFiles: readonly string[];
+}
+
+/** No argv/title inspection: retitling cannot hide a process or expose the vendor's child key. */
+async function localProcesses(): Promise<BrowserStackLocalProcess[]> {
+  const ps = Bun.spawn(["ps", "-axo", "pid=,ppid=,lstart="], { env: { ...process.env, LC_ALL: "C" }, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+  const [listing, status] = await Promise.all([new Response(ps.stdout).text(), ps.exited]);
+  if (status !== 0) throw new Error("could not enumerate BrowserStack Local process lineage");
+  const processes = new Map<number, { pid: number; parentPid: number; started: string; cwd?: string; executableFiles: string[] }>();
+  for (const line of listing.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/u.exec(line);
+    if (match) processes.set(Number(match[1]), { pid: Number(match[1]), parentPid: Number(match[2]), started: match[3]!, executableFiles: [] });
   }
-  return owned;
+  const uid = process.getuid?.();
+  if (uid === undefined) throw new Error("BrowserStack Local process ownership requires POSIX");
+  const lsof = Bun.spawn(["lsof", "-nP", "-a", "-u", String(uid), "-d", "cwd,txt", "-F", "pfn"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+  const [files, fileStatus] = await Promise.all([new Response(lsof.stdout).text(), lsof.exited]);
+  if (fileStatus !== 0 && fileStatus !== 1) throw new Error("could not verify BrowserStack Local process ownership");
+  let current: ReturnType<typeof processes.get>;
+  let descriptor = "";
+  for (const line of files.split("\n")) {
+    if (line.startsWith("p")) { current = processes.get(Number(line.slice(1))); descriptor = ""; }
+    else if (line.startsWith("f")) descriptor = line.slice(1);
+    else if (line.startsWith("n") && current !== undefined) {
+      const file = line.slice(1).replace(/ \(deleted\)$/u, "");
+      if (descriptor === "cwd") current.cwd = file;
+      else if (descriptor === "txt") current.executableFiles.push(file);
+    }
+  }
+  return [...processes.values()];
+}
+
+async function localProcessIdentities(options: BrowserStackLocalIdentity): Promise<LocalProcessIdentity[]> {
+  const file = join(options.directory, "processes.json");
+  const stat = await lstat(file).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+  if (stat === undefined) return [];
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600 || stat.size > 32_768) throw new Error("invalid BrowserStack Local process checkpoint");
+  const value = parseRetainedVendorJson(await readFile(file, "utf8"));
+  if (!Array.isArray(value) || value.length > 128 || value.some(item => !isRecord(item) || Object.keys(item).sort().join(",") !== "pid,started" ||
+    !Number.isSafeInteger(item.pid) || (item.pid as number) < 1 || typeof item.started !== "string" || !/^[ -~]{1,64}$/u.test(item.started))) throw new Error("invalid BrowserStack Local process checkpoint");
+  return value as LocalProcessIdentity[];
+}
+
+async function saveLocalProcesses(options: BrowserStackLocalIdentity, identities: readonly LocalProcessIdentity[]): Promise<void> {
+  const file = join(options.directory, "processes.json");
+  await writeFile(`${file}.new`, JSON.stringify(identities), { mode: 0o600 });
+  await chmod(`${file}.new`, 0o600);
+  await rename(`${file}.new`, file);
+}
+
+async function canonicalLocalPath(path: string): Promise<{ path: string; exists: boolean }> {
+  try { return { path: await realpath(path), exists: true }; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(path) === path) throw new Error("could not resolve BrowserStack Local process ownership");
+    const parent = await canonicalLocalPath(dirname(path));
+    return { path: join(parent.path, basename(path)), exists: false };
+  }
+}
+
+/** Birth identities prevent PID reuse; exact executable/cwd also catches orphaned vendor children. */
+export async function ownedLocalProcesses(options: BrowserStackLocalIdentity, snapshot: () => Promise<readonly BrowserStackLocalProcess[]> = localProcesses): Promise<number[]> {
+  const [binary, directory, roots, processes] = await Promise.all([
+    canonicalLocalPath(options.binary), canonicalLocalPath(options.directory), localProcessIdentities(options), snapshot(),
+  ]);
+  const owned = new Set<number>();
+  for (const entry of processes) {
+    if (roots.some(root => root.pid === entry.pid && root.started === entry.started) ||
+      (entry.executableFiles.includes(binary.path) && entry.cwd === directory.path)) owned.add(entry.pid);
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const entry of processes) if (!owned.has(entry.pid) && owned.has(entry.parentPid)) { owned.add(entry.pid); changed = true; }
+  }
+  if (!directory.exists && processes.some(entry => entry.executableFiles.includes(binary.path)) && owned.size === 0) throw new Error("BrowserStack Local absence cannot be proved without its working directory");
+  if (processes.some(entry => entry.cwd === directory.path && !owned.has(entry.pid))) throw new Error("BrowserStack Local working directory has an unverified process");
+  const identities = processes.filter(entry => owned.has(entry.pid)).map(({ pid, started }) => ({ pid, started })).sort((a, b) => a.pid - b.pid);
+  if (identities.length > 128) throw new Error("BrowserStack Local process lineage exceeded its bound");
+  if (directory.exists && JSON.stringify(identities) !== JSON.stringify(roots)) await saveLocalProcesses(options, identities);
+  return identities.map(entry => entry.pid);
 }
 
 export async function canonicalBrowserStackLocalIdentity(options: BrowserStackLocalIdentity): Promise<BrowserStackLocalIdentity> {
@@ -360,6 +477,16 @@ export async function canonicalBrowserStackLocalIdentity(options: BrowserStackLo
     const [binary, directory] = await Promise.all([realpath(options.binary), realpath(options.directory)]);
     return { ...options, binary, directory };
   } catch { throw new Error("could not resolve BrowserStack Local process ownership"); }
+}
+
+/** No tunnel ownership is checkpointed until download and private-directory preparation succeed. */
+export async function prepareBrowserStackLocal(options: BrowserStackLocalIdentity, checkpoint: () => Promise<void>, ensure = ensureBrowserStackLocal): Promise<BrowserStackLocalIdentity> {
+  const binary = await ensure();
+  if (binary !== options.binary) throw new Error("BrowserStack Local binary differs from its recovery identity");
+  await mkdir(options.directory, { recursive: true, mode: 0o700 });
+  await canonicalBrowserStackLocalIdentity(options);
+  await checkpoint();
+  return options;
 }
 
 interface LocalStopRuntime {
@@ -377,6 +504,7 @@ export async function stopBrowserStackLocal(options: BrowserStackLocalIdentity, 
   pause: Bun.sleep,
 }): Promise<void> {
   if (!IDENTIFIER.test(options.identifier)) throw new Error("invalid BrowserStack Local identifier");
+  let stopped = false;
   try {
     for (const signal of ["SIGTERM", "SIGKILL"] as const) {
       const deadline = runtime.now() + 10_000;
@@ -386,7 +514,7 @@ export async function stopBrowserStackLocal(options: BrowserStackLocalIdentity, 
         const pids = await runtime.processes(options);
         if (pids.length === 0) {
           quietSince ??= runtime.now();
-          if (runtime.now() - quietSince >= 1_000) return;
+          if (runtime.now() - quietSince >= 1_000) { stopped = true; return; }
         } else {
           quietSince = undefined;
           for (const pid of pids) {
@@ -402,6 +530,10 @@ export async function stopBrowserStackLocal(options: BrowserStackLocalIdentity, 
   } finally {
     await rm(join(options.directory, "local.yml"), { force: true });
     await rm(join(options.directory, "startup.pipe"), { force: true });
+    if (stopped) {
+      await rm(join(options.directory, "processes.json"), { force: true });
+      await rm(join(options.directory, "processes.json.new"), { force: true });
+    }
   }
 }
 
@@ -439,6 +571,9 @@ export async function startBrowserStackLocal(options: BrowserStackLocalOptions, 
     const child = Bun.spawn(argv, { cwd: options.directory,
       env: { HOME: options.directory, TMP: options.directory, TMPDIR: options.directory, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
       stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const parent = (await localProcesses()).find(entry => entry.pid === child.pid);
+    if (parent === undefined) throw new Error("BrowserStack Local launched parent identity is unavailable");
+    await saveLocalProcesses(options, [{ pid: parent.pid, started: parent.started }]);
     child.unref();
     void child.exited.then(closePipe);
     const deadline = Date.now() + timeoutMs;

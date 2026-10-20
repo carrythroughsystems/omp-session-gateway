@@ -1,5 +1,11 @@
 {
   "schema": 1,
+  "artifactOrigins": [
+    "https://api.browserstack.com",
+    "https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com",
+    "https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com"
+  ],
+  "dashboardOrigins": ["https://automate.browserstack.com"],
   "local": {
     "version": "8.9",
     "platform": "darwin-x64",

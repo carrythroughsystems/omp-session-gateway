@@ -53,7 +53,7 @@ import { WebDriverSession, endWebDriverSession } from "./device-cloud-webdriver.
 import { serviceAccountTokenFile, startAllowlistProxy, type AllowlistProxy, type CloudDevice, type DeviceCloudVendor } from "./device-cloud-common.ts";
 import {
   BrowserStackApi, BROWSERSTACK_LOCAL, BROWSERSTACK_LOCAL_BINARY, BROWSERSTACK_MODELS, browserStackCapabilities, browserStackEntitlement,
-  readBrowserStackCredentials, requireBrowserStackRosetta, ensureBrowserStackLocal, startBrowserStackLocal, stopBrowserStackLocal,
+  readBrowserStackCredentials, requireBrowserStackRosetta, prepareBrowserStackLocal, startBrowserStackLocal, stopBrowserStackLocal,
   type BrowserStackCredentials,
 } from "./browserstack.ts";
 
@@ -499,10 +499,10 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
       password = fallback.credentials.accessKey;
       if (!localStarted) {
         if (proxy === undefined || allowed === undefined) throw new Error("BrowserStack requires the lane-owned CONNECT proxy");
-        await attempt.startingTunnel("browserstack");
+        const local = await prepareBrowserStackLocal(localIdentity(attempt.epoch), () => attempt.startingTunnel("browserstack"));
         localCleanupUnverified = true;
         await startBrowserStackLocal({
-          ...localIdentity(attempt.epoch), binary: await ensureBrowserStackLocal(), localProxyPort: proxy.port,
+          ...local, localProxyPort: proxy.port,
           hosts: [...new Set(allowed.map(authority => authority.split(":")[0]!))],
         }, fallback.credentials);
         localStarted = true;

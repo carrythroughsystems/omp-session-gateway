@@ -525,7 +525,11 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   all ports and do not replace the proxy's exact authority check. Local's listeners must be
   loopback-only; cleanup closes the proxy first, then stops only processes with the exact pinned
   executable and unique attempt working directory, including respawned children. Both paths are
-  realpath-resolved before comparison with macOS process ownership; unresolved paths fail closed.
+  realpath-resolved; process enumeration never depends on argv or a `BrowserStackLocal` title.
+  Private 0600 PID/birth identities and parent lineage retain ownership of retitled descendants;
+  exact executable/cwd finds orphaned children and birth checks reject reused PIDs. A missing
+  never-created directory is releasable only when a process snapshot proves no matching executable
+  lineage; ambiguous ownership fails closed. Binary/directory preparation precedes tunnel intent.
 - **Explicit argv exception, single-user orchestrator only:** the lane never places the BrowserStack
   key in argv, URLs, receipts or logs. It creates only a 0600 key config in the attempt's owned 0700
   directory and supplies `--config-file`. The pinned vendor binary expands the key into its child's
@@ -543,6 +547,13 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   Media detection rejects nonempty screenshot/video/visual fields, including opaque failed-command
   screenshot payloads, not just familiar media URLs. Only null, false, empty-string and empty-list
   markers are treated as disabled; the documented disabled-video URL is fetched separately.
+  Discovery walks every string in the complete strictly parsed JSON, including nested `logs`,
+  `insights`, arrays and later responses. `browserstack-pins.json` defines disjoint origin sets:
+  reviewed API/S3 artifact-storage origins are fetched, scanned, privately inventoried and
+  absence-verified; only top-level `browser_url`/`public_url` on the pinned dashboard origin
+  (`automate.browserstack.com`) are presentation references, counted but never fetched/followed.
+  Their contents are the already-audited session record, whose API deletion proves removal.
+  Any other origin anywhere, or a dashboard-host URL in another field, fails closed.
   DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
   signed artifact** are required before removal/restoration, including references returning 404 at
   the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.
@@ -554,9 +565,15 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   flag. It re-audits finalized raw surfaces using the exact whole-link/16-character scan when both
   recorded session generations still match. If those links cannot be reconstructed, deletion
   still proceeds for confidentiality, but `unauditedRecordsDeleted` explicitly counts it and the
-  record is not marked audited. An audit hit or unverifiable required surface is a persisted
+  deletion receives no new clean-audit claim. Audit, API deletion and artifact absence are
+  monotonic stages: a post-DELETE 404 never downgrades an earlier audit into an unaudited deletion.
+  Every later API response body is scanned too, including 200s while waiting for 404.
+  An audit hit or unverifiable required surface is a persisted
   incident: deletion is attempted, but cleanup remains failed for operator incident handling.
   Deletion is defense in depth after the audit, not its replacement.
+  Release proceeds through records, tunnels, fixture, then workspace. Unverified records or Local
+  termination retain the fixture/generation and workspace for recovery; fixture-stop failure also
+  preserves the workspace. Closing the proxy and removing the key config still happen on failure.
 - The iPhone turns background alerts off before its session ends. If its attempt fails first, the
   subscription stays on the candidate gateway until qualification cleanup uninstalls the gateway,
   and any alerts sent meanwhile carry only session metadata.

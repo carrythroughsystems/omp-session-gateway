@@ -16,6 +16,8 @@ export interface CloudArtifact {
 }
 export interface CloudRecordRemoval {
   readonly artifacts: readonly CloudArtifact[];
+  readonly deleted: boolean;
+  readonly markDeleted: () => Promise<void>;
   readonly remember: (artifacts: readonly CloudArtifact[]) => Promise<void>;
   readonly inspect: (record: TestRecord) => Promise<void>;
 }
@@ -25,6 +27,7 @@ export interface TestRecord {
   readonly text: string;
   readonly video: boolean;
   readonly screenshots: number;
+  readonly dashboardReferences?: number;
 }
 
 export async function boundedVendorText(response: Response, vendor: string, maximum = 2_000_000): Promise<string> {

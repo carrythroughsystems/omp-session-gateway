@@ -736,6 +736,13 @@ defense in depth after this audit. Unknown surfaces, missing required logs and e
 budgets fail. Nonempty screenshot/video/visual fields and image/video URLs are retained-media
 indicators, including opaque screenshots in failed-command responses.
 
+Artifact discovery walks all strings in the complete strictly parsed JSON, not a top-level field
+projection. The disjoint origin lists in `browserstack-pins.json` classify nested API/S3 references
+as artifacts, and only top-level `browser_url`/`public_url` on `automate.browserstack.com` as dashboard
+presentations. Dashboard references are counted, never fetched or followed, and their session/log
+API absence proves removal of their represented content. Other origins, or the dashboard origin
+in another field, fail closed. Property-style tests place references at varied nested paths.
+
 Pinned in `scripts/browserstack-pins.json`:
 
 | Artifact | URL / bytes / SHA-256 |
@@ -763,13 +770,21 @@ A crash-era saved clean flag cannot authorize lingering signed URLs: normal and 
 cleanup both require disappearance within the three-minute absence bound. A delayed artifact is
 fetched and scanned if it starts serving content. Exhaustion leaves `recordRemoved` false and
 cleanup dirty; retry through `deviceCloudCleanup`, retaining the original progress.
+The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
+deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
+received while waiting for API absence are scanned raw plus canonical, just like the first read.
 Fresh cleanup re-audits finalized raw surfaces against the live links only if the persisted live
 and fixture generation identities still match. Otherwise it still deletes for confidentiality,
 reports `unauditedRecordsDeleted`, and never calls those records audited. A detected link/media
 hit or unverifiable required surface persists an incident even after deletion; stop and handle
 that incident rather than clearing progress or authorizing another campaign.
 If Local termination is unverified, cleanup removes its key config but preserves the working
-directory needed to identify its remaining processes; it does not claim restoration.
+directory and private PID/birth checkpoint needed to identify remaining processes; it does not
+claim restoration. Discovery uses process ancestry and canonical executable/cwd, never argv names.
+Cleanup keeps both the fixture and workspace while any record or tunnel release remains unverified;
+it also keeps the workspace after fixture-stop failure. Local download/directory preparation occurs
+before tunnel intent is checkpointed. A missing never-created directory is safely idempotent only
+when process enumeration proves no matching executable lineage; otherwise cleanup stays dirty.
 An unidentified create stays dirty; reconcile that attempt's exact vendor/build in the account
 before any new attempt, never guess an ID, discard progress or retry creation blindly. Failure to
 restore any resource/checkpoint sets `pixelUnrestored` and blocks later Pixel lanes.

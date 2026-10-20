@@ -314,11 +314,18 @@ BrowserStack and shared transport tests add:
   unverified deletion fail; even clean identical signed artifacts must become absent;
 - private durable inventories include initially-404 references and survive DELETE/process loss;
   late content is audited, unresolved references keep cleanup dirty, and returned evidence has no URLs;
+- property-style full-JSON discovery at varied object/array paths, pinned disjoint storage/dashboard
+  origins, top-level dashboard references counted without fetching, and unknown origins refused;
+- raw/canonical post-audit API bodies are scanned before absence; post-DELETE retries preserve
+  monotonic audited/deleted/absent milestones rather than inventing unaudited deletions;
 - crash cleanup re-audits unchanged generations, counts unaudited deletions if links cannot be
   reconstructed, and persists link/media incidents instead of manufacturing a clean audit;
 - key-free lane argv, exact two-host argv, canonical ownership through symlinked ancestors,
   shared loopback-only listener refusal and the existing
   plain-HTTP/alternate-host/port/loopback/LAN/tailnet denial matrix;
+- retitled descendants/orphans and PID reuse, a real retitled macOS child, proved not-started
+  idempotent cleanup, preparation failure before tunnel ownership, a later TestingBot-only attempt,
+  and fixture/workspace preservation after each record/tunnel/fixture release failure;
 - release summaries preserve historical golden bytes, attribute mixed targets individually,
   and refuse BrowserStack iPhone or non-Samsung/mismatched Android evidence.
 

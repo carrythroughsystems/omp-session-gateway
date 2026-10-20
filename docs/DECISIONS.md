@@ -1289,7 +1289,14 @@ persist only in private 0600 recovery progress until verified absent; public evi
 no URLs. Fresh cleanup re-audits against unchanged session generations, or deletes for confidentiality
 while explicitly counting `unauditedRecordsDeleted` if links cannot be reconstructed. Link/media
 hits and unverifiable required surfaces remain incidents even after deletion. Unverified cleanup
-blocks the Pixel lease. [Release setup and the sourced contract matrix](RELEASE.md#browserstack-device-cloud-fallback)
+blocks the Pixel lease. Discovery walks every JSON string: pinned storage origins are artifacts;
+only the top-level `browser_url`/`public_url` fields on the separately pinned dashboard origin are
+count-only presentations of the API record. Other origins or dashboard-field uses fail closed.
+Audit/deletion/absence milestones never regress, and post-audit API bodies receive the same scan.
+Release preserves the fixture and workspace until records and tunnels are verified released.
+Local preparation precedes ownership intent; PID/birth lineage plus canonical executable/cwd,
+not argv names, establishes process ownership and permits a proved not-started cleanup.
+[Release setup and the sourced contract matrix](RELEASE.md#browserstack-device-cloud-fallback)
 record the public-page probes; those are Tested evidence, not a signed-candidate qualification.
 
 ## ADR-033 — Retain a macOS virtual machine as the campaign Mac
