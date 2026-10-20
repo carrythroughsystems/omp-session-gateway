@@ -107,7 +107,7 @@ describe("BrowserStack fixed policy inputs", () => {
     expect(JSON.stringify(capabilities)).not.toContain(credentials.accessKey);
   });
 
-  test("reads only the exact BrowserStack fields through the pinned service account", async () => {
+  test.skipIf(process.platform === "win32")("reads only the exact BrowserStack fields through the pinned service account", async () => {
     const directory = await mkdtemp(join(tmpdir(), "omp-bs-credentials-"));
     try {
       const file = join(directory, "token");
@@ -145,13 +145,21 @@ describe("BrowserStack allocation attestation", () => {
   });
 });
 
+test.skipIf(process.platform === "win32")("Local cleanup's private config fixture has POSIX mode 0600", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "omp-bs-private-config-"));
+  try {
+    const config = join(directory, "local.yml");
+    await writeFile(config, "synthetic: only", { mode: 0o600 });
+    expect((await lstat(config)).mode & 0o777).toBe(0o600);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("Local crash cleanup catches respawned children, escalates and removes private config", async () => {
   const directory = await mkdtemp(join(tmpdir(), "omp-bs-stop-"));
   const config = join(directory, "local.yml"), fifo = join(directory, "startup.pipe");
   await writeFile(config, "synthetic: only", { mode: 0o600 });
   await writeFile(fifo, "", { mode: 0o600 });
   try {
-    expect((await lstat(config)).mode & 0o777).toBe(0o600);
     let time = 0, respawned = false;
     const alive = new Set([101]);
     const signals: string[] = [];
