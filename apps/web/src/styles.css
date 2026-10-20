@@ -94,6 +94,13 @@ main {
   flex-direction: column;
 }
 
+/* Desktop viewports: let the shell grow past the phone reading column. */
+@media (min-width: 60rem) {
+  main {
+    width: min(100% - 4rem, 72rem);
+  }
+}
+
 h1,
 h2,
 h3,
