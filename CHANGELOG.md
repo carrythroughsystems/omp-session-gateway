@@ -38,6 +38,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   deletion/absence verification across crashes, and reject data/media keys using value classification.
   Keep DELETE and bounded absence checks running after post-audit validation failures by atomically
   recording an unvalidated-record incident and safely recovered strict-JSON whole-value references.
+  Verify record/log absence before failing for missing inventory, and accept clean XML/text artifact
+  404 or reviewed media-403 bodies after raw scans/censuses without falsely requiring JSON.
   Scan every non-media retained-surface body before rejection,
   whatever its status, including pre/post-audit errors and transient GET-retry bodies, and persist
   capability hits as incidents. Preserve monotonic cleanup stages and recovery dependencies on

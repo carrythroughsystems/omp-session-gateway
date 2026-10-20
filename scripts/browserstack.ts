@@ -124,6 +124,12 @@ function percentDecoded(value: string): string {
   return value;
 }
 
+/** Non-JSON error text cannot declare references, so every pinned-host census must be zero. */
+function rawErrorCensus(raw: string): void {
+  const text = raw.toLowerCase(), decoded = percentDecoded(text).toLowerCase();
+  if (REFERENCE_HOSTNAMES.some(hostname => text.includes(hostname) || decoded.includes(hostname))) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
+}
+
 function dashboardPresentation(value: string, url: URL): boolean {
   const parts = /^https?:\/\/([^/?#]+)(\/[^?#]*)(?:\?([^#]*))?$/iu.exec(value);
   return parts !== null && parts[1]!.toLowerCase() === url.hostname && url.username === "" && url.password === "" && url.port === "" && url.hash === "" &&
@@ -320,7 +326,7 @@ export class BrowserStackApi {
       mergeArtifacts(sessionId, artifacts, found.artifacts);
       await remember?.([...artifacts]);
     };
-    const append = async (response: Response): Promise<string | undefined> => {
+    const append = async (response: Response, artifactError = false): Promise<string | undefined> => {
       const contentType = response.headers.get("content-type") ?? "";
       if (/^(?:image|video)\//iu.test(contentType)) {
         video = true;
@@ -330,6 +336,7 @@ export class BrowserStackApi {
       }
       const raw = await readRetainedBody(response);
       await inspect?.({ complete: false, text: raw, video: false, screenshots: 0 });
+      if (artifactError && !/(?:\/|\+)json(?:;|$)/iu.test(contentType)) rawErrorCensus(raw);
       const content = retainedContent(raw, contentType);
       if (content.text !== raw || content.media) await inspect?.({ complete: false, text: content.text !== raw ? content.text : "", video: false, screenshots: content.media ? 1 : 0 });
       if (content.json !== undefined) await inventory(content.json, raw);
@@ -365,7 +372,7 @@ export class BrowserStackApi {
       if (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType)) throw new Error("BrowserStack returned an unexpected log format");
     }
     for (const artifact of artifacts) {
-      const response = await this.#artifact(artifact.url, sessionId, artifact.buildId, inspectResponse);
+      const response = await this.#artifact(artifact.url, sessionId, artifact.buildId, async response => { await append(response, response.status >= 400); });
       if (artifact.kind === "media" && response.status === 200) {
         video = true;
         await response.body?.cancel();
@@ -373,7 +380,7 @@ export class BrowserStackApi {
         continue;
       }
       const contentType = response.headers.get("content-type") ?? "";
-      const text = await append(response);
+      const text = await append(response, response.status >= 400);
       if (response.status === 404) continue;
       if (artifact.kind === "media") {
         if (response.status !== 403 || text === undefined || !text.includes("<Code>AccessDenied</Code>") || !text.includes("s3:ListBucket")) throw new Error("BrowserStack video retention state is unknown");
@@ -418,7 +425,8 @@ export class BrowserStackApi {
       await removal.inspect({ complete: false, text: raw, video: false, screenshots: 0 });
       const metadata = mode === "session" && response.status === 200;
       const deletion = mode === "delete";
-      const unexpectedFormat = mode === "artifact" && !contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType);
+      const jsonType = /(?:\/|\+)json(?:;|$)/iu.test(contentType);
+      const unexpectedFormat = mode === "artifact" && response.status === 200 && !contentType.startsWith("text/plain") && !jsonType;
       let content: ReturnType<typeof retainedContent>;
       try { content = retainedContent(raw, metadata || deletion || unexpectedFormat ? "application/json" : contentType); }
       catch (error) {
@@ -430,6 +438,7 @@ export class BrowserStackApi {
       let next = [...artifacts], retained: TestRecord | undefined;
       let invalid = false;
       try {
+        if (mode === "artifact" && response.status >= 400 && !jsonType) rawErrorCensus(raw);
         if (metadata) {
           const record = sessionRecord(content.json, sessionId);
           if (typeof record.build_hashed_id !== "string" || !BROWSERSTACK_SESSION_ID.test(record.build_hashed_id)) throw new BrowserStackAuditFailure("BrowserStack record has invalid build identity");
@@ -469,9 +478,6 @@ export class BrowserStackApi {
       } else if (deleteAcknowledged) await removal.markDeleted();
     }
     if (existing.status === 404) await removal.markDeleted();
-    // Confidentiality still requires DELETE when a crash lost the inventory. Never claim
-    // restoration afterward: without the references their signed objects cannot be verified.
-    if (artifacts.length === 0) throw new Error("BrowserStack retained artifact inventory is unavailable");
     const deadline = clock.now() + 180_000;
     for (;;) {
       let absent = true;
@@ -486,16 +492,17 @@ export class BrowserStackApi {
       await clock.pause(2_000);
     }
     await removal.markDeleted();
+    // Prove record/log absence even without an inventory, but never claim artifact restoration.
+    if (artifacts.length === 0) throw new Error("BrowserStack retained artifact inventory is unavailable");
     for (const artifact of artifacts) {
       for (;;) {
-        const mode = artifact.kind === "text" ? "artifact" : "body";
-        const check = await this.#artifact(artifact.url, sessionId, artifact.buildId, async response => { await inspect(response, mode); });
+        const check = await this.#artifact(artifact.url, sessionId, artifact.buildId, async response => { await inspect(response, "artifact"); });
         if (artifact.kind === "media" && check.status === 200) {
           await check.body?.cancel();
           await removal.inspect({ complete: true, text: "", video: true, screenshots: 0 });
         } else {
           const before = validationFailures;
-          const text = await inspect(check, mode);
+          const text = await inspect(check, "artifact");
           if (check.status === 404) break;
           if (artifact.kind === "media" && check.status === 403) {
             if (text?.includes("<Code>AccessDenied</Code>") && text.includes("s3:ListBucket")) break;

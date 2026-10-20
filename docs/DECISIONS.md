@@ -1311,6 +1311,9 @@ Post-audit schema/census/body-validation failure atomically persists a `post-aud
 record` incident and individually validated pinned-origin whole-value URLs recoverable from strict
 JSON before continuing DELETE and bounded absence verification, without malformed-JSON heuristics
 or restoration approval; checkpoint failure remains fatal.
+Missing inventory still requires record/all-log absence verification before the restoration-blocking
+error, and artifact XML/text errors receive raw capability/hostname scans with JSON parsing only
+for JSON Content-Type, preserving 404 and the reviewed media-403 absence rule without false incidents.
 Duplicate/media-classification checks and monotonic audit/deletion/absence milestones remain.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.

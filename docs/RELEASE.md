@@ -795,6 +795,9 @@ Post-audit validation/schema/census errors atomically checkpoint a `post-audit u
 incident with safely recoverable pinned-origin whole-value URLs from strict JSON and still proceed
 through DELETE and bounded record/log/artifact absence checks, never heuristic recovery of malformed
 JSON or restoration approval; a checkpoint-write failure still stops effects.
+When inventory is missing, first verify record/all-six-log absence before reporting it unavailable;
+XML/text artifact 404 bodies and the reviewed media-403 denial are raw-scanned and hostname-censused
+as absence evidence without forcing JSON unless their Content-Type declares it.
 The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
 deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
 from every retained surface, before or after the audit and whatever their HTTP status, are scanned

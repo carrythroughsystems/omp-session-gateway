@@ -606,6 +606,59 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(fixture.removal.deleted).toBe(true);
     expect(fixture.clock.now()).toBe(180_000);
   });
+  test("an empty inventory blocks restoration only after record and all log absence is verified", async () => {
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { hashed_id: id, build_hashed_id: build, status: "running" } }) });
+    expect((await fixture.audit())?.complete).toBe(false);
+    await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow("BrowserStack retained artifact inventory is unavailable");
+    const deletion = fixture.calls.findIndex(call => call.method === "DELETE");
+    expect(deletion).toBeGreaterThanOrEqual(0);
+    expect(fixture.calls.slice(deletion + 1).map(call => call.url)).toEqual([
+      `${apiOrigin}/sessions/${id}.json`,
+      ...["logs", "networklogs", "consolelogs", "seleniumlogs", "appiumlogs", "telemetrylogs"].map(surface => `${apiOrigin}/sessions/${id}/${surface}`),
+    ]);
+    expect(fixture.removal.deleted).toBe(true);
+    expect(fixture.removal.artifacts).toEqual([]);
+    expect(fixture.incidents).toEqual([]);
+  });
+  const noSuchKey = "<Error><Code>NoSuchKey</Code><Message>SYNTHETIC MISSING OBJECT</Message></Error>";
+  test.each(["application/xml", "text/plain", "application/json"])("a clean %s artifact 404 converges without an incident", async type => {
+    const reply = { status: 404, type, text: type === "application/json" ? JSON.stringify({ code: "NoSuchKey" }) : noSuchKey };
+    const fixture = provider({ artifactReply: reply, postDeleteArtifactReply: reply });
+    const lane = auditedAttempt(fixture);
+    expect(await lane.attempt).toMatchObject({ passed: true });
+    expect(fixture.incidents).toEqual([]);
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.cleanupRequired).toBe(false);
+    expect(progress.resources?.find(resource => resource.vendor === "browserstack")?.incident).not.toBe(true);
+    expect(fixture.inspected.some(record => record.text.includes(reply.text))).toBe(true);
+  });
+  test.each(["audit", "absence"])("an XML 404 capability window persists an incident during %s", async stage => {
+    const clean = { text: noSuchKey, status: 404, type: "application/xml" };
+    const exposed = { ...clean, text: `<Error><Code>NoSuchKey</Code><Message>${replayWindow}</Message></Error>` };
+    const fixture = provider({ artifactReply: stage === "audit" ? exposed : clean, postDeleteArtifactReply: stage === "absence" ? exposed : clean });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("incident");
+    expect(fixture.inspected.some(record => record.text.includes(replayWindow))).toBe(true);
+    expect(fixture.incidents).not.toContain("post-audit unvalidated record");
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
+    expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
+  });
+  test.each([new URL(artifact).hostname, new URL(artifact).hostname.replaceAll(".", "%2e")])("non-JSON artifact errors still enforce the raw hostname census: %s", async host => {
+    const fixture = provider({ postDeleteArtifactReply: { text: `<Error><Code>NoSuchKey</Code><Message>${host}</Message></Error>`, status: 404, type: "application/xml" } });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).rejects.toThrow();
+    expect(fixture.incidents).toContain("post-audit unvalidated record");
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
+  });
+  test("a JSON 404 still inventories declared whole-value references", async () => {
+    const reply = { text: JSON.stringify({ code: "NoSuchKey", log_url: nestedArtifact }), status: 404, type: "application/json" };
+    const fixture = provider({ artifactReply: reply, postDeleteArtifactReply: reply });
+    const lane = auditedAttempt(fixture);
+    expect(await lane.attempt).toMatchObject({ passed: true });
+    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(2);
+    expect(fixture.incidents).toEqual([]);
+  });
   test("whole-value references accept case-insensitive schemes and preserve duplicate/classification checks", () => {
     const upper = nestedArtifact.replace("https:", "HtTpS:");
     expect(browserStackReferences(id, build, { reason: [{ arbitrary: upper }] }).artifacts).toEqual([{ url: upper, buildId: build, kind: "text" }]);
@@ -866,10 +919,12 @@ describe("BrowserStack complete retention and deletion", () => {
     const result = operation === "audit" ? fixture.audit() : fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
     if (operation === "audit") await expect(result).rejects.toThrow("unbound retained reference");
     else {
-      await expect(result).rejects.toThrow("retained artifact inventory is unavailable");
+      await expect(result).rejects.toThrow("record deletion could not be verified");
       expect(fixture.incidents).toContain("post-audit unvalidated record");
+      expect(fixture.clock.now()).toBe(180_000);
     }
-    expect(fixture.calls).toHaveLength(1);
+    if (operation === "audit") expect(fixture.calls).toHaveLength(1);
+    else expect(fixture.calls.length).toBeGreaterThan(1);
   });
   test("fresh cleanup records an unvalidated pre-build body and still deletes after the retry", async () => {
     const fixture = provider({ retry: { surface: "session", reply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 502, type: "application/json" } } });
