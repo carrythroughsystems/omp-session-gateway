@@ -143,17 +143,21 @@ export async function admitDeviceCloud(
   }
   if (mode === "free") {
     const free = await api.devices("available");
+    const failures: unknown[] = [];
     for (const target of DEVICE_CLOUD_TARGETS) {
       if (!free.some(device => eligibleDevice(DEVICE_CLOUD_PROFILES[target], device))) {
         if (target !== "iphone") {
-          await dependencies.fallbackReady(environment, target);
+          try { await dependencies.fallbackReady(environment, target); }
+          catch (error) { failures.push(error); }
           continue;
         }
-        throw new DeviceCloudAvailabilityHold({
+        failures.push(new DeviceCloudAvailabilityHold({
           kind: "device-cloud-availability", stage: "preflight", target, vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0,
-        });
+        }));
       }
     }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "device-cloud free admission failed");
   }
   return credentials;
 }
@@ -453,6 +457,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     binary: BROWSERSTACK_LOCAL_BINARY, directory: join(options.workspace, epoch, "browserstack"), identifier: `omp-dc-bs-${epoch.slice(0, 8)}`,
   });
   let localStarted = false;
+  let localCleanupUnverified = false;
 
   const verify = async (target: DeviceCloudTarget, attempt: DeviceCloudTargetAttempt): Promise<Observations> => {
     const profile = DEVICE_CLOUD_PROFILES[target];
@@ -495,6 +500,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
       if (!localStarted) {
         if (proxy === undefined || allowed === undefined) throw new Error("BrowserStack requires the lane-owned CONNECT proxy");
         await attempt.startingTunnel("browserstack");
+        localCleanupUnverified = true;
         await startBrowserStackLocal({
           ...localIdentity(attempt.epoch), binary: await ensureBrowserStackLocal(), localProxyPort: proxy.port,
           hosts: [...new Set(allowed.map(authority => authority.split(":")[0]!))],
@@ -566,11 +572,15 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     liveSession: publishedSession,
     tunnel: async (operation, epoch, vendor) => {
       if (operation === "stop") {
+        if (vendor === "browserstack") localCleanupUnverified = true;
         // The proxy first: a tunnel that outlives SIGKILL then forwards only to a closed port.
         await proxy?.close();
         proxy = undefined;
-        if (vendor === "browserstack") await stopBrowserStackLocal(localIdentity(epoch));
-        else await stopTunnel(tunnelIdentifier(epoch));
+        if (vendor === "browserstack") {
+          await stopBrowserStackLocal(localIdentity(epoch));
+          localCleanupUnverified = false;
+          localStarted = false;
+        } else await stopTunnel(tunnelIdentifier(epoch));
         return;
       }
       if (vendor !== "testingbot") throw new Error("BrowserStack Local starts lazily only for fallback allocation");
@@ -597,6 +607,9 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     },
     launch: (session, mode) => launchLink(origin, session, mode),
     removeWorkspace: async epoch => {
+      // Local's exact cwd is part of crash-recovery ownership; never erase it while a child
+      // might remain. The key config is still removed by stop's finally path.
+      if (localCleanupUnverified) throw new Error("BrowserStack workspace remains until tunnel termination is verified");
       await rm(join(options.workspace, epoch), { recursive: true, force: true });
     },
   };
