@@ -49,14 +49,18 @@ export interface CloudDevice {
 
 export interface TestRecord {
   readonly complete: boolean;
-  /** The whole record as JSON text, searched in memory and never persisted. */
+  /** Bounded raw retained surfaces and their canonical JSON, searched only in memory. */
   readonly text: string;
   readonly video: boolean;
   readonly screenshots: number;
 }
 
-async function boundedVendorText(response: Response): Promise<string> {
+async function boundedVendorText(response: Response, maximumBytes = MAX_RECORD_BYTES): Promise<string> {
   if (response.body === null) throw new Error("TestingBot returned an empty response");
+  if (maximumBytes < 1) {
+    await response.body.cancel();
+    throw new Error("TestingBot returned an oversized response");
+  }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
@@ -65,7 +69,7 @@ async function boundedVendorText(response: Response): Promise<string> {
       const result = await reader.read();
       if (result.done) break;
       bytes += result.value.byteLength;
-      if (bytes > MAX_RECORD_BYTES) {
+      if (bytes > maximumBytes) {
         await reader.cancel();
         throw new Error("TestingBot returned an oversized response");
       }
@@ -81,6 +85,16 @@ async function boundedVendorText(response: Response): Promise<string> {
 function vendorJson(text: string): unknown {
   try { return JSON.parse(text); }
   catch { throw new Error("TestingBot returned invalid JSON"); }
+}
+
+function retainedLogUrl(value: unknown): string {
+  if (typeof value !== "string") throw new Error("TestingBot returned an invalid retained log reference");
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("TestingBot returned an invalid retained log reference"); }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.hash !== "" ||
+    !["s3.amazonaws.com", "s3-eu-west-1.amazonaws.com"].includes(url.hostname) || url.port !== "" ||
+    !url.pathname.startsWith("/eulogtestingbot/")) throw new Error("TestingBot returned an unreviewed retained log origin or bucket");
+  return url.href;
 }
 
 export interface OpResult {
@@ -210,11 +224,43 @@ export class TestingBotApi {
     const text = await boundedVendorText(response);
     const record = vendorJson(text);
     if (!isRecord(record)) throw new Error("TestingBot returned an invalid test record");
+    if (record.state !== "COMPLETE" || record.assets_available !== true) {
+      return { complete: false, text: `${text}\n${JSON.stringify(record)}`, video: record.video !== false, screenshots: 0 };
+    }
+    const assetsResponse = await this.#get(`/tests/${sessionId}/assets`, "test assets");
+    if (assetsResponse === undefined) throw new Error("TestingBot retained asset inventory is missing");
+    let remainingBytes = MAX_RECORD_BYTES - Buffer.byteLength(text, "utf8");
+    const assetsText = await boundedVendorText(assetsResponse, remainingBytes);
+    remainingBytes -= Buffer.byteLength(assetsText, "utf8");
+    const assets = vendorJson(assetsText);
+    if (!isRecord(assets) || assets.session_id !== sessionId || !isRecord(record.logs) || !isRecord(assets.logs) ||
+      !Array.isArray(record.thumbs) || !Array.isArray(assets.screenshots) ||
+      (assets.har !== null && assets.har !== false && typeof assets.har !== "string") ||
+      (assets.performance !== null && assets.performance !== false && typeof assets.performance !== "string")) {
+      throw new Error("TestingBot returned an invalid retained asset inventory");
+    }
+    const surfaces = [text, JSON.stringify(record), assetsText, JSON.stringify(assets)];
+    const references = new Set([...Object.values(record.logs), ...Object.values(assets.logs)]);
+    for (const extra of [assets.har, assets.performance]) if (typeof extra === "string") references.add(extra);
+    if (references.size > 16) throw new Error("TestingBot retained log inventory exceeds its surface bound");
+    for (const reference of references) {
+      const url = retainedLogUrl(reference);
+      // Signed asset references are already authorized. Never forward the account's credentials.
+      const logResponse = await readProvider(() => fetch(url, { redirect: "error", signal: AbortSignal.timeout(30_000) }));
+      if (!logResponse.ok) {
+        await logResponse.body?.cancel();
+        throw new Error(`TestingBot retained log read failed with HTTP ${logResponse.status}`);
+      }
+      const logText = await boundedVendorText(logResponse, remainingBytes);
+      remainingBytes -= Buffer.byteLength(logText, "utf8");
+      surfaces.push(logText);
+      try { surfaces.push(JSON.stringify(JSON.parse(logText))); } catch { /* Plain-text logs have no JSON representation. */ }
+    }
     return {
-      complete: record.state === "COMPLETE",
-      text: JSON.stringify(record),
-      video: record.video !== false,
-      screenshots: Array.isArray(record.thumbs) ? record.thumbs.length : 1,
+      complete: true,
+      text: surfaces.join("\n"),
+      video: record.video !== false || (assets.video !== null && assets.video !== false),
+      screenshots: record.thumbs.length + assets.screenshots.length,
     };
   }
 }

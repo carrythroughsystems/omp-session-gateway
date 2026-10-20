@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import {
   DEVICE_CLOUD_PROFILES,
@@ -18,6 +18,8 @@ import {
 } from "./device-cloud-qualification.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudHolds } from "./device-cloud-availability.ts";
 import { createPixelLease, type PixelLease } from "./stable-qualification.ts";
+import { pixelUnrestored } from "./restoration.ts";
+import { TestingBotApi } from "./testingbot.ts";
 
 // Distinctive synthetic links: never a real capability shape, so the repository leak scans stay green.
 const LINKS: Record<string, Record<"view" | "control", string>> = {
@@ -184,6 +186,35 @@ describe("device-cloud lane", () => {
     expect(lane.effects).toHaveLength(effects);
   });
 
+  test("ends each target before allocating another under the vendor's two-session limit", async () => {
+    const lane = harness();
+    const active = new Set<string>();
+    let maximumActive = 0;
+    const runtime: DeviceCloudRuntime = {
+      ...lane.runtime,
+      verify: async (target, attempt) => {
+        if (active.size >= 2) throw new Error("the vendor refuses a third concurrent session");
+        return lane.runtime.verify(target, {
+          ...attempt,
+          created: async sessionId => {
+            active.add(sessionId);
+            maximumActive = Math.max(maximumActive, active.size);
+            await attempt.created(sessionId);
+          },
+        });
+      },
+      endSession: async sessionId => {
+        await lane.runtime.endSession(sessionId);
+        active.delete(sessionId);
+      },
+    };
+    expect(await runDeviceCloud({ ...input(lane), runtime })).toMatchObject({ passed: true });
+    expect(maximumActive).toBe(1);
+    expect(active.size).toBe(0);
+    expect(lane.effects.indexOf("end session-iphone-0001")).toBeLessThan(lane.effects.indexOf("verify ipad"));
+    expect(lane.effects.indexOf("end session-ipad-0001")).toBeLessThan(lane.effects.indexOf("verify android"));
+  });
+
   test("no other Pixel lane starts between the attempt and its release", async () => {
     const lane = harness();
     const lease = createPixelLease(() => {});
@@ -202,6 +233,43 @@ describe("device-cloud lane", () => {
     expect(lane.effects.map(effect => effect.replace(" (unleased)", "")).slice(-4)).toEqual([
       "tunnel stop", "fixture stop", "workspace remove", "androidPush",
     ]);
+  });
+
+  test("a failed cloud release refuses a queued Android lane until cleanup recovery", async () => {
+    const lane = harness({ failing: "tunnel stop" });
+    const lease = createPixelLease(() => {});
+    let queued: Promise<unknown> | undefined;
+    let androidStarted = false;
+    const runtime: DeviceCloudRuntime = {
+      ...lane.runtime,
+      verify: async (target, attempt) => {
+        queued ??= lease("android", async () => { androidStarted = true; });
+        queued.catch(() => {});
+        return lane.runtime.verify(target, attempt);
+      },
+    };
+    const error = await runDeviceCloud({ ...input(lane), pixel: lease, runtime }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    if (queued === undefined) throw new Error("the fake Android lane was not queued");
+    await expect(queued).rejects.toThrow("left unrestored by deviceCloud");
+    expect(androidStarted).toBe(false);
+    expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(true);
+    const recovery = harness();
+    await cleanupDeviceCloud(input(recovery, lane.checkpoints.at(-1)));
+    expect(deviceCloudNeedsCleanup(recovery.checkpoints.at(-1))).toBe(false);
+  });
+
+  test("a failed restoration checkpoint also leaves the Pixel lease unrestored", async () => {
+    const lane = harness();
+    const error = await runDeviceCloud({
+      ...input(lane), pixel: createPixelLease(() => {}),
+      checkpoint: async progress => {
+        if (progress.phase === "restored") throw new Error("restoration checkpoint failed");
+        await lane.checkpoint(progress);
+      },
+    }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(true);
   });
 
   test("a failed attempt is still released under its own lease", async () => {
@@ -235,6 +303,29 @@ describe("device-cloud lane", () => {
     expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).results.audit).toEqual({ records: 3, recordsExposingLinks: 1, recordsWithMedia: 0 });
   });
 
+  test.each(["duplicate-key", "escaped-value"] as const)("audits raw and canonical retained JSON without dropping a %s leak", async form => {
+    const leaked = LINKS["instance-live"]!.view.slice(39, 55);
+    const encoded = [...leaked].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+    const raw = form === "duplicate-key"
+      ? `{"state":"COMPLETE","assets_available":true,"steps":"${leaked}","steps":"clean","logs":{},"video":false,"thumbs":[]}`
+      : `{"state":"COMPLETE","assets_available":true,"steps":"${encoded}","logs":{},"video":false,"thumbs":[]}`;
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) => {
+      const path = new URL(String(url)).pathname;
+      const sessionId = path.split("/")[3]!;
+      return path.endsWith("/assets")
+        ? Response.json({ session_id: sessionId, logs: {}, video: null, screenshots: [], har: null, performance: null })
+        : new Response(raw);
+    }, { preconnect: () => {} }));
+    try {
+      const lane = harness();
+      const api = new TestingBotApi({ key: "synthetic-key", secret: "synthetic-secret" });
+      const message = await failure(runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime, record: sessionId => api.testRecord(sessionId) } }));
+      expect(message).toContain("3 of 3 TestingBot test records contain a live View or Control link");
+      expect(message).not.toContain(leaked);
+      expect(JSON.stringify(lane.checkpoints)).not.toContain(leaked);
+    } finally { mock.mockRestore(); }
+  });
+
   test("an iPad hold ends and audits the partial iPhone attempt before release", async () => {
     const lane = harness({ hold: "ipad" });
     const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
@@ -251,6 +342,7 @@ describe("device-cloud lane", () => {
     const lane = harness({ hold: "ipad", ...options });
     const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
     expect(deviceCloudHolds(error)).toBeUndefined();
+    expect(pixelUnrestored(error)).toBe("failing" in options);
     expect(lane.effects).toContain("workspace remove");
   });
 

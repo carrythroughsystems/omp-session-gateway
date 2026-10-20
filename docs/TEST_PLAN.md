@@ -255,6 +255,12 @@ The device-cloud lane (`scripts/device-cloud-qualification.test.ts`) runs agains
   exhaustion; authentication, transport and malformed inventory never become holds;
 - an iPhone-only partial attempt is ended, audited and released before an iPad hold propagates;
   an audit or cleanup failure combined with availability remains diagnostic;
+- a fake vendor refusing a third concurrent session passes because each target ends before
+  allocating the next, and a failed release blocks an already-queued Android lane through the
+  existing `pixelUnrestored` restoration guard, including nested aggregate failures;
+- raw duplicate-key values and escaped JSON values cannot disappear from retained audits; the
+  test detail, asset inventory and declared logs are inspected, and missing/unreviewed surfaces
+  fail without forwarding account credentials to log storage;
 - every WebDriver session reaches a checkpoint before it is driven, and every effect, the release of
   its sessions, tunnel, fixture, and workspace included, runs in one Pixel lease turn that no queued
   lane can enter, after a failure too;

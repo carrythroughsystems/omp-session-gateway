@@ -443,8 +443,8 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   lends the TestingBot account to any unauthenticated caller that can reach it. The lane asks for
   port -1 for both, so neither opens, and stops any tunnel that listens anywhere but loopback or
   fails to start, before going on.
-- Sessions request no video, screenshots, or device logs, and are not public. TestingBot still keeps
-  a step log of every WebDriver command and its result, so page evaluations return only counts,
+- Sessions request no video, screenshots, or device logs, and are not public. The lane does not
+  rely on log-disable requests to prevent vendor retention, so page evaluations return only counts,
   booleans, and fixed names, and a failed evaluation only its error's name. The in-page sink sweep
   keeps the capability inside the page and returns no digest, length, matched detail, address, or
   cache or database name. Control residuals, missing-target labels, arbitrary payload keys and raw
@@ -462,6 +462,15 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   release. An audit or cleanup error combined with device availability is diagnostic, never a hold.
   The links and windows exist only in orchestrator memory; only record counts and verdicts persist,
   never matched text, windows, digests or lengths.
+  Every declared retained surface is scanned as bounded raw bytes as well as canonical JSON:
+  duplicate keys cannot discard earlier values, and JSON escape forms are also covered. The test
+  detail, asset inventory, and declared log/HAR/performance references share one raw-byte budget.
+  Signed log reads forward no account authorization, refuse redirects and unreviewed HTTPS
+  origins/buckets, and fail if any declared surface cannot be inspected. A log-disable request
+  and an empty inventory do not prove anything about unobservable vendor-internal retention.
+- Each target's sessions end before the next allocation. Any cloud release failure, including
+  a restoration checkpoint failure, marks the result `pixelUnrestored` through aggregate errors;
+  the existing Pixel-lease guard refuses queued device work until cleanup recovery.
 - TestingBot credentials are supplied only through child-process environment variables and in-memory
   request headers, never command-line arguments, receipts, or logs.
 - The iPhone turns background alerts off before its session ends. If its attempt fails first, the

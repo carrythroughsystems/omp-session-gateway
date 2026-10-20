@@ -374,14 +374,27 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
     await runtime.tunnel("start", progress.epoch);
     await advance("tunnel_ready");
     for (const target of DEVICE_CLOUD_TARGETS) {
-      const observations = await runtime.verify(target, {
-        epoch: progress.epoch,
-        session: live,
-        created: async sessionId => {
-          progress.sessions.push(sessionId);
-          await save();
-        },
-      });
+      const firstSession = progress.sessions.length;
+      const targetFailures: unknown[] = [];
+      let observations: Record<string, DeviceCloudObservation> | undefined;
+      try {
+        observations = await runtime.verify(target, {
+          epoch: progress.epoch,
+          session: live,
+          created: async sessionId => {
+            progress.sessions.push(sessionId);
+            await save();
+          },
+        });
+      } catch (error) { targetFailures.push(error); }
+      // Targets are sequential: never retain active devices behind the next allocation.
+      for (let index = firstSession; index < progress.sessions.length; index += 1) {
+        try { await runtime.endSession(progress.sessions[index]!); }
+        catch { targetFailures.push(new Error("a device-cloud target session did not end before the next allocation")); }
+      }
+      if (targetFailures.length === 1) throw targetFailures[0];
+      if (targetFailures.length > 1) throw new AggregateError(targetFailures, "device-cloud target and session release failed");
+      if (observations === undefined) throw new Error("device-cloud target returned no observations");
       if (!safeObservations(observations)) throw new Error(`unsafe device-cloud evidence from the ${target}`);
       progress.results[target] = observations;
       await advance(`${target}_verified`);
@@ -419,35 +432,40 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
  * runs even if another fails, and only a complete release marks the attempt restored.
  */
 async function release(runtime: DeviceCloudRuntime, progress: DeviceCloudProgress, save: () => Promise<void>): Promise<Record<string, unknown>> {
-  const failures: string[] = [];
-  const attempt = async (step: string, action: () => Promise<void>) => {
-    try {
-      await action();
-    } catch {
-      // Raw errors can carry vendor identifiers; the step name is the evidence.
-      failures.push(step);
-    }
-  };
-  await attempt("sessions", async () => {
-    let ended = 0;
-    for (const sessionId of progress.sessions) {
+  try {
+    const failures: string[] = [];
+    const attempt = async (step: string, action: () => Promise<void>) => {
       try {
-        await runtime.endSession(sessionId);
-        ended += 1;
+        await action();
       } catch {
-        // Keep ending the others.
+        // Raw errors can carry vendor identifiers; the step name is the evidence.
+        failures.push(step);
       }
-    }
-    if (ended !== progress.sessions.length) throw new Error("a TestingBot session did not end");
-  });
-  await attempt("tunnel", () => runtime.tunnel("stop", progress.epoch));
-  await attempt("fixture", () => runtime.fixture("stop", progress.epoch));
-  await attempt("workspace", () => runtime.removeWorkspace(progress.epoch));
-  if (failures.length > 0) throw new Error(`device-cloud cleanup failed: ${failures.join(", ")}`);
-  progress.cleanupRequired = false;
-  progress.phase = "restored";
-  await save();
-  return { epoch: progress.epoch, restored: true, sessionsEnded: progress.sessions.length, tunnelStopped: true, fixtureStopped: true };
+    };
+    await attempt("sessions", async () => {
+      let ended = 0;
+      for (const sessionId of progress.sessions) {
+        try {
+          await runtime.endSession(sessionId);
+          ended += 1;
+        } catch {
+          // Keep ending the others.
+        }
+      }
+      if (ended !== progress.sessions.length) throw new Error("a TestingBot session did not end");
+    });
+    await attempt("tunnel", () => runtime.tunnel("stop", progress.epoch));
+    await attempt("fixture", () => runtime.fixture("stop", progress.epoch));
+    await attempt("workspace", () => runtime.removeWorkspace(progress.epoch));
+    if (failures.length > 0) throw new Error(`device-cloud cleanup failed: ${failures.join(", ")}`);
+    progress.cleanupRequired = false;
+    progress.phase = "restored";
+    await save();
+    return { epoch: progress.epoch, restored: true, sessionsEnded: progress.sessions.length, tunnelStopped: true, fixtureStopped: true };
+  } catch (error) {
+    // createPixelLease's existing restoration helper recognizes this flag through aggregates.
+    throw Object.assign(error instanceof Error ? error : new Error("device-cloud cleanup failed"), { pixelUnrestored: true });
+  }
 }
 
 export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Record<string, unknown>> {

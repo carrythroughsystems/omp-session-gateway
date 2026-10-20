@@ -14,6 +14,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   diagnostic failures without changing schema 3 or qualification claims. Audit every partial
   attempt for exact contiguous 16-character link windows, minimize vendor-logged page results,
   attest before opening capabilities, and stage the cloud fixture only under the Pixel lease.
+  Keep targets sequential within the vendor's session limit, block queued Pixel lanes after any
+  release failure, and audit raw plus canonical retained metadata, asset inventories and declared
+  logs so duplicate JSON keys cannot hide a link.
 
 - Move the OMP engineering baseline to published v18.12.3 (#409), with pins derived by
   `scripts/upstream-pins.ts`. Registry v1, the discovery file format and socket paths, the relay

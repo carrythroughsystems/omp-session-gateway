@@ -1216,6 +1216,24 @@ original error, so neither can become an availability hold. The audit searches w
 and every contiguous 16-character window, including interior and delimiter-crossing windows.
 Only counts and verdicts persist, never matches, windows, digests or lengths. Crash cleanup may
 release resources without reconstructing an audit; it cannot manufacture successful evidence.
+Targets run sequentially and each target's sessions end before the next allocation, so the
+three-target journey stays within TestingBot's two-concurrent-session plan. Any release failure,
+including failure to persist restoration, is marked `pixelUnrestored`; the existing Pixel-lease
+restoration guard also recognizes it inside aggregates and refuses queued device lanes until
+cleanup recovery.
+
+Retained-surface auditing uses the bounded raw response bytes **and** canonical JSON, so duplicate
+keys cannot discard earlier values and JSON escape forms are also searched. It includes the test
+detail, the documented `/tests/:id/assets` inventory, and every declared log/HAR/performance
+reference. Signed log reads forward no account authorization, refuse redirects, and accept only
+reviewed HTTPS S3 log origins/buckets; unknown references, missing inventories, excessive surfaces
+or an exhausted aggregate byte budget are diagnostic. The 2026-10-20 read-only reinspection of
+the three public-page proofs found session-creation data in `steps`, no navigation/evaluation
+payload there, empty `logs`, and no declared log/media assets. Current vendor documentation says
+[`recordLogs: false` disables logs](https://testingbot.com/support/web-automate/selenium/sensitive-data),
+and documents [the retained asset inventory](https://testingbot.com/support/api/tests).
+This observed absence does not weaken the audit or
+vendor-safe-result requirement or prove unobservable vendor-internal retention.
 
 Device attestation precedes the first capability open. User agents and client hints are parsed
 inside the page into fixed families, browser names, validated versions and bounded Samsung codes;

@@ -59,6 +59,89 @@ test("oversized retained records fail without truncation or reflected content", 
   } finally { mock.mockRestore(); }
 });
 
+describe("TestingBot retained audit surfaces", () => {
+  const sessionId = "session-surfaces-0001";
+  const logUrl = "https://s3-eu-west-1.amazonaws.com/eulogtestingbot/synthetic-session.log";
+  const record = { state: "COMPLETE", assets_available: true, steps: "session creation", logs: {}, video: false, thumbs: [] };
+  const assets = { session_id: sessionId, logs: {}, video: null, screenshots: [], har: null, performance: null };
+  const needle = "SYNTHETIC-RAW-SURFACE-7e2c";
+
+  test.each(["record", "assets", "log"] as const)("keeps raw duplicate-key values from the %s surface", async surface => {
+    const duplicate = `"earlier":"${needle}","earlier":"clean"`;
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL, options?: RequestInit) => {
+      const target = String(url);
+      if (target === logUrl) {
+        expect(options?.headers).toBeUndefined();
+        expect(options?.redirect).toBe("error");
+        return new Response(`{${duplicate}}`);
+      }
+      if (target.endsWith("/assets")) {
+        const value = { ...assets, logs: surface === "log" ? { appium: logUrl } : {} };
+        return new Response(JSON.stringify(value).replace(/\}$/u, surface === "assets" ? `,${duplicate}}` : "}"));
+      }
+      return new Response(JSON.stringify(record).replace(/\}$/u, surface === "record" ? `,${duplicate}}` : "}"));
+    }, { preconnect: () => {} }));
+    try {
+      const result = await new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId);
+      expect(result?.complete).toBe(true);
+      expect(result?.text).toContain(needle);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("canonicalizes escaped JSON log values as well as auditing their raw bytes", async () => {
+    const encoded = [...needle].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) =>
+      String(url) === logUrl ? new Response(`{"step":"${encoded}"}`) :
+        Response.json(String(url).endsWith("/assets") ? { ...assets, logs: { appium: logUrl } } : record),
+    { preconnect: () => {} }));
+    try {
+      expect((await new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId))?.text).toContain(needle);
+    } finally { mock.mockRestore(); }
+  });
+
+  test.each(["missing inventory", "missing log", "unreviewed log origin", "unknown inventory"] as const)("refuses %s instead of claiming a complete audit", async failure => {
+    const calls: string[] = [];
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) => {
+      const target = String(url);
+      calls.push(target);
+      if (target.endsWith("/assets")) {
+        if (failure === "missing inventory") return new Response(null, { status: 404 });
+        if (failure === "unknown inventory") return Response.json({ ...assets, logs: null });
+        return Response.json({ ...assets, logs: { appium: failure === "unreviewed log origin" ? "https://unreviewed.invalid/log" : logUrl } });
+      }
+      if (target === logUrl) return new Response(null, { status: 404 });
+      return Response.json(record);
+    }, { preconnect: () => {} }));
+    try {
+      await expect(new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId)).rejects.toThrow();
+      expect(calls.some(url => url.startsWith("https://unreviewed.invalid"))).toBe(false);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("bounds aggregate retained bytes rather than permitting the limit again per log", async () => {
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) =>
+      String(url) === logUrl ? new Response("x".repeat(1_100_000)) :
+        Response.json(String(url).endsWith("/assets") ? { ...assets, logs: { appium: logUrl } } : { ...record, steps: "x".repeat(1_100_000) }),
+    { preconnect: () => {} }));
+    try {
+      await expect(new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId)).rejects.toThrow("oversized response");
+    } finally { mock.mockRestore(); }
+  });
+
+  test("refuses excessive declared surfaces before reading any log", async () => {
+    let reads = 0;
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) => {
+      reads += 1;
+      return Response.json(String(url).endsWith("/assets") ?
+        { ...assets, logs: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`log${index}`, `${logUrl}?part=${index}`])) } : record);
+    }, { preconnect: () => {} }));
+    try {
+      await expect(new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId)).rejects.toThrow("surface bound");
+      expect(reads).toBe(2);
+    } finally { mock.mockRestore(); }
+  });
+});
+
 describe("TestingBot credentials through the 1Password service account", () => {
   let root: string;
   let tokenFile: string;
