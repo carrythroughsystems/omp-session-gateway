@@ -34,7 +34,8 @@ export interface CollaborationJourneyOptions {
 }
 
 export interface CollaborationJourneyResult {
-  readonly appAsset: string;
+  /** The trusted expected asset, only when supplied; never page-controlled result text. */
+  readonly appAsset?: string;
   readonly viewReadOnly: true;
   readonly controlWritable: true;
   readonly promptAccepted: true;
@@ -94,13 +95,12 @@ export async function runCollaborationJourney(
       `Boolean([...document.querySelectorAll("button[aria-label]")].find(button => button.getAttribute("aria-label") === "View " + ${quotedLabel}))`,
     );
 
-    const appAsset = await page.evaluate<string | null>(
-      `performance.getEntriesByType("resource").map(entry => new URL(entry.name).pathname).find(path => /^\\/assets\\/app\\.[0-9a-f]+\\.js$/.test(path)) ?? null`,
-    );
-    if (appAsset === null || !APP_ASSET_PATTERN.test(appAsset)) throw new Error("hashed app asset was not loaded");
-    if (options.expectedAppAsset !== undefined && appAsset !== options.expectedAppAsset) {
-      throw new Error("installed app asset does not match the release archive");
-    }
+    const appAssetMatched = await page.evaluate<boolean>(`(() => {
+      const expected = ${JSON.stringify(options.expectedAppAsset ?? null)};
+      const asset = performance.getEntriesByType("resource").map(entry => new URL(entry.name).pathname).find(path => /^\\/assets\\/app\\.[0-9a-f]+\\.js$/.test(path));
+      return typeof asset === "string" && (expected === null || asset === expected);
+    })()`);
+    if (appAssetMatched !== true) throw new Error(options.expectedAppAsset === undefined ? "hashed app asset was not loaded" : "installed app asset does not match the release archive");
 
     options.announce?.("View");
     const openedView = await page.evaluate<boolean>(`(() => {
@@ -185,7 +185,7 @@ export async function runCollaborationJourney(
     );
 
     return {
-      appAsset,
+      ...(options.expectedAppAsset === undefined ? {} : { appAsset: options.expectedAppAsset }),
       viewReadOnly: true,
       controlWritable: true,
       promptAccepted: true,

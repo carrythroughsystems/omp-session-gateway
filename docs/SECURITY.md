@@ -463,11 +463,15 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   The links and windows exist only in orchestrator memory; only record counts and verdicts persist,
   never matched text, windows, digests or lengths.
   Every declared retained surface is scanned as bounded raw bytes as well as canonical JSON:
-  duplicate keys cannot discard earlier values, and JSON escape forms are also covered. The test
+  the shared strict parser rejects duplicate object keys at every depth before references are
+  discovered, and JSON escape forms are also covered. Plaintext logs remain raw-only and never
+  supply references; malformed JSON-declared logs fail closed. The test
   detail, asset inventory, and declared log/HAR/performance references share one raw-byte budget.
   Signed log reads forward no account authorization, refuse redirects and unreviewed HTTPS
   origins/buckets, and fail if any declared surface cannot be inspected. A log-disable request
   and an empty inventory do not prove anything about unobservable vendor-internal retention.
+- The page compares its loaded application asset with the expected archive asset and returns
+  only a boolean, never a page-controlled pathname, in vendor-logged evaluation results.
 - Each target's sessions end before the next allocation. Any cloud release failure, including
   a restoration checkpoint failure, marks the result `pixelUnrestored` through aggregate errors;
   the existing Pixel-lease guard refuses queued device work until cleanup recovery.

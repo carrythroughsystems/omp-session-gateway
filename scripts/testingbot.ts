@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { isRecord } from "../packages/collab-client/upstream/src/tool-render/util.ts";
 import type { JourneyPage } from "./browser-journey.ts";
 import { readProvider } from "./provider-read.ts";
+import { parseRetainedVendorJson, RetainedVendorJsonError } from "./device-cloud-record-json.ts";
 
 /** The GitHub release asset, verified by the digest GitHub publishes for it. */
 export const TESTINGBOT_TUNNEL = {
@@ -80,11 +81,6 @@ async function boundedVendorText(response: Response, maximumBytes = MAX_RECORD_B
   let offset = 0;
   for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
   return new TextDecoder().decode(buffer);
-}
-
-function vendorJson(text: string): unknown {
-  try { return JSON.parse(text); }
-  catch { throw new Error("TestingBot returned invalid JSON"); }
 }
 
 function retainedLogUrl(value: unknown): string {
@@ -155,7 +151,7 @@ export async function readTestingBotCredentials(tokenFile: string, op: OpRunner 
   }
   let identity: unknown;
   try {
-    identity = JSON.parse(whoami.stdout);
+    identity = parseRetainedVendorJson(whoami.stdout);
   } catch {
     identity = undefined;
   }
@@ -206,7 +202,7 @@ export class TestingBotApi {
   async devices(scope: "all" | "available"): Promise<readonly CloudDevice[]> {
     const response = await this.#get(scope === "all" ? "/devices" : "/devices/available", "device catalog");
     if (response === undefined) throw new Error("TestingBot device catalog is unavailable");
-    const listing = vendorJson(await boundedVendorText(response));
+    const listing = parseRetainedVendorJson(await boundedVendorText(response));
     if (!Array.isArray(listing)) throw new Error("TestingBot returned an invalid device catalog");
     return listing.map(entry => {
       if (!isRecord(entry) || typeof entry.name !== "string" || entry.name.length < 1 || entry.name.length > 100 ||
@@ -222,7 +218,7 @@ export class TestingBotApi {
     const response = await this.#get(`/tests/${sessionId}`, "test record");
     if (response === undefined) return undefined;
     const text = await boundedVendorText(response);
-    const record = vendorJson(text);
+    const record = parseRetainedVendorJson(text);
     if (!isRecord(record)) throw new Error("TestingBot returned an invalid test record");
     if (record.state !== "COMPLETE" || record.assets_available !== true) {
       return { complete: false, text: `${text}\n${JSON.stringify(record)}`, video: record.video !== false, screenshots: 0 };
@@ -232,7 +228,7 @@ export class TestingBotApi {
     let remainingBytes = MAX_RECORD_BYTES - Buffer.byteLength(text, "utf8");
     const assetsText = await boundedVendorText(assetsResponse, remainingBytes);
     remainingBytes -= Buffer.byteLength(assetsText, "utf8");
-    const assets = vendorJson(assetsText);
+    const assets = parseRetainedVendorJson(assetsText);
     if (!isRecord(assets) || assets.session_id !== sessionId || !isRecord(record.logs) || !isRecord(assets.logs) ||
       !Array.isArray(record.thumbs) || !Array.isArray(assets.screenshots) ||
       (assets.har !== null && assets.har !== false && typeof assets.har !== "string") ||
@@ -254,7 +250,13 @@ export class TestingBotApi {
       const logText = await boundedVendorText(logResponse, remainingBytes);
       remainingBytes -= Buffer.byteLength(logText, "utf8");
       surfaces.push(logText);
-      try { surfaces.push(JSON.stringify(JSON.parse(logText))); } catch { /* Plain-text logs have no JSON representation. */ }
+      try { surfaces.push(JSON.stringify(parseRetainedVendorJson(logText))); }
+      catch (error) {
+        const type = logResponse.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+        if (!(error instanceof RetainedVendorJsonError) || error.code !== "invalid-json" ||
+          type === "application/json" || type?.endsWith("+json")) throw error;
+        // Plain-text logs remain raw-only and are never a source of further references.
+      }
     }
     return {
       complete: true,

@@ -66,7 +66,7 @@ describe("TestingBot retained audit surfaces", () => {
   const assets = { session_id: sessionId, logs: {}, video: null, screenshots: [], har: null, performance: null };
   const needle = "SYNTHETIC-RAW-SURFACE-7e2c";
 
-  test.each(["record", "assets", "log"] as const)("keeps raw duplicate-key values from the %s surface", async surface => {
+  test.each(["record", "assets", "log"] as const)("rejects duplicate object keys in the %s retained surface", async surface => {
     const duplicate = `"earlier":"${needle}","earlier":"clean"`;
     const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL, options?: RequestInit) => {
       const target = String(url);
@@ -76,15 +76,19 @@ describe("TestingBot retained audit surfaces", () => {
         return new Response(`{${duplicate}}`);
       }
       if (target.endsWith("/assets")) {
+        if (surface === "assets") {
+          return new Response(JSON.stringify(assets).replace('"logs":{}', `"logs":{"appium":"${logUrl}","appium":"${logUrl}?clean"}`));
+        }
         const value = { ...assets, logs: surface === "log" ? { appium: logUrl } : {} };
-        return new Response(JSON.stringify(value).replace(/\}$/u, surface === "assets" ? `,${duplicate}}` : "}"));
+        return Response.json(value);
       }
-      return new Response(JSON.stringify(record).replace(/\}$/u, surface === "record" ? `,${duplicate}}` : "}"));
+      if (target === `${logUrl}?clean`) return Response.json({ step: "clean" });
+      return surface === "record"
+        ? new Response(JSON.stringify(record).replace('"logs":{}', `"logs":{"appium":"${logUrl}"},"logs":{}`))
+        : Response.json(record);
     }, { preconnect: () => {} }));
     try {
-      const result = await new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId);
-      expect(result?.complete).toBe(true);
-      expect(result?.text).toContain(needle);
+      await expect(new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId)).rejects.toThrow("duplicate");
     } finally { mock.mockRestore(); }
   });
 
@@ -96,6 +100,26 @@ describe("TestingBot retained audit surfaces", () => {
     { preconnect: () => {} }));
     try {
       expect((await new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId))?.text).toContain(needle);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("keeps ordinary plaintext logs raw-only without parsing references from them", async () => {
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) =>
+      String(url) === logUrl ? new Response(`INFO: ${needle}`, { headers: { "content-type": "text/plain" } }) :
+        Response.json(String(url).endsWith("/assets") ? { ...assets, logs: { appium: logUrl } } : record),
+    { preconnect: () => {} }));
+    try {
+      expect((await new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId))?.text).toContain(needle);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("rejects invalid JSON when the retained log declares a JSON content type", async () => {
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) =>
+      String(url) === logUrl ? new Response("not JSON", { headers: { "content-type": "application/json" } }) :
+        Response.json(String(url).endsWith("/assets") ? { ...assets, logs: { appium: logUrl } } : record),
+    { preconnect: () => {} }));
+    try {
+      await expect(new TestingBotApi({ key: KEY, secret: SECRET }).testRecord(sessionId)).rejects.toThrow("invalid retained vendor JSON");
     } finally { mock.mockRestore(); }
   });
 

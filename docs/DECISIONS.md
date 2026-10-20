@@ -1190,8 +1190,9 @@ and iPad enter the qualified matrix only from a passed campaign on the exact sig
 **Amendment — 2026-10-20 (availability and audit):** The ordered iPhone pool is iPhone 17 Pro Max,
 iPhone 17 Pro, iPhone 16, iPhone 16 Pro, iPhone Air, then iPhone 17, all on iOS 26 or later. The
 iPad pool remains only iPad (9th generation), on iPadOS 26 or later; obsolete catalog iPads are not
-fallbacks. The Samsung-only Android pool is Galaxy S26, S25, S24, then A55, on Android 14 or
-later. Observed Chrome hardware codes must match the checked-in canonical mapping: S26 SM-S942B,
+fallbacks. Safari reports Apple family and release, not the exact model: iPhone/iPad model
+evidence remains the vendor's allocated-session report. The Samsung-only Android pool is Galaxy
+S26, S25, S24, then A55, on Android 14 or later. Observed Chrome hardware codes must match the checked-in canonical mapping: S26 SM-S942B,
 S25 SM-S931B, S24 SM-S921B.
 Galaxy A55 remains disabled: the bounded 2026-10-20 public-page probe found no free device, so its observed hardware code awaits proof.
 The same bounded probe ended and audited three capability-free sessions: iPhone 16 Pro
@@ -1222,8 +1223,11 @@ including failure to persist restoration, is marked `pixelUnrestored`; the exist
 restoration guard also recognizes it inside aggregates and refuses queued device lanes until
 cleanup recovery.
 
-Retained-surface auditing uses the bounded raw response bytes **and** canonical JSON, so duplicate
-keys cannot discard earlier values and JSON escape forms are also searched. It includes the test
+Retained vendor JSON first passes one shared strict parser, which rejects duplicate decoded object
+keys at every depth before any reference discovery; a parse-site meta-test forbids lenient bypasses.
+Auditing then uses bounded raw response bytes **and** canonical JSON so JSON escape forms are
+also searched. Plaintext logs are raw-only and never supply further references; malformed
+JSON-declared logs fail closed. Auditing includes the test
 detail, the documented `/tests/:id/assets` inventory, and every declared log/HAR/performance
 reference. Signed log reads forward no account authorization, refuse redirects, and accept only
 reviewed HTTPS S3 log origins/buckets; unknown references, missing inventories, excessive surfaces
@@ -1239,6 +1243,8 @@ Device attestation precedes the first capability open. User agents and client hi
 inside the page into fixed families, browser names, validated versions and bounded Samsung codes;
 raw reports never become command results. Vendor-safe sink controls and sweeps return booleans,
 counts, closed codes and `LEAK_SINKS` names only, including error and residual-state branches.
+The application asset is compared with the expected archive asset in-page and returns only a
+boolean; no page-controlled pathname becomes a vendor-logged result.
 Retained-Mac fixture staging begins inside the attempt's Pixel lease, which still covers audit
 and every release step. These changes enable no additional vendor and change no published claims.
 

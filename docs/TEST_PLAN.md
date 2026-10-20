@@ -258,9 +258,13 @@ The device-cloud lane (`scripts/device-cloud-qualification.test.ts`) runs agains
 - a fake vendor refusing a third concurrent session passes because each target ends before
   allocating the next, and a failed release blocks an already-queued Android lane through the
   existing `pixelUnrestored` restoration guard, including nested aggregate failures;
-- raw duplicate-key values and escaped JSON values cannot disappear from retained audits; the
+- duplicate keys at top level, nested inventories and JSON logs are rejected before reference
+  discovery, including escaped-equivalent keys; a parse-site meta-test forbids lenient vendor
+  record parsers. Escaped JSON values cannot disappear from retained audits; the
   test detail, asset inventory and declared logs are inspected, and missing/unreviewed surfaces
   fail without forwarding account credentials to log storage;
+- expected application assets are compared in-page with boolean-only results, and a mismatch
+  fails before View/Control; page-controlled pathnames never become vendor-logged results;
 - every WebDriver session reaches a checkpoint before it is driven, and every effect, the release of
   its sessions, tunnel, fixture, and workspace included, runs in one Pixel lease turn that no queued
   lane can enter, after a failure too;

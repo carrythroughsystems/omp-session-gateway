@@ -1,5 +1,50 @@
 import { describe, expect, test } from "bun:test";
-import { LEAK_SINKS, vendorLeakControlExpression } from "./browser-journey.ts";
+import { JOURNEY_VIEW_STATE, LEAK_SINKS, runCollaborationJourney, vendorLeakControlExpression, type JourneyPage } from "./browser-journey.ts";
+
+describe("vendor-safe application asset attestation", () => {
+  test.each([undefined, "/assets/app.abc123.js"])("compares the expected asset in-page without returning a pathname to the vendor (expected=%s)", async expected => {
+    const loggedResults: unknown[] = [];
+    const page: JourneyPage = {
+      navigate: async () => {},
+      evaluate: async <T>(expression: string): Promise<T> => {
+        let result: unknown = true;
+        if (expression === JOURNEY_VIEW_STATE) result = { readOnly: true, controlVisible: true, rootMounted: true };
+        else if (expression.includes("sendInitiallyDisabled")) result = { writable: true, sendInitiallyDisabled: true };
+        else if (expression.includes('getEntriesByType("resource")') && !expression.includes("serviceWorker")) {
+          result = new Function("performance", `return ${expression};`)({
+            getEntriesByType: () => [{ name: "https://fixture.invalid/assets/app.abc123.js" }],
+          });
+        }
+        loggedResults.push(result);
+        return result as T;
+      },
+    };
+    const result = await runCollaborationJourney(page, { origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-EXPECTED-ASSET", ...(expected === undefined ? {} : { expectedAppAsset: expected }) });
+    expect(result.appAsset).toBe(expected);
+    expect(loggedResults.some(value => typeof value === "string")).toBe(false);
+    expect(JSON.stringify(loggedResults)).not.toContain("/assets/");
+  });
+
+  test("refuses an asset mismatch in-page before any capability opens", async () => {
+    let viewOpened = false;
+    const page: JourneyPage = {
+      navigate: async () => {},
+      evaluate: async <T>(expression: string): Promise<T> => {
+        if (expression.includes('getEntriesByType("resource")') && !expression.includes("serviceWorker")) {
+          return new Function("performance", `return ${expression};`)({
+            getEntriesByType: () => [{ name: "https://fixture.invalid/assets/app.def456.js" }],
+          }) as T;
+        }
+        return true as T;
+      },
+    };
+    await expect(runCollaborationJourney(page, {
+      origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-EXPECTED-ASSET", expectedAppAsset: "/assets/app.abc123.js",
+      announce: stage => { if (stage === "View") viewOpened = true; },
+    })).rejects.toThrow("installed app asset does not match the release archive");
+    expect(viewOpened).toBe(false);
+  });
+});
 
 async function control(residual: boolean) {
   const store = () => {

@@ -320,7 +320,7 @@ describe("device-cloud lane", () => {
       const lane = harness();
       const api = new TestingBotApi({ key: "synthetic-key", secret: "synthetic-secret" });
       const message = await failure(runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime, record: sessionId => api.testRecord(sessionId) } }));
-      expect(message).toContain("3 of 3 TestingBot test records contain a live View or Control link");
+      expect(message).toContain(form === "duplicate-key" ? "device-cloud retained-record audits failed" : "3 of 3 TestingBot test records contain a live View or Control link");
       expect(message).not.toContain(leaked);
       expect(JSON.stringify(lane.checkpoints)).not.toContain(leaked);
     } finally { mock.mockRestore(); }
