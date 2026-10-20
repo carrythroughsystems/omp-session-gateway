@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -174,6 +174,13 @@ test("Local crash cleanup catches respawned children, escalates and removes priv
 });
 
 describe("BrowserStack complete retention and deletion", () => {
+  test("every BrowserStack JSON boundary uses the shared duplicate-rejecting parser", async () => {
+    const source = await readFile(new URL("./browserstack.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/\bJSON\s*\.\s*parse\s*\(/u);
+    expect(source).not.toMatch(/\bvendorJson\s*\(/u);
+    expect(source).not.toMatch(/\.\s*json\s*\(/u);
+    expect([...source.matchAll(/\bparseRetainedVendorJson\s*\(/gu)]).toHaveLength(5);
+  });
   test("audits raw and canonical metadata, text and referenced logs without forwarding auth", async () => {
     const raw = JSON.stringify({ automation_session: { ...record, reason: "SYNTHETIC-CLOUD-LINK" } }).replace("SYNTHETIC", "\\u0053YNTHETIC");
     const fixture = provider({ raw });

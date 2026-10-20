@@ -753,6 +753,8 @@ Keep the original private progress and exact orchestrator checkout. Cleanup rout
 session by vendor, ends it, inspects/removes BrowserStack records, verifies absence, closes the
 proxy, stops only owned tunnels, and removes config/workspace. A crash-era saved clean flag cannot
 authorize lingering signed URLs: a fresh process re-inspects and requires their disappearance.
+If Local termination is unverified, cleanup removes its key config but preserves the working
+directory needed to identify its remaining processes; it does not claim restoration.
 An unidentified create stays dirty; reconcile that attempt's exact vendor/build in the account
 before any new attempt, never guess an ID, discard progress or retry creation blindly. Failure to
 restore any resource/checkpoint sets `pixelUnrestored` and blocks later Pixel lanes.
