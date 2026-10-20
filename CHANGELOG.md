@@ -132,6 +132,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
   the capabilities, so it refused every such allocation as "another platform or browser". This
   was found by the first Studio development run. Session start now reads the W3C `value`, still
   accepts JSON Wire responses, and treats two different session ids as an unidentified create.
+- The iPhone Home Screen install now expands Safari's shortened share sheet on every observed iOS
+  26 release. The expansion cell is labelled "View More" on 26.4 but "More" on 26.2, so the second
+  development run could not find Add to Home Screen on an iPhone Air. The lane taps only that
+  cell, never Safari's toolbar More button, which dismisses the sheet.
 
 ## [v0.7.7] — 2026-10-13
 

@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import { DEVICE_CLOUD_PROFILES, DEVICE_CLOUD_TARGETS, SAMSUNG_MODEL_CODES, eligibleDevice } from "./device-cloud-qualification.ts";
 import { deviceCloudHolds } from "./device-cloud-availability.ts";
 import { recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
-import { DEVICE_WAIT_MS, admitDeviceCloud, deviceCloudVendor, freeDevice, type DeviceCloudAdmissionDependencies } from "./device-cloud-runtime.ts";
-import { TestingBotApi } from "./testingbot.ts";
+import { DEVICE_WAIT_MS, admitDeviceCloud, deviceCloudVendor, freeDevice, installHomeScreenApp, type DeviceCloudAdmissionDependencies } from "./device-cloud-runtime.ts";
+import { TestingBotApi, TestingBotNativeSession } from "./testingbot.ts";
+import { WebDriverError, type WebDriverSession } from "./device-cloud-webdriver.ts";
 import type { CloudDevice } from "./device-cloud-common.ts";
 
 const epoch = "11111111-2222-4333-8444-555555555555";
@@ -141,5 +142,84 @@ describe("TestingBot catalog refusal", () => {
     const error = await new TestingBotApi({ key: "synthetic-key", secret: "synthetic-secret" }).devices("available").catch((error: unknown) => error);
     expect(error).toBeInstanceOf(Error);
     expect(deviceCloudHolds(error)).toBeUndefined();
+  });
+});
+
+interface NativeNode { readonly id: string; readonly type: string; readonly label: string }
+
+/** The NSPredicate subset the lane uses: `key == "x"` / `key CONTAINS "x"` joined by AND, OR and parentheses. */
+function nodeMatches(node: NativeNode, predicate: string): boolean {
+  const tokens = predicate.match(/\(|\)|\bAND\b|\bOR\b|\w+\s+(?:==|CONTAINS)\s+"[^"]*"/gu) ?? [];
+  let index = 0;
+  const atom = (): boolean => {
+    const token = tokens[index++]!;
+    if (token === "(") {
+      const value = either();
+      index += 1;
+      return value;
+    }
+    const [, key, operator, text] = /^(\w+)\s+(==|CONTAINS)\s+"([^"]*)"$/u.exec(token)!;
+    const actual = key === "type" ? node.type : key === "label" ? node.label : node.id;
+    return operator === "==" ? actual === text : actual.includes(text!);
+  };
+  const both = (): boolean => {
+    let value = atom();
+    while (tokens[index] === "AND") { index += 1; value = atom() && value; }
+    return value;
+  };
+  const either = (): boolean => {
+    let value = both();
+    while (tokens[index] === "OR") { index += 1; value = both() || value; }
+    return value;
+  };
+  return either();
+}
+
+describe("Safari Add to Home Screen on iOS 26", () => {
+  let restoreSleep: (() => void) | undefined;
+  afterEach(() => { restoreSleep?.(); });
+
+  // Observed 2026-10-20 on TestingBot: Share lives in Safari's More menu, and the shortened share
+  // sheet expands through a cell labelled "View More" (iOS 26.4) or "More" (26.2). Safari's own
+  // toolbar keeps a "More" button on screen, and tapping it dismisses the sheet.
+  test.each(["View More", "More"])("expands the share sheet through its %s cell, never Safari's More button", async expansion => {
+    const sleep = spyOn(Bun, "sleep").mockResolvedValue(undefined);
+    restoreSleep = () => sleep.mockRestore();
+    const button = (label: string, id = label) => ({ id, type: "XCUIElementTypeButton", label });
+    const cell = (label: string, id = label) => ({ id, type: "XCUIElementTypeCell", label });
+    const toolbar = [button("Back"), button("Page Menu", "page-menu"), button("refresh"), button("More", "toolbar-more")];
+    const screens: Record<string, readonly NativeNode[]> = {
+      page: toolbar,
+      menu: [...toolbar, button("Share", "menu-share"), button("Add to Bookmarks")],
+      sheet: [...toolbar, cell("Mail"), cell("Copy"), cell("Add to Reading List"), cell(expansion, "expand")],
+      expanded: [...toolbar, cell("Mail"), cell("Add to Home Screen", "add"), cell("View Less")],
+      confirm: [button("Cancel"), button("Add", "confirm")],
+      home: [{ id: "icon", type: "XCUIElementTypeIcon", label: "OMP Sessions" }],
+      app: [],
+    };
+    // Either toolbar menu button opens the page menu, and either one dismisses an open share sheet.
+    const menuButton = { page: "menu", sheet: "page", expanded: "page" };
+    const transitions: Record<string, Record<string, string>> = {
+      "page-menu": menuButton, "toolbar-more": menuButton,
+      "menu-share": { menu: "sheet" }, expand: { sheet: "expanded" }, add: { expanded: "confirm" }, confirm: { confirm: "home" }, icon: { home: "app" },
+    };
+    let screen = "page";
+    const element = "element-6066-11e4-a52e-4f735466cecf";
+    const session = {
+      vendor: "testingbot",
+      async command(_operation: string, _method: string, path: string, body?: { value?: string }) {
+        const visible = screens[screen]!.filter(node => body?.value !== undefined && nodeMatches(node, body.value));
+        if (path === "/element") {
+          if (visible[0] === undefined) throw new WebDriverError("TestingBot element lookup failed with HTTP 404 (no such element)", 404, "no such element");
+          return { [element]: visible[0].id };
+        }
+        if (path === "/elements") return visible.map(node => ({ [element]: node.id }));
+        const tapped = /^\/element\/([^/]+)\/click$/u.exec(path)?.[1];
+        if (tapped !== undefined) screen = transitions[decodeURIComponent(tapped)]?.[screen] ?? screen;
+        return null;
+      },
+    } as unknown as WebDriverSession;
+    await installHomeScreenApp(new TestingBotNativeSession(session));
+    expect(screen).toBe("app");
   });
 });
