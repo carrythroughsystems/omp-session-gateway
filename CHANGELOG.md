@@ -36,6 +36,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   references; deletion/absence checks still proceed, but fresh cleanup cannot clear the incident.
   Atomically checkpoint post-audit artifact references with an incident while continuing only
   deletion/absence verification across crashes, and reject data/media keys using value classification.
+  Keep DELETE and bounded absence checks running after post-audit validation failures by atomically
+  recording an unvalidated-record incident and safely recovered strict-JSON whole-value references.
   Scan every non-media retained-surface body before rejection,
   whatever its status, including pre/post-audit errors and transient GET-retry bodies, and persist
   capability hits as incidents. Preserve monotonic cleanup stages and recovery dependencies on

@@ -440,7 +440,7 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(source).not.toMatch(/\bJSON\s*\.\s*parse\s*\(/u);
     expect(source).not.toMatch(/\bvendorJson\s*\(/u);
     expect(source).not.toMatch(/\.\s*json\s*\(/u);
-    expect([...source.matchAll(/\bparseRetainedVendorJson\s*\(/gu)]).toHaveLength(6);
+    expect([...source.matchAll(/\bparseRetainedVendorJson\s*\(/gu)]).toHaveLength(5);
     expect(source).not.toMatch(/\.command\.includes\("BrowserStackLocal"\)/u);
   });
   const placements: [string, (value: unknown) => unknown][] = [];
@@ -544,6 +544,68 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(fresh.calls.findIndex(call => call.url === nestedArtifact)).toBeGreaterThan(fresh.calls.findIndex(call => call.method === "DELETE"));
     expect(parseDeviceCloudProgress(recovery.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
   });
+  const unlistedMetadata = JSON.stringify({ automation_session: { ...record, unlisted_log_url: nestedArtifact } });
+  test.each(["schema", "census"])("post-audit %s validation failure checkpoints safe references and still deletes", async failure => {
+    const raw = failure === "schema" ? unlistedMetadata : JSON.stringify({
+      automation_session: { ...record, insights: { unaccounted: new URL(artifact).hostname, safe: nestedArtifact } },
+    });
+    const fixture = provider({ preDeleteSessionRaw: raw });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).rejects.toThrow();
+    expect(fixture.incidents).toContain("post-audit unvalidated record");
+    const saved = lane.checkpoints.map(parseDeviceCloudProgress).find(progress =>
+      progress.resources?.some(resource => resource.incident && resource.artifacts?.some(artifact => artifact.url === nestedArtifact)));
+    expect(saved).toBeDefined();
+    expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
+    expect(fixture.calls.findIndex(call => call.url === nestedArtifact)).toBeGreaterThan(fixture.calls.findIndex(call => call.method === "DELETE"));
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+    expect(progress.cleanupRequired).toBe(true);
+  });
+  test("a crash after an unvalidated-record checkpoint preserves references for fresh cleanup", async () => {
+    const fixture = provider({ preDeleteSessionRaw: unlistedMetadata });
+    const crashed = auditedAttempt(fixture, { crashOnIncident: true });
+    await expect(crashed.attempt).rejects.toThrow();
+    const progress = structuredClone(crashed.checkpoints.at(-1));
+    const resource = parseDeviceCloudProgress(progress).resources?.find(resource => resource.vendor === "browserstack");
+    expect(resource).toMatchObject({ incident: true, recordRemoved: false });
+    expect(resource?.artifacts).toContainEqual({ url: nestedArtifact, buildId: build, kind: "text" });
+    expect(fixture.calls.some(call => call.method === "DELETE")).toBe(false);
+    restore?.();
+    const fresh = provider({ raw: unlistedMetadata });
+    const recovery = auditedAttempt(fresh, { progress });
+    await expect(recovery.attempt).rejects.toThrow("incident");
+    expect(fresh.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(fresh.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
+    expect(parseDeviceCloudProgress(recovery.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+  });
+  test("a malformed DELETE acknowledgement cannot prevent normal absence verification", async () => {
+    const fixture = provider({ deleteReply: { text: "SYNTHETIC MALFORMED JSON {", status: 200, type: "application/json" } });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).rejects.toThrow();
+    expect(fixture.incidents).toContain("post-audit unvalidated record");
+    expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(fixture.calls.filter(call => call.url === artifact)).toHaveLength(2);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+  });
+  test("a malformed absence body persists an incident while polling still converges", async () => {
+    const fixture = provider({ postDeleteLog: "SYNTHETIC MALFORMED JSON {" });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).rejects.toThrow();
+    expect(fixture.incidents).toContain("post-audit unvalidated record");
+    expect(fixture.calls.filter(call => call.url === `${apiOrigin}/sessions/${id}/logs`)).toHaveLength(3);
+    expect(fixture.clock.now()).toBe(2_000);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
+  });
+  test("a malformed lingering artifact still exhausts the existing absence bound", async () => {
+    const fixture = provider({ postDeleteArtifactReply: { text: "SYNTHETIC MALFORMED JSON {", status: 200, type: "application/json" } });
+    await fixture.audit();
+    await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow("retained signed artifact absence could not be verified");
+    expect(fixture.incidents).toContain("post-audit unvalidated record");
+    expect(fixture.removal.deleted).toBe(true);
+    expect(fixture.clock.now()).toBe(180_000);
+  });
   test("whole-value references accept case-insensitive schemes and preserve duplicate/classification checks", () => {
     const upper = nestedArtifact.replace("https:", "HtTpS:");
     expect(browserStackReferences(id, build, { reason: [{ arbitrary: upper }] }).artifacts).toEqual([{ url: upper, buildId: build, kind: "text" }]);
@@ -594,12 +656,14 @@ describe("BrowserStack complete retention and deletion", () => {
     if (surface === "delete") options.deleteReply = { ...reply, text: JSON.stringify({ status: "ok", ...json }) };
     if (surface === "post-session") options.postDeleteSessionRaw = metadata;
     if (surface === "post-log") options.postDeleteLog = raw;
-    if (surface === "post-artifact") options.postDeleteArtifactReply = reply;
+    if (surface === "post-artifact") options.postDeleteArtifactReply = { ...reply, status: 404 };
     if (surface === "retry") options.retry = { surface: "session", reply: { ...reply, status: 502 } };
     const fixture = provider(options);
     if (surface === "delete" || surface.startsWith("post-")) {
       await fixture.audit();
-      await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow("unaccounted BrowserStack artifact reference");
+      await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+      expect(fixture.incidents).toContain("post-audit unvalidated record");
+      expect(fixture.removal.deleted).toBe(true);
     } else await expect(fixture.audit()).rejects.toThrow("unaccounted BrowserStack artifact reference");
   });
   test.each(placements)("class invariant: unreviewed origin anywhere at %s fails closed", async (_name, place) => {
@@ -800,14 +864,19 @@ describe("BrowserStack complete retention and deletion", () => {
   test.each(["audit", "cleanup"])("an absent %s session body with unbound references fails closed", async operation => {
     const fixture = provider({ sessionReply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 404, type: "application/json" } });
     const result = operation === "audit" ? fixture.audit() : fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
-    await expect(result).rejects.toThrow("unbound retained reference");
+    if (operation === "audit") await expect(result).rejects.toThrow("unbound retained reference");
+    else {
+      await expect(result).rejects.toThrow("retained artifact inventory is unavailable");
+      expect(fixture.incidents).toContain("post-audit unvalidated record");
+    }
     expect(fixture.calls).toHaveLength(1);
   });
-  test("fresh cleanup refuses a pre-build reference rather than retaining it in volatile memory", async () => {
+  test("fresh cleanup records an unvalidated pre-build body and still deletes after the retry", async () => {
     const fixture = provider({ retry: { surface: "session", reply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 502, type: "application/json" } } });
-    await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow("unbound retained reference");
-    expect(fixture.removal.artifacts).toEqual([]);
-    expect(fixture.calls).toHaveLength(1);
+    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    expect(fixture.incidents).toContain("post-audit unvalidated record");
+    expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(fixture.calls.some(call => call.url === nestedArtifact)).toBe(false);
   });
   test("pre-finalization references are unbound even when running metadata reports a build", async () => {
     const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, status: "running", insights: { reason: nestedArtifact } } }) });
@@ -839,11 +908,12 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(incident).toBe(true);
     expect(fixture.inspected.some(record => record.text.includes("\\u0053YNTHETIC") && record.text.includes(marker))).toBe(true);
   });
-  test("duplicate post-DELETE JSON is raw-scanned before rejecting its discarded content", async () => {
+  test("duplicate post-DELETE JSON is raw-scanned and flagged without blocking absence", async () => {
     const marker = "SYNTHETIC-LATE-DUPLICATE-CONTENT";
     const fixture = provider({ postDeleteLog: `{"step":"${marker}","step":"clean"}` });
     await fixture.audit();
-    await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow();
+    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    expect(fixture.incidents).toContain("post-audit unvalidated record");
     expect(fixture.inspected.some(record => record.text.includes(marker))).toBe(true);
     expect(fixture.removal.deleted).toBe(true);
   });

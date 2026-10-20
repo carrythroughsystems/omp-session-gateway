@@ -791,6 +791,10 @@ An exact artifact URL first declared after auditing, even in the pre-DELETE GET,
 checkpoints its inventory plus a `post-audit retained reference` incident and receives only
 deletion/absence verification rather than late auditing, including after a crash; keys also use
 value media classification and any `data:`/media-pattern key fails closed.
+Post-audit validation/schema/census errors atomically checkpoint a `post-audit unvalidated record`
+incident with safely recoverable pinned-origin whole-value URLs from strict JSON and still proceed
+through DELETE and bounded record/log/artifact absence checks, never heuristic recovery of malformed
+JSON or restoration approval; a checkpoint-write failure still stops effects.
 The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
 deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
 from every retained surface, before or after the audit and whatever their HTTP status, are scanned

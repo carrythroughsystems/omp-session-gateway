@@ -573,6 +573,10 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   checkpoints its inventory and a `post-audit retained reference` incident while deletion/absence
   verification continues without late auditing; keys use the value media classifier and any
   case-insensitive `data:` or media-pattern key fails closed.
+  Post-audit schema, census or body-validation failures atomically checkpoint a `post-audit
+  unvalidated record` incident and individually validated pinned-origin whole-value URLs recovered
+  from strict JSON, then continue DELETE and bounded absence checks rather than accepting the
+  body or inferring references from malformed JSON; checkpoint failures themselves still halt.
   DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
   signed artifact** are required before removal/restoration, including references returning 404 at
   the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.

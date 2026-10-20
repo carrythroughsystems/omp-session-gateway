@@ -1307,6 +1307,10 @@ Any exact artifact URL first declared after the audit atomically checkpoints its
 `post-audit retained reference` incident before deletion/absence verification continues, never late
 auditing, including in fresh cleanup; keys use value media classification and `data:`/media-pattern
 keys fail closed.
+Post-audit schema/census/body-validation failure atomically persists a `post-audit unvalidated
+record` incident and individually validated pinned-origin whole-value URLs recoverable from strict
+JSON before continuing DELETE and bounded absence verification, without malformed-JSON heuristics
+or restoration approval; checkpoint failure remains fatal.
 Duplicate/media-classification checks and monotonic audit/deletion/absence milestones remain.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
