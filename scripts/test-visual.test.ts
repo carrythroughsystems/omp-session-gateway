@@ -198,6 +198,8 @@ test("only the exact pinned entry-point future-Node notice is nonfatal", () => {
   expect(visualProcessReasons(notice, true, false)).toContain("sdk-warning");
 });
 
+// A cold Windows runner can spend over 10 s starting Node and loading @percy/core (2026-10-20,
+// Compatibility portable-source); 30 s matches the portable lane's default per-test bound.
 test("the installed Percy API answers health under its native Node runtime", async () => {
   const script = `
     import { createRequire } from "node:module";
@@ -234,4 +236,4 @@ test("the installed Percy API answers health under its native Node runtime", asy
   expect(code).toBe(0);
   expect(stdout === "local-percy: healthy\n").toBe(true);
   expect(stderr === "").toBe(true);
-}, 10_000);
+}, 30_000);
