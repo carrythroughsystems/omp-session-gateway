@@ -45,6 +45,14 @@ No Percy output, trace, screenshot, video, raw SDK diagnostics or error-log uplo
 
 ## Set up the Percy project
 
+Upload prerequisite: install native **Node.js 24.22.0 LTS** on `PATH`, alongside Bun 1.4.0 and
+Playwright's Chromium. Only the Percy CLI runs under Node; build, worker and local validation
+remain Bun commands. CI pins `actions/setup-node` by commit, verifies exactly 24.22.0, and passes
+that setup's executable path to the runner. Local uploads resolve native `node` from `PATH`;
+missing Node fails with `reason=node-missing` and `visual upload: Node.js is required for Percy`.
+Do not launch Percy with Bun: its HTTP API can appear started but never answer the worker's
+health request, creating a build with zero snapshots.
+
 1. Create a dedicated **web** Percy project for these synthetic fixtures, connected to this
    repository. Do not share a project/token with production captures or real sessions.
 2. The maintainer chooses renderers in Percy project settings, not this suite. Recommended:
@@ -83,6 +91,16 @@ the lane has no `continue-on-error`, retry or silent no-op, but is **not a requi
   are exact devDependency pins excluded from Dependabot; runtime output stays first-party.
 - No real Percy build or deliberate visual-diff proof is claimed until those checks are observed
   in the configured project. No new supported or qualified platform follows from a Percy render.
+
+### Diagnose a failed upload
+
+The runner forwards only closed-set state/project/phase/reason codes and bounded validation/
+submission counts through both child-process layers. It never prints raw Percy or browser text.
+`phase=server` distinguishes malformed addresses, unreachable API, invalid HTTP/JSON/type or
+missing build identity. `phase=submit` distinguishes SDK offline/warning/error/no-submission,
+guard rejection and server rejection. `phase=percy` reports child exit, diagnostics, incomplete
+counts or missing finalization. Use these categories to select the failing boundary; do not
+enable raw logs, traces, screenshots or vendor error-log collection to diagnose it.
 
 ## Live rule
 

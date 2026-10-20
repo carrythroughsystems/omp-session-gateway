@@ -111,6 +111,14 @@ test("visual review stays GitHub-hosted and scopes its secret only to eligible u
   const setup = steps.find(step => step.uses?.startsWith("oven-sh/setup-bun@"))!;
   expect(setup.if).toBeUndefined();
   expect(setup.with?.["bun-version"]).toBe("1.4.0");
+  const nodeSetup = steps.find(step => step.uses?.startsWith("actions/setup-node@"))!;
+  expect(nodeSetup.uses).toBe("actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38");
+  expect(nodeSetup.if).toBeUndefined();
+  expect(nodeSetup.with?.["node-version"]).toBe("24.22.0");
+  expect(nodeSetup.with?.["package-manager-cache"]).toBe(false);
+  const nodeSelection = steps.find(step => step.name === "Select pinned Percy Node")!;
+  expect(nodeSelection.run).toContain('test "$(node --version)" = v24.22.0');
+  expect(nodeSelection.run).toContain('node --print process.execPath');
   expect(steps.find(step => step.uses?.startsWith("actions/checkout@"))?.with?.["persist-credentials"]).toBe(false);
   expect(steps.find((step: { run?: string }) => step.run === "bun install --frozen-lockfile")).toBeDefined();
   expect(steps.find(step => step.run === "bunx playwright install chromium")?.["timeout-minutes"]).toBe(10);
@@ -121,6 +129,7 @@ test("visual review stays GitHub-hosted and scopes its secret only to eligible u
   expect(secretSteps).toHaveLength(1);
   const upload = secretSteps[0]!;
   expect(upload.run).toBe("bun run test:visual:percy");
+  expect(upload.env?.OMP_VISUAL_NODE_EXECUTABLE).toBe("${{ steps.percy-node.outputs.executable }}");
   for (const condition of [upload.if, upload.env?.PERCY_TOKEN]) {
     expect(condition).toContain("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository");
     expect(condition).toContain("github.event_name == 'push' && github.ref == 'refs/heads/main'");

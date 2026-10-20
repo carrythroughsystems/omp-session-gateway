@@ -156,35 +156,47 @@ export async function submitSnapshot(
   sdk: SDKUtils = requireSDK("@percy/sdk-utils") as SDKUtils,
 ): Promise<void> {
   let accepted = 0;
-  let failed = false;
+  let reason = "";
   const originalPost = sdk.request.post;
   const originalLog = sdk.logger.log;
   sdk.logger.log = (_namespace, level, message) => {
-    if (level === "warn" || level === "error" || /Percy is not running/iu.test(String(message))) failed = true;
+    if (!reason) {
+      if (/Percy is not running/iu.test(String(message))) reason = "sdk-offline";
+      else if (level === "warn") reason = "sdk-warning";
+      else if (level === "error") reason = "sdk-error";
+    }
   };
   sdk.request.post = async (path, data) => {
     if (path !== "/percy/snapshot") {
-      failed = true;
+      reason = "sdk-endpoint";
       throw new Error("visual upload: unexpected SDK request");
     }
     try {
       assertSerializedSnapshotSafe(data.domSnapshot, fixture);
       // Check the envelope as well as the DOM: names, URLs and metadata are upload surfaces too.
       assertTextSafe(JSON.stringify(data), fixture);
+    } catch {
+      reason = "guard-rejected";
+      throw new Error("visual upload: submission rejected");
+    }
+    try {
       const response = await originalPost(path, data);
       if (response.body?.success !== true) throw new Error();
       accepted++;
       return response;
     } catch {
-      failed = true;
+      reason = "server-rejected";
       throw new Error("visual upload: submission rejected");
     }
   };
   try {
     await snapshot(page, name, options);
-    if (failed || accepted !== 1) throw new Error();
+    if (reason || accepted !== 1) {
+      reason ||= accepted === 0 ? "sdk-no-submission" : "submission-count";
+      throw new Error();
+    }
   } catch {
-    throw new Error("visual upload: submission failed");
+    throw new Error(`visual upload: submission failed (${reason || "sdk-exception"})`);
   } finally {
     sdk.request.post = originalPost;
     sdk.logger.log = originalLog;

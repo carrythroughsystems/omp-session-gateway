@@ -443,6 +443,9 @@ requires a healthy Percy server, exactly 18 submissions and successful build fin
 Forks and every gateway-ci dispatch receive no token and explicitly report not uploaded.
 No traces, screenshots, videos, raw diagnostics, log uploads or Percy output enter CI artifacts;
 Percy CLI logs stay in memory and client error-log collection is disabled.
+Only closed-set phase/reason codes and bounded counts may pass through nested process output.
+The CLI runs under native Node (exactly pinned in CI); the Bun worker requires a responsive API
+and active build before a snapshot can be submitted.
 
 Live is restricted to manual, capability-free synthetic fixtures only. Never point it at a
 production gateway or forward a loopback/tailnet service to it. This lane authorizes no Live

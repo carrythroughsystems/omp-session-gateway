@@ -5,7 +5,7 @@ export const VISUAL_STATES = [
 ] as const;
 export type VisualState = typeof VISUAL_STATES[number];
 export const VISUAL_PROJECTS = ["visual-phone-390x844", "visual-tablet-810x1080", "visual-desktop-1280x800"] as const;
-const PHASES: Readonly<Record<string, true>> = {
+export const VISUAL_PHASES: Readonly<Record<string, true>> = {
   fixture: true, directory: true, alerts: true, state: true, geometry: true, guard: true, submit: true, cleanup: true,
   "negative-hidden-attribute": true, "negative-form-value": true, "negative-inline-style": true,
   "negative-text": true, "negative-textual-resource": true, "negative-surface": true,
@@ -13,6 +13,11 @@ const PHASES: Readonly<Record<string, true>> = {
   "parity-directory": true, "parity-column": true, "parity-transcript": true, "parity-header": true,
   "parity-ask": true, "parity-triage": true, "parity-settings": true, "parity-overflow": true,
   "parity-directory-x": true, "parity-directory-y": true, "parity-directory-width": true, "parity-directory-height": true,
+};
+export const VISUAL_UPLOAD_REASONS: Readonly<Record<string, true>> = {
+  "sdk-offline": true, "sdk-warning": true, "sdk-error": true, "sdk-endpoint": true,
+  "guard-rejected": true, "server-rejected": true, "sdk-no-submission": true, "sdk-exception": true,
+  "submission-count": true,
 };
 
 /** No raw errors, attachments, browser console, child stdout/stderr, or DOM excerpts. */
@@ -29,14 +34,15 @@ export default class SafeVisualReporter implements Reporter {
       return;
     }
     const identity = `${state} / ${project}`;
-    const phase = test.annotations.filter(value => value.type === "visual-phase" && PHASES[value.description ?? ""]).at(-1)?.description ?? "fixture";
+    const phase = test.annotations.filter(value => value.type === "visual-phase" && Object.hasOwn(VISUAL_PHASES, value.description ?? "")).at(-1)?.description ?? "fixture";
+    const reason = test.annotations.find(value => value.type === "visual-upload-reason" && Object.hasOwn(VISUAL_UPLOAD_REASONS, value.description ?? ""))?.description;
     if (result.status === "passed" && !this.passed.has(identity)) {
       this.passed.add(identity);
       if (test.annotations.some(value => value.type === "visual-submitted" && value.description === "accepted")) this.submitted.add(identity);
       process.stdout.write(`visual: ${identity}: passed\n`);
     } else {
       this.failed = true;
-      process.stdout.write(`visual: ${identity}: failed phase=${phase}\n`);
+      process.stdout.write(`visual: ${identity}: failed phase=${phase}${reason ? ` reason=${reason}` : ""}\n`);
     }
   }
 

@@ -5,7 +5,7 @@ import { startDashboardFixture, type DashboardFixture } from "../e2e/fixture-ser
 import {
   GATEWAY_WAITING, INITIAL_SESSIONS, RELEASE_WAITING, installSyntheticProductFixture,
 } from "../e2e/synthetic-product-fixture.ts";
-import { VISUAL_STATES } from "./safe-reporter.ts";
+import { VISUAL_STATES, VISUAL_UPLOAD_REASONS } from "./safe-reporter.ts";
 import { snapshotOptions, submitSnapshot, validateSnapshot } from "./snapshot-safety.ts";
 
 const TRANSCRIPT = [
@@ -231,9 +231,11 @@ for (const state of VISUAL_STATES) {
         await submitSnapshot(page, `${state} / ${info.project.name}`, fixture, options);
         info.annotations.push({ type: "visual-submitted", description: "accepted" });
       } else if (process.env.OMP_VISUAL_MODE !== "local") throw new Error("visual mode: closed mode required");
-    } catch {
+    } catch (error) {
       // Playwright must never get a browser error, locator excerpt, unsafe message or cause.
       info.annotations.push({ type: "visual-phase", description: phase });
+      const reason = error instanceof Error ? /^visual upload: submission failed \(([a-z-]+)\)$/u.exec(error.message)?.[1] : undefined;
+      if (reason && Object.hasOwn(VISUAL_UPLOAD_REASONS, reason)) info.annotations.push({ type: "visual-upload-reason", description: reason });
       throw new Error("visual validation failed");
     } finally {
       await context.close();

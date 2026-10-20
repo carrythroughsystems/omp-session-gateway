@@ -56,6 +56,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Run the Percy CLI under native Node instead of Bun's incompatible HTTP server layer, and pin
+  its CI Node 24.22.0 LTS runtime. Preserve sanitized phase/reason/count diagnostics through both
+  runner layers so a created build with zero accepted snapshots cannot hide its failing boundary.
 - Poll for the installed WebAPK's DevTools page target before judging the published-byte smoke render, with a fail-closed deadline and sanitized timeout diagnostics.
 - Open sessions on tablet and desktop widths are no longer squeezed into the directory's 35rem
   column (#411, #412). The directory's `main` rule also sized the embedded client's `<main>`, so the

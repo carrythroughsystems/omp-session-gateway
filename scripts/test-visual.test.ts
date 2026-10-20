@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createServer } from "node:http";
-import { assertVisualResult, requirePercyServer, runVisual, visualEnvironment, type VisualProcessResult } from "./test-visual.ts";
+import { fileURLToPath } from "node:url";
+import { assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
 
 const localSuccess = { code: 0, stdout: "visual: validated=18 submitted=0 outcome=passed\n", stderr: "" };
 const uploadSuccess = { code: 0, stdout: "visual: validated=18 submitted=18 outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n", stderr: "" };
@@ -25,6 +26,26 @@ test("upload mode refuses an absent token before creating any child", async () =
   expect(calls).toBe(0);
 });
 
+test("upload refuses missing native Node before creating any child", async () => {
+  let calls = 0;
+  await expect(runVisual(["upload"], {
+    PERCY_TOKEN: "synthetic-test-token", OMP_VISUAL_NODE_EXECUTABLE: "/nonexistent/percy-node",
+  }, async () => { calls++; return uploadSuccess; })).rejects.toThrow("visual upload: Node.js is required for Percy");
+  expect(calls).toBe(0);
+});
+
+test("upload uses the explicitly selected setup-node executable rather than another PATH node", async () => {
+  const selected = Bun.which("node")!;
+  const commands: string[][] = [];
+  await runVisual(["upload"], {
+    PERCY_TOKEN: "synthetic-test-token", OMP_VISUAL_NODE_EXECUTABLE: selected, PATH: "/nonexistent",
+  }, async command => {
+    commands.push(command);
+    return commands.length === 1 ? { code: 0, stdout: "", stderr: "" } : uploadSuccess;
+  });
+  expect(commands[1]?.[0]).toBe(selected);
+});
+
 test("modes are closed and never fall back on a failure or invalid selection", async () => {
   for (const args of [[], ["auto"], ["local", "upload"]]) {
     await expect(runVisual(args, {})).rejects.toThrow("visual: choose local or upload");
@@ -41,6 +62,7 @@ test("upload launches the pinned CLI with the Playwright browser and isolated lo
   });
   expect(calls).toHaveLength(2);
   expect(calls[0]?.environment.PERCY_TOKEN).toBeUndefined();
+  expect(calls[1]?.command[0]).toBe(Bun.which("node")!);
   expect(calls[1]?.command[1]?.endsWith("/bin/run.cjs")).toBe(true);
   expect(calls[1]?.environment.PERCY_BROWSER_EXECUTABLE?.includes("chromium")).toBe(true);
   expect(calls[1]?.environment.PERCY_SERVER_HOST).toBe("127.0.0.1");
@@ -82,3 +104,66 @@ test("failed diagnostics never repeat untrusted child output", () => {
   expect(message.includes(planted)).toBe(false);
   expect(visualEnvironment({ PERCY_TOKEN: planted, __PERCY_BROWSERIFIED__: "1", OMP_VISUAL_MODE: "upload", CI: "true" })).toEqual({ CI: "true" });
 });
+
+test("nested upload diagnostics preserve only closed-set phases, reasons and bounded counts", () => {
+  const planted = "synthetic-sensitive-diagnostic";
+  const diagnostic = [
+    "visual: directory-empty / visual-phone-390x844: failed phase=submit reason=guard-rejected",
+    "visual: validated=0 submitted=0 outcome=failed",
+    "visual-runner: phase=server reason=healthy",
+    "visual-runner: phase=playwright reason=child-exit",
+    `[percy] ${planted}`,
+    `visual: directory-empty / visual-phone-390x844: failed phase=${planted}`,
+    `visual: directory-empty / visual-phone-390x844: failed phase=submit reason=${planted}`,
+    "visual: directory-empty / visual-phone-390x844: failed phase=constructor",
+    "visual: directory-empty / visual-phone-390x844: failed phase=submit reason=constructor",
+    "visual-runner: phase=constructor reason=healthy",
+    "visual: unknown-state / visual-phone-390x844: passed",
+    "visual: validated=99 submitted=0 outcome=passed",
+    "visual: validated=0 submitted=18 outcome=passed",
+  ].join("\n");
+  const lines = safeVisualLines(diagnostic);
+  expect(lines.some(line => line.includes(planted))).toBe(false);
+  expect(lines).toEqual(diagnostic.split("\n").slice(0, 4));
+  expect(visualProcessReasons({ code: 1, stdout: diagnostic, stderr: planted }, true)).toEqual([
+    "child-exit", "sdk-warning", "missing-summary", "not-finalized",
+  ]);
+});
+
+test("the installed Percy API answers health under its native Node runtime", async () => {
+  const script = `
+    import { createRequire } from "node:module";
+    import { pathToFileURL } from "node:url";
+    const require = createRequire(pathToFileURL(process.cwd() + "/package.json"));
+    const cliRequire = createRequire(require.resolve("@percy/cli"));
+    // Resolve the pinned transitive package rather than importing a hoisted dependency.
+    const { default: Percy } = await import(pathToFileURL(cliRequire.resolve("@percy/core")).href);
+    const percy = new Percy({ testing: true, port: 0, projectType: "web" });
+    percy.testing.build = { id: "local-synthetic-build" };
+    try {
+      await percy.start();
+      const response = await fetch(percy.address() + "/percy/healthcheck", { signal: AbortSignal.timeout(2000) });
+      const body = await response.json();
+      if (!response.ok || body.success !== true || body.type !== "web" || body.build?.id !== "local-synthetic-build") throw new Error();
+      process.stdout.write("local-percy: healthy\\n");
+    } catch {
+      process.stderr.write("local-percy: failed\\n");
+      process.exitCode = 1;
+    } finally { await percy.stop(); }
+  `;
+  const child = Bun.spawn([Bun.which("node")!, "--input-type=module", "--eval", script], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: {
+      ...visualEnvironment(process.env),
+      PERCY_TOKEN: "web_local-synthetic-testing-only",
+      PERCY_SERVER_HOST: "127.0.0.1",
+      PERCY_LOGS_IN_MEMORY: "1",
+      PERCY_CLIENT_ERROR_LOGS: "false",
+    },
+    stdout: "pipe", stderr: "pipe", stdin: "ignore",
+  });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  expect(code).toBe(0);
+  expect(stdout === "local-percy: healthy\n").toBe(true);
+  expect(stderr === "").toBe(true);
+}, 10_000);

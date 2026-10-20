@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "@playwright/test";
+import { VISUAL_PHASES, VISUAL_PROJECTS, VISUAL_STATES, VISUAL_UPLOAD_REASONS } from "../apps/web/visual/safe-reporter.ts";
 
 export type VisualMode = "local" | "upload";
 export interface VisualProcessResult { code: number; stdout: string; stderr: string }
@@ -11,17 +12,57 @@ const CLI = createRequire(import.meta.url).resolve("@percy/cli");
 const CLI_EXECUTABLE = fileURLToPath(new URL("../bin/run.cjs", pathToFileURL(CLI)));
 const CONFIG = "apps/web/playwright.visual.config.ts";
 const MISSING_TOKEN = "visual upload: PERCY_TOKEN is required";
+const MISSING_NODE = "visual upload: Node.js is required for Percy";
+const RUNNER_PHASES: Readonly<Record<string, true>> = { server: true, playwright: true, percy: true };
+const RUNNER_REASONS: Readonly<Record<string, true>> = {
+  healthy: true, "health-rejected": true, "child-exit": true, "sdk-warning": true,
+  "missing-summary": true, "not-finalized": true,
+  "health-address": true, "health-unreachable": true, "health-status": true, "health-shape": true,
+  "health-type": true, "health-build": true,
+  "node-missing": true,
+};
 
 export function visualEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(environment).filter(([key]) => !key.startsWith("PERCY_") && !key.startsWith("OMP_VISUAL_") && !key.startsWith("__PERCY_")));
 }
 
-export function assertVisualResult(result: VisualProcessResult, upload: boolean): void {
+/** Reconstruct only closed-set diagnostics; never forward raw child lines or matched substrings. */
+export function safeVisualLines(text: string): string[] {
+  const lines: string[] = [];
+  for (const line of text.replace(/\u001b\[[0-9;]*m/gu, "").split("\n")) {
+    const state = /^visual: ([a-z-]+) \/ ([a-z0-9-]+): (passed|failed)(?: phase=([a-z-]+))?(?: reason=([a-z-]+))?$/u.exec(line);
+    if (state && VISUAL_STATES.some(value => value === state[1]) && VISUAL_PROJECTS.some(value => value === state[2]) &&
+      (state[3] === "passed" && state[4] === undefined && state[5] === undefined ||
+        state[3] === "failed" && Object.hasOwn(VISUAL_PHASES, state[4] ?? "") && (state[5] === undefined || Object.hasOwn(VISUAL_UPLOAD_REASONS, state[5])))) {
+      lines.push(`visual: ${state[1]} / ${state[2]}: ${state[3]}${state[4] ? ` phase=${state[4]}` : ""}${state[5] ? ` reason=${state[5]}` : ""}`);
+      continue;
+    }
+    const summary = /^visual: validated=(\d{1,2}) submitted=(\d{1,2}) outcome=(passed|failed)$/u.exec(line);
+    if (summary && Number(summary[1]) <= 18 && Number(summary[2]) <= Number(summary[1])) {
+      lines.push(`visual: validated=${Number(summary[1])} submitted=${Number(summary[2])} outcome=${summary[3]}`);
+      continue;
+    }
+    const runner = /^visual-runner: phase=([a-z-]+) reason=([a-z-]+)$/u.exec(line);
+    if (runner && Object.hasOwn(RUNNER_PHASES, runner[1] ?? "") && Object.hasOwn(RUNNER_REASONS, runner[2] ?? "")) {
+      lines.push(`visual-runner: phase=${runner[1]} reason=${runner[2]}`);
+    }
+  }
+  return lines;
+}
+
+export function visualProcessReasons(result: VisualProcessResult, upload: boolean, requireFinalization = upload): string[] {
   const expected = `visual: validated=18 submitted=${upload ? 18 : 0} outcome=passed`;
+  const reasons: string[] = [];
+  if (result.code !== 0) reasons.push("child-exit");
   // Warnings/errors use stderr at info loglevel in the pinned CLI. Do not print their contents.
-  if (result.code !== 0 || result.stderr.trim() !== "" || !result.stdout.split("\n").includes(expected) ||
-    /Percy is not running|\bwarning\b|skipping visual tests|Percy is disabled/iu.test(result.stdout) ||
-    (upload && !/\[percy\] Finalized build #\d+:/u.test(result.stdout.replace(/\u001b\[[0-9;]*m/gu, "")))) {
+  if (result.stderr.trim() !== "" || /Percy is not running|\bwarning\b|skipping visual tests|Percy is disabled/iu.test(result.stdout)) reasons.push("sdk-warning");
+  if (!result.stdout.split("\n").includes(expected)) reasons.push("missing-summary");
+  if (requireFinalization && !/\[percy\] Finalized build #\d+:/u.test(result.stdout.replace(/\u001b\[[0-9;]*m/gu, ""))) reasons.push("not-finalized");
+  return reasons;
+}
+
+export function assertVisualResult(result: VisualProcessResult, upload: boolean): void {
+  if (visualProcessReasons(result, upload).length !== 0) {
     throw new Error(upload ? "visual upload: incomplete or failed Percy build" : "visual local: validation failed");
   }
 }
@@ -43,15 +84,22 @@ async function execute(command: string[], environment: NodeJS.ProcessEnv): Promi
 }
 
 export async function requirePercyServer(environment: NodeJS.ProcessEnv): Promise<void> {
+  let reason = "health-address";
   try {
     const address = new URL(environment.PERCY_SERVER_ADDRESS ?? "http://127.0.0.1:5338");
     if (address.protocol !== "http:" || address.hostname !== "127.0.0.1" || address.username || address.password || address.search || address.hash || address.pathname !== "/") throw new Error();
+    reason = "health-unreachable";
     const response = await fetch(new URL("/percy/healthcheck", address), { signal: AbortSignal.timeout(5_000) });
+    reason = "health-status";
+    if (!response.ok) throw new Error();
+    reason = "health-shape";
     const body: unknown = await response.json();
-    if (!response.ok || body === null || typeof body !== "object" || !("success" in body) || body.success !== true ||
-      !("type" in body) || body.type !== "web" || !("build" in body) || body.build === null || typeof body.build !== "object" ||
-      !("id" in body.build) || !body.build.id) throw new Error();
-  } catch { throw new Error("visual upload: healthy Percy server required"); }
+    if (body === null || typeof body !== "object" || !("success" in body) || body.success !== true) throw new Error();
+    reason = "health-type";
+    if (!("type" in body) || body.type !== "web") throw new Error();
+    reason = "health-build";
+    if (!("build" in body) || body.build === null || typeof body.build !== "object" || !("id" in body.build) || !body.build.id) throw new Error();
+  } catch { throw new Error(`visual upload: healthy Percy server required (${reason})`); }
 }
 
 export async function runVisual(
@@ -65,25 +113,42 @@ export async function runVisual(
   delete clean.FORCE_COLOR;
   const playwright = [process.execPath, "x", "--no-install", "playwright", "test", "-c", CONFIG];
   if (upload && environment.OMP_VISUAL_PERCY_CHILD === "1") {
-    await requirePercyServer(environment);
+    try { await requirePercyServer(environment); }
+    catch (error) {
+      const code = error instanceof Error ? /^visual upload: healthy Percy server required \(([a-z-]+)\)$/u.exec(error.message)?.[1] : undefined;
+      const reason = code && Object.hasOwn(RUNNER_REASONS, code) ? code : "health-rejected";
+      process.stdout.write(`visual-runner: phase=server reason=${reason}\n`);
+      throw new Error("visual upload: healthy Percy server required");
+    }
+    process.stdout.write("visual-runner: phase=server reason=healthy\n");
     const result = await run(playwright, { ...clean, PERCY_SERVER_ADDRESS: environment.PERCY_SERVER_ADDRESS ?? "http://127.0.0.1:5338", PERCY_LOGS_IN_MEMORY: "1", PERCY_CLIENT_ERROR_LOGS: "false", OMP_VISUAL_MODE: "upload", NO_COLOR: "" });
-    if (result.code !== 0 || result.stderr.trim() !== "" || !result.stdout.includes("visual: validated=18 submitted=18 outcome=passed")) throw new Error("visual upload: submissions failed");
-    process.stdout.write("visual: validated=18 submitted=18 outcome=passed\n");
+    for (const line of safeVisualLines(`${result.stdout}\n${result.stderr}`)) process.stdout.write(`${line}\n`);
+    // The worker requires 18 submissions; only its owning CLI can finalize the build.
+    const reasons = visualProcessReasons(result, true, false);
+    for (const reason of reasons) process.stdout.write(`visual-runner: phase=playwright reason=${reason}\n`);
+    if (reasons.length !== 0) throw new Error("visual upload: submissions failed");
     return;
   }
   if (upload && !environment.PERCY_TOKEN?.trim()) throw new Error(MISSING_TOKEN);
+  // Percy is a Node CLI. Bun's http.Server compatibility can start its API without serving
+  // requests, yielding a created build with zero snapshots. Keep our worker on pinned Bun.
+  const percyRuntime = upload ? Bun.which(environment.OMP_VISUAL_NODE_EXECUTABLE ?? "node", {
+    PATH: environment.PATH ?? process.env.PATH ?? "",
+  }) : undefined;
+  if (upload && !percyRuntime) {
+    process.stdout.write("visual-runner: phase=percy reason=node-missing\n");
+    throw new Error(MISSING_NODE);
+  }
   const build = await run([process.execPath, "run", "build"], clean);
   if (build.code !== 0) throw new Error("visual: build failed");
   if (!upload) {
     const result = await run(playwright, { ...clean, OMP_VISUAL_MODE: "local", NO_COLOR: "" });
     // Only emit the reporter's fixed grammar, never subprocess/browser/serializer diagnostics.
-    for (const line of result.stdout.split("\n")) {
-      if (/^visual: (?:[a-z-]+ \/ visual-(?:phone-390x844|tablet-810x1080|desktop-1280x800): (?:passed|failed phase=[a-z-]+)|validated=\d+ submitted=0 outcome=(?:passed|failed))$/u.test(line)) process.stdout.write(`${line}\n`);
-    }
+    for (const line of safeVisualLines(result.stdout)) process.stdout.write(`${line}\n`);
     assertVisualResult(result, false);
     return;
   }
-  const result = await run([process.execPath, CLI_EXECUTABLE, "exec", "--", process.execPath, "scripts/test-visual.ts", "upload"], {
+  const result = await run([percyRuntime!, CLI_EXECUTABLE, "exec", "--", process.execPath, "scripts/test-visual.ts", "upload"], {
     ...clean,
     PERCY_TOKEN: environment.PERCY_TOKEN,
     PERCY_SERVER_HOST: "127.0.0.1",
@@ -94,14 +159,16 @@ export async function runVisual(
     OMP_VISUAL_PERCY_CHILD: "1",
     NO_COLOR: "1",
   });
+  for (const line of safeVisualLines(`${result.stdout}\n${result.stderr}`)) process.stdout.write(`${line}\n`);
+  for (const reason of visualProcessReasons(result, true)) process.stdout.write(`visual-runner: phase=percy reason=${reason}\n`);
   assertVisualResult(result, true);
-  process.stdout.write("visual: validated=18 submitted=18 outcome=passed\nvisual upload: build finalized\n");
+  process.stdout.write("visual upload: build finalized\n");
 }
 
 if (import.meta.main) {
   try { await runVisual(Bun.argv.slice(2), process.env); }
   catch (error) {
-    const allowed = [MISSING_TOKEN, "visual: choose local or upload", "visual: build failed", "visual local: validation failed", "visual upload: healthy Percy server required", "visual upload: submissions failed", "visual upload: incomplete or failed Percy build"];
+    const allowed = [MISSING_TOKEN, MISSING_NODE, "visual: choose local or upload", "visual: build failed", "visual local: validation failed", "visual upload: healthy Percy server required", "visual upload: submissions failed", "visual upload: incomplete or failed Percy build"];
     const message = error instanceof Error && allowed.includes(error.message) ? error.message : "visual: execution failed";
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;

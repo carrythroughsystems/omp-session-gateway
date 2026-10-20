@@ -102,13 +102,13 @@ test("last-mile SDK guard rejects swallowed errors, warnings, no-ops and mutated
       logger: { log: (_namespace: string, _level: string, _message: unknown): unknown => undefined },
     };
     const valid = { html: "<p>synthetic</p>", resources: [], warnings: [] };
-    const callbacks: Array<typeof percySnapshot> = [
-      async () => undefined,
-      async () => { sdk.logger.log("playwright", "warn", canary); return undefined; },
-      async () => { try { await sdk.request.post("/percy/snapshot", { domSnapshot: { ...valid, html: canary } }); } catch {} return undefined; },
+    const callbacks: Array<{ reason: string; snapshot: typeof percySnapshot }> = [
+      { reason: "sdk-no-submission", snapshot: async () => undefined },
+      { reason: "sdk-warning", snapshot: async () => { sdk.logger.log("playwright", "warn", canary); return undefined; } },
+      { reason: "guard-rejected", snapshot: async () => { try { await sdk.request.post("/percy/snapshot", { domSnapshot: { ...valid, html: canary } }); } catch {} return undefined; } },
     ];
     for (const callback of callbacks) {
-      await expect(submitSnapshot(page, "directory-empty / visual-phone-390x844", fixture, snapshotOptions(390, 844), callback, sdk)).rejects.toThrow("visual upload: submission failed");
+      await expect(submitSnapshot(page, "directory-empty / visual-phone-390x844", fixture, snapshotOptions(390, 844), callback.snapshot, sdk)).rejects.toThrow(`visual upload: submission failed (${callback.reason})`);
     }
     expect(uploads).toBe(0);
     await submitSnapshot(page, "directory-empty / visual-phone-390x844", fixture, snapshotOptions(390, 844), async () => {
