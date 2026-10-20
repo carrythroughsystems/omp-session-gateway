@@ -94,6 +94,27 @@ main {
   flex-direction: column;
 }
 
+/* The rule above also sizes the embedded client's `<main>`. From 37rem, where it stops tracking the
+ * window, an open session instead gets one centered column wide enough for the client's 900px
+ * transcript, and the session's header and triage bar align to it. The directory stays 35rem. */
+@media (min-width: 37rem) {
+  .gateway-shell {
+    --session-column: 60rem;
+  }
+
+  .gateway-shell main {
+    width: min(100% - 2rem, var(--session-column));
+  }
+
+  .gateway-shell > .shell-bar {
+    padding-inline: max(0.65rem, calc((100% - var(--session-column)) / 2));
+  }
+
+  .gateway-shell > .triage-bar {
+    padding-inline: max(0.75rem, calc((100% - var(--session-column)) / 2));
+  }
+}
+
 h1,
 h2,
 h3,

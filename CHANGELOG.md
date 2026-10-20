@@ -46,6 +46,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 ### Fixed
 
 - Poll for the installed WebAPK's DevTools page target before judging the published-byte smoke render, with a fail-closed deadline and sanitized timeout diagnostics.
+- Open sessions on tablet and desktop widths are no longer squeezed into the directory's 35rem
+  column (#411, #412). The directory's `main` rule also sized the embedded client's `<main>`, so the
+  transcript stayed 542px wide and code lines showed about 45 characters. From 37rem up, the
+  session, its header, and its triage bar share one centered `min(100% − 2rem, 60rem)` column, and
+  the transcript reaches the client's own 900px width (about 88 characters per code line). The
+  directory keeps its 35rem triage column, and nothing changes below 37rem.
 
 ## [v0.7.7] — 2026-10-13
 
