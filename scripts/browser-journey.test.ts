@@ -44,7 +44,11 @@ describe("vendor-safe application asset attestation", () => {
     })).rejects.toThrow("installed app asset does not match the release archive");
     expect(viewOpened).toBe(false);
   });
-  test.each(["no-app-asset", "asset-mismatch", "shell-caches:0", "shell-caches:2", "shell-caches:1", "asset-not-cached", "evaluation-error"])("installed-shell timeout returns only the closed diagnostic %s", async code => {
+  const SHELL_CODES = [
+    "no-registration", "sw-installing", "sw-waiting", "sw-not-active", "uncontrolled", "controller-not-active",
+    "no-app-asset", "asset-mismatch", "shell-caches:0", "shell-caches:2", "asset-not-cached", "ready-late", "evaluation-error",
+  ] as const;
+  test.each([...SHELL_CODES])("installed-shell timeout returns only the closed diagnostic %s", async code => {
     const marker = "SYNTHETIC_PAGE_DETAIL_NOT_FOR_ERRORS";
     let diagnosticReads = 0, readinessReads = 0;
     const timer = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void) => {
@@ -52,12 +56,19 @@ describe("vendor-safe application asset attestation", () => {
       return 0;
     }) as unknown as typeof setTimeout);
     try {
+      const worker = (state: string) => ({ state, scriptURL: marker });
+      const registration = code === "no-registration" ? undefined : {
+        installing: code === "sw-installing" ? worker("installing") : null,
+        waiting: code === "sw-waiting" ? worker("installed") : null,
+        active: worker(code === "sw-not-active" ? "activating" : "activated"),
+      };
+      const controller = code === "uncontrolled" ? null : worker(code === "controller-not-active" ? "activating" : "activated");
       const page: JourneyPage = {
         navigate: async () => {},
         evaluate: async <T>(expression: string): Promise<T> => {
           if (!expression.includes('"no-app-asset"')) { readinessReads += 1; return false as T; }
           diagnosticReads += 1;
-          return await new Function("performance", "caches", `return ${expression};`)({
+          return await new Function("performance", "caches", "navigator", `return ${expression};`)({
             getEntriesByType: () => code === "no-app-asset" ? [] : [{
               name: `https://fixture.invalid/assets/app.${code === "asset-mismatch" ? "def456" : "abc123"}.js?${marker}`,
             }],
@@ -68,18 +79,41 @@ describe("vendor-safe application asset attestation", () => {
               return [marker, ...Array.from({ length: count }, (_, index) => `omp-sessions-shell-${marker}-${index}`)];
             },
             open: async () => ({ match: async () => code === "asset-not-cached" ? undefined : new Response(marker) }),
-          }) as T;
+          }, { serviceWorker: { controller, getRegistration: async () => registration } }) as T;
         },
       };
       const error = await runCollaborationJourney(page, {
         origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-SHELL-TIMEOUT", expectedAppAsset: "/assets/app.abc123.js",
       }).catch((error: unknown) => error);
       expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toBe(`installed application shell did not become ready (${code})`);
+      expect((error as Error).message).toBe(`installed application shell did not become ready (${code}; 0 of 120 reads failed)`);
       expect((error as Error).cause).toBeUndefined();
       expect(String(error)).not.toContain(marker);
       expect(diagnosticReads).toBe(1);
       expect(readinessReads).toBe(120);
+    } finally { timer.mockRestore(); }
+  });
+  test("installed-shell timeout counts readiness reads that failed rather than returned false", async () => {
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void) => {
+      queueMicrotask(callback);
+      return 0;
+    }) as unknown as typeof setTimeout);
+    try {
+      let reads = 0;
+      const page: JourneyPage = {
+        navigate: async () => {},
+        evaluate: async <T>(expression: string): Promise<T> => {
+          if (expression.includes('"no-app-asset"')) return "ready-late" as T;
+          reads += 1;
+          if (reads % 2 === 0) throw new Error("SYNTHETIC_SCRIPT_FAILURE_DETAIL");
+          return false as T;
+        },
+      };
+      const error = await runCollaborationJourney(page, {
+        origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-SHELL-TIMEOUT",
+      }).catch((error: unknown) => error);
+      expect((error as Error).message).toBe("installed application shell did not become ready (ready-late; 60 of 120 reads failed)");
+      expect(String(error)).not.toContain("SYNTHETIC_SCRIPT_FAILURE_DETAIL");
     } finally { timer.mockRestore(); }
   });
   test.each(["untrusted result", "transport error"])("installed-shell diagnostics discard page-controlled %s", async failure => {
@@ -102,7 +136,7 @@ describe("vendor-safe application asset attestation", () => {
       const error = await runCollaborationJourney(page, {
         origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-SHELL-TIMEOUT",
       }).catch((error: unknown) => error);
-      expect((error as Error).message).toBe("installed application shell did not become ready (evaluation-error)");
+      expect((error as Error).message).toBe("installed application shell did not become ready (evaluation-error; 0 of 120 reads failed)");
       expect(String(error)).not.toContain(marker);
       expect((error as Error).cause).toBeUndefined();
       expect(diagnosticReads).toBe(1);

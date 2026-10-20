@@ -62,17 +62,26 @@ function currentShellExpression(expectedAppAsset: string | undefined): string {
 })()`;
 }
 
+/** Names the first unmet readiness condition; "ready-late" means it held by the time of this read. */
 function shellDiagnosticExpression(expectedAppAsset: string | undefined): string {
   return `(async () => {
   try {
     const expected = ${JSON.stringify(expectedAppAsset ?? null)};
+    const registration = await navigator.serviceWorker.getRegistration("/");
+    if (registration === undefined) return "no-registration";
+    if (registration.installing !== null) return "sw-installing";
+    if (registration.waiting !== null) return "sw-waiting";
+    if (registration.active?.state !== "activated") return "sw-not-active";
+    const controller = navigator.serviceWorker.controller;
+    if (controller === null) return "uncontrolled";
+    if (controller.state !== "activated") return "controller-not-active";
     const asset = performance.getEntriesByType("resource").map(entry => new URL(entry.name).pathname).find(path => /^\\/assets\\/app\\.[0-9a-f]+\\.js$/.test(path));
     if (asset === undefined) return "no-app-asset";
     if (expected !== null && asset !== expected) return "asset-mismatch";
     const shells = (await caches.keys()).filter(name => name.startsWith("omp-sessions-shell-"));
     if (shells.length !== 1) return "shell-caches:" + shells.length;
     if ((await (await caches.open(shells[0])).match(asset)) === undefined) return "asset-not-cached";
-    return "shell-caches:1";
+    return "ready-late";
   } catch { return "evaluation-error"; }
 })()`;
 }
@@ -90,9 +99,10 @@ export async function runCollaborationJourney(
 ): Promise<CollaborationJourneyResult> {
     await page.navigate(`${options.origin}/`);
 
+    let failedReads = 0;
     const waitFor = async (name: string, expression: string, attempts = 60): Promise<void> => {
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        if (await page.evaluate<boolean>(expression).catch(() => false)) return;
+        if (await page.evaluate<boolean>(expression).catch(() => { failedReads += 1; return false; })) return;
         await pause(500);
       }
       throw new Error(`${name} did not become ready`);
@@ -102,9 +112,11 @@ export async function runCollaborationJourney(
     try { await waitFor("installed application shell", currentShellExpression(options.expectedAppAsset), 120); }
     catch {
       const diagnostic = await page.evaluate<unknown>(shellDiagnosticExpression(options.expectedAppAsset)).catch(() => "evaluation-error");
-      const code = typeof diagnostic === "string" && /^(?:no-app-asset|asset-mismatch|asset-not-cached|evaluation-error|shell-caches:(?:0|[1-9][0-9]{0,9}))$/u.test(diagnostic)
+      const code = typeof diagnostic === "string" &&
+        /^(?:no-registration|sw-installing|sw-waiting|sw-not-active|uncontrolled|controller-not-active|no-app-asset|asset-mismatch|asset-not-cached|ready-late|evaluation-error|shell-caches:(?:0|[1-9][0-9]{0,9}))$/u.test(diagnostic)
         ? diagnostic : "evaluation-error";
-      throw new Error(`installed application shell did not become ready (${code})`);
+      // Failed reads separate a page whose state never settled from evaluations that kept failing.
+      throw new Error(`installed application shell did not become ready (${code}; ${failedReads} of 120 reads failed)`);
     }
     // Start from a document the settled worker controlled from load, so no update reload can follow.
     await page.navigate(`${options.origin}/`);
