@@ -516,6 +516,32 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   the existing Pixel-lease guard refuses queued device work until cleanup recovery.
 - TestingBot credentials are supplied only through child-process environment variables and in-memory
   request headers, never command-line arguments, receipts, or logs.
+- BrowserStack is a fixed fallback for iPad Safari and Samsung Chrome only, never iPhone. Selection
+  occurs only on a valid empty TestingBot eligible pool, before a primary write; failures cannot
+  trigger vendor switching. Vendor-qualified ownership prevents colliding IDs from deleting or
+  auditing the wrong account's session, and an ambiguous create remains dirty.
+- BrowserStack Local 8.9 uses the pinned Darwin x64 artifact under Rosetta, force-local, exact host
+  inclusion and force-proxy through the same loopback CONNECT proxy. Include/exclude filters cover
+  all ports and do not replace the proxy's exact authority check. Local's listeners must be
+  loopback-only; cleanup closes the proxy first, then stops only processes with the exact pinned
+  executable and unique attempt working directory, including respawned children.
+- **Explicit argv exception, single-user orchestrator only:** the lane never places the BrowserStack
+  key in argv, URLs, receipts or logs. It creates only a 0600 key config in the attempt's owned 0700
+  directory and supplies `--config-file`. The pinned vendor binary expands the key into its child's
+  argv; same-user processes already can read the 1Password service-account token. This is accepted
+  exposure, not argv secrecy. Prefer a dedicated BrowserStack team-member key (the plan permits
+  unlimited users), and rotate on suspected exposure. Local stdout/stderr are discarded and its
+  readiness log is a private FIFO, not an evidence file. Stop and crash recovery remove both files.
+- BrowserStack's mandatory text logs, session JSON and every known log/media surface receive the
+  same bounded raw-plus-canonical and exact-16 audit, including partial failures. Signed artifact
+  requests carry no account authorization, refuse redirects and unreviewed origins. No recording
+  setting proves vendor-internal absence. Video disabled plus clean indicators and the observed
+  missing-object S3 403 is accepted as no retained media observed; media returning 200 fails.
+  DELETE acknowledgement and 404 on session JSON and all six log APIs verify record removal.
+  An already-issued signed text URL may still serve its exact previously audited, clean,
+  media-free content until expiry; only its count persists. Changed, unaudited or media content
+  cannot use this exception. A fresh cleanup process must wait for signed artifacts to disappear,
+  not trust a persisted clean flag. Deletion is defense in depth after the audit, not its replacement.
 - The iPhone turns background alerts off before its session ends. If its attempt fails first, the
   subscription stays on the candidate gateway until qualification cleanup uninstalls the gateway,
   and any alerts sent meanwhile carry only session metadata.
@@ -568,7 +594,7 @@ Before release, prove:
 - cross-origin launches fail; any future WebAuthn endpoints must enforce the same exact-origin boundary;
 - malformed and oversized IPC/API input stays bounded;
 - gateway restart starts empty and discovery polling repopulates only live hosts;
-- every test record TestingBot kept from the stable campaign's cloud devices contains neither
+- every test record either vendor kept from the stable campaign's cloud devices contains neither
   session's live View or Control link, and the tunnel can reach nothing but the candidate origin and
   its `connect-src` sources;
 - release binaries bind loopback only and match published checksums.

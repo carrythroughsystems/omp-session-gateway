@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { assertStableReleaseQualification, releaseVersion } from "./release-policy.ts";
 import { externalCleanupCurrent, validateStableQualificationReceipt } from "./stable-qualification.ts";
 import { historicalPredecessor } from "./post-release-smoke.ts";
+import { SAMSUNG_MODEL_CODES } from "./device-cloud-qualification.ts";
 
 const REPO = "https://github.com/carrythroughsystems/omp-session-gateway";
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
@@ -119,6 +120,57 @@ function measurements(value: unknown): unknown {
   }
   return out;
 }
+
+/** Legacy homogeneous receipts retain their bytes; new receipts attribute every target explicitly. */
+export function cloudReleaseEvidence(value: unknown): { summary: string; devices: Record<"iphone" | "ipad" | "android", string> } {
+  const cloud = object(value, "cloud result");
+  requireTrue(cloud.passed, "cloud result");
+  const targets = object(cloud.targets, "cloud targets");
+  const names = ["iphone", "ipad", "android"] as const;
+  const attributed = names.some(name => object(targets[name], `cloud ${name}`).vendor !== undefined);
+  const devices = {} as Record<typeof names[number], string>;
+  let browserStackTargets = 0;
+  for (const name of names) {
+    const target = object(targets[name], `cloud ${name}`);
+    const vendor = attributed ? target.vendor : cloud.vendor;
+    const tunnel = attributed ? target.tunnelVersion : cloud.tunnelVersion;
+    if (vendor !== "TestingBot" && vendor !== "BrowserStack") throw new Error("invalid per-target cloud vendor");
+    if (name === "iphone" && vendor !== "TestingBot") throw new Error("BrowserStack iPhone evidence is forbidden");
+    if (vendor === "BrowserStack") browserStackTargets += 1;
+    const model = text(target.device, "device");
+    const os = text(target.os, "OS", /^[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}$/u);
+    const browser = text(target.browser, "browser", /^(?:safari|chrome)$/u);
+    const version = text(target.browserVersion, "browser version", /^[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}$/u);
+    if (browser !== (name === "android" ? "chrome" : "safari")) throw new Error("cloud target browser does not match");
+    if (name === "android" && (!model.startsWith("Galaxy ") || typeof target.model !== "string" || !SAMSUNG_MODEL_CODES[model]?.includes(target.model))) throw new Error("cloud Android evidence must attest its exact Samsung hardware");
+    if (name === "iphone" && !model.startsWith("iPhone ")) throw new Error("cloud iPhone evidence names another family");
+    if (name === "ipad" && !model.startsWith("iPad ")) throw new Error("cloud iPad evidence names another family");
+    for (const field of ["appAssetMatched", "viewReadOnly", "controlWritable", "promptAccepted", "returnedToDirectory"]) requireTrue(target[field], `cloud ${name} ${field}`);
+    equal(target.sinkFindings, 0, `cloud ${name} sink findings`);
+    equal(target.sinksDetectable, 7, `cloud ${name} detectable sinks`);
+    if (name === "iphone") for (const field of ["homeScreenApp", "alertsEnabled", "tapOpenedControl", "tapUrlScrubbed", "alertsDisabled"]) requireTrue(target[field], `cloud iPhone ${field}`);
+    const description = `${model} (${os}, ${browser} ${version})`;
+    const tunnelVersion = text(tunnel, "per-target tunnel version", /^[0-9]+(?:\.[0-9]+){1,3}$/u);
+    devices[name] = attributed ? `${vendor}, tunnel ${tunnelVersion}: ${description}` : description;
+  }
+  const audit = object(cloud.audit, "cloud audit");
+  equal(audit.records, 3, "cloud audited records");
+  equal(audit.recordsExposingLinks, 0, "cloud retained link exposure");
+  equal(audit.recordsWithMedia, 0, "cloud retained media");
+  if (attributed) {
+    equal(cloud.vendor, browserStackTargets === 0 ? "TestingBot" : "mixed", "aggregate cloud vendor");
+    equal(cloud.tunnelVersion, browserStackTargets === 0 ? object(targets.iphone, "cloud iphone").tunnelVersion : "per-target", "aggregate cloud tunnel");
+    equal(audit.browserstackRecords, browserStackTargets, "BrowserStack audited records");
+    equal(audit.testingbotRecords, 3 - browserStackTargets, "TestingBot audited records");
+  } else equal(cloud.vendor, "TestingBot", "legacy cloud vendor");
+  return {
+    devices,
+    summary: attributed
+      ? `${devices.iphone}; ${devices.ipad}; ${devices.android}. Home Screen alerts were proven only on the TestingBot iPhone and do not qualify lock-screen presentation.`
+      : `${text(cloud.vendor, "cloud vendor")} real devices, tunnel ${text(cloud.tunnelVersion, "tunnel version")}: ${devices.iphone}; ${devices.ipad}; ${devices.android}. Home Screen alerts do not qualify lock-screen presentation.`,
+  };
+}
+
 function qualification(receiptValue: unknown, candidateTag: string, tag: string, previousTag: string, upstream: ObjectValue): Qualification {
   const raw = object(receiptValue, "receipt");
   const orchestrator = text(raw.orchestratorCommit, "orchestrator commit", SHA);
@@ -185,12 +237,8 @@ function qualification(receiptValue: unknown, candidateTag: string, tag: string,
   equal(push.ompVersion, releaseVersion(baseline), "Push OMP");
   const platform = object(push.platform, "Push platform");
   const cloud = object(e("deviceCloud").result, "cloud result");
-  requireTrue(cloud.passed, "cloud result");
-  const targets = object(cloud.targets, "cloud targets");
-  const device = (name: string) => {
-    const target = object(targets[name], `cloud ${name}`);
-    return `${text(target.device, "device")} (${text(target.os, "OS")}, ${text(target.browser, "browser")} ${text(target.browserVersion, "browser version")})`;
-  };
+  const cloudEvidence = cloudReleaseEvidence(cloud);
+  const device = (name: "iphone" | "ipad" | "android") => cloudEvidence.devices[name];
   const observations = object(windows.observations, "Windows observations");
   const relay = e("relay");
   if (number(relay.durationSeconds, "relay duration") < 1_800) throw new Error("relay duration is below the qualified boundary");
@@ -215,7 +263,7 @@ function qualification(receiptValue: unknown, candidateTag: string, tag: string,
     android: `${model}, Android ${androidOs} build ${text(android.buildId, "Android build")}, Chrome ${browser}; same-page unlock ${number(android.unlockMs, "unlock")} ms, Airplane ${number(android.airplaneRecoveredMs, "Airplane")} ms, Doze ${number(android.dozeRecoveredMs, "Doze")} ms; ${text(android.forbiddenSinkSweep, "sink sweep", /^[0-9/ a-z;]+$/u)}.`,
     androidPush: `Android ${text(platform.android, "Push Android")}, Chrome ${text(platform.browser, "Push browser")}, installed WebAPK; force-stop ${text(object(object(push.phases, "Push phases").force_stop_verified, "force stop").variant, "force stop variant")}, Doze ${text(object(object(push.phases, "Push phases").doze_verified, "Doze").variant, "Doze variant")}; outcomes are observed variants, not delivery guarantees.`,
     androidPushCleanup: "Device, browser and fixture restored.",
-    deviceCloud: `${text(cloud.vendor, "cloud vendor")} real devices, tunnel ${text(cloud.tunnelVersion, "tunnel version")}: ${device("iphone")}; ${device("ipad")}; ${device("android")}. Home Screen alerts do not qualify lock-screen presentation.`,
+    deviceCloud: cloudEvidence.summary,
     deviceCloudCleanup: "Restored.",
     relay: `${number(relay.durationSeconds, "relay duration")} seconds, ${timestamp(relay.startedAt, "relay start")}–${timestamp(relay.completedAt, "relay completion")}; ${number(relay.transitions, "relay transitions")} transitions, final phase live. Eight-hour endurance is not claimed.`,
     cleanup: "Zero gateway processes, listeners and live OMP hosts.",

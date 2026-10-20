@@ -1248,6 +1248,47 @@ boolean; no page-controlled pathname becomes a vendor-logged result.
 Retained-Mac fixture staging begins inside the attempt's Pixel lease, which still covers audit
 and every release step. These changes enable no additional vendor and change no published claims.
 
+**Amendment — 2026-10-20 (BrowserStack fallback):** A fixed vendor policy keeps iPhone on
+TestingBot only: its Home Screen installation and background Web Push journey have no documented
+BrowserStack iOS Safari equivalent. iPad Safari and Samsung Chrome use TestingBot when its eligible
+free pool is nonempty, otherwise immediately select BrowserStack before any session write.
+Authentication, malformed inventory, transport, allocation or journey failures never select a
+fallback; no write is replayed. BrowserStack catalog entries are eligibility, not free inventory.
+Targets remain sequential, not five-way execution despite the Automate Mobile plan's five slots.
+The entitlement is refused from `2027-10-20T00:00:00Z` until a reviewed renewal changes its pin.
+
+The shared transport pins each vendor's endpoint and retries GET only. Additive schema-3 progress
+owns `{vendor,target,sessionId}` resources and pending allocation intents; equal session IDs at
+different vendors remain distinct. An unidentified allocation stays dirty for reconciliation.
+Every target names its vendor and tunnel version. All-TestingBot aggregates and historical release
+summaries stay compatible; mixed aggregates say `mixed`/`per-target`. Release generation refuses
+BrowserStack iPhone evidence and Android evidence without its exact Samsung hardware mapping.
+
+BrowserStack Local 8.9 is pinned by ZIP and binary digest as Darwin x64, with Rosetta 2 on Apple
+Silicon. Force-local plus exact host inclusion and force-proxy route browser traffic through the
+same loopback CONNECT allowlist; no TLS interception or broader listeners are allowed.
+**Accepted single-user-workstation exception:** the lane passes only `--config-file`, never the
+BrowserStack key in argv, URLs, receipts or logs. The config is 0600 in the attempt's private 0700
+directory and is removed on stop and crash cleanup. Local itself expands it into a child's argv.
+This vendor behavior is accepted only on the existing single-user orchestrator, where same-user
+processes already can read the service-account token. Use a dedicated BrowserStack team-member
+key and rotate it on suspected exposure. Local stdout/stderr are discarded; its log target is a
+private FIFO, consumed only for a fixed readiness marker and never persisted.
+
+Both vendors retain the same whole-link and exact-16-window audit over bounded raw and canonical
+surfaces. BrowserStack text logs cannot be disabled; origin-only navigation is not a capability:
+the supported default relay's links are compact `room.key` strings handed off inside the page.
+All known metadata, API logs, declared signed logs and media indicators are inspected before the
+retention decision. Disabled video, clean indicators and the observed S3 missing-object 403
+(`AccessDenied`/`s3:ListBucket`) mean no retained media observed; a media URL serving a body fails.
+Deletion is defense in depth, not a substitute for auditing: DELETE `status:ok` plus 404 on session
+JSON and every log API proves removal. Previously issued signed text URLs may outlive deletion
+until expiry only if their exact unchanged content was already audited clean and media-free;
+evidence records a count, never URLs. Crash cleanup cannot recreate this exception from a saved
+clean flag and instead requires those artifacts to disappear. Unverified cleanup blocks the Pixel
+lease. [Release setup and the sourced contract matrix](RELEASE.md#browserstack-device-cloud-fallback)
+record the public-page probes; those are Tested evidence, not a signed-candidate qualification.
+
 ## ADR-033 — Retain a macOS virtual machine as the campaign Mac
 
 **Status:** Proposed; founder-selected design, amending ADR-030 only for the retained Mac.

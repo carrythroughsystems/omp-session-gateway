@@ -19,6 +19,14 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Add BrowserStack Automate Mobile as an immediate pre-write fallback for empty TestingBot
+  iPad and Samsung Android pools, keeping iPhone/Home Screen Push TestingBot-only and targets
+  sequential. Pin Local 8.9 under Rosetta with the documented single-user child-argv exception,
+  shared CONNECT containment, private crash-cleaned config, vendor-qualified ownership,
+  per-target release attribution, complete retained-record audits and verified record deletion.
+  Keep signed-log expiry limits explicit and refuse the fallback entitlement from 2027-10-20
+  without a reviewed renewal. Public-page development probes do not qualify a release.
+
 - Widen TestingBot's modern iPhone and Samsung device pools with explicit OS floors and canonical
   Galaxy hardware checks; keep A55 disabled pending an observed hardware-code proof. Check free
   inventory during read-only preflight and distinguish typed availability holds (exit 75) from

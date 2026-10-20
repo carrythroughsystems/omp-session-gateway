@@ -2,8 +2,9 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { DEVICE_CLOUD_PROFILES, DEVICE_CLOUD_TARGETS, SAMSUNG_MODEL_CODES, eligibleDevice } from "./device-cloud-qualification.ts";
 import { deviceCloudHolds } from "./device-cloud-availability.ts";
-import { DEVICE_WAIT_MS, admitDeviceCloud, freeDevice, type DeviceCloudAdmissionDependencies } from "./device-cloud-runtime.ts";
-import { TestingBotApi, type CloudDevice } from "./testingbot.ts";
+import { DEVICE_WAIT_MS, admitDeviceCloud, deviceCloudVendor, freeDevice, type DeviceCloudAdmissionDependencies } from "./device-cloud-runtime.ts";
+import { TestingBotApi } from "./testingbot.ts";
+import type { CloudDevice } from "./device-cloud-common.ts";
 
 const epoch = "11111111-2222-4333-8444-555555555555";
 const catalog: readonly CloudDevice[] = [
@@ -17,6 +18,7 @@ function admission(free: readonly CloudDevice[] = catalog) {
     javaRuns: () => true,
     credentials: async () => ({ key: "synthetic-key", secret: "synthetic-secret" }),
     api: () => ({ devices: async scope => { reads.push(scope); return scope === "all" ? catalog : free; } }),
+    fallbackReady: async (_environment, target) => { reads.push(`browserstack ${target}`); },
   };
   return { dependencies, reads };
 }
@@ -62,6 +64,16 @@ describe("read-only cloud admission", () => {
     const error = await admitDeviceCloud({}, "free", fixture.dependencies).catch((error: unknown) => error);
     expect(deviceCloudHolds(error)).toMatchObject([{ stage: "preflight", target: "iphone", waitedMs: 0 }]);
     expect(fixture.reads).toEqual(["all", "available"]);
+  });
+  test("only empty iPad and Android pools trigger immediate, lazy fallback admission", async () => {
+    const fixture = admission([catalog[0]!]);
+    await admitDeviceCloud({}, "free", fixture.dependencies);
+    expect(fixture.reads).toEqual(["all", "available", "browserstack ipad", "browserstack android"]);
+    expect(deviceCloudVendor("iphone", [])).toBe("testingbot");
+    for (const target of ["ipad", "android"] as const) {
+      expect(deviceCloudVendor(target, [])).toBe("browserstack");
+      expect(deviceCloudVendor(target, catalog)).toBe("testingbot");
+    }
   });
   test.each(["authentication", "transport", "malformed catalog"])("%s failure is not a hold", async kind => {
     const fixture = admission();

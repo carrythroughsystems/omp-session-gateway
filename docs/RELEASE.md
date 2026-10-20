@@ -675,6 +675,104 @@ The Windows lane also needs a mode-private `~/.vultr-apikey` whose API access co
 
 The orchestrator refuses a dirty or unpublished branch, rejects changed candidate or receipt identity, and hash-guards `STABLE_RELEASE.lock.json` plus `docs/RELEASE_STATUS.md`. It never edits either file, creates a stable tag, or publishes a stable release. Ledger approval and stable publication remain separate maintainer effects after the receipt is reviewed.
 
+### BrowserStack device-cloud fallback
+
+The fixed policy is TestingBot-only iPhone (including Home Screen/background Web Push), and
+TestingBot-first iPad Safari/Samsung Chrome with immediate BrowserStack selection only when the
+eligible TestingBot free pool is empty. There is no fallback after a primary write or failure and
+no parallel device execution. A catalog is not a reservation. Each target's evidence names its
+actual vendor, exact allocated model, device-reported OS/browser and tunnel version.
+
+Keep the existing TestingBot token/Java prerequisites. BrowserStack additionally needs the same
+read-only service account to read `op://Centaur/BrowserStack/username` and
+`op://Centaur/BrowserStack/access-key`, Automate Mobile with five group/team parallels, and Rosetta 2
+on Apple Silicon (`arch -x86_64 /usr/bin/true` must succeed). Credentials, entitlement checks and
+Local startup are lazy: a wholly TestingBot attempt does not depend on BrowserStack. The fallback
+fails admission clearly when required Rosetta/credentials/entitlement are absent. Its maintained
+cutoff is **2027-10-20 00:00 UTC**, conservatively derived from the plan's end date; the Plan API
+does not report expiry. Renewal requires a reviewed pin update, not an environment bypass.
+
+Use a dedicated BrowserStack team-member key for qualification and rotate it on suspected
+exposure. The single-user orchestrator exception in
+[Security](SECURITY.md#real-device-cloud-qualification) is mandatory: the lane writes the key only
+to a 0600 `local.yml` in an owned 0700 attempt directory and passes the filename, but Local 8.9
+re-spawns itself with the key in its child argv. Same-user processes already can read the service
+account token. Local stdout/stderr are discarded; a 0600 FIFO supplies only the fixed readiness
+marker in memory. Never capture Local debug output with a real key.
+
+#### Sourced contract matrix — observed 2026-10-20
+
+The public-page probes below are **Tested**, not qualification or a capability-opening journey.
+Documentation is distinguished from live observations; no claim covers vendor-internal retention.
+
+| Contract | Source | Observed finding / gate |
+| --- | --- | --- |
+| Account and entitlement | [Plan API](https://www.browserstack.com/docs/automate/api-reference/selenium/plan); read-only 1Password identity/field reads | `SERVICE_ACCOUNT` at `my.1password.com`; both fields readable. Plan HTTP 200: `Automate Mobile`, group/team maximum 5, running/queued 0, queue maximum 5. `terminal_access=Public` is not session privacy evidence. No expiry field. |
+| W3C real mobile | [Official Selenium example](https://www.browserstack.com/docs/automate/selenium/oxygen) | Fixed `https://hub.browserstack.com/wd/hub`, Basic header only. `browserName=safari/chrome`; `bstack:options` contains exact `deviceName`, `osVersion`, `realMobile:true`, `local:true`, `localIdentifier`. Both target allocations succeeded. An initial `enableTelemetry` option was refused (HTTP 200/status 13, empty session ID); it is not sent. |
+| Catalog / availability | [Browser API](https://www.browserstack.com/docs/automate/api-reference/selenium/browser) | 5,244 rows. Eligible reviewed aliases: `iPad 10th`/iOS 27 (`ipad`), `Samsung Galaxy S26`/Android 16.0, S25/15.0, S24/16.0 or 14.0 (`android`, Chrome). `samsung` means Samsung Internet and is refused. iPad 9th rows were below the iPadOS 26 floor; no A55 alias was present. No documented per-model free-device API was identified; plan concurrency is not availability. |
+| Allocation identity | Bounded public-page session capabilities, REST session identity and device-side version report | iPad 10th: Safari 27.0, iPadOS 27.0. Samsung Galaxy S26: Chrome 152.0.7977.54, Android 16.0.0, `SM-S942B`. Android's capability `deviceName` is a serial, not evidence; exact REST model and Chrome hardware hints corroborate it. **Attestation gate passed.** |
+| Local artifact | [Downloads](https://www.browserstack.com/docs/local-testing/releases-and-downloads), [official Python loader](https://raw.githubusercontent.com/browserstack/browserstack-local-python/master/browserstack/local_binary.py), downloaded bytes | Official Darwin x64 8.9, Mach-O x86_64, runs under Rosetta. Exact ZIP/binary pins below; an unversioned URL changing bytes fails closed. |
+| Forced routing | [Binary parameters](https://www.browserstack.com/docs/local-testing/binary-params), [tunnel firewall](https://www.browserstack.com/local-testing/tunnel-firewall) | `--force-local` plus exact `--include-hosts` rejects nonincluded names; exclusion supersedes inclusion. `--only` is ineffective with force-local and is not used. Filters cover all ports/protocols, so the exact CONNECT allowlist remains authoritative. |
+| Browser upstream / containment | [Proxy configuration](https://www.browserstack.com/docs/automate/selenium/test-behind-proxy/configure-settings), [binary parameters](https://www.browserstack.com/docs/local-testing/binary-params) | `--local-proxy-host 127.0.0.1`, lane-owned port, `--force-proxy`, unique local identifier, dashboard/proxy discovery disabled. Before allocation, seven proxy denials (plain HTTP, wrong port, alternate name, loopback address/name, LAN, tailnet) returned 403 with zero trap connections. During successful iPad/Samsung probes, Local forwarded only example.com CONNECTs (one/two). **Observed proxy gate passed.** |
+| TLS and listeners | [Transparent TCP architecture](https://www.browserstack.com/docs/local-testing/network-and-architecture); proxy and Local probes | Direct versus CONNECT-proxied example.com certificate fingerprints matched with authorized TLS. Actual Local traffic carried TLS ClientHello, not plaintext. Local owned processes had no listeners; runtime refuses any non-loopback listener. This is not remote-browser certificate-chain attestation. **Observed noninterception/listener gate passed.** |
+| Credential configuration | [Binary parameters](https://www.browserstack.com/docs/local-testing/binary-params); synthetic child-spawn trace and production-helper probes | 0600 config in 0700 directory accepted; binary expands it to child `--key`. **Explicit maintainer exception, not argv secrecy.** Lane argv contains only the config path. Normal stop and a killed-parent recovery removed config/FIFO and left zero owned Local processes; recovery verifies exact executable plus attempt cwd and shutdown quiescence. |
+| Recording / masking | [Debugging controls](https://www.browserstack.com/docs/automate/selenium/debugging-options), [sensitive data](https://www.browserstack.com/docs/automate/selenium/hide-sensitive-data) | `video/debug/networkLogs/seleniumLogs/appiumLogs:false`, `consoleLogs:"disable"` and `maskCommands:"screenshot,setValues,getValues,setCookies,getCookies"` used. Text logs cannot be disabled and retained public navigation/commands. No screenshot references or retained media were observed. Failed-command screenshots remain an audit gate, never assumed absent. |
+| Retained surfaces | [Session API](https://www.browserstack.com/docs/automate/api-reference/selenium/session); both finalized records | Session JSON and `/logs`, `/networklogs`, `/consolelogs`, `/seleniumlogs`, `/appiumlogs`, `/telemetrylogs`, plus all populated signed log/profiling/session-terminal/build-terminal references are inspected. `/logs` returned text (4,855/5,472 bytes), console a 363-byte no-messages placeholder, other log APIs 404. Console signed URL returned the same text; other signed logs 404. `browser_url`/`public_url` are dashboard representations, not followed as log surfaces; no public sharing is enabled. |
+| Media indicators | Same Session API and debugging contract; both records | Video URL was populated even when disabled, but returned S3 403 `AccessDenied` mentioning missing `s3:ListBucket`, the observed missing-object response. Together with disabled capability and clean indicators, accepted as **no retained media observed**. A media URL serving a body fails the audit. |
+| Deletion / absence | [DELETE session](https://www.browserstack.com/docs/automate/api-reference/selenium/session#delete-session); both records | Single `DELETE /automate/sessions/{id}.json` returned HTTP 200/`status:ok`; session JSON and all six API log surfaces then returned 404. **Record-removal gate passed.** Issued signed console URLs briefly still served identical audited text, then returned 404 (iPad observed absent after 30 seconds; Samsung on a later read). |
+| Signed URL lifetime | Observed `X-Amz-Date` / `X-Amz-Expires` and post-delete reads | One issued URL advertised 604,800 seconds (seven days), although its object disappeared sooner. Clean, unchanged, media-free text fetched and audited before deletion may outlive record deletion until expiry; evidence records only a count, never URLs. Changed/unaudited content, media or unverifiable API absence fails. |
+
+The shared audit searches raw bounded bytes plus canonical serialization for each whole live
+View/Control capability and every exact contiguous 16-character window. Default-relay capabilities
+are compact `room.key` strings, not candidate-origin URLs: retained directory navigation is not
+an exception to the scan and needs no obfuscation. Only counts/verdicts persist. Deletion is defense
+in depth after this audit. Unknown surfaces, missing required logs and exhausted byte budgets fail.
+
+Pinned in `scripts/browserstack-pins.json`:
+
+| Artifact | URL / bytes / SHA-256 |
+| --- | --- |
+| ZIP | `https://local-downloads.browserstack.com/BrowserStackLocal-darwin-x64.zip`; `10298446` bytes; `bb293eeeeec062f97b380a0de077a2e5aea48b288b4bb654f8274ee6483b2d4d` |
+| Local 8.9 binary | `36317952` bytes; `9091089b71864a5f840ba26eb15e141be184676cf2c9f0d821c53cb4cd42d8fb` |
+
+The reviewed three create calls were one schema refusal with no session, one successful iPad and
+one successful Samsung. Both allocated sessions opened only `https://example.com`, were ended,
+inspected and deleted; all record APIs and the previously issued signed text artifacts were
+subsequently absent. No View/Control capability, Pixel, retained Mac, stable campaign or driver
+was exercised. Local-only probes also proved private config modes and crash recovery.
+
+#### Recovery and the remaining mixed development journey
+
+Keep the original private progress and exact orchestrator checkout. Cleanup routes each known
+session by vendor, ends it, inspects/removes BrowserStack records, verifies absence, closes the
+proxy, stops only owned tunnels, and removes config/workspace. A crash-era saved clean flag cannot
+authorize lingering signed URLs: a fresh process re-inspects and requires their disappearance.
+An unidentified create stays dirty; reconcile that attempt's exact vendor/build in the account
+before any new attempt, never guess an ID, discard progress or retry creation blindly. Failure to
+restore any resource/checkpoint sets `pixelUnrestored` and blocks later Pixel lanes.
+
+After the lead confirms no campaign, Pixel operation or retained-Mac use overlaps, select the
+verified Bun 1.4.0 binary on `PATH` (not a newer workstation Bun), then run:
+
+```sh
+bun scripts/device-cloud-development.ts \
+  --identity "${DEVICE_CLOUD_IDENTITY:?private isolated identity JSON required}" \
+  --mac-host "${OMP_STABLE_MAC_HOST:?qualification user@host required}" \
+  --origin "${DEVICE_CLOUD_ORIGIN:?deployed candidate HTTPS origin required}" \
+  --session-label "${DEVICE_CLOUD_SESSION_LABEL:?isolated live OMP label required}" \
+  --mixed-vendors
+```
+
+The identity must bind the verified candidate archive/digest, exact stock-OMP identity and a
+fresh private `receiptRoot` containing `device-cloud-development`; the live candidate gateway,
+isolated published OMP session, SSH fixture tools, both vendor accounts, Java, Rosetta and the
+single-user workstation boundary must already be ready. Bounds: one attempt, at most three
+sequential sessions (TestingBot iPhone with Home Screen Push; BrowserStack iPad and Samsung),
+no session-creation retries, and no new allocations after 40 minutes. In-flight provider-command
+and session bounds still apply; 40 minutes is not a wall-clock kill deadline. Production audits
+and release run on failure too. Results are private **Tested** evidence, never qualification.
+This command has not been run by the public-page probe work.
+
 ## Post-release local installation smoke
 
 From the matching release tooling checkout, run
