@@ -29,10 +29,14 @@
     "qualify:endurance": "bun scripts/gateway-endurance.ts",
     "test:browser": "bun run build && bun scripts/test-browser.ts",
     "test:browser:compat": "bun run build && bun scripts/test-browser.ts --compat",
+    "test:visual": "bun scripts/test-visual.ts local",
+    "test:visual:percy": "bun scripts/test-visual.ts upload",
     "media:capture": "bun run build && bun scripts/media/capture-readme-media.ts",
     "media:check": "bun scripts/media/check-readme-media.ts"
   },
   "devDependencies": {
+    "@percy/cli": "1.32.11",
+    "@percy/playwright": "1.1.2",
     "@playwright/test": "1.62.1",
     "@types/bun": "1.4.0",
     "@types/react": "19.2.17",

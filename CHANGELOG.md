@@ -6,6 +6,17 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Advisory Percy visual review of 18 deterministic, authored synthetic states across phone,
+  810×1080 tablet and desktop CSS viewports, with fail-closed serialized DOM/resource canary
+  guards and source/serialized layout parity. CI always validates locally and uploads only for
+  same-repository PRs, main pushes and GitHub-hosted dispatches; forks and gateway-ci dispatches
+  receive no Percy secret. No production source or runtime assets change.
+- BrowserStack setup/baseline/renewal runbook and ADR-035 separating Percy visual review,
+  TestingBot release deviceCloud, Automate fallback under ADR-032, and capability-free manual
+  Live review. Sponsorship review is due 2027-09-20 before the 2027-10-20 expiry.
+
 ### Changed
 
 - Widen TestingBot's modern iPhone and Samsung device pools with explicit OS floors and canonical
@@ -57,6 +68,18 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Fail closed on classified Percy diagnostics from either output stream and refuse snapshot
+  POSTs after an SDK warning. Upload mode now audits the exact redacted CLI-log candidate after
+  an isolated 18-state testing-host run and proves a planted SDK-log canary is rejected. Document
+  that Percy uploads CLI logs with every build; the opt-out disables CI logs only.
+- Run the Percy CLI under native Node instead of Bun's incompatible HTTP server layer, and pin
+  its CI Node 24.22.0 LTS runtime. Preserve sanitized phase/reason/count diagnostics through both
+  runner layers so a created build with zero accepted snapshots cannot hide its failing boundary.
+- Disable automatic Percy drop-in baseline seeding; baseline approval stays manual. Classify CLI
+  diagnostics without exposing their text. Only CLI 1.32.11's exact unconditional future-Node
+  startup notice is nonfatal on the already-pinned Node 24 runtime; SDK/unknown warnings stay fatal.
+- Resolve Percy Node executables through the platform-native lookup (including Windows), and
+  disable test-only CSS animation replay so source/serialized parity does not capture entrance motion.
 - Poll for the installed WebAPK's DevTools page target before judging the published-byte smoke render, with a fail-closed deadline and sanitized timeout diagnostics.
 - Open sessions on tablet and desktop widths are no longer squeezed into the directory's 35rem
   column (#411, #412). The directory's `main` rule also sized the embedded client's `<main>`, so the

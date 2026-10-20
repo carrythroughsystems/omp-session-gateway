@@ -78,3 +78,67 @@ test("every fleet lane fails closed and admits either qualified site", async () 
     });
   }
 });
+
+interface VisualWorkflowStep {
+  name?: string;
+  uses?: string;
+  run?: string;
+  if?: string;
+  env?: Record<string, string>;
+  with?: Record<string, unknown>;
+  "timeout-minutes"?: number;
+}
+interface VisualWorkflow {
+  jobs: Record<string, {
+    "runs-on": string;
+    "timeout-minutes": number;
+    env?: unknown;
+    needs?: unknown;
+    steps: VisualWorkflowStep[];
+  }>;
+}
+
+test("visual review stays GitHub-hosted and scopes its secret only to eligible uploads", async () => {
+  const source = await readFile(workflowPath, "utf8");
+  const workflow = Bun.YAML.parse(source) as VisualWorkflow;
+  const visual = workflow.jobs["visual-review"]!;
+  expect(visual["runs-on"]).toBe("ubuntu-24.04");
+  expect(visual["timeout-minutes"]).toBe(20);
+  expect(visual.env).toBeUndefined();
+  expect(visual.needs).toBeUndefined();
+  expect(JSON.stringify(visual)).not.toMatch(/continue-on-error|upload-artifact|retries/u);
+  const steps = visual.steps;
+  const setup = steps.find(step => step.uses?.startsWith("oven-sh/setup-bun@"))!;
+  expect(setup.if).toBeUndefined();
+  expect(setup.with?.["bun-version"]).toBe("1.4.0");
+  const nodeSetup = steps.find(step => step.uses?.startsWith("actions/setup-node@"))!;
+  expect(nodeSetup.uses).toBe("actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38");
+  expect(nodeSetup.if).toBeUndefined();
+  expect(nodeSetup.with?.["node-version"]).toBe("24.22.0");
+  expect(nodeSetup.with?.["package-manager-cache"]).toBe(false);
+  const nodeSelection = steps.find(step => step.name === "Select pinned Percy Node")!;
+  expect(nodeSelection.run).toContain('test "$(node --version)" = v24.22.0');
+  expect(nodeSelection.run).toContain('node --print process.execPath');
+  expect(steps.find(step => step.uses?.startsWith("actions/checkout@"))?.with?.["persist-credentials"]).toBe(false);
+  expect(steps.find((step: { run?: string }) => step.run === "bun install --frozen-lockfile")).toBeDefined();
+  expect(steps.find(step => step.run === "bunx playwright install chromium")?.["timeout-minutes"]).toBe(10);
+  const local = steps.find(step => step.run === "bun run test:visual")!;
+  expect(local.if).toBeUndefined();
+  expect(local.env).toBeUndefined();
+  const secretSteps = steps.filter((step: unknown) => JSON.stringify(step).includes("secrets.PERCY_TOKEN"));
+  expect(secretSteps).toHaveLength(1);
+  const upload = secretSteps[0]!;
+  expect(upload.run).toBe("bun run test:visual:percy");
+  expect(upload.env?.OMP_VISUAL_NODE_EXECUTABLE).toBe("${{ steps.percy-node.outputs.executable }}");
+  for (const condition of [upload.if, upload.env?.PERCY_TOKEN]) {
+    expect(condition).toContain("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository");
+    expect(condition).toContain("github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect(condition).toContain("github.event_name == 'workflow_dispatch' && inputs.runner == 'github-hosted'");
+    expect(condition).not.toContain("pull_request_target");
+  }
+  const summary = steps.find(step => step.name === "Record local-only visual review")!;
+  expect(summary.if).toContain("inputs.runner != 'github-hosted'");
+  expect(summary.if).toContain("head.repo.full_name != github.repository");
+  expect(summary.run).toContain("Percy not uploaded");
+  expect(summary.env).toBeUndefined();
+});

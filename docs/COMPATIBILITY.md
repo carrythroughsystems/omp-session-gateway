@@ -231,6 +231,11 @@ Tested and supported never become qualified: a green hosted or emulated lane is 
 physical-device or signed-release result. A family whose lanes stop running loses its support
 status (ADR-030).
 
+The advisory [Percy visual lane](BROWSERSTACK.md#percy-scope) re-renders 18 synthetic DOM
+snapshots at three CSS viewports. Visual snapshots are neither functional browser tests nor
+qualification, even when a renderer is branded Safari, Edge, iPhone or Android. They do not add
+Tested functional coverage, Supported families or Qualified rows to the matrices above.
+
 Real-device cloud rows (ADR-032) are qualified **in the browser on a cloud device**: the stable
 campaign's `deviceCloud` lane passed on the named real device, OS, and browser version in
 TestingBot's cloud, each as the device itself reported it. The limits are part of that claim.

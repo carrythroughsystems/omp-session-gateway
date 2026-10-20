@@ -423,6 +423,45 @@ Forbidden:
 
 Test infrastructure must fail when a known canary appears in logs, files, Playwright traces, HARs, screenshots, video, browser history, DOM snapshots, caches, storage, service-worker state, or diagnostics archives.
 
+### Percy visual upload boundary and Live
+
+Percy is a test-only third-party sink for authored synthetic DOM and first-party build resources,
+never a production gateway or real OMP session. Synthetic View/Control canaries still count as
+forbidden material. `DashboardFixture.assertNoCapabilityMaterial` closes over full capabilities,
+room ID and encoded key, every contiguous 16-character segment, and URL/JSON/HTML-escaped forms;
+none is exposed as a fixture property. The installed `@percy/dom` serializer runs with the SDK's
+same options. Its full HTML (including hidden attributes, current form values, inline styles and
+text) and every resource, including decoded bytes, must pass that guard plus the capability and
+identifier scanners. The SDK's exact last-mile POST is checked again. A finding fails; it is not
+redacted away. Errors, reporter output and SDK diagnostics never repeat the input or match.
+
+Discovery is restricted to the loopback fixture host, uses Playwright's installed Chromium, and
+keeps JavaScript rendering disabled. Source requests cannot leave the fixture origin; unreviewed
+embedded/executable and resource surfaces fail. There is no live relay or production gateway
+connection. Local mode starts no Percy and strips all Percy credentials. Eligible upload mode
+requires a healthy Percy server, exactly 18 submissions and successful build finalization.
+Forks and every gateway-ci dispatch receive no token and explicitly report not uploaded.
+No traces, screenshots, videos, raw diagnostics or Percy output enter CI artifacts. Local CLI
+logs stay in memory, but Percy redacts and uploads its **CLI logs with each build**. Setting
+`PERCY_CLIENT_ERROR_LOGS=false` disables the separate **CI-log** upload only, not CLI logs.
+Vendor redaction is not the capability boundary: structured log metadata is scanned too.
+Before the real upload starts, upload mode runs the identical 18-state suite against a native-Node
+Percy testing host with real asset discovery and no vendor effects. A private local pipe supplies
+one distinctive ephemeral authority to those fixtures; its guard stays in host memory. After all
+18 submissions, the host reads the testing server's logger records, selects non-`ci` entries and
+applies the pinned CLI redactor exactly as `sendBuildLogs` does. The resulting `clilogs` candidate
+must pass that fixture's full/segment/escape guard plus the capability and identifier scanners.
+A planted SDK-log canary must fail the same scan without repeating it. The audit has a five-minute
+deadline, passes no real token, and never calls `sendBuildLogs`; local mode remains Percy-free.
+Only closed-set phase/reason codes and bounded counts may pass through nested process output.
+The CLI runs under native Node (exactly pinned in CI); the Bun worker requires a responsive API
+and active build before a snapshot can be submitted.
+
+Live is restricted to manual, capability-free synthetic fixtures only. Never point it at a
+production gateway or forward a loopback/tailnet service to it. This lane authorizes no Live
+tunnel, real-session access or candidate qualification. See [ADR-035](DECISIONS.md#adr-035--advisory-percy-review-of-capability-free-serialized-fixtures)
+and the [maintainer runbook](BROWSERSTACK.md).
+
 ### Real-device cloud qualification
 
 Cloud-device qualification opens View and Control on TestingBot's real devices, so a vendor-operated
