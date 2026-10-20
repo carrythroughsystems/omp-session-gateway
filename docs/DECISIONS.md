@@ -1187,6 +1187,67 @@ within ten minutes, fails the lane and holds the release, as a Pixel failure doe
 means replacing the tunnel launch and the record audit; the journeys are standard WebDriver. iPhone
 and iPad enter the qualified matrix only from a passed campaign on the exact signed candidate.
 
+**Amendment — 2026-10-20 (availability and audit):** The ordered iPhone pool is iPhone 17 Pro Max,
+iPhone 17 Pro, iPhone 16, iPhone 16 Pro, iPhone Air, then iPhone 17, all on iOS 26 or later. The
+iPad pool remains only iPad (9th generation), on iPadOS 26 or later; obsolete catalog iPads are not
+fallbacks. Safari reports Apple family and release, not the exact model: iPhone/iPad model
+evidence remains the vendor's allocated-session report. The Samsung-only Android pool is Galaxy
+S26, S25, S24, then A55, on Android 14 or later. Observed Chrome hardware codes must match the checked-in canonical mapping: S26 SM-S942B,
+S25 SM-S931B, S24 SM-S921B.
+Galaxy A55 remains disabled: the bounded 2026-10-20 public-page probe found no free device, so its observed hardware code awaits proof.
+The same bounded probe ended and audited three capability-free sessions: iPhone 16 Pro
+(Safari/iOS 26.4), iPhone Air (26.2), and iPhone 17 (Safari 26.0.1, iOS 26.0). This is Tested
+allocation evidence, not qualification or proof of their Home Screen journey.
+
+Read-only preflight applies the same model and OS eligibility to the catalog and free inventory.
+An otherwise valid catalog with an empty eligible free pool raises a closed availability hold
+before any fixture, tunnel, session, or receipt writes. A free snapshot is not a reservation:
+runtime admission checks the catalog and allocation polls every 15 seconds for at most ten minutes.
+Only validated no-free observations can raise `DeviceCloudAvailabilityHold`; authentication,
+malformed catalogs, transport errors, ambiguous writes, identity mismatch, journey, audit and
+cleanup failures remain diagnostic. An aggregate is a hold only if every failure leaf is typed
+availability. Allocation holds remain failed schema-3 attempts, with additive `availabilityHold`
+evidence; the CLI emits a sanitized machine outcome and exits 75, never a qualification pass.
+Until the explicit hold-resume driver change lands, the driver still treats exit 75 as failure.
+
+Every known session is ended before its retained record is inspected, including partial and
+unsuccessful attempts, while both driven OMP generations still exist. All retained records are
+attempted even if an individual fetch fails. Audit and release failures are combined with the
+original error, so neither can become an availability hold. The audit searches whole live links
+and every contiguous 16-character window, including interior and delimiter-crossing windows.
+Only counts and verdicts persist, never matches, windows, digests or lengths. Crash cleanup may
+release resources without reconstructing an audit; it cannot manufacture successful evidence.
+Targets run sequentially and each target's sessions end before the next allocation, so the
+three-target journey stays within TestingBot's two-concurrent-session plan. Any release failure,
+including failure to persist restoration, is marked `pixelUnrestored`; the existing Pixel-lease
+restoration guard also recognizes it inside aggregates and refuses queued device lanes until
+cleanup recovery.
+
+Retained vendor JSON first passes one shared strict parser, which rejects duplicate decoded object
+keys at every depth before any reference discovery; a parse-site meta-test forbids lenient bypasses.
+Auditing then uses bounded raw response bytes **and** canonical JSON so JSON escape forms are
+also searched. Plaintext logs are raw-only and never supply further references; malformed
+JSON-declared logs fail closed. Auditing includes the test
+detail, the documented `/tests/:id/assets` inventory, and every declared log/HAR/performance
+reference. Signed log reads forward no account authorization, refuse redirects, and accept only
+reviewed HTTPS S3 log origins/buckets; unknown references, missing inventories, excessive surfaces
+or an exhausted aggregate byte budget are diagnostic. The 2026-10-20 read-only reinspection of
+the three public-page proofs found session-creation data in `steps`, no navigation/evaluation
+payload there, empty `logs`, and no declared log/media assets. Current vendor documentation says
+[`recordLogs: false` disables logs](https://testingbot.com/support/web-automate/selenium/sensitive-data),
+and documents [the retained asset inventory](https://testingbot.com/support/api/tests).
+This observed absence does not weaken the audit or
+vendor-safe-result requirement or prove unobservable vendor-internal retention.
+
+Device attestation precedes the first capability open. User agents and client hints are parsed
+inside the page into fixed families, browser names, validated versions and bounded Samsung codes;
+raw reports never become command results. Vendor-safe sink controls and sweeps return booleans,
+counts, closed codes and `LEAK_SINKS` names only, including error and residual-state branches.
+The application asset is compared with the expected archive asset in-page and returns only a
+boolean; no page-controlled pathname becomes a vendor-logged result.
+Retained-Mac fixture staging begins inside the attempt's Pixel lease, which still covers audit
+and every release step. These changes enable no additional vendor and change no published claims.
+
 ## ADR-033 — Retain a macOS virtual machine as the campaign Mac
 
 **Status:** Proposed; founder-selected design, amending ADR-030 only for the retained Mac.

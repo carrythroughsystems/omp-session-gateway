@@ -15,7 +15,8 @@ export interface AndroidCollabSmokeOptions {
 export interface AndroidCollabSmokeResult {
   readonly packageName: string;
   readonly androidPackageVersion: string;
-  readonly appAsset: string;
+  /** The supplied archive expectation, absent for an unpinned development smoke. */
+  readonly appAsset?: string;
   readonly viewReadOnly: true;
   readonly controlWritable: true;
   readonly promptAccepted: true;

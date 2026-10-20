@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import {
   DEVICE_CLOUD_PROFILES,
   DEVICE_CLOUD_TARGETS,
+  ALLOCATION_REPORT_EXPRESSION,
   attestAllocation,
   cleanupDeviceCloud,
   deviceCloudNeedsCleanup,
@@ -13,8 +14,12 @@ import {
   type DeviceCloudObservation,
   type DeviceCloudRuntime,
   type DeviceCloudTarget,
+  type BrowserAllocationReport,
 } from "./device-cloud-qualification.ts";
+import { DeviceCloudAvailabilityHold, deviceCloudHolds } from "./device-cloud-availability.ts";
 import { createPixelLease, type PixelLease } from "./stable-qualification.ts";
+import { pixelUnrestored } from "./restoration.ts";
+import { TestingBotApi } from "./testingbot.ts";
 
 // Distinctive synthetic links: never a real capability shape, so the repository leak scans stay green.
 const LINKS: Record<string, Record<"view" | "control", string>> = {
@@ -54,6 +59,8 @@ function harness(options: {
   readonly generationChangesAt?: string;
   readonly generationChanges?: "fixture" | "live";
   readonly failing?: string;
+  readonly hold?: DeviceCloudTarget;
+  readonly auditFails?: boolean;
   /** What a target's device reports instead of its first pinned model. */
   readonly evidence?: Partial<Record<DeviceCloudTarget, Record<string, DeviceCloudObservation>>>;
 } = {}): Harness {
@@ -91,6 +98,10 @@ function harness(options: {
     },
     verify: async (target, attempt) => {
       if (attempt.session.cwdLabel !== LIVE_LABEL) throw new Error("journeys must drive the live session");
+      if (target === options.hold) throw new DeviceCloudAvailabilityHold({
+        kind: "device-cloud-availability", stage: "allocation", target, vendors: ["testingbot"],
+        reason: "pinned-pool-busy", waitedMs: 600_000, epoch: attempt.epoch,
+      });
       await attempt.created(`session-${target}-0001`);
       effect(`verify ${target}`);
       if (options.generationChangesAt === target) generations[options.generationChanges ?? "fixture"] += 1;
@@ -101,12 +112,16 @@ function harness(options: {
     endSession: async sessionId => {
       effect(`end ${sessionId}`);
     },
-    record: async sessionId => ({
-      complete: true,
-      text: options.record?.(sessionId) ?? JSON.stringify({ state: "COMPLETE", steps: `POST /url for ${sessionId}` }),
-      video: options.media === true,
-      screenshots: 0,
-    }),
+    record: async sessionId => {
+      effect(`audit ${sessionId}`);
+      if (options.auditFails) throw new Error("vendor audit failed");
+      return {
+        complete: true,
+        text: options.record?.(sessionId) ?? JSON.stringify({ state: "COMPLETE", steps: `POST /url for ${sessionId}` }),
+        video: options.media === true,
+        screenshots: 0,
+      };
+    },
     launch: async (launched, mode) => LINKS[launched.instanceId]![mode],
     removeWorkspace: async () => {
       effect("workspace remove");
@@ -171,6 +186,35 @@ describe("device-cloud lane", () => {
     expect(lane.effects).toHaveLength(effects);
   });
 
+  test("ends each target before allocating another under the vendor's two-session limit", async () => {
+    const lane = harness();
+    const active = new Set<string>();
+    let maximumActive = 0;
+    const runtime: DeviceCloudRuntime = {
+      ...lane.runtime,
+      verify: async (target, attempt) => {
+        if (active.size >= 2) throw new Error("the vendor refuses a third concurrent session");
+        return lane.runtime.verify(target, {
+          ...attempt,
+          created: async sessionId => {
+            active.add(sessionId);
+            maximumActive = Math.max(maximumActive, active.size);
+            await attempt.created(sessionId);
+          },
+        });
+      },
+      endSession: async sessionId => {
+        await lane.runtime.endSession(sessionId);
+        active.delete(sessionId);
+      },
+    };
+    expect(await runDeviceCloud({ ...input(lane), runtime })).toMatchObject({ passed: true });
+    expect(maximumActive).toBe(1);
+    expect(active.size).toBe(0);
+    expect(lane.effects.indexOf("end session-iphone-0001")).toBeLessThan(lane.effects.indexOf("verify ipad"));
+    expect(lane.effects.indexOf("end session-ipad-0001")).toBeLessThan(lane.effects.indexOf("verify android"));
+  });
+
   test("no other Pixel lane starts between the attempt and its release", async () => {
     const lane = harness();
     const lease = createPixelLease(() => {});
@@ -189,6 +233,43 @@ describe("device-cloud lane", () => {
     expect(lane.effects.map(effect => effect.replace(" (unleased)", "")).slice(-4)).toEqual([
       "tunnel stop", "fixture stop", "workspace remove", "androidPush",
     ]);
+  });
+
+  test("a failed cloud release refuses a queued Android lane until cleanup recovery", async () => {
+    const lane = harness({ failing: "tunnel stop" });
+    const lease = createPixelLease(() => {});
+    let queued: Promise<unknown> | undefined;
+    let androidStarted = false;
+    const runtime: DeviceCloudRuntime = {
+      ...lane.runtime,
+      verify: async (target, attempt) => {
+        queued ??= lease("android", async () => { androidStarted = true; });
+        queued.catch(() => {});
+        return lane.runtime.verify(target, attempt);
+      },
+    };
+    const error = await runDeviceCloud({ ...input(lane), pixel: lease, runtime }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    if (queued === undefined) throw new Error("the fake Android lane was not queued");
+    await expect(queued).rejects.toThrow("left unrestored by deviceCloud");
+    expect(androidStarted).toBe(false);
+    expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(true);
+    const recovery = harness();
+    await cleanupDeviceCloud(input(recovery, lane.checkpoints.at(-1)));
+    expect(deviceCloudNeedsCleanup(recovery.checkpoints.at(-1))).toBe(false);
+  });
+
+  test("a failed restoration checkpoint also leaves the Pixel lease unrestored", async () => {
+    const lane = harness();
+    const error = await runDeviceCloud({
+      ...input(lane), pixel: createPixelLease(() => {}),
+      checkpoint: async progress => {
+        if (progress.phase === "restored") throw new Error("restoration checkpoint failed");
+        await lane.checkpoint(progress);
+      },
+    }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(true);
   });
 
   test("a failed attempt is still released under its own lease", async () => {
@@ -211,6 +292,8 @@ describe("device-cloud lane", () => {
   test.each([
     ["the live session's whole View link", LINKS["instance-live"]!.view],
     ["an opaque segment of the fixture's Control link", "SYNTHETIC-CLOUD-FIXTURE-CTRLKEY-1d6e4b9c"],
+    ["an interior 16-character window", LINKS["instance-live"]!.view.slice(39, 55)],
+    ["a delimiter-crossing 16-character window", LINKS["instance-fixture"]!.control.slice(15, 31)],
   ])("a vendor record holding %s fails the lane without repeating it", async (_name, leaked) => {
     const lane = harness({ record: sessionId => JSON.stringify({ steps: sessionId.includes("ipad") ? `returned ${leaked}` : "clean" }) });
     const message = await failure(runDeviceCloud(input(lane)));
@@ -218,6 +301,49 @@ describe("device-cloud lane", () => {
     const saved = JSON.stringify(lane.checkpoints);
     for (const text of [message, saved]) expect(text).not.toContain("SYNTHETIC-CLOUD-");
     expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).results.audit).toEqual({ records: 3, recordsExposingLinks: 1, recordsWithMedia: 0 });
+  });
+
+  test.each(["duplicate-key", "escaped-value"] as const)("audits raw and canonical retained JSON without dropping a %s leak", async form => {
+    const leaked = LINKS["instance-live"]!.view.slice(39, 55);
+    const encoded = [...leaked].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+    const raw = form === "duplicate-key"
+      ? `{"state":"COMPLETE","assets_available":true,"steps":"${leaked}","steps":"clean","logs":{},"video":false,"thumbs":[]}`
+      : `{"state":"COMPLETE","assets_available":true,"steps":"${encoded}","logs":{},"video":false,"thumbs":[]}`;
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) => {
+      const path = new URL(String(url)).pathname;
+      const sessionId = path.split("/")[3]!;
+      return path.endsWith("/assets")
+        ? Response.json({ session_id: sessionId, logs: {}, video: null, screenshots: [], har: null, performance: null })
+        : new Response(raw);
+    }, { preconnect: () => {} }));
+    try {
+      const lane = harness();
+      const api = new TestingBotApi({ key: "synthetic-key", secret: "synthetic-secret" });
+      const message = await failure(runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime, record: sessionId => api.testRecord(sessionId) } }));
+      expect(message).toContain(form === "duplicate-key" ? "device-cloud retained-record audits failed" : "3 of 3 TestingBot test records contain a live View or Control link");
+      expect(message).not.toContain(leaked);
+      expect(JSON.stringify(lane.checkpoints)).not.toContain(leaked);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("an iPad hold ends and audits the partial iPhone attempt before release", async () => {
+    const lane = harness({ hold: "ipad" });
+    const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
+    expect(deviceCloudHolds(error)).toHaveLength(1);
+    expect(lane.effects.indexOf("end session-iphone-0001")).toBeLessThan(lane.effects.indexOf("audit session-iphone-0001"));
+    expect(lane.effects.indexOf("audit session-iphone-0001")).toBeLessThan(lane.effects.indexOf("tunnel stop"));
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1))).toMatchObject({
+      phase: "restored", cleanupRequired: false, results: { audit: { records: 1, recordsExposingLinks: 0 } },
+    });
+    expect(lane.effects.filter(effect => effect.endsWith("(unleased)"))).toEqual([]);
+  });
+
+  test.each([{ auditFails: true }, { failing: "tunnel stop" }])("availability combined with audit or cleanup failure is diagnostic: %j", async options => {
+    const lane = harness({ hold: "ipad", ...options });
+    const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
+    expect(deviceCloudHolds(error)).toBeUndefined();
+    expect(pixelUnrestored(error)).toBe("failing" in options);
+    expect(lane.effects).toContain("workspace remove");
   });
 
   test.each(["fixture", "live"] as const)("a %s generation change before the audit fails instead of searching for the wrong links", async kind => {
@@ -309,12 +435,20 @@ describe("device allocation", () => {
     android: { name: "Galaxy S26", version: "16.0" },
   } as const;
 
-  test("records what each device reports about itself", () => {
-    expect(attestAllocation("iphone", requested.iphone, { capabilities: ios("iPhone 17 Pro Max"), userAgent: IPHONE_UA, touchPoints: 5 }))
+  async function parsed(report: { capabilities: Record<string, unknown>; userAgent: string; touchPoints: number; hints?: Record<string, unknown> }) {
+    const browser = await new Function("navigator", `return ${ALLOCATION_REPORT_EXPRESSION}`)({
+      userAgent: report.userAgent, maxTouchPoints: report.touchPoints,
+      userAgentData: { getHighEntropyValues: async () => report.hints },
+    }) as BrowserAllocationReport;
+    return { capabilities: report.capabilities, browser };
+  }
+
+  test("records what each device reports about itself", async () => {
+    expect(attestAllocation("iphone", requested.iphone, await parsed({ capabilities: ios("iPhone 17 Pro Max"), userAgent: IPHONE_UA, touchPoints: 5 })))
       .toEqual({ device: "iPhone 17 Pro Max", os: "26.6", browser: "safari", browserVersion: "26.6" });
-    expect(attestAllocation("ipad", requested.ipad, { capabilities: ios("iPad (9th generation)"), userAgent: IPAD_UA, touchPoints: 5 }))
+    expect(attestAllocation("ipad", requested.ipad, await parsed({ capabilities: ios("iPad (9th generation)"), userAgent: IPAD_UA, touchPoints: 5 })))
       .toEqual({ device: "iPad (9th generation)", os: "26.6", browser: "safari", browserVersion: "26.6" });
-    expect(attestAllocation("android", requested.android, { capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5, hints }))
+    expect(attestAllocation("android", requested.android, await parsed({ capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5, hints })))
       .toEqual({ device: "Galaxy S26", model: "SM-S942B", os: "16.0.0", browser: "chrome", browserVersion: "145.0.7632.159" });
   });
 
@@ -329,7 +463,9 @@ describe("device allocation", () => {
     ["a Galaxy without client hints", "android", { capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5 }, "not Chrome"],
     ["another Android release", "android", { capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5, hints: { ...hints, platformVersion: "15.0.0" } }, "another Android release"],
     ["a phone that is not a Galaxy", "android", { capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5, hints: { ...hints, model: "Pixel 10" } }, "not a Galaxy"],
-  ] as const)("refuses %s", (_name, target, report, message) => {
-    expect(() => attestAllocation(target, requested[target], report)).toThrow(message);
+    ["a different Galaxy hardware model", "android", { capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5, hints: { ...hints, model: "SM-S921B" } }, "canonical model"],
+  ] as const)("refuses %s", async (_name, target, report, message) => {
+    const observed = await parsed(report);
+    expect(() => attestAllocation(target, requested[target], observed)).toThrow(message);
   });
 });

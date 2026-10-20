@@ -12,18 +12,20 @@ import { isRecord } from "../packages/collab-client/upstream/src/tool-render/uti
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { parseSessionListResponse } from "../packages/protocol/src/validation.ts";
 import {
-  LEAK_CONTROL_EXPRESSION,
+  vendorLeakControlExpression,
   LEAK_SINKS,
-  leakControlGaps,
   leakSweepExpression,
   runCollaborationJourney,
-  type LeakControlResult,
+  type VendorLeakControlResult,
   type LeakSweepResult,
 } from "./browser-journey.ts";
 import {
   attestAllocation,
+  ALLOCATION_REPORT_EXPRESSION,
   DEVICE_CLOUD_PROFILES,
   DEVICE_CLOUD_TARGETS,
+  eligibleDevice,
+  type BrowserAllocationReport,
   type DeviceCloudIdentity,
   type DeviceCloudObservation,
   type DeviceCloudRuntime,
@@ -31,6 +33,7 @@ import {
   type DeviceCloudTargetAttempt,
   type DeviceProfile,
 } from "./device-cloud-qualification.ts";
+import { DeviceCloudAvailabilityHold } from "./device-cloud-availability.ts";
 import { PUSH_FIXTURE_ASK_BODY } from "./fixtures/push-qualification-extension.ts";
 import { commandPushFixture, type FixtureExecutor, type PushFixtureLocation } from "./push-qualification-fixture.ts";
 import {
@@ -50,7 +53,7 @@ import {
 
 const PROMPT_MARKER = "OMP_DEVICE_CLOUD_CONTROL_PROMPT";
 /** A pinned model can be busy with another TestingBot customer; wait for one before failing. */
-const DEVICE_WAIT_MS = 10 * 60 * 1_000;
+export const DEVICE_WAIT_MS = 10 * 60 * 1_000;
 const HOME_SCREEN_ICON = `type == "XCUIElementTypeIcon" AND label CONTAINS "OMP"`;
 const ATTENTION_BANNER = `label CONTAINS "needs attention"`;
 
@@ -70,7 +73,8 @@ export interface DeviceCloudRuntimeOptions {
   readonly identity: DeviceCloudIdentity;
   /** Local directory for each attempt's tunnel working directory. */
   readonly workspace: string;
-  readonly fixture: DeviceCloudFixture;
+  /** Invoked only inside the attempt's Pixel lease; construction stages nothing remotely. */
+  readonly fixture: () => Promise<DeviceCloudFixture>;
   readonly environment: Environment;
 }
 
@@ -86,20 +90,50 @@ export function tunnelIdentifier(epoch: string): string {
  * Read-only admission: Java runs, the service account yields the TestingBot credentials, and the
  * vendor catalog still offers a pinned model for every target.
  */
-export async function admitDeviceCloud(environment: Environment): Promise<TestingBotCredentials> {
+export interface DeviceCloudAdmissionDependencies {
+  javaRuns(environment: Environment): boolean;
+  credentials(environment: Environment): Promise<TestingBotCredentials>;
+  api(credentials: TestingBotCredentials): Pick<TestingBotApi, "devices">;
+}
+
+const admissionDependencies: DeviceCloudAdmissionDependencies = {
+  javaRuns: environment => {
+    try { return Bun.spawnSync([javaExecutable(environment), "-version"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exitCode === 0; }
+    catch { return false; }
+  },
+  credentials: environment => readTestingBotCredentials(serviceAccountTokenFile(environment)),
+  api: credentials => new TestingBotApi(credentials),
+};
+
+export async function admitDeviceCloud(
+  environment: Environment,
+  mode: "catalog" | "free",
+  dependencies: DeviceCloudAdmissionDependencies = admissionDependencies,
+): Promise<TestingBotCredentials> {
   let javaRuns = false;
   try {
-    javaRuns = Bun.spawnSync([javaExecutable(environment), "-version"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+    javaRuns = dependencies.javaRuns(environment);
   } catch {
     javaRuns = false;
   }
   if (!javaRuns) throw new Error("the TestingBot tunnel needs Java; install openjdk@17 or set OMP_STABLE_JAVA");
-  const credentials = await readTestingBotCredentials(serviceAccountTokenFile(environment));
-  const catalog = await new TestingBotApi(credentials).devices("all");
+  const credentials = await dependencies.credentials(environment);
+  const api = dependencies.api(credentials);
+  const catalog = await api.devices("all");
   for (const target of DEVICE_CLOUD_TARGETS) {
     const profile = DEVICE_CLOUD_PROFILES[target];
-    if (!catalog.some(device => device.platform === profile.platform && profile.models.includes(device.name))) {
+    if (!catalog.some(device => eligibleDevice(profile, device))) {
       throw new Error(`TestingBot no longer offers a pinned ${target} model`);
+    }
+  }
+  if (mode === "free") {
+    const free = await api.devices("available");
+    for (const target of DEVICE_CLOUD_TARGETS) {
+      if (!free.some(device => eligibleDevice(DEVICE_CLOUD_PROFILES[target], device))) {
+        throw new DeviceCloudAvailabilityHold({
+          kind: "device-cloud-availability", stage: "preflight", target, vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0,
+        });
+      }
     }
   }
   return credentials;
@@ -128,18 +162,25 @@ function versionOrder(left: string, right: string): number {
   return 0;
 }
 
-async function freeDevice(api: TestingBotApi, target: DeviceCloudTarget, profile: DeviceProfile): Promise<CloudDevice> {
-  const deadline = Date.now() + DEVICE_WAIT_MS;
+export async function freeDevice(
+  api: Pick<TestingBotApi, "devices">, target: DeviceCloudTarget, profile: DeviceProfile, epoch: string,
+  clock: { now(): number; pause(milliseconds: number): Promise<void> } = { now: Date.now, pause: Bun.sleep },
+): Promise<CloudDevice> {
+  const started = clock.now();
+  const deadline = started + DEVICE_WAIT_MS;
   for (;;) {
     const free = await api.devices("available");
     for (const model of profile.models) {
       const newest = free
-        .filter(device => device.platform === profile.platform && device.name === model)
+        .filter(device => eligibleDevice(profile, device) && device.name === model)
         .sort((a, b) => versionOrder(b.version, a.version))[0];
       if (newest !== undefined) return newest;
     }
-    if (Date.now() >= deadline) throw new Error(`no pinned ${target} model became free on TestingBot within ${DEVICE_WAIT_MS / 60_000} minutes`);
-    await Bun.sleep(15_000);
+    if (clock.now() >= deadline) throw new DeviceCloudAvailabilityHold({
+      kind: "device-cloud-availability", stage: "allocation", target, vendors: ["testingbot"],
+      reason: "pinned-pool-busy", waitedMs: DEVICE_WAIT_MS, epoch,
+    });
+    await clock.pause(Math.min(15_000, deadline - clock.now()));
   }
 }
 
@@ -211,15 +252,15 @@ async function pollNative(session: WebDriverSession, predicate: string, timeoutM
 
 /** Plants and detects the synthetic control secret, then launches View in-page and requires every sink clean. */
 async function assertCleanSinks(session: WebDriverSession, label: string): Promise<void> {
-  const gaps = leakControlGaps(await session.evaluate<LeakControlResult>(LEAK_CONTROL_EXPRESSION));
-  if (gaps.missed.length > 0 || gaps.residualPlants.length > 0) {
-    throw new Error(`the capability-sink detector missed ${gaps.missed.length} sinks and left ${gaps.residualPlants.length} plants`);
+  const control = await session.evaluate<VendorLeakControlResult>(vendorLeakControlExpression());
+  if (!control.complete || control.missedCount !== 0 || control.residualCount !== 0) {
+    throw new Error("the capability-sink detector missed sinks or left synthetic plants");
   }
   const sweep = await session.evaluate<LeakSweepResult>(leakSweepExpression(label, { detail: false }));
-  if (sweep.error !== undefined || sweep.launchStatus !== 200 || sweep.launchCacheControl?.includes("no-store") !== true) {
+  if (sweep.error !== undefined || sweep.launchStatus !== 200 || sweep.launchNoStore !== true) {
     throw new Error("the in-page View launch did not return a no-store capability");
   }
-  if ((sweep.findings?.length ?? 0) > 0) throw new Error(`a View capability reached ${sweep.findings?.length} browser sinks`);
+  if (sweep.findingCount !== 0) throw new Error("a View capability reached browser sinks");
 }
 
 /** Adds the current Safari page to the Home Screen and opens the installed app. */
@@ -265,13 +306,13 @@ async function standaloneWebView(session: WebDriverSession, origin: string): Pro
   const webViews = (await session.contexts()).filter(context => context.startsWith("WEBVIEW"));
   for (const context of webViews.reverse()) {
     await session.context(context);
-    const state = await session.evaluate<unknown>(`({ standalone: navigator.standalone === true, origin: location.origin })`);
-    if (isRecord(state) && state.standalone === true && state.origin === origin) return context;
+    const state = await session.evaluate<unknown>(`navigator.standalone === true && location.origin === ${JSON.stringify(origin)}`);
+    if (state === true) return context;
   }
   throw new Error("the Home Screen app exposed no standalone web view on the candidate origin");
 }
 
-const NOTIFY_STATE = `document.querySelector("#notify")?.dataset.state`;
+const NOTIFY_STATE = `(() => { const state = document.querySelector("#notify")?.dataset.state; return ["idle", "enabled", "blocked", "unavailable"].includes(state) ? state : "unknown"; })()`;
 const OPEN_SETTINGS = `(() => { document.querySelector("#settings")?.click(); return true; })()`;
 
 /**
@@ -290,7 +331,7 @@ async function homeScreenAlerts(
   await session.evaluate(OPEN_SETTINGS);
   await pollPage(session, "the alerts control", `["idle", "enabled", "blocked", "unavailable"].includes(${NOTIFY_STATE})`, 30_000);
   const initial = await session.evaluate<unknown>(NOTIFY_STATE);
-  if (initial !== "idle") throw new Error(`background alerts started ${String(initial)}, not idle`);
+  if (initial !== "idle") throw new Error("background alerts did not start idle");
   await session.context("NATIVE_APP");
   const enable = await session.find(`label == "Enable background alerts"`);
   if (enable === undefined) throw new Error("the Enable background alerts control was not tappable");
@@ -303,12 +344,16 @@ async function homeScreenAlerts(
   const subscription = await session.evaluate<unknown>(`(async () => {
     const registration = await navigator.serviceWorker.getRegistration("/");
     const current = await registration?.pushManager.getSubscription();
-    return current ? { keys: Object.keys(current.toJSON()).sort(), host: new URL(current.endpoint).host } : null;
+    return {
+      subscribed: current !== null && current !== undefined,
+      appleService: current ? new URL(current.endpoint).host === "web.push.apple.com" : false,
+      omitsExpirationTime: current ? !Object.hasOwn(current.toJSON(), "expirationTime") : false,
+    };
   })()`);
-  if (!isRecord(subscription) || !Array.isArray(subscription.keys) || typeof subscription.host !== "string") {
+  if (!isRecord(subscription) || subscription.subscribed !== true || typeof subscription.omitsExpirationTime !== "boolean") {
     throw new Error("background alerts reported enabled without a push subscription");
   }
-  if (subscription.host !== "web.push.apple.com") throw new Error("the Home Screen app subscribed through a push service other than Apple's");
+  if (subscription.appleService !== true) throw new Error("the Home Screen app subscribed through a push service other than Apple's");
 
   await session.context("NATIVE_APP");
   await session.pressHome();
@@ -348,8 +393,8 @@ async function homeScreenAlerts(
   return {
     homeScreenApp: true,
     alertsEnabled: true,
-    subscriptionOmitsExpirationTime: !subscription.keys.includes("expirationTime"),
-    pushServiceHost: subscription.host,
+    subscriptionOmitsExpirationTime: subscription.omitsExpirationTime,
+    pushServiceHost: "web.push.apple.com",
     deliveredMs,
     tapOpenedControl: true,
     tapUrlScrubbed: true,
@@ -358,13 +403,16 @@ async function homeScreenAlerts(
 }
 
 export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOptions): Promise<DeviceCloudRuntime> {
-  const { identity, fixture } = options;
+  const { identity } = options;
   const { origin } = identity;
   const credentials = await readTestingBotCredentials(serviceAccountTokenFile(options.environment));
   const api = new TestingBotApi(credentials);
-  const location = (epoch: string): PushFixtureLocation => ({
-    root: join(fixture.base, `omp-cloud-${epoch}`), epoch, bun: fixture.bun, binary: fixture.binary, scripts: fixture.scripts,
-  });
+  let fixture: DeviceCloudFixture | undefined;
+  const prepareFixture = async () => fixture ??= await options.fixture();
+  const location = (epoch: string): PushFixtureLocation => {
+    if (fixture === undefined) throw new Error("device-cloud fixture has not been staged under its lease");
+    return { root: join(fixture.base, `omp-cloud-${epoch}`), epoch, bun: fixture.bun, binary: fixture.binary, scripts: fixture.scripts };
+  };
   let appAsset: string | undefined;
   // In-process: a crash takes the proxy with it, so an orphaned tunnel forwards to a closed port until cleanup stops it.
   let proxy: AllowlistProxy | undefined;
@@ -374,7 +422,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     const label = attempt.session.cwdLabel;
     if (label === undefined) throw new Error("the live OMP session published no label");
     appAsset ??= await archiveAppAsset(identity.candidate.archivePath);
-    const device = await freeDevice(api, target, profile);
+    const device = await freeDevice(api, target, profile, attempt.epoch);
     const started = Date.now();
     const refusalsBefore = proxy?.refusals() ?? 0;
     const { session, capabilities } = await WebDriverSession.create(credentials, {
@@ -395,23 +443,14 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
         maxduration: 1_800,
       },
     }, attempt.created);
-    try {
-      const journey = await runCollaborationJourney(session, { origin, label, promptMarker: PROMPT_MARKER, expectedAppAsset: appAsset });
-      // The browser's own report of the device; Chrome's reduced user agent leaves its details to client hints.
-      const reported = await session.evaluate<unknown>(`(async () => ({
-        userAgent: navigator.userAgent,
-        touchPoints: navigator.maxTouchPoints,
-        hints: (await navigator.userAgentData?.getHighEntropyValues?.(["uaFullVersion", "platformVersion", "model"]).catch(() => undefined)) ?? null,
-      }))()`);
-      if (!isRecord(reported) || typeof reported.userAgent !== "string" || typeof reported.touchPoints !== "number") {
-        throw new Error(`the ${target} session's browser did not report its device`);
-      }
+      // Attest on the directory page, before the first View or Control opens any capability.
+      await session.navigate(`${origin}/`);
+      const reported = await session.evaluate<BrowserAllocationReport>(ALLOCATION_REPORT_EXPRESSION);
       const allocation = attestAllocation(target, device, {
         capabilities,
-        userAgent: reported.userAgent,
-        touchPoints: reported.touchPoints,
-        ...(isRecord(reported.hints) ? { hints: reported.hints } : {}),
+        browser: reported,
       });
+      const journey = await runCollaborationJourney(session, { origin, label, promptMarker: PROMPT_MARKER, expectedAppAsset: appAsset });
       await assertCleanSinks(session, label);
       const observations: Observations = {
         ...allocation,
@@ -424,15 +463,11 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
         sinkFindings: 0,
       };
       if (profile.homeScreenAlerts) {
-        Object.assign(observations, await homeScreenAlerts(session, origin, () => commandPushFixture(location(attempt.epoch), "ask", fixture.execute)));
+        Object.assign(observations, await homeScreenAlerts(session, origin, () => commandPushFixture(location(attempt.epoch), "ask", fixture!.execute)));
       }
       observations.tunnelRefusals = (proxy?.refusals() ?? 0) - refusalsBefore;
       observations.elapsedMs = Date.now() - started;
       return observations;
-    } finally {
-      // Cleanup ends it again from the recorded id if this fails.
-      await endWebDriverSession(credentials, session.id).catch(() => undefined);
-    }
   };
 
   const publishedSession = async (label: string): Promise<SessionMetadata | undefined> => {
@@ -447,9 +482,12 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     now: Date.now,
     pause: Bun.sleep,
     admit: async () => {
-      await admitDeviceCloud(options.environment);
+      await admitDeviceCloud(options.environment, "catalog");
     },
-    fixture: (operation, epoch) => commandPushFixture(location(epoch), operation, fixture.execute),
+    fixture: async (operation, epoch) => {
+      const prepared = await prepareFixture();
+      await commandPushFixture(location(epoch), operation, prepared.execute);
+    },
     fixtureSession: epoch => publishedSession(basename(location(epoch).root)),
     liveSession: publishedSession,
     tunnel: async (operation, epoch) => {

@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { isRecord } from "../packages/collab-client/upstream/src/tool-render/util.ts";
 import type { JourneyPage } from "./browser-journey.ts";
 import { readProvider } from "./provider-read.ts";
+import { parseRetainedVendorJson, RetainedVendorJsonError } from "./device-cloud-record-json.ts";
 
 /** The GitHub release asset, verified by the digest GitHub publishes for it. */
 export const TESTINGBOT_TUNNEL = {
@@ -49,10 +50,47 @@ export interface CloudDevice {
 
 export interface TestRecord {
   readonly complete: boolean;
-  /** The whole record as JSON text, searched in memory and never persisted. */
+  /** Bounded raw retained surfaces and their canonical JSON, searched only in memory. */
   readonly text: string;
   readonly video: boolean;
   readonly screenshots: number;
+}
+
+async function boundedVendorText(response: Response, maximumBytes = MAX_RECORD_BYTES): Promise<string> {
+  if (response.body === null) throw new Error("TestingBot returned an empty response");
+  if (maximumBytes < 1) {
+    await response.body.cancel();
+    throw new Error("TestingBot returned an oversized response");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) break;
+      bytes += result.value.byteLength;
+      if (bytes > maximumBytes) {
+        await reader.cancel();
+        throw new Error("TestingBot returned an oversized response");
+      }
+      chunks.push(result.value);
+    }
+  } finally { reader.releaseLock(); }
+  const buffer = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(buffer);
+}
+
+function retainedLogUrl(value: unknown): string {
+  if (typeof value !== "string") throw new Error("TestingBot returned an invalid retained log reference");
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("TestingBot returned an invalid retained log reference"); }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.hash !== "" ||
+    !["s3.amazonaws.com", "s3-eu-west-1.amazonaws.com"].includes(url.hostname) || url.port !== "" ||
+    !url.pathname.startsWith("/eulogtestingbot/")) throw new Error("TestingBot returned an unreviewed retained log origin or bucket");
+  return url.href;
 }
 
 export interface OpResult {
@@ -113,7 +151,7 @@ export async function readTestingBotCredentials(tokenFile: string, op: OpRunner 
   }
   let identity: unknown;
   try {
-    identity = JSON.parse(whoami.stdout);
+    identity = parseRetainedVendorJson(whoami.stdout);
   } catch {
     identity = undefined;
   }
@@ -163,13 +201,15 @@ export class TestingBotApi {
   /** The real-device catalog, or only the devices free right now. */
   async devices(scope: "all" | "available"): Promise<readonly CloudDevice[]> {
     const response = await this.#get(scope === "all" ? "/devices" : "/devices/available", "device catalog");
-    const listing: unknown = response === undefined ? [] : await response.json();
+    if (response === undefined) throw new Error("TestingBot device catalog is unavailable");
+    const listing = parseRetainedVendorJson(await boundedVendorText(response));
     if (!Array.isArray(listing)) throw new Error("TestingBot returned an invalid device catalog");
-    return listing.flatMap(entry =>
-      isRecord(entry) && typeof entry.name === "string" && typeof entry.platform_name === "string" && typeof entry.version === "string"
-        ? [{ name: entry.name, platform: entry.platform_name, version: entry.version }]
-        : [],
-    );
+    return listing.map(entry => {
+      if (!isRecord(entry) || typeof entry.name !== "string" || entry.name.length < 1 || entry.name.length > 100 ||
+        !["iOS", "Android"].includes(String(entry.platform_name)) || typeof entry.version !== "string" ||
+        !/^[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}$/u.test(entry.version)) throw new Error("TestingBot returned an invalid device catalog");
+      return { name: entry.name, platform: entry.platform_name as string, version: entry.version };
+    });
   }
 
   /** The retained record of one WebDriver session, which TestingBot keys by session id. */
@@ -177,15 +217,52 @@ export class TestingBotApi {
     if (!TESTINGBOT_SESSION_ID.test(sessionId)) throw new Error("invalid TestingBot session id");
     const response = await this.#get(`/tests/${sessionId}`, "test record");
     if (response === undefined) return undefined;
-    const text = await response.text();
-    if (text.length > MAX_RECORD_BYTES) throw new Error("TestingBot returned an oversized test record");
-    const record: unknown = JSON.parse(text);
+    const text = await boundedVendorText(response);
+    const record = parseRetainedVendorJson(text);
     if (!isRecord(record)) throw new Error("TestingBot returned an invalid test record");
+    if (record.state !== "COMPLETE" || record.assets_available !== true) {
+      return { complete: false, text: `${text}\n${JSON.stringify(record)}`, video: record.video !== false, screenshots: 0 };
+    }
+    const assetsResponse = await this.#get(`/tests/${sessionId}/assets`, "test assets");
+    if (assetsResponse === undefined) throw new Error("TestingBot retained asset inventory is missing");
+    let remainingBytes = MAX_RECORD_BYTES - Buffer.byteLength(text, "utf8");
+    const assetsText = await boundedVendorText(assetsResponse, remainingBytes);
+    remainingBytes -= Buffer.byteLength(assetsText, "utf8");
+    const assets = parseRetainedVendorJson(assetsText);
+    if (!isRecord(assets) || assets.session_id !== sessionId || !isRecord(record.logs) || !isRecord(assets.logs) ||
+      !Array.isArray(record.thumbs) || !Array.isArray(assets.screenshots) ||
+      (assets.har !== null && assets.har !== false && typeof assets.har !== "string") ||
+      (assets.performance !== null && assets.performance !== false && typeof assets.performance !== "string")) {
+      throw new Error("TestingBot returned an invalid retained asset inventory");
+    }
+    const surfaces = [text, JSON.stringify(record), assetsText, JSON.stringify(assets)];
+    const references = new Set([...Object.values(record.logs), ...Object.values(assets.logs)]);
+    for (const extra of [assets.har, assets.performance]) if (typeof extra === "string") references.add(extra);
+    if (references.size > 16) throw new Error("TestingBot retained log inventory exceeds its surface bound");
+    for (const reference of references) {
+      const url = retainedLogUrl(reference);
+      // Signed asset references are already authorized. Never forward the account's credentials.
+      const logResponse = await readProvider(() => fetch(url, { redirect: "error", signal: AbortSignal.timeout(30_000) }));
+      if (!logResponse.ok) {
+        await logResponse.body?.cancel();
+        throw new Error(`TestingBot retained log read failed with HTTP ${logResponse.status}`);
+      }
+      const logText = await boundedVendorText(logResponse, remainingBytes);
+      remainingBytes -= Buffer.byteLength(logText, "utf8");
+      surfaces.push(logText);
+      try { surfaces.push(JSON.stringify(parseRetainedVendorJson(logText))); }
+      catch (error) {
+        const type = logResponse.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+        if (!(error instanceof RetainedVendorJsonError) || error.code !== "invalid-json" ||
+          type === "application/json" || type?.endsWith("+json")) throw error;
+        // Plain-text logs remain raw-only and are never a source of further references.
+      }
+    }
     return {
-      complete: record.state === "COMPLETE",
-      text: JSON.stringify(record),
-      video: record.video !== false,
-      screenshots: Array.isArray(record.thumbs) ? record.thumbs.length : 0,
+      complete: true,
+      text: surfaces.join("\n"),
+      video: record.video !== false || (assets.video !== null && assets.video !== false),
+      screenshots: record.thumbs.length + assets.screenshots.length,
     };
   }
 }
@@ -239,7 +316,7 @@ export function pageEvaluationScript(expression: string): string {
   return `const done = arguments[arguments.length - 1];
     Promise.resolve().then(() => (${expression})).then(
       value => done({ ok: true, value }),
-      error => done({ ok: false, error: error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : "unnamed rejection" }));`;
+      error => done({ ok: false, error: error instanceof Error && ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError", "EvalError", "DOMException"].includes(error.name) ? error.name : "unnamed rejection" }));`;
 }
 
 /** One W3C session on a real device. Page evaluations return only their structured result. */
@@ -262,8 +339,14 @@ export class WebDriverSession implements JourneyPage {
       throw new Error("TestingBot started no identifiable session");
     }
     const session = new WebDriverSession(value.sessionId, authorization);
-    await created(session.id);
-    await session.#command("timeouts", "POST", "/timeouts", { script: 90_000, pageLoad: 90_000 });
+    try {
+      await created(session.id);
+      await session.#command("timeouts", "POST", "/timeouts", { script: 90_000, pageLoad: 90_000 });
+    } catch (error) {
+      try { await endWebDriverSession(credentials, session.id); }
+      catch { throw new AggregateError([error, new Error("TestingBot identified session could not be ended after setup failure")], "TestingBot session setup and release failed"); }
+      throw error;
+    }
     return { session, capabilities: isRecord(value.capabilities) ? value.capabilities : {} };
   }
 

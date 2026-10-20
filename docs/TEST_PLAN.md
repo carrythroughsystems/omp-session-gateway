@@ -249,11 +249,28 @@ real run exercises.
 
 The device-cloud lane (`scripts/device-cloud-qualification.test.ts`) runs against a fake runtime:
 
+- catalog/free admission uses identical explicit model and OS floors, refuses malformed catalogs,
+  obsolete iPads and unproved A55 hardware, and a free-empty snapshot is a zero-write hold;
+- injected allocation time proves busy-to-free recovery, admission races and exactly ten minutes'
+  exhaustion; authentication, transport and malformed inventory never become holds;
+- an iPhone-only partial attempt is ended, audited and released before an iPad hold propagates;
+  an audit or cleanup failure combined with availability remains diagnostic;
+- a fake vendor refusing a third concurrent session passes because each target ends before
+  allocating the next, and a failed release blocks an already-queued Android lane through the
+  existing `pixelUnrestored` restoration guard, including nested aggregate failures;
+- duplicate keys at top level, nested inventories and JSON logs are rejected before reference
+  discovery, including escaped-equivalent keys; a parse-site meta-test forbids lenient vendor
+  record parsers. Escaped JSON values cannot disappear from retained audits; the
+  test detail, asset inventory and declared logs are inspected, and missing/unreviewed surfaces
+  fail without forwarding account credentials to log storage;
+- expected application assets are compared in-page with boolean-only results, and a mismatch
+  fails before View/Control; page-controlled pathnames never become vendor-logged results;
 - every WebDriver session reaches a checkpoint before it is driven, and every effect, the release of
   its sessions, tunnel, fixture, and workspace included, runs in one Pixel lease turn that no queued
   lane can enter, after a failure too;
 - a vendor record holding either session's live link, or a 16-character segment of one, fails the
-  lane, and neither the error nor the saved progress repeats it;
+  lane, including interior and delimiter-crossing contiguous windows, and neither the error nor
+  the saved progress repeats it;
 - a generation change of either session before the audit fails the lane, and so do records that kept
   video or screenshots;
 - an attempt interrupted before its release is released rather than resumed, a release that cannot
@@ -284,6 +301,17 @@ names and counts, never the page text that held the link.
 A real run exercises TestingBot's iPhone, iPad, and Android devices through the tunnel against the
 candidate gateway, the iPhone's Home Screen alert, and the vendor-record audit; ADR-032 lists what
 it proves and what stays Pixel-only.
+`bun scripts/device-cloud-attestation.ts --admission` is a read-only free-inventory probe.
+`--attest-public` permits at most four sequential allocation sessions (the three added iPhones
+and A55), navigates only to `https://example.com`, ends each known session and inspects its retained
+record. It never opens View/Control, contacts the retained Mac or Pixel, or qualifies a release.
+Unavailable hardware remains disabled until its bounded attestation is proven.
+The separate `scripts/device-cloud-development.ts` runner accepts an isolated candidate identity,
+Mac host, HTTPS origin and session label. It runs at most three journey sessions, stops admitting
+new allocations after 40 minutes, and always attempts production audit/release; provider command
+and session-duration bounds still apply to in-flight work. `--hold-after-iphone` injects a marked
+development-only iPad hold for partial-attempt audit testing. Its private results are explicitly
+Tested and cannot approve a release. Equipment availability must be confirmed before running it.
 
 ## 2. Secret-leak test harness
 

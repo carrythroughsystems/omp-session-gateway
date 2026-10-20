@@ -13,6 +13,7 @@ import { fixtureModelError, OMP_FIXTURE_MODEL } from "./omp-fixture.ts";
 import { isSupportedOmpVersion, parseOmpVersion } from "./upstream-canary.ts";
 import { defaultLaneModules } from "./stable-lanes.ts";
 import { pixelUnrestored } from "./restoration.ts";
+import { deviceCloudHolds, deviceCloudMachineOutcome } from "./device-cloud-availability.ts";
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
 
@@ -542,6 +543,8 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
     lane.status = "failed";
     lane.completedAt = now();
     lane.error = "lane execution failed; inspect the qualification process output";
+    const holds = name === "deviceCloud" ? deviceCloudHolds(error) : undefined;
+    if (holds?.length === 1) lane.evidence = { ...lane.evidence, availabilityHold: holds[0] };
     await persist();
     throw error;
   }
@@ -1323,6 +1326,7 @@ else:
     try {
       await lane.preflight(laneContext);
     } catch (error) {
+      if (deviceCloudHolds(error) !== undefined) throw error;
       throw new Error(`Stable preflight: ${name} lane admission failed`, { cause: error });
     }
   }
@@ -2296,7 +2300,9 @@ if (import.meta.main) {
   try {
     console.log(JSON.stringify(await runStableQualification(Bun.argv.slice(2))));
   } catch (error) {
-    console.error(`stable qualification failed: ${errorMessage(error)}`);
-    process.exitCode = 1;
+    const hold = deviceCloudMachineOutcome(error);
+    if (hold !== undefined) console.log(JSON.stringify(hold));
+    else console.error(`stable qualification failed: ${errorMessage(error)}`);
+    process.exitCode = hold === undefined ? 1 : 75;
   }
 }

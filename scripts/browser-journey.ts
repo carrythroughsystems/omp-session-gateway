@@ -34,7 +34,8 @@ export interface CollaborationJourneyOptions {
 }
 
 export interface CollaborationJourneyResult {
-  readonly appAsset: string;
+  /** The trusted expected asset, only when supplied; never page-controlled result text. */
+  readonly appAsset?: string;
   readonly viewReadOnly: true;
   readonly controlWritable: true;
   readonly promptAccepted: true;
@@ -94,13 +95,12 @@ export async function runCollaborationJourney(
       `Boolean([...document.querySelectorAll("button[aria-label]")].find(button => button.getAttribute("aria-label") === "View " + ${quotedLabel}))`,
     );
 
-    const appAsset = await page.evaluate<string | null>(
-      `performance.getEntriesByType("resource").map(entry => new URL(entry.name).pathname).find(path => /^\\/assets\\/app\\.[0-9a-f]+\\.js$/.test(path)) ?? null`,
-    );
-    if (appAsset === null || !APP_ASSET_PATTERN.test(appAsset)) throw new Error("hashed app asset was not loaded");
-    if (options.expectedAppAsset !== undefined && appAsset !== options.expectedAppAsset) {
-      throw new Error("installed app asset does not match the release archive");
-    }
+    const appAssetMatched = await page.evaluate<boolean>(`(() => {
+      const expected = ${JSON.stringify(options.expectedAppAsset ?? null)};
+      const asset = performance.getEntriesByType("resource").map(entry => new URL(entry.name).pathname).find(path => /^\\/assets\\/app\\.[0-9a-f]+\\.js$/.test(path));
+      return typeof asset === "string" && (expected === null || asset === expected);
+    })()`);
+    if (appAssetMatched !== true) throw new Error(options.expectedAppAsset === undefined ? "hashed app asset was not loaded" : "installed app asset does not match the release archive");
 
     options.announce?.("View");
     const openedView = await page.evaluate<boolean>(`(() => {
@@ -185,7 +185,7 @@ export async function runCollaborationJourney(
     );
 
     return {
-      appAsset,
+      ...(options.expectedAppAsset === undefined ? {} : { appAsset: options.expectedAppAsset }),
       viewReadOnly: true,
       controlWritable: true,
       promptAccepted: true,
@@ -214,6 +214,7 @@ export interface LeakSweepResult {
   readonly target?: Record<string, unknown>;
   readonly launchStatus?: number;
   readonly launchCacheControl?: string | null;
+  readonly launchNoStore?: boolean;
   readonly launchKeys?: readonly string[];
   readonly capabilityLength?: number;
   readonly capabilityDigest?: string;
@@ -226,12 +227,14 @@ export interface LeakSweepResult {
   readonly locationHref?: string;
   readonly locationHashLength?: number;
   readonly findings?: readonly string[];
+  readonly findingCount?: number;
   readonly error?: string;
   readonly seen?: readonly string[];
 }
 
 /** Self-contained page expression that plants, detects and removes the synthetic control secret. */
-export const LEAK_CONTROL_EXPRESSION = `(async () => {
+function leakControlExpression(detail: boolean): string {
+  return `(async () => {
     ${PAGE_PRELUDE}
     const NEEDLE = "SYNTHETIC-CAPABILITY-CONTROL-b7f3a91c2d8e4056";
     const CONTROL_KEY = "__leak_control__";
@@ -266,18 +269,41 @@ export const LEAK_CONTROL_EXPRESSION = `(async () => {
     indexedDB.deleteDatabase(CONTROL_KEY);
     history.replaceState(null, "", location.pathname);
 
-    return {
+    const residual = {
+      localStorage: localStorage.getItem(CONTROL_KEY),
+      sessionStorage: sessionStorage.getItem(CONTROL_KEY),
+      cookie: document.cookie.includes(CONTROL_KEY),
+      hash: location.hash,
+      caches: await caches.keys(),
+    };
+    ${detail ? `return {
       plantedUnique: [...new Set(planted)].sort(),
       detectedUnique: [...new Set(detected)].sort(),
-      residual: {
-        localStorage: localStorage.getItem(CONTROL_KEY),
-        sessionStorage: sessionStorage.getItem(CONTROL_KEY),
-        cookie: document.cookie.includes(CONTROL_KEY),
-        hash: location.hash,
-        caches: await caches.keys(),
-      },
-    };
+      residual,
+    };` : `const sinks = ${JSON.stringify(LEAK_SINKS)};
+    return {
+      complete: planted.length === sinks.length,
+      detected: sinks.filter(sink => detected.includes(sink)),
+      missedCount: sinks.filter(sink => !detected.includes(sink)).length,
+      residualCount: Number(residual.localStorage !== null) + Number(residual.sessionStorage !== null) +
+        Number(residual.cookie) + Number(residual.hash !== "") + Number(residual.caches.includes(CONTROL_KEY)),
+    };`}
   })()`;
+}
+
+export const LEAK_CONTROL_EXPRESSION = leakControlExpression(true);
+
+export interface VendorLeakControlResult {
+  readonly complete: boolean;
+  readonly detected: readonly (typeof LEAK_SINKS)[number][];
+  readonly missedCount: number;
+  readonly residualCount: number;
+}
+
+/** Vendor-safe control: even residual failure branches return only booleans, counts and sink names. */
+export function vendorLeakControlExpression(): string {
+  return leakControlExpression(false);
+}
 
 /** Sinks the control missed and control plants it left behind. */
 export function leakControlGaps(control: LeakControlResult): {
@@ -303,8 +329,8 @@ export function leakSweepExpression(label: string, options: { readonly detail: b
     const out = {};
     const list = await (await fetch("/api/v1/sessions", { cache: "no-store" })).json();
     const target = list.sessions.find(session => session.cwdLabel === ${JSON.stringify(label)});
-    if (!target) return { error: "target session not published", seen: list.sessions.map(s => s.cwdLabel) };
-    out.target = { generation: target.generation, canView: target.canView, canControl: target.canControl };
+    if (!target) return ${options.detail ? '{ error: "target session not published", seen: list.sessions.map(s => s.cwdLabel) }' : '{ error: "target-not-published" }'};
+${options.detail ? "    out.target = { generation: target.generation, canView: target.canView, canControl: target.canControl };" : ""}
 
     const response = await fetch("/api/v1/sessions/" + target.instanceId + "/launch", {
       method: "POST",
@@ -313,13 +339,13 @@ export function leakSweepExpression(label: string, options: { readonly detail: b
       body: JSON.stringify({ generation: target.generation, mode: "view" }),
     });
     out.launchStatus = response.status;
-    out.launchCacheControl = response.headers.get("cache-control");
-    if (!response.ok) return { ...out, error: "launch rejected" };
+${options.detail ? '    out.launchCacheControl = response.headers.get("cache-control");' : '    out.launchNoStore = response.headers.get("cache-control")?.split(",").some(value => value.trim().toLowerCase() === "no-store") === true;'}
+    if (!response.ok) return { ...out, error: "launch-rejected" };
 
     const payload = await response.json();
-    out.launchKeys = Object.keys(payload).sort();
+${options.detail ? "    out.launchKeys = Object.keys(payload).sort();" : ""}
     const capability = payload.capability;
-    if (typeof capability !== "string") return { ...out, error: "no capability string in launch payload" };
+    if (typeof capability !== "string") return { ...out, error: "invalid-launch-payload" };
 
 ${options.detail ? "    out.capabilityLength = capability.length;\n    const digest = await crypto.subtle.digest(\"SHA-256\", new TextEncoder().encode(capability));\n    out.capabilityDigest = [...new Uint8Array(digest)].slice(0, 8).map(b => b.toString(16).padStart(2, \"0\")).join(\"\");" : ""}
 
@@ -335,9 +361,9 @@ ${options.detail ? "    out.needleCount = needles.length;" : ""}
     const cacheNames = await caches.keys();
     const indexedDbNames = ((await indexedDB.databases?.()) ?? []).map(entry => entry.name);
 ${options.detail ? "    out.cacheNames = cacheNames;\n    out.indexedDbNames = indexedDbNames;" : "    out.cacheCount = cacheNames.length;\n    out.indexedDbCount = indexedDbNames.length;"}
-${options.detail ? "    out.locationHref = location.href;" : ""}
-    out.locationHashLength = location.hash.length;
-    out.findings = findings;
+${options.detail ? "    out.locationHref = location.href;\n    out.locationHashLength = location.hash.length;" : ""}
+    out.findingCount = findings.length;
+    out.findings = ${options.detail ? "findings" : `${JSON.stringify(LEAK_SINKS)}.filter(sink => findings.map(name => name === "cacheName" || name === "cacheKey" ? "cacheBody" : name === "indexedDbName" ? "indexedDB" : name).includes(sink))`};
     return out;
   })()`;
 }

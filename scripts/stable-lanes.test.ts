@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { remoteCommandLine, type RemoteExecutor } from "./stable-qualification.ts";
-import { gatewayStreamsDiscarded, PUSH_FIXTURE_FILES, remoteHome, stageRemoteFile } from "./stable-lanes.ts";
+import { gatewayStreamsDiscarded, PUSH_FIXTURE_FILES, remoteHome, retainedMacCloudFixture, stageRemoteFile } from "./stable-lanes.ts";
+import type { ExternalLaneContext, RetainedMacLaneContext } from "./stable-qualification.ts";
 
 const SCRIPTS = fileURLToPath(new URL(".", import.meta.url));
 
@@ -37,6 +38,31 @@ async function relativeImports(file: string): Promise<string[]> {
 }
 
 describe("retained-Mac Push fixture staging", () => {
+  test("device-cloud fixture construction stages nothing before lease ownership", async () => {
+    let leased = false;
+    const calls: string[] = [];
+    const context: ExternalLaneContext & RetainedMacLaneContext = {
+      identity: {
+        tag: "v0.7.7-prealpha.1", previousTag: "v0.7.6", orchestratorCommit: "a".repeat(40), receiptRoot: "/fixture",
+        candidate: { tag: "v0.7.7-prealpha.1", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64), archivePath: "/candidate.tar" },
+        predecessor: { tag: "v0.7.6", sourceCommit: "c".repeat(40), archiveSha256: "d".repeat(64), archivePath: "/predecessor.tar" },
+        omp: { bunVersion: "1.4.0", sourceCommit: "e".repeat(40), sourceTree: "f".repeat(40), version: "18.12.3", nativeTarballSha256: "0".repeat(64), nativeBinarySha256: "1".repeat(64) },
+      },
+      progress: undefined, checkpoint: async () => {}, origin: "https://fixture.invalid", sessionLabel: "fixture",
+      pixel: async (_owner, action) => { leased = true; try { return await action(); } finally { leased = false; } },
+      mac: async argv => {
+        expect(leased).toBe(true);
+        calls.push(argv.join(" "));
+        return { exitCode: 0, stdout: calls.length === 1 ? "/Users/ompqual" : "", stderr: "" };
+      },
+    };
+    const prepare = retainedMacCloudFixture(context);
+    expect(calls).toEqual([]);
+    const fixture = await context.pixel("deviceCloud", prepare);
+    expect(fixture.base).toBe("/Users/ompqual/qual-tools/device-cloud/fixtures");
+    expect(calls).toHaveLength(1 + PUSH_FIXTURE_FILES.length);
+  });
+
   test("stages exactly the Push fixture's import closure", async () => {
     // The fixture runs on the retained Mac from these staged copies alone, so a new relative import
     // that is not staged would break the campaign there and nowhere else.

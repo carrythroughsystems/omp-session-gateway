@@ -87,12 +87,25 @@ describe("the sweep a vendor-logged driver runs", () => {
     });
     expect(out).toMatchObject({
       launchStatus: 200,
-      launchCacheControl: "no-store",
+      launchNoStore: true,
       cacheCount: 2,
       indexedDbCount: 1,
-      findings: ["cacheName", "indexedDbName"],
+      findings: ["cacheBody", "indexedDB"],
+      findingCount: 2,
     });
     expect(Object.keys(out)).not.toContain("cacheNames");
     expect(JSON.stringify(out)).not.toContain("SYNTHETIC-SWEEP");
+  });
+
+  test.each([
+    ["missing target", { sessions: [{ cwdLabel: KEY }] }, undefined, { error: "target-not-published" }],
+    ["untrusted launch keys", { sessions: [{ cwdLabel: LABEL, instanceId: "instance-safe", generation: 1 }] }, { [KEY]: LINK }, { error: "invalid-launch-payload", launchNoStore: true, launchStatus: 200 }],
+  ])("minimizes vendor results for %s", async (_name, listing, launch, expected) => {
+    const out = await inPage<Promise<Record<string, unknown>>>(`return ${leakSweepExpression(LABEL, { detail: false })};`, {
+      fetch: async url => url === "/api/v1/sessions" ? Response.json(listing) :
+        Response.json(launch, { headers: { "cache-control": `no-store, ${KEY}` } }),
+    });
+    expect(out).toEqual(expected);
+    expect(JSON.stringify(out)).not.toContain(KEY);
   });
 });

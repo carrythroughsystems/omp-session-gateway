@@ -19,6 +19,18 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Widen TestingBot's modern iPhone and Samsung device pools with explicit OS floors and canonical
+  Galaxy hardware checks; keep A55 disabled pending an observed hardware-code proof. Check free
+  inventory during read-only preflight and distinguish typed availability holds (exit 75) from
+  diagnostic failures without changing schema 3 or qualification claims. Audit every partial
+  attempt for exact contiguous 16-character link windows, minimize vendor-logged page results,
+  attest before opening capabilities, and stage the cloud fixture only under the Pixel lease.
+  Keep targets sequential within the vendor's session limit, block queued Pixel lanes after any
+  release failure, and audit raw plus canonical retained metadata, asset inventories and declared
+  logs. A shared strict JSON parser rejects duplicate keys at every depth before discovering
+  references, with a parse-site invariant against lenient bypasses. Application asset checks
+  return only an in-page comparison boolean to vendor command logs.
+
 - Move the OMP engineering baseline to published v18.12.3 (#409), with pins derived by
   `scripts/upstream-pins.ts`. Registry v1, the discovery file format and socket paths, the relay
   protocol, `collab.autoStart`, and the collaboration `host.ts`, `registry.ts`, `settings.ts`,
