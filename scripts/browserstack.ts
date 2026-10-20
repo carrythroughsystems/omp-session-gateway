@@ -70,7 +70,7 @@ function retainedMedia(value: unknown, key = ""): boolean {
     value !== undefined && value !== null && value !== false && value !== "" && !(Array.isArray(value) && value.length === 0)) return true;
   if (typeof value === "string") return MEDIA_URL.test(value);
   if (Array.isArray(value)) return value.some(item => retainedMedia(item));
-  return isRecord(value) && Object.entries(value).some(([name, item]) => retainedMedia(item, name));
+  return isRecord(value) && Object.entries(value).some(([name, item]) => retainedMedia(name) || retainedMedia(item, name));
 }
 
 function retainedContent(raw: string, contentType: string | null): { text: string; media: boolean; json?: unknown } {
@@ -168,6 +168,7 @@ export function browserStackReferences(sessionId: string, buildId: string | unde
       for (const item of value) walk(item, key, depth + 1);
     } else if (isRecord(value)) {
       for (const [name, item] of Object.entries(value)) {
+        if (/data:/iu.test(name) || retainedMedia(name)) throw new BrowserStackAuditFailure("BrowserStack retained media key");
         if (referenceLike(name)) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
         walk(item, name, depth + 1);
       }
@@ -364,10 +365,12 @@ export class BrowserStackApi {
   async deleteRecord(sessionId: string, removal: CloudRecordRemoval, clock: { now(): number; pause(milliseconds: number): Promise<void> } = { now: Date.now, pause: Bun.sleep }): Promise<void> {
     validateBrowserStackArtifacts(sessionId, removal.artifacts);
     const artifacts = [...removal.artifacts];
+    const audited = new Set(artifacts.map(artifact => artifact.url));
     let buildId = artifacts[0]?.buildId;
     const discover = async (json: unknown, raw: string, sessionMetadata = false) => {
-      mergeArtifacts(sessionId, artifacts, browserStackReferences(sessionId, buildId, json, sessionMetadata, raw).artifacts);
-      await removal.remember([...artifacts]);
+      const found = browserStackReferences(sessionId, buildId, json, sessionMetadata, raw).artifacts;
+      mergeArtifacts(sessionId, artifacts, found);
+      await removal.remember([...artifacts], found.some(artifact => !audited.has(artifact.url)) ? "post-audit retained reference" : undefined);
     };
     const inspect = async (response: Response, session = false): Promise<string | undefined> => {
       const contentType = response.headers.get("content-type") ?? "";

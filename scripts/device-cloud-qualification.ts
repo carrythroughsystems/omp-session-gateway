@@ -400,24 +400,31 @@ function recordExposure(links: readonly string[]): (record: TestRecord) => { lea
 }
 
 function rememberArtifacts(resource: DeviceCloudResource, save: () => Promise<void>): CloudRecordRemoval["remember"] {
-  return async artifacts => {
+  return async (artifacts, incident) => {
     const previousInventory = resource.artifacts;
+    const previousIncident = resource.incident;
     const merged = [...(previousInventory ?? [])];
-    let changed = previousInventory === undefined;
+    let changed = previousInventory === undefined || (incident !== undefined && resource.incident !== true);
+    let postAuditReference = false;
     for (const artifact of artifacts) {
       const previous = merged.find(item => item.url === artifact.url);
-      if (previous === undefined) { merged.push(artifact); changed = true; }
+      if (previous === undefined) { merged.push(artifact); changed = true; postAuditReference ||= resource.audited; }
       else if (previous.kind !== artifact.kind || previous.buildId !== artifact.buildId) throw new Error("cloud artifact identity changed");
     }
     validateBrowserStackArtifacts(sessionReference(resource).sessionId, merged);
     if (!changed) return;
     resource.artifacts = merged;
+    if (incident !== undefined || postAuditReference) resource.incident = true;
     try { await save(); }
     catch (error) {
       if (previousInventory === undefined) delete resource.artifacts;
       else resource.artifacts = previousInventory;
+      if (previousIncident === undefined) delete resource.incident;
+      else resource.incident = previousIncident;
       throw error;
     }
+    // A record re-read must stop before fetching late references; removal still proceeds.
+    if (postAuditReference && incident === undefined) throw new BrowserStackAuditFailure("post-audit retained reference");
   };
 }
 
@@ -686,7 +693,7 @@ async function release(input: DeviceCloudLaneInput, progress: DeviceCloudProgres
             };
             let audited = resource.audited;
             const recovery = artifactRecovery(resource, save, inspect, () => audited);
-            if (!resource.recordDeleted) {
+            if (!resource.recordDeleted && !resource.incident) {
               try {
                 const { record } = await waitFor(runtime, "cleanup record finalization", async () => {
                   const record = await runtime.record(sessionReference(resource), recovery.remember, recovery.inspect);

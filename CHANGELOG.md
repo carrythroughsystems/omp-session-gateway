@@ -34,6 +34,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   reference, with character-class-pinned dashboard paths/queries and no userinfo, ports or fragments.
   Persist an incident for any unbound pre-build reference instead of retaining volatile pending
   references; deletion/absence checks still proceed, but fresh cleanup cannot clear the incident.
+  Atomically checkpoint post-audit artifact references with an incident while continuing only
+  deletion/absence verification across crashes, and reject data/media keys using value classification.
   Scan every non-media retained-surface body before rejection,
   whatever its status, including pre/post-audit errors and transient GET-retry bodies, and persist
   capability hits as incidents. Preserve monotonic cleanup stages and recovery dependencies on

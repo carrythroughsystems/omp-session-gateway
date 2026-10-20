@@ -787,6 +787,10 @@ establish the real path before release, because no saved observed dashboard shap
 A pre-build/pre-finalization reference persists an `unbound retained reference` incident and fails
 closed immediately, with no volatile pending list; later clean metadata permits deletion and
 absence checks but neither normal nor fresh crash cleanup clears the incident or authorizes restoration.
+An exact artifact URL first declared after auditing, even in the pre-DELETE GET, atomically
+checkpoints its inventory plus a `post-audit retained reference` incident and receives only
+deletion/absence verification rather than late auditing, including after a crash; keys also use
+value media classification and any `data:`/media-pattern key fails closed.
 The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
 deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
 from every retained surface, before or after the audit and whatever their HTTP status, are scanned

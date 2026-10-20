@@ -1303,6 +1303,10 @@ segments/query tokens and forbid userinfo, ports and fragments without guessing 
 A reference before finalized build identification persists an `unbound retained reference`
 incident immediately: deletion and absence checks still proceed from later clean metadata, but
 restoration stays blocked after a crash or successful deletion until operator incident handling.
+Any exact artifact URL first declared after the audit atomically checkpoints its inventory and a
+`post-audit retained reference` incident before deletion/absence verification continues, never late
+auditing, including in fresh cleanup; keys use value media classification and `data:`/media-pattern
+keys fail closed.
 Duplicate/media-classification checks and monotonic audit/deletion/absence milestones remain.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.

@@ -18,7 +18,7 @@ export interface CloudRecordRemoval {
   readonly artifacts: readonly CloudArtifact[];
   readonly deleted: boolean;
   readonly markDeleted: () => Promise<void>;
-  readonly remember: (artifacts: readonly CloudArtifact[]) => Promise<void>;
+  readonly remember: (artifacts: readonly CloudArtifact[], incident?: "post-audit retained reference") => Promise<void>;
   readonly inspect: (record: TestRecord) => Promise<void>;
 }
 export interface TestRecord {

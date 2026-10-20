@@ -36,15 +36,15 @@ function provider(options: {
   raw?: string; log?: string; logType?: string; missingLogs?: boolean; videoStatus?: number; media?: boolean; large?: boolean;
   deletionFails?: boolean; deletionUnverified?: boolean; lingering?: boolean; changed?: boolean;
   initiallyAbsent?: boolean; disappearsAfter?: number;
-  postDeleteLog?: string; postDeleteSessionRaw?: string;
+  postDeleteLog?: string; postDeleteSessionRaw?: string; preDeleteSessionRaw?: string; recordAlreadyDeleted?: boolean;
   sessionReply?: RetainedReply; logReply?: RetainedReply; artifactReply?: RetainedReply;
   deleteReply?: RetainedReply; postDeleteArtifactReply?: RetainedReply; nestedLog?: string;
   retry?: { surface: "session" | "log" | "artifact"; reply: RetainedReply };
 } = {}) {
-  let deleted = false;
+  let deleted = options.recordAlreadyDeleted ?? false;
   let acknowledged = false, lateLogRead = false, lateSessionRead = false;
   let signedAbsent = false, postDeleteReads = 0;
-  let retried = false;
+  let retried = false, sessionReads = 0;
   const calls: { method: string; url: string; authorization: boolean }[] = [];
   const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input), method = init?.method ?? "GET";
@@ -58,11 +58,15 @@ function provider(options: {
     }
     if (method === "DELETE") {
       if (options.deletionFails) throw new Error("synthetic ambiguous transport failure");
-      if (options.deleteReply !== undefined) return retainedReply(options.deleteReply);
+      if (options.deleteReply !== undefined) {
+        if (options.deleteReply.status === 200) deleted = !options.deletionUnverified;
+        return retainedReply(options.deleteReply);
+      }
       deleted = !options.deletionUnverified;
       return Response.json({ status: "ok" });
     }
     if (url === `${apiOrigin}/sessions/${id}.json`) {
+      if (!deleted && ++sessionReads > 1 && options.preDeleteSessionRaw !== undefined) return new Response(options.preDeleteSessionRaw, { headers: { "content-type": "application/json" } });
       if (!deleted && options.sessionReply !== undefined) return retainedReply(options.sessionReply);
       if (deleted && options.postDeleteSessionRaw !== undefined && !lateSessionRead) {
         lateSessionRead = true;
@@ -99,21 +103,22 @@ function provider(options: {
   let now = 0;
   let artifacts: CloudArtifact[] = [];
   const inspected: TestRecord[] = [];
+  const incidents: string[] = [];
   const removal: CloudRecordRemoval = {
     get artifacts() { return artifacts; },
     get deleted() { return acknowledged; },
     markDeleted: async () => { acknowledged = true; },
-    remember: async values => { artifacts = structuredClone([...values]); },
+    remember: async (values, incident) => { artifacts = structuredClone([...values]); if (incident !== undefined) incidents.push(incident); },
     inspect: async value => { inspected.push(value); },
   };
   const api = new BrowserStackApi(credentials);
-  return { calls, api, removal, inspected, releaseArtifacts: () => { signedAbsent = true; },
+  return { calls, api, removal, inspected, incidents, releaseArtifacts: () => { signedAbsent = true; },
     audit: () => api.testRecord(id, removal.remember),
     clock: { now: () => now, pause: async (milliseconds: number) => { now += milliseconds; } } };
 }
 
 /** Real qualification scanner/checkpoints, with only the vendor/device/host effects replaced. */
-function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progress?: unknown; crashOnIncident?: boolean } = {}) {
+function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progress?: unknown; crashOnIncident?: boolean; interruptRemoval?: boolean } = {}) {
   let published = options.progress !== undefined, crashed = false;
   const checkpoints: Record<string, unknown>[] = [];
   const errors: string[] = [];
@@ -146,13 +151,19 @@ function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progres
     },
     endSession: async () => {},
     record: async (reference, remember, inspect) => {
-      if (crashed) throw new Error("synthetic process lost before build discovery");
+      if (crashed) throw new Error("synthetic process lost after checkpoint");
       return reference.vendor === "browserstack" ? capture(() => fixture.api.testRecord(id, remember, scan(inspect)))
         : { complete: true, text: "synthetic clean record", video: false, screenshots: 0 };
     },
     removeRecord: async (reference, removal) => {
-      if (crashed) throw new Error("synthetic process lost before build discovery");
-      if (reference.vendor === "browserstack") await capture(() => fixture.api.deleteRecord(id, { ...removal, inspect: scan(removal.inspect) }, fixture.clock));
+      if (crashed) throw new Error("synthetic process lost after checkpoint");
+      if (options.interruptRemoval) throw new Error("synthetic interruption before record removal");
+      if (reference.vendor === "browserstack") await capture(() => fixture.api.deleteRecord(id, {
+        ...removal, inspect: scan(removal.inspect), remember: async (artifacts, incident) => {
+          await fixture.removal.remember(artifacts, incident);
+          await removal.remember(artifacts, incident);
+        },
+      }, fixture.clock));
     },
     launch: async () => replayCapability,
     removeWorkspace: async () => {},
@@ -167,6 +178,7 @@ function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progres
     sessionLabel: "omp-stable-live", progress: options.progress, runtime,
     pixel: async (_owner, action) => action(),
     checkpoint: async (progress: Record<string, unknown>) => {
+      if (crashed) throw new Error("synthetic process lost after checkpoint");
       checkpoints.push(structuredClone(progress));
       if (options.crashOnIncident && parseDeviceCloudProgress(progress).resources?.some(resource => resource.incident)) {
         crashed = true;
@@ -466,6 +478,72 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(progress.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
     expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
   });
+  const lateMetadata = JSON.stringify({ automation_session: { ...record, insights: { reference: nestedArtifact } } });
+  const lateBody = JSON.stringify({ reference: nestedArtifact });
+  function lateReference(surface: string): NonNullable<Parameters<typeof provider>[0]> {
+    if (surface === "pre-delete") return { preDeleteSessionRaw: lateMetadata };
+    if (surface === "delete") return { deleteReply: { text: JSON.stringify({ status: "ok", reference: nestedArtifact }), status: 200, type: "application/json" } };
+    if (surface === "absence-session") return { postDeleteSessionRaw: lateMetadata };
+    if (surface === "absence-log") return { postDeleteLog: lateBody };
+    return { postDeleteArtifactReply: { text: lateBody, status: 404, type: "application/json" } };
+  }
+  test.each(["pre-delete", "delete", "absence-session", "absence-log", "absence-artifact"])("a new %s reference is an incident, never a late audit", async surface => {
+    const fixture = provider({ ...lateReference(surface), nestedLog: replayWindow });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("incident");
+    expect(fixture.incidents).toContain("post-audit retained reference");
+    const discovered = lane.checkpoints.map(parseDeviceCloudProgress).filter(progress =>
+      progress.resources?.some(resource => resource.artifacts?.some(artifact => artifact.url === nestedArtifact)));
+    expect(discovered.length).toBeGreaterThan(0);
+    expect(discovered.every(progress => progress.resources?.find(resource => resource.vendor === "browserstack")?.incident === true)).toBe(true);
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ audited: true, incident: true, recordDeleted: true, recordRemoved: true });
+    expect(progress.cleanupRequired).toBe(true);
+    expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
+    expect(fixture.calls.findIndex(call => call.url === nestedArtifact)).toBeGreaterThan(fixture.calls.findIndex(call => call.method === "DELETE"));
+    expect(fixture.inspected.some(record => record.text.includes(replayWindow))).toBe(false);
+  });
+  test.each(["pre-delete", "delete"])("a crash after the atomic %s-reference checkpoint survives fresh cleanup", async surface => {
+    const fixture = provider(lateReference(surface));
+    const crashed = auditedAttempt(fixture, { crashOnIncident: true });
+    await expect(crashed.attempt).rejects.toThrow();
+    const progress = structuredClone(crashed.checkpoints.at(-1));
+    const resource = parseDeviceCloudProgress(progress).resources?.find(resource => resource.vendor === "browserstack");
+    expect(resource).toMatchObject({ audited: true, incident: true, recordRemoved: false });
+    expect(resource?.artifacts).toContainEqual({ url: nestedArtifact, buildId: build, kind: "text" });
+    const before = fixture.calls.filter(call => call.method === "DELETE").length;
+    expect(before).toBe(surface === "delete" ? 1 : 0);
+    expect(fixture.calls.some(call => call.url === nestedArtifact)).toBe(false);
+    restore?.();
+    const fresh = provider(surface === "delete" ? { recordAlreadyDeleted: true } : { raw: lateMetadata });
+    const recovery = auditedAttempt(fresh, { progress });
+    await expect(recovery.attempt).rejects.toThrow("incident");
+    expect(before + fresh.calls.filter(call => call.method === "DELETE").length).toBe(1);
+    expect(fresh.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
+    const deletion = fresh.calls.findIndex(call => call.method === "DELETE");
+    if (deletion !== -1) expect(fresh.calls.slice(0, deletion).some(call => call.url.endsWith("/logs"))).toBe(false);
+    const after = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
+    expect(after.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+    expect(after.cleanupRequired).toBe(true);
+  });
+  test("fresh cleanup detects a reference first appearing in its record re-read before it can be fetched", async () => {
+    const fixture = provider();
+    const interrupted = auditedAttempt(fixture, { interruptRemoval: true });
+    await expect(interrupted.attempt).rejects.toThrow();
+    const progress = structuredClone(interrupted.checkpoints.at(-1));
+    expect(parseDeviceCloudProgress(progress).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ audited: true, recordRemoved: false });
+    restore?.();
+    const fresh = provider({ raw: lateMetadata, nestedLog: replayWindow });
+    const recovery = auditedAttempt(fresh, { progress });
+    await expect(recovery.attempt).rejects.toThrow("incident");
+    expect(recovery.errors).toContain("post-audit retained reference");
+    expect(fresh.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(fresh.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
+    expect(fresh.calls.findIndex(call => call.url === nestedArtifact)).toBeGreaterThan(fresh.calls.findIndex(call => call.method === "DELETE"));
+    expect(parseDeviceCloudProgress(recovery.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
+  });
   test("whole-value references accept case-insensitive schemes and preserve duplicate/classification checks", () => {
     const upper = nestedArtifact.replace("https:", "HtTpS:");
     expect(browserStackReferences(id, build, { reason: [{ arbitrary: upper }] }).artifacts).toEqual([{ url: upper, buildId: build, kind: "text" }]);
@@ -685,7 +763,7 @@ describe("BrowserStack complete retention and deletion", () => {
     const incident = lane.checkpoints.find(checkpoint => parseDeviceCloudProgress(checkpoint).resources?.some(resource => resource.incident));
     expect(parseDeviceCloudProgress(incident).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, audited: false, recordRemoved: false });
     expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
-    expect(fixture.calls.filter(call => call.url === artifact)).toHaveLength(2);
+    expect(fixture.calls.filter(call => call.url === artifact)).toHaveLength(1);
     expect(fixture.calls.some(call => call.url === nestedArtifact)).toBe(false);
     const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
     expect(progress.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
@@ -711,7 +789,7 @@ describe("BrowserStack complete retention and deletion", () => {
     const after = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
     expect(after.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
     expect(after.cleanupRequired).toBe(true);
-    expect(fresh.calls.filter(call => call.url === artifact)).toHaveLength(2);
+    expect(fresh.calls.filter(call => call.url === artifact)).toHaveLength(1);
   });
   test.each(["running", "done"])("a %s session with references but no build identity fails closed", async status => {
     const { build_hashed_id: _build, ...withoutBuild } = record;
@@ -871,6 +949,25 @@ describe("BrowserStack complete retention and deletion", () => {
   test("opaque data-image content remains a retained-media audit hit, not a fetched reference", async () => {
     const fixture = provider({ log: JSON.stringify({ value: { screen: "data:image/png;base64,synthetic" } }), logType: "application/json" });
     expect((await fixture.audit())?.screenshots).toBe(1);
+  });
+  const mediaKeys: [string, boolean][] = [
+    ["data:image/png;base64,SYNTHETIC-MEDIA-KEY", true],
+    ["DaTa:application/octet-stream,SYNTHETIC-DATA-KEY", false],
+    [`https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/image.png`, true],
+    [`https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/video.mp4`, true],
+  ];
+  test.each(mediaKeys)("keys are media-classified and data/media keys fail closed: %s", async (key, media) => {
+    const fixture = provider({ log: JSON.stringify({ nested: [{ [key]: null }] }), logType: "application/json" });
+    await expect(fixture.api.testRecord(id, fixture.removal.remember, fixture.removal.inspect)).rejects.toThrow("BrowserStack retained media key");
+    expect(fixture.inspected.some(record => record.screenshots > 0)).toBe(media);
+  });
+  test.each(placements)("media-key rejection holds at every retained metadata path: %s", async (_name, place) => {
+    for (const [key] of mediaKeys) {
+      const fixture = provider({ raw: JSON.stringify({ automation_session: place({ arbitrary: [{ [key]: null }] }) }) });
+      await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+      expect(fixture.calls).toHaveLength(1);
+      restore?.();
+    }
   });
   test.each([{ marker: null }, { marker: false }, { marker: "" }, { marker: [] }])("documented empty media markers are not retained content: %j", async ({ marker }) => {
     const fixture = provider({ log: JSON.stringify({ screenshot: marker, video: marker, visual: marker }), logType: "application/json" });
