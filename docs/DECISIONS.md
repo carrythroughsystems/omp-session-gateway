@@ -1206,9 +1206,15 @@ runtime admission checks the catalog and allocation polls every 15 seconds for a
 Only validated no-free observations can raise `DeviceCloudAvailabilityHold`; authentication,
 malformed catalogs, transport errors, ambiguous writes, identity mismatch, journey, audit and
 cleanup failures remain diagnostic. An aggregate is a hold only if every failure leaf is typed
-availability. Allocation holds remain failed schema-3 attempts, with additive `availabilityHold`
-evidence; the CLI emits a sanitized machine outcome and exits 75, never a qualification pass.
-Until the explicit hold-resume driver change lands, the driver still treats exit 75 as failure.
+availability. Free admission reports every unavailable target, not only the first. Allocation
+holds remain failed schema-3 attempts, with additive `availabilityHold` evidence containing a
+closed array of one to three hold leaves. The CLI exits 75 for that all-hold set, never a pass.
+The driver supplies a per-phase `OMP_STABLE_OUTCOME_FILE` inside its private job directory;
+the CLI atomically writes the closed outcome there. Human stdout/stderr, including earlier
+lane output, is never the machine protocol. Missing, malformed or mixed-failure evidence is
+diagnostic, not a hold.
+The driver accepts exit 75 only with validated, candidate-bound machine evidence; the explicit
+operator authorization below is the only same-candidate retry.
 
 Every known session is ended before its retained record is inspected, including partial and
 unsuccessful attempts, while both driven OMP generations still exist. All retained records are
@@ -1325,6 +1331,29 @@ Local preparation precedes ownership intent; PID/birth lineage plus canonical ex
 not argv names, establishes process ownership and permits a proved not-started cleanup.
 [Release setup and the sourced contract matrix](RELEASE.md#browserstack-device-cloud-fallback)
 record the public-page probes; those are Tested evidence, not a signed-candidate qualification.
+
+**Amendment — 2026-10-20 (same-receipt availability resumption):** After live consumers settle,
+an availability-only cloud failure still stops the relay tunnel and completes the actual OMP
+publication lifecycle before the hold is reported. Lifecycle, process cleanup, final Mac cleanup
+and Windows failures are combined with the hold and remain diagnostic. The campaign is eligible
+only after every other qualification lane, publication lifecycle and epoch-bound cleanup passed
+and no recorded resources remain dirty.
+
+`--resume-device-cloud` explicitly reopens only that failed cloud attempt on the same schema-3
+receipt. Candidate, predecessor, orchestrator commit and Mac host must match; ordinary, foreign,
+incomplete and dirty receipts are refused before admission or receipt mutation. A new isolated
+OMP session and candidate gateway are reconstructed and their launch readiness rechecked, while
+the already-passed publication lifecycle evidence and attempt count are preserved. All three
+cloud targets rerun with a new epoch, not only the formerly busy target. Artifact identity,
+signatures and checksums are reverified and final Mac cleanup reopens; Debian, macOS lifecycle,
+Android, Push, Windows and relay qualification evidence are not repeated. The release-host lease
+is unchanged: the exact campaign reacquires its retained durable owner, never a new owner.
+Before resumed admission or setup, the existing hold eligibility is durably consumed by removing
+`availabilityHold`. Only a newly validated all-hold failure, after the whole campaign settles,
+can restore the closed set. Setup, teardown, protected-file and other ordinary failures leave the
+receipt ineligible and exit 1 even though its already-passed publication proof remains intact.
+A fresh free-admission hold during explicit resume is receipt-scoped: existing clean progress and
+all other passed proof remain required, while its latest hold leaves describe the new preflight.
 
 ## ADR-033 — Retain a macOS virtual machine as the campaign Mac
 
@@ -1480,6 +1509,30 @@ still execute no repository or upstream code; the existing promotion and qualifi
 
 See [Unattended release driver](RELEASE.md#unattended-release-driver) for installation and the
 kill switch.
+
+**Amendment — 2026-10-20 (explicit infrastructure retry):** A validated candidate-bound
+`infrastructure-hold` job observation enters `infrastructure-held`, distinct from routine
+promotion-policy holds and from `diagnostic-required`. It remains idle indefinitely, even if a
+later observation passes, main moves, a new request arrives, or free inventory changes.
+`retry-device-cloud --candidate <exact-tag> --job-attempt <current-attempt>` authorizes one worker
+only after checking the held selection, immutable completed job, no pending intent/outbox,
+no active candidate worker or stable publication, unchanged source/control-policy/Mac-host binding
+from the completed worker's immutable specification (not the operator CLI environment),
+eligible receipt (or effects-free preflight hold), and absent/exact-owned release-host lease.
+It allocates nothing; the next tick launches the authorized job.
+Both preflight- and receipt-scoped hold payloads persist that exact binding. Recomputed scope must
+match: a preflight payload cannot authorize an eligible existing receipt as an effects-free start.
+
+`campaignAttempt` defaults to zero. Original job identities stay unchanged at zero; each retry
+has a new ordinal in its directory, tmux session, worktree and published campaign branch.
+Completed results, start claims, logs, exit files and held-receipt snapshots are not overwritten.
+An immutable specification is only launch preparation, not a start claim. If tmux fails after it
+is written, replay launches into the same directory with the same host and source/policy binding
+only when both the worker claim and tmux session are absent; it does not consume another ordinal.
+Allocation holds archive the sanitized failed receipt in their completed job directory before
+the working receipt advances. Ordinary and missing-worker failures retain the existing
+diagnostic/new-request/next-prealpha policy. This exception never makes infrastructure a
+qualification pass and grants no automatic retries or lease takeover.
 
 ## ADR-035 — Advisory Percy review of capability-free serialized fixtures
 

@@ -349,6 +349,32 @@ The [release contract matrix](RELEASE.md#browserstack-device-cloud-fallback) rec
 public-page and crash-cleanup proofs. The capability-opening mixed journey remains a separately
 scheduled development check, never an automatic extension of those probes.
 
+Same-receipt hold/resume tests (`scripts/stable-qualification.test.ts` and
+`scripts/release-driver.test.ts`) prove:
+
+- availability-only live failures await publication lifecycle completion; lifecycle/cleanup
+  failures make the result diagnostic, while cloud-only resume preserves passed publication
+  evidence and attempt counts;
+- explicit resumption refuses dirty, foreign, ordinary, incomplete and stale-cleanup receipts
+  before admission or receipt writes, and reuses other expensive lanes' passed proof;
+- closed worker outcomes bind candidate, source, digest, policy, Mac host and job ordinal; malformed
+  outcomes and ordinary/missing workers never authorize an infrastructure retry;
+- noisy earlier lane stdout cannot corrupt the dedicated atomically written per-phase outcome
+  file; two and three free-admission hold leaves survive CLI/receipt/driver validation as one set;
+- resume consumes old eligibility durably before setup; injected fixture/publication-readiness/
+  launch/tunnel failures and teardown/protected-file errors after a hold leave it ineligible;
+- receipt-scoped authorization preserves the worker's immutable host despite different operator
+  CLI environment, and refuses scope, snapshot, host, source/policy and outcome-leaf mismatches;
+- `infrastructure-held` never auto-retries or clears from later passing observations;
+- one guarded authorization creates one immutable ordinal job, refuses duplicate authorization
+  and changed identities/policy/lease, and preserves attempt-zero results and logs. A tmux failure
+  after spec write replays into the same job once without another ordinal or immutable-file change;
+  a worker start claim prevents relaunch even after its session disappears.
+
+Before stable activation, the lead must confirm equipment availability and run the bounded
+isolated full journey plus controlled hold/resume development proof at the final tree. Unit
+fixtures are Tested state-machine evidence, not a live campaign or release qualification.
+
 ## 2. Secret-leak test harness
 
 Generate distinct per-host query tokens, readiness tokens, and capability canaries in test memory.

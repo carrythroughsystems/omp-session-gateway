@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 
 test("local and API control fingerprints normalize the same source framing", async () => {
@@ -61,9 +64,12 @@ test("routine controls normalize generated versions but retain policy and depend
   expect(await runtime.controls("old", true)).toEqual(await runtime.controls("new", true));
 });
 
-import { botEnvironment, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
-import { compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, REPOSITORY, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
-import type { Decision, DriverPort, DriverState, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
+import { botEnvironment, campaignAvailabilityObservation, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
+import { campaignAttempt, compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, parseCampaignInfrastructureHold, REPOSITORY, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
+import type { CampaignInfrastructureHold, Decision, DriverPort, DriverState, JobObservation, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
+import { createStableQualificationReceipt } from "./stable-qualification.ts";
+import type { ExternalLaneModule, StableQualificationLaneModules, StableQualificationReceipt } from "./stable-qualification.ts";
+import { readDeviceCloudOutcomeFile, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
 
 import { REQUIRED_CHECKS, ROUTINE_EVIDENCE_STEPS, RoutineHoldError } from "./release-policy.ts";
 const authority = { policy: "policy-1", protectedChanges: [], sourceReviewed: true, sourceFresh: true, patchRelease: true };
@@ -362,8 +368,319 @@ test("a later passing observation cannot erase a diagnostic host fault or restar
   expect(fake.performed).toEqual([]);
 });
 
-test("a temporary-failure campaign worker is still a failed observation before hold-resume support", () => {
+test("an unvalidated temporary-failure exit remains a diagnostic failed observation", () => {
   expect(nextStep(state("qualifying"), snapshot({ campaign: { status: "failed", detail: "campaign exited 75" } }), config).operation).toBe("stop");
+});
+
+function heldCampaign() {
+  const selected: DriverState = {
+    ...state("infrastructure-held"), candidateCommit: "e".repeat(40), candidateDigest: "f".repeat(64), authorityPolicy: "1".repeat(64), preparePr: 399, macHost: "gwqual@fixture.invalid",
+  };
+  const hold: CampaignInfrastructureHold = {
+    scope: "preflight", candidate: selected.candidate, sourceCommit: selected.candidateCommit!, archiveSha256: selected.candidateDigest!,
+    orchestratorCommit: selected.candidateCommit!, policy: selected.authorityPolicy!, campaignAttempt: 0, macHost: selected.macHost!,
+    availabilityHolds: [{ kind: "device-cloud-availability", stage: "preflight", target: "android", vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0 }],
+  };
+  selected.infrastructureHold = hold;
+  return { selected, hold };
+}
+
+describe("device-cloud infrastructure-held driver", () => {
+  test("only a closed candidate/policy/attempt-bound observation enters the durable hold", async () => {
+    const { selected, hold } = heldCampaign();
+    const fake = new FakeDriver();
+    fake.state = { ...selected, phase: "qualifying" };
+    fake.repo.campaign = { status: "infrastructure-hold", availabilityHold: hold };
+    expect((await tick(fake, config)).operation).toBe("hold-device-cloud");
+    expect(fake.state.phase).toBe("infrastructure-held");
+    expect(fake.state.infrastructureHold).toEqual(hold);
+    const before = structuredClone(fake.state);
+    fake.repo.campaign = { status: "passed" };
+    fake.repo.main = "9".repeat(40);
+    fake.repo.issues = [{ ...issue, request: "999:1" }];
+    expect((await tick(fake, config)).operation).toBe("idle");
+    expect(fake.state).toEqual(before);
+    expect(fake.performed).toEqual(["hold-device-cloud"]);
+  });
+  test.each([
+    { candidate: "v0.7.5-prealpha.99" }, { campaignAttempt: 1 }, { policy: "2".repeat(64) }, { sourceCommit: "d".repeat(40) },
+    { availabilityHolds: [] }, { macHost: "other@fixture.invalid" }, { detail: "unknown-vendor-output" },
+  ])("malformed or foreign holds are diagnostic: %j", change => {
+    const { selected, hold } = heldCampaign();
+    expect(nextStep({ ...selected, phase: "qualifying" }, snapshot({
+      campaign: { status: "infrastructure-hold", availabilityHold: { ...hold, ...change } },
+    }), config).operation).toBe("stop");
+  });
+  test("exit-75 output is validated rather than inferred from messages or exit code", () => {
+    const { selected, hold } = heldCampaign();
+    const output = { outcome: "infrastructure-hold", availabilityHolds: hold.availabilityHolds };
+    expect(campaignAvailabilityObservation(selected, output, undefined)).toEqual(hold);
+    for (const bad of ["no devices free", {}, { outcome: "infrastructure-hold", availabilityHolds: [], raw: "untrusted" }]) {
+      expect(() => campaignAvailabilityObservation(selected, bad, undefined)).toThrow();
+    }
+    const allocation = { ...hold.availabilityHolds[0]!, stage: "allocation", epoch: "11111111-2222-4333-8444-555555555555" };
+    expect(() => campaignAvailabilityObservation(selected, { outcome: "infrastructure-hold", availabilityHolds: [allocation] }, undefined)).toThrow("no resumable receipt");
+    expect(campaignAttempt(selected)).toBe(0);
+    expect(() => parseCampaignInfrastructureHold({ ...hold, campaignAttempt: -1 }, selected)).toThrow();
+    expect(() => parseCampaignInfrastructureHold({ ...hold, macHost: undefined }, selected)).toThrow();
+  });
+  test.each([2, 3])("accepts all %i free-admission hold leaves from a dedicated outcome file despite noisy stdout", async count => {
+    const { selected, hold } = heldCampaign();
+    const availabilityHolds = (["iphone", "ipad", "android"] as const).slice(3 - count).map(target => ({ ...hold.availabilityHolds[0]!, target }));
+    const root = await mkdtemp(join(tmpdir(), "release-cloud-outcome-"));
+    try {
+      const stdout = "gh run watch: noisy lane output\nMac fixture: noisy lane output\n";
+      expect(() => JSON.parse(stdout)).toThrow();
+      const path = join(root, "preflight-outcome.json");
+      await writeDeviceCloudOutcomeFile(path, { outcome: "infrastructure-hold", availabilityHolds });
+      expect(campaignAvailabilityObservation(selected, await readDeviceCloudOutcomeFile(path), undefined)).toMatchObject({ scope: "preflight", availabilityHolds });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+const retryReceiptModules: StableQualificationLaneModules = (() => {
+  const lane: ExternalLaneModule = {
+    preflight: async () => {}, run: async () => { throw new Error("not a live fixture"); }, cleanup: async () => ({}),
+    needsCleanup: progress => typeof progress !== "object" || progress === null || !("cleanupRequired" in progress) || progress.cleanupRequired !== false,
+  };
+  return { windows: lane, androidPush: lane, deviceCloud: lane, createPixelLease: () => async (_owner, action) => action() };
+})();
+
+function receiptScopedCampaign(selected: DriverState) {
+  const receipt = createStableQualificationReceipt(selected.candidate, selected.candidateCommit!, selected.previousStable!);
+  receipt.status = "failed"; receipt.macHost = selected.macHost!;
+  receipt.candidate = { tag: selected.candidate, sourceCommit: selected.candidateCommit!, archiveSha256: selected.candidateDigest! };
+  receipt.predecessor = { tag: selected.previousStable!, sourceCommit: "c".repeat(40), archiveSha256: "d".repeat(64) };
+  const epoch = "11111111-2222-4333-8444-555555555555";
+  for (const lane of Object.values(receipt.lanes)) Object.assign(lane, { status: "passed", attempts: 1, evidence: {} });
+  for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
+    receipt.lanes[name].evidence = { progress: { epoch, cleanupRequired: false }, result: { passed: true } };
+    receipt.lanes[`${name}Cleanup`].evidence = { epoch };
+  }
+  receipt.lanes.deviceCloud.status = "failed";
+  const availabilityHolds = [{
+    kind: "device-cloud-availability", stage: "allocation", target: "ipad", vendors: ["testingbot"],
+    reason: "pinned-pool-busy", waitedMs: 600_000, epoch,
+  }] as const;
+  receipt.lanes.deviceCloud.evidence!.availabilityHold = availabilityHolds;
+  receipt.lanes.ompPublication.evidence = { published: true, revoked: true, lifecycle: {
+    newGeneration: { sameInstance: true, generationDelta: 1, staleRejected: true, liveLaunches: 2, noStore: true },
+    fork: { sameInstance: true, generationDelta: 1, syntheticMessages: 2, staleRejected: true, liveLaunches: 2, noStore: true },
+    resumed: { newInstance: true, generation: 1, sameLabel: true, liveLaunches: 2, noStore: true, revocations: 2 },
+  } };
+  return { receipt, hold: campaignAvailabilityObservation(selected, { outcome: "infrastructure-hold", availabilityHolds }, receipt, retryReceiptModules) };
+}
+
+class RetryDriver extends StudioDriver {
+  current = heldCampaign().selected;
+  observation: JobObservation = { status: "infrastructure-hold", availabilityHold: heldCampaign().hold };
+  saves = 0;
+  active = false;
+  owner: string | undefined;
+  published = false;
+  policyChanged = false;
+  bindingChange: Partial<DriverState> = {};
+  receiptPath = "";
+  override async load() { return structuredClone(this.current); }
+  override async save(value: DriverState) { this.saves += 1; this.current = structuredClone(value); }
+  override async job() { return this.observation; }
+  override async campaignWorkerRunning() { return this.active; }
+  override async releaseHostOwner() { return this.owner; }
+  override async campaignBinding(state: DriverState) { return { ...state, ...this.bindingChange }; }
+  override campaignHoldObservation(state: DriverState, output: unknown, receipt: StableQualificationReceipt | undefined) {
+    return campaignAvailabilityObservation(state, output, receipt, retryReceiptModules);
+  }
+  override receipt() { return this.receiptPath; }
+  override async readPr() { return pr({ merged: true, mergeCommit: this.current.candidateCommit, mergedBy: config.bot }); }
+  override async authority() { return { ...authority, policy: this.policyChanged ? "2".repeat(64) : this.current.authorityPolicy! }; }
+  override async api<T>(path: string): Promise<T | undefined> {
+    return (path === "commits/main" ? { sha: this.current.candidateCommit } : this.published ? { exists: true } : undefined) as T | undefined;
+  }
+}
+
+describe("guarded one-shot operator retry", () => {
+  test("receipt-scoped authorization uses the immutable worker host, not the invoking CLI environment", async () => {
+    const root = await mkdtemp(join(tmpdir(), "release-cloud-receipt-retry-"));
+    const previousHost = process.env.OMP_STABLE_MAC_HOST;
+    try {
+      process.env.OMP_STABLE_MAC_HOST = "foreign-cli@other.invalid";
+      const runtime = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+      runtime.receiptPath = join(root, "receipt.json");
+      const { receipt, hold } = receiptScopedCampaign(runtime.current);
+      runtime.current.infrastructureHold = hold;
+      runtime.observation = { status: "infrastructure-hold", availabilityHold: hold };
+      await writeFile(runtime.receiptPath, JSON.stringify(receipt));
+      const oldJob = runtime.jobDirectory("campaign", runtime.current);
+      await mkdir(oldJob, { recursive: true });
+      await writeFile(join(oldJob, "held-qualification.json"), JSON.stringify(receipt));
+      const next = await runtime.authorizeDeviceCloudRetry(runtime.current.candidate, 0);
+      expect(next).toMatchObject({ resumeDeviceCloud: true, campaignAttempt: 1, macHost: "gwqual@fixture.invalid" });
+      expect(JSON.parse(await readFile(runtime.receiptPath, "utf8"))).toEqual(receipt);
+      expect(runtime.saves).toBe(1);
+    } finally {
+      if (previousHost === undefined) delete process.env.OMP_STABLE_MAC_HOST; else process.env.OMP_STABLE_MAC_HOST = previousHost;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  test.each(["preflight scope over eligible receipt", "changed snapshot", "foreign receipt host", "different outcome leaves"] as const)(
+    "refuses receipt-scoped %s without authorization", async variant => {
+      const root = await mkdtemp(join(tmpdir(), "release-cloud-receipt-refusal-"));
+      try {
+        const runtime = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+        runtime.receiptPath = join(root, "receipt.json");
+        const { receipt, hold } = receiptScopedCampaign(runtime.current);
+        runtime.current.infrastructureHold = hold;
+        runtime.observation = { status: "infrastructure-hold", availabilityHold: hold };
+        const oldJob = runtime.jobDirectory("campaign", runtime.current);
+        await mkdir(oldJob, { recursive: true });
+        await writeFile(join(oldJob, "held-qualification.json"), JSON.stringify(receipt));
+        if (variant === "preflight scope over eligible receipt") {
+          // A fresh read-only admission may hold an existing eligible receipt too; scope is still receipt.
+          const availabilityHolds = heldCampaign().hold.availabilityHolds;
+          receipt.lanes.deviceCloud.evidence!.availabilityHold = availabilityHolds;
+          runtime.current.infrastructureHold = { ...hold, scope: "preflight", availabilityHolds };
+          runtime.observation = { status: "infrastructure-hold", availabilityHold: runtime.current.infrastructureHold };
+        }
+        if (variant === "changed snapshot") receipt.updatedAt = "2026-10-20T12:00:00.000Z";
+        if (variant === "foreign receipt host") receipt.macHost = "other@fixture.invalid";
+        if (variant === "different outcome leaves") receipt.lanes.deviceCloud.evidence!.availabilityHold = heldCampaign().hold.availabilityHolds;
+        await writeFile(runtime.receiptPath, JSON.stringify(receipt));
+        await expect(runtime.authorizeDeviceCloudRetry(runtime.current.candidate, 0)).rejects.toThrow();
+        expect(runtime.saves).toBe(0);
+      } finally { await rm(root, { recursive: true, force: true }); }
+    },
+  );
+  test("one authorization creates one new immutable job and never overwrites attempt zero", async () => {
+    const root = await mkdtemp(join(tmpdir(), "release-cloud-retry-"));
+    try {
+      const runtime = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+      runtime.receiptPath = join(root, "absent-receipt.json");
+      const initial = structuredClone(runtime.current);
+      const oldJob = runtime.jobDirectory("campaign", initial);
+      await mkdir(oldJob, { recursive: true });
+      await writeFile(join(oldJob, "result.json"), "immutable old result");
+      await writeFile(join(oldJob, "out.log"), "immutable old output");
+      const next = await runtime.authorizeDeviceCloudRetry(initial.candidate, 0);
+      expect(next).toMatchObject({ phase: "candidate-verified", campaignAttempt: 1, resumeDeviceCloud: false });
+      expect(runtime.saves).toBe(1);
+      expect(await readdir(join(root, "jobs"))).toHaveLength(1);
+      expect(runtime.jobDirectory("campaign", next)).toBe(`${oldJob}-retry-1`);
+      expect(runtime.session("campaign", next)).toBe(`${runtime.session("campaign", initial)}-retry-1`);
+      await expect(runtime.authorizeDeviceCloudRetry(initial.candidate, 0)).rejects.toThrow("exact held candidate");
+      let jobsStarted = 0;
+      const port: DriverPort = {
+        load: () => runtime.load(),
+        save: value => runtime.save(value),
+        snapshot: async () => snapshot({ campaign: { status: "running" } }),
+        perform: async (step, current) => {
+          expect(step.operation).toBe("start-campaign");
+          jobsStarted += 1;
+          const directory = runtime.jobDirectory("campaign", current);
+          await mkdir(directory, { recursive: true });
+          await writeFile(join(directory, "spec.json"), JSON.stringify({ state: current }), { flag: "wx" });
+          return {};
+        },
+        announce: async () => {},
+      };
+      expect((await tick(port, config)).operation).toBe("start-campaign");
+      const specification = await readFile(join(runtime.jobDirectory("campaign", next), "spec.json"), "utf8");
+      expect((await tick(port, config)).operation).toBe("idle");
+      expect(await readFile(join(runtime.jobDirectory("campaign", next), "spec.json"), "utf8")).toBe(specification);
+      expect(jobsStarted).toBe(1);
+      expect(await readdir(join(root, "jobs"))).toHaveLength(2);
+      expect(await readFile(join(oldJob, "result.json"), "utf8")).toBe("immutable old result");
+      expect(await readFile(join(oldJob, "out.log"), "utf8")).toBe("immutable old output");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  // The production launcher requires POSIX ownership/modes and /bin/sh/tmux on its macOS host.
+  // Keep authorization and tick semantics above portable; do not weaken those production checks.
+  test.skipIf(process.platform === "win32")("the POSIX campaign launcher preserves immutable job files on repeated launch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "release-cloud-launch-"));
+    const previousPath = process.env.PATH;
+    try {
+      const bin = join(root, "bin");
+      await mkdir(bin);
+      const launched = join(root, "launched");
+      await writeFile(join(bin, "tmux"), `#!/bin/sh\n[ "$1" != has-session ] || { [ -f '${launched}' ]; exit $?; }\nprintf '%s\\n' "$*" >> '${launched}'\n`, { mode: 0o700 });
+      process.env.PATH = `${bin}:${previousPath}`;
+      const runtime = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+      process.env.PATH = previousPath;
+      const initial = structuredClone(runtime.current);
+      const next: DriverState = { ...initial, phase: "candidate-verified", campaignAttempt: 1, resumeDeviceCloud: false };
+      const oldJob = runtime.jobDirectory("campaign", initial);
+      await mkdir(oldJob, { recursive: true });
+      await writeFile(join(oldJob, "result.json"), "immutable old result");
+      await writeFile(join(oldJob, "out.log"), "immutable old output");
+      await runtime.launch("campaign", next);
+      const specification = await readFile(join(runtime.jobDirectory("campaign", next), "spec.json"), "utf8");
+      await runtime.launch("campaign", next);
+      expect(await readFile(join(runtime.jobDirectory("campaign", next), "spec.json"), "utf8")).toBe(specification);
+      expect((await readFile(launched, "utf8")).trim().split("\n")).toHaveLength(1);
+      expect(await readFile(join(oldJob, "result.json"), "utf8")).toBe("immutable old result");
+      expect(await readFile(join(oldJob, "out.log"), "utf8")).toBe("immutable old output");
+    } finally { process.env.PATH = previousPath; await rm(root, { recursive: true, force: true }); }
+  });
+  test.skipIf(process.platform === "win32")("a tmux failure after spec write replays the same unclaimed job exactly once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "release-cloud-launch-replay-"));
+    const previousPath = process.env.PATH, previousHost = process.env.OMP_STABLE_MAC_HOST;
+    try {
+      const bin = join(root, "bin");
+      await mkdir(bin);
+      const failed = join(root, "first-launch-failed"), running = join(root, "running"), launched = join(root, "launched");
+      await writeFile(join(bin, "tmux"), `#!/bin/sh\n[ "$1" != has-session ] || { [ -f '${running}' ]; exit $?; }\n[ -f '${failed}' ] || { touch '${failed}'; exit 9; }\nprintf '%s\\n' "$*" >> '${launched}'\ntouch '${running}'\n`, { mode: 0o700 });
+      process.env.PATH = `${bin}:${previousPath}`;
+      process.env.OMP_STABLE_MAC_HOST = "first@fixture.invalid";
+      const first = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+      const selected: DriverState = { ...first.current, phase: "candidate-verified", campaignAttempt: 1, macHost: undefined };
+      const step: Decision = { operation: "start-campaign", phase: "qualifying", detail: "authorized retry" };
+      await expect(first.perform(step, selected)).rejects.toThrow("exited 9");
+      const directory = first.jobDirectory("campaign", selected);
+      const specification = await readFile(join(directory, "spec.json"), "utf8");
+      expect(JSON.parse(specification).state.macHost).toBe("first@fixture.invalid");
+      expect(await Bun.file(join(directory, "started")).exists()).toBe(false);
+      process.env.OMP_STABLE_MAC_HOST = "changed-cli@other.invalid";
+      const replay = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+      expect(await replay.perform(step, selected)).toEqual({ macHost: "first@fixture.invalid" });
+      expect(await replay.perform(step, selected)).toEqual({ macHost: "first@fixture.invalid" });
+      expect((await readFile(launched, "utf8")).trim().split("\n")).toHaveLength(1);
+      expect(await readFile(join(directory, "spec.json"), "utf8")).toBe(specification);
+      expect(await readdir(join(root, "jobs"))).toEqual([directory.slice(directory.lastIndexOf("/") + 1)]);
+      await rm(running);
+      await writeFile(join(directory, "started"), "");
+      await replay.perform(step, selected); // The durable worker claim forbids relaunch even without tmux.
+      expect((await readFile(launched, "utf8")).trim().split("\n")).toHaveLength(1);
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousHost === undefined) delete process.env.OMP_STABLE_MAC_HOST; else process.env.OMP_STABLE_MAC_HOST = previousHost;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["candidate", "attempt", "intent", "outbox", "active worker", "publication", "policy", "foreign lease", "ordinary failure", "missing job", "dirty receipt", "occupied retry", "foreign host binding", "foreign source binding", "foreign policy binding"] as const)(
+    "refuses %s without allocating or authorizing another job", async variant => {
+      const root = await mkdtemp(join(tmpdir(), "release-cloud-retry-refusal-"));
+      try {
+        const runtime = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+        runtime.receiptPath = join(root, "receipt.json");
+        if (variant === "intent") runtime.current.intent = { operation: "start-campaign", phase: "qualifying", detail: "pending" };
+        if (variant === "outbox") runtime.current.announcement = { body: "pending", marker: "pending" };
+        if (variant === "active worker") runtime.active = true;
+        if (variant === "publication") runtime.published = true;
+        if (variant === "policy") runtime.policyChanged = true;
+        if (variant === "foreign lease") runtime.owner = "qualification:another-candidate:another-receipt";
+        if (variant === "ordinary failure") runtime.observation = { status: "failed" };
+        if (variant === "missing job") runtime.observation = { status: "absent" };
+        if (variant === "foreign host binding") runtime.bindingChange = { macHost: "other@fixture.invalid" };
+        if (variant === "foreign source binding") runtime.bindingChange = { candidateCommit: "9".repeat(40) };
+        if (variant === "foreign policy binding") runtime.bindingChange = { authorityPolicy: "9".repeat(64) };
+        if (variant === "dirty receipt") await writeFile(runtime.receiptPath, JSON.stringify({ lanes: { deviceCloud: { attempts: 1, status: "failed" } } }));
+        if (variant === "occupied retry") await mkdir(runtime.jobDirectory("campaign", { ...runtime.current, campaignAttempt: 1 }), { recursive: true });
+        await expect(runtime.authorizeDeviceCloudRetry(variant === "candidate" ? "v0.7.5-prealpha.99" : runtime.current.candidate, variant === "attempt" ? 1 : 0)).rejects.toThrow();
+        expect(runtime.saves).toBe(0);
+      } finally { await rm(root, { recursive: true, force: true }); }
+    },
+  );
 });
 
 test("a retry request on a new tracking issue for the same version re-selects the failed release", () => {

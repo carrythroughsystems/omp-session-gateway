@@ -367,14 +367,14 @@ Campaign, approve checks and smoke run detached in named tmux sessions with a st
 result and exit file under `jobs/`. Campaign receipts remain at
 `~/.local/share/omp-session-gateway/qualification/<candidate>/stable-qualification.json`.
 Qualification and smoke use their existing shared release-host lease (including its durable failed
-owner); the driver never deletes, replaces or steals it. A failed/missing device/cloud job enters
+owner); the driver never deletes, replaces or steals it. An ordinary failed/missing device/cloud job enters
 diagnostic-required, reports non-passed lanes, and is not retried. A missing local approve-check
 worker can resume only at the same head/tree and policy; no device, cloud or publication action
 is replayed. Passed/failed results are never overwritten to invent a retry. The saved intent and
 outbox reconcile accepted bot merges and announcements after a crash; immutable tags never move. An explicit new green request
 after a fix on main selects the next prealpha only after the previous lease is recovered. Follow
 [Release gates](#release-gates) for cleanup/recovery of that exact old campaign first; a new request
-is not permission to abandon cloud/device resources. Failed receipts stay unchanged. Public
+is not permission to abandon cloud/device resources. Ordinary failed receipts stay unchanged. Public
 verification failures also leave the write intent for diagnosis; immutable tags are never moved.
 
 A 1Password identity-probe deadline is a host-fault diagnostic, not a wrong-account verdict.
@@ -391,6 +391,74 @@ after confirming no pending intent/outbox, stable publication, active job or own
 then select the new request under the reviewed installed policy. Updating the checkout alone
 leaves the old binding and holds preparation. The next selection uses the next prealpha; never
 overwrite a completed campaign job or its evidence.
+
+### Device-cloud availability holds
+
+Only validated no-free pinned-device observations are availability. Authentication, malformed
+catalogs, transport/queue ambiguity, allocation mismatch, journey defects, audit errors and failed
+cleanup remain diagnostic. The stable CLI exits 75 for an availability-only failure. The driver
+sets `OMP_STABLE_OUTCOME_FILE` to a distinct `preflight-outcome.json` or `campaign-outcome.json`
+inside the private job directory; the CLI atomically writes a closed JSON outcome there. Earlier
+human lane stdout/stderr is never parsed as machine evidence. Missing or invalid outcome files
+make exit 75 diagnostic. An allocation attempt remains `failed` with additive `availabilityHold`
+evidence containing the complete closed array of one to three hold leaves in schema 3.
+
+Before reporting a resumable allocation hold, all other consumers must finish, the relay tunnel
+must stop, the real OMP publication lifecycle must pass, Windows must settle, and every resource
+and final Mac cleanup must pass. A cleanup or lifecycle error combined with availability refuses
+resumption. A preflight-only hold creates no cloud session, tunnel, fixture or qualification
+receipt and may instead be retried as an effects-free campaign start.
+
+The driver's `infrastructure-held` phase never retries automatically, even after devices become
+free or a later observation passes. First inspect the private completed job and receipt, confirm
+equipment availability, then authorize exactly the displayed candidate and attempt:
+
+```sh
+bun scripts/release-driver.ts status
+bun scripts/release-driver.ts retry-device-cloud --candidate <exact-prealpha-tag> --job-attempt <current-attempt>
+```
+
+The command takes the tick mutex and checks: exact held selection and attempt; no pending
+intent/outbox, active candidate worker, approve step or stable publication; unchanged reviewed
+source/control policy and Mac host from the immutable completed-worker specification, not the
+invoking CLI environment; a fully eligible held receipt or effects-free preflight hold; and no
+foreign release-host owner. It allocates no devices. The next ordinary tick launches one new
+job; repeating the authorization is refused. A dry-run configuration never authorizes a write.
+Both hold scopes persist that binding, and a scope mismatch is refused even if the receipt is
+otherwise eligible.
+
+Attempt zero keeps `jobs/<issue>-<candidate>-campaign/`; retries use
+`jobs/<issue>-<candidate>-campaign-retry-<n>/`, with matching unique tmux/worktree/branch names.
+Never remove or overwrite a completed job, its start claim, result, logs, exit file, or
+`held-qualification.json`. For allocation holds, that private immutable snapshot must still
+equal the working receipt when retry is authorized. The working receipt advances normally only
+in the new attempt.
+If tmux fails after writing the new specification, the next tick replays that same authorized
+job, directory and host binding while neither its worker start claim nor tmux session exists.
+It does not allocate another ordinal or overwrite the specification. A start claim is a hard
+no-relaunch fence even when the tmux session has disappeared.
+
+For an operator-owned eligible campaign outside the driver, use the same source, candidate,
+predecessor, Mac host and receipt directory explicitly:
+
+```sh
+bun run qualify:stable -- --tag <exact-prealpha-tag> --resume-device-cloud
+```
+
+This refuses ordinary, foreign, incomplete, stale-cleanup or dirty receipts before admission
+or receipt mutation. It reruns the whole cloud attempt on a new epoch, not an old browser session.
+Once eligibility is accepted, it clears and persists the old hold before any admission or setup.
+Only a newly validated all-hold failure can restore eligibility; an ordinary setup, teardown or
+protected-file failure exits 1 and leaves no hold authorization. Resume uses its own in-process
+preflight, not a separate driver preflight against stale authorization. A new admission-only hold
+on an existing eligible receipt remains receipt-scoped, with fresh preflight leaves and the same
+required passed proof and clean resources.
+Passed Debian, macOS lifecycle, Android, background Push, Windows, relay and OMP publication
+proof stay unchanged. Candidate/predecessor signatures, checksums and identity are reverified;
+the candidate gateway and a fresh isolated OMP fixture are reconstructed and launch readiness
+checked; final Mac cleanup reopens. Those setup/identity/cleanup steps are not repeated expensive
+qualification journeys. A changed orchestrator commit cannot resume this receipt. The original
+release-host owner remains until the exact campaign succeeds; never clear it to force a retry.
 
 To stop new work immediately:
 
@@ -532,7 +600,8 @@ after `clear_verified` and before `force_stop_verified`, including the second fi
 Delayed taps re-present the original notification's metadata-only data after authoritative clear;
 `replayed: true` proves physical delayed-tap handling, not push delivery ordering or delay.
 `ompPublication` must also contain passed `evidence.lifecycle` with `newGeneration`, `fork`, and
-`resumed` observations. After all live-session users settle successfully and the relay tunnel
+`resumed` observations. After all live-session users settle successfully (or only device-cloud
+availability failed with its resources released) and the relay tunnel
 stops, the Mac host runs `/new`, `/fork` after two synthetic messages, stop/revocation,
 `--continue`, and stop/revocation again. Rotations require generation + 1 on the same instance,
 stale launches rejected without capabilities, and live View/Control `200 no-store`; resume requires

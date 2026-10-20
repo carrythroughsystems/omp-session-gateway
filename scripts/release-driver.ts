@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { runDriver } from "./release-driver-runtime.ts";
 import { RoutineHoldError, routineReleaseHold, routineSourceHold } from "./release-policy.ts";
 import type { RoutineAuthority, RoutineEvidence, RoutineHoldReason } from "./release-policy.ts";
+import type { DeviceCloudHold } from "./device-cloud-availability.ts";
+import { parseDeviceCloudHoldSet } from "./device-cloud-outcome.ts";
 
 export const REPOSITORY = "carrythroughsystems/omp-session-gateway";
 // The delivery App's bot opens an order from a branch under this prefix.
@@ -44,12 +46,12 @@ export type Phase = "selected" | "order-updated" | "order-ready" | "order-landed
   | "prepare-open" | "prepared" | "candidate-tagged" | "candidate-published" | "candidate-verified"
   | "qualifying" | "qualified" | "approve-open" | "approve-checking" | "approval-required"
   | "approved" | "stable-tagged" | "stable-published" | "stable-verified" | "smoking" | "smoked"
-  | "record-open" | "recorded" | "closed" | "diagnostic-required" | "stopped";
+  | "record-open" | "recorded" | "closed" | "diagnostic-required" | "infrastructure-held" | "stopped";
 export type Operation = "select" | "hold" | "stop" | "update-order" | "update-release-pr" | "ready-order" | "merge-order"
   | "open-prepare" | "merge-prepare" | "tag-candidate" | "observe-candidate" | "verify-candidate"
   | "start-campaign" | "finish-campaign" | "open-approve" | "start-approve-checks" | "finish-approve-checks"
   | "merge-approve" | "accept-approval" | "tag-stable" | "observe-stable" | "verify-stable" | "start-smoke"
-  | "finish-smoke" | "open-record" | "merge-record" | "close" | "rerequest";
+  | "finish-smoke" | "open-record" | "merge-record" | "close" | "rerequest" | "hold-device-cloud";
 export interface DriverState {
   schemaVersion: 1;
   sequence: number;
@@ -75,13 +77,60 @@ export interface DriverState {
   publicationRun?: string | undefined;
   recordPr?: number | undefined;
   failedMain?: string | undefined;
+  /** Attempt zero preserves the original job paths. Each authorized retry gets a new ordinal. */
+  campaignAttempt?: number | undefined;
+  resumeDeviceCloud?: boolean | undefined;
+  /** Bound in the immutable campaign specification, never retargeted from operator CLI ambient env. */
+  macHost?: string | undefined;
+  infrastructureHold?: CampaignInfrastructureHold | undefined;
   updatedHead?: string | undefined;
   /** Saved before any effect. Its operation must reconcile existing provider state on replay. */
   intent?: Decision;
   /** Transactional outbox: committed state is exposed only after this comment is reconciled. */
   announcement?: { body: string; marker: string };
 }
-export interface JobObservation { status: "absent" | "running" | "passed" | "failed"; detail?: string }
+export interface CampaignInfrastructureHold {
+  readonly scope: "preflight" | "receipt";
+  readonly candidate: string;
+  readonly sourceCommit: string;
+  readonly archiveSha256: string;
+  readonly orchestratorCommit: string;
+  readonly policy: string;
+  readonly campaignAttempt: number;
+  readonly macHost: string;
+  readonly availabilityHolds: readonly DeviceCloudHold[];
+}
+export interface JobObservation {
+  status: "absent" | "running" | "passed" | "failed" | "infrastructure-hold";
+  detail?: string;
+  availabilityHold?: CampaignInfrastructureHold;
+}
+
+export function campaignAttempt(state: DriverState): number {
+  const attempt = state.campaignAttempt ?? 0;
+  if (!Number.isSafeInteger(attempt) || attempt < 0 || attempt > 10_000) throw new Error("invalid campaign job attempt");
+  return attempt;
+}
+
+export function parseCampaignInfrastructureHold(value: unknown, state: DriverState): CampaignInfrastructureHold {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid campaign infrastructure hold");
+  const hold = value as Record<string, unknown>;
+  if (Object.keys(hold).sort().join(",") !== "archiveSha256,availabilityHolds,campaignAttempt,candidate,macHost,orchestratorCommit,policy,scope,sourceCommit" ||
+    (hold.scope !== "preflight" && hold.scope !== "receipt") || hold.candidate !== state.candidate || !/^v[0-9]+\.[0-9]+\.[0-9]+-prealpha\.[1-9][0-9]*$/u.test(state.candidate) ||
+    hold.sourceCommit !== state.candidateCommit || typeof hold.sourceCommit !== "string" || !/^[a-f0-9]{40}$/u.test(hold.sourceCommit) ||
+    hold.orchestratorCommit !== state.candidateCommit || hold.archiveSha256 !== state.candidateDigest ||
+    typeof hold.archiveSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(hold.archiveSha256) ||
+    typeof hold.policy !== "string" || !/^[a-f0-9]{64}$/u.test(hold.policy) || hold.policy !== state.authorityPolicy ||
+    typeof hold.macHost !== "string" || hold.macHost !== state.macHost || !/^[A-Za-z_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*$/u.test(hold.macHost) ||
+    hold.campaignAttempt !== campaignAttempt(state) || !Array.isArray(hold.availabilityHolds) || hold.availabilityHolds.length < 1 ||
+    hold.availabilityHolds.length > 3) throw new Error("invalid campaign infrastructure hold");
+  const availabilityHolds = parseDeviceCloudHoldSet(hold.availabilityHolds);
+  if (hold.scope === "preflight" && availabilityHolds.some(item => item.stage !== "preflight")) throw new Error("incoherent campaign infrastructure hold");
+  return {
+    scope: hold.scope, candidate: state.candidate, sourceCommit: state.candidateCommit!, archiveSha256: state.candidateDigest!,
+    orchestratorCommit: state.candidateCommit!, policy: state.authorityPolicy!, campaignAttempt: campaignAttempt(state), macHost: hold.macHost, availabilityHolds,
+  };
+}
 export interface RepositorySnapshot {
   main: string;
   upstreamTag: string;
@@ -168,6 +217,7 @@ export function promotionHold(state: DriverState, repo: RepositorySnapshot, conf
 }
 export function nextStep(state: DriverState | undefined, repo: RepositorySnapshot, config: DriverConfig, date = new Date().toISOString().slice(0, 10)): Decision | Idle {
   if (state?.intent !== undefined) return state.intent;
+  if (state?.phase === "infrastructure-held") return idle("device-cloud infrastructure held; explicit retry-device-cloud authorization required; no automatic retry");
   if (repo.authorityFailure !== undefined) return routineHold(repo.authorityFailure);
   if (state?.holdReason !== undefined) return idle("held: " + state.holdReason + (state.holdCommit === undefined ? "" : " at source commit " + state.holdCommit) + "; inspect exact subject before operator recovery");
   if (state === undefined || state.phase === "closed") {
@@ -195,6 +245,7 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       preparePr: undefined, orderPr: undefined, updatedHead: undefined, candidateCommit: undefined, candidateDigest: undefined, approvePr: undefined,
       approvedHead: undefined, approvedTree: undefined, stableCommit: undefined, stableDigest: undefined,
       publicationRun: undefined, recordPr: undefined, failedMain: undefined,
+      campaignAttempt: 0, infrastructureHold: undefined, resumeDeviceCloud: undefined, macHost: undefined,
     } });
   }
   if (["selected", "order-updated", "order-ready", "order-landed", "held"].includes(state.phase)) {
@@ -235,6 +286,13 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
   if (state.phase === "candidate-verified") return decision("start-campaign", "qualifying", `preflight then detached qualification of ${state.candidate}`);
   if (state.phase === "qualifying" || state.phase === "approve-checking" || state.phase === "smoking") {
     const job = state.phase === "qualifying" ? repo.campaign : state.phase === "smoking" ? repo.smoke : repo.approveChecks;
+    if (job?.status === "infrastructure-hold") {
+      if (state.phase !== "qualifying") return failure("unexpected infrastructure hold outside candidate qualification");
+      try {
+        const hold = parseCampaignInfrastructureHold(job.availabilityHold, state);
+        return decision("hold-device-cloud", "infrastructure-held", "candidate device-cloud availability held; no automatic retry", { patch: { infrastructureHold: hold } });
+      } catch { return failure("invalid device-cloud infrastructure-hold observation; inspect private job evidence"); }
+    }
     if (state.phase === "approve-checking" && job?.status === "absent") {
       const pr = repo.approve;
       if (!pr || pr.head !== state.approvedHead || pr.tree !== state.approvedTree) return routineHold("head-tree-changed");
