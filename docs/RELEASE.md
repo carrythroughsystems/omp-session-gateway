@@ -722,7 +722,10 @@ Documentation is distinguished from live observations; no claim covers vendor-in
 | Deletion / absence | [DELETE session](https://www.browserstack.com/docs/automate/api-reference/selenium/session#delete-session); both records | Single `DELETE /automate/sessions/{id}.json` returned HTTP 200/`status:ok`; session JSON and all six API log surfaces then returned 404. **Record-removal gate passed.** Issued signed console URLs briefly still served identical audited text, then returned 404 (iPad observed absent after 30 seconds; Samsung on a later read). |
 | Signed URL lifetime | Observed `X-Amz-Date` / `X-Amz-Expires` and post-delete reads | One issued URL advertised 604,800 seconds (seven days), although its object disappeared sooner. Clean, unchanged, media-free text fetched and audited before deletion may outlive record deletion until expiry; evidence records only a count, never URLs. Changed/unaudited content, media or unverifiable API absence fails. |
 
-The shared audit searches raw bounded bytes plus canonical serialization for each whole live
+The shared strict parser refuses duplicate decoded object keys at any depth before deriving
+references from JSON metadata or inventories. JSON log bodies use the same parser; ordinary
+text logs remain raw-only and are never reference sources. The audit searches raw bounded bytes
+plus strict canonical serialization for each whole live
 View/Control capability and every exact contiguous 16-character window. Default-relay capabilities
 are compact `room.key` strings, not candidate-origin URLs: retained directory navigation is not
 an exception to the scan and needs no obfuscation. Only counts/verdicts persist. Deletion is defense
@@ -740,6 +743,9 @@ one successful Samsung. Both allocated sessions opened only `https://example.com
 inspected and deleted; all record APIs and the previously issued signed text artifacts were
 subsequently absent. No View/Control capability, Pixel, retained Mac, stable campaign or driver
 was exercised. Local-only probes also proved private config modes and crash recovery.
+The iPad generation is the vendor's allocation report, not an independent Safari hardware
+identifier: Safari corroborates tablet family and version. Samsung's Chrome model code adds
+independent browser-reported hardware corroboration. Neither observation broadens qualification.
 
 #### Recovery and the remaining mixed development journey
 

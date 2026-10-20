@@ -1276,7 +1276,8 @@ key and rotate it on suspected exposure. Local stdout/stderr are discarded; its 
 private FIFO, consumed only for a fixed readiness marker and never persisted.
 
 Both vendors retain the same whole-link and exact-16-window audit over bounded raw and canonical
-surfaces. BrowserStack text logs cannot be disabled; origin-only navigation is not a capability:
+surfaces. JSON with duplicate decoded keys is refused before reference discovery; plaintext logs
+are raw-only and never reference sources. BrowserStack text logs cannot be disabled; origin-only navigation is not a capability:
 the supported default relay's links are compact `room.key` strings handed off inside the page.
 All known metadata, API logs, declared signed logs and media indicators are inspected before the
 retention decision. Disabled video, clean indicators and the observed S3 missing-object 403

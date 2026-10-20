@@ -22,7 +22,7 @@ let restore: (() => void) | undefined;
 afterEach(() => { restore?.(); restore = undefined; });
 
 function provider(options: {
-  raw?: string; missingLogs?: boolean; videoStatus?: number; media?: boolean; large?: boolean;
+  raw?: string; log?: string; logType?: string; missingLogs?: boolean; videoStatus?: number; media?: boolean; large?: boolean;
   deletionFails?: boolean; deletionUnverified?: boolean; lingering?: boolean; changed?: boolean;
 } = {}) {
   let deleted = false;
@@ -39,7 +39,7 @@ function provider(options: {
     if (url === `${apiOrigin}/sessions/${id}.json`) return deleted ? new Response("absent", { status: 404 }) : new Response(options.raw ?? JSON.stringify({ automation_session: record }), { headers: { "content-type": "application/json" } });
     if (url.startsWith(`${apiOrigin}/sessions/${id}/`)) {
       if (deleted) return new Response("absent", { status: 404 });
-      if (url.endsWith("/logs") && !options.missingLogs) return new Response(options.large ? "x".repeat(2_000_001) : "synthetic command record", { headers: { "content-type": "text/plain" } });
+      if (url.endsWith("/logs") && !options.missingLogs) return new Response(options.large ? "x".repeat(2_000_001) : options.log ?? "synthetic command record", { headers: { "content-type": options.logType ?? "text/plain" } });
       if (url.endsWith("/consolelogs")) return new Response("No messages were logged", { headers: { "content-type": "text/plain" } });
       return new Response("absent", { status: 404 });
     }
@@ -175,16 +175,32 @@ test("Local crash cleanup catches respawned children, escalates and removes priv
 
 describe("BrowserStack complete retention and deletion", () => {
   test("audits raw and canonical metadata, text and referenced logs without forwarding auth", async () => {
-    const raw = `{"automation_session":${JSON.stringify({ ...record, reason: "last-value" }).replace('"reason":"last-value"', '"reason":"SYNTHETIC-DUPLICATE-CLOUD-LINK","reason":"last-value"')}}`;
+    const raw = JSON.stringify({ automation_session: { ...record, reason: "SYNTHETIC-CLOUD-LINK" } }).replace("SYNTHETIC", "\\u0053YNTHETIC");
     const fixture = provider({ raw });
     const inspected = await fixture.api.testRecord(id);
     expect(inspected?.complete).toBe(true);
-    expect(inspected?.text).toContain("SYNTHETIC-DUPLICATE-CLOUD-LINK");
+    expect(inspected?.text).toContain("SYNTHETIC-CLOUD-LINK");
     expect(inspected?.text).toContain("synthetic command record");
     expect(inspected?.video).toBe(false);
     expect(fixture.calls.filter(call => !call.url.startsWith(apiOrigin)).every(call => !call.authorization)).toBe(true);
     expect(await fixture.api.deleteRecord(id, true, fixture.clock)).toBe(0);
     expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+  });
+  test("rejects duplicate decoded keys in metadata and JSON logs before trusting references", async () => {
+    const raw = `{"automation_session":${JSON.stringify(record).replace('"video_url":', '"video_url":"https://unreviewed.example/hidden.mp4","video_url":')}}`;
+    const fixture = provider({ raw });
+    await expect(fixture.api.testRecord(id)).rejects.toThrow();
+    expect(fixture.calls).toHaveLength(1);
+    restore?.();
+    const logs = provider({ log: '{"nested":{"link":"SYNTHETIC-HIDDEN","l\\u0069nk":"clean"}}' });
+    await expect(logs.api.testRecord(id)).rejects.toThrow();
+  });
+  test("strictly canonicalizes JSON logs but refuses malformed declared JSON", async () => {
+    const fixture = provider({ log: '{"step":"\\u0053YNTHETIC-LOG-VALUE"}', logType: "application/json" });
+    expect((await fixture.api.testRecord(id))?.text).toContain("SYNTHETIC-LOG-VALUE");
+    restore?.();
+    const malformed = provider({ log: "not JSON", logType: "application/json" });
+    await expect(malformed.api.testRecord(id)).rejects.toThrow();
   });
   test.each([ ["missing required logs", { missingLogs: true }], ["oversized body", { large: true }], ["unknown video state", { videoStatus: 401 }] ] as const)("refuses %s", async (_name, options) => {
     const fixture = provider(options);

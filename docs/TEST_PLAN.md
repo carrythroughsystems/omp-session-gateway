@@ -306,7 +306,8 @@ BrowserStack and shared transport tests add:
   refusal of HTTP-200 schema errors, bounded responses and unreviewed retained surfaces;
 - equal IDs at different vendors remain distinct; unknown creation stays dirty; every vendor's
   partial record audit runs even when another record fails, and deletion failure blocks the lease;
-- raw duplicate-key records and canonical escaped values are both scanned; candidate-origin
+- duplicate JSON keys are refused before reference discovery, and raw plus strict canonical
+  escaped values are scanned; candidate-origin
   navigation text passes because default-relay capabilities are compact `room.key` strings,
   while a capability's interior 16-character window fails without being persisted;
 - missing required logs, retained media, changed/unaudited signed artifacts and unverified

@@ -534,6 +534,8 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   readiness log is a private FIFO, not an evidence file. Stop and crash recovery remove both files.
 - BrowserStack's mandatory text logs, session JSON and every known log/media surface receive the
   same bounded raw-plus-canonical and exact-16 audit, including partial failures. Signed artifact
+  references come only from JSON parsed by the shared duplicate-key-rejecting parser. JSON logs
+  use it too; ordinary plaintext logs remain raw-only and never supply references. Signed artifact
   requests carry no account authorization, refuse redirects and unreviewed origins. No recording
   setting proves vendor-internal absence. Video disabled plus clean indicators and the observed
   missing-object S3 403 is accepted as no retained media observed; media returning 200 fails.

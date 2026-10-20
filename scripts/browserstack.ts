@@ -6,11 +6,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../packages/collab-client/upstream/src/tool-render/util.ts";
 import {
-  boundedVendorText, vendorJson, readCloudCredentials, runOp, listProcesses, listeningAddresses, requireLoopbackListeners,
+  boundedVendorText, readCloudCredentials, runOp, listProcesses, listeningAddresses, requireLoopbackListeners,
   type CloudDevice, type TestRecord, type OpRunner,
 } from "./device-cloud-common.ts";
 import { readProvider } from "./provider-read.ts";
 import { BROWSERSTACK_SESSION_ID } from "./device-cloud-webdriver.ts";
+import { parseRetainedVendorJson, RetainedVendorJsonError } from "./device-cloud-record-json.ts";
 import pins from "./browserstack-pins.json";
 
 export const BROWSERSTACK_LOCAL = pins.local;
@@ -82,7 +83,7 @@ export class BrowserStackApi {
     browserStackEntitlement(now);
     const response = await this.#get("/plan.json");
     if (!response.ok) { await response.body?.cancel(); throw new Error(`BrowserStack plan read failed with HTTP ${response.status}`); }
-    const plan = vendorJson(await boundedVendorText(response, "BrowserStack"), "BrowserStack");
+    const plan = parseRetainedVendorJson(await boundedVendorText(response, "BrowserStack"));
     if (!isRecord(plan) || plan.automate_plan !== pins.entitlement.plan || plan.parallel_sessions_max_allowed !== pins.entitlement.parallelSessions ||
       plan.team_parallel_sessions_max_allowed !== pins.entitlement.parallelSessions) throw new Error("BrowserStack Automate Mobile entitlement no longer matches reviewed metadata");
   }
@@ -91,7 +92,7 @@ export class BrowserStackApi {
   async devices(target: "ipad" | "android"): Promise<readonly CloudDevice[]> {
     const response = await this.#get("/browsers.json");
     if (!response.ok) { await response.body?.cancel(); throw new Error(`BrowserStack catalog read failed with HTTP ${response.status}`); }
-    const listing = vendorJson(await boundedVendorText(response, "BrowserStack"), "BrowserStack");
+    const listing = parseRetainedVendorJson(await boundedVendorText(response, "BrowserStack"));
     if (!Array.isArray(listing)) throw new Error("BrowserStack returned an invalid catalog");
     const devices: CloudDevice[] = [];
     for (const entry of listing) {
@@ -110,7 +111,7 @@ export class BrowserStackApi {
     const response = await this.#get(`/sessions/${sessionId}.json`);
     if (!response.ok) { await response.body?.cancel(); throw new Error(`BrowserStack allocation read failed with HTTP ${response.status}`); }
     const raw = await boundedVendorText(response, "BrowserStack");
-    const payload = vendorJson(raw, "BrowserStack");
+    const payload = parseRetainedVendorJson(raw);
     if (!isRecord(payload) || Object.keys(payload).join(",") !== "automation_session" || !isRecord(payload.automation_session) || payload.automation_session.hashed_id !== sessionId) throw new Error("BrowserStack returned an invalid allocation record");
     return { record: payload.automation_session, raw };
   }
@@ -132,20 +133,22 @@ export class BrowserStackApi {
     const { record, raw } = await this.#session(sessionId);
     if (record.status === "running") return { complete: false, text: "", video: false, screenshots: 0 };
     if (Object.keys(record).some(field => !(RECORD_FIELDS as readonly string[]).includes(field))) throw new Error("BrowserStack returned an unreviewed retained-record field");
-    for (const field of ["video_url", ...ARTIFACT_FIELDS]) {
-      if ([...raw.matchAll(new RegExp(`"${field}"\\s*:`, "gu"))].length > 1) throw new Error("BrowserStack returned duplicate artifact indicators");
-    }
     if (!["done", "failed", "timeout", "passed"].includes(String(record.status)) || typeof record.build_hashed_id !== "string" || !BROWSERSTACK_SESSION_ID.test(record.build_hashed_id)) throw new Error("BrowserStack record has unknown finalization state");
     const texts = [raw, JSON.stringify(record)];
     const artifacts: AuditedArtifact[] = [];
     let bytes = Buffer.byteLength(raw) + Buffer.byteLength(texts[1]!);
     if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
-    const append = (text: string) => {
+    const append = (text: string, contentType: string | null = null) => {
       bytes += Buffer.byteLength(text);
       if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
       texts.push(text);
+      // Plain logs are raw-only and never reference sources. JSON logs must reject duplicates.
       let canonical: string | undefined;
-      try { canonical = JSON.stringify(JSON.parse(text)); } catch { /* Plain-text and XML have no JSON representation. */ }
+      try { canonical = JSON.stringify(parseRetainedVendorJson(text)); }
+      catch (error) {
+        if (!(error instanceof RetainedVendorJsonError) || error.code !== "invalid-json" ||
+          /(?:\/|\+)json(?:;|$)/iu.test(contentType ?? "")) throw error;
+      }
       if (canonical !== undefined && canonical !== text) {
         bytes += Buffer.byteLength(canonical);
         if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
@@ -154,20 +157,22 @@ export class BrowserStackApi {
     };
     for (const surface of LOG_SURFACES) {
       const response = await this.#get(`/sessions/${sessionId}/${surface}`);
-      if (response.status === 404 && surface !== "logs") { append(await boundedVendorText(response, "BrowserStack")); continue; }
+      if (response.status === 404 && surface !== "logs") { append(await boundedVendorText(response, "BrowserStack"), response.headers.get("content-type")); continue; }
       if (response.status !== 200) { await response.body?.cancel(); throw new Error("BrowserStack required retained log is unavailable"); }
-      if (!(response.headers.get("content-type") ?? "").startsWith("text/plain")) { await response.body?.cancel(); throw new Error("BrowserStack returned an unexpected log format"); }
-      append(await boundedVendorText(response, "BrowserStack"));
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType)) { await response.body?.cancel(); throw new Error("BrowserStack returned an unexpected log format"); }
+      append(await boundedVendorText(response, "BrowserStack"), contentType);
     }
     for (const field of ARTIFACT_FIELDS) {
       const url = record[field];
       if (url === undefined || url === null || url === "") continue;
       if (typeof url !== "string") throw new Error("BrowserStack returned an invalid artifact reference");
       const response = await this.#artifact(url, sessionId, record.build_hashed_id);
-      if (response.status === 404) { append(await boundedVendorText(response, "BrowserStack")); continue; }
-      if (response.status !== 200 || !(response.headers.get("content-type") ?? "").startsWith("text/plain")) { await response.body?.cancel(); throw new Error("BrowserStack retained artifact state is unknown"); }
+      if (response.status === 404) { append(await boundedVendorText(response, "BrowserStack"), response.headers.get("content-type")); continue; }
+      const contentType = response.headers.get("content-type") ?? "";
+      if (response.status !== 200 || (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType))) { await response.body?.cancel(); throw new Error("BrowserStack retained artifact state is unknown"); }
       const text = await boundedVendorText(response, "BrowserStack");
-      append(text);
+      append(text, contentType);
       artifacts.push({ url, text });
     }
     if (typeof record.video_url !== "string" || record.video_url === "") throw new Error("BrowserStack returned no video retention indicator");
@@ -179,7 +184,7 @@ export class BrowserStackApi {
       // A retained media reference can never qualify for the lingering-clean-text exception.
       artifacts.push({ url: record.video_url, text: "" });
     }
-    else if (videoResponse.status === 404) append(await boundedVendorText(videoResponse, "BrowserStack"));
+    else if (videoResponse.status === 404) append(await boundedVendorText(videoResponse, "BrowserStack"), videoResponse.headers.get("content-type"));
     else if (videoResponse.status === 403) {
       const denial = await boundedVendorText(videoResponse, "BrowserStack");
       if (!denial.includes("<Code>AccessDenied</Code>") || !denial.includes("s3:ListBucket")) throw new Error("BrowserStack video retention state is unknown");
@@ -208,7 +213,7 @@ export class BrowserStackApi {
       this.#removalStarted.add(sessionId);
       const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE", headers: { authorization: this.#authorization }, redirect: "error", signal: AbortSignal.timeout(30_000) });
       if (response.status !== 200) { await response.body?.cancel(); throw new Error(`BrowserStack record deletion failed with HTTP ${response.status}`); }
-      const result = vendorJson(await boundedVendorText(response, "BrowserStack"), "BrowserStack");
+      const result = parseRetainedVendorJson(await boundedVendorText(response, "BrowserStack"));
       if (!isRecord(result) || result.status !== "ok") throw new Error("BrowserStack record deletion was not acknowledged");
     }
     const deadline = clock.now() + 180_000;
@@ -229,7 +234,8 @@ export class BrowserStackApi {
       for (;;) {
         const check = await readProvider(() => fetch(artifact.url, { redirect: "error", signal: AbortSignal.timeout(30_000) }));
         if (check.status === 404) { await check.body?.cancel(); break; }
-        if (check.status !== 200 || !(check.headers.get("content-type") ?? "").startsWith("text/plain")) { await check.body?.cancel(); throw new Error("BrowserStack retained signed artifact state is unknown"); }
+        const contentType = check.headers.get("content-type") ?? "";
+        if (check.status !== 200 || (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType))) { await check.body?.cancel(); throw new Error("BrowserStack retained signed artifact state is unknown"); }
         const unchanged = await boundedVendorText(check, "BrowserStack") === artifact.text;
         if (auditClean && unchanged) { lingering += 1; break; }
         if (clock.now() >= deadline) throw new Error("BrowserStack retained signed artifact is not audited clean");
