@@ -22,6 +22,7 @@ OMP Session Gateway lists your running [Oh My Pi](https://github.com/can1357/oh-
 - [OMP integration](OMP_INTEGRATION.md) — stock mainline discovery/query contract and supported settings
 - [Attention specification](ATTENTION_SPEC.md) — Needs you queue, triage semantics, and notification lifecycle
 - [Test plan](TEST_PLAN.md) — unit, integration, browser, and leak-detection coverage
+- [BrowserStack](BROWSERSTACK.md) — synthetic Percy visual review, project setup, baseline policy, Live limits and sponsorship renewal
 - [Branding](BRANDING.md) — visual identity, tokens, and typography
 - [Upstream strategy](UPSTREAM_STRATEGY.md) — how the gateway tracks mainline OMP
 - [Backlog](BACKLOG.md) — deferred work and open follow-ups

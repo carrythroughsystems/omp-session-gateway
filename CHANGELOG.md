@@ -6,6 +6,17 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Advisory Percy visual review of 18 deterministic, authored synthetic states across phone,
+  810×1080 tablet and desktop CSS viewports, with fail-closed serialized DOM/resource canary
+  guards and source/serialized layout parity. CI always validates locally and uploads only for
+  same-repository PRs, main pushes and GitHub-hosted dispatches; forks and gateway-ci dispatches
+  receive no Percy secret. No production source or runtime assets change.
+- BrowserStack setup/baseline/renewal runbook and ADR-035 separating Percy visual review,
+  TestingBot release deviceCloud, Automate fallback under ADR-032, and capability-free manual
+  Live review. Sponsorship review is due 2027-09-20 before the 2027-10-20 expiry.
+
 ### Changed
 
 - Move the OMP engineering baseline to published v18.12.3 (#409), with pins derived by

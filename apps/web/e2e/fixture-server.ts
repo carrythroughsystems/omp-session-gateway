@@ -33,6 +33,7 @@ export interface DashboardFixture {
   readonly origin: string;
   readonly requests: readonly string[];
   readonly launchRequests: readonly FixtureLaunchRequest[];
+  assertNoCapabilityMaterial(text: string): void;
   disconnectEvents(): number;
   remove(instanceId: string, generation: number): void;
   setSnapshot(sessions: readonly SessionMetadata[], revision?: number): void;
@@ -56,6 +57,27 @@ export async function startDashboardFixture(
   if (roomKey.byteLength !== 32) throw new Error("dashboard fixture room key must be 32 bytes");
   const viewCapability = `${roomId}.${roomKey.toString("base64url")}`;
   const controlCapability = `${roomId}.${Buffer.concat([roomKey, randomBytes(16)]).toString("base64url")}`;
+  // Keep the canaries closure-owned: consumers get a predicate, never secret properties.
+  const forbiddenMaterial = new Set<string>();
+  for (const value of [viewCapability, controlCapability, roomId, roomKey.toString("base64url")]) {
+    const segments = [value];
+    for (let offset = 0; offset + 16 <= value.length; offset++) {
+      segments.push(value.slice(offset, offset + 16));
+    }
+    for (const segment of segments) {
+      forbiddenMaterial.add(segment);
+      forbiddenMaterial.add(encodeURIComponent(segment));
+      forbiddenMaterial.add(JSON.stringify(segment).slice(1, -1));
+      forbiddenMaterial.add(segment.replace(/[&<>"']/gu, character => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[character]!));
+      // Escaping all code points is legal too (and base64url otherwise escapes to itself).
+      forbiddenMaterial.add([...segment].map(character => `%${character.charCodeAt(0).toString(16).padStart(2, "0")}`).join(""));
+      forbiddenMaterial.add([...segment].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
+      forbiddenMaterial.add([...segment].map(character => `&#${character.charCodeAt(0)};`).join(""));
+      forbiddenMaterial.add([...segment].map(character => `&#x${character.charCodeAt(0).toString(16)};`).join(""));
+    }
+  }
 
   const snapshotEvent = (): SessionEvent => ({
     type: "snapshot",
@@ -235,6 +257,28 @@ export async function startDashboardFixture(
     origin: `http://127.0.0.1:${address.port}`,
     requests,
     launchRequests,
+    assertNoCapabilityMaterial(text): void {
+      // Decode ordinary mixed escaping before checking, without retaining or echoing input.
+      let normalized = text;
+      for (let pass = 0; pass < 2; pass++) {
+        normalized = normalized
+          .replace(/%([0-9a-f]{2})/giu, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+          .replace(/\\u([0-9a-f]{4})/giu, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+          .replace(/\\\//gu, "/")
+          .replace(/&#(?:x([0-9a-f]+)|([0-9]+));/giu, (_, hex: string | undefined, decimal: string) => {
+            const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
+            return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+          })
+          .replace(/&(?:amp|lt|gt|quot|apos);/gu, entity => ({
+            "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
+          })[entity]!);
+      }
+      for (const value of forbiddenMaterial) {
+        if (text.includes(value) || normalized.includes(value)) {
+          throw new Error("visual safety: capability material detected");
+        }
+      }
+    },
     disconnectEvents(): number {
       const disconnected = streams.size;
       for (const stream of streams) stream.end();
