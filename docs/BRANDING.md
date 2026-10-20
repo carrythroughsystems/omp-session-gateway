@@ -125,8 +125,9 @@ Register: restraint — strong type, clear hierarchy,
 few colors, no decoration that isn't information. One accent per state:
 emerald = live, amber = needs-you/privileged, red = unauthorized.
 
-- Layout: one couch-first triage column, `min(100% − 2rem, 35rem)` at every
-  viewport. Spacing on a 4px grid. System font stacks only in the app (Space
+- Layout: the directory is one couch-first triage column, `min(100% − 2rem, 35rem)`
+  at every viewport; open sessions widen separately (see Collaboration shell).
+  Spacing on a 4px grid. System font stacks only in the app (Space
   Grotesk/JetBrains Mono webfonts remain README/banner-only).
 - Radii: ~10px rows/cards, 12px hero, 999px pills. Borders 1px `border`;
   shadows only on overlays (toast, sheets) — hierarchy comes from surface
@@ -146,6 +147,9 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
 - Collaboration shell: one centered header row on wide screens. Phone widths
   put Back and Control/connection state on the first row and give the session
   title a full-width second row, so long titles never collide with controls.
+  From 37rem up, the session, its header row, and its triage bar share one
+  centered column, `min(100% − 2rem, 60rem)`: wide enough for the client's
+  900px transcript, with no empty frame around it.
 - All clear: compact left-aligned status (ringed live dot, `All clear`, one muted
   line), without repeating live counts already present in the masthead. Alert state appears only while background alerts are
   enabled; otherwise a pill chip routes to Settings.
