@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { runDriver } from "./release-driver-runtime.ts";
 import { RoutineHoldError, routineReleaseHold, routineSourceHold } from "./release-policy.ts";
 import type { RoutineAuthority, RoutineEvidence, RoutineHoldReason } from "./release-policy.ts";
-import { parseDeviceCloudHold, type DeviceCloudHold } from "./device-cloud-availability.ts";
+import type { DeviceCloudHold } from "./device-cloud-availability.ts";
+import { parseDeviceCloudHoldSet } from "./device-cloud-outcome.ts";
 
 export const REPOSITORY = "carrythroughsystems/omp-session-gateway";
 // The delivery App's bot opens an order from a branch under this prefix.
@@ -79,6 +80,8 @@ export interface DriverState {
   /** Attempt zero preserves the original job paths. Each authorized retry gets a new ordinal. */
   campaignAttempt?: number | undefined;
   resumeDeviceCloud?: boolean | undefined;
+  /** Bound in the immutable campaign specification, never retargeted from operator CLI ambient env. */
+  macHost?: string | undefined;
   infrastructureHold?: CampaignInfrastructureHold | undefined;
   updatedHead?: string | undefined;
   /** Saved before any effect. Its operation must reconcile existing provider state on replay. */
@@ -94,6 +97,7 @@ export interface CampaignInfrastructureHold {
   readonly orchestratorCommit: string;
   readonly policy: string;
   readonly campaignAttempt: number;
+  readonly macHost: string;
   readonly availabilityHolds: readonly DeviceCloudHold[];
 }
 export interface JobObservation {
@@ -111,20 +115,20 @@ export function campaignAttempt(state: DriverState): number {
 export function parseCampaignInfrastructureHold(value: unknown, state: DriverState): CampaignInfrastructureHold {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid campaign infrastructure hold");
   const hold = value as Record<string, unknown>;
-  if (Object.keys(hold).sort().join(",") !== "archiveSha256,availabilityHolds,campaignAttempt,candidate,orchestratorCommit,policy,scope,sourceCommit" ||
+  if (Object.keys(hold).sort().join(",") !== "archiveSha256,availabilityHolds,campaignAttempt,candidate,macHost,orchestratorCommit,policy,scope,sourceCommit" ||
     (hold.scope !== "preflight" && hold.scope !== "receipt") || hold.candidate !== state.candidate || !/^v[0-9]+\.[0-9]+\.[0-9]+-prealpha\.[1-9][0-9]*$/u.test(state.candidate) ||
     hold.sourceCommit !== state.candidateCommit || typeof hold.sourceCommit !== "string" || !/^[a-f0-9]{40}$/u.test(hold.sourceCommit) ||
     hold.orchestratorCommit !== state.candidateCommit || hold.archiveSha256 !== state.candidateDigest ||
     typeof hold.archiveSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(hold.archiveSha256) ||
     typeof hold.policy !== "string" || !/^[a-f0-9]{64}$/u.test(hold.policy) || hold.policy !== state.authorityPolicy ||
+    typeof hold.macHost !== "string" || hold.macHost !== state.macHost || !/^[A-Za-z_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*$/u.test(hold.macHost) ||
     hold.campaignAttempt !== campaignAttempt(state) || !Array.isArray(hold.availabilityHolds) || hold.availabilityHolds.length < 1 ||
     hold.availabilityHolds.length > 3) throw new Error("invalid campaign infrastructure hold");
-  const availabilityHolds = hold.availabilityHolds.map(parseDeviceCloudHold);
-  if ((hold.scope === "preflight" && availabilityHolds.some(item => item.stage !== "preflight")) ||
-    availabilityHolds.some(item => item.stage !== availabilityHolds[0]!.stage)) throw new Error("incoherent campaign infrastructure hold");
+  const availabilityHolds = parseDeviceCloudHoldSet(hold.availabilityHolds);
+  if (hold.scope === "preflight" && availabilityHolds.some(item => item.stage !== "preflight")) throw new Error("incoherent campaign infrastructure hold");
   return {
     scope: hold.scope, candidate: state.candidate, sourceCommit: state.candidateCommit!, archiveSha256: state.candidateDigest!,
-    orchestratorCommit: state.candidateCommit!, policy: state.authorityPolicy!, campaignAttempt: campaignAttempt(state), availabilityHolds,
+    orchestratorCommit: state.candidateCommit!, policy: state.authorityPolicy!, campaignAttempt: campaignAttempt(state), macHost: hold.macHost, availabilityHolds,
   };
 }
 export interface RepositorySnapshot {
@@ -241,7 +245,7 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       preparePr: undefined, orderPr: undefined, updatedHead: undefined, candidateCommit: undefined, candidateDigest: undefined, approvePr: undefined,
       approvedHead: undefined, approvedTree: undefined, stableCommit: undefined, stableDigest: undefined,
       publicationRun: undefined, recordPr: undefined, failedMain: undefined,
-      campaignAttempt: 0, infrastructureHold: undefined, resumeDeviceCloud: undefined,
+      campaignAttempt: 0, infrastructureHold: undefined, resumeDeviceCloud: undefined, macHost: undefined,
     } });
   }
   if (["selected", "order-updated", "order-ready", "order-landed", "held"].includes(state.phase)) {

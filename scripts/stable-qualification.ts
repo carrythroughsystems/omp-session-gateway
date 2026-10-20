@@ -13,7 +13,8 @@ import { fixtureModelError, OMP_FIXTURE_MODEL } from "./omp-fixture.ts";
 import { isSupportedOmpVersion, parseOmpVersion } from "./upstream-canary.ts";
 import { defaultLaneModules } from "./stable-lanes.ts";
 import { pixelUnrestored } from "./restoration.ts";
-import { deviceCloudHolds, deviceCloudMachineOutcome, parseDeviceCloudHold, type DeviceCloudHold } from "./device-cloud-availability.ts";
+import { deviceCloudHolds, type DeviceCloudHold } from "./device-cloud-availability.ts";
+import { parseDeviceCloudHoldSet, recognizedDeviceCloudOutcome, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
 
@@ -142,6 +143,7 @@ export interface StableQualificationReceipt {
 export interface StableQualificationOptions {
   readonly preflight: boolean;
   readonly resumeDeviceCloud?: boolean;
+  readonly outcomeFile?: string;
   readonly tag: string;
   readonly previousTag: string;
   readonly receiptRoot: string;
@@ -397,6 +399,7 @@ export function parseStableQualificationArgs(
   return {
     preflight,
     resumeDeviceCloud,
+    ...(environment.OMP_STABLE_OUTCOME_FILE === undefined ? {} : { outcomeFile: resolve(environment.OMP_STABLE_OUTCOME_FILE) }),
     tag,
     previousTag,
     receiptRoot,
@@ -548,8 +551,11 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
     lane.status = "failed";
     lane.completedAt = now();
     lane.error = "lane execution failed; inspect the qualification process output";
-    const holds = name === "deviceCloud" ? deviceCloudHolds(error) : undefined;
-    if (holds?.length === 1) lane.evidence = { ...lane.evidence, availabilityHold: holds[0] };
+    const outcome = name === "deviceCloud" ? recognizedDeviceCloudOutcome(error) : undefined;
+    if (name === "deviceCloud") {
+      if (outcome !== undefined) lane.evidence = { ...lane.evidence, availabilityHold: outcome.availabilityHolds };
+      else if (lane.evidence !== undefined) delete lane.evidence.availabilityHold;
+    }
     await persist();
     throw error;
   }
@@ -622,7 +628,7 @@ export function assertDeviceCloudResumeEligible(
   receipt: StableQualificationReceipt,
   expected: { readonly tag: string; readonly previousTag: string; readonly orchestratorCommit: string; readonly macHost: string },
   modules: StableQualificationLaneModules = defaultLaneModules,
-): DeviceCloudHold {
+): readonly DeviceCloudHold[] {
   validateStableQualificationReceipt(receipt, expected.tag, expected.orchestratorCommit, expected.previousTag);
   if (receipt.status !== "failed" || receipt.macHost !== expected.macHost || receipt.candidate?.tag !== expected.tag ||
     receipt.predecessor?.tag !== expected.previousTag || !/^[a-f0-9]{40}$/u.test(receipt.candidate.sourceCommit) ||
@@ -633,8 +639,8 @@ export function assertDeviceCloudResumeEligible(
       throw new Error("device-cloud resume requires every other qualification and cleanup lane passed");
     }
   }
-  const hold = parseDeviceCloudHold(receipt.lanes.deviceCloud.evidence?.availabilityHold);
-  if (hold.stage !== "allocation" || hold.epoch !== progressEpoch(laneProgress(receipt.lanes.deviceCloud))) {
+  const holds = parseDeviceCloudHoldSet(receipt.lanes.deviceCloud.evidence?.availabilityHold);
+  if (holds.some(hold => hold.stage === "allocation" && hold.epoch !== progressEpoch(laneProgress(receipt.lanes.deviceCloud)))) {
     throw new Error("device-cloud resume hold does not identify the failed allocation attempt");
   }
   for (const name of Object.keys(CLEANUP_LANES) as ExternalLaneName[]) {
@@ -658,7 +664,55 @@ export function assertDeviceCloudResumeEligible(
     lifecycle.resumed.liveLaunches !== 2 || lifecycle.resumed.noStore !== true || lifecycle.resumed.revocations !== 2) {
     throw new Error("device-cloud resume requires completed OMP publication lifecycle proof");
   }
-  return hold;
+  return holds;
+}
+
+/** Consume old authorization durably before any resumed setup, including setup outside finally. */
+export async function withConsumedDeviceCloudHold<T>(
+  receipt: StableQualificationReceipt,
+  persist: () => Promise<void>,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (receipt.lanes.deviceCloud.evidence !== undefined) delete receipt.lanes.deviceCloud.evidence.availabilityHold;
+  await persist();
+  try { return await run(); }
+  catch (error) {
+    if (recognizedDeviceCloudOutcome(error) === undefined) {
+      if (receipt.lanes.deviceCloud.evidence !== undefined) delete receipt.lanes.deviceCloud.evidence.availabilityHold;
+      receipt.status = "failed";
+      receipt.error = "qualification failed; inspect the qualification process output";
+      await persist();
+    }
+    throw error;
+  }
+}
+
+/** Only a newly validated, all-hold failure can grant same-receipt authorization again. */
+export async function recordDeviceCloudCampaignFailure(
+  receipt: StableQualificationReceipt,
+  error: unknown,
+  expected: { readonly tag: string; readonly previousTag: string; readonly orchestratorCommit: string; readonly macHost: string },
+  persist: () => Promise<void>,
+  modules: StableQualificationLaneModules = defaultLaneModules,
+  outcomeFile?: string,
+): Promise<unknown> {
+  receipt.status = "failed";
+  receipt.error = "qualification failed; inspect the qualification process output";
+  if (receipt.lanes.deviceCloud.evidence !== undefined) delete receipt.lanes.deviceCloud.evidence.availabilityHold;
+  const outcome = recognizedDeviceCloudOutcome(error);
+  let failure = error;
+  if (outcome !== undefined) {
+    receipt.lanes.deviceCloud.evidence = { ...receipt.lanes.deviceCloud.evidence, availabilityHold: outcome.availabilityHolds };
+    try {
+      assertDeviceCloudResumeEligible(receipt, expected, modules);
+      await writeDeviceCloudOutcomeFile(outcomeFile, outcome);
+    } catch (eligibilityError) {
+      delete receipt.lanes.deviceCloud.evidence.availabilityHold;
+      failure = new AggregateError([error, eligibilityError], "qualification availability and eligibility failed");
+    }
+  }
+  await persist();
+  return failure;
 }
 
 type ExternalLaneRunContext<Extra extends object> = {
@@ -2033,7 +2087,12 @@ export async function runStableQualification(
 ): Promise<Record<string, unknown>> {
   const options = parseStableQualificationArgs(argv, runtime.environment);
   if (options.preflight) {
-    await preflightStableQualification(options, runtime, lanes);
+    try { await preflightStableQualification(options, runtime, lanes); }
+    catch (error) {
+      const outcome = recognizedDeviceCloudOutcome(error);
+      if (outcome !== undefined) await writeDeviceCloudOutcomeFile(options.outcomeFile, outcome);
+      throw error;
+    }
     return {
       status: "preflight-passed",
       effects: "none; bounded read-only prerequisite probes only",
@@ -2076,12 +2135,26 @@ async function runOwnedStableQualification(
     try { assertDeviceCloudResumeEligible(receipt, resumeIdentity, lanes); eligible = true; } catch { /* Other failures retain normal cleanup recovery. */ }
     if (eligible) throw new Error("this availability-held receipt requires explicit --resume-device-cloud");
   }
+  const persist = createReceiptPersister(receiptPath, receipt);
+  const run = () => runReceiptStableQualification(options, runtime, lanes, receiptPath, receipt, orchestratorCommit, persist);
+  return options.resumeDeviceCloud ? withConsumedDeviceCloudHold(receipt, persist, run) : run();
+}
+
+async function runReceiptStableQualification(
+  options: StableQualificationOptions,
+  runtime: StablePreflightRuntime,
+  lanes: StableQualificationLaneModules,
+  receiptPath: string,
+  receipt: StableQualificationReceipt,
+  orchestratorCommit: string,
+  persist: () => Promise<void>,
+): Promise<Record<string, unknown>> {
+  const resumeIdentity = { tag: options.tag, previousTag: options.previousTag, orchestratorCommit, macHost: options.macHost };
   receipt.status = "running";
   delete receipt.completedAt;
   delete receipt.error;
   const ompPins = await loadQualificationPins();
   const protectedFiles = await captureProtectedFiles();
-  const persist = createReceiptPersister(receiptPath, receipt);
   let admitted = false;
   let externalEffects = false;
   const pixel = lanes.createPixelLease();
@@ -2368,17 +2441,12 @@ async function runOwnedStableQualification(
     if (incomplete !== undefined) primaryError = new Error(incomplete);
   }
   if (primaryError !== undefined) {
-    if (!admitted && !cleanupRequired && !externalEffects) throw primaryError;
-    receipt.status = "failed";
-    receipt.error = "qualification failed; inspect the qualification process output";
-    await persist();
-    if (deviceCloudHolds(primaryError) !== undefined) {
-      try { assertDeviceCloudResumeEligible(receipt, resumeIdentity, lanes); }
-      catch {
-        primaryError = new AggregateError([primaryError, new Error("the availability-held campaign is not eligible for same-receipt resumption")], "qualification availability and eligibility failed");
-      }
+    if (!admitted && !cleanupRequired && !externalEffects && !options.resumeDeviceCloud) {
+      const outcome = recognizedDeviceCloudOutcome(primaryError);
+      if (outcome !== undefined) await writeDeviceCloudOutcomeFile(options.outcomeFile, outcome);
+      throw primaryError;
     }
-    throw primaryError;
+    throw await recordDeviceCloudCampaignFailure(receipt, primaryError, resumeIdentity, persist, lanes, options.outcomeFile);
   }
   receipt.status = "passed";
   receipt.completedAt = now();
@@ -2391,8 +2459,8 @@ if (import.meta.main) {
   try {
     console.log(JSON.stringify(await runStableQualification(Bun.argv.slice(2))));
   } catch (error) {
-    const hold = deviceCloudMachineOutcome(error);
-    if (hold !== undefined) console.log(JSON.stringify(hold));
+    const hold = recognizedDeviceCloudOutcome(error);
+    if (hold !== undefined) console.error("stable qualification held: pinned device-cloud pools are busy; explicit operator retry required");
     else console.error(`stable qualification failed: ${errorMessage(error)}`);
     process.exitCode = hold === undefined ? 1 : 75;
   }

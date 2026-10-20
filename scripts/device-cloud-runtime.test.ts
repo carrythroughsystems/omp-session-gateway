@@ -2,6 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { DEVICE_CLOUD_PROFILES, DEVICE_CLOUD_TARGETS, SAMSUNG_MODEL_CODES, eligibleDevice } from "./device-cloud-qualification.ts";
 import { deviceCloudHolds } from "./device-cloud-availability.ts";
+import { recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
 import { DEVICE_WAIT_MS, admitDeviceCloud, deviceCloudVendor, freeDevice, type DeviceCloudAdmissionDependencies } from "./device-cloud-runtime.ts";
 import { TestingBotApi } from "./testingbot.ts";
 import type { CloudDevice } from "./device-cloud-common.ts";
@@ -63,6 +64,7 @@ describe("read-only cloud admission", () => {
     const fixture = admission([]);
     const error = await admitDeviceCloud({}, "free", fixture.dependencies).catch((error: unknown) => error);
     expect(deviceCloudHolds(error)).toMatchObject([{ stage: "preflight", target: "iphone", waitedMs: 0 }]);
+    expect(recognizedDeviceCloudOutcome(error)?.availabilityHolds).toHaveLength(1);
     expect(fixture.reads).toEqual(["all", "available", "browserstack ipad", "browserstack android"]);
   });
   test("only empty iPad and Android pools trigger immediate, lazy fallback admission", async () => {
@@ -84,6 +86,7 @@ describe("read-only cloud admission", () => {
     const error = await admitDeviceCloud({}, "free", fixture.dependencies).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(AggregateError);
     expect(deviceCloudHolds(error)).toBeUndefined();
+    expect(recognizedDeviceCloudOutcome(error)).toBeUndefined();
     expect(fixture.reads).toEqual(["all", "available", "browserstack ipad", "browserstack android"]);
   });
   test.each(["authentication", "transport", "malformed catalog"])("%s failure is not a hold", async kind => {

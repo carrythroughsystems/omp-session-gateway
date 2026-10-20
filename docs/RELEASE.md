@@ -396,9 +396,12 @@ overwrite a completed campaign job or its evidence.
 
 Only validated no-free pinned-device observations are availability. Authentication, malformed
 catalogs, transport/queue ambiguity, allocation mismatch, journey defects, audit errors and failed
-cleanup remain diagnostic. The stable CLI emits a closed JSON infrastructure outcome and exits
-75 for an availability-only failure; exit 75 without a valid machine outcome is still a failure.
-An allocation attempt remains `failed` with additive `availabilityHold` evidence in schema 3.
+cleanup remain diagnostic. The stable CLI exits 75 for an availability-only failure. The driver
+sets `OMP_STABLE_OUTCOME_FILE` to a distinct `preflight-outcome.json` or `campaign-outcome.json`
+inside the private job directory; the CLI atomically writes a closed JSON outcome there. Earlier
+human lane stdout/stderr is never parsed as machine evidence. Missing or invalid outcome files
+make exit 75 diagnostic. An allocation attempt remains `failed` with additive `availabilityHold`
+evidence containing the complete closed array of one to three hold leaves in schema 3.
 
 Before reporting a resumable allocation hold, all other consumers must finish, the relay tunnel
 must stop, the real OMP publication lifecycle must pass, Windows must settle, and every resource
@@ -417,9 +420,12 @@ bun scripts/release-driver.ts retry-device-cloud --candidate <exact-prealpha-tag
 
 The command takes the tick mutex and checks: exact held selection and attempt; no pending
 intent/outbox, active candidate worker, approve step or stable publication; unchanged reviewed
-source/control policy; a fully eligible held receipt or effects-free preflight hold; and no
+source/control policy and Mac host from the immutable completed-worker specification, not the
+invoking CLI environment; a fully eligible held receipt or effects-free preflight hold; and no
 foreign release-host owner. It allocates no devices. The next ordinary tick launches one new
 job; repeating the authorization is refused. A dry-run configuration never authorizes a write.
+Both hold scopes persist that binding, and a scope mismatch is refused even if the receipt is
+otherwise eligible.
 
 Attempt zero keeps `jobs/<issue>-<candidate>-campaign/`; retries use
 `jobs/<issue>-<candidate>-campaign-retry-<n>/`, with matching unique tmux/worktree/branch names.
@@ -427,6 +433,10 @@ Never remove or overwrite a completed job, its start claim, result, logs, exit f
 `held-qualification.json`. For allocation holds, that private immutable snapshot must still
 equal the working receipt when retry is authorized. The working receipt advances normally only
 in the new attempt.
+If tmux fails after writing the new specification, the next tick replays that same authorized
+job, directory and host binding while neither its worker start claim nor tmux session exists.
+It does not allocate another ordinal or overwrite the specification. A start claim is a hard
+no-relaunch fence even when the tmux session has disappeared.
 
 For an operator-owned eligible campaign outside the driver, use the same source, candidate,
 predecessor, Mac host and receipt directory explicitly:
@@ -437,6 +447,12 @@ bun run qualify:stable -- --tag <exact-prealpha-tag> --resume-device-cloud
 
 This refuses ordinary, foreign, incomplete, stale-cleanup or dirty receipts before admission
 or receipt mutation. It reruns the whole cloud attempt on a new epoch, not an old browser session.
+Once eligibility is accepted, it clears and persists the old hold before any admission or setup.
+Only a newly validated all-hold failure can restore eligibility; an ordinary setup, teardown or
+protected-file failure exits 1 and leaves no hold authorization. Resume uses its own in-process
+preflight, not a separate driver preflight against stale authorization. A new admission-only hold
+on an existing eligible receipt remains receipt-scoped, with fresh preflight leaves and the same
+required passed proof and clean resources.
 Passed Debian, macOS lifecycle, Android, background Push, Windows, relay and OMP publication
 proof stay unchanged. Candidate/predecessor signatures, checksums and identity are reverified;
 the candidate gateway and a fresh isolated OMP fixture are reconstructed and launch readiness

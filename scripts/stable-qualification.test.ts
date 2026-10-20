@@ -18,6 +18,8 @@ import {
   executeReceiptLane,
   externalCleanupCurrent,
   finishLiveQualification,
+  recordDeviceCloudCampaignFailure,
+  withConsumedDeviceCloudHold,
   incompleteQualification,
   loadConfiguredMacTarget,
   markMacCleanupRequired,
@@ -42,6 +44,7 @@ import {
 } from "./stable-qualification.ts";
 import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-qualification.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } from "./device-cloud-availability.ts";
+import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
 // Derived exactly as the orchestrator derives it, so this suite cannot pass against a predecessor
@@ -880,12 +883,15 @@ function availabilityReceipt() {
   receipt.lanes.deviceCloud.status = "failed";
   receipt.lanes.deviceCloud.evidence = {
     progress: { epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: false },
-    availabilityHold: {
+    availabilityHold: [{
       kind: "device-cloud-availability", stage: "allocation", target: "ipad", vendors: ["testingbot"],
       reason: "pinned-pool-busy", waitedMs: 600_000, epoch: "11111111-2222-4333-8444-555555555555",
-    },
+    }],
   };
   receipt.lanes.ompPublication.evidence = { published: true, revoked: true, lifecycle: structuredClone(lifecycleEvidence) };
+  const relay = passedRelayReceipt();
+  receipt.startedAt = relay.startedAt;
+  receipt.lanes.relay = relay.lanes.relay;
   return receipt;
 }
 
@@ -907,7 +913,7 @@ describe("explicit same-receipt cloud resumption", () => {
   test("validates a clean failed hold without changing any passed evidence", () => {
     const receipt = availabilityReceipt();
     const before = structuredClone(receipt);
-    expect(assertDeviceCloudResumeEligible(receipt, resumeIdentity, resumeModules)).toMatchObject({ stage: "allocation", target: "ipad" });
+    expect(assertDeviceCloudResumeEligible(receipt, resumeIdentity, resumeModules)).toMatchObject([{ stage: "allocation", target: "ipad" }]);
     expect(receipt).toEqual(before);
   });
   test.each(["dirty", "stale cleanup", "ordinary failure", "foreign commit", "foreign candidate", "foreign predecessor", "foreign host", "missing lifecycle", "other failed lane"] as const)(
@@ -961,6 +967,100 @@ describe("explicit same-receipt cloud resumption", () => {
     expect(receipt.lanes.deviceCloudCleanup.attempts).toBe(2);
     expect(receipt.lanes.deviceCloud.evidence?.availabilityHold).toBeUndefined();
   });
+  test.each(["prepareMacFixture", "waitForPublishedSession", "verifyLaunchContracts", "startTunnel", "teardown", "protected-file guard"] as const)(
+    "%s failure after consuming a hold cannot retain same-receipt eligibility", async stage => {
+      const receipt = availabilityReceipt();
+      const publication = structuredClone(receipt.lanes.ompPublication);
+      const root = await mkdtemp(join(tmpdir(), "stable-cloud-consumed-"));
+      const path = join(root, "receipt.json");
+      const persist = createReceiptPersister(path, receipt);
+      try {
+        await persist();
+        const failure = await withConsumedDeviceCloudHold(receipt, persist, async () => {
+          // Every setup/teardown callback is inside this production consumption boundary.
+          const onDisk = JSON.parse(await readFile(path, "utf8"));
+          expect(onDisk.lanes.deviceCloud.evidence.availabilityHold).toBeUndefined();
+          if (stage === "teardown" || stage === "protected-file guard") {
+            // Even an earlier newly typed hold may not survive an ordinary finally-path error.
+            receipt.lanes.deviceCloud.evidence!.availabilityHold = parseDeviceCloudHoldSet(availabilityReceipt().lanes.deviceCloud.evidence!.availabilityHold);
+            await persist();
+            throw new AggregateError([
+              new DeviceCloudAvailabilityHold(parseDeviceCloudHoldSet(receipt.lanes.deviceCloud.evidence!.availabilityHold)[0]!),
+              new Error(`${stage} failed`),
+            ]);
+          }
+          throw new Error(`${stage} failed`);
+        }).catch((error: unknown) => error);
+        expect(recognizedDeviceCloudOutcome(failure)).toBeUndefined();
+        expect(receipt.lanes.deviceCloud.evidence!.availabilityHold).toBeUndefined();
+        expect(JSON.parse(await readFile(path, "utf8")).lanes.deviceCloud.evidence.availabilityHold).toBeUndefined();
+        expect(receipt.lanes.ompPublication).toEqual(publication);
+        expect(() => assertDeviceCloudResumeEligible(receipt, resumeIdentity, resumeModules)).toThrow();
+      } finally { await rm(root, { recursive: true, force: true }); }
+    },
+  );
+  test.each([2, 3])("a fresh all-hold admission failure records all %i leaves on the same receipt", async count => {
+    const receipt = availabilityReceipt();
+    const before = structuredClone(receipt.lanes);
+    const holds = (["iphone", "ipad", "android"] as const).slice(3 - count).map(target => new DeviceCloudAvailabilityHold({
+      kind: "device-cloud-availability", stage: "preflight", target, vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0,
+    }));
+    const root = await mkdtemp(join(tmpdir(), "stable-cloud-fresh-holds-"));
+    const path = join(root, "receipt.json"), outcomePath = join(root, "outcome.json");
+    const persist = createReceiptPersister(path, receipt);
+    try {
+      const error = await withConsumedDeviceCloudHold(receipt, persist, async () => {
+        throw await recordDeviceCloudCampaignFailure(receipt, new AggregateError(holds), resumeIdentity, persist, resumeModules, outcomePath);
+      }).catch((error: unknown) => error);
+      expect(recognizedDeviceCloudOutcome(error)?.availabilityHolds).toHaveLength(count);
+      expect(assertDeviceCloudResumeEligible(receipt, resumeIdentity, resumeModules)).toHaveLength(count);
+      expect((await readDeviceCloudOutcomeFile(outcomePath)).availabilityHolds).toEqual(holds.map(hold => hold.evidence));
+      for (const name of Object.keys(before) as (keyof typeof before)[]) if (name !== "deviceCloud") expect(receipt.lanes[name]).toEqual(before[name]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["ordinary", "two holds", "three holds"] as const)("the real resume entry consumes eligibility before %s admission", async kind => {
+    const root = await mkdtemp(join(tmpdir(), "stable-cloud-resume-admission-"));
+    const path = join(root, "stable-qualification.json");
+    const receipt = availabilityReceipt(), publication = structuredClone(receipt.lanes.ompPublication);
+    try {
+      await writeFile(path, JSON.stringify(receipt));
+      const runtime = await preflightFixture(root);
+      const count = kind === "two holds" ? 2 : 3;
+      const holds = (["iphone", "ipad", "android"] as const).slice(3 - count).map(target => new DeviceCloudAvailabilityHold({
+        kind: "device-cloud-availability", stage: "preflight", target, vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0,
+      }));
+      let admitted = 0;
+      const modules = { ...resumeModules, deviceCloud: { ...resumeModules.deviceCloud, preflight: async () => {
+        admitted += 1;
+        const consumed = JSON.parse(await readFile(path, "utf8"));
+        expect(consumed.lanes.deviceCloud.evidence.availabilityHold).toBeUndefined();
+        if (kind === "ordinary") throw new Error("ordinary admission diagnostic");
+        throw new AggregateError(holds);
+      } } };
+      const error = await runStableQualification(["--tag", TAG, "--resume-device-cloud"], runtime, modules).catch((error: unknown) => error);
+      expect(admitted).toBe(1);
+      const saved = validateStableQualificationReceipt(JSON.parse(await readFile(path, "utf8")), TAG, COMMIT, PREVIOUS_TAG);
+      expect(saved.lanes.ompPublication).toEqual(publication);
+      if (kind === "ordinary") {
+        expect(recognizedDeviceCloudOutcome(error)).toBeUndefined();
+        expect(saved.lanes.deviceCloud.evidence!.availabilityHold).toBeUndefined();
+        expect(() => assertDeviceCloudResumeEligible(saved, resumeIdentity, resumeModules)).toThrow();
+      } else {
+        expect(recognizedDeviceCloudOutcome(error)?.availabilityHolds).toHaveLength(count);
+        expect(assertDeviceCloudResumeEligible(saved, resumeIdentity, resumeModules)).toHaveLength(count);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("an outcome-file failure is diagnostic and cannot re-establish a receipt hold", async () => {
+    const receipt = availabilityReceipt();
+    const hold = new DeviceCloudAvailabilityHold(parseDeviceCloudHoldSet(receipt.lanes.deviceCloud.evidence!.availabilityHold)[0]!);
+    const root = await mkdtemp(join(tmpdir(), "stable-cloud-outcome-refusal-"));
+    try {
+      const error = await recordDeviceCloudCampaignFailure(receipt, hold, resumeIdentity, async () => {}, resumeModules, root);
+      expect(recognizedDeviceCloudOutcome(error)).toBeUndefined();
+      expect(receipt.lanes.deviceCloud.evidence!.availabilityHold).toBeUndefined();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 });
 
 describe("publication lifecycle receipt", () => {
@@ -969,7 +1069,7 @@ describe("publication lifecycle receipt", () => {
     const lane = receipt.lanes.ompPublication;
     lane.status = "running"; lane.evidence = { published: true };
     const order: string[] = [];
-    const hold = new DeviceCloudAvailabilityHold(parseDeviceCloudHold(receipt.lanes.deviceCloud.evidence!.availabilityHold));
+    const hold = new DeviceCloudAvailabilityHold(parseDeviceCloudHoldSet(receipt.lanes.deviceCloud.evidence!.availabilityHold)[0]!);
     const error = await finishLiveQualification([hold], lane, async () => {}, async () => { order.push("relay stopped"); }, async () => {
       order.push("lifecycle"); return structuredClone(lifecycleEvidence);
     }).catch((error: unknown) => error);
@@ -1252,7 +1352,7 @@ describe("resumable receipt lanes", () => {
     }).catch((error: unknown) => error);
     expect(deviceCloudHolds(error)).toEqual([hold.evidence]);
     expect(receipt.schemaVersion).toBe(3);
-    expect(receipt.lanes.deviceCloud).toMatchObject({ status: "failed", evidence: { availabilityHold: hold.evidence } });
+    expect(receipt.lanes.deviceCloud).toMatchObject({ status: "failed", evidence: { availabilityHold: [hold.evidence] } });
   });
 
   test("checkpoints running evidence, persists a pass, and skips an already passed lane", async () => {

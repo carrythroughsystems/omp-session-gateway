@@ -52,6 +52,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   before reporting a clean hold, preserve other passed qualification proof, and require one
   guarded operator authorization per immutable release-driver retry job. Infrastructure holds
   never pass qualification, auto-retry, or clear ordinary failures or foreign host ownership.
+  Keep machine outcomes in atomic private per-phase files rather than noisy lane stdout, record
+  every hold leaf, consume old resume eligibility before setup, bind both hold scopes to the
+  immutable worker host/source/policy, and replay a failed unclaimed tmux launch in the same job.
 
 - Widen TestingBot's modern iPhone and Samsung device pools with explicit OS floors and canonical
   Galaxy hardware checks; keep A55 disabled pending an observed hardware-code proof. Check free

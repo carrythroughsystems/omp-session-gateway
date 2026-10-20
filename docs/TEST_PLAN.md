@@ -357,11 +357,19 @@ Same-receipt hold/resume tests (`scripts/stable-qualification.test.ts` and
   evidence and attempt counts;
 - explicit resumption refuses dirty, foreign, ordinary, incomplete and stale-cleanup receipts
   before admission or receipt writes, and reuses other expensive lanes' passed proof;
-- closed worker outcomes bind candidate, source, digest, policy and job ordinal; malformed
+- closed worker outcomes bind candidate, source, digest, policy, Mac host and job ordinal; malformed
   outcomes and ordinary/missing workers never authorize an infrastructure retry;
+- noisy earlier lane stdout cannot corrupt the dedicated atomically written per-phase outcome
+  file; two and three free-admission hold leaves survive CLI/receipt/driver validation as one set;
+- resume consumes old eligibility durably before setup; injected fixture/publication-readiness/
+  launch/tunnel failures and teardown/protected-file errors after a hold leave it ineligible;
+- receipt-scoped authorization preserves the worker's immutable host despite different operator
+  CLI environment, and refuses scope, snapshot, host, source/policy and outcome-leaf mismatches;
 - `infrastructure-held` never auto-retries or clears from later passing observations;
 - one guarded authorization creates one immutable ordinal job, refuses duplicate authorization
-  and changed identities/policy/lease, and preserves attempt-zero results and logs.
+  and changed identities/policy/lease, and preserves attempt-zero results and logs. A tmux failure
+  after spec write replays into the same job once without another ordinal or immutable-file change;
+  a worker start claim prevents relaunch even after its session disappears.
 
 Before stable activation, the lead must confirm equipment availability and run the bounded
 isolated full journey plus controlled hold/resume development proof at the final tree. Unit
