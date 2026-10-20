@@ -53,13 +53,13 @@ describe("retained-Mac Push fixture staging", () => {
       mac: async argv => {
         expect(leased).toBe(true);
         calls.push(argv.join(" "));
-        return { exitCode: 0, stdout: calls.length === 1 ? "/Users/fixture" : "", stderr: "" };
+        return { exitCode: 0, stdout: calls.length === 1 ? "/Users/ompqual" : "", stderr: "" };
       },
     };
     const prepare = retainedMacCloudFixture(context);
     expect(calls).toEqual([]);
     const fixture = await context.pixel("deviceCloud", prepare);
-    expect(fixture.base).toBe("/Users/fixture/qual-tools/device-cloud/fixtures");
+    expect(fixture.base).toBe("/Users/ompqual/qual-tools/device-cloud/fixtures");
     expect(calls).toHaveLength(1 + PUSH_FIXTURE_FILES.length);
   });
 
