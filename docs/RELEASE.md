@@ -720,7 +720,8 @@ Documentation is distinguished from live observations; no claim covers vendor-in
 | Retained surfaces | [Session API](https://www.browserstack.com/docs/automate/api-reference/selenium/session); both finalized records | Session JSON and `/logs`, `/networklogs`, `/consolelogs`, `/seleniumlogs`, `/appiumlogs`, `/telemetrylogs`, plus all populated signed log/profiling/session-terminal/build-terminal references are inspected. `/logs` returned text (4,855/5,472 bytes), console a 363-byte no-messages placeholder, other log APIs 404. Console signed URL returned the same text; other signed logs 404. `browser_url`/`public_url` are dashboard representations, not followed as log surfaces; no public sharing is enabled. |
 | Media indicators | Same Session API and debugging contract; both records | Video URL was populated even when disabled, but returned S3 403 `AccessDenied` mentioning missing `s3:ListBucket`, the observed missing-object response. Together with disabled capability and clean indicators, accepted as **no retained media observed**. A media URL serving a body fails the audit. |
 | Deletion / absence | [DELETE session](https://www.browserstack.com/docs/automate/api-reference/selenium/session#delete-session); both records | Single `DELETE /automate/sessions/{id}.json` returned HTTP 200/`status:ok`; session JSON and all six API log surfaces then returned 404. **Record-removal gate passed.** Issued signed console URLs briefly still served identical audited text, then returned 404 (iPad observed absent after 30 seconds; Samsung on a later read). |
-| Signed URL lifetime | Observed `X-Amz-Date` / `X-Amz-Expires` and post-delete reads | One issued URL advertised 604,800 seconds (seven days), although its object disappeared sooner. Clean, unchanged, media-free text fetched and audited before deletion may outlive record deletion until expiry; evidence records only a count, never URLs. Changed/unaudited content, media or unverifiable API absence fails. |
+| Signed URL lifetime | Observed `X-Amz-Date` / `X-Amz-Expires` and post-delete reads; reviewed recovery contract | One issued URL advertised 604,800 seconds (seven days), although its object disappeared sooner. Every declared reference, including initially-404 artifacts, persists only in private 0600 progress until verified absent. Even identical clean text must disappear within the three-minute absence bound; otherwise cleanup remains incomplete. Fresh processes recheck the same durable inventory. Public evidence/logs never contain signed URLs. |
+| Multiple hosts / canonical ownership | [Tunnel Firewall examples 2–3](https://www.browserstack.com/local-testing/tunnel-firewall); pinned 8.9 synthetic-key child trace and Local-only probe | The documented syntax is separate space-delimited host argv entries, not a comma-joined argument. The child trace preserved `example.com` and `example.org`; actual Local reached readiness with both. The configured proxy accepted CONNECT/TLS to both (authorized, matching direct certificate fingerprints), denied all seven trap cases with 403 and zero trap connections, and Local had no listeners. Fresh-process stop through the unresolved `/var` path removed config/FIFO using canonical executable/cwd ownership. No device session was used for this probe: it proves Local configuration plus proxy containment, not a two-host remote-browser journey. |
 
 The shared strict parser refuses duplicate decoded object keys at any depth before deriving
 references from JSON metadata or inventories. JSON log bodies use the same parser; ordinary
@@ -728,8 +729,12 @@ text logs remain raw-only and are never reference sources. The audit searches ra
 plus strict canonical serialization for each whole live
 View/Control capability and every exact contiguous 16-character window. Default-relay capabilities
 are compact `room.key` strings, not candidate-origin URLs: retained directory navigation is not
-an exception to the scan and needs no obfuscation. Only counts/verdicts persist. Deletion is defense
-in depth after this audit. Unknown surfaces, missing required logs and exhausted byte budgets fail.
+an exception to the scan and needs no obfuscation. Only counts/verdicts enter returned evidence.
+The private recovery checkpoint additionally holds vendor-signed artifact references and public
+session generation identities, never View/Control links or retained log contents. Deletion is
+defense in depth after this audit. Unknown surfaces, missing required logs and exhausted byte
+budgets fail. Nonempty screenshot/video/visual fields and image/video URLs are retained-media
+indicators, including opaque screenshots in failed-command responses.
 
 Pinned in `scripts/browserstack-pins.json`:
 
@@ -751,8 +756,18 @@ independent browser-reported hardware corroboration. Neither observation broaden
 
 Keep the original private progress and exact orchestrator checkout. Cleanup routes each known
 session by vendor, ends it, inspects/removes BrowserStack records, verifies absence, closes the
-proxy, stops only owned tunnels, and removes config/workspace. A crash-era saved clean flag cannot
-authorize lingering signed URLs: a fresh process re-inspects and requires their disappearance.
+proxy, stops only owned tunnels, and removes config/workspace. The checkpoint is 0600 inside a
+0700 directory; never publish it. All declared signed references are checkpointed before DELETE,
+including ones initially returning 404, and removed from progress only after verified absence.
+A crash-era saved clean flag cannot authorize lingering signed URLs: normal and fresh-process
+cleanup both require disappearance within the three-minute absence bound. A delayed artifact is
+fetched and scanned if it starts serving content. Exhaustion leaves `recordRemoved` false and
+cleanup dirty; retry through `deviceCloudCleanup`, retaining the original progress.
+Fresh cleanup re-audits finalized raw surfaces against the live links only if the persisted live
+and fixture generation identities still match. Otherwise it still deletes for confidentiality,
+reports `unauditedRecordsDeleted`, and never calls those records audited. A detected link/media
+hit or unverifiable required surface persists an incident even after deletion; stop and handle
+that incident rather than clearing progress or authorizing another campaign.
 If Local termination is unverified, cleanup removes its key config but preserves the working
 directory needed to identify its remaining processes; it does not claim restoration.
 An unidentified create stays dirty; reconcile that attempt's exact vendor/build in the account

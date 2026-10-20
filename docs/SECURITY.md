@@ -524,7 +524,8 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   inclusion and force-proxy through the same loopback CONNECT proxy. Include/exclude filters cover
   all ports and do not replace the proxy's exact authority check. Local's listeners must be
   loopback-only; cleanup closes the proxy first, then stops only processes with the exact pinned
-  executable and unique attempt working directory, including respawned children.
+  executable and unique attempt working directory, including respawned children. Both paths are
+  realpath-resolved before comparison with macOS process ownership; unresolved paths fail closed.
 - **Explicit argv exception, single-user orchestrator only:** the lane never places the BrowserStack
   key in argv, URLs, receipts or logs. It creates only a 0600 key config in the attempt's owned 0700
   directory and supplies `--config-file`. The pinned vendor binary expands the key into its child's
@@ -539,11 +540,23 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   requests carry no account authorization, refuse redirects and unreviewed origins. No recording
   setting proves vendor-internal absence. Video disabled plus clean indicators and the observed
   missing-object S3 403 is accepted as no retained media observed; media returning 200 fails.
-  DELETE acknowledgement and 404 on session JSON and all six log APIs verify record removal.
-  An already-issued signed text URL may still serve its exact previously audited, clean,
-  media-free content until expiry; only its count persists. Changed, unaudited or media content
-  cannot use this exception. A fresh cleanup process must wait for signed artifacts to disappear,
-  not trust a persisted clean flag. Deletion is defense in depth after the audit, not its replacement.
+  Media detection rejects nonempty screenshot/video/visual fields, including opaque failed-command
+  screenshot payloads, not just familiar media URLs. Only null, false, empty-string and empty-list
+  markers are treated as disabled; the documented disabled-video URL is fetched separately.
+  DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
+  signed artifact** are required before removal/restoration, including references returning 404 at
+  the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.
+  No lingering-clean-text exception remains. Any artifact that starts serving content is audited
+  again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
+  Signed references persist only in private 0600 recovery progress (inside its 0700 directory),
+  until verified absent. They never enter returned evidence, public summaries or logs; do not
+  publish the private receipt. Recovery does not rely on an in-memory inventory or a saved clean
+  flag. It re-audits finalized raw surfaces using the exact whole-link/16-character scan when both
+  recorded session generations still match. If those links cannot be reconstructed, deletion
+  still proceeds for confidentiality, but `unauditedRecordsDeleted` explicitly counts it and the
+  record is not marked audited. An audit hit or unverifiable required surface is a persisted
+  incident: deletion is attempted, but cleanup remains failed for operator incident handling.
+  Deletion is defense in depth after the audit, not its replacement.
 - The iPhone turns background alerts off before its session ends. If its attempt fails first, the
   subscription stays on the candidate gateway until qualification cleanup uninstalls the gateway,
   and any alerts sent meanwhile carry only session metadata.

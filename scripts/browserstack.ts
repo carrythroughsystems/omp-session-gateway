@@ -1,17 +1,17 @@
 /** BrowserStack Automate Mobile: fixed catalog aliases, private Local, complete record audit/removal. */
 import { createHash } from "node:crypto";
 import { createReadStream, openSync, writeSync, type ReadStream } from "node:fs";
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../packages/collab-client/upstream/src/tool-render/util.ts";
 import {
   boundedVendorText, readCloudCredentials, runOp, listProcesses, listeningAddresses, requireLoopbackListeners,
-  type CloudDevice, type TestRecord, type OpRunner,
+  type CloudDevice, type TestRecord, type OpRunner, type CloudArtifact, type CloudRecordRemoval,
 } from "./device-cloud-common.ts";
 import { readProvider } from "./provider-read.ts";
 import { BROWSERSTACK_SESSION_ID } from "./device-cloud-webdriver.ts";
-import { parseRetainedVendorJson, RetainedVendorJsonError } from "./device-cloud-record-json.ts";
+import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
 import pins from "./browserstack-pins.json";
 
 export const BROWSERSTACK_LOCAL = pins.local;
@@ -63,11 +63,44 @@ export function browserStackCapabilities(target: "ipad" | "android", device: Clo
   };
 }
 
-interface AuditedArtifact { readonly url: string; readonly text: string }
+const MEDIA_URL = /(?:data:(?:image|video)\/|https?:[^\s"'<>]*(?:\/(?:screenshots?|video)(?:[/?]|$)|\.(?:png|jpe?g|webp|gif|avif|svg|bmp|ico|mp4|webm|mov|m4v)(?:[?#]|$)))/iu;
+const ARTIFACT_KEY = /(?:log|profiling|terminal|artifact).*url|screenshot|video|visual|^screen$/iu;
+
+/** Closed disabled markers; opaque screenshot payloads count too, not only familiar URLs. */
+function retainedMedia(value: unknown, key = ""): boolean {
+  if (/screenshot|video|visual|^screen$/iu.test(key) &&
+    value !== undefined && value !== null && value !== false && value !== "" && !(Array.isArray(value) && value.length === 0)) return true;
+  if (typeof value === "string") return MEDIA_URL.test(value);
+  if (Array.isArray(value)) return value.some(item => retainedMedia(item));
+  return isRecord(value) && Object.entries(value).some(([name, item]) => retainedMedia(item, name));
+}
+
+function retainedContent(raw: string, contentType: string | null): { text: string; media: boolean; json?: unknown } {
+  // Plain text remains raw-only for reference discovery. JSON bodies reject duplicates.
+  if (!/(?:\/|\+)json(?:;|$)/iu.test(contentType ?? "")) return { text: raw, media: MEDIA_URL.test(raw) ||
+    /"(?:[^"]*(?:screenshot|video|visual)[^"]*|screen)"\s*:\s*(?!null\b|false\b|""|\[\s*\])\S/iu.test(raw) };
+  const json = parseRetainedVendorJson(raw);
+  const canonical = JSON.stringify(json);
+  return { text: canonical === raw ? raw : `${raw}\n${canonical}`, media: retainedMedia(json), json };
+}
+
+export function validateBrowserStackArtifacts(sessionId: string, artifacts: readonly CloudArtifact[]): void {
+  if (!BROWSERSTACK_SESSION_ID.test(sessionId) || artifacts.length > 64) throw new Error("invalid BrowserStack artifact inventory");
+  const seen = new Set<string>();
+  for (const artifact of artifacts) {
+    if (!isRecord(artifact) || Object.keys(artifact).sort().join(",") !== "buildId,kind,url" ||
+      typeof artifact.url !== "string" || artifact.url.length > 8192 || typeof artifact.buildId !== "string" ||
+      !BROWSERSTACK_SESSION_ID.test(artifact.buildId) || (artifact.kind !== "text" && artifact.kind !== "media") || seen.has(artifact.url)) throw new Error("invalid BrowserStack artifact inventory");
+    let parsed: URL;
+    try { parsed = new URL(artifact.url); } catch { throw new Error("invalid BrowserStack artifact reference"); }
+    if (!Object.hasOwn(ARTIFACT_ORIGINS, parsed.origin) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
+      (!parsed.pathname.includes(sessionId) && !parsed.pathname.includes(artifact.buildId))) throw new Error("unreviewed BrowserStack artifact reference");
+    seen.add(artifact.url);
+  }
+}
+
 export class BrowserStackApi {
   readonly #authorization: string;
-  /** In-memory only: exact fetched bytes, required before permitting a lingering signed text URL. */
-  readonly #records = new Map<string, readonly AuditedArtifact[]>();
   readonly #removalStarted = new Set<string>();
   constructor(credentials: BrowserStackCredentials) {
     this.#authorization = `Basic ${btoa(`${credentials.username}:${credentials.accessKey}`)}`;
@@ -106,9 +139,10 @@ export class BrowserStackApi {
     return devices;
   }
 
-  async #session(sessionId: string): Promise<{ readonly record: Record<string, unknown>; readonly raw: string }> {
+  async #session(sessionId: string): Promise<{ readonly record: Record<string, unknown>; readonly raw: string } | undefined> {
     if (!BROWSERSTACK_SESSION_ID.test(sessionId)) throw new Error("invalid BrowserStack session id");
     const response = await this.#get(`/sessions/${sessionId}.json`);
+    if (response.status === 404) { await response.body?.cancel(); return undefined; }
     if (!response.ok) { await response.body?.cancel(); throw new Error(`BrowserStack allocation read failed with HTTP ${response.status}`); }
     const raw = await boundedVendorText(response, "BrowserStack");
     const payload = parseRetainedVendorJson(raw);
@@ -117,7 +151,9 @@ export class BrowserStackApi {
   }
 
   async allocation(sessionId: string): Promise<Record<string, unknown>> {
-    return (await this.#session(sessionId)).record;
+    const result = await this.#session(sessionId);
+    if (result === undefined) throw new Error("BrowserStack allocation record is absent");
+    return result.record;
   }
 
   async #artifact(url: string, sessionId: string, buildId: string): Promise<Response> {
@@ -129,86 +165,91 @@ export class BrowserStackApi {
     return readProvider(() => fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(30_000) }));
   }
 
-  async testRecord(sessionId: string): Promise<TestRecord | undefined> {
-    const { record, raw } = await this.#session(sessionId);
+  async testRecord(sessionId: string, remember?: (artifacts: readonly CloudArtifact[]) => Promise<void>): Promise<TestRecord | undefined> {
+    const session = await this.#session(sessionId);
+    if (session === undefined) return undefined;
+    const { record, raw } = session;
     if (record.status === "running") return { complete: false, text: "", video: false, screenshots: 0 };
     if (Object.keys(record).some(field => !(RECORD_FIELDS as readonly string[]).includes(field))) throw new Error("BrowserStack returned an unreviewed retained-record field");
     if (!["done", "failed", "timeout", "passed"].includes(String(record.status)) || typeof record.build_hashed_id !== "string" || !BROWSERSTACK_SESSION_ID.test(record.build_hashed_id)) throw new Error("BrowserStack record has unknown finalization state");
     const texts = [raw, JSON.stringify(record)];
-    const artifacts: AuditedArtifact[] = [];
-    let bytes = Buffer.byteLength(raw) + Buffer.byteLength(texts[1]!);
-    if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
-    const append = (text: string, contentType: string | null = null) => {
-      bytes += Buffer.byteLength(text);
-      if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
-      texts.push(text);
-      // Plain logs are raw-only and never reference sources. JSON logs must reject duplicates.
-      let canonical: string | undefined;
-      try { canonical = JSON.stringify(parseRetainedVendorJson(text)); }
-      catch (error) {
-        if (!(error instanceof RetainedVendorJsonError) || error.code !== "invalid-json" ||
-          /(?:\/|\+)json(?:;|$)/iu.test(contentType ?? "")) throw error;
-      }
-      if (canonical !== undefined && canonical !== text) {
-        bytes += Buffer.byteLength(canonical);
-        if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
-        texts.push(canonical);
+    const artifacts: CloudArtifact[] = [];
+    const inventory = async (json: unknown, key = ""): Promise<void> => {
+      if (typeof json === "string") {
+        let url: URL;
+        try { url = new URL(json); } catch { return; }
+        if (url.protocol !== "https:" && url.protocol !== "http:") return;
+        if (ARTIFACT_KEY.test(key)) validateBrowserStackArtifacts(sessionId, [{ url: json, buildId: record.build_hashed_id as string, kind: "text" }]);
+        if (Object.hasOwn(ARTIFACT_ORIGINS, url.origin) && (url.pathname.includes(sessionId) || url.pathname.includes(record.build_hashed_id as string))) {
+          const kind = /screenshot|video|visual|^screen$/iu.test(key) || MEDIA_URL.test(json) ? "media" : "text";
+          if (!artifacts.some(artifact => artifact.url === json)) {
+            artifacts.push({ url: json, buildId: record.build_hashed_id as string, kind });
+            validateBrowserStackArtifacts(sessionId, artifacts);
+            await remember?.([...artifacts]);
+          }
+        }
+      } else if (Array.isArray(json)) {
+        for (const item of json) await inventory(item, key);
+      } else if (isRecord(json)) {
+        for (const [name, item] of Object.entries(json)) await inventory(item, name);
       }
     };
-    for (const surface of LOG_SURFACES) {
-      const response = await this.#get(`/sessions/${sessionId}/${surface}`);
-      if (response.status === 404 && surface !== "logs") { append(await boundedVendorText(response, "BrowserStack"), response.headers.get("content-type")); continue; }
-      if (response.status !== 200) { await response.body?.cancel(); throw new Error("BrowserStack required retained log is unavailable"); }
-      const contentType = response.headers.get("content-type") ?? "";
-      if (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType)) { await response.body?.cancel(); throw new Error("BrowserStack returned an unexpected log format"); }
-      append(await boundedVendorText(response, "BrowserStack"), contentType);
-    }
-    for (const field of ARTIFACT_FIELDS) {
+    for (const field of [...ARTIFACT_FIELDS, "video_url"]) {
       const url = record[field];
       if (url === undefined || url === null || url === "") continue;
       if (typeof url !== "string") throw new Error("BrowserStack returned an invalid artifact reference");
-      const response = await this.#artifact(url, sessionId, record.build_hashed_id);
-      if (response.status === 404) { append(await boundedVendorText(response, "BrowserStack"), response.headers.get("content-type")); continue; }
-      const contentType = response.headers.get("content-type") ?? "";
-      if (response.status !== 200 || (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType))) { await response.body?.cancel(); throw new Error("BrowserStack retained artifact state is unknown"); }
-      const text = await boundedVendorText(response, "BrowserStack");
-      append(text, contentType);
-      artifacts.push({ url, text });
+      validateBrowserStackArtifacts(sessionId, [{ url, buildId: record.build_hashed_id, kind: field === "video_url" ? "media" : "text" }]);
+      await inventory(url, field);
     }
     if (typeof record.video_url !== "string" || record.video_url === "") throw new Error("BrowserStack returned no video retention indicator");
-    const videoResponse = await this.#artifact(record.video_url, sessionId, record.build_hashed_id);
+    let screenshots = Object.entries(record).some(([key, value]) => key !== "video_url" && retainedMedia(value, key)) ? 1 : 0;
+    let bytes = Buffer.byteLength(raw) + Buffer.byteLength(texts[1]!);
+    if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
+    const append = async (raw: string, contentType: string | null = null) => {
+      const content = retainedContent(raw, contentType);
+      bytes += Buffer.byteLength(content.text);
+      if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
+      texts.push(content.text);
+      if (content.media) screenshots = 1;
+      if (content.json !== undefined) await inventory(content.json);
+    };
     let video = false;
-    if (videoResponse.status === 200) {
-      video = true;
-      await videoResponse.body?.cancel();
-      // A retained media reference can never qualify for the lingering-clean-text exception.
-      artifacts.push({ url: record.video_url, text: "" });
+    for (const surface of LOG_SURFACES) {
+      const response = await this.#get(`/sessions/${sessionId}/${surface}`);
+      if (response.status === 404 && surface !== "logs") { await append(await boundedVendorText(response, "BrowserStack"), response.headers.get("content-type")); continue; }
+      if (response.status !== 200) { await response.body?.cancel(); throw new Error("BrowserStack required retained log is unavailable"); }
+      const contentType = response.headers.get("content-type") ?? "";
+      if (response.status === 200 && /^(?:image|video)\//iu.test(contentType)) { video = true; await response.body?.cancel(); continue; }
+      if (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType)) { await response.body?.cancel(); throw new Error("BrowserStack returned an unexpected log format"); }
+      await append(await boundedVendorText(response, "BrowserStack"), contentType);
     }
-    else if (videoResponse.status === 404) append(await boundedVendorText(videoResponse, "BrowserStack"), videoResponse.headers.get("content-type"));
-    else if (videoResponse.status === 403) {
-      const denial = await boundedVendorText(videoResponse, "BrowserStack");
-      if (!denial.includes("<Code>AccessDenied</Code>") || !denial.includes("s3:ListBucket")) throw new Error("BrowserStack video retention state is unknown");
-      append(denial);
-    } else { await videoResponse.body?.cancel(); throw new Error("BrowserStack video retention state is unknown"); }
+    for (const artifact of artifacts) {
+      const response = await this.#artifact(artifact.url, sessionId, artifact.buildId);
+      if (response.status === 404) { await append(await boundedVendorText(response, "BrowserStack"), response.headers.get("content-type")); continue; }
+      if (artifact.kind === "media") {
+        if (response.status === 200) { video = true; await response.body?.cancel(); continue; }
+        const denial = await boundedVendorText(response, "BrowserStack");
+        if (response.status !== 403 || !denial.includes("<Code>AccessDenied</Code>") || !denial.includes("s3:ListBucket")) throw new Error("BrowserStack video retention state is unknown");
+        await append(denial);
+        continue;
+      }
+      const contentType = response.headers.get("content-type") ?? "";
+      if (response.status === 200 && /^(?:image|video)\//iu.test(contentType)) { video = true; await response.body?.cancel(); continue; }
+      if (response.status !== 200 || (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType))) { await response.body?.cancel(); throw new Error("BrowserStack retained artifact state is unknown"); }
+      const text = await boundedVendorText(response, "BrowserStack");
+      await append(text, contentType);
+    }
     const text = texts.join("\n");
-    const screenshots = /https?:[^\s"'<>]*(?:screenshot|\.png|\.jpe?g|\.webp|\.gif)|"screenshots?"\s*:\s*(?!false|null|""|\[\s*\])[\["{]/iu.test(text) ? 1 : 0;
-    this.#records.set(sessionId, artifacts);
     return { complete: true, text, video, screenshots };
   }
 
   /** DELETE is never retried; only subsequent absence reads are bounded/retried. */
-  async deleteRecord(sessionId: string, auditClean: boolean, clock: { now(): number; pause(milliseconds: number): Promise<void> } = { now: Date.now, pause: Bun.sleep }): Promise<number> {
-    if (!BROWSERSTACK_SESSION_ID.test(sessionId)) throw new Error("invalid BrowserStack session id");
+  async deleteRecord(sessionId: string, removal: CloudRecordRemoval, clock: { now(): number; pause(milliseconds: number): Promise<void> } = { now: Date.now, pause: Bun.sleep }): Promise<void> {
+    validateBrowserStackArtifacts(sessionId, removal.artifacts);
+    const artifacts = [...removal.artifacts];
     const existing = await this.#get(`/sessions/${sessionId}.json`);
     await existing.body?.cancel();
     if (existing.status !== 200 && existing.status !== 404) throw new Error("BrowserStack record cleanup state is unknown");
-    if (existing.status === 200 && !this.#records.has(sessionId)) {
-      // Crash cleanup re-inspects but cannot authorize lingering URLs from an old clean flag.
-      auditClean = false;
-      const record = await this.testRecord(sessionId);
-      if (record?.complete !== true) throw new Error("BrowserStack record is not finalized for cleanup");
-    }
-    const artifacts = this.#records.get(sessionId) ?? [];
     if (existing.status === 200 && !this.#removalStarted.has(sessionId)) {
       this.#removalStarted.add(sessionId);
       const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE", headers: { authorization: this.#authorization }, redirect: "error", signal: AbortSignal.timeout(30_000) });
@@ -216,6 +257,9 @@ export class BrowserStackApi {
       const result = parseRetainedVendorJson(await boundedVendorText(response, "BrowserStack"));
       if (!isRecord(result) || result.status !== "ok") throw new Error("BrowserStack record deletion was not acknowledged");
     }
+    // Confidentiality still requires DELETE when a crash lost the inventory. Never claim
+    // restoration afterward: without the references their signed objects cannot be verified.
+    if (artifacts.length === 0) throw new Error("BrowserStack retained artifact inventory is unavailable");
     const deadline = clock.now() + 180_000;
     for (;;) {
       let absent = true;
@@ -228,22 +272,46 @@ export class BrowserStackApi {
       if (clock.now() >= deadline) throw new Error("BrowserStack record deletion could not be verified");
       await clock.pause(2_000);
     }
-    let lingering = 0;
     for (const artifact of artifacts) {
-      // Reference was fully validated and fetched before deletion; no account authorization.
       for (;;) {
-        const check = await readProvider(() => fetch(artifact.url, { redirect: "error", signal: AbortSignal.timeout(30_000) }));
+        const check = await this.#artifact(artifact.url, sessionId, artifact.buildId);
         if (check.status === 404) { await check.body?.cancel(); break; }
+        if (artifact.kind === "media" && check.status === 403) {
+          const denial = await boundedVendorText(check, "BrowserStack");
+          if (denial.includes("<Code>AccessDenied</Code>") && denial.includes("s3:ListBucket")) break;
+          throw new Error("BrowserStack retained media absence is unknown");
+        }
         const contentType = check.headers.get("content-type") ?? "";
-        if (check.status !== 200 || (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType))) { await check.body?.cancel(); throw new Error("BrowserStack retained signed artifact state is unknown"); }
-        const unchanged = await boundedVendorText(check, "BrowserStack") === artifact.text;
-        if (auditClean && unchanged) { lingering += 1; break; }
-        if (clock.now() >= deadline) throw new Error("BrowserStack retained signed artifact is not audited clean");
+        if (check.status !== 200) { await check.body?.cancel(); throw new Error("BrowserStack retained signed artifact state is unknown"); }
+        if (artifact.kind === "media" || /^(?:image|video)\//iu.test(contentType)) {
+          await check.body?.cancel();
+          await removal.inspect({ complete: true, text: "", video: true, screenshots: 0 });
+        } else {
+          if (!contentType.startsWith("text/plain") && !/(?:\/|\+)json(?:;|$)/iu.test(contentType)) { await check.body?.cancel(); throw new Error("BrowserStack retained signed artifact format is unknown"); }
+          const content = retainedContent(await boundedVendorText(check, "BrowserStack"), contentType);
+          await removal.inspect({ complete: true, text: content.text, video: false, screenshots: content.media ? 1 : 0 });
+          const discover = (value: unknown, key = ""): void => {
+            if (typeof value === "string") {
+              let url: URL;
+              try { url = new URL(value); } catch { return; }
+              if (url.protocol !== "https:" && url.protocol !== "http:") return;
+              if (ARTIFACT_KEY.test(key)) validateBrowserStackArtifacts(sessionId, [{ url: value, buildId: artifact.buildId, kind: "text" }]);
+              if (Object.hasOwn(ARTIFACT_ORIGINS, url.origin) && (url.pathname.includes(sessionId) || url.pathname.includes(artifact.buildId)) && !artifacts.some(item => item.url === value)) {
+                artifacts.push({ url: value, buildId: artifact.buildId, kind: /screenshot|video|visual|^screen$/iu.test(key) || MEDIA_URL.test(value) ? "media" : "text" });
+              }
+            } else if (Array.isArray(value)) { for (const item of value) discover(item, key); }
+            else if (isRecord(value)) { for (const [name, item] of Object.entries(value)) discover(item, name); }
+          };
+          if (content.json !== undefined) {
+            discover(content.json);
+            validateBrowserStackArtifacts(sessionId, artifacts);
+            await removal.remember([...artifacts]);
+          }
+        }
+        if (clock.now() >= deadline) throw new Error("BrowserStack retained signed artifact absence could not be verified");
         await clock.pause(2_000);
       }
     }
-    this.#records.delete(sessionId);
-    return lingering;
   }
 }
 
@@ -274,6 +342,7 @@ export function browserStackLocalArguments(options: BrowserStackLocalOptions): s
 async function ownedLocalProcesses(options: BrowserStackLocalIdentity): Promise<number[]> {
   // Local rewrites process titles and can respawn a child during shutdown. The attempt's
   // unique private cwd plus exact executable identify even a child whose argv was rewritten.
+  const identity = await canonicalBrowserStackLocalIdentity(options);
   const candidates = (await listProcesses()).filter(entry => entry.command.includes("BrowserStackLocal"));
   const owned: number[] = [];
   for (const candidate of candidates) {
@@ -281,9 +350,16 @@ async function ownedLocalProcesses(options: BrowserStackLocalIdentity): Promise<
     const [text, status] = await Promise.all([new Response(child.stdout).text(), child.exited]);
     if (status !== 0 && status !== 1) throw new Error("could not verify BrowserStack Local process ownership");
     const files = text.split("\n");
-    if (files.includes(`n${options.binary}`) && files.includes(`n${options.directory}`)) owned.push(candidate.pid);
+    if (files.includes(`n${identity.binary}`) && files.includes(`n${identity.directory}`)) owned.push(candidate.pid);
   }
   return owned;
+}
+
+export async function canonicalBrowserStackLocalIdentity(options: BrowserStackLocalIdentity): Promise<BrowserStackLocalIdentity> {
+  try {
+    const [binary, directory] = await Promise.all([realpath(options.binary), realpath(options.directory)]);
+    return { ...options, binary, directory };
+  } catch { throw new Error("could not resolve BrowserStack Local process ownership"); }
 }
 
 interface LocalStopRuntime {

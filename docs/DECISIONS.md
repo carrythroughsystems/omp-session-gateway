@@ -1282,12 +1282,14 @@ the supported default relay's links are compact `room.key` strings handed off in
 All known metadata, API logs, declared signed logs and media indicators are inspected before the
 retention decision. Disabled video, clean indicators and the observed S3 missing-object 403
 (`AccessDenied`/`s3:ListBucket`) mean no retained media observed; a media URL serving a body fails.
-Deletion is defense in depth, not a substitute for auditing: DELETE `status:ok` plus 404 on session
-JSON and every log API proves removal. Previously issued signed text URLs may outlive deletion
-until expiry only if their exact unchanged content was already audited clean and media-free;
-evidence records a count, never URLs. Crash cleanup cannot recreate this exception from a saved
-clean flag and instead requires those artifacts to disappear. Unverified cleanup blocks the Pixel
-lease. [Release setup and the sourced contract matrix](RELEASE.md#browserstack-device-cloud-fallback)
+Deletion is defense in depth, not a substitute for auditing: DELETE `status:ok`, 404 on session
+JSON and every log API, and verified absence of every declared signed artifact are required for
+removal. No lingering-clean-text exception remains. References, including initially-404 artifacts,
+persist only in private 0600 recovery progress until verified absent; public evidence/logs contain
+no URLs. Fresh cleanup re-audits against unchanged session generations, or deletes for confidentiality
+while explicitly counting `unauditedRecordsDeleted` if links cannot be reconstructed. Link/media
+hits and unverifiable required surfaces remain incidents even after deletion. Unverified cleanup
+blocks the Pixel lease. [Release setup and the sourced contract matrix](RELEASE.md#browserstack-device-cloud-fallback)
 record the public-page probes; those are Tested evidence, not a signed-candidate qualification.
 
 ## ADR-033 — Retain a macOS virtual machine as the campaign Mac

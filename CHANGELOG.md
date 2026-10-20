@@ -24,6 +24,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   sequential. Pin Local 8.9 under Rosetta with the documented single-user child-argv exception,
   shared CONNECT containment, private crash-cleaned config, vendor-qualified ownership,
   per-target release attribution, complete retained-record audits and verified record deletion.
+  Persist signed artifact inventories only in private recovery progress, require every artifact
+  absent before restoration, and re-audit crash cleanup or count unaudited deletions explicitly.
+  Detect opaque failed-command media and canonicalize Local ownership through symlinked paths.
   Keep signed-log expiry limits explicit and refuse the fallback entitlement from 2027-10-20
   without a reviewed renewal. Public-page development probes do not qualify a release.
 

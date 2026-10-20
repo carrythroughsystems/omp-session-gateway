@@ -8,6 +8,17 @@ import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
 
 export type DeviceCloudVendor = "testingbot" | "browserstack";
 export interface CloudDevice { readonly name: string; readonly platform: string; readonly version: string }
+/** Vendor-signed references belong only in the private 0600 recovery checkpoint. */
+export interface CloudArtifact {
+  readonly url: string;
+  readonly buildId: string;
+  readonly kind: "text" | "media";
+}
+export interface CloudRecordRemoval {
+  readonly artifacts: readonly CloudArtifact[];
+  readonly remember: (artifacts: readonly CloudArtifact[]) => Promise<void>;
+  readonly inspect: (record: TestRecord) => Promise<void>;
+}
 export interface TestRecord {
   readonly complete: boolean;
   /** Bounded raw retained surfaces and their canonical JSON, searched only in memory. */

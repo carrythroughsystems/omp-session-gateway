@@ -1,6 +1,6 @@
 /** Isolated Tested-only journey runner. Never starts a stable campaign or approves a release. */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { cleanupDeviceCloud, runDeviceCloud, type DeviceCloudProgress, type DeviceCloudTargetAttempt } from "./device-cloud-qualification.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudMachineOutcome } from "./device-cloud-availability.ts";
@@ -46,8 +46,10 @@ export async function runDeviceCloudDevelopment(argv: readonly string[]) {
   const checkpoint = async (value: Record<string, unknown>) => {
     progress = value as DeviceCloudProgress;
     await mkdir(root, { recursive: true, mode: 0o700 });
+    await chmod(root, 0o700);
     const temporary = `${path}.tmp`;
     await writeFile(temporary, `${JSON.stringify({ evidenceClass: "Tested", progress })}\n`, { mode: 0o600 });
+    await chmod(temporary, 0o600);
     await rename(temporary, path);
   };
   const target = macHost;

@@ -310,10 +310,14 @@ BrowserStack and shared transport tests add:
   escaped values are scanned; candidate-origin
   navigation text passes because default-relay capabilities are compact `room.key` strings,
   while a capability's interior 16-character window fails without being persisted;
-- missing required logs, retained media, changed/unaudited signed artifacts and unverified
-  deletion fail; clean identical lingering text is counted without publishing URLs; crash cleanup
-  re-inspects rather than manufacturing a clean audit;
-- key-free lane argv, exact proxy flags, shared loopback-only listener refusal and the existing
+- missing required logs, retained media (including opaque failed-command screenshots) and
+  unverified deletion fail; even clean identical signed artifacts must become absent;
+- private durable inventories include initially-404 references and survive DELETE/process loss;
+  late content is audited, unresolved references keep cleanup dirty, and returned evidence has no URLs;
+- crash cleanup re-audits unchanged generations, counts unaudited deletions if links cannot be
+  reconstructed, and persists link/media incidents instead of manufacturing a clean audit;
+- key-free lane argv, exact two-host argv, canonical ownership through symlinked ancestors,
+  shared loopback-only listener refusal and the existing
   plain-HTTP/alternate-host/port/loopback/LAN/tailnet denial matrix;
 - release summaries preserve historical golden bytes, attribute mixed targets individually,
   and refuse BrowserStack iPhone or non-Samsung/mismatched Android evidence.

@@ -120,8 +120,12 @@ function harness(options: {
     endSession: async ({ sessionId }) => {
       effect(`end ${sessionId}`);
     },
-    record: async ({ sessionId }) => {
+    record: async ({ vendor, sessionId }, remember) => {
       effect(`audit ${sessionId}`);
+      if (vendor === "browserstack") await remember?.([{
+        url: `https://automate.browserstack.com/sessions/${sessionId}/synthetic-log`,
+        buildId: "c".repeat(40), kind: "text",
+      }]);
       if (options.auditFails) throw new Error("vendor audit failed");
       return {
         complete: true,
@@ -130,7 +134,7 @@ function harness(options: {
         screenshots: 0,
       };
     },
-    removeRecord: async ({ sessionId }) => { effect(`remove ${sessionId}`); return 0; },
+    removeRecord: async ({ sessionId }) => { effect(`remove ${sessionId}`); },
     launch: async (launched, mode) => LINKS[launched.instanceId]![mode],
     removeWorkspace: async () => {
       effect("workspace remove");
@@ -166,6 +170,11 @@ async function failure(promise: Promise<unknown>): Promise<string> {
     return error instanceof Error ? error.message : String(error);
   }
   throw new Error("expected a rejection");
+}
+
+function errorMessages(error: unknown): string {
+  return error instanceof AggregateError ? [error.message, ...error.errors.map(errorMessages)].join("\n") :
+    error instanceof Error ? error.message : String(error);
 }
 
 describe("device-cloud lane", () => {
@@ -418,11 +427,12 @@ describe("mixed-vendor ownership and partial failure", () => {
       runtime: {
         ...lane.runtime,
         endSession: async reference => { ended.push(`${reference.vendor}:${reference.sessionId}`); await lane.runtime.endSession(reference); },
-        record: async reference => { audited.push(`${reference.vendor}:${reference.sessionId}`); return lane.runtime.record(reference); },
-        removeRecord: async (reference, clean) => { expect(clean).toBe(true); removed.push(reference.vendor); return 1; },
+        record: async (reference, remember) => { audited.push(`${reference.vendor}:${reference.sessionId}`); return lane.runtime.record(reference, remember); },
+        removeRecord: async (reference, removal) => { expect(removal.artifacts.length).toBeGreaterThan(0); removed.push(reference.vendor); },
       },
     });
-    expect(result).toMatchObject({ vendor: "mixed", tunnelVersion: "per-target", audit: { testingbotRecords: 1, browserstackRecords: 2, lingeringSignedArtifacts: 2 } });
+    expect(result).toMatchObject({ vendor: "mixed", tunnelVersion: "per-target", audit: { testingbotRecords: 1, browserstackRecords: 2, lingeringSignedArtifacts: 0 } });
+    expect(JSON.stringify(result)).not.toContain("https://automate.browserstack.com");
     expect(ended).toEqual([`testingbot:${sessionIds.ipad}`, `browserstack:${sessionIds.ipad}`, `browserstack:${sessionIds.android}`]);
     expect(audited).toEqual(ended);
     expect(removed).toEqual(["browserstack", "browserstack"]);
@@ -447,10 +457,10 @@ describe("mixed-vendor ownership and partial failure", () => {
     await expect(runDeviceCloud({
       ...input(lane), runtime: {
         ...lane.runtime,
-        record: async reference => {
+        record: async (reference, remember) => {
           audited.push(reference.vendor);
           if (reference.target === "iphone") throw new Error("primary record unavailable");
-          return lane.runtime.record(reference);
+          return lane.runtime.record(reference, remember);
         },
       },
     })).rejects.toThrow("could not be audited");
@@ -460,8 +470,9 @@ describe("mixed-vendor ownership and partial failure", () => {
   test("the identical exact-16 window scan rejects BrowserStack retained text", async () => {
     const leaked = LINKS["instance-live"]!.control.slice(22, 38);
     const lane = harness({ vendors, sessionIds, record: sessionId => sessionId === sessionIds.ipad ? leaked : "clean" });
-    const error = await failure(runDeviceCloud(input(lane)));
-    expect(error).toContain("1 of 3 cloud test records");
+    const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("1 of 3 cloud test records");
+    expect(pixelUnrestored(error)).toBe(true);
     expect(JSON.stringify(lane.checkpoints)).not.toContain(leaked);
     expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).results.audit).toMatchObject({ recordsExposingLinks: 1, browserstackRecords: 2 });
   });
@@ -473,8 +484,12 @@ describe("mixed-vendor ownership and partial failure", () => {
     const lane = harness({ vendors, sessionIds, record: sessionId =>
       navigation + (leak && sessionId === sessionIds.ipad ? capability.slice(22, 38) : "") });
     const attempt = runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime, launch: async () => capability } });
-    if (leak) await expect(attempt).rejects.toThrow("1 of 3 cloud test records");
-    else expect(await attempt).toMatchObject({ passed: true, audit: { recordsExposingLinks: 0 } });
+    if (leak) {
+      const error = await attempt.catch((error: unknown) => error);
+      expect(errorMessages(error)).toContain("1 of 3 cloud test records");
+      expect(pixelUnrestored(error)).toBe(true);
+      expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.target === "ipad")?.incident).toBe(true);
+    } else expect(await attempt).toMatchObject({ passed: true, audit: { recordsExposingLinks: 0 } });
   });
 
   test("an allocation with no known session stays dirty and blocks the Pixel lease", async () => {
@@ -505,6 +520,73 @@ describe("mixed-vendor ownership and partial failure", () => {
     expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(true);
     expect(lane.effects.filter(effect => effect === "tunnel stop")).toHaveLength(2);
     expect(lane.effects).toContain("fixture stop");
+  });
+
+  async function interruptedDeletion() {
+    const lane = harness({ vendors, sessionIds });
+    await expect(runDeviceCloud({
+      ...input(lane), runtime: { ...lane.runtime, removeRecord: async () => { throw new Error("not absent"); } },
+    })).rejects.toThrow();
+    return parseDeviceCloudProgress(structuredClone(lane.checkpoints.at(-1)));
+  }
+
+  test.each(["unchanged", "changed", "unavailable"] as const)("fresh cleanup audits only recoverable generations (%s)", async state => {
+    const progress = await interruptedDeletion();
+    expect(progress.resources?.filter(resource => resource.vendor === "browserstack").every(resource => resource.artifacts?.length === 1)).toBe(true);
+    const recovery = harness({ vendors, sessionIds });
+    const runtime: DeviceCloudRuntime = {
+      ...recovery.runtime,
+      fixtureSession: async () => state === "unavailable" ? undefined : {
+        ...(await recovery.runtime.liveSession(LIVE_LABEL))!, instanceId: "instance-fixture", generation: state === "changed" ? 2 : 1,
+      },
+      removeRecord: async (reference, removal) => {
+        expect(recovery.effects).toContain(`audit ${reference.sessionId}`);
+        expect(removal.artifacts).toHaveLength(1);
+        await recovery.runtime.removeRecord(reference, removal);
+      },
+    };
+    const result = await cleanupDeviceCloud({ ...input(recovery, progress), runtime });
+    expect(result).toMatchObject({ restored: true, unauditedRecordsDeleted: state === "unchanged" ? 0 : 2 });
+    expect(JSON.stringify(result)).not.toContain("https://automate.browserstack.com");
+    const final = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
+    for (const resource of final.resources!.filter(resource => resource.vendor === "browserstack")) {
+      expect(resource.recordRemoved).toBe(true);
+      expect(resource.artifacts).toEqual([]);
+      expect(resource.audited).toBe(state === "unchanged");
+    }
+  });
+
+  test("fresh cleanup detects an exact-16 link hit, deletes for confidentiality, and persists an incident", async () => {
+    const progress = await interruptedDeletion();
+    const leaked = LINKS["instance-live"]!.control.slice(22, 38);
+    const recovery = harness({ vendors, sessionIds, record: sessionId => sessionId === sessionIds.ipad ? leaked : "clean" });
+    const runtime = {
+      ...recovery.runtime,
+      fixtureSession: async () => ({ ...(await recovery.runtime.liveSession(LIVE_LABEL))!, instanceId: "instance-fixture" }),
+    };
+    const error = await cleanupDeviceCloud({ ...input(recovery, progress), runtime }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(String(error)).toContain("incident");
+    expect(recovery.effects).toContain(`remove ${sessionIds.ipad}`);
+    const final = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
+    expect(final.resources?.find(resource => resource.target === "ipad")).toMatchObject({ recordRemoved: true, incident: true, audited: false });
+    expect(final.cleanupRequired).toBe(true);
+    expect(JSON.stringify(recovery.checkpoints)).not.toContain(leaked);
+    await expect(cleanupDeviceCloud({ ...input(harness(), final), runtime })).rejects.toThrow("incident");
+  });
+
+  test("a late signed artifact hit uses the same exact-16 scanner and cannot be restored", async () => {
+    const progress = await interruptedDeletion();
+    const leaked = LINKS["instance-live"]!.view.slice(22, 38);
+    const recovery = harness({ vendors, sessionIds });
+    const runtime: DeviceCloudRuntime = {
+      ...recovery.runtime,
+      fixtureSession: async () => ({ ...(await recovery.runtime.liveSession(LIVE_LABEL))!, instanceId: "instance-fixture" }),
+      removeRecord: async (_reference, removal) => { await removal.inspect({ complete: true, text: leaked, video: false, screenshots: 0 }); },
+    };
+    await expect(cleanupDeviceCloud({ ...input(recovery, progress), runtime })).rejects.toThrow("incident");
+    expect(deviceCloudNeedsCleanup(recovery.checkpoints.at(-1))).toBe(true);
+    expect(JSON.stringify(recovery.checkpoints)).not.toContain(leaked);
   });
 });
 

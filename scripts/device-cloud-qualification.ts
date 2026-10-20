@@ -20,8 +20,8 @@ import { fixtureModelError } from "./omp-fixture.ts";
 import type { OmpPins, PixelLease } from "./stable-qualification.ts";
 import { TESTINGBOT_TUNNEL } from "./testingbot.ts";
 import { TESTINGBOT_SESSION_ID, BROWSERSTACK_SESSION_ID } from "./device-cloud-webdriver.ts";
-import type { TestRecord, DeviceCloudVendor } from "./device-cloud-common.ts";
-import { BROWSERSTACK_LOCAL, BROWSERSTACK_MODELS, browserStackModel } from "./browserstack.ts";
+import type { TestRecord, DeviceCloudVendor, CloudArtifact, CloudRecordRemoval } from "./device-cloud-common.ts";
+import { BROWSERSTACK_LOCAL, BROWSERSTACK_MODELS, browserStackModel, validateBrowserStackArtifacts } from "./browserstack.ts";
 
 export interface DeviceCloudIdentity {
   readonly tag: string;
@@ -52,6 +52,10 @@ export interface DeviceCloudResource {
   ended: boolean;
   audited: boolean;
   recordRemoved: boolean;
+  /** Private recovery inventory, never included in returned evidence. */
+  artifacts?: CloudArtifact[];
+  unauditedDeletion?: boolean;
+  incident?: boolean;
 }
 
 export interface DeviceProfile {
@@ -102,6 +106,7 @@ export interface DeviceCloudProgress extends Record<string, unknown> {
   /** Additive schema-3 ownership. sessions remains the TestingBot-only projection. */
   resources?: DeviceCloudResource[];
   tunnels?: DeviceCloudVendor[];
+  auditSessions?: Record<"live" | "fixture", Pick<SessionMetadata, "instanceId" | "generation">>;
   results: DeviceCloudResults;
 }
 
@@ -128,8 +133,8 @@ export interface DeviceCloudRuntime {
   /** Allocates a device, runs the target's journeys, and ends its session. */
   verify(target: DeviceCloudTarget, attempt: DeviceCloudTargetAttempt): Promise<Record<string, DeviceCloudObservation>>;
   endSession(reference: DeviceCloudSessionRef): Promise<void>;
-  record(reference: DeviceCloudSessionRef): Promise<TestRecord | undefined>;
-  removeRecord(reference: DeviceCloudSessionRef, auditClean: boolean): Promise<number>;
+  record(reference: DeviceCloudSessionRef, remember?: (artifacts: readonly CloudArtifact[]) => Promise<void>): Promise<TestRecord | undefined>;
+  removeRecord(reference: DeviceCloudSessionRef, removal: CloudRecordRemoval): Promise<void>;
   /** A live capability through the candidate gateway's launch contract, for the record audit only. */
   launch(session: SessionMetadata, mode: "view" | "control"): Promise<string>;
   removeWorkspace(epoch: string): Promise<void>;
@@ -293,12 +298,18 @@ function binding(identity: DeviceCloudIdentity): string {
 /** Refuses anything but the exact progress shape, and any evidence that could carry a secret. */
 export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
   if (
-    !isRecord(value) || Object.keys(value).some(key => !["binding", "cleanupRequired", "epoch", "lane", "phase", "results", "sessions", "resources", "tunnels"].includes(key)) ||
+    !isRecord(value) || Object.keys(value).some(key => !["binding", "cleanupRequired", "epoch", "lane", "phase", "results", "sessions", "resources", "tunnels", "auditSessions"].includes(key)) ||
     value.lane !== "deviceCloud" || typeof value.epoch !== "string" || !EPOCH.test(value.epoch) ||
     typeof value.binding !== "string" || !/^[a-f0-9]{64}$/u.test(value.binding) || typeof value.cleanupRequired !== "boolean" ||
     !DEVICE_CLOUD_PHASES.some(phase => phase === value.phase)
   ) {
     throw new Error("invalid device-cloud progress");
+  }
+  if (value.auditSessions !== undefined) {
+    if (!isRecord(value.auditSessions) || Object.keys(value.auditSessions).sort().join(",") !== "fixture,live" ||
+      Object.values(value.auditSessions).some(session => !isRecord(session) || Object.keys(session).sort().join(",") !== "generation,instanceId" ||
+        typeof session.instanceId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/u.test(session.instanceId) ||
+        !Number.isSafeInteger(session.generation) || (session.generation as number) < 1)) throw new Error("invalid device-cloud audit generation identities");
   }
   if (value.resources !== undefined || value.tunnels !== undefined) {
     if (!Array.isArray(value.resources) || value.resources.length > 3 || !Array.isArray(value.tunnels) ||
@@ -307,8 +318,7 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
     const targets = new Set<string>();
     const references = new Set<string>();
     for (const resource of value.resources) {
-      if (!isRecord(resource) || Object.keys(resource).sort().join(",") !==
-        (resource.sessionId === undefined ? "audited,ended,recordRemoved,target,vendor" : "audited,ended,recordRemoved,sessionId,target,vendor") ||
+      if (!isRecord(resource) || Object.keys(resource).some(key => !["audited", "ended", "recordRemoved", "target", "vendor", "sessionId", "artifacts", "unauditedDeletion", "incident"].includes(key)) ||
         (resource.vendor !== "testingbot" && resource.vendor !== "browserstack") ||
         !DEVICE_CLOUD_TARGETS.some(target => target === resource.target) || typeof resource.target !== "string" ||
         (resource.vendor === "browserstack" && resource.target === "iphone") ||
@@ -322,6 +332,15 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
           references.has(`${resource.vendor}:${resource.sessionId}`)) throw new Error("invalid vendor-qualified cloud session");
         references.add(`${resource.vendor}:${resource.sessionId}`);
       }
+      if (resource.artifacts !== undefined) {
+        if (resource.vendor !== "browserstack" || typeof resource.sessionId !== "string" || !Array.isArray(resource.artifacts)) throw new Error("invalid private cloud artifact inventory");
+        validateBrowserStackArtifacts(resource.sessionId, resource.artifacts);
+        if (resource.recordRemoved && resource.artifacts.length > 0) throw new Error("removed cloud record retains unchecked references");
+      }
+      for (const field of ["unauditedDeletion", "incident"]) {
+        if (resource[field] !== undefined && (resource.vendor !== "browserstack" || typeof resource[field] !== "boolean")) throw new Error("invalid cloud deletion audit state");
+      }
+      if (value.cleanupRequired === false && resource.incident === true) throw new Error("unresolved cloud retention incident");
       if (!value.tunnels.includes(resource.vendor) || (resource.recordRemoved && (!resource.ended || resource.vendor !== "browserstack"))) throw new Error("inconsistent cloud resource lifecycle");
       if (value.cleanupRequired === false && (!resource.ended || (resource.vendor === "browserstack" && !resource.recordRemoved))) throw new Error("unreleased cloud resource");
     }
@@ -365,6 +384,34 @@ function sessionReference(resource: DeviceCloudResource): DeviceCloudSessionRef 
   return { vendor: resource.vendor, target: resource.target, sessionId: resource.sessionId };
 }
 
+function recordExposure(links: readonly string[]): (record: TestRecord) => { leaks: boolean; media: boolean } {
+  const windows = new Set<string>();
+  for (const link of links) for (let index = 0; index + 16 <= link.length; index += 1) windows.add(link.slice(index, index + 16));
+  return record => {
+    let leaks = links.some(link => record.text.includes(link));
+    for (let index = 0; !leaks && index + 16 <= record.text.length; index += 1) leaks = windows.has(record.text.slice(index, index + 16));
+    return { leaks, media: record.video || record.screenshots > 0 };
+  };
+}
+
+function rememberArtifacts(resource: DeviceCloudResource, save: () => Promise<void>): CloudRecordRemoval["remember"] {
+  return async artifacts => {
+    const merged = [...(resource.artifacts ?? [])];
+    for (const artifact of artifacts) {
+      const previous = merged.find(item => item.url === artifact.url);
+      if (previous === undefined) merged.push(artifact);
+      else if (previous.kind !== artifact.kind || previous.buildId !== artifact.buildId) throw new Error("cloud artifact identity changed");
+    }
+    validateBrowserStackArtifacts(sessionReference(resource).sessionId, merged);
+    resource.artifacts = merged;
+    await save();
+  };
+}
+
+function artifactRecovery(resource: DeviceCloudResource, save: () => Promise<void>, inspect: CloudRecordRemoval["inspect"]): CloudRecordRemoval {
+  return { get artifacts() { return resource.artifacts ?? []; }, remember: rememberArtifacts(resource, save), inspect };
+}
+
 async function waitFor<T>(
   runtime: DeviceCloudRuntime,
   name: string,
@@ -397,7 +444,7 @@ async function auditRecords(
   for (const resource of ownedResources(progress)) {
     try {
       const record = await waitFor(runtime, "test record finalization", async () => {
-        const record = await runtime.record(sessionReference(resource));
+        const record = await runtime.record(sessionReference(resource), resource.vendor === "browserstack" ? rememberArtifacts(resource, save) : undefined);
         return record?.complete === true ? record : undefined;
       }, RECORD_FINALIZATION_MS);
       records.push({ resource, record });
@@ -416,34 +463,35 @@ async function auditRecords(
       needles.push(link);
     }
   }
-  const windows = new Set<string>();
-  for (const link of needles) {
-    for (let index = 0; index + 16 <= link.length; index += 1) windows.add(link.slice(index, index + 16));
-  }
+  const exposure = recordExposure(needles);
   let exposing = 0;
   let withMedia = 0;
-  let lingeringSignedArtifacts = 0;
   for (const { resource, record } of records) {
-    let leaks = false;
-    if (needles.some(link => record.text.includes(link))) leaks = true;
-    for (let index = 0; index + 16 <= record.text.length; index += 1) {
-      if (windows.has(record.text.slice(index, index + 16))) { leaks = true; break; }
-    }
-    const media = record.video || record.screenshots > 0;
+    const { leaks, media } = exposure(record);
     if (leaks) exposing += 1;
     if (media) withMedia += 1;
     resource.audited = !leaks && !media;
+    if (resource.vendor === "browserstack" && (leaks || media)) resource.incident = true;
     try { await save(); } catch { failures.push(new Error("a cloud record audit could not be checkpointed")); }
     if (resource.vendor === "browserstack" && resource.ended) {
       try {
-        lingeringSignedArtifacts += await runtime.removeRecord(sessionReference(resource), resource.audited);
+        await runtime.removeRecord(sessionReference(resource), artifactRecovery(resource, save, async later => {
+          const found = exposure(later);
+          if (found.leaks || found.media) {
+            resource.incident = true;
+            resource.audited = false;
+            await save();
+          }
+        }));
         resource.recordRemoved = true;
+        resource.artifacts = [];
         await save();
+        if (resource.incident) throw new Error("BrowserStack retained-record incident");
       } catch { failures.push(new Error("BrowserStack record removal could not be verified")); }
     }
   }
   const audit = {
-    records: records.length, recordsExposingLinks: exposing, recordsWithMedia: withMedia, lingeringSignedArtifacts,
+    records: records.length, recordsExposingLinks: exposing, recordsWithMedia: withMedia, lingeringSignedArtifacts: 0,
     testingbotRecords: records.filter(({ resource }) => resource.vendor === "testingbot").length,
     browserstackRecords: records.filter(({ resource }) => resource.vendor === "browserstack").length,
   };
@@ -479,6 +527,10 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
       if (!session.canView || !session.canControl) throw new Error("a device-cloud session does not offer View and Control");
     }
     driven.push([live, () => runtime.liveSession(input.sessionLabel)], [fixture, () => runtime.fixtureSession(progress.epoch)]);
+    progress.auditSessions = {
+      live: { instanceId: live.instanceId, generation: live.generation },
+      fixture: { instanceId: fixture.instanceId, generation: fixture.generation },
+    };
     await advance("fixture_ready");
     progress.tunnels!.push("testingbot");
     await save();
@@ -555,7 +607,8 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
  * Ends every recorded session, stops the tunnel and fixture, and removes the workspace. Each step
  * runs even if another fails, and only a complete release marks the attempt restored.
  */
-async function release(runtime: DeviceCloudRuntime, progress: DeviceCloudProgress, save: () => Promise<void>): Promise<Record<string, unknown>> {
+async function release(input: DeviceCloudLaneInput, progress: DeviceCloudProgress, save: () => Promise<void>): Promise<Record<string, unknown>> {
+  const { runtime } = input;
   try {
     const failures: string[] = [];
     const attempt = async (step: string, action: () => Promise<void>) => {
@@ -566,16 +619,55 @@ async function release(runtime: DeviceCloudRuntime, progress: DeviceCloudProgres
         failures.push(step);
       }
     };
+    let links: string[] | undefined;
+    if (ownedResources(progress).some(resource => resource.vendor === "browserstack" && !resource.recordRemoved) && progress.auditSessions !== undefined) {
+      try {
+        const live = await runtime.liveSession(input.sessionLabel), fixture = await runtime.fixtureSession(progress.epoch);
+        if (live !== undefined && fixture !== undefined && ([["live", live], ["fixture", fixture]] as const).every(([kind, session]) =>
+          session.instanceId === progress.auditSessions![kind].instanceId && session.generation === progress.auditSessions![kind].generation)) {
+          links = [];
+          for (const session of [live, fixture]) for (const mode of ["view", "control"] as const) links.push(await runtime.launch(session, mode));
+        }
+      } catch { links = undefined; }
+    }
+    const exposure = recordExposure(links ?? []);
     await attempt("sessions", async () => {
       let ended = 0;
       for (const resource of ownedResources(progress)) {
         try {
           if (!resource.ended) { await runtime.endSession(sessionReference(resource)); resource.ended = true; await save(); }
           if (resource.vendor === "browserstack" && !resource.recordRemoved) {
-            await runtime.removeRecord(sessionReference(resource), resource.audited);
+            const inspect = async (record: TestRecord) => {
+              const found = exposure(record);
+              if (found.leaks || found.media) { resource.incident = true; resource.audited = false; }
+              else if (links !== undefined && record.complete && resource.incident !== true) resource.audited = true;
+              await save();
+            };
+            const recovery = artifactRecovery(resource, save, inspect);
+            let reaudited = false;
+            try {
+              const { record } = await waitFor(runtime, "cleanup record finalization", async () => {
+                const record = await runtime.record(sessionReference(resource), recovery.remember);
+                return record === undefined || record.complete ? { record } : undefined;
+              }, RECORD_FINALIZATION_MS);
+              if (record?.complete === true) {
+                await inspect(record);
+                reaudited = links !== undefined;
+              }
+            } catch {
+              // Delete for confidentiality, but a malformed/missing required surface is not
+              // the permitted case of unavailable generation identities.
+              resource.incident = true;
+              resource.audited = false;
+              await save();
+            }
+            if (!reaudited) { resource.unauditedDeletion = true; resource.audited = false; await save(); }
+            await runtime.removeRecord(sessionReference(resource), recovery);
             resource.recordRemoved = true;
+            resource.artifacts = [];
             await save();
           }
+          if (resource.incident) throw new Error("cloud retained-record incident");
           ended += 1;
         } catch {
           // Keep ending the others.
@@ -583,6 +675,7 @@ async function release(runtime: DeviceCloudRuntime, progress: DeviceCloudProgres
       }
       if (ended !== ownedResources(progress).length) throw new Error("a cloud session or record was not released");
     });
+    if (ownedResources(progress).some(resource => resource.incident === true)) failures.push("retained-record incident");
     for (const vendor of progress.tunnels ?? ["testingbot"]) {
       await attempt(`${vendor}Tunnel`, () => runtime.tunnel("stop", progress.epoch, vendor));
     }
@@ -592,7 +685,8 @@ async function release(runtime: DeviceCloudRuntime, progress: DeviceCloudProgres
     progress.cleanupRequired = false;
     progress.phase = "restored";
     await save();
-    return { epoch: progress.epoch, restored: true, sessionsEnded: ownedResources(progress).length, tunnelStopped: true, fixtureStopped: true };
+    return { epoch: progress.epoch, restored: true, sessionsEnded: ownedResources(progress).length, tunnelStopped: true, fixtureStopped: true,
+      unauditedRecordsDeleted: ownedResources(progress).filter(resource => resource.unauditedDeletion === true).length };
   } catch (error) {
     // createPixelLease's existing restoration helper recognizes this flag through aggregates.
     throw Object.assign(error instanceof Error ? error : new Error("device-cloud cleanup failed"), { pixelUnrestored: true });
@@ -626,7 +720,7 @@ export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Recor
       failure = error;
     }
     try {
-      await release(runtime, progress, save);
+      await release(input, progress, save);
     } catch (releaseError) {
       failure = Object.assign(failure === undefined ? releaseError as Error : new AggregateError([failure, releaseError], "the device-cloud attempt and its release failed"), { pixelUnrestored: true });
     }
@@ -641,5 +735,5 @@ export async function cleanupDeviceCloud(input: DeviceCloudLaneInput): Promise<R
   if (progress.binding !== binding(input.identity)) throw new Error("device-cloud progress belongs to a different candidate, origin, or device profile");
   if (!progress.cleanupRequired) return { epoch: progress.epoch, restored: true };
   return input.pixel("deviceCloud-cleanup", () =>
-    release(input.runtime, progress, async () => { await input.checkpoint(structuredClone(parseDeviceCloudProgress(progress))); }));
+    release(input, progress, async () => { await input.checkpoint(structuredClone(parseDeviceCloudProgress(progress))); }));
 }
