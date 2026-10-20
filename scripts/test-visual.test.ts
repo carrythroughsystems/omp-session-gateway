@@ -67,6 +67,7 @@ test("upload launches the pinned CLI with the Playwright browser and isolated lo
   expect(calls[1]?.environment.PERCY_BROWSER_EXECUTABLE?.includes("chromium")).toBe(true);
   expect(calls[1]?.environment.PERCY_SERVER_HOST).toBe("127.0.0.1");
   expect(calls[1]?.environment.PERCY_CLIENT_ERROR_LOGS).toBe("false");
+  expect(calls[1]?.environment.PERCY_DROPIN_DISABLE).toBe("true");
   expect(calls[1]?.environment.PERCY_LOGS_IN_MEMORY).toBe("1");
   expect(calls[1]?.environment.PERCY_ENABLE).toBeUndefined();
   expect(calls[1]?.environment.PERCY_PARALLEL_TOTAL).toBeUndefined();
@@ -126,8 +127,23 @@ test("nested upload diagnostics preserve only closed-set phases, reasons and bou
   expect(lines.some(line => line.includes(planted))).toBe(false);
   expect(lines).toEqual(diagnostic.split("\n").slice(0, 4));
   expect(visualProcessReasons({ code: 1, stdout: diagnostic, stderr: planted }, true)).toEqual([
-    "child-exit", "sdk-warning", "missing-summary", "not-finalized",
+    "child-exit", "sdk-warning", "cli-unknown-diagnostic", "missing-summary", "not-finalized",
   ]);
+});
+
+test("classified and unknown CLI diagnostics still fail a finalized 18-snapshot build", () => {
+  for (const [text, category] of [
+    ["[percy] Skipping baseline setup", "cli-baseline-warning"],
+    ["[percy] [SDK Update Available] package: version", "cli-sdk-update"],
+    ["[percy] Invalid snapshot options:", "cli-config-warning"],
+    ["[percy] Could not send the builds logs", "cli-log-upload-warning"],
+    ["(node:1) DeprecationWarning: synthetic", "cli-node-warning"],
+    ["unknown synthetic diagnostic", "cli-unknown-diagnostic"],
+  ]) {
+    const result = { ...uploadSuccess, stderr: text! };
+    expect(visualProcessReasons(result, true)).toContain(category!);
+    expect(() => assertVisualResult(result, true)).toThrow("visual upload: incomplete or failed Percy build");
+  }
 });
 
 test("the installed Percy API answers health under its native Node runtime", async () => {

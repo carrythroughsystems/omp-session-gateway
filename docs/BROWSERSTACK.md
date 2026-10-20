@@ -52,6 +52,8 @@ that setup's executable path to the runner. Local uploads resolve native `node` 
 missing Node fails with `reason=node-missing` and `visual upload: Node.js is required for Percy`.
 Do not launch Percy with Bun: its HTTP API can appear started but never answer the worker's
 health request, creating a build with zero snapshots.
+The SDK's automatic drop-in baseline provider is disabled explicitly; this lane never seeds or
+auto-approves committed screenshots.
 
 1. Create a dedicated **web** Percy project for these synthetic fixtures, connected to this
    repository. Do not share a project/token with production captures or real sessions.
@@ -101,6 +103,9 @@ missing build identity. `phase=submit` distinguishes SDK offline/warning/error/n
 guard rejection and server rejection. `phase=percy` reports child exit, diagnostics, incomplete
 counts or missing finalization. Use these categories to select the failing boundary; do not
 enable raw logs, traces, screenshots or vendor error-log collection to diagnose it.
+CLI diagnostics are further classified by stable messages from the pinned packages (baseline,
+config, discovery, SDK update, log upload, layout mode, lockfile, proxy, Node or serialization);
+unknown diagnostics remain a failure too. Classification never makes a warning non-fatal.
 
 ## Live rule
 

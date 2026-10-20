@@ -20,7 +20,24 @@ const RUNNER_REASONS: Readonly<Record<string, true>> = {
   "health-address": true, "health-unreachable": true, "health-status": true, "health-shape": true,
   "health-type": true, "health-build": true,
   "node-missing": true,
+  "cli-baseline-warning": true, "cli-config-warning": true, "cli-discovery-warning": true,
+  "cli-sdk-update": true, "cli-log-upload-warning": true, "cli-layout-mode-warning": true,
+  "cli-lockfile-warning": true, "cli-proxy-warning": true, "cli-node-warning": true,
+  "cli-serialization-warning": true, "cli-unknown-diagnostic": true,
 };
+// Stable messages from the pinned CLI; classify only, never echo text or relax failure policy.
+const CLI_DIAGNOSTICS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["cli-baseline-warning", /Skipping baseline setup|baseline snapshot\(s\)|cannot read build status|Baseline build did not finish/iu],
+  ["cli-config-warning", /Invalid (?:snapshot options|upload options|config):/iu],
+  ["cli-discovery-warning", /Browser disconnected|browser disconnection|Skipping resource:|Network idle|Domain validation:|Failed to save auto configured hostnames/iu],
+  ["cli-sdk-update", /\[SDK Update Available\]/u],
+  ["cli-log-upload-warning", /Could not send the builds logs/iu],
+  ["cli-layout-mode-warning", /VRA is Percy's recommended visual review mode/u],
+  ["cli-lockfile-warning", /buildDepTree: (?:OLD|NEW) lockfile failed to parse/u],
+  ["cli-proxy-warning", /system level proxy/iu],
+  ["cli-node-warning", /ExperimentalWarning|DeprecationWarning|MaxListenersExceededWarning/u],
+  ["cli-serialization-warning", /Encountered snapshot serialization warnings|Readiness timed out|DOM elements found outside/iu],
+];
 
 export function visualEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(environment).filter(([key]) => !key.startsWith("PERCY_") && !key.startsWith("OMP_VISUAL_") && !key.startsWith("__PERCY_")));
@@ -55,7 +72,14 @@ export function visualProcessReasons(result: VisualProcessResult, upload: boolea
   const reasons: string[] = [];
   if (result.code !== 0) reasons.push("child-exit");
   // Warnings/errors use stderr at info loglevel in the pinned CLI. Do not print their contents.
-  if (result.stderr.trim() !== "" || /Percy is not running|\bwarning\b|skipping visual tests|Percy is disabled/iu.test(result.stdout)) reasons.push("sdk-warning");
+  if (result.stderr.trim() !== "" || /Percy is not running|\bwarning\b|skipping visual tests|Percy is disabled/iu.test(result.stdout)) {
+    reasons.push("sdk-warning");
+    if (requireFinalization) {
+      const diagnostics = `${result.stderr}\n${result.stdout}`.replace(/\u001b\[[0-9;]*m/gu, "");
+      const categories = CLI_DIAGNOSTICS.filter(([, pattern]) => pattern.test(diagnostics)).map(([code]) => code);
+      reasons.push(...(categories.length ? categories : ["cli-unknown-diagnostic"]));
+    }
+  }
   if (!result.stdout.split("\n").includes(expected)) reasons.push("missing-summary");
   if (requireFinalization && !/\[percy\] Finalized build #\d+:/u.test(result.stdout.replace(/\u001b\[[0-9;]*m/gu, ""))) reasons.push("not-finalized");
   return reasons;
@@ -156,6 +180,7 @@ export async function runVisual(
     PERCY_LOGLEVEL: "info",
     PERCY_LOGS_IN_MEMORY: "1",
     PERCY_CLIENT_ERROR_LOGS: "false",
+    PERCY_DROPIN_DISABLE: "true",
     OMP_VISUAL_PERCY_CHILD: "1",
     NO_COLOR: "1",
   });
