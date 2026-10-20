@@ -127,6 +127,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - The embedded-ask browser test now waits out the relay client's backoff after the relay
   returns. Its 5-second wait failed on slow runners, because each held reconnect doubles the
   retry delay to as much as 15 seconds under the test's fixed jitter.
+- The deviceCloud lane reads TestingBot's iPhone session start correctly. TestingBot answers with
+  a W3C `value` and also echoes the session id at the top level. The lane took that wrapper for
+  the capabilities, so it refused every such allocation as "another platform or browser". This
+  was found by the first Studio development run. Session start now reads the W3C `value`, still
+  accepts JSON Wire responses, and treats two different session ids as an unidentified create.
 
 ## [v0.7.7] — 2026-10-13
 
