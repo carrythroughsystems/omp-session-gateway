@@ -1289,10 +1289,18 @@ persist only in private 0600 recovery progress until verified absent; public evi
 no URLs. Fresh cleanup re-audits against unchanged session generations, or deletes for confidentiality
 while explicitly counting `unauditedRecordsDeleted` if links cannot be reconstructed. Link/media
 hits and unverifiable required surfaces remain incidents even after deletion. Unverified cleanup
-blocks the Pixel lease. Discovery walks every JSON string: pinned storage origins are artifacts;
-only the top-level `browser_url`/`public_url` fields on the separately pinned dashboard origin are
-count-only presentations of the API record. Other origins or dashboard-field uses fail closed.
-Audit/deletion/absence milestones never regress, and post-audit API bodies receive the same scan.
+blocks the Pixel lease. Discovery extracts every case-insensitive `http://`/`https://` token from
+every JSON string at any depth, including longer strings containing embedded references. Pinned
+storage origins are artifacts; a pinned storage hostname outside any extracted URL token
+(a scheme-less reference) fails closed. Only an entire top-level `browser_url`/`public_url` string
+on the separately pinned dashboard origin is a count-only presentation of the API record.
+Other origins, embedded dashboard URLs or other dashboard-field uses fail closed; duplicate and
+media-classification checks remain unchanged. Audit/deletion/absence milestones never regress.
+Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
+is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
+Rejected DELETE and signed-artifact bodies and transient 5xx bodies before GET retry are included;
+a capability hit persists an incident before the original status/format error or retry proceeds.
+Media bodies remain unread and report media; plan/catalog/Local-download transport is unchanged.
 Release preserves the fixture and workspace until records and tunnels are verified released.
 Local preparation precedes ownership intent; PID/birth lineage plus canonical executable/cwd,
 not argv names, establishes process ownership and permits a proved not-started cleanup.

@@ -136,7 +136,7 @@ export interface DeviceCloudRuntime {
   /** Allocates a device, runs the target's journeys, and ends its session. */
   verify(target: DeviceCloudTarget, attempt: DeviceCloudTargetAttempt): Promise<Record<string, DeviceCloudObservation>>;
   endSession(reference: DeviceCloudSessionRef): Promise<void>;
-  record(reference: DeviceCloudSessionRef, remember?: (artifacts: readonly CloudArtifact[]) => Promise<void>): Promise<TestRecord | undefined>;
+  record(reference: DeviceCloudSessionRef, remember?: (artifacts: readonly CloudArtifact[]) => Promise<void>, inspect?: CloudRecordRemoval["inspect"]): Promise<TestRecord | undefined>;
   removeRecord(reference: DeviceCloudSessionRef, removal: CloudRecordRemoval): Promise<void>;
   /** A live capability through the candidate gateway's launch contract, for the record audit only. */
   launch(session: SessionMetadata, mode: "view" | "control"): Promise<string>;
@@ -464,10 +464,28 @@ async function auditRecords(
 ): Promise<Record<string, DeviceCloudObservation>> {
   const records: { resource: DeviceCloudResource; record: TestRecord }[] = [];
   const failures: Error[] = [];
+  const needles: string[] = [];
+  let generationsMatch = true, launchFailed = false;
+  for (const [before, reread] of driven) {
+    const current = await reread().catch(() => undefined);
+    if (current === undefined || current.instanceId !== before.instanceId || current.generation !== before.generation) {
+      generationsMatch = false;
+      continue;
+    }
+    for (const mode of ["view", "control"] as const) {
+      try { needles.push(await runtime.launch(current, mode)); }
+      catch { launchFailed = true; }
+    }
+  }
+  const exposure = recordExposure(needles);
   for (const resource of ownedResources(progress)) {
     try {
       const record = await waitFor(runtime, "test record finalization", async () => {
-        const record = await runtime.record(sessionReference(resource), resource.vendor === "browserstack" ? rememberArtifacts(resource, save) : undefined);
+        const inspect = resource.vendor === "browserstack" ? async (record: TestRecord) => {
+          const found = exposure(record);
+          if ((found.leaks || found.media) && !resource.incident) { resource.incident = true; await save(); }
+        } : undefined;
+        const record = await runtime.record(sessionReference(resource), resource.vendor === "browserstack" ? rememberArtifacts(resource, save) : undefined, inspect);
         return record?.complete === true ? record : undefined;
       }, RECORD_FINALIZATION_MS);
       records.push({ resource, record });
@@ -475,18 +493,13 @@ async function auditRecords(
       failures.push(new Error("a device-cloud retained record could not be audited"));
     }
   }
-  const needles: string[] = [];
   for (const [before, reread] of driven) {
     const current = await reread();
-    if (current === undefined || current.instanceId !== before.instanceId || current.generation !== before.generation) {
+    if (!generationsMatch || current === undefined || current.instanceId !== before.instanceId || current.generation !== before.generation) {
       throw new Error("a device-cloud session changed generation before its vendor records were audited");
     }
-    for (const mode of ["view", "control"] as const) {
-      const link = await runtime.launch(current, mode);
-      needles.push(link);
-    }
   }
-  const exposure = recordExposure(needles);
+  if (launchFailed) throw new Error("a device-cloud capability could not be fetched for its retained-record audit");
   let exposing = 0;
   let withMedia = 0;
   for (const { resource, record } of records) {
@@ -672,7 +685,7 @@ async function release(input: DeviceCloudLaneInput, progress: DeviceCloudProgres
             if (!resource.recordDeleted) {
               try {
                 const { record } = await waitFor(runtime, "cleanup record finalization", async () => {
-                  const record = await runtime.record(sessionReference(resource), recovery.remember);
+                  const record = await runtime.record(sessionReference(resource), recovery.remember, recovery.inspect);
                   return record === undefined || record.complete ? { record } : undefined;
                 }, RECORD_FINALIZATION_MS);
                 if (record?.complete === true) {

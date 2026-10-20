@@ -547,13 +547,17 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   Media detection rejects nonempty screenshot/video/visual fields, including opaque failed-command
   screenshot payloads, not just familiar media URLs. Only null, false, empty-string and empty-list
   markers are treated as disabled; the documented disabled-video URL is fetched separately.
-  Discovery walks every string in the complete strictly parsed JSON, including nested `logs`,
-  `insights`, arrays and later responses. `browserstack-pins.json` defines disjoint origin sets:
+  Discovery extracts every `http://` or `https://` token from every string at any depth in the
+  complete strictly parsed JSON, including nested `logs`, `insights`, arrays and later responses.
+  Schemes are case-insensitive; whitespace, quotes, angle brackets, backslash or end terminate a
+  token. A pinned artifact-storage hostname outside an extracted URL token (a scheme-less
+  reference) fails closed. `browserstack-pins.json` defines disjoint origin sets:
   reviewed API/S3 artifact-storage origins are fetched, scanned, privately inventoried and
-  absence-verified; only top-level `browser_url`/`public_url` on the pinned dashboard origin
-  (`automate.browserstack.com`) are presentation references, counted but never fetched/followed.
+  absence-verified; only entire top-level `browser_url`/`public_url` strings on the pinned dashboard
+  origin (`automate.browserstack.com`) are presentation references, counted but never fetched/followed.
   Their contents are the already-audited session record, whose API deletion proves removal.
-  Any other origin anywhere, or a dashboard-host URL in another field, fails closed.
+  Any other origin anywhere, or a dashboard-host URL embedded in longer text or in another field,
+  fails closed. Duplicate references retain the same inventory and media-classification checks.
   DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
   signed artifact** are required before removal/restoration, including references returning 404 at
   the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.
@@ -567,7 +571,13 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   still proceeds for confidentiality, but `unauditedRecordsDeleted` explicitly counts it and the
   deletion receives no new clean-audit claim. Audit, API deletion and artifact absence are
   monotonic stages: a post-DELETE 404 never downgrades an earlier audit into an unaudited deletion.
-  Every later API response body is scanned too, including 200s while waiting for 404.
+  Every non-media retained-surface response body is scanned before rejection, both before and
+  after the initial audit, whatever its HTTP status. This includes rejected DELETE acknowledgements,
+  signed-artifact checks, 200s while waiting for 404, and transient 5xx bodies before a GET retry
+  discards them. Raw scanning precedes parsing; declared JSON also receives the strict canonical
+  scan and reference discovery. A capability hit checkpoints an incident before the original
+  status/format rejection or retry proceeds. Image/video bodies remain unread and report retained
+  media instead; plan, catalog and Local-download transport bodies are not retained surfaces.
   An audit hit or unverifiable required surface is a persisted
   incident: deletion is attempted, but cleanup remains failed for operator incident handling.
   Deletion is defense in depth after the audit, not its replacement.

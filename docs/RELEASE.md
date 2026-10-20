@@ -770,9 +770,20 @@ A crash-era saved clean flag cannot authorize lingering signed URLs: normal and 
 cleanup both require disappearance within the three-minute absence bound. A delayed artifact is
 fetched and scanned if it starts serving content. Exhaustion leaves `recordRemoved` false and
 cleanup dirty; retry through `deviceCloudCleanup`, retaining the original progress.
+Discovery extracts every case-insensitive `http://`/`https://` token from every JSON string at any
+depth, including URLs embedded in longer `reason`/`insights` text. Pinned artifact-storage hostnames
+not covered by an extracted URL token (scheme-less references) fail closed. The dashboard exemption
+still requires the entire top-level `browser_url`/`public_url` string to be a pinned dashboard URL;
+embedded dashboard URLs and unknown origins fail closed. Duplicate/classification checks still apply.
 The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
 deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
-received while waiting for API absence are scanned raw plus canonical, just like the first read.
+from every retained surface, before or after the audit and whatever their HTTP status, are scanned
+before rejection: raw first, then strict canonical JSON and reference discovery for declared JSON.
+This includes rejected DELETE bodies, signed-artifact errors and transient 5xx bodies before a GET
+retry, as well as responses received while waiting for API absence. A capability hit persists an
+incident before the original status/format error is thrown or the retry proceeds. Image/video
+bodies stay unread and report media; plan/catalog/Local-download transport bodies are not retained
+surfaces.
 Fresh cleanup re-audits finalized raw surfaces against the live links only if the persisted live
 and fixture generation identities still match. Otherwise it still deletes for confidentiality,
 reports `unauditedRecordsDeleted`, and never calls those records audited. A detected link/media

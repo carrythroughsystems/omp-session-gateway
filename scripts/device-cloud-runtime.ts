@@ -600,7 +600,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
       const fallback = await browserStack();
       await endWebDriverSession("browserstack", fallback.credentials.username, fallback.credentials.accessKey, reference.sessionId);
     },
-    record: async (reference, remember) => reference.vendor === "testingbot" ? api.testRecord(reference.sessionId) : (await browserStack()).api.testRecord(reference.sessionId, remember),
+    record: async (reference, remember, inspect) => reference.vendor === "testingbot" ? api.testRecord(reference.sessionId) : (await browserStack()).api.testRecord(reference.sessionId, remember, inspect),
     removeRecord: async (reference, removal) => {
       if (reference.vendor === "testingbot") return;
       await (await browserStack()).api.deleteRecord(reference.sessionId, removal);
