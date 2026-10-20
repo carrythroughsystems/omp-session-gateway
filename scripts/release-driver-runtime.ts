@@ -4,13 +4,14 @@ import { lstat, mkdir, open, readFile, readdir, rename, writeFile } from "node:f
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ORDER_AUTHOR, ORDER_HEAD_PREFIX, REPOSITORY, StaleIntentError, compareVersions, isOrder, outsideOrderScope, requestVersion, promotionHold, tick } from "./release-driver.ts";
-import type { Decision, DriverConfig, DriverPort, DriverState, JobObservation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
+import { ORDER_AUTHOR, ORDER_HEAD_PREFIX, REPOSITORY, StaleIntentError, campaignAttempt, compareVersions, isOrder, outsideOrderScope, parseCampaignInfrastructureHold, requestVersion, promotionHold, tick } from "./release-driver.ts";
+import type { CampaignInfrastructureHold, Decision, DriverConfig, DriverPort, DriverState, JobObservation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
 import { assertReleaseTagState } from "./release-tag-state.ts";
 import { releaseAssetNames, verifyReleaseSignatures } from "./post-release-smoke.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
 import { compareReleaseArchives } from "./release-runtime-compare.ts";
-import type { StableQualificationReceipt } from "./stable-qualification.ts";
+import { assertDeviceCloudResumeEligible, validateStableQualificationReceipt, type StableQualificationReceipt } from "./stable-qualification.ts";
+import { parseDeviceCloudHold } from "./device-cloud-availability.ts";
 import { REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineProtectedPath, routineSourceHold, generatedReleaseKind, generatedReleaseFilesMatch } from "./release-policy.ts";
 import type { RoutineAuthority, RoutineEvidence } from "./release-policy.ts";
 import { runAdb } from "./android-device.ts";
@@ -62,6 +63,19 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   const parent = await open(dirname(path), "r");
   try { await parent.sync(); } finally { await parent.close(); }
 }
+async function immutableJobJson(path: string, value: unknown): Promise<boolean> {
+  let file;
+  try { file = await open(path, "wx", 0o600); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+  try { await file.writeFile(`${JSON.stringify(value, null, 2)}\n`); await file.sync(); }
+  finally { await file.close(); }
+  const parent = await open(dirname(path), "r");
+  try { await parent.sync(); } finally { await parent.close(); }
+  return true;
+}
 async function privateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const info = await lstat(path);
@@ -79,6 +93,42 @@ interface ApiPr {
 }
 interface WorkflowRun { id: number; run_attempt: number; head_sha: string; head_branch: string; conclusion: string | null; status: string; html_url: string; created_at: string }
 interface JobSpec { kind: "campaign" | "approve" | "smoke"; state: DriverState; root: string }
+
+class CampaignAvailabilityResult extends Error {
+  constructor(readonly hold: CampaignInfrastructureHold) { super("candidate device-cloud infrastructure held"); }
+}
+
+/** Exit 75 alone is never authoritative: validate its closed outcome and the bound receipt. */
+export function campaignAvailabilityObservation(
+  state: DriverState, output: string, receipt: StableQualificationReceipt | undefined, macHost: string,
+): CampaignInfrastructureHold {
+  let outcome: unknown;
+  try { outcome = JSON.parse(output); } catch { throw new Error("invalid stable infrastructure outcome"); }
+  if (typeof outcome !== "object" || outcome === null || Array.isArray(outcome) ||
+    Object.keys(outcome).sort().join(",") !== "availabilityHolds,outcome" ||
+    !("outcome" in outcome) || outcome.outcome !== "infrastructure-hold" ||
+    !("availabilityHolds" in outcome) || !Array.isArray(outcome.availabilityHolds) ||
+    outcome.availabilityHolds.length < 1 || outcome.availabilityHolds.length > 3) throw new Error("invalid stable infrastructure outcome");
+  const holds = outcome.availabilityHolds.map(parseDeviceCloudHold);
+  let scope: CampaignInfrastructureHold["scope"] = "preflight";
+  if (receipt !== undefined && Object.values(receipt.lanes).some(lane => lane.attempts !== 0 || lane.status !== "pending" || lane.evidence !== undefined)) {
+    assertDeviceCloudResumeEligible(receipt, { tag: state.candidate, previousTag: state.previousStable!, orchestratorCommit: state.candidateCommit!, macHost });
+    if (receipt.candidate?.sourceCommit !== state.candidateCommit || receipt.candidate.archiveSha256 !== state.candidateDigest) throw new Error("held receipt differs from the selected candidate");
+    const recorded = parseDeviceCloudHold(receipt.lanes.deviceCloud.evidence?.availabilityHold);
+    if (holds.some(hold => hold.stage === "allocation" && JSON.stringify(hold) !== JSON.stringify(recorded))) throw new Error("stable outcome differs from held allocation evidence");
+    scope = "receipt";
+  } else {
+    if (receipt !== undefined) {
+      validateStableQualificationReceipt(receipt, state.candidate, state.candidateCommit!, state.previousStable!);
+      if (receipt.candidate !== undefined || receipt.predecessor !== undefined || receipt.macHost !== undefined) throw new Error("preflight hold receipt records qualification identity effects");
+    }
+    if (holds.some(hold => hold.stage !== "preflight")) throw new Error("allocation hold has no resumable receipt");
+  }
+  return parseCampaignInfrastructureHold({
+    scope, candidate: state.candidate, sourceCommit: state.candidateCommit, archiveSha256: state.candidateDigest,
+    orchestratorCommit: state.candidateCommit, policy: state.authorityPolicy, campaignAttempt: campaignAttempt(state), availabilityHolds: holds,
+  }, state);
+}
 
 export class StudioDriver implements DriverPort {
   private env: NodeJS.ProcessEnv;
@@ -175,6 +225,7 @@ export class StudioDriver implements DriverPort {
   async load(): Promise<DriverState | undefined> {
     const state = await jsonFile<DriverState>(join(this.config.stateDir, "state.json"));
     if (state !== undefined && (state.schemaVersion !== 1 || !Number.isSafeInteger(state.sequence) || requestVersion(state.issue) === undefined)) throw new Error("unsupported/corrupt release-driver state");
+    if (state !== undefined) campaignAttempt(state);
     return state;
   }
   async save(state: DriverState): Promise<void> {
@@ -225,8 +276,73 @@ export class StudioDriver implements DriverPort {
     const running = await command(["tmux", "has-session", "-t", this.session(kind, state)], ROOT, this.env, true);
     return { status: running.code === 0 ? "running" : "absent", detail: `${kind} job has no exit receipt and no tmux session; no automatic retry` };
   }
-  jobDirectory(kind: JobSpec["kind"], state: DriverState): string { return join(this.config.stateDir, "jobs", `${state.issue.number}-${state.candidate}-${kind}`); }
-  session(kind: JobSpec["kind"], state: DriverState): string { return `omp-release-${state.issue.number}-${state.candidate.replaceAll(".", "-")}-${kind}`; }
+  jobDirectory(kind: JobSpec["kind"], state: DriverState): string {
+    const retry = kind === "campaign" && campaignAttempt(state) > 0 ? `-retry-${campaignAttempt(state)}` : "";
+    return join(this.config.stateDir, "jobs", `${state.issue.number}-${state.candidate}-${kind}${retry}`);
+  }
+  session(kind: JobSpec["kind"], state: DriverState): string {
+    const retry = kind === "campaign" && campaignAttempt(state) > 0 ? `-retry-${campaignAttempt(state)}` : "";
+    return `omp-release-${state.issue.number}-${state.candidate.replaceAll(".", "-")}-${kind}${retry}`;
+  }
+  async campaignWorkerRunning(state: DriverState): Promise<boolean> {
+    return (await command(["tmux", "has-session", "-t", this.session("campaign", state)], ROOT, this.env, true)).code === 0;
+  }
+  async releaseHostOwner(): Promise<string | undefined> {
+    const path = join(homedir(), ".local/state/omp-session-gateway/release-host/lease.sqlite");
+    if (!await Bun.file(path).exists()) return undefined;
+    const db = new Database(path, { readonly: true });
+    try {
+      return db.query<{ owner: string }, []>("SELECT owner FROM campaign WHERE id = 1").get()?.owner;
+    } finally { db.close(); }
+  }
+  /** One operator authorization, no device allocation. The next tick launches a fresh immutable job. */
+  async authorizeDeviceCloudRetry(candidate: string, attempt: number): Promise<DriverState> {
+    const state = await this.load();
+    if (state === undefined || state.phase !== "infrastructure-held" || state.candidate !== candidate || campaignAttempt(state) !== attempt ||
+      state.intent !== undefined || state.announcement !== undefined || state.stableCommit !== undefined || state.approvePr !== undefined) {
+      throw new Error("retry-device-cloud requires the exact held candidate and current job attempt without pending work or publication");
+    }
+    const hold = parseCampaignInfrastructureHold(state.infrastructureHold, state);
+    const job = await this.job("campaign", state);
+    if (job.status !== "infrastructure-hold" || JSON.stringify(parseCampaignInfrastructureHold(job.availabilityHold, state)) !== JSON.stringify(hold)) {
+      throw new Error("held campaign job is missing or changed");
+    }
+    for (let ordinal = 0; ordinal <= attempt; ordinal += 1) {
+      if (await this.campaignWorkerRunning({ ...state, campaignAttempt: ordinal })) throw new Error("a candidate campaign worker is still active");
+    }
+    if (await this.api(`git/ref/tags/v${state.version}`, true) !== undefined || await this.api(`releases/tags/v${state.version}`, true) !== undefined) {
+      throw new Error("stable publication already exists; device-cloud retry is refused");
+    }
+    const prepare = state.preparePr === undefined ? undefined : await this.readPr(state.preparePr);
+    if (prepare === undefined || !prepare.merged || prepare.mergeCommit !== state.candidateCommit) throw new Error("candidate source binding changed");
+    const authority = await this.authority(state, (await this.api<{ sha: string }>("commits/main"))!.sha, prepare);
+    this.requireSourceAuthority(authority, state.authorityPolicy);
+    const receipt = await jsonFile<StableQualificationReceipt>(this.receipt(state));
+    if (hold.scope === "receipt") {
+      if (receipt === undefined) throw new Error("held allocation receipt is missing");
+      assertDeviceCloudResumeEligible(receipt, {
+        tag: state.candidate, previousTag: state.previousStable!, orchestratorCommit: state.candidateCommit!, macHost: this.env.OMP_STABLE_MAC_HOST ?? "",
+      });
+      if (receipt.candidate?.sourceCommit !== state.candidateCommit || receipt.candidate.archiveSha256 !== state.candidateDigest) throw new Error("held receipt candidate changed");
+      const archived = await jsonFile<StableQualificationReceipt>(join(this.jobDirectory("campaign", state), "held-qualification.json"));
+      if (archived === undefined || JSON.stringify(archived) !== JSON.stringify(receipt)) throw new Error("held receipt differs from its immutable completed-job snapshot");
+    } else {
+      campaignAvailabilityObservation(state, JSON.stringify({ outcome: "infrastructure-hold", availabilityHolds: hold.availabilityHolds }), receipt, this.env.OMP_STABLE_MAC_HOST ?? "");
+    }
+    const owner = await this.releaseHostOwner();
+    if (owner !== undefined && owner !== `qualification:${state.candidate}:${this.receipt(state)}`) throw new Error("release host lease belongs to another campaign");
+    const next: DriverState = {
+      ...state, phase: "candidate-verified", campaignAttempt: attempt + 1, resumeDeviceCloud: hold.scope === "receipt", sequence: state.sequence + 1,
+    };
+    delete next.infrastructureHold;
+    const occupied = await lstat(this.jobDirectory("campaign", next)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (occupied !== undefined || await this.campaignWorkerRunning(next)) throw new Error("retry job identity is already occupied");
+    await this.save(next);
+    return next;
+  }
   /** Installed controls are the separately reviewed trust root, not candidate-supplied policy. */
   async controls(source: string, local = false): Promise<Map<string, string>> {
     const entries = local
@@ -498,9 +614,11 @@ export class StudioDriver implements DriverPort {
     if (await Bun.file(join(directory, "result.json")).exists()) return;
     if ((await command(["tmux", "has-session", "-t", this.session(kind, state)], ROOT, this.env, true)).code === 0) return;
     if (kind !== "approve" && await Bun.file(join(directory, "started")).exists()) return; // Never infer device/cloud action absence from a missing reply.
-    await atomicJson(join(directory, "spec.json"), { kind, state, root: ROOT } satisfies JobSpec);
+    const specification = { kind, state, root: ROOT } satisfies JobSpec;
+    if (kind === "approve") await atomicJson(join(directory, "spec.json"), specification);
+    else if (!await immutableJobJson(join(directory, "spec.json"), specification)) return;
     const quote = (text: string) => `'${text.replaceAll("'", `'"'"'`)}'`;
-    const launcher = `${quote(process.execPath)} ${quote(join(ROOT, "scripts/release-driver.ts"))} worker ${quote(join(directory, "spec.json"))} >${quote(join(directory, "out.log"))} 2>${quote(join(directory, "err.log"))}`;
+    const launcher = `${quote(process.execPath)} ${quote(join(ROOT, "scripts/release-driver.ts"))} worker ${quote(join(directory, "spec.json"))} >>${quote(join(directory, "out.log"))} 2>>${quote(join(directory, "err.log"))}`;
     const workerEnvironment = { PATH: this.env.PATH ?? "", OMP_RELEASE_BOT_LOGIN: this.config.bot, OMP_RELEASE_FOUNDER_LOGIN: this.config.founder, OMP_RELEASE_GH_CONFIG_DIR: this.config.ghConfig, OMP_RELEASE_SIGNING_KEY: this.config.signingKey, OMP_RELEASE_STATE_DIR: this.config.stateDir, OMP_STABLE_MAC_HOST: this.env.OMP_STABLE_MAC_HOST ?? "", OMP_STABLE_MAC_MODEL: this.env.OMP_STABLE_MAC_MODEL ?? "VirtualMac2,1" };
     await command(["tmux", "new-session", "-d", "-s", this.session(kind, state), ...Object.entries(workerEnvironment).flatMap(([key, value]) => ["-e", `${key}=${value}`]), launcher], ROOT, this.env);
   }
@@ -593,8 +711,9 @@ export class StudioDriver implements DriverPort {
     try {
       await this.authenticate();
       const source = spec.kind === "campaign" ? state.candidateCommit! : spec.kind === "approve" ? state.approvedHead! : state.stableCommit!;
-      const branch = spec.kind === "campaign" ? `release-driver/${state.issue.number}/${state.candidate}-campaign` : undefined;
-      const checkout = await this.checkout(`${state.issue.number}-${state.candidate}-${spec.kind}-job`, source, branch);
+      const retry = spec.kind === "campaign" && campaignAttempt(state) > 0 ? `-retry-${campaignAttempt(state)}` : "";
+      const branch = spec.kind === "campaign" ? `release-driver/${state.issue.number}/${state.candidate}-campaign${retry}` : undefined;
+      const checkout = await this.checkout(`${state.issue.number}-${state.candidate}-${spec.kind}-job${retry}`, source, branch);
       if (await this.git(["rev-parse", "HEAD"], checkout) !== source) throw new Error("job checkout is not its pinned source");
       await command([process.execPath, "install", "--frozen-lockfile"], checkout, this.env);
       if (spec.kind === "campaign") {
@@ -604,8 +723,21 @@ export class StudioDriver implements DriverPort {
         const env = { ...this.env, OMP_STABLE_MAC_HOST: macHost, OMP_STABLE_MAC_MODEL: this.env.OMP_STABLE_MAC_MODEL ?? "VirtualMac2,1", OMP_STABLE_OP_TOKEN_FILE: join(homedir(), ".local/state/omp-session-gateway/op-service-account.token") };
         await command(["security", "unlock-keychain", "-p", "", join(homedir(), "Library/Keychains/omp-qualification.keychain-db")], checkout, env);
         await command(["security", "set-keychain-settings", join(homedir(), "Library/Keychains/omp-qualification.keychain-db")], checkout, env);
-        await command([process.execPath, "run", "qualify:stable", "--", "--tag", state.candidate, "--preflight"], checkout, env);
-        await command([process.execPath, "run", "qualify:stable", "--", "--tag", state.candidate], checkout, env);
+        const runCampaign = async (flags: string[]) => {
+          const result = await command([process.execPath, "run", "qualify:stable", "--", "--tag", state.candidate, ...flags], checkout, env, true);
+          if (result.code === 75) {
+            const receipt = await jsonFile<StableQualificationReceipt>(this.receipt(state));
+            const hold = campaignAvailabilityObservation(state, result.out, receipt, macHost);
+            if (hold.scope === "receipt") {
+              const archivePath = join(directory, "held-qualification.json");
+              if (!await immutableJobJson(archivePath, receipt)) throw new Error("held receipt archive already exists");
+            }
+            throw new CampaignAvailabilityResult(hold);
+          }
+          if (result.code !== 0) throw new Error(`stable qualification exited ${result.code}; inspect private job logs`, { cause: { out: result.out.slice(-262144), err: result.err.slice(-262144) } });
+        };
+        await runCampaign(["--preflight"]);
+        await runCampaign(state.resumeDeviceCloud ? ["--resume-device-cloud"] : []);
         const receipt = await jsonFile<StableQualificationReceipt>(this.receipt(state));
         if (receipt?.status !== "passed" || receipt.schemaVersion !== 3 || receipt.tag !== state.candidate || receipt.candidate?.sourceCommit !== state.candidateCommit || receipt.candidate?.archiveSha256 !== state.candidateDigest || Object.values(receipt.lanes).some(lane => lane.status !== "passed")) throw new Error("qualification receipt is not fully passed and candidate-bound");
       } else if (spec.kind === "approve") {
@@ -639,22 +771,40 @@ export class StudioDriver implements DriverPort {
       } : undefined;
       await atomicJson(join(directory, "result.json"), { status: "passed", ...(evidence === undefined ? {} : { evidence }) });
     } catch (error) {
-      console.error(error instanceof Error ? error.message : String(error));
-      if (error instanceof Error && error.cause !== undefined) await atomicJson(join(directory, "diagnostic.json"), error.cause);
-      let detail = `${spec.kind} failed; inspect private job logs; no retry`;
-      if (spec.kind === "campaign") {
-        const receipt = await jsonFile<StableQualificationReceipt>(this.receipt(state));
-        if (receipt !== undefined) detail = `campaign failed lanes: ${Object.entries(receipt.lanes).filter(([, lane]) => lane.status !== "passed").map(([name, lane]) => `${name} (${lane.status})`).join(", ")}; no retry`;
+      if (error instanceof CampaignAvailabilityResult) {
+        await atomicJson(join(directory, "result.json"), { status: "infrastructure-hold", availabilityHold: error.hold } satisfies JobObservation);
+        process.exitCode = 75;
+      } else {
+        console.error(error instanceof Error ? error.message : String(error));
+        if (error instanceof Error && error.cause !== undefined) await atomicJson(join(directory, "diagnostic.json"), error.cause);
+        let detail = `${spec.kind} failed; inspect private job logs; no retry`;
+        if (spec.kind === "campaign") {
+          const receipt = await jsonFile<StableQualificationReceipt>(this.receipt(state));
+          if (receipt !== undefined) detail = `campaign failed lanes: ${Object.entries(receipt.lanes).filter(([, lane]) => lane.status !== "passed").map(([name, lane]) => `${name} (${lane.status})`).join(", ")}; no retry`;
+        }
+        await atomicJson(join(directory, "result.json"), { status: "failed", detail } satisfies JobObservation);
+        process.exitCode = 1;
       }
-      await atomicJson(join(directory, "result.json"), { status: "failed", detail } satisfies JobObservation);
-      process.exitCode = 1;
-    } finally { await writeFile(join(directory, "exit"), `${process.exitCode === 1 ? 1 : 0}\n`, { mode: 0o600 }); }
+    } finally { await writeFile(join(directory, "exit"), `${process.exitCode ?? 0}\n`, { mode: 0o600 }); }
   }
 }
 
 async function drive(args: string[]): Promise<unknown> {
   const [mode, spec, ...extra] = args;
-  if (!["plan", "status", "tick", "worker"].includes(mode ?? "") || extra.length > 0 || (mode === "worker") !== (spec !== undefined)) throw new Error("usage: bun scripts/release-driver.ts plan|status|tick|worker <private-spec-path>");
+  const retry = mode === "retry-device-cloud";
+  let retryCandidate: string | undefined;
+  let retryAttempt: number | undefined;
+  if (retry) {
+    if (args.length !== 5 || spec !== "--candidate" || args[3] !== "--job-attempt" ||
+      !/^v[0-9]+\.[0-9]+\.[0-9]+-prealpha\.[1-9][0-9]*$/u.test(args[2] ?? "") || !/^(?:0|[1-9][0-9]*)$/u.test(args[4] ?? "")) {
+      throw new Error("usage: release-driver retry-device-cloud --candidate <exact-tag> --job-attempt <current-attempt>");
+    }
+    retryCandidate = args[2];
+    retryAttempt = Number(args[4]);
+    if (!Number.isSafeInteger(retryAttempt) || retryAttempt > 10_000) throw new Error("invalid retry job attempt");
+  } else if (!["plan", "status", "tick", "worker"].includes(mode ?? "") || extra.length > 0 || (mode === "worker") !== (spec !== undefined)) {
+    throw new Error("usage: bun scripts/release-driver.ts plan|status|tick|worker <private-spec-path>|retry-device-cloud --candidate <tag> --job-attempt <n>");
+  }
   const config = driverConfig(), plan = mode === "plan" || mode === "status" || config.dryRun;
   const driver = new StudioDriver(config, plan);
   if (plan) {
@@ -662,7 +812,8 @@ async function drive(args: string[]): Promise<unknown> {
     if (mode === "status") {
       const state = await driver.load();
       return { readiness, phase: state?.phase, candidate: state?.candidate, intent: state?.intent?.operation,
-        holdReason: state?.holdReason, holdCommit: state?.holdCommit, outboxPending: state?.announcement !== undefined };
+        holdReason: state?.holdReason, holdCommit: state?.holdCommit, infrastructureHold: state?.infrastructureHold,
+        campaignAttempt: state === undefined ? undefined : campaignAttempt(state), outboxPending: state?.announcement !== undefined };
     }
     return { ...await tick(driver, config, true), readiness };
   }
@@ -682,6 +833,10 @@ async function drive(args: string[]): Promise<unknown> {
     const state = await driver.load();
     if ((state === undefined || state.phase === "closed") && !readiness.ready) return { operation: "idle", detail: "blocked-prerequisite; inspect readiness.json", readiness };
     await driver.authenticate();
+    if (retry) {
+      const authorized = await driver.authorizeDeviceCloudRetry(retryCandidate!, retryAttempt!);
+      return { operation: "retry-device-cloud-authorized", candidate: authorized.candidate, campaignAttempt: campaignAttempt(authorized) };
+    }
     return await tick(driver, config);
   } finally { lock.close(); }
 }

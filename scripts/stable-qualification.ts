@@ -13,7 +13,7 @@ import { fixtureModelError, OMP_FIXTURE_MODEL } from "./omp-fixture.ts";
 import { isSupportedOmpVersion, parseOmpVersion } from "./upstream-canary.ts";
 import { defaultLaneModules } from "./stable-lanes.ts";
 import { pixelUnrestored } from "./restoration.ts";
-import { deviceCloudHolds, deviceCloudMachineOutcome } from "./device-cloud-availability.ts";
+import { deviceCloudHolds, deviceCloudMachineOutcome, parseDeviceCloudHold, type DeviceCloudHold } from "./device-cloud-availability.ts";
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
 
@@ -141,6 +141,7 @@ export interface StableQualificationReceipt {
 
 export interface StableQualificationOptions {
   readonly preflight: boolean;
+  readonly resumeDeviceCloud?: boolean;
   readonly tag: string;
   readonly previousTag: string;
   readonly receiptRoot: string;
@@ -363,7 +364,10 @@ export function parseStableQualificationArgs(
   argv: readonly string[],
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): StableQualificationOptions {
-  const { preflight, tag, previousTag } = parseCandidateTagArgs(argv, environment);
+  const resumeDeviceCloud = argv.includes("--resume-device-cloud");
+  if (argv.filter(argument => argument === "--resume-device-cloud").length > 1) throw new Error("--resume-device-cloud may be supplied only once");
+  const { preflight, tag, previousTag } = parseCandidateTagArgs(argv.filter(argument => argument !== "--resume-device-cloud"), environment);
+  if (resumeDeviceCloud && preflight) throw new Error("--resume-device-cloud requires a failed allocation receipt, not --preflight");
   const receiptRoot = resolve(
     environment.OMP_STABLE_QUALIFICATION_DIR ??
       join(homedir(), ".local", "share", "omp-session-gateway", "qualification", tag),
@@ -392,6 +396,7 @@ export function parseStableQualificationArgs(
   }
   return {
     preflight,
+    resumeDeviceCloud,
     tag,
     previousTag,
     receiptRoot,
@@ -610,6 +615,50 @@ export function externalCleanupCurrent(receipt: StableQualificationReceipt, name
   const epoch = progressEpoch(laneProgress(receipt.lanes[name]));
   const cleanup = receipt.lanes[CLEANUP_LANES[name]];
   return epoch !== undefined && cleanup.status === "passed" && cleanup.evidence?.epoch === epoch;
+}
+
+/** Eligibility is read-only and must run before admission, receipt mutation, or renewed effects. */
+export function assertDeviceCloudResumeEligible(
+  receipt: StableQualificationReceipt,
+  expected: { readonly tag: string; readonly previousTag: string; readonly orchestratorCommit: string; readonly macHost: string },
+  modules: StableQualificationLaneModules = defaultLaneModules,
+): DeviceCloudHold {
+  validateStableQualificationReceipt(receipt, expected.tag, expected.orchestratorCommit, expected.previousTag);
+  if (receipt.status !== "failed" || receipt.macHost !== expected.macHost || receipt.candidate?.tag !== expected.tag ||
+    receipt.predecessor?.tag !== expected.previousTag || !/^[a-f0-9]{40}$/u.test(receipt.candidate.sourceCommit) ||
+    !/^[a-f0-9]{64}$/u.test(receipt.candidate.archiveSha256) || !/^[a-f0-9]{40}$/u.test(receipt.predecessor.sourceCommit) ||
+    !/^[a-f0-9]{64}$/u.test(receipt.predecessor.archiveSha256)) throw new Error("device-cloud resume receipt identity or campaign verdict is ineligible");
+  for (const name of LANE_NAMES) {
+    if (receipt.lanes[name].status !== (name === "deviceCloud" ? "failed" : "passed") || receipt.lanes[name].attempts < 1) {
+      throw new Error("device-cloud resume requires every other qualification and cleanup lane passed");
+    }
+  }
+  const hold = parseDeviceCloudHold(receipt.lanes.deviceCloud.evidence?.availabilityHold);
+  if (hold.stage !== "allocation" || hold.epoch !== progressEpoch(laneProgress(receipt.lanes.deviceCloud))) {
+    throw new Error("device-cloud resume hold does not identify the failed allocation attempt");
+  }
+  for (const name of Object.keys(CLEANUP_LANES) as ExternalLaneName[]) {
+    if (!externalCleanupCurrent(receipt, name) || modules[name].needsCleanup(laneProgress(receipt.lanes[name]))) {
+      throw new Error("device-cloud resume refuses dirty resources or stale cleanup");
+    }
+    const result = receipt.lanes[name].evidence?.result;
+    if (name !== "deviceCloud" && (!isRecord(result) || result.passed === false)) {
+      throw new Error("device-cloud resume requires passed external-lane results");
+    }
+  }
+  const publication = receipt.lanes.ompPublication.evidence;
+  const lifecycle = isRecord(publication?.lifecycle) ? publication.lifecycle : undefined;
+  if (publication?.published !== true || publication.revoked !== true || lifecycle === undefined ||
+    !isRecord(lifecycle.newGeneration) || !isRecord(lifecycle.fork) || !isRecord(lifecycle.resumed) ||
+    lifecycle.newGeneration.sameInstance !== true || lifecycle.newGeneration.generationDelta !== 1 ||
+    lifecycle.newGeneration.staleRejected !== true || lifecycle.newGeneration.liveLaunches !== 2 || lifecycle.newGeneration.noStore !== true ||
+    lifecycle.fork.sameInstance !== true || lifecycle.fork.generationDelta !== 1 || lifecycle.fork.syntheticMessages !== 2 ||
+    lifecycle.fork.staleRejected !== true || lifecycle.fork.liveLaunches !== 2 || lifecycle.fork.noStore !== true ||
+    lifecycle.resumed.newInstance !== true || lifecycle.resumed.generation !== 1 || lifecycle.resumed.sameLabel !== true ||
+    lifecycle.resumed.liveLaunches !== 2 || lifecycle.resumed.noStore !== true || lifecycle.resumed.revocations !== 2) {
+    throw new Error("device-cloud resume requires completed OMP publication lifecycle proof");
+  }
+  return hold;
 }
 
 type ExternalLaneRunContext<Extra extends object> = {
@@ -1956,6 +2005,27 @@ export async function completeOmpPublicationLifecycle(
   }
 }
 
+/** A pure availability failure must not discard publication proof that can still finish safely. */
+export async function finishLiveQualification(
+  failures: readonly unknown[],
+  publication: LaneReceipt,
+  persist: () => Promise<void>,
+  stopRelay: () => Promise<void>,
+  lifecycle: () => Promise<OmpLifecycleEvidence>,
+  preservePublication = false,
+): Promise<void> {
+  const failure = failures.length === 0 ? undefined : new AggregateError(failures, "live qualification consumers failed");
+  if (failure !== undefined && deviceCloudHolds(failure) === undefined) throw failure;
+  try {
+    await stopRelay();
+    if (!preservePublication) await completeOmpPublicationLifecycle(publication, persist, lifecycle);
+  } catch (error) {
+    if (failure !== undefined) throw new AggregateError([failure, error], "device availability and publication completion failed");
+    throw error;
+  }
+  if (failure !== undefined) throw failure;
+}
+
 export async function runStableQualification(
   argv: readonly string[],
   runtime: StablePreflightRuntime = defaultPreflightRuntime,
@@ -1999,6 +2069,13 @@ async function runOwnedStableQualification(
   const receipt = await loadReceipt(receiptPath, options.tag, orchestratorCommit, options.previousTag);
   // Refuse retargeting before admission, target resolution, or any finally-path remote cleanup.
   assertMacHostBinding(receipt, options.macHost);
+  const resumeIdentity = { tag: options.tag, previousTag: options.previousTag, orchestratorCommit, macHost: options.macHost };
+  if (options.resumeDeviceCloud) assertDeviceCloudResumeEligible(receipt, resumeIdentity, lanes);
+  else if (receipt.lanes.deviceCloud.evidence?.availabilityHold !== undefined) {
+    let eligible = false;
+    try { assertDeviceCloudResumeEligible(receipt, resumeIdentity, lanes); eligible = true; } catch { /* Other failures retain normal cleanup recovery. */ }
+    if (eligible) throw new Error("this availability-held receipt requires explicit --resume-device-cloud");
+  }
   receipt.status = "running";
   delete receipt.completedAt;
   delete receipt.error;
@@ -2128,13 +2205,16 @@ async function runOwnedStableQualification(
       }
       if (macContext === undefined) throw new Error("Mac live fixture was not prepared");
       const publicationLane = receipt.lanes.ompPublication;
-      publicationLane.status = "running";
-      publicationLane.attempts += 1;
-      publicationLane.startedAt = now();
-      delete publicationLane.error;
-      delete publicationLane.completedAt;
-      delete publicationLane.evidence;
-      await persist();
+      const preservePublication = options.resumeDeviceCloud === true && publicationLane.status === "passed";
+      if (!preservePublication) {
+        publicationLane.status = "running";
+        publicationLane.attempts += 1;
+        publicationLane.startedAt = now();
+        delete publicationLane.error;
+        delete publicationLane.completedAt;
+        delete publicationLane.evidence;
+        await persist();
+      }
 
       // Only this driver writes the SSH stdin pipe; it stays open until its owned host stops.
       ompHost = createOmpStdinDriver(
@@ -2147,8 +2227,10 @@ async function runOwnedStableQualification(
       );
       const session = await waitForPublishedSession(macContext.publicOrigin, options.sessionLabel);
       const launchEvidence = await verifyLaunchContracts(macContext.publicOrigin, session);
-      publicationLane.evidence = { ...launchEvidence, published: true };
-      await persist();
+      if (!preservePublication) {
+        publicationLane.evidence = { ...launchEvidence, published: true };
+        await persist();
+      }
       const instanceId = launchEvidence.instanceId;
       if (typeof instanceId !== "string") throw new Error("published OMP instance id is missing");
 
@@ -2198,23 +2280,26 @@ async function runOwnedStableQualification(
       }
       const settled = await Promise.allSettled(pending);
       const failures = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-      if (failures.length > 0) {
-        throw new AggregateError(failures.map(result => result.reason), "physical-client, background Push, device-cloud or relay qualification failed");
-      }
-      await stopSubprocess(tunnelProcess);
-      tunnelProcess = undefined;
-      await completeOmpPublicationLifecycle(publicationLane, persist, () => runOmpLifecycle({
+      await finishLiveQualification(failures.map(result => result.reason), publicationLane, persist, async () => {
+        await stopSubprocess(tunnelProcess);
+        tunnelProcess = undefined;
+      }, () => runOmpLifecycle({
         host: ompHost!,
         observer: { origin: macContext!.publicOrigin, waitForPublishedSession, verifyLaunchContracts, waitForRevocation },
         label: options.sessionLabel,
-      }));
+      }), preservePublication);
     }
     await assertProtectedFilesUnchanged(protectedFiles);
   } catch (error) {
     primaryError = error;
   } finally {
-    await stopSubprocess(tunnelProcess).catch(() => {});
-    await ompHost?.stopAll().catch(() => {});
+    for (const stop of [() => stopSubprocess(tunnelProcess), async () => { await ompHost?.stopAll(); }]) {
+      try { await stop(); }
+      catch {
+        const cleanupError = new Error("qualification live-session process cleanup failed");
+        primaryError = primaryError === undefined ? cleanupError : new AggregateError([primaryError, cleanupError], "qualification and live-session cleanup failed");
+      }
+    }
     for (const [name, description] of [["androidPush", "background Push"], ["deviceCloud", "device-cloud"]] as const) {
       if (driven[name] || !recordedEffects(lanes[name], receipt.lanes[name])) continue;
       // A resumed campaign stopped before this lane could release what it recorded. Both lanes
@@ -2287,6 +2372,12 @@ async function runOwnedStableQualification(
     receipt.status = "failed";
     receipt.error = "qualification failed; inspect the qualification process output";
     await persist();
+    if (deviceCloudHolds(primaryError) !== undefined) {
+      try { assertDeviceCloudResumeEligible(receipt, resumeIdentity, lanes); }
+      catch {
+        primaryError = new AggregateError([primaryError, new Error("the availability-held campaign is not eligible for same-receipt resumption")], "qualification availability and eligibility failed");
+      }
+    }
     throw primaryError;
   }
   receipt.status = "passed";

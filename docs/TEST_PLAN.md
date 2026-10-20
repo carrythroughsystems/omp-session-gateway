@@ -349,6 +349,24 @@ The [release contract matrix](RELEASE.md#browserstack-device-cloud-fallback) rec
 public-page and crash-cleanup proofs. The capability-opening mixed journey remains a separately
 scheduled development check, never an automatic extension of those probes.
 
+Same-receipt hold/resume tests (`scripts/stable-qualification.test.ts` and
+`scripts/release-driver.test.ts`) prove:
+
+- availability-only live failures await publication lifecycle completion; lifecycle/cleanup
+  failures make the result diagnostic, while cloud-only resume preserves passed publication
+  evidence and attempt counts;
+- explicit resumption refuses dirty, foreign, ordinary, incomplete and stale-cleanup receipts
+  before admission or receipt writes, and reuses other expensive lanes' passed proof;
+- closed worker outcomes bind candidate, source, digest, policy and job ordinal; malformed
+  outcomes and ordinary/missing workers never authorize an infrastructure retry;
+- `infrastructure-held` never auto-retries or clears from later passing observations;
+- one guarded authorization creates one immutable ordinal job, refuses duplicate authorization
+  and changed identities/policy/lease, and preserves attempt-zero results and logs.
+
+Before stable activation, the lead must confirm equipment availability and run the bounded
+isolated full journey plus controlled hold/resume development proof at the final tree. Unit
+fixtures are Tested state-machine evidence, not a live campaign or release qualification.
+
 ## 2. Secret-leak test harness
 
 Generate distinct per-host query tokens, readiness tokens, and capability canaries in test memory.

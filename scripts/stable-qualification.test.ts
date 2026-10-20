@@ -10,12 +10,14 @@ import {
   assertMacBuildOutput,
   assertMacLifecycleOutput,
   assertProtectedFilesUnchanged,
+  assertDeviceCloudResumeEligible,
   createPixelLease,
   createReceiptPersister,
   createStableQualificationReceipt,
   completeOmpPublicationLifecycle,
   executeReceiptLane,
   externalCleanupCurrent,
+  finishLiveQualification,
   incompleteQualification,
   loadConfiguredMacTarget,
   markMacCleanupRequired,
@@ -39,7 +41,7 @@ import {
   type StableQualificationLaneModules,
 } from "./stable-qualification.ts";
 import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-qualification.ts";
-import { DeviceCloudAvailabilityHold, deviceCloudHolds } from "./device-cloud-availability.ts";
+import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } from "./device-cloud-availability.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
 // Derived exactly as the orchestrator derives it, so this suite cannot pass against a predecessor
@@ -863,7 +865,129 @@ const lifecycleEvidence: OmpLifecycleEvidence = {
   resumed: { newInstance: true, generation: 1, sameLabel: true, liveLaunches: 2, noStore: true, revocations: 2 },
 };
 
+function availabilityReceipt() {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.status = "failed";
+  receipt.macHost = MAC_ENV.OMP_STABLE_MAC_HOST;
+  receipt.candidate = { tag: TAG, sourceCommit: COMMIT, archiveSha256: "b".repeat(64) };
+  receipt.predecessor = { tag: PREVIOUS_TAG, sourceCommit: "c".repeat(40), archiveSha256: "d".repeat(64) };
+  for (const lane of Object.values(receipt.lanes)) Object.assign(lane, { status: "passed", attempts: 1, evidence: { proven: true } });
+  for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
+    const epoch = name === "deviceCloud" ? "11111111-2222-4333-8444-555555555555" : `epoch-${name}`;
+    receipt.lanes[name].evidence = { progress: { epoch, cleanupRequired: false }, result: { passed: true } };
+    receipt.lanes[`${name}Cleanup`].evidence = { epoch };
+  }
+  receipt.lanes.deviceCloud.status = "failed";
+  receipt.lanes.deviceCloud.evidence = {
+    progress: { epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: false },
+    availabilityHold: {
+      kind: "device-cloud-availability", stage: "allocation", target: "ipad", vendors: ["testingbot"],
+      reason: "pinned-pool-busy", waitedMs: 600_000, epoch: "11111111-2222-4333-8444-555555555555",
+    },
+  };
+  receipt.lanes.ompPublication.evidence = { published: true, revoked: true, lifecycle: structuredClone(lifecycleEvidence) };
+  return receipt;
+}
+
+const resumeModules: StableQualificationLaneModules = (() => {
+  const lane: ExternalLaneModule = {
+    preflight: async () => {}, run: async () => { throw new Error("not a live fixture"); }, cleanup: async () => ({}),
+    needsCleanup: value => typeof value !== "object" || value === null || !("cleanupRequired" in value) || value.cleanupRequired !== false,
+  };
+  return { windows: lane, androidPush: lane, deviceCloud: lane, createPixelLease: () => createPixelLease(() => {}) };
+})();
+const resumeIdentity = { tag: TAG, previousTag: PREVIOUS_TAG, orchestratorCommit: COMMIT, macHost: MAC_ENV.OMP_STABLE_MAC_HOST };
+
+describe("explicit same-receipt cloud resumption", () => {
+  test("accepts only the explicit option, separate from preflight", () => {
+    expect(parseStableQualificationArgs(["--tag", TAG, "--resume-device-cloud"], MAC_ENV).resumeDeviceCloud).toBe(true);
+    expect(() => parseStableQualificationArgs(["--tag", TAG, "--preflight", "--resume-device-cloud"], MAC_ENV)).toThrow("not --preflight");
+    expect(() => parseStableQualificationArgs(["--tag", TAG, "--resume-device-cloud", "--resume-device-cloud"], MAC_ENV)).toThrow("only once");
+  });
+  test("validates a clean failed hold without changing any passed evidence", () => {
+    const receipt = availabilityReceipt();
+    const before = structuredClone(receipt);
+    expect(assertDeviceCloudResumeEligible(receipt, resumeIdentity, resumeModules)).toMatchObject({ stage: "allocation", target: "ipad" });
+    expect(receipt).toEqual(before);
+  });
+  test.each(["dirty", "stale cleanup", "ordinary failure", "foreign commit", "foreign candidate", "foreign predecessor", "foreign host", "missing lifecycle", "other failed lane"] as const)(
+    "refuses %s before admission or effects", async variant => {
+      const receipt = availabilityReceipt();
+      if (variant === "dirty") receipt.lanes.deviceCloud.evidence!.progress = { epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: true };
+      if (variant === "stale cleanup") receipt.lanes.deviceCloudCleanup.evidence = { epoch: "another" };
+      if (variant === "ordinary failure") delete receipt.lanes.deviceCloud.evidence!.availabilityHold;
+      if (variant === "foreign commit") receipt.orchestratorCommit = "f".repeat(40);
+      if (variant === "foreign candidate") receipt.candidate!.tag = "v0.7.7-prealpha.999";
+      if (variant === "foreign predecessor") receipt.predecessor!.tag = "v0.0.1";
+      if (variant === "foreign host") receipt.macHost = "other@fixture.invalid";
+      if (variant === "missing lifecycle") receipt.lanes.ompPublication.evidence = { published: true };
+      if (variant === "other failed lane") receipt.lanes.android.status = "failed";
+      expect(() => assertDeviceCloudResumeEligible(receipt, resumeIdentity, resumeModules)).toThrow();
+      const root = await mkdtemp(join(tmpdir(), "stable-cloud-resume-refusal-"));
+      try {
+        await writeFile(join(root, "stable-qualification.json"), JSON.stringify(receipt));
+        const fixture = await preflightFixture(root);
+        let calls = 0;
+        const runtime: StablePreflightRuntime = { ...fixture, output: async args => {
+          if (args.join(" ") === "git rev-parse HEAD") return COMMIT;
+          calls += 1; throw new Error("must refuse before admission");
+        } };
+        await expect(runStableQualification(["--tag", TAG, "--resume-device-cloud"], runtime, resumeModules)).rejects.toThrow();
+        expect(calls).toBe(0);
+        expect(JSON.parse(await readFile(join(root, "stable-qualification.json"), "utf8"))).toEqual(receipt);
+      } finally { await rm(root, { recursive: true, force: true }); }
+    },
+  );
+  test("only cloud and cleanup advance; passed publication and expensive lanes are reused unchanged", async () => {
+    const receipt = availabilityReceipt();
+    const before = structuredClone(receipt.lanes);
+    const identity: ExternalLaneIdentity = {
+      tag: TAG, previousTag: PREVIOUS_TAG, orchestratorCommit: COMMIT, receiptRoot: "/fixture",
+      candidate: { ...receipt.candidate!, archivePath: "/candidate.tar" }, predecessor: { ...receipt.predecessor!, archivePath: "/previous.tar" },
+      omp: { bunVersion: "1.4.0", version: "18.12.3", sourceCommit: "e".repeat(40), sourceTree: "f".repeat(40), nativeTarballSha256: "0".repeat(64), nativeBinarySha256: "1".repeat(64) },
+    };
+    const module: ExternalLaneModule = {
+      ...resumeModules.deviceCloud,
+      run: async ({ checkpoint }) => { await checkpoint({ epoch: "new-cloud-attempt", cleanupRequired: false }); return { passed: true }; },
+      cleanup: async ({ progress }) => ({ epoch: (progress as { epoch: string }).epoch, restored: true }),
+    };
+    assertDeviceCloudResumeEligible(receipt, resumeIdentity, resumeModules);
+    await runExternalLane(receipt, "deviceCloud", async () => {}, module, { identity, pixel: createPixelLease(() => {}) });
+    for (const name of ["debian", "macos", "ompPublication", "android", "androidPush", "windows", "relay"] as const) {
+      await executeReceiptLane(receipt, name, async () => {}, async () => { throw new Error("passed proof must not rerun"); });
+      expect(receipt.lanes[name]).toEqual(before[name]);
+    }
+    expect(receipt.lanes.deviceCloud.attempts).toBe(2);
+    expect(receipt.lanes.deviceCloudCleanup.attempts).toBe(2);
+    expect(receipt.lanes.deviceCloud.evidence?.availabilityHold).toBeUndefined();
+  });
+});
+
 describe("publication lifecycle receipt", () => {
+  test("an availability-only live failure finishes the real lifecycle before reporting its hold", async () => {
+    const receipt = availabilityReceipt();
+    const lane = receipt.lanes.ompPublication;
+    lane.status = "running"; lane.evidence = { published: true };
+    const order: string[] = [];
+    const hold = new DeviceCloudAvailabilityHold(parseDeviceCloudHold(receipt.lanes.deviceCloud.evidence!.availabilityHold));
+    const error = await finishLiveQualification([hold], lane, async () => {}, async () => { order.push("relay stopped"); }, async () => {
+      order.push("lifecycle"); return structuredClone(lifecycleEvidence);
+    }).catch((error: unknown) => error);
+    expect(order).toEqual(["relay stopped", "lifecycle"]);
+    expect(deviceCloudHolds(error)).toHaveLength(1);
+    expect(lane).toMatchObject({ status: "passed", evidence: { revoked: true, lifecycle: lifecycleEvidence } });
+    const failed = await finishLiveQualification([hold], lane, async () => {}, async () => {}, async () => { throw new Error("lifecycle failed"); }).catch((error: unknown) => error);
+    expect(deviceCloudHolds(failed)).toBeUndefined();
+    expect(lane.status).toBe("failed");
+  });
+  test("cloud-only resume preserves passed publication evidence byte-for-byte", async () => {
+    const receipt = availabilityReceipt();
+    const lane = receipt.lanes.ompPublication;
+    const before = structuredClone(lane);
+    await finishLiveQualification([], lane, async () => { throw new Error("publication must not persist again"); }, async () => {}, async () => { throw new Error("lifecycle must not rerun"); }, true);
+    expect(lane).toEqual(before);
+  });
+
   test("adds lifecycle evidence without changing the receipt version or earlier publication observations", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     const lane = receipt.lanes.ompPublication;
