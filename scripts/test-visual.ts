@@ -14,6 +14,9 @@ const CLI_EXECUTABLE = fileURLToPath(new URL("../bin/run.cjs", pathToFileURL(CLI
 const CONFIG = "apps/web/playwright.visual.config.ts";
 const MISSING_TOKEN = "visual upload: PERCY_TOKEN is required";
 const MISSING_NODE = "visual upload: Node.js is required for Percy";
+// @percy/cli 1.32.11 bin/run.cjs:13-16 prints this unconditionally, even on Node 24.
+// Our exact major pin and native Node >=20 already satisfy this future-major announcement.
+export const PERCY_RUNTIME_NOTICE = "Heads up! The next major version of @percy/cli will require Node 20+. Either pin @percy/cli to its current major version, or make sure your setup runs on Node 20+, before the next major release.";
 const RUNNER_PHASES: Readonly<Record<string, true>> = { server: true, playwright: true, percy: true };
 const RUNNER_REASONS: Readonly<Record<string, true>> = {
   healthy: true, "health-rejected": true, "child-exit": true, "sdk-warning": true,
@@ -25,6 +28,7 @@ const RUNNER_REASONS: Readonly<Record<string, true>> = {
   "cli-sdk-update": true, "cli-log-upload-warning": true, "cli-layout-mode-warning": true,
   "cli-lockfile-warning": true, "cli-proxy-warning": true, "cli-node-warning": true,
   "cli-serialization-warning": true, "cli-unknown-diagnostic": true,
+  "cli-runtime-notice": true,
 };
 // Stable messages from the pinned CLI; classify only, never echo text or relax failure policy.
 const CLI_DIAGNOSTICS: ReadonlyArray<readonly [string, RegExp]> = [
@@ -72,11 +76,14 @@ export function visualProcessReasons(result: VisualProcessResult, upload: boolea
   const expected = `visual: validated=18 submitted=${upload ? 18 : 0} outcome=passed`;
   const reasons: string[] = [];
   if (result.code !== 0) reasons.push("child-exit");
-  // Warnings/errors use stderr at info loglevel in the pinned CLI. Do not print their contents.
-  if (result.stderr.trim() !== "" || /Percy is not running|\bwarning\b|skipping visual tests|Percy is disabled/iu.test(result.stdout)) {
+  // The sole nonfatal diagnostic is the exact pinned entry-point announcement, not SDK output.
+  const stderr = result.stderr.replace(/\u001b\[[0-9;]*m/gu, "").split("\n")
+    .filter(line => !requireFinalization || line !== PERCY_RUNTIME_NOTICE).join("\n");
+  // All other warnings/errors remain fatal. Never print their contents.
+  if (stderr.trim() !== "" || /Percy is not running|\bwarning\b|skipping visual tests|Percy is disabled/iu.test(result.stdout)) {
     reasons.push("sdk-warning");
     if (requireFinalization) {
-      const diagnostics = `${result.stderr}\n${result.stdout}`.replace(/\u001b\[[0-9;]*m/gu, "");
+      const diagnostics = `${stderr}\n${result.stdout}`.replace(/\u001b\[[0-9;]*m/gu, "");
       const categories = CLI_DIAGNOSTICS.filter(([, pattern]) => pattern.test(diagnostics)).map(([code]) => code);
       reasons.push(...(categories.length ? categories : ["cli-unknown-diagnostic"]));
     }
@@ -187,6 +194,9 @@ export async function runVisual(
     NO_COLOR: "1",
   });
   for (const line of safeVisualLines(`${result.stdout}\n${result.stderr}`)) process.stdout.write(`${line}\n`);
+  if (result.stderr.replace(/\u001b\[[0-9;]*m/gu, "").split("\n").includes(PERCY_RUNTIME_NOTICE)) {
+    process.stdout.write("visual-runner: phase=percy reason=cli-runtime-notice\n");
+  }
   for (const reason of visualProcessReasons(result, true)) process.stdout.write(`visual-runner: phase=percy reason=${reason}\n`);
   assertVisualResult(result, true);
   process.stdout.write("visual upload: build finalized\n");

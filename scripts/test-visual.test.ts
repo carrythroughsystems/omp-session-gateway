@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { basename, dirname } from "node:path";
-import { assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
+import { PERCY_RUNTIME_NOTICE, assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
 
 const localSuccess = { code: 0, stdout: "visual: validated=18 submitted=0 outcome=passed\n", stderr: "" };
 const uploadSuccess = { code: 0, stdout: "visual: validated=18 submitted=18 outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n", stderr: "" };
@@ -148,6 +148,18 @@ test("classified and unknown CLI diagnostics still fail a finalized 18-snapshot 
     expect(visualProcessReasons(result, true)).toContain(category!);
     expect(() => assertVisualResult(result, true)).toThrow("visual upload: incomplete or failed Percy build");
   }
+});
+
+test("only the exact pinned entry-point future-Node notice is nonfatal", () => {
+  const notice = { ...uploadSuccess, stderr: PERCY_RUNTIME_NOTICE + "\n" };
+  expect(visualProcessReasons(notice, true)).toEqual([]);
+  assertVisualResult(notice, true);
+  for (const stderr of [
+    PERCY_RUNTIME_NOTICE + " changed",
+    PERCY_RUNTIME_NOTICE + "\n[percy] Warning: synthetic SDK warning",
+    "[percy] " + PERCY_RUNTIME_NOTICE,
+  ]) expect(() => assertVisualResult({ ...uploadSuccess, stderr }, true)).toThrow("visual upload: incomplete or failed Percy build");
+  expect(visualProcessReasons(notice, true, false)).toContain("sdk-warning");
 });
 
 test("the installed Percy API answers health under its native Node runtime", async () => {

@@ -106,7 +106,10 @@ counts or missing finalization. Use these categories to select the failing bound
 enable raw logs, traces, screenshots or vendor error-log collection to diagnose it.
 CLI diagnostics are further classified by stable messages from the pinned packages (baseline,
 config, discovery, SDK update, log upload, layout mode, lockfile, proxy, Node or serialization);
-unknown diagnostics remain a failure too. Classification never makes a warning non-fatal.
+unknown diagnostics remain a failure too. The sole nonfatal category is `cli-runtime-notice`:
+the exact unconditional `bin/run.cjs` announcement in CLI 1.32.11 about its next major requiring
+Node 20+. The exact CLI major pin and native Node 24.22.0 already satisfy it. Its fixed code is
+visible; any changed/additional line and every SDK warning still fail.
 
 ## Live rule
 
