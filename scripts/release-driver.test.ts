@@ -447,15 +447,8 @@ class RetryDriver extends StudioDriver {
 describe("guarded one-shot operator retry", () => {
   test("one authorization creates one new immutable job and never overwrites attempt zero", async () => {
     const root = await mkdtemp(join(tmpdir(), "release-cloud-retry-"));
-    const previousPath = process.env.PATH;
     try {
-      const bin = join(root, "bin");
-      await mkdir(bin);
-      const launched = join(root, "launched");
-      await writeFile(join(bin, "tmux"), `#!/bin/sh\n[ \"$1\" != has-session ] || exit 1\nprintf '%s\\n' \"$*\" >> '${launched}'\n`, { mode: 0o700 });
-      process.env.PATH = `${bin}:${previousPath}`;
       const runtime = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
-      process.env.PATH = previousPath;
       runtime.receiptPath = join(root, "absent-receipt.json");
       const initial = structuredClone(runtime.current);
       const oldJob = runtime.jobDirectory("campaign", initial);
@@ -469,11 +462,56 @@ describe("guarded one-shot operator retry", () => {
       expect(runtime.jobDirectory("campaign", next)).toBe(`${oldJob}-retry-1`);
       expect(runtime.session("campaign", next)).toBe(`${runtime.session("campaign", initial)}-retry-1`);
       await expect(runtime.authorizeDeviceCloudRetry(initial.candidate, 0)).rejects.toThrow("exact held candidate");
+      let jobsStarted = 0;
+      const port: DriverPort = {
+        load: () => runtime.load(),
+        save: value => runtime.save(value),
+        snapshot: async () => snapshot({ campaign: { status: "running" } }),
+        perform: async (step, current) => {
+          expect(step.operation).toBe("start-campaign");
+          jobsStarted += 1;
+          const directory = runtime.jobDirectory("campaign", current);
+          await mkdir(directory, { recursive: true });
+          await writeFile(join(directory, "spec.json"), JSON.stringify({ state: current }), { flag: "wx" });
+          return {};
+        },
+        announce: async () => {},
+      };
+      expect((await tick(port, config)).operation).toBe("start-campaign");
+      const specification = await readFile(join(runtime.jobDirectory("campaign", next), "spec.json"), "utf8");
+      expect((await tick(port, config)).operation).toBe("idle");
+      expect(await readFile(join(runtime.jobDirectory("campaign", next), "spec.json"), "utf8")).toBe(specification);
+      expect(jobsStarted).toBe(1);
+      expect(await readdir(join(root, "jobs"))).toHaveLength(2);
+      expect(await readFile(join(oldJob, "result.json"), "utf8")).toBe("immutable old result");
+      expect(await readFile(join(oldJob, "out.log"), "utf8")).toBe("immutable old output");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  // The production launcher requires POSIX ownership/modes and /bin/sh/tmux on its macOS host.
+  // Keep authorization and tick semantics above portable; do not weaken those production checks.
+  test.skipIf(process.platform === "win32")("the POSIX campaign launcher preserves immutable job files on repeated launch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "release-cloud-launch-"));
+    const previousPath = process.env.PATH;
+    try {
+      const bin = join(root, "bin");
+      await mkdir(bin);
+      const launched = join(root, "launched");
+      await writeFile(join(bin, "tmux"), `#!/bin/sh\n[ "$1" != has-session ] || exit 1\nprintf '%s\\n' "$*" >> '${launched}'\n`, { mode: 0o700 });
+      process.env.PATH = `${bin}:${previousPath}`;
+      const runtime = new RetryDriver(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+      process.env.PATH = previousPath;
+      const initial = structuredClone(runtime.current);
+      const next: DriverState = { ...initial, phase: "candidate-verified", campaignAttempt: 1, resumeDeviceCloud: false };
+      const oldJob = runtime.jobDirectory("campaign", initial);
+      await mkdir(oldJob, { recursive: true });
+      await writeFile(join(oldJob, "result.json"), "immutable old result");
+      await writeFile(join(oldJob, "out.log"), "immutable old output");
       await runtime.launch("campaign", next);
       const specification = await readFile(join(runtime.jobDirectory("campaign", next), "spec.json"), "utf8");
       await runtime.launch("campaign", next);
       expect(await readFile(join(runtime.jobDirectory("campaign", next), "spec.json"), "utf8")).toBe(specification);
-      expect((await readFile(launched, "utf8")).trim().split("\\n")).toHaveLength(1);
+      expect((await readFile(launched, "utf8")).trim().split("\n")).toHaveLength(1);
       expect(await readFile(join(oldJob, "result.json"), "utf8")).toBe("immutable old result");
       expect(await readFile(join(oldJob, "out.log"), "utf8")).toBe("immutable old output");
     } finally { process.env.PATH = previousPath; await rm(root, { recursive: true, force: true }); }
