@@ -108,6 +108,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   session, its header, and its triage bar share one centered `min(100% − 2rem, 60rem)` column, and
   the transcript reaches the client's own 900px width (about 88 characters per code line). The
   directory keeps its 35rem triage column, and nothing changes below 37rem.
+- The embedded-ask browser test now waits out the relay client's backoff after the relay
+  returns. Its 5-second wait failed on slow runners, because each held reconnect doubles the
+  retry delay to as much as 15 seconds under the test's fixed jitter.
 
 ## [v0.7.7] — 2026-10-13
 
