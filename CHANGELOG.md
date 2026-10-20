@@ -40,6 +40,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   SHA linked to the exact upstream commit so the table no longer scrolls sideways on a phone; the
   settings-sheet capture appears once, beside the background-alerts bullet. `release-generate`
   approve emits the linked short commit.
+- The README adds BrowserStack's open-source attribution ("This project is tested with
+  BrowserStack") below the TestingBot real-device acknowledgement.
 
 ### Fixed
 
