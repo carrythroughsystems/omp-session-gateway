@@ -497,11 +497,12 @@ async function auditRecords(
       }, RECORD_FINALIZATION_MS);
       records.push({ resource, record });
     } catch (error) {
-      if (resource.vendor === "browserstack" && (error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError)) {
+      const safeCause = error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError;
+      if (resource.vendor === "browserstack" && safeCause) {
         resource.incident = true;
         await save();
       }
-      failures.push(new Error("a device-cloud retained record could not be audited"));
+      failures.push(new Error("a device-cloud retained record could not be audited", safeCause ? { cause: error } : undefined));
     }
   }
   for (const [before, reread] of driven) {

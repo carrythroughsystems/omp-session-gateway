@@ -1297,15 +1297,18 @@ while explicitly counting `unauditedRecordsDeleted` if links cannot be reconstru
 hits and unverifiable required surfaces remain incidents even after deletion. Unverified cleanup
 blocks the Pixel lease. Only whole JSON string values that are well-formed absolute HTTP(S) URLs
 are references: one case-insensitive `://`, their hostname exactly once, and no comma.
-Keys are never references; any other key/value containing `://` or a pinned artifact/dashboard
-hostname fails closed. Every retained JSON body must pass a census: each pinned hostname's raw
+Keys are never references; any other key/value containing `://` or a pinned artifact/dashboard/documentation
+hostname fails closed. Every retained JSON body must pass a census: each pinned artifact/dashboard hostname's raw
 and canonical counts independently equal its accepted reference occurrences, including duplicates,
 or fail with `unaccounted BrowserStack artifact reference`. No delimiter extraction, repair or
-pending-reference list remains. Only entire top-level `browser_url`/`public_url` values on the
-pinned dashboard origin remain count-only presentations; other origins/placements fail closed.
+pending-reference list remains; dashboard presentations remain count-only and other
+origins/placements fail closed.
 The census also checks canonical text percent-decoded to a four-pass-bounded fixpoint and one
-decoded `://` per reference, while dashboard presentations have character-class-pinned path
-segments/query tokens and forbid userinfo, ports and fragments without guessing exact paths.
+decoded `://` per reference.
+The 2026-10-20 BrowserStack probes pin top-level `browser_url`, `public_url`, `logs` and `video_url`
+to their exact record-bound dashboard forms and permit only the three observed
+`insights.summary.time_breakdown` components' `optimize_url` documentation `/docs/` links, never fetching
+either host or counting documentation links in the artifact census.
 A reference before finalized build identification persists an `unbound retained reference`
 incident immediately: deletion and absence checks still proceed from later clean metadata, but
 restoration stays blocked after a crash or successful deletion until operator incident handling.

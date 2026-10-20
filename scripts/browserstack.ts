@@ -30,7 +30,11 @@ const RECORD_FIELDS = [
 /** Official API examples plus the exact authenticated account surfaces observed 2026-10-20. */
 const ARTIFACT_ORIGINS = new Set(pins.artifactOrigins);
 const DASHBOARD_ORIGINS = new Set(pins.dashboardOrigins);
+const DOCUMENTATION_ORIGINS = new Set(pins.documentationOrigins);
 const REFERENCE_HOSTNAMES = [...new Set([...ARTIFACT_ORIGINS, ...DASHBOARD_ORIGINS].map(origin => new URL(origin).hostname))];
+const DOCUMENTATION_HOSTNAMES = [...DOCUMENTATION_ORIGINS].map(origin => new URL(origin).hostname);
+const INSIGHT_COMPONENTS = new Set(["browserstack_time", "user_time", "capabilities_impact"]);
+const PRESENTATION_FIELDS = new Set(["browser_url", "public_url", "logs", "video_url"]);
 
 export class BrowserStackAuditFailure extends Error {}
 
@@ -68,7 +72,14 @@ const MEDIA_URL = /(?:data:(?:image|video)\/|https?:[^\s"'<>]*(?:\/(?:screenshot
 function retainedMedia(value: unknown, key = ""): boolean {
   if (/screenshot|video|visual|^screen$/iu.test(key) &&
     value !== undefined && value !== null && value !== false && value !== "" && !(Array.isArray(value) && value.length === 0)) return true;
-  if (typeof value === "string") return MEDIA_URL.test(value);
+  if (typeof value === "string") {
+    if (key === "optimize_url") {
+      let url: URL | undefined;
+      try { url = new URL(value); } catch { url = undefined; }
+      if (url !== undefined && DOCUMENTATION_ORIGINS.has(url.origin) && documentationPresentation(value, url)) return false;
+    }
+    return MEDIA_URL.test(value);
+  }
   if (Array.isArray(value)) return value.some(item => retainedMedia(item));
   return isRecord(value) && Object.entries(value).some(([name, item]) => retainedMedia(name) || retainedMedia(item, name));
 }
@@ -110,7 +121,8 @@ function occurrences(text: string, fragment: string): number {
 
 function referenceLike(value: string): boolean {
   const lower = value.toLowerCase();
-  return value.includes("://") || REFERENCE_HOSTNAMES.some(hostname => lower.includes(hostname));
+  return value.includes("://") || REFERENCE_HOSTNAMES.some(hostname => lower.includes(hostname)) ||
+    DOCUMENTATION_HOSTNAMES.some(hostname => lower.includes(hostname));
 }
 
 /** Decode bytes, not URLs; malformed escapes stay literal and excessive nesting fails closed. */
@@ -130,11 +142,25 @@ function rawErrorCensus(raw: string): void {
   if (REFERENCE_HOSTNAMES.some(hostname => text.includes(hostname) || decoded.includes(hostname))) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
 }
 
-function dashboardPresentation(value: string, url: URL): boolean {
+function dashboardPresentation(value: string, url: URL, field: string, sessionId: string, buildId: string): boolean {
   const parts = /^https?:\/\/([^/?#]+)(\/[^?#]*)(?:\?([^#]*))?$/iu.exec(value);
-  return parts !== null && parts[1]!.toLowerCase() === url.hostname && url.username === "" && url.password === "" && url.port === "" && url.hash === "" &&
-    /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/u.test(parts[2]!) &&
-    (parts[3] === undefined || parts[3].split("&").every(parameter => /^[A-Za-z0-9_-]*(?:=[A-Za-z0-9_-]*)?$/u.test(parameter)));
+  if (parts === null || parts[1]!.toLowerCase() !== url.hostname || value.includes("%") ||
+    url.username !== "" || url.password !== "" || url.port !== "" || url.hash !== "") return false;
+  const sessionPath = `/builds/${buildId}/sessions/${sessionId}`;
+  if (field === "browser_url" || field === "logs") return parts[2] === `${sessionPath}${field === "logs" ? "/logs" : ""}` && parts[3] === undefined;
+  if (field === "public_url") return parts[2] === sessionPath && /^auth_token=[A-Za-z0-9_-]{16,128}$/u.test(parts[3] ?? "");
+  if (field !== "video_url" || parts[2] !== `/sessions/${sessionId}/video` || !/^[^&]+(?:&[^&]+){2}$/u.test(parts[3] ?? "")) return false;
+  const query = url.searchParams;
+  return query.size === 3 &&
+    /^[A-Za-z0-9_-]{16,512}$/u.test(query.get("token") ?? "") && /^[A-Za-z0-9_-]{1,32}$/u.test(query.get("source") ?? "") &&
+    /^[0-9]{1,10}(?:\.[0-9]{1,12})?$/u.test(query.get("diff") ?? "");
+}
+
+function documentationPresentation(value: string, url: URL): boolean {
+  const parts = /^https?:\/\/([^/?#]+)(\/[^?#]*)(?:#([^?#]*))?$/iu.exec(value);
+  return parts !== null && parts[1]!.toLowerCase() === url.hostname && url.username === "" && url.password === "" && url.port === "" &&
+    /^\/docs\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/u.test(parts[2]!) &&
+    (parts[3] === undefined || /^[A-Za-z0-9_-]+$/u.test(parts[3]));
 }
 
 /** No token extraction, delimiter repair or inferred references. */
@@ -155,12 +181,19 @@ export function browserStackReferences(sessionId: string, buildId: string | unde
   const artifacts: CloudArtifact[] = [];
   const dashboards = new Set<string>();
   const accepted = new Map(REFERENCE_HOSTNAMES.map(hostname => [hostname, 0]));
+  const path: string[] = [];
   const walk = (value: unknown, key = "", depth = 0): void => {
     if (typeof value === "string") {
       const url = referenceUrl(value);
       if (url === undefined) return;
-      const dashboard = DASHBOARD_ORIGINS.has(url.origin) && sessionMetadata && depth === 1 && (key === "browser_url" || key === "public_url") &&
-        dashboardPresentation(value, url);
+      if (DOCUMENTATION_ORIGINS.has(url.origin)) {
+        if (!sessionMetadata || path.length !== 5 || path[0] !== "insights" || path[1] !== "summary" || path[2] !== "time_breakdown" ||
+          !INSIGHT_COMPONENTS.has(path[3]!) || path[4] !== "optimize_url" || !documentationPresentation(value, url)) throw new BrowserStackAuditFailure("unreviewed BrowserStack documentation reference");
+        return;
+      }
+      const presentation = DASHBOARD_ORIGINS.has(url.origin) && sessionMetadata && depth === 1 && PRESENTATION_FIELDS.has(key);
+      if (presentation && buildId === undefined) throw new BrowserStackAuditFailure("unbound retained reference");
+      const dashboard = presentation && buildId !== undefined && dashboardPresentation(value, url, key, sessionId, buildId);
       if (!dashboard && !ARTIFACT_ORIGINS.has(url.origin)) throw new BrowserStackAuditFailure("unreviewed BrowserStack artifact reference");
       if (buildId === undefined) throw new BrowserStackAuditFailure("unbound retained reference");
       accepted.set(url.hostname, (accepted.get(url.hostname) ?? 0) + 1);
@@ -171,12 +204,18 @@ export function browserStackReferences(sessionId: string, buildId: string | unde
       if (previous === undefined) artifacts.push(artifact);
       else if (previous.kind !== artifact.kind) throw new BrowserStackAuditFailure("BrowserStack artifact classification changed");
     } else if (Array.isArray(value)) {
-      for (const item of value) walk(item, key, depth + 1);
+      for (const item of value) {
+        path.push("[]");
+        walk(item, key, depth + 1);
+        path.pop();
+      }
     } else if (isRecord(value)) {
       for (const [name, item] of Object.entries(value)) {
         if (/data:/iu.test(name) || retainedMedia(name)) throw new BrowserStackAuditFailure("BrowserStack retained media key");
         if (referenceLike(name)) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
+        path.push(name);
         walk(item, name, depth + 1);
+        path.pop();
       }
     }
   };

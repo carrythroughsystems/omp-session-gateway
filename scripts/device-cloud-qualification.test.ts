@@ -21,7 +21,8 @@ import { DeviceCloudAvailabilityHold, deviceCloudHolds } from "./device-cloud-av
 import { createPixelLease, type PixelLease } from "./stable-qualification.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import { TestingBotApi } from "./testingbot.ts";
-import { BrowserStackAuditFailure, prepareBrowserStackLocal } from "./browserstack.ts";
+import { BrowserStackApi, BrowserStackAuditFailure, prepareBrowserStackLocal } from "./browserstack.ts";
+import { RetainedVendorJsonError } from "./device-cloud-record-json.ts";
 
 // Distinctive synthetic links: never a real capability shape, so the repository leak scans stay green.
 const LINKS: Record<string, Record<"view" | "control", string>> = {
@@ -469,6 +470,45 @@ describe("mixed-vendor ownership and partial failure", () => {
       },
     })).rejects.toThrow("could not be audited");
     expect(audited).toEqual(["testingbot", "browserstack", "browserstack"]);
+  });
+  test.each(["reference", "duplicate-json", "vendor-error"])("audit diagnostics attach only fixed developer causes: %s", async kind => {
+    const marker = "SYNTHETIC_VENDOR_BODY_NOT_FOR_DIAGNOSTICS";
+    const raw = kind === "reference" ? JSON.stringify({ automation_session: {
+      hashed_id: sessionIds.ipad, build_hashed_id: "c".repeat(40), status: "done",
+      reason: `https://unreviewed.example/${sessionIds.ipad}/${marker}`,
+    } }) : `{"automation_session":{"reason":"${marker}","reason":"clean"}}`;
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () =>
+      new Response(raw, { headers: { "content-type": "application/json" } }), { preconnect: () => {} }));
+    try {
+      const lane = harness({ vendors, sessionIds });
+      const api = new BrowserStackApi({ username: "synthetic-user", accessKey: "synthetic-key" });
+      const error = await runDeviceCloud({ ...input(lane), runtime: {
+        ...lane.runtime,
+        record: async (reference, remember, inspect) => {
+          if (reference.target !== "ipad") return lane.runtime.record(reference, remember, inspect);
+          if (kind === "vendor-error") throw new Error(marker);
+          return api.testRecord(reference.sessionId, remember, inspect);
+        },
+      } }).catch((error: unknown) => error);
+      const findAudit = (error: unknown): Error | undefined => {
+        if (error instanceof Error && error.message === "a device-cloud retained record could not be audited") return error;
+        if (error instanceof AggregateError) for (const child of error.errors) {
+          const found = findAudit(child);
+          if (found !== undefined) return found;
+        }
+        return undefined;
+      };
+      const audit = findAudit(error);
+      expect(audit).toBeDefined();
+      if (kind === "reference") expect(audit?.cause).toBeInstanceOf(BrowserStackAuditFailure);
+      else if (kind === "duplicate-json") expect(audit?.cause).toBeInstanceOf(RetainedVendorJsonError);
+      else expect(audit?.cause).toBeUndefined();
+      expect(String(audit?.cause)).not.toContain(marker);
+      expect(audit?.cause instanceof Error ? audit.cause.stack : "").not.toContain(marker);
+      expect(errorMessages(error)).not.toContain(marker);
+      expect(JSON.stringify(lane.checkpoints)).not.toContain(marker);
+      expect(JSON.stringify(parseDeviceCloudProgress(lane.checkpoints.at(-1)).results)).not.toContain(marker);
+    } finally { mock.mockRestore(); }
   });
 
   test("the identical exact-16 window scan rejects BrowserStack retained text", async () => {

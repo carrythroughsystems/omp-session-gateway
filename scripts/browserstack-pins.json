@@ -6,6 +6,7 @@
     "https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com"
   ],
   "dashboardOrigins": ["https://automate.browserstack.com"],
+  "documentationOrigins": ["https://www.browserstack.com"],
   "local": {
     "version": "8.9",
     "platform": "darwin-x64",

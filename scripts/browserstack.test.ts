@@ -24,6 +24,30 @@ const record = {
   hashed_id: id, build_hashed_id: build, status: "done", device: "iPad 10th", os: "ios", os_version: "27.0",
   browser: "ipad", video_url: video, browser_console_logs_url: artifact,
 };
+const presentation = {
+  browser_url: `https://automate.browserstack.com/builds/${build}/sessions/${id}`,
+  public_url: `https://automate.browserstack.com/builds/${build}/sessions/${id}?auth_token=${"SYNTHETIC_PUBLIC_ONLY_".padEnd(64, "X")}`,
+  logs: `https://automate.browserstack.com/builds/${build}/sessions/${id}/logs`,
+  video_url: `https://automate.browserstack.com/sessions/${id}/video?token=${"SYNTHETIC_VIDEO_ONLY_".padEnd(194, "X")}&source=TEST_SYN&diff=1.234567890`,
+};
+const documentation = "https://www.browserstack.com/docs/automate/selenium/synthetic-optimization#synthetic-fragment";
+const observedArtifacts = {
+  browser_console_logs_url: artifact,
+  har_logs_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/har.txt?synthetic=true`,
+  selenium_logs_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/selenium.txt?synthetic=true`,
+  browser_profiling_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/profiling.txt?synthetic=true`,
+  session_terminal_logs_url: `https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com/${id}/session-terminal.txt?response-content-type=text%2Fplain`,
+  build_terminal_logs_url: `https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com/${build}/build-terminal.txt?response-content-type=text%2Fplain`,
+};
+const observedRecord = {
+  ...record, device: "Samsung Galaxy S26", os: "android", os_version: "16.0", browser: "chrome_android",
+  ...presentation, ...observedArtifacts,
+  insights: { summary: { time_breakdown: {
+    browserstack_time: { seconds: 1, reason: "synthetic", optimize_url: documentation },
+    user_time: { seconds: 2, reason: "synthetic", optimize_url: documentation },
+    capabilities_impact: { seconds: 3, reason: "synthetic", optimize_url: documentation },
+  } } },
+};
 let restore: (() => void) | undefined;
 afterEach(() => { restore?.(); restore = undefined; });
 
@@ -40,6 +64,7 @@ function provider(options: {
   sessionReply?: RetainedReply; logReply?: RetainedReply; artifactReply?: RetainedReply;
   deleteReply?: RetainedReply; postDeleteArtifactReply?: RetainedReply; nestedLog?: string;
   retry?: { surface: "session" | "log" | "artifact"; reply: RetainedReply };
+  additionalArtifacts?: readonly string[]; xmlLogs?: boolean;
 } = {}) {
   let deleted = options.recordAlreadyDeleted ?? false;
   let acknowledged = false, lateLogRead = false, lateSessionRead = false;
@@ -79,11 +104,11 @@ function provider(options: {
         lateLogRead = true;
         return new Response(options.postDeleteLog, { headers: { "content-type": "application/json" } });
       }
-      if (deleted) return new Response("absent", { status: 404 });
+      if (deleted) return options.xmlLogs ? new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404, headers: { "content-type": "application/xml" } }) : new Response("absent", { status: 404 });
       if (url.endsWith("/logs") && options.logReply !== undefined) return retainedReply(options.logReply);
       if (url.endsWith("/logs") && !options.missingLogs) return new Response(options.large ? "x".repeat(2_000_001) : options.log ?? "synthetic command record", { headers: { "content-type": options.logType ?? "text/plain" } });
       if (url.endsWith("/consolelogs")) return new Response("No messages were logged", { headers: { "content-type": "text/plain" } });
-      return new Response("absent", { status: 404 });
+      return options.xmlLogs ? new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404, headers: { "content-type": "application/xml" } }) : new Response("absent", { status: 404 });
     }
     if (url === artifact) {
       if (deleted && options.postDeleteArtifactReply !== undefined) return retainedReply(options.postDeleteArtifactReply);
@@ -93,6 +118,7 @@ function provider(options: {
       return new Response(deleted && options.changed ? "changed after audit" : "No messages were logged", { headers: { "content-type": "text/plain" } });
     }
     if (pins.artifactOrigins.some(origin => url === `${origin}/${id}/nested.txt?synthetic=true`)) return deleted ? new Response("absent", { status: 404 }) : new Response(options.nestedLog ?? "Nested synthetic log", { headers: { "content-type": "text/plain" } });
+    if (options.additionalArtifacts?.includes(url)) return deleted ? new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404, headers: { "content-type": "application/xml" } }) : new Response("synthetic observed log", { headers: { "content-type": "text/plain" } });
     if (url === video) {
       if (options.media) return new Response("synthetic-media", { headers: { "content-type": "video/mp4" } });
       return new Response("<Error><Code>AccessDenied</Code><Message>s3:ListBucket</Message></Error>", { status: options.videoStatus ?? 403, headers: { "content-type": "application/xml" } });
@@ -196,12 +222,13 @@ function errorMessages(error: unknown): string {
 }
 
 describe("BrowserStack fixed policy inputs", () => {
-  test("pins disjoint storage and dashboard origins", () => {
+  test("pins disjoint storage, dashboard and documentation origins", () => {
     expect(pins.artifactOrigins).toEqual([
       "https://api.browserstack.com", "https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com", "https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com",
     ]);
     expect(pins.dashboardOrigins).toEqual(["https://automate.browserstack.com"]);
-    expect(new Set([...pins.artifactOrigins, ...pins.dashboardOrigins]).size).toBe(4);
+    expect(pins.documentationOrigins).toEqual(["https://www.browserstack.com"]);
+    expect(new Set([...pins.artifactOrigins, ...pins.dashboardOrigins, ...pins.documentationOrigins]).size).toBe(5);
   });
   test("requires the observed Mobile plan and exactly five group/team parallels", async () => {
     let body = { automate_plan: "Automate Mobile", parallel_sessions_max_allowed: 5, team_parallel_sessions_max_allowed: 5 };
@@ -747,8 +774,8 @@ describe("BrowserStack complete retention and deletion", () => {
     }
   });
   test("only top-level dashboard presentation fields are counted and never fetched", async () => {
-    const browserUrl = `https://automate.browserstack.com/dashboard/v2/sessions/${id}`;
-    const publicUrl = `https://automate.browserstack.com/dashboard/v2/public-build/${build}/sessions/${id}`;
+    const browserUrl = presentation.browser_url;
+    const publicUrl = presentation.public_url;
     const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, browser_url: browserUrl, public_url: publicUrl } }) });
     expect((await fixture.audit())?.dashboardReferences).toBe(2);
     await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
@@ -758,14 +785,103 @@ describe("BrowserStack complete retention and deletion", () => {
     const misplaced = provider({ raw: JSON.stringify({ automation_session: { ...record, insights: { browser_url: browserUrl } } }) });
     await expect(misplaced.audit()).rejects.toThrow("unreviewed");
   });
-  test("documentation-shaped dashboard paths and safe query tokens remain count-only presentations", async () => {
-    const browserUrl = `https://automate.browserstack.com/builds/${build}/sessions/${id}`;
-    const publicUrl = `${browserUrl}?auth_token=SYNTHETICDASHBOARDONLY`;
-    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, browser_url: browserUrl, public_url: publicUrl } }) });
-    expect((await fixture.audit())?.dashboardReferences).toBe(2);
+  test("the observed finalized Galaxy record audits clean without fetching presentation or docs hosts", async () => {
+    const fixture = provider({
+      raw: JSON.stringify({ automation_session: observedRecord }),
+      additionalArtifacts: Object.values(observedArtifacts), xmlLogs: true,
+      log: "synthetic device http://192.0.2.10:4444 navigated https://example.com",
+    });
+    const audited = await fixture.audit();
+    expect(audited).toMatchObject({ complete: true, video: false, screenshots: 0, dashboardReferences: 4 });
+    expect(fixture.removal.artifacts.map(artifact => artifact.url).sort()).toEqual(Object.values(observedArtifacts).sort());
+    expect(audited?.text).toContain(documentation);
     await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
-    expect(fixture.calls.some(call => call.url === browserUrl || call.url === publicUrl)).toBe(false);
-    expect(browserStackReferences(id, build, { browser_url: `${browserUrl}?safe_key=safe-value&extra=&empty` }, true).dashboardReferences).toBe(1);
+    expect(fixture.incidents).toEqual([]);
+    expect(fixture.calls.some(call => [...pins.dashboardOrigins, ...pins.documentationOrigins].some(origin => call.url.startsWith(origin)))).toBe(false);
+    expect(fixture.calls.filter(call => Object.values(observedArtifacts).includes(call.url))).toHaveLength(12);
+  });
+  test.each(Object.keys(presentation) as (keyof typeof presentation)[])("observed %s presentation binds ids and rejects extra parameters/fragments", async field => {
+    const value = presentation[field];
+    const wrong = "c".repeat(40);
+    const invalid = [
+      value.replace(id, wrong),
+      field === "video_url" ? value.replace("/sessions/", `/builds/${wrong}/sessions/`) : value.replace(build, wrong),
+      `${value}${value.includes("?") ? "&" : "?"}extra=SYNTHETIC`,
+      `${value}#synthetic-fragment`,
+    ];
+    for (const url of invalid) {
+      const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, [field]: url } }) });
+      await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+      expect(fixture.calls).toHaveLength(1);
+      restore?.();
+    }
+  });
+  test.each(["public_url", "video_url"] as const)("observed %s token validation rejects dots and missing/duplicate parameters", async field => {
+    const value = presentation[field];
+    const invalid = [
+      value.replace(/(auth_token|token)=[^&]*/u, "$1=SYNTHETIC_DOTTED_TOKEN.value"),
+      value.replace(/(auth_token|token)=[^&]*/u, "$1=short"),
+      `${value}&${field === "public_url" ? "auth_token" : "token"}=SYNTHETIC_DUPLICATE`,
+      value.replace(/(auth_token|token)=[^&]*/u, "$1="),
+    ];
+    for (const url of invalid) {
+      const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, [field]: url } }) });
+      await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+      restore?.();
+    }
+  });
+  test.each(["not_decimal", "1e9", "-1", "1.2.3", "9.", "12345678901", "1.1234567890123"])("video diff rejects non-observed decimal forms: %s", diff => {
+    expect(() => browserStackReferences(id, build, { video_url: presentation.video_url.replace("1.234567890", diff) }, true)).toThrow(BrowserStackAuditFailure);
+  });
+  test("dashboard fields do not retain the old generic paths or misplaced logs paths", () => {
+    for (const [field, url] of [
+      ["browser_url", `https://automate.browserstack.com/dashboard/v2/sessions/${id}`],
+      ["logs", presentation.browser_url],
+      ["logs", `${presentation.logs}/extra`],
+      ["reason", presentation.logs],
+    ] as const) expect(() => browserStackReferences(id, build, { [field]: url }, true)).toThrow(BrowserStackAuditFailure);
+  });
+  test.each(["public_url", "video_url"] as const)("empty query separators are not the pinned %s shape", field => {
+    for (const url of [presentation[field].replace("?", "?&"), `${presentation[field]}&`, `${presentation[field]}&&`])
+      expect(() => browserStackReferences(id, build, { [field]: url }, true)).toThrow(BrowserStackAuditFailure);
+  });
+  test("the exact video query keys do not pin parameter order", () => {
+    const url = `${presentation.video_url.split("?")[0]}?diff=1.234567890&source=TEST_SYN&token=${"SYNTHETIC_VIDEO_ONLY_".padEnd(194, "X")}`;
+    expect(browserStackReferences(id, build, { video_url: url }, true)).toEqual({ artifacts: [], dashboardReferences: 1 });
+  });
+  test.each(["browserstack_time", "user_time", "capabilities_impact"])("only the observed %s optimize_url path accepts documentation references", component => {
+    const metadata = { insights: { summary: { time_breakdown: { [component]: { optimize_url: documentation } } } } };
+    expect(browserStackReferences(id, build, metadata, true)).toEqual({ artifacts: [], dashboardReferences: 0 });
+    expect(() => browserStackReferences(id, build, metadata)).toThrow(BrowserStackAuditFailure);
+    for (const value of [
+      { reason: documentation },
+      { insights: { optimize_url: documentation } },
+      { insights: { summary: { time_breakdown: { [component]: { hint: documentation } } } } },
+      { insights: { summary: { time_breakdown: { unobserved_component: { optimize_url: documentation } } } } },
+      { insights: [{ summary: { time_breakdown: { [component]: { optimize_url: documentation } } } }] },
+    ]) expect(() => browserStackReferences(id, build, value, true)).toThrow(BrowserStackAuditFailure);
+  });
+  test.each([
+    `${documentation.split("#")[0]}?query=synthetic`,
+    "https://www.browserstack.com/automate/synthetic",
+    "https://www.browserstack.com/docs/synthetic/page.html",
+    "https://www.browserstack.com/docs/synthetic#dotted.fragment",
+    "https://www.browserstack.com/docs/synthetic#",
+    "https://synthetic@www.browserstack.com/docs/synthetic",
+    "https://www.browserstack.com:443/docs/synthetic",
+  ])("documentation URL shape fails closed: %s", url => {
+    expect(() => browserStackReferences(id, build, {
+      insights: { summary: { time_breakdown: { browserstack_time: { optimize_url: url } } } },
+    }, true)).toThrow(BrowserStackAuditFailure);
+  });
+  test("an accepted optimization document is not classified as retained video by its slug", async () => {
+    const fixture = provider({
+      raw: JSON.stringify({ automation_session: { ...observedRecord, insights: { summary: { time_breakdown: {
+        browserstack_time: { optimize_url: "https://www.browserstack.com/docs/automate/selenium/video" },
+      } } } } }),
+      additionalArtifacts: Object.values(observedArtifacts), xmlLogs: true,
+    });
+    expect(await fixture.audit()).toMatchObject({ complete: true, video: false, screenshots: 0, dashboardReferences: 4 });
   });
   test.each(["%2E", "%2e", "%252E", "%2525252E", "%252525252E"])("percent-escaped nested hosts fail closed at every query surface (dots=%s)", async escape => {
     const host = new URL(nestedArtifact).hostname.replaceAll(".", escape);
@@ -800,7 +916,7 @@ describe("BrowserStack complete retention and deletion", () => {
     "?auth_token=synthetic.dotted", "?dotted.key=synthetic", "?auth_token=synthetic%2Esuffix",
     "?auth_token=synthetic+suffix", "#synthetic-fragment", "/extra.segment", "//empty",
     "/../synthetic-normalized", "?auth_token=%zz",
-  ])("dashboard presentation character classes reject %s", async suffix => {
+  ])("dashboard presentation exact shapes reject %s", async suffix => {
     const url = `https://automate.browserstack.com/builds/${build}/sessions/${id}${suffix}`;
     const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, browser_url: url } }) });
     await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
@@ -808,7 +924,7 @@ describe("BrowserStack complete retention and deletion", () => {
   });
   test.each(["synthetic@", ":443", ":444"])("dashboard presentation authority rejects userinfo/ports: %s", async extra => {
     const authority = extra.endsWith("@") ? `${extra}automate.browserstack.com` : `automate.browserstack.com${extra}`;
-    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, public_url: `https://${authority}/builds/${build}/sessions/${id}` } }) });
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, public_url: presentation.public_url.replace("automate.browserstack.com", authority) } }) });
     await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
     expect(fixture.calls).toHaveLength(1);
   });

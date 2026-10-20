@@ -841,18 +841,19 @@ fetched and scanned if it starts serving content. Exhaustion leaves `recordRemov
 cleanup dirty; retry through `deviceCloudCleanup`, retaining the original progress.
 Only a whole JSON string value containing one well-formed absolute HTTP(S) URL is a reference:
 one case-insensitive `://`, its hostname exactly once, and no comma; keys are never references.
-Any other key/value containing `://` or a pinned artifact/dashboard hostname fails closed.
-Every retained JSON body must pass independent raw/canonical hostname censuses whose counts equal
+Any other key/value containing `://` or a pinned artifact/dashboard/documentation hostname fails closed.
+Every retained JSON body must pass independent raw/canonical artifact/dashboard hostname censuses whose counts equal
 accepted reference occurrences, including duplicates; mismatches are `unaccounted BrowserStack
 artifact reference` failures, not permission to guess delimiters or follow nested URLs.
 The census additionally checks canonical text percent-decoded to a fixpoint within four passes
 (malformed escapes stay literal; excess depth fails closed), requires one decoded `://` per
-reference, and restricts dashboard presentations to `[A-Za-z0-9_-]+` path segments and
-`[A-Za-z0-9_-]*` query keys/values without userinfo, ports or fragments.
-Only entire top-level `browser_url`/`public_url` values retain the pinned-dashboard exemption.
-A real dashboard URL rejected by this shape-agnostic rule is a diagnostic requiring observed
-evidence and a reviewed fix, never runtime loosening; the mixed-vendor development run must
-establish the real path before release, because no saved observed dashboard shape exists.
+reference.
+The capability-free BrowserStack probes on 2026-10-20 pin `browser_url`, `public_url`, `logs` and
+`video_url` to the observed record-bound dashboard paths and exact query grammars, plus
+only the three observed time-breakdown components' `optimize_url` documentation links under
+`/docs/`, with neither host fetched and documentation excluded from the artifact census.
+An unreviewed real URL remains a diagnostic requiring evidence and a reviewed pin update, never
+runtime loosening; fixed audit/parser causes are available in memory while progress/receipts stay generic.
 A pre-build/pre-finalization reference persists an `unbound retained reference` incident and fails
 closed immediately, with no volatile pending list; later clean metadata permits deletion and
 absence checks but neither normal nor fresh crash cleanup clears the incident or authorizes restoration.

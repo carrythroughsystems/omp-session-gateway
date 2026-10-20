@@ -546,23 +546,24 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   missing-object S3 403 is accepted as no retained media observed; media returning 200 fails.
   Media detection rejects nonempty screenshot/video/visual fields, including opaque failed-command
   screenshot payloads, not just familiar media URLs. Only null, false, empty-string and empty-list
-  markers are treated as disabled; the documented disabled-video URL is fetched separately.
+  markers are treated as disabled; dashboard `video_url` is an audited indicator, never a fetch target.
   Only an entire JSON string value that is one well-formed absolute HTTP(S) URL is a reference:
   one case-insensitive `://`, its hostname appearing exactly once, and no comma.
-  Keys are never references; any key or non-reference value containing `://` or a pinned artifact
-  or dashboard hostname, case-insensitively, fails closed rather than extracting or repairing URLs.
-  Before accepting any retained JSON body, a census independently counts every pinned hostname in
-  raw text and strict canonical JSON; each count must equal its accepted reference occurrences,
+  Keys are never references; any key or non-reference value containing `://` or a pinned artifact,
+  dashboard or documentation hostname, case-insensitively, fails closed rather than extracting or repairing URLs.
+  Before accepting any retained JSON body, a census independently counts every pinned
+  artifact/dashboard hostname in raw text and strict canonical JSON; each count must equal its accepted reference occurrences,
   including duplicates, or fail with `unaccounted BrowserStack artifact reference`.
   The census also covers canonical text percent-decoded to a fixpoint within four passes (malformed
-  escapes stay literal; excess depth fails closed), requires one decoded `://` per reference, and
-  restricts dashboard presentations to `[A-Za-z0-9_-]+` path segments and `[A-Za-z0-9_-]*` query
-  keys/values, without userinfo, ports or fragments.
+  escapes stay literal; excess depth fails closed) and requires one decoded `://` per reference.
   `browserstack-pins.json` defines disjoint origin sets:
   reviewed API/S3 artifact-storage origins are fetched, scanned, privately inventoried and
-  absence-verified; only entire top-level `browser_url`/`public_url` strings on the pinned dashboard
-  origin (`automate.browserstack.com`) are presentation references, counted but never fetched/followed.
-  Their contents are the already-audited session record, whose API deletion proves removal.
+  absence-verified; dashboard presentations are counted but never fetched/followed.
+  Capability-free BrowserStack probes on 2026-10-20 pin top-level `browser_url`, `public_url`, `logs`
+  and `video_url` to exact record-bound dashboard paths and query grammars (no userinfo, ports or fragments), and accept only
+  `insights.summary.time_breakdown.{browserstack_time,user_time,capabilities_impact}.optimize_url`
+  links under `/docs/` on the separately pinned documentation origin (no query; optional safe fragment), never fetched or included in the artifact census.
+  A dashboard presentation's content is the already-audited session record, whose API deletion proves removal.
   Any other origin anywhere, or a dashboard-host URL embedded in longer text or in another field,
   fails closed. Duplicate references retain the same inventory and media-classification checks.
   A reference received before finalized build identification is an `unbound retained reference`:

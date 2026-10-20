@@ -136,6 +136,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   26 release. The expansion cell is labelled "View More" on 26.4 but "More" on 26.2, so the second
   development run could not find Add to Home Screen on an iPhone Air. The lane taps only that
   cell, never Safari's toolbar More button, which dismisses the sheet.
+- Pin the BrowserStack `browser_url`, `public_url`, `logs`, `video_url` and insight `optimize_url`
+  shapes found by the third Studio development run, keeping dashboard/docs hosts unfetched and
+  retaining only fixed audit/parser causes in memory while progress and receipts remain generic.
 
 ## [v0.7.7] — 2026-10-13
 
