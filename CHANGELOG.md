@@ -127,6 +127,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - The embedded-ask browser test now waits out the relay client's backoff after the relay
   returns. Its 5-second wait failed on slow runners, because each held reconnect doubles the
   retry delay to as much as 15 seconds under the test's fixed jitter.
+- The local Percy health test allows 30 seconds, the portable lane's per-test default. On a
+  cold Windows runner, starting Node and loading `@percy/core` took longer than its former
+  10-second limit.
 
 ## [v0.7.7] — 2026-10-13
 
