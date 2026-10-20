@@ -62,6 +62,21 @@ function currentShellExpression(expectedAppAsset: string | undefined): string {
 })()`;
 }
 
+function shellDiagnosticExpression(expectedAppAsset: string | undefined): string {
+  return `(async () => {
+  try {
+    const expected = ${JSON.stringify(expectedAppAsset ?? null)};
+    const asset = performance.getEntriesByType("resource").map(entry => new URL(entry.name).pathname).find(path => /^\\/assets\\/app\\.[0-9a-f]+\\.js$/.test(path));
+    if (asset === undefined) return "no-app-asset";
+    if (expected !== null && asset !== expected) return "asset-mismatch";
+    const shells = (await caches.keys()).filter(name => name.startsWith("omp-sessions-shell-"));
+    if (shells.length !== 1) return "shell-caches:" + shells.length;
+    if ((await (await caches.open(shells[0])).match(asset)) === undefined) return "asset-not-cached";
+    return "shell-caches:1";
+  } catch { return "evaluation-error"; }
+})()`;
+}
+
 async function pause(milliseconds: number): Promise<void> {
   const paused = Promise.withResolvers<void>();
   setTimeout(paused.resolve, milliseconds);
@@ -84,7 +99,13 @@ export async function runCollaborationJourney(
     };
 
     options.announce?.("installed shell");
-    await waitFor("installed application shell", currentShellExpression(options.expectedAppAsset), 120);
+    try { await waitFor("installed application shell", currentShellExpression(options.expectedAppAsset), 120); }
+    catch {
+      const diagnostic = await page.evaluate<unknown>(shellDiagnosticExpression(options.expectedAppAsset)).catch(() => "evaluation-error");
+      const code = typeof diagnostic === "string" && /^(?:no-app-asset|asset-mismatch|asset-not-cached|evaluation-error|shell-caches:(?:0|[1-9][0-9]{0,9}))$/u.test(diagnostic)
+        ? diagnostic : "evaluation-error";
+      throw new Error(`installed application shell did not become ready (${code})`);
+    }
     // Start from a document the settled worker controlled from load, so no update reload can follow.
     await page.navigate(`${options.origin}/`);
 

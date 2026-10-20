@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { JOURNEY_VIEW_STATE, LEAK_SINKS, runCollaborationJourney, vendorLeakControlExpression, type JourneyPage } from "./browser-journey.ts";
 
 describe("vendor-safe application asset attestation", () => {
@@ -43,6 +43,70 @@ describe("vendor-safe application asset attestation", () => {
       announce: stage => { if (stage === "View") viewOpened = true; },
     })).rejects.toThrow("installed app asset does not match the release archive");
     expect(viewOpened).toBe(false);
+  });
+  test.each(["no-app-asset", "asset-mismatch", "shell-caches:0", "shell-caches:2", "shell-caches:1", "asset-not-cached", "evaluation-error"])("installed-shell timeout returns only the closed diagnostic %s", async code => {
+    const marker = "SYNTHETIC_PAGE_DETAIL_NOT_FOR_ERRORS";
+    let diagnosticReads = 0, readinessReads = 0;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void) => {
+      queueMicrotask(callback);
+      return 0;
+    }) as unknown as typeof setTimeout);
+    try {
+      const page: JourneyPage = {
+        navigate: async () => {},
+        evaluate: async <T>(expression: string): Promise<T> => {
+          if (!expression.includes('"no-app-asset"')) { readinessReads += 1; return false as T; }
+          diagnosticReads += 1;
+          return await new Function("performance", "caches", `return ${expression};`)({
+            getEntriesByType: () => code === "no-app-asset" ? [] : [{
+              name: `https://fixture.invalid/assets/app.${code === "asset-mismatch" ? "def456" : "abc123"}.js?${marker}`,
+            }],
+          }, {
+            keys: async () => {
+              if (code === "evaluation-error") throw new Error(marker);
+              const count = code === "shell-caches:0" ? 0 : code === "shell-caches:2" ? 2 : 1;
+              return [marker, ...Array.from({ length: count }, (_, index) => `omp-sessions-shell-${marker}-${index}`)];
+            },
+            open: async () => ({ match: async () => code === "asset-not-cached" ? undefined : new Response(marker) }),
+          }) as T;
+        },
+      };
+      const error = await runCollaborationJourney(page, {
+        origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-SHELL-TIMEOUT", expectedAppAsset: "/assets/app.abc123.js",
+      }).catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(`installed application shell did not become ready (${code})`);
+      expect((error as Error).cause).toBeUndefined();
+      expect(String(error)).not.toContain(marker);
+      expect(diagnosticReads).toBe(1);
+      expect(readinessReads).toBe(120);
+    } finally { timer.mockRestore(); }
+  });
+  test.each(["untrusted result", "transport error"])("installed-shell diagnostics discard page-controlled %s", async failure => {
+    const marker = "SYNTHETIC_PAGE_RESULT_NOT_A_DIAGNOSTIC";
+    let diagnosticReads = 0;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void) => {
+      queueMicrotask(callback);
+      return 0;
+    }) as unknown as typeof setTimeout);
+    try {
+      const page: JourneyPage = {
+        navigate: async () => {},
+        evaluate: async <T>(expression: string): Promise<T> => {
+          if (!expression.includes('"no-app-asset"')) return false as T;
+          diagnosticReads += 1;
+          if (failure === "transport error") throw new Error(marker);
+          return marker as T;
+        },
+      };
+      const error = await runCollaborationJourney(page, {
+        origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-SHELL-TIMEOUT",
+      }).catch((error: unknown) => error);
+      expect((error as Error).message).toBe("installed application shell did not become ready (evaluation-error)");
+      expect(String(error)).not.toContain(marker);
+      expect((error as Error).cause).toBeUndefined();
+      expect(diagnosticReads).toBe(1);
+    } finally { timer.mockRestore(); }
   });
 });
 

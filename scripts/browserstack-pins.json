@@ -27,7 +27,7 @@
       { "canonical": "iPad (10th generation)", "name": "iPad 10th", "platform": "ios", "browser": "ipad", "minimumOsMajor": 26 }
     ],
     "android": [
-      { "canonical": "Galaxy S26", "name": "Samsung Galaxy S26", "platform": "android", "browser": "android", "minimumOsMajor": 14, "hardware": ["SM-S942B"] },
+      { "canonical": "Galaxy S26", "name": "Samsung Galaxy S26", "platform": "android", "browser": "android", "minimumOsMajor": 14, "hardware": ["SM-S942B", "SM-S942U1"] },
       { "canonical": "Galaxy S25", "name": "Samsung Galaxy S25", "platform": "android", "browser": "android", "minimumOsMajor": 14, "hardware": ["SM-S931B"] },
       { "canonical": "Galaxy S24", "name": "Samsung Galaxy S24", "platform": "android", "browser": "android", "minimumOsMajor": 14, "hardware": ["SM-S921B"] }
     ]

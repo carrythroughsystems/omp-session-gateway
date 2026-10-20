@@ -139,6 +139,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Pin the BrowserStack `browser_url`, `public_url`, `logs`, `video_url` and insight `optimize_url`
   shapes found by the third Studio development run, keeping dashboard/docs hosts unfetched and
   retaining only fixed audit/parser causes in memory while progress and receipts remain generic.
+- Resolve the BrowserStack contracts exposed by Studio development runs four and five: accept the
+  observed S26 `SM-S942U1`, ignore non-media capability echoes, track re-signed logs by object
+  identity with the latest persisted URL, diagnose installed-shell timeouts with closed codes,
+  and distinguish completed incident removals from unverified removal.
 
 ## [v0.7.7] — 2026-10-13
 

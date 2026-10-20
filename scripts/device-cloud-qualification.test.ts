@@ -560,6 +560,8 @@ describe("mixed-vendor ownership and partial failure", () => {
     const error = await runDeviceCloud({
       ...input(lane), runtime: { ...lane.runtime, removeRecord: async () => { throw new Error("absence unverified"); } },
     }).catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("BrowserStack record removal could not be verified");
+    expect(errorMessages(error)).not.toContain("BrowserStack record removed under a retained-record incident");
     expect(pixelUnrestored(error)).toBe(true);
     expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(true);
     expect(lane.effects.filter(effect => effect === "tunnel stop")).toHaveLength(2);

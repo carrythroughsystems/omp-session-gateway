@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserStackApi, BrowserStackAuditFailure, BROWSERSTACK_LOCAL, browserStackCapabilities, browserStackEntitlement, browserStackLocalArguments, browserStackReferences,
-  browserStackModel, canonicalBrowserStackLocalIdentity, ownedLocalProcesses, prepareBrowserStackLocal, readBrowserStackCredentials, stopBrowserStackLocal,
+  browserStackModel, canonicalBrowserStackLocalIdentity, mergeBrowserStackArtifacts, ownedLocalProcesses, prepareBrowserStackLocal, readBrowserStackCredentials, stopBrowserStackLocal,
 } from "./browserstack.ts";
 import { attestAllocation, cleanupDeviceCloud, parseDeviceCloudProgress, runDeviceCloud, type DeviceCloudLaneInput, type DeviceCloudRuntime } from "./device-cloud-qualification.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
@@ -16,6 +16,8 @@ const credentials = { username: "synthetic-browserstack-user", accessKey: "synth
 const id = "a".repeat(40), build = "b".repeat(40);
 const apiOrigin = "https://api.browserstack.com/automate";
 const artifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/console.txt?synthetic=true`;
+const oldSignature = `${artifact.split("?")[0]}?X-Amz-Date=SYNTHETIC_OLD_DATE&X-Amz-Expires=604800&X-Amz-Signature=SYNTHETIC_OLD_SIGNATURE`;
+const newSignature = `${artifact.split("?")[0]}?X-Amz-Date=SYNTHETIC_NEW_DATE&X-Amz-Expires=604800&X-Amz-Signature=SYNTHETIC_NEW_SIGNATURE`;
 const nestedArtifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/nested.txt?synthetic=true`;
 const video = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/video.mp4`;
 const replayCapability = "SYNTHETIC_REPLAY_ROOM.SYNTHETIC_R1_R2_WINDOW_CANARY_NOT_A_REAL_KEY";
@@ -110,7 +112,7 @@ function provider(options: {
       if (url.endsWith("/consolelogs")) return new Response("No messages were logged", { headers: { "content-type": "text/plain" } });
       return options.xmlLogs ? new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404, headers: { "content-type": "application/xml" } }) : new Response("absent", { status: 404 });
     }
-    if (url === artifact) {
+    if (url === artifact || (options.additionalArtifacts?.includes(url) && url.split("?")[0] === artifact.split("?")[0])) {
       if (deleted && options.postDeleteArtifactReply !== undefined) return retainedReply(options.postDeleteArtifactReply);
       if (!deleted && options.artifactReply !== undefined) return retainedReply(options.artifactReply);
       if ((!deleted && options.initiallyAbsent) || signedAbsent || (deleted && (!options.lingering ||
@@ -144,7 +146,7 @@ function provider(options: {
 }
 
 /** Real qualification scanner/checkpoints, with only the vendor/device/host effects replaced. */
-function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progress?: unknown; crashOnIncident?: boolean; interruptRemoval?: boolean } = {}) {
+function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progress?: unknown; crashOnIncident?: boolean; crashOnArtifactUrl?: string; interruptRemoval?: boolean } = {}) {
   let published = options.progress !== undefined, crashed = false;
   const checkpoints: Record<string, unknown>[] = [];
   const errors: string[] = [];
@@ -209,6 +211,11 @@ function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progres
       if (options.crashOnIncident && parseDeviceCloudProgress(progress).resources?.some(resource => resource.incident)) {
         crashed = true;
         throw new Error("synthetic crash after incident checkpoint");
+      }
+      if (options.crashOnArtifactUrl !== undefined && parseDeviceCloudProgress(progress).resources?.some(resource =>
+        resource.artifacts?.some(artifact => artifact.url === options.crashOnArtifactUrl))) {
+        crashed = true;
+        throw new Error("synthetic crash after refreshed-signature checkpoint");
       }
     },
   };
@@ -409,9 +416,12 @@ test.skipIf(process.platform !== "darwin")("real process ownership finds and sto
 describe("BrowserStack allocation attestation", () => {
   const ipad = { capabilities: { platformName: "iOS", browserName: "safari", deviceName: "iPad 10th" }, browser: { family: "ipad", browser: "safari", browserVersion: "27.0", os: "27.0", model: "" }, vendorRecord: { device: "iPad 10th", os: "ios", osVersion: "27.0", browser: "ipad" } } as const;
   const samsung = { capabilities: { platformName: "Android", browserName: "chrome", deviceName: "synthetic-serial" }, browser: { family: "android", browser: "chrome", browserVersion: "152.0.7977.54", os: "16.0.0", model: "SM-S942B" }, vendorRecord: { device: "Samsung Galaxy S26", os: "android", osVersion: "16.0", browser: "chrome_android" } } as const;
-  test("records exact browser-reported versions and canonical allocated models", () => {
+  test.each(["SM-S942B", "SM-S942U1"])("records exact browser-reported versions and canonical allocated model %s", model => {
     expect(attestAllocation("browserstack", "ipad", { name: "iPad 10th", version: "27" }, ipad)).toEqual({ device: "iPad (10th generation)", os: "27.0", browser: "safari", browserVersion: "27.0" });
-    expect(attestAllocation("browserstack", "android", { name: "Samsung Galaxy S26", version: "16.0" }, samsung)).toEqual({ device: "Galaxy S26", model: "SM-S942B", os: "16.0.0", browser: "chrome", browserVersion: "152.0.7977.54" });
+    expect(attestAllocation("browserstack", "android", { name: "Samsung Galaxy S26", version: "16.0" }, { ...samsung, browser: { ...samsung.browser, model } })).toEqual({ device: "Galaxy S26", model, os: "16.0.0", browser: "chrome", browserVersion: "152.0.7977.54" });
+    expect(() => attestAllocation("browserstack", "android", { name: "Samsung Galaxy S25", version: "16.0" }, {
+      ...samsung, browser: { ...samsung.browser, model }, vendorRecord: { ...samsung.vendorRecord, device: "Samsung Galaxy S25" },
+    })).toThrow("canonical model");
   });
   test("refuses iPhone, wrong OEM/model/OS/browser and uncorroborated allocation", () => {
     expect(() => attestAllocation("browserstack", "iphone", { name: "iPhone 17", version: "26" }, ipad)).toThrow();
@@ -499,6 +509,8 @@ describe("BrowserStack complete retention and deletion", () => {
     const lane = auditedAttempt(fixture);
     const error = await lane.attempt.catch((error: unknown) => error);
     expect(errorMessages(error)).toContain("cloud test records contain a live View or Control link");
+    expect(errorMessages(error)).toContain("BrowserStack record removed under a retained-record incident");
+    expect(errorMessages(error)).not.toContain("BrowserStack record removal could not be verified");
     expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(2);
     const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
     expect(progress.results.audit).toMatchObject({ recordsExposingLinks: 1 });
@@ -506,6 +518,83 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
   });
   const lateMetadata = JSON.stringify({ automation_session: { ...record, insights: { reference: nestedArtifact } } });
+  const signedMetadata = (url: string) => JSON.stringify({ automation_session: { ...record, browser_console_logs_url: url } });
+  test("re-signing an audited object checkpoints and polls the newest URL without an incident", async () => {
+    const fixture = provider({
+      raw: signedMetadata(oldSignature), preDeleteSessionRaw: signedMetadata(newSignature),
+      additionalArtifacts: [oldSignature, newSignature], lingering: true, disappearsAfter: 2,
+    });
+    await fixture.audit();
+    expect(fixture.removal.artifacts.filter(artifact => artifact.kind === "text")).toEqual([{ url: oldSignature, buildId: build, kind: "text" }]);
+    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    expect(fixture.removal.artifacts.filter(artifact => artifact.kind === "text")).toEqual([{ url: newSignature, buildId: build, kind: "text" }]);
+    expect(fixture.incidents).toEqual([]);
+    expect(fixture.calls.filter(call => call.url === oldSignature)).toHaveLength(1);
+    expect(fixture.calls.filter(call => call.url === newSignature)).toHaveLength(3);
+    expect(fixture.clock.now()).toBe(4_000);
+    expect((await fetch(oldSignature)).status).toBe(404);
+    expect((await fetch(newSignature)).status).toBe(404);
+  });
+  async function signatureCheckpoint() {
+    const fixture = provider({
+      raw: signedMetadata(oldSignature), preDeleteSessionRaw: signedMetadata(newSignature),
+      additionalArtifacts: [oldSignature, newSignature],
+    });
+    const crashed = auditedAttempt(fixture, { crashOnArtifactUrl: newSignature });
+    await expect(crashed.attempt).rejects.toThrow();
+    const progress = structuredClone(crashed.checkpoints.at(-1));
+    const resource = parseDeviceCloudProgress(progress).resources?.find(resource => resource.vendor === "browserstack");
+    expect(resource).toMatchObject({ audited: true, recordRemoved: false });
+    expect(resource?.incident).not.toBe(true);
+    expect(resource?.artifacts?.filter(artifact => artifact.kind === "text")).toEqual([{ url: newSignature, buildId: build, kind: "text" }]);
+    expect(fixture.calls.some(call => call.method === "DELETE")).toBe(false);
+    restore?.();
+    return progress;
+  }
+  test("fresh cleanup uses the last checkpointed signature after a crash before DELETE", async () => {
+    const progress = await signatureCheckpoint();
+    const fresh = provider({ raw: signedMetadata(newSignature), additionalArtifacts: [oldSignature, newSignature], lingering: true, disappearsAfter: 2 });
+    const recovery = auditedAttempt(fresh, { progress });
+    await expect(recovery.attempt).resolves.toMatchObject({ restored: true });
+    expect(fresh.calls.some(call => call.url === oldSignature)).toBe(false);
+    expect(fresh.calls.filter(call => call.url === newSignature)).toHaveLength(4);
+    expect(fresh.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    const resource = parseDeviceCloudProgress(recovery.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack");
+    expect(resource).toMatchObject({ recordDeleted: true, recordRemoved: true, artifacts: [] });
+    expect(resource?.incident).not.toBe(true);
+  });
+  test("loading older URL-based inventories keeps the last signature and every historical incident", async () => {
+    const progress = parseDeviceCloudProgress(await signatureCheckpoint());
+    const resource = progress.resources!.find(resource => resource.vendor === "browserstack")!;
+    resource.artifacts = [{ url: oldSignature, buildId: build, kind: "text" }, ...resource.artifacts!];
+    resource.incident = true;
+    const legacy = structuredClone(progress);
+    const normalized = parseDeviceCloudProgress(structuredClone(legacy)).resources!.find(resource => resource.vendor === "browserstack")!;
+    expect(normalized.incident).toBe(true);
+    expect(normalized.artifacts?.filter(artifact => artifact.kind === "text")).toEqual([{ url: newSignature, buildId: build, kind: "text" }]);
+    for (const field of ["kind", "buildId"] as const) {
+      const conflict = structuredClone(legacy);
+      const owned = conflict.resources!.find(resource => resource.vendor === "browserstack")!;
+      owned.artifacts = owned.artifacts!.map(artifact => artifact.url !== newSignature ? artifact
+        : field === "kind" ? { ...artifact, kind: "media" } : { ...artifact, buildId: "c".repeat(40) });
+      expect(() => parseDeviceCloudProgress(conflict)).toThrow("BrowserStack artifact identity changed");
+    }
+    const fresh = provider({ raw: signedMetadata(newSignature), additionalArtifacts: [oldSignature, newSignature] });
+    const recovery = auditedAttempt(fresh, { progress: legacy });
+    await expect(recovery.attempt).rejects.toThrow("incident");
+    expect(fresh.calls.some(call => call.url === oldSignature)).toBe(false);
+    expect(parseDeviceCloudProgress(recovery.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true, artifacts: [] });
+  });
+  test("discovery dedupes signatures without weakening classification or build identity", () => {
+    expect(browserStackReferences(id, build, { reason: [oldSignature, newSignature] }).artifacts)
+      .toEqual([{ url: newSignature, buildId: build, kind: "text" }]);
+    expect(() => browserStackReferences(id, build, { reason: oldSignature, insights: { screenshot: newSignature } })).toThrow("classification changed");
+    for (const changed of [{ url: newSignature, buildId: build, kind: "media" }, { url: newSignature, buildId: "c".repeat(40), kind: "text" }] as const) {
+      const inventory: CloudArtifact[] = [{ url: oldSignature, buildId: build, kind: "text" }];
+      expect(() => mergeBrowserStackArtifacts(id, inventory, [changed])).toThrow("BrowserStack artifact identity changed");
+    }
+  });
   const lateBody = JSON.stringify({ reference: nestedArtifact });
   function lateReference(surface: string): NonNullable<Parameters<typeof provider>[0]> {
     if (surface === "pre-delete") return { preDeleteSessionRaw: lateMetadata };
@@ -1182,6 +1271,31 @@ describe("BrowserStack complete retention and deletion", () => {
   ])("failed-command media is not limited to familiar screenshot URLs: %j", async log => {
     const fixture = provider({ log: JSON.stringify(log), logType: "application/json" });
     expect((await fixture.audit())?.screenshots).toBe(1);
+  });
+  test.each([
+    [{ takesScreenshot: true }, false],
+    [{ video: "false" }, false],
+    [{ disableAutomaticScreenshots: true }, false],
+    [{ screenshot: "data:image/png;base64,SYNTHETIC_TEXT_IMAGE" }, true],
+    [{ video: "https://media.invalid/SYNTHETIC_TEXT_VIDEO.mp4" }, true],
+    [{ screenshot: "iVBORw0KGgoSYNTHETIC_TEXT_PNG" }, true],
+    [{ screenshot: "/9j/SYNTHETIC_TEXT_JPEG" }, true],
+    [{ screenshot: "R0lGODSYNTHETIC_TEXT_GIF" }, true],
+    [{ screenshot: "UklGRSYNTHETIC_TEXT_WEBP" }, true],
+    [{ screen: "https://media.invalid/SYNTHETIC_OPAQUE_IMAGE" }, true],
+    [{ unrelated: "https://media.invalid/SYNTHETIC_TEXT_VIDEO.mp4?synthetic=true" }, true],
+  ] as const)("text-log media requires a media-valued JSON string, not capability flags: %j", async (log, media) => {
+    const fixture = provider({ log: JSON.stringify(log) });
+    const lane = auditedAttempt(fixture);
+    if (media) {
+      const error = await lane.attempt.catch((error: unknown) => error);
+      expect(errorMessages(error)).toContain("kept video or screenshots for 1 of 3 sessions");
+      expect(errorMessages(error)).toContain("BrowserStack record removed under a retained-record incident");
+      expect(errorMessages(error)).not.toContain("BrowserStack record removal could not be verified");
+    } else await expect(lane.attempt).resolves.toMatchObject({ audit: { recordsWithMedia: 0 } });
+    const resource = parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack");
+    expect(resource?.incident === true).toBe(media);
+    expect(resource?.recordRemoved).toBe(true);
   });
   test("an unreviewed HTTP media URL fails closed", async () => {
     const fixture = provider({ log: JSON.stringify({ value: { screen: "https://media.example/opaque.webm" } }), logType: "application/json" });

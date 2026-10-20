@@ -36,7 +36,7 @@ describe("pinned cloud pools", () => {
     expect(DEVICE_CLOUD_PROFILES.ipad.models).toEqual(["iPad (9th generation)"]);
     expect(DEVICE_CLOUD_PROFILES.android.models).toEqual(["Galaxy S26", "Galaxy S25", "Galaxy S24", "Galaxy A55"]);
     expect(DEVICE_CLOUD_TARGETS.map(target => DEVICE_CLOUD_PROFILES[target].minimumOsMajor)).toEqual([26, 26, 14]);
-    expect(SAMSUNG_MODEL_CODES).toEqual({ "Galaxy S24": ["SM-S921B"], "Galaxy S25": ["SM-S931B"], "Galaxy S26": ["SM-S942B"] });
+    expect(SAMSUNG_MODEL_CODES).toEqual({ "Galaxy S24": ["SM-S921B"], "Galaxy S25": ["SM-S931B"], "Galaxy S26": ["SM-S942B", "SM-S942U1"] });
     for (const target of DEVICE_CLOUD_TARGETS) {
       const profile = DEVICE_CLOUD_PROFILES[target];
       for (const name of profile.models.filter(name => !profile.disabledModels.includes(name))) {

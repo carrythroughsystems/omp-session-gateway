@@ -570,7 +570,7 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   persist an incident and fail closed, never queue volatile references for later discovery.
   Clean later metadata still permits deletion and absence checks, but cannot clear that incident;
   fresh cleanup after a crash also remains blocked until operator incident handling.
-  Any exact artifact URL first declared after the audit, including pre-DELETE reads, atomically
+  Any artifact object (origin plus pathname) first declared after the audit, including pre-DELETE reads, atomically
   checkpoints its inventory and a `post-audit retained reference` incident while deletion/absence
   verification continues without late auditing; keys use the value media classifier and any
   case-insensitive `data:` or media-pattern key fails closed.
@@ -582,8 +582,12 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   while XML/text artifact errors remain raw-scanned and hostname-censused rather than JSON-parsed
   unless declared JSON, preserving clean 404 and the reviewed media-403 absence evidence.
   DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
-  signed artifact** are required before removal/restoration, including references returning 404 at
+  artifact object** are required before removal/restoration, including references returning 404 at
   the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.
+  Text-log media keys require `http(s):`, `data:` or a reviewed base64 image prefix in a string value,
+  re-signed storage objects retain origin/path identity and the latest private URL without clearing
+  incidents, and installed-shell timeouts and completed incident removals use closed-code,
+  stage-accurate diagnostics rather than page strings.
   No lingering-clean-text exception remains. Any already-audited artifact that starts serving
   content is inspected again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
   Signed references persist only in private 0600 recovery progress (inside its 0700 directory),
