@@ -489,7 +489,11 @@ async function auditRecords(
         return record?.complete === true ? record : undefined;
       }, RECORD_FINALIZATION_MS);
       records.push({ resource, record });
-    } catch {
+    } catch (error) {
+      if (resource.vendor === "browserstack" && (error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError)) {
+        resource.incident = true;
+        await save();
+      }
       failures.push(new Error("a device-cloud retained record could not be audited"));
     }
   }

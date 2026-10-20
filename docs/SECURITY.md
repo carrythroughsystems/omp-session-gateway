@@ -547,19 +547,24 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   Media detection rejects nonempty screenshot/video/visual fields, including opaque failed-command
   screenshot payloads, not just familiar media URLs. Only null, false, empty-string and empty-list
   markers are treated as disabled; the documented disabled-video URL is fetched separately.
-  Discovery extracts every `http://` or `https://` token from every string at any depth in the
-  complete strictly parsed JSON, including nested `logs`, `insights`, arrays and later responses.
-  Schemes are case-insensitive; whitespace, quotes, angle brackets, backslash or end terminate a
-  token. A pinned artifact-storage hostname outside an extracted URL token (a scheme-less
-  reference) fails closed. `browserstack-pins.json` defines disjoint origin sets:
+  Only an entire JSON string value that is one well-formed absolute HTTP(S) URL is a reference:
+  one case-insensitive `://`, its hostname appearing exactly once, and no comma.
+  Keys are never references; any key or non-reference value containing `://` or a pinned artifact
+  or dashboard hostname, case-insensitively, fails closed rather than extracting or repairing URLs.
+  Before accepting any retained JSON body, a census independently counts every pinned hostname in
+  raw text and strict canonical JSON; each count must equal its accepted reference occurrences,
+  including duplicates, or fail with `unaccounted BrowserStack artifact reference`.
+  `browserstack-pins.json` defines disjoint origin sets:
   reviewed API/S3 artifact-storage origins are fetched, scanned, privately inventoried and
   absence-verified; only entire top-level `browser_url`/`public_url` strings on the pinned dashboard
   origin (`automate.browserstack.com`) are presentation references, counted but never fetched/followed.
   Their contents are the already-audited session record, whose API deletion proves removal.
   Any other origin anywhere, or a dashboard-host URL embedded in longer text or in another field,
   fails closed. Duplicate references retain the same inventory and media-classification checks.
-  Tokens containing a comma or a second HTTP(S) scheme fail as ambiguous, and references seen before
-  build identification remain pending for validation/inventory or fail closed if no build is obtained.
+  A reference received before finalized build identification is an `unbound retained reference`:
+  persist an incident and fail closed, never queue volatile references for later discovery.
+  Clean later metadata still permits deletion and absence checks, but cannot clear that incident;
+  fresh cleanup after a crash also remains blocked until operator incident handling.
   DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
   signed artifact** are required before removal/restoration, including references returning 404 at
   the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.

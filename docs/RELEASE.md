@@ -770,13 +770,16 @@ A crash-era saved clean flag cannot authorize lingering signed URLs: normal and 
 cleanup both require disappearance within the three-minute absence bound. A delayed artifact is
 fetched and scanned if it starts serving content. Exhaustion leaves `recordRemoved` false and
 cleanup dirty; retry through `deviceCloudCleanup`, retaining the original progress.
-Discovery extracts every case-insensitive `http://`/`https://` token from every JSON string at any
-depth, including URLs embedded in longer `reason`/`insights` text. Pinned artifact-storage hostnames
-not covered by an extracted URL token (scheme-less references) fail closed. The dashboard exemption
-still requires the entire top-level `browser_url`/`public_url` string to be a pinned dashboard URL;
-embedded dashboard URLs and unknown origins fail closed. Duplicate/classification checks still apply.
-Comma/second-scheme tokens fail as ambiguous, and early references remain pending until the build
-identity permits validation/inventory or fail closed if that identity is never obtained.
+Only a whole JSON string value containing one well-formed absolute HTTP(S) URL is a reference:
+one case-insensitive `://`, its hostname exactly once, and no comma; keys are never references.
+Any other key/value containing `://` or a pinned artifact/dashboard hostname fails closed.
+Every retained JSON body must pass independent raw/canonical hostname censuses whose counts equal
+accepted reference occurrences, including duplicates; mismatches are `unaccounted BrowserStack
+artifact reference` failures, not permission to guess delimiters or decode nested URLs.
+Only entire top-level `browser_url`/`public_url` values retain the pinned-dashboard exemption.
+A pre-build/pre-finalization reference persists an `unbound retained reference` incident and fails
+closed immediately, with no volatile pending list; later clean metadata permits deletion and
+absence checks but neither normal nor fresh crash cleanup clears the incident or authorizes restoration.
 The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
 deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
 from every retained surface, before or after the audit and whatever their HTTP status, are scanned

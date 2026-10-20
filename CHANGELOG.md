@@ -27,14 +27,15 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Persist signed artifact inventories only in private recovery progress, require every artifact
   absent before restoration, and re-audit crash cleanup or count unaudited deletions explicitly.
   Detect opaque failed-command media and canonicalize Local ownership through symlinked paths.
-  Extract every HTTP(S) token at any JSON depth, including embedded URLs, with pinned
-  artifact/dashboard classifications; fail closed on scheme-less pinned storage hosts and
-  embedded dashboard URLs. Scan every non-media retained-surface body before rejection,
+  Accept references only as whole HTTP(S) string values with one scheme/hostname occurrence and
+  no comma; reject reference-like keys or other values, retaining the exact dashboard exemption.
+  Require each pinned hostname's raw and canonical JSON census to equal accepted reference counts.
+  Persist an incident for any unbound pre-build reference instead of retaining volatile pending
+  references; deletion/absence checks still proceed, but fresh cleanup cannot clear the incident.
+  Scan every non-media retained-surface body before rejection,
   whatever its status, including pre/post-audit errors and transient GET-retry bodies, and persist
   capability hits as incidents. Preserve monotonic cleanup stages and recovery dependencies on
   release failure.
-  Reject ambiguous comma/second-scheme tokens and retain early references for build-bound
-  validation/inventory, failing closed if pending references never acquire a build identity.
   Identify retitled Local descendants by PID/birth lineage, not argv; prepare before owning a tunnel.
   Keep signed-log expiry limits explicit and refuse the fallback entitlement from 2027-10-20
   without a reviewed renewal. Public-page development probes do not qualify a release.

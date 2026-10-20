@@ -1289,15 +1289,18 @@ persist only in private 0600 recovery progress until verified absent; public evi
 no URLs. Fresh cleanup re-audits against unchanged session generations, or deletes for confidentiality
 while explicitly counting `unauditedRecordsDeleted` if links cannot be reconstructed. Link/media
 hits and unverifiable required surfaces remain incidents even after deletion. Unverified cleanup
-blocks the Pixel lease. Discovery extracts every case-insensitive `http://`/`https://` token from
-every JSON string at any depth, including longer strings containing embedded references. Pinned
-storage origins are artifacts; a pinned storage hostname outside any extracted URL token
-(a scheme-less reference) fails closed. Only an entire top-level `browser_url`/`public_url` string
-on the separately pinned dashboard origin is a count-only presentation of the API record.
-Other origins, embedded dashboard URLs or other dashboard-field uses fail closed; duplicate and
-media-classification checks remain unchanged. Audit/deletion/absence milestones never regress.
-Comma/second-scheme tokens are ambiguous and fail closed; early references remain pending for build-bound
-validation/inventory, and an operation ending without that build identity fails closed.
+blocks the Pixel lease. Only whole JSON string values that are well-formed absolute HTTP(S) URLs
+are references: one case-insensitive `://`, their hostname exactly once, and no comma.
+Keys are never references; any other key/value containing `://` or a pinned artifact/dashboard
+hostname fails closed. Every retained JSON body must pass a census: each pinned hostname's raw
+and canonical counts independently equal its accepted reference occurrences, including duplicates,
+or fail with `unaccounted BrowserStack artifact reference`. No delimiter extraction, repair or
+pending-reference list remains. Only entire top-level `browser_url`/`public_url` values on the
+pinned dashboard origin remain count-only presentations; other origins/placements fail closed.
+A reference before finalized build identification persists an `unbound retained reference`
+incident immediately: deletion and absence checks still proceed from later clean metadata, but
+restoration stays blocked after a crash or successful deletion until operator incident handling.
+Duplicate/media-classification checks and monotonic audit/deletion/absence milestones remain.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
 Rejected DELETE and signed-artifact bodies and transient 5xx bodies before GET retry are included;

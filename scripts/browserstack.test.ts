@@ -6,7 +6,7 @@ import {
   BrowserStackApi, BrowserStackAuditFailure, BROWSERSTACK_LOCAL, browserStackCapabilities, browserStackEntitlement, browserStackLocalArguments, browserStackReferences,
   browserStackModel, canonicalBrowserStackLocalIdentity, ownedLocalProcesses, prepareBrowserStackLocal, readBrowserStackCredentials, stopBrowserStackLocal,
 } from "./browserstack.ts";
-import { attestAllocation, parseDeviceCloudProgress, runDeviceCloud, type DeviceCloudRuntime } from "./device-cloud-qualification.ts";
+import { attestAllocation, cleanupDeviceCloud, parseDeviceCloudProgress, runDeviceCloud, type DeviceCloudLaneInput, type DeviceCloudRuntime } from "./device-cloud-qualification.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { requireLoopbackListeners } from "./device-cloud-common.ts";
 import type { CloudArtifact, CloudRecordRemoval, TestRecord } from "./device-cloud-common.ts";
@@ -113,8 +113,8 @@ function provider(options: {
 }
 
 /** Real qualification scanner/checkpoints, with only the vendor/device/host effects replaced. */
-function auditedAttempt(fixture: ReturnType<typeof provider>) {
-  let published = false;
+function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progress?: unknown; crashOnIncident?: boolean } = {}) {
+  let published = options.progress !== undefined, crashed = false;
   const checkpoints: Record<string, unknown>[] = [];
   const errors: string[] = [];
   const session = (kind: "fixture" | "live"): SessionMetadata => ({
@@ -145,26 +145,36 @@ function auditedAttempt(fixture: ReturnType<typeof provider>) {
       return { vendor: vendor === "browserstack" ? "BrowserStack" : "TestingBot", tunnelVersion: vendor === "browserstack" ? "8.9" : "4.9" };
     },
     endSession: async () => {},
-    record: async (reference, remember, inspect) => reference.vendor === "browserstack"
-      ? capture(() => fixture.api.testRecord(id, remember, scan(inspect)))
-      : { complete: true, text: "synthetic clean record", video: false, screenshots: 0 },
+    record: async (reference, remember, inspect) => {
+      if (crashed) throw new Error("synthetic process lost before build discovery");
+      return reference.vendor === "browserstack" ? capture(() => fixture.api.testRecord(id, remember, scan(inspect)))
+        : { complete: true, text: "synthetic clean record", video: false, screenshots: 0 };
+    },
     removeRecord: async (reference, removal) => {
+      if (crashed) throw new Error("synthetic process lost before build discovery");
       if (reference.vendor === "browserstack") await capture(() => fixture.api.deleteRecord(id, { ...removal, inspect: scan(removal.inspect) }, fixture.clock));
     },
     launch: async () => replayCapability,
     removeWorkspace: async () => {},
   };
-  const attempt = runDeviceCloud({
+  const input: DeviceCloudLaneInput = {
     identity: {
       tag: "v0.7.0-prealpha.1",
       candidate: { tag: "v0.7.0-prealpha.1", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64), archivePath: "/synthetic/archive.tar" },
       omp: { bunVersion: "1.4.0", sourceCommit: "c".repeat(40), sourceTree: "d".repeat(40), version: "18.1.20", nativeTarballSha256: "e".repeat(64), nativeBinarySha256: "f".repeat(64) },
       origin: "https://synthetic-replay.example",
     },
-    sessionLabel: "omp-stable-live", progress: undefined, runtime,
+    sessionLabel: "omp-stable-live", progress: options.progress, runtime,
     pixel: async (_owner, action) => action(),
-    checkpoint: async progress => { checkpoints.push(structuredClone(progress)); },
-  });
+    checkpoint: async (progress: Record<string, unknown>) => {
+      checkpoints.push(structuredClone(progress));
+      if (options.crashOnIncident && parseDeviceCloudProgress(progress).resources?.some(resource => resource.incident)) {
+        crashed = true;
+        throw new Error("synthetic crash after incident checkpoint");
+      }
+    },
+  };
+  const attempt = options.progress === undefined ? runDeviceCloud(input) : cleanupDeviceCloud(input);
   return { attempt, checkpoints, errors };
 }
 
@@ -421,7 +431,7 @@ describe("BrowserStack complete retention and deletion", () => {
     expect([...source.matchAll(/\bparseRetainedVendorJson\s*\(/gu)]).toHaveLength(6);
     expect(source).not.toMatch(/\.command\.includes\("BrowserStackLocal"\)/u);
   });
-  const placements: [string, (value: string) => unknown][] = [];
+  const placements: [string, (value: unknown) => unknown][] = [];
   for (const field of ["logs", "insights", "reason"]) for (let depth = 0; depth < 6; depth++) {
     placements.push([`${field}/${depth}`, value => {
       let nested: unknown = value;
@@ -442,17 +452,9 @@ describe("BrowserStack complete retention and deletion", () => {
       restore?.();
     }
   });
-  test.each(placements)("class invariant: embedded storage URL at %s is fetched and absence-checked", async (_name, place) => {
-    const fixture = provider({ raw: JSON.stringify({ automation_session: place(`See "${nestedArtifact}" for the log`) }) });
-    await fixture.audit();
-    expect(fixture.removal.artifacts.filter(item => item.url === nestedArtifact)).toHaveLength(1);
-    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
-    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
-    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(2);
-  });
-  test("an embedded signed log's interior capability window is an audit hit and a persisted incident", async () => {
+  test("a whole-value signed log's interior capability window is an audit hit and a persisted incident", async () => {
     const fixture = provider({
-      raw: JSON.stringify({ automation_session: { ...record, insights: [{ nested: { reason: `See ${nestedArtifact} for retained details` } }] } }),
+      raw: JSON.stringify({ automation_session: { ...record, insights: [{ nested: { reason: nestedArtifact } }] } }),
       nestedLog: `synthetic retained fragment ${replayWindow}`,
     });
     const lane = auditedAttempt(fixture);
@@ -464,26 +466,63 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(progress.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
     expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
   });
-  test.each([" ", "\n", "\t", '"', "'", "<", ">", "\\", ""])("HTTP token extraction honors a %j terminator and case-insensitive schemes", terminator => {
+  test("whole-value references accept case-insensitive schemes and preserve duplicate/classification checks", () => {
     const upper = nestedArtifact.replace("https:", "HtTpS:");
-    const value = `See ${upper}${terminator}${terminator === "" ? "" : "synthetic suffix"}`;
-    expect(browserStackReferences(id, build, { reason: [{ arbitrary: value }] }).artifacts).toEqual([{ url: upper, buildId: build, kind: "text" }]);
+    expect(browserStackReferences(id, build, { reason: [{ arbitrary: upper }] }).artifacts).toEqual([{ url: upper, buildId: build, kind: "text" }]);
+    expect(browserStackReferences(id, build, { reason: [artifact, nestedArtifact, artifact] }).artifacts.map(item => item.url)).toEqual([artifact, nestedArtifact]);
+    expect(() => browserStackReferences(id, build, { reason: artifact, insights: { screenshot: artifact } })).toThrow("classification changed");
+    expect(() => browserStackReferences(id, build, { reason: `http://${new URL(artifact).hostname}/${id}/log` })).toThrow(BrowserStackAuditFailure);
   });
-  test("every token is classified, with duplicate and media-classification checks unchanged", () => {
-    expect(browserStackReferences(id, build, { reason: `See ${artifact} and ${nestedArtifact} and ${artifact}` }).artifacts.map(item => item.url)).toEqual([artifact, nestedArtifact]);
-    expect(() => browserStackReferences(id, build, { reason: `See ${artifact}`, insights: { screenshot: `See ${artifact}` } })).toThrow("classification changed");
-    expect(() => browserStackReferences(id, build, { reason: `See ${artifact} and https://unreviewed.example/${id}/log` })).toThrow(BrowserStackAuditFailure);
-    expect(() => browserStackReferences(id, build, { reason: `See http://${new URL(artifact).hostname}/${id}/log` })).toThrow(BrowserStackAuditFailure);
+  test.each(placements)("census invariant: every unaccounted key/value reference at %s fails closed", async (_name, place) => {
+    for (const origin of [...pins.artifactOrigins, ...pins.dashboardOrigins]) {
+      const host = new URL(origin).hostname, url = `${origin}/${id}/nested.txt`;
+      const variants: unknown[] = [
+        { [host]: "synthetic key" }, { [url]: "synthetic URL key" },
+        `(${url})`, `${url},${url}`, `${url}${url}`, `${url};${url}`,
+        host, `${url}?nested=${encodeURIComponent(url)}`, `${url}?host=${host}`, `See ${url} for details`,
+        `${url}?nested=${encodeURIComponent(`${[...pins.artifactOrigins, ...pins.dashboardOrigins].find(other => other !== origin)!}/${id}/other.txt`)}`,
+      ];
+      for (const value of variants) {
+        const fixture = provider({ raw: JSON.stringify({ automation_session: place(value) }) });
+        await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+        expect(fixture.calls).toHaveLength(1);
+        restore?.();
+      }
+      const raw = JSON.stringify({ automation_session: place(url) }).replaceAll(host, host.replaceAll(".", "\\u002e"));
+      const fixture = provider({ raw });
+      await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+      expect(fixture.calls).toHaveLength(1);
+      restore?.();
+    }
   });
-  test.each([",", "", ";"])("comma/scheme/semicolon-joined artifact references fail closed (separator=%j)", async separator => {
-    const joined = `${artifact}${separator}${nestedArtifact.replace("https:", "hTtPs:")}`;
-    expect(() => browserStackReferences(id, build, { insights: [{ reason: `See ${joined}` }] })).toThrow("ambiguous BrowserStack artifact reference");
-    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, reason: joined } }) });
-    await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
-    expect(fixture.calls).toHaveLength(1);
+  test("raw and canonical host censuses independently equal accepted reference occurrences", async () => {
+    const value = { reason: [artifact, artifact] };
+    expect(browserStackReferences(id, build, value).artifacts).toHaveLength(1);
+    for (const raw of [JSON.stringify({ reason: artifact }), JSON.stringify({ reason: [artifact, artifact, artifact] })]) {
+      expect(() => browserStackReferences(id, build, value, false, raw)).toThrow("unaccounted BrowserStack artifact reference");
+    }
+    expect(() => browserStackReferences(id, build, { reason: `${artifact}&nested=${encodeURIComponent(`https://api.browserstack.com/${id}/other.txt`)}` })).toThrow("unaccounted BrowserStack artifact reference");
+    const fixture = provider({ raw: JSON.stringify({ automation_session: record }).replaceAll("/", "\\/") });
+    expect((await fixture.audit())?.complete).toBe(true);
   });
-  test.each([`${artifact},synthetic-tail`, `${artifact}&related=${nestedArtifact}`])("a comma or another scheme anywhere in one HTTP token is ambiguous: %s", value => {
-    expect(() => browserStackReferences(id, build, { reason: value })).toThrow("ambiguous BrowserStack artifact reference");
+  test.each(["session", "log", "artifact", "delete", "post-session", "post-log", "post-artifact", "retry"])("every retained %s JSON body enforces the census", async surface => {
+    const json = { [new URL(artifact).hostname]: "synthetic unaccounted key" };
+    const raw = JSON.stringify(json), metadata = JSON.stringify({ automation_session: { ...record, insights: json } });
+    const reply = { text: raw, status: 200, type: "application/json" };
+    const options: NonNullable<Parameters<typeof provider>[0]> = {};
+    if (surface === "session") options.raw = metadata;
+    if (surface === "log") options.logReply = reply;
+    if (surface === "artifact") options.artifactReply = reply;
+    if (surface === "delete") options.deleteReply = { ...reply, text: JSON.stringify({ status: "ok", ...json }) };
+    if (surface === "post-session") options.postDeleteSessionRaw = metadata;
+    if (surface === "post-log") options.postDeleteLog = raw;
+    if (surface === "post-artifact") options.postDeleteArtifactReply = reply;
+    if (surface === "retry") options.retry = { surface: "session", reply: { ...reply, status: 502 } };
+    const fixture = provider(options);
+    if (surface === "delete" || surface.startsWith("post-")) {
+      await fixture.audit();
+      await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow("unaccounted BrowserStack artifact reference");
+    } else await expect(fixture.audit()).rejects.toThrow("unaccounted BrowserStack artifact reference");
   });
   test.each(placements)("class invariant: unreviewed origin anywhere at %s fails closed", async (_name, place) => {
     const fixture = provider({ raw: JSON.stringify({ automation_session: place(`https://unreviewed.example/${id}/opaque`) }) });
@@ -506,7 +545,7 @@ describe("BrowserStack complete retention and deletion", () => {
         `See ${new URL(origin).hostname}/${id}/log and ${artifact}`,
       ]) {
         const fixture = provider({ raw: JSON.stringify({ automation_session: place(value) }) });
-        await expect(fixture.audit()).rejects.toThrow("no HTTP scheme");
+        await expect(fixture.audit()).rejects.toThrow("unaccounted BrowserStack artifact reference");
         expect(fixture.calls).toHaveLength(1);
         restore?.();
       }
@@ -553,8 +592,8 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(progress.cleanupRequired).toBe(true);
     expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
   });
-  test.each(["deleteReply", "postDeleteArtifactReply"] as const)("rejected JSON from %s is canonical-scanned and discovers embedded references", async option => {
-    const raw = JSON.stringify({ reason: replayWindow, insights: { log: `See ${nestedArtifact} for details` } })
+  test.each(["deleteReply", "postDeleteArtifactReply"] as const)("rejected JSON from %s is canonical-scanned and discovers whole-value references", async option => {
+    const raw = JSON.stringify({ reason: replayWindow, insights: { log: nestedArtifact } })
       .replace(replayWindow[0]!, `\\u${replayWindow.charCodeAt(0).toString(16).padStart(4, "0")}`);
     const fixture = provider({ [option]: { text: raw, status: 401, type: "application/json" } });
     await fixture.audit();
@@ -578,41 +617,47 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")?.incident).toBe(true);
     expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
   });
-  test("a session retry-only signed reference is inventoried after build discovery and its log persists an incident", async () => {
+  test("a 502 unbound reference persists an incident before clean metadata permits deletion", async () => {
     const fixture = provider({
       retry: { surface: "session", reply: {
-        text: JSON.stringify({ insights: [{ reason: `See ${nestedArtifact} for retained details` }] }),
+        text: JSON.stringify({ insights: [{ reason: nestedArtifact }] }),
         status: 502, type: "application/json",
       } },
-      nestedLog: `synthetic retry-only retained fragment ${replayWindow}`,
     });
     const lane = auditedAttempt(fixture);
     const error = await lane.attempt.catch((error: unknown) => error);
-    expect(errorMessages(error)).toContain("cloud test records contain a live View or Control link");
-    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(2);
-    expect(lane.checkpoints.some(checkpoint => parseDeviceCloudProgress(checkpoint).resources?.some(resource =>
-      resource.artifacts?.some(reference => reference.url === nestedArtifact && reference.buildId === build)))).toBe(true);
+    expect(errorMessages(error)).toContain("incident");
+    expect(lane.errors).toContain("unbound retained reference");
+    const incident = lane.checkpoints.find(checkpoint => parseDeviceCloudProgress(checkpoint).resources?.some(resource => resource.incident));
+    expect(parseDeviceCloudProgress(incident).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, audited: false, recordRemoved: false });
+    expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(fixture.calls.filter(call => call.url === artifact)).toHaveLength(2);
+    expect(fixture.calls.some(call => call.url === nestedArtifact)).toBe(false);
     const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
-    expect(progress.results.audit).toMatchObject({ recordsExposingLinks: 1 });
     expect(progress.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
-    expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
+    expect(progress.cleanupRequired).toBe(true);
+    expect(JSON.stringify(lane.checkpoints)).not.toContain(nestedArtifact);
   });
-  test("pending retry references fail closed if the final session read has no build identity", async () => {
+  test("a crash before build discovery leaves a durable incident that fresh cleanup cannot erase", async () => {
     const fixture = provider({
       retry: { surface: "session", reply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 502, type: "application/json" } },
-      sessionReply: { text: '{"error":"synthetic final rejection"}', status: 401, type: "application/json" },
     });
-    await expect(fixture.audit()).rejects.toThrow("pending artifact references have no build identity");
-    expect(fixture.calls).toHaveLength(2);
-    expect(fixture.calls.some(call => call.url === nestedArtifact)).toBe(false);
-  });
-  test.each([
-    `https://unreviewed.example/${id}/nested.txt`,
-    "https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/synthetic-unrelated/nested.txt",
-  ])("pending references receive the same origin and build-path validation: %s", async url => {
-    const fixture = provider({ retry: { surface: "session", reply: { text: JSON.stringify({ insights: { reason: url } }), status: 502, type: "application/json" } } });
-    await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
-    expect(fixture.calls).toHaveLength(2);
+    const crashed = auditedAttempt(fixture, { crashOnIncident: true });
+    await expect(crashed.attempt).rejects.toThrow();
+    expect(crashed.errors).toContain("unbound retained reference");
+    expect(fixture.calls).toHaveLength(1);
+    const progress = structuredClone(crashed.checkpoints.at(-1));
+    expect(parseDeviceCloudProgress(progress).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, audited: false, recordRemoved: false });
+    expect(JSON.stringify(progress)).not.toContain(nestedArtifact);
+    restore?.();
+    const fresh = provider();
+    const recovery = auditedAttempt(fresh, { progress });
+    await expect(recovery.attempt).rejects.toThrow("incident");
+    expect(fresh.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    const after = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
+    expect(after.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+    expect(after.cleanupRequired).toBe(true);
+    expect(fresh.calls.filter(call => call.url === artifact)).toHaveLength(2);
   });
   test.each(["running", "done"])("a %s session with references but no build identity fails closed", async status => {
     const { build_hashed_id: _build, ...withoutBuild } = record;
@@ -620,22 +665,22 @@ describe("BrowserStack complete retention and deletion", () => {
     await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
     expect(fixture.calls).toHaveLength(1);
   });
-  test.each(["audit", "cleanup"])("an absent %s session body with pending references fails closed instead of discarding them", async operation => {
+  test.each(["audit", "cleanup"])("an absent %s session body with unbound references fails closed", async operation => {
     const fixture = provider({ sessionReply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 404, type: "application/json" } });
     const result = operation === "audit" ? fixture.audit() : fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
-    await expect(result).rejects.toThrow("pending artifact references have no build identity");
+    await expect(result).rejects.toThrow("unbound retained reference");
     expect(fixture.calls).toHaveLength(1);
   });
-  test("fresh cleanup also inventories retry-only references once its build is reconstructed", async () => {
+  test("fresh cleanup refuses a pre-build reference rather than retaining it in volatile memory", async () => {
     const fixture = provider({ retry: { surface: "session", reply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 502, type: "application/json" } } });
-    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
-    expect(fixture.removal.artifacts).toContainEqual({ url: nestedArtifact, buildId: build, kind: "text" });
-    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
+    await expect(fixture.api.deleteRecord(id, fixture.removal, fixture.clock)).rejects.toThrow("unbound retained reference");
+    expect(fixture.removal.artifacts).toEqual([]);
+    expect(fixture.calls).toHaveLength(1);
   });
-  test("pre-finalization references with a known build are privately inventoried", async () => {
+  test("pre-finalization references are unbound even when running metadata reports a build", async () => {
     const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, status: "running", insights: { reason: nestedArtifact } } }) });
-    expect((await fixture.audit())?.complete).toBe(false);
-    expect(fixture.removal.artifacts).toContainEqual({ url: nestedArtifact, buildId: build, kind: "text" });
+    await expect(fixture.audit()).rejects.toThrow("unbound retained reference");
+    expect(fixture.removal.artifacts).toEqual([]);
   });
   test("pre-finalization without references or a build identity remains incomplete", async () => {
     const fixture = provider({ raw: JSON.stringify({ automation_session: { hashed_id: id, status: "running" } }) });
@@ -765,9 +810,13 @@ describe("BrowserStack complete retention and deletion", () => {
     const fixture = provider({ log: JSON.stringify(log), logType: "application/json" });
     expect((await fixture.audit())?.screenshots).toBe(1);
   });
-  test.each(["data:image/png;base64,synthetic", "https://media.example/opaque.webm"])("an unreviewed media URL fails closed: %s", async url => {
-    const fixture = provider({ log: JSON.stringify({ value: { screen: url } }), logType: "application/json" });
+  test("an unreviewed HTTP media URL fails closed", async () => {
+    const fixture = provider({ log: JSON.stringify({ value: { screen: "https://media.example/opaque.webm" } }), logType: "application/json" });
     await expect(fixture.audit()).rejects.toThrow("unreviewed");
+  });
+  test("opaque data-image content remains a retained-media audit hit, not a fetched reference", async () => {
+    const fixture = provider({ log: JSON.stringify({ value: { screen: "data:image/png;base64,synthetic" } }), logType: "application/json" });
+    expect((await fixture.audit())?.screenshots).toBe(1);
   });
   test.each([{ marker: null }, { marker: false }, { marker: "" }, { marker: [] }])("documented empty media markers are not retained content: %j", async ({ marker }) => {
     const fixture = provider({ log: JSON.stringify({ screenshot: marker, video: marker, visual: marker }), logType: "application/json" });
