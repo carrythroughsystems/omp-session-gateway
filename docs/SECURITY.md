@@ -554,6 +554,10 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   Before accepting any retained JSON body, a census independently counts every pinned hostname in
   raw text and strict canonical JSON; each count must equal its accepted reference occurrences,
   including duplicates, or fail with `unaccounted BrowserStack artifact reference`.
+  The census also covers canonical text percent-decoded to a fixpoint within four passes (malformed
+  escapes stay literal; excess depth fails closed), requires one decoded `://` per reference, and
+  restricts dashboard presentations to `[A-Za-z0-9_-]+` path segments and `[A-Za-z0-9_-]*` query
+  keys/values, without userinfo, ports or fragments.
   `browserstack-pins.json` defines disjoint origin sets:
   reviewed API/S3 artifact-storage origins are fetched, scanned, privately inventoried and
   absence-verified; only entire top-level `browser_url`/`public_url` strings on the pinned dashboard

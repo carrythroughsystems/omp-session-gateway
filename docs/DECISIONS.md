@@ -1297,6 +1297,9 @@ and canonical counts independently equal its accepted reference occurrences, inc
 or fail with `unaccounted BrowserStack artifact reference`. No delimiter extraction, repair or
 pending-reference list remains. Only entire top-level `browser_url`/`public_url` values on the
 pinned dashboard origin remain count-only presentations; other origins/placements fail closed.
+The census also checks canonical text percent-decoded to a four-pass-bounded fixpoint and one
+decoded `://` per reference, while dashboard presentations have character-class-pinned path
+segments/query tokens and forbid userinfo, ports and fragments without guessing exact paths.
 A reference before finalized build identification persists an `unbound retained reference`
 incident immediately: deletion and absence checks still proceed from later clean metadata, but
 restoration stays blocked after a crash or successful deletion until operator incident handling.

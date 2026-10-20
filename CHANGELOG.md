@@ -30,6 +30,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Accept references only as whole HTTP(S) string values with one scheme/hostname occurrence and
   no comma; reject reference-like keys or other values, retaining the exact dashboard exemption.
   Require each pinned hostname's raw and canonical JSON census to equal accepted reference counts.
+  Extend that census to bounded fixpoint percent-decoded text and a single decoded scheme per
+  reference, with character-class-pinned dashboard paths/queries and no userinfo, ports or fragments.
   Persist an incident for any unbound pre-build reference instead of retaining volatile pending
   references; deletion/absence checks still proceed, but fresh cleanup cannot clear the incident.
   Scan every non-media retained-surface body before rejection,

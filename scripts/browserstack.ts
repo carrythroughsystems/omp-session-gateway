@@ -113,17 +113,36 @@ function referenceLike(value: string): boolean {
   return value.includes("://") || REFERENCE_HOSTNAMES.some(hostname => lower.includes(hostname));
 }
 
-/** No token extraction, delimiter repair, nested URL decoding or inferred references. */
+/** Decode bytes, not URLs; malformed escapes stay literal and excessive nesting fails closed. */
+function percentDecoded(value: string): string {
+  for (let pass = 0; pass < 4; pass += 1) {
+    const decoded = value.replace(/%([0-9a-f]{2})/giu, (_match, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
+    if (decoded === value) return value;
+    value = decoded;
+  }
+  if (/%[0-9a-f]{2}/iu.test(value)) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
+  return value;
+}
+
+function dashboardPresentation(value: string, url: URL): boolean {
+  const parts = /^https?:\/\/([^/?#]+)(\/[^?#]*)(?:\?([^#]*))?$/iu.exec(value);
+  return parts !== null && parts[1]!.toLowerCase() === url.hostname && url.username === "" && url.password === "" && url.port === "" && url.hash === "" &&
+    /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/u.test(parts[2]!) &&
+    (parts[3] === undefined || parts[3].split("&").every(parameter => /^[A-Za-z0-9_-]*(?:=[A-Za-z0-9_-]*)?$/u.test(parameter)));
+}
+
+/** No token extraction, delimiter repair or inferred references. */
 function referenceUrl(value: string): URL | undefined {
   if (!referenceLike(value)) return undefined;
   let url: URL;
   try { url = new URL(value); } catch { throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference"); }
   if (!/^https?:\/\/[^/?#]/iu.test(value) || /[,\s"'<>\\]/u.test(value) ||
-    occurrences(value, "://") !== 1 || occurrences(value.toLowerCase(), url.hostname) !== 1) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
+    occurrences(value, "://") !== 1 || occurrences(percentDecoded(value), "://") !== 1 ||
+    occurrences(value.toLowerCase(), url.hostname) !== 1) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
   return url;
 }
 
-/** Every pinned-host occurrence, raw and canonical, must belong to an accepted whole value. */
+/** Every pinned-host occurrence in raw, canonical and decoded text belongs to an accepted value. */
 export function browserStackReferences(sessionId: string, buildId: string | undefined, value: unknown, sessionMetadata = false, raw = JSON.stringify(value) ?? ""): {
   artifacts: CloudArtifact[]; dashboardReferences: number;
 } {
@@ -135,7 +154,7 @@ export function browserStackReferences(sessionId: string, buildId: string | unde
       const url = referenceUrl(value);
       if (url === undefined) return;
       const dashboard = DASHBOARD_ORIGINS.has(url.origin) && sessionMetadata && depth === 1 && (key === "browser_url" || key === "public_url") &&
-        url.username === "" && url.password === "" && url.hash === "";
+        dashboardPresentation(value, url);
       if (!dashboard && !ARTIFACT_ORIGINS.has(url.origin)) throw new BrowserStackAuditFailure("unreviewed BrowserStack artifact reference");
       if (buildId === undefined) throw new BrowserStackAuditFailure("unbound retained reference");
       accepted.set(url.hostname, (accepted.get(url.hostname) ?? 0) + 1);
@@ -155,9 +174,10 @@ export function browserStackReferences(sessionId: string, buildId: string | unde
     }
   };
   walk(value);
-  const canonical = (JSON.stringify(value) ?? "").toLowerCase(), original = raw.toLowerCase();
+  const canonical = (JSON.stringify(value) ?? "").toLowerCase(), original = raw.toLowerCase(), decoded = percentDecoded(canonical).toLowerCase();
   for (const [hostname, count] of accepted) {
-    if (occurrences(original, hostname) !== count || occurrences(canonical, hostname) !== count) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
+    if (occurrences(original, hostname) !== count || occurrences(canonical, hostname) !== count ||
+      occurrences(decoded, hostname) !== count) throw new BrowserStackAuditFailure("unaccounted BrowserStack artifact reference");
   }
   validateBrowserStackArtifacts(sessionId, artifacts);
   return { artifacts, dashboardReferences: dashboards.size };

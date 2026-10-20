@@ -563,6 +563,60 @@ describe("BrowserStack complete retention and deletion", () => {
     const misplaced = provider({ raw: JSON.stringify({ automation_session: { ...record, insights: { browser_url: browserUrl } } }) });
     await expect(misplaced.audit()).rejects.toThrow("unreviewed");
   });
+  test("documentation-shaped dashboard paths and safe query tokens remain count-only presentations", async () => {
+    const browserUrl = `https://automate.browserstack.com/builds/${build}/sessions/${id}`;
+    const publicUrl = `${browserUrl}?auth_token=SYNTHETICDASHBOARDONLY`;
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, browser_url: browserUrl, public_url: publicUrl } }) });
+    expect((await fixture.audit())?.dashboardReferences).toBe(2);
+    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    expect(fixture.calls.some(call => call.url === browserUrl || call.url === publicUrl)).toBe(false);
+    expect(browserStackReferences(id, build, { browser_url: `${browserUrl}?safe_key=safe-value&extra=&empty` }, true).dashboardReferences).toBe(1);
+  });
+  test.each(["%2E", "%2e", "%252E", "%2525252E", "%252525252E"])("percent-escaped nested hosts fail closed at every query surface (dots=%s)", async escape => {
+    const host = new URL(nestedArtifact).hostname.replaceAll(".", escape);
+    const nested = `https%3A%2F%2F${host}%2F${id}%2Fnested.txt`;
+    for (const field of ["browser_url", "public_url", "reason"]) {
+      const value = field === "reason" ? `${artifact}&nested=${nested}` : `https://automate.browserstack.com/builds/${build}/sessions/${id}?auth_token=${nested}`;
+      const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, [field]: value } }) });
+      await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+      expect(fixture.calls).toHaveLength(1);
+      restore?.();
+    }
+  });
+  test.each(["%2E", "%2e", "%252E"])("the decoded census detects hidden hostname-only keys, values and artifact queries (dots=%s)", async escape => {
+    const host = new URL(nestedArtifact).hostname.replaceAll(".", escape);
+    for (const json of [{ [host]: "synthetic" }, { hint: host }, { reason: `${artifact}&host=${host}` }]) {
+      const fixture = provider({ log: JSON.stringify(json), logType: "application/json" });
+      await expect(fixture.audit()).rejects.toThrow("unaccounted BrowserStack artifact reference");
+      restore?.();
+    }
+  });
+  test.each(["%3A%2F%2F", "%3a%2f%2f", "%253A%252F%252F"])("an accepted artifact may contain exactly one decoded scheme separator (separator=%s)", separator => {
+    const value = `${artifact}&nested=https${separator}unreviewed.example%2Fsynthetic`;
+    expect(() => browserStackReferences(id, build, { reason: value })).toThrow("unaccounted BrowserStack artifact reference");
+  });
+  test("percent decoding leaves malformed escapes literal and accepts a clean four-pass fixpoint", () => {
+    for (const suffix of ["%zz%2G%tail%", "%41%42%43", "%25252541"]) {
+      expect(browserStackReferences(id, build, { reason: `${artifact}&note=${suffix}` }).artifacts).toHaveLength(1);
+    }
+    expect(() => browserStackReferences(id, build, { reason: `${artifact}&note=%2525252541` })).toThrow("unaccounted BrowserStack artifact reference");
+  });
+  test.each([
+    "?auth_token=synthetic.dotted", "?dotted.key=synthetic", "?auth_token=synthetic%2Esuffix",
+    "?auth_token=synthetic+suffix", "#synthetic-fragment", "/extra.segment", "//empty",
+    "/../synthetic-normalized", "?auth_token=%zz",
+  ])("dashboard presentation character classes reject %s", async suffix => {
+    const url = `https://automate.browserstack.com/builds/${build}/sessions/${id}${suffix}`;
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, browser_url: url } }) });
+    await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+    expect(fixture.calls).toHaveLength(1);
+  });
+  test.each(["synthetic@", ":443", ":444"])("dashboard presentation authority rejects userinfo/ports: %s", async extra => {
+    const authority = extra.endsWith("@") ? `${extra}automate.browserstack.com` : `automate.browserstack.com${extra}`;
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, public_url: `https://${authority}/builds/${build}/sessions/${id}` } }) });
+    await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+    expect(fixture.calls).toHaveLength(1);
+  });
   test.each(["browser_url", "public_url"])("a dashboard URL embedded in top-level %s is not exempt", async field => {
     const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, [field]: `See https://automate.browserstack.com/dashboard/v2/sessions/${id} for details` } }) });
     await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);

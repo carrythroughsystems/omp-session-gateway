@@ -775,8 +775,15 @@ one case-insensitive `://`, its hostname exactly once, and no comma; keys are ne
 Any other key/value containing `://` or a pinned artifact/dashboard hostname fails closed.
 Every retained JSON body must pass independent raw/canonical hostname censuses whose counts equal
 accepted reference occurrences, including duplicates; mismatches are `unaccounted BrowserStack
-artifact reference` failures, not permission to guess delimiters or decode nested URLs.
+artifact reference` failures, not permission to guess delimiters or follow nested URLs.
+The census additionally checks canonical text percent-decoded to a fixpoint within four passes
+(malformed escapes stay literal; excess depth fails closed), requires one decoded `://` per
+reference, and restricts dashboard presentations to `[A-Za-z0-9_-]+` path segments and
+`[A-Za-z0-9_-]*` query keys/values without userinfo, ports or fragments.
 Only entire top-level `browser_url`/`public_url` values retain the pinned-dashboard exemption.
+A real dashboard URL rejected by this shape-agnostic rule is a diagnostic requiring observed
+evidence and a reviewed fix, never runtime loosening; the mixed-vendor development run must
+establish the real path before release, because no saved observed dashboard shape exists.
 A pre-build/pre-finalization reference persists an `unbound retained reference` incident and fails
 closed immediately, with no volatile pending list; later clean metadata permits deletion and
 absence checks but neither normal nor fresh crash cleanup clears the incident or authorizes restoration.
