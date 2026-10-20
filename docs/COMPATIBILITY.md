@@ -238,6 +238,12 @@ Tailscale Serve saw the orchestrator's allowlisted login, not the phone's own; a
 with the device unlocked and the app in the background; and lock, Airplane, Doze, force-stop, and
 cellular behavior are qualified only on the Pixel.
 
+Shared-device availability is infrastructure, not a candidate pass or defect. A valid pinned
+pool with no free eligible device produces a failed attempt with closed availability-hold
+evidence (CLI exit 75); auth, transport, audit and cleanup failures remain diagnostic. Wider
+model pools and capability-free allocation probes are Tested tooling evidence only. They add
+no qualified devices or versions to the signed-release tables above.
+
 ## Exact OMP baseline
 
 **Fork-era evidence:** the table and pin-refresh records below are immutable published-release

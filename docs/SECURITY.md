@@ -447,14 +447,21 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   a step log of every WebDriver command and its result, so page evaluations return only counts,
   booleans, and fixed names, and a failed evaluation only its error's name. The in-page sink sweep
   keeps the capability inside the page and returns no digest, length, matched detail, address, or
-  cache or database name.
+  cache or database name. Control residuals, missing-target labels, arbitrary payload keys and raw
+  headers are also excluded: vendor-safe results contain bounded counts, booleans, closed codes,
+  and `LEAK_SINKS` names only. Allocation user agents/client hints are parsed in-page into constrained
+  family, browser, hardware-code and version fields, and attestation precedes any capability open.
 - Evidence text comes only from fixed grammars (a pinned model, a version number, Apple's push
   service), so neither a device nor TestingBot can write a link or a reflected credential into a
   receipt.
 - After the sessions end, the lane fetches every test record TestingBot kept for the attempt, and
-  fails if one contains either session's live View or Control link, or any 16-character segment of
-  one, or kept video or screenshots. The links it compares against are fetched through the gateway's
-  own launch contract and exist only in the orchestrator's memory for that comparison.
+  fails if one contains either session's live View or Control link, or any contiguous 16-character
+  window of one, or kept video or screenshots. Interior and delimiter-crossing windows count,
+  not only delimiter-separated parts. This audit also covers partial/failed attempts: every known
+  session is ended first and every retained record is inspected before fixture/tunnel/workspace
+  release. An audit or cleanup error combined with device availability is diagnostic, never a hold.
+  The links and windows exist only in orchestrator memory; only record counts and verdicts persist,
+  never matched text, windows, digests or lengths.
 - TestingBot credentials are supplied only through child-process environment variables and in-memory
   request headers, never command-line arguments, receipts, or logs.
 - The iPhone turns background alerts off before its session ends. If its attempt fails first, the

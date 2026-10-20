@@ -36,14 +36,28 @@ export interface DeviceProfile {
   readonly browser: "safari" | "chrome";
   /** In preference order; the first one free is used, and the evidence names it. */
   readonly models: readonly string[];
+  readonly minimumOsMajor: number;
+  /** Catalog members awaiting a bounded, capability-free allocation proof. */
+  readonly disabledModels: readonly string[];
   readonly homeScreenAlerts: boolean;
 }
 
 export const DEVICE_CLOUD_PROFILES: Readonly<Record<DeviceCloudTarget, DeviceProfile>> = {
-  iphone: { platform: "iOS", browser: "safari", models: ["iPhone 17 Pro Max", "iPhone 17 Pro", "iPhone 16"], homeScreenAlerts: true },
-  ipad: { platform: "iOS", browser: "safari", models: ["iPad (9th generation)"], homeScreenAlerts: false },
-  android: { platform: "Android", browser: "chrome", models: ["Galaxy S26", "Galaxy S25", "Galaxy S24"], homeScreenAlerts: false },
+  iphone: { platform: "iOS", browser: "safari", models: ["iPhone 17 Pro Max", "iPhone 17 Pro", "iPhone 16", "iPhone 16 Pro", "iPhone Air", "iPhone 17"], minimumOsMajor: 26, disabledModels: [], homeScreenAlerts: true },
+  ipad: { platform: "iOS", browser: "safari", models: ["iPad (9th generation)"], minimumOsMajor: 26, disabledModels: [], homeScreenAlerts: false },
+  android: { platform: "Android", browser: "chrome", models: ["Galaxy S26", "Galaxy S25", "Galaxy S24", "Galaxy A55"], minimumOsMajor: 14, disabledModels: ["Galaxy A55"], homeScreenAlerts: false },
 };
+
+export const SAMSUNG_MODEL_CODES: Readonly<Record<string, readonly string[]>> = {
+  "Galaxy S24": ["SM-S921B"],
+  "Galaxy S25": ["SM-S931B"],
+  "Galaxy S26": ["SM-S942B"],
+};
+
+export function eligibleDevice(profile: DeviceProfile, device: { readonly name: string; readonly platform: string; readonly version: string }): boolean {
+  return device.platform === profile.platform && profile.models.includes(device.name) && !profile.disabledModels.includes(device.name) &&
+    VERSION.test(device.version) && Number(device.version.split(".")[0]) >= profile.minimumOsMajor;
+}
 
 export const DEVICE_CLOUD_PHASES = [
   "attempt_started", "fixture_ready", "tunnel_ready", "iphone_verified", "ipad_verified", "android_verified",
@@ -131,22 +145,38 @@ function safeObservations(result: Record<string, unknown>): boolean {
     ));
 }
 
-/** What the allocated session and the device's own browser report about the device. */
+/** Parsed inside the page; raw user agents and arbitrary client hints never enter vendor results. */
+export interface BrowserAllocationReport {
+  readonly family: "iphone" | "ipad" | "android" | "unknown";
+  readonly browser: "safari" | "chrome" | "unknown";
+  readonly browserVersion: string;
+  readonly os: string;
+  readonly model: string;
+}
+
+export const ALLOCATION_REPORT_EXPRESSION = `(async () => {
+  const ua = navigator.userAgent;
+  const version = value => typeof value === "string" && /^[0-9]{1,4}(?:\\.[0-9]{1,4}){0,3}$/.test(value) ? value : "";
+  const family = /\\biPhone\\b/.test(ua) ? "iphone" :
+    /\\biPad\\b/.test(ua) || (/\\bMacintosh\\b/.test(ua) && navigator.maxTouchPoints > 1) ? "ipad" :
+    /\\bAndroid\\b/.test(ua) ? "android" : "unknown";
+  const safari = /\\bVersion\\/([0-9.]{1,24}) (?:Mobile\\/\\S+ )?Safari\\//.exec(ua)?.[1];
+  const isSafari = safari !== undefined && !/\\b(?:CriOS|FxiOS|EdgiOS)\\//.test(ua);
+  const isChrome = /\\bChrome\\//.test(ua) && !/\\b(?:SamsungBrowser|EdgA|OPR|Firefox)\\//.test(ua);
+  const hints = isChrome ? await navigator.userAgentData?.getHighEntropyValues?.(["uaFullVersion", "platformVersion", "model"]).catch(() => undefined) : undefined;
+  return {
+    family, browser: isSafari ? "safari" : isChrome ? "chrome" : "unknown",
+    browserVersion: version(isSafari ? safari : hints?.uaFullVersion),
+    os: version(isSafari ? safari?.split(".").slice(0, 2).join(".") : hints?.platformVersion),
+    model: typeof hints?.model === "string" && /^SM-[A-Z0-9]{1,12}$/.test(hints.model) ? hints.model : "",
+  };
+})()`;
+
 export interface AllocationReport {
   /** The capabilities TestingBot returned for the session it allocated. */
   readonly capabilities: Record<string, unknown>;
-  readonly userAgent: string;
-  readonly touchPoints: number;
-  /** User-agent client hints, which Chrome answers and Safari does not. */
-  readonly hints?: Record<string, unknown>;
+  readonly browser: BrowserAllocationReport;
 }
-
-const DEVICE_FAMILY: Readonly<Record<DeviceCloudTarget, (report: AllocationReport) => boolean>> = {
-  iphone: report => /\biPhone\b/u.test(report.userAgent),
-  // iPadOS Safari asks for desktop sites, so it reports a Mac with a touch screen.
-  ipad: report => /\biPad\b/u.test(report.userAgent) || (/\bMacintosh\b/u.test(report.userAgent) && report.touchPoints > 1),
-  android: report => /\bAndroid\b/u.test(report.userAgent),
-};
 
 /**
  * The device as its session and browser report it, refused unless it is the requested platform,
@@ -163,33 +193,36 @@ export function attestAllocation(
   const profile = DEVICE_CLOUD_PROFILES[target];
   const text = (value: unknown) => (typeof value === "string" ? value : "");
   const leading = (version: string, parts: number) => version.split(".").slice(0, parts).join(".");
-  const { capabilities, userAgent } = report;
+  const { capabilities, browser } = report;
+  if (!eligibleDevice(profile, { ...requested, platform: profile.platform })) throw new Error(`the ${target} requested model or OS is not eligible`);
   if (
     text(capabilities.platformName).toLowerCase() !== profile.platform.toLowerCase() ||
     text(capabilities.browserName).toLowerCase() !== profile.browser
   ) {
     throw new Error(`TestingBot allocated the ${target} session on another platform or browser`);
   }
-  if (!DEVICE_FAMILY[target](report)) throw new Error(`the ${target} session's browser reports another kind of device`);
+  if (!isRecord(browser) || Object.keys(browser).sort().join(",") !== "browser,browserVersion,family,model,os" || browser.family !== target) {
+    throw new Error(`the ${target} session's browser reports another kind of device`);
+  }
   if (profile.browser === "safari") {
-    const safari = /\bVersion\/([0-9.]{1,24}) (?:Mobile\/\S+ )?Safari\//u.exec(userAgent)?.[1];
-    if (safari === undefined || !VERSION.test(safari) || /\b(?:CriOS|FxiOS|EdgiOS)\//u.test(userAgent)) {
+    const safari = browser.browserVersion;
+    if (browser.browser !== "safari" || typeof safari !== "string" || !VERSION.test(safari) || !VERSION.test(browser.os)) {
       throw new Error(`the ${target} session's browser is not Safari`);
     }
     const model = text(capabilities.deviceName);
     if (model !== requested.name) throw new Error(`TestingBot allocated another model for the ${target}`);
-    if (leading(safari, 2) !== leading(requested.version, 2)) throw new Error(`the ${target} runs another iOS release`);
+    if (leading(safari, 2) !== leading(requested.version, 2) || browser.os !== leading(safari, 2)) throw new Error(`the ${target} runs another iOS release`);
     return { device: model, os: leading(safari, 2), browser: "safari", browserVersion: safari };
   }
-  const hints = report.hints ?? {};
-  const version = text(hints.uaFullVersion);
-  const release = text(hints.platformVersion);
-  const model = text(hints.model);
-  if (!VERSION.test(version) || !/\bChrome\//u.test(userAgent) || /\b(?:SamsungBrowser|EdgA|OPR|Firefox)\//u.test(userAgent)) {
+  const version = text(browser.browserVersion);
+  const release = text(browser.os);
+  const model = text(browser.model);
+  if (!VERSION.test(version) || browser.browser !== "chrome") {
     throw new Error(`the ${target} session's browser is not Chrome`);
   }
   if (!VERSION.test(release) || leading(release, 1) !== leading(requested.version, 1)) throw new Error(`the ${target} runs another Android release`);
   if (!/^SM-[A-Z0-9]{1,12}$/u.test(model)) throw new Error(`the ${target} is not a Galaxy phone`);
+  if (!SAMSUNG_MODEL_CODES[requested.name]?.includes(model)) throw new Error(`the ${target} Galaxy hardware does not match its canonical model`);
   return { device: requested.name, model, os: release, browser: "chrome", browserVersion: version };
 }
 
@@ -206,7 +239,7 @@ function binding(identity: DeviceCloudIdentity): string {
   }
   return createHash("sha256").update(JSON.stringify([
     identity.tag, identity.candidate.sourceCommit, identity.candidate.archiveSha256, identity.omp, identity.origin,
-    DEVICE_CLOUD_PROFILES, TESTINGBOT_TUNNEL.sha256,
+    DEVICE_CLOUD_PROFILES, SAMSUNG_MODEL_CODES, TESTINGBOT_TUNNEL.sha256,
   ])).digest("hex");
 }
 
@@ -270,11 +303,16 @@ async function auditRecords(
   save: () => Promise<void>,
 ): Promise<Record<string, DeviceCloudObservation>> {
   const records: TestRecord[] = [];
+  const failures: Error[] = [];
   for (const sessionId of progress.sessions) {
-    records.push(await waitFor(runtime, "test record finalization", async () => {
-      const record = await runtime.record(sessionId);
-      return record?.complete === true ? record : undefined;
-    }, RECORD_FINALIZATION_MS));
+    try {
+      records.push(await waitFor(runtime, "test record finalization", async () => {
+        const record = await runtime.record(sessionId);
+        return record?.complete === true ? record : undefined;
+      }, RECORD_FINALIZATION_MS));
+    } catch {
+      failures.push(new Error("a device-cloud retained record could not be audited"));
+    }
   }
   const needles: string[] = [];
   for (const [before, reread] of driven) {
@@ -284,16 +322,28 @@ async function auditRecords(
     }
     for (const mode of ["view", "control"] as const) {
       const link = await runtime.launch(current, mode);
-      needles.push(link, ...link.split(/[/?#&=]/u).filter(part => part.length >= 16));
+      needles.push(link);
     }
   }
-  const exposing = records.filter(record => needles.some(needle => record.text.includes(needle))).length;
+  const windows = new Set<string>();
+  for (const link of needles) {
+    for (let index = 0; index + 16 <= link.length; index += 1) windows.add(link.slice(index, index + 16));
+  }
+  const exposing = records.filter(record => {
+    if (needles.some(link => record.text.includes(link))) return true;
+    for (let index = 0; index + 16 <= record.text.length; index += 1) {
+      if (windows.has(record.text.slice(index, index + 16))) return true;
+    }
+    return false;
+  }).length;
   const withMedia = records.filter(record => record.video || record.screenshots > 0).length;
   const audit = { records: records.length, recordsExposingLinks: exposing, recordsWithMedia: withMedia };
   progress.results.audit = audit;
   await save();
-  if (exposing > 0) throw new Error(`${exposing} of ${records.length} TestingBot test records contain a live View or Control link`);
-  if (withMedia > 0) throw new Error(`TestingBot kept video or screenshots for ${withMedia} of ${records.length} sessions`);
+  if (exposing > 0) failures.push(new Error(`${exposing} of ${records.length} TestingBot test records contain a live View or Control link`));
+  if (withMedia > 0) failures.push(new Error(`TestingBot kept video or screenshots for ${withMedia} of ${records.length} sessions`));
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "device-cloud retained-record audits failed");
   return audit;
 }
 
@@ -304,43 +354,56 @@ export async function preflightDeviceCloud(runtime: DeviceCloudRuntime): Promise
 /** Drives one attempt from its fixture to its record audit; the caller releases it either way. */
 async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress, save: () => Promise<void>): Promise<Record<string, unknown>> {
   const { runtime } = input;
+  const driven: (readonly [SessionMetadata, () => Promise<SessionMetadata | undefined>])[] = [];
+  const failures: unknown[] = [];
   const advance = async (phase: DeviceCloudPhase) => {
     progress.phase = phase;
     await save();
   };
-  await runtime.fixture("start", progress.epoch);
-  const fixture = await waitFor(runtime, "fixture publication", () => runtime.fixtureSession(progress.epoch), FIXTURE_PUBLICATION_MS);
-  const live = await waitFor(runtime, "live session", () => runtime.liveSession(input.sessionLabel), FIXTURE_PUBLICATION_MS);
-  for (const session of [fixture, live]) {
-    const modelError = fixtureModelError(session);
-    if (modelError !== undefined) throw new Error(modelError);
-    if (!session.canView || !session.canControl) throw new Error("a device-cloud session does not offer View and Control");
+  try {
+    await runtime.fixture("start", progress.epoch);
+    const fixture = await waitFor(runtime, "fixture publication", () => runtime.fixtureSession(progress.epoch), FIXTURE_PUBLICATION_MS);
+    const live = await waitFor(runtime, "live session", () => runtime.liveSession(input.sessionLabel), FIXTURE_PUBLICATION_MS);
+    for (const session of [fixture, live]) {
+      const modelError = fixtureModelError(session);
+      if (modelError !== undefined) throw new Error(modelError);
+      if (!session.canView || !session.canControl) throw new Error("a device-cloud session does not offer View and Control");
+    }
+    driven.push([live, () => runtime.liveSession(input.sessionLabel)], [fixture, () => runtime.fixtureSession(progress.epoch)]);
+    await advance("fixture_ready");
+    await runtime.tunnel("start", progress.epoch);
+    await advance("tunnel_ready");
+    for (const target of DEVICE_CLOUD_TARGETS) {
+      const observations = await runtime.verify(target, {
+        epoch: progress.epoch,
+        session: live,
+        created: async sessionId => {
+          progress.sessions.push(sessionId);
+          await save();
+        },
+      });
+      if (!safeObservations(observations)) throw new Error(`unsafe device-cloud evidence from the ${target}`);
+      progress.results[target] = observations;
+      await advance(`${target}_verified`);
+    }
+  } catch (error) {
+    failures.push(error);
   }
-  await advance("fixture_ready");
-
-  await runtime.tunnel("start", progress.epoch);
-  await advance("tunnel_ready");
-
-  for (const target of DEVICE_CLOUD_TARGETS) {
-    const observations = await runtime.verify(target, {
-      epoch: progress.epoch,
-      session: live,
-      created: async sessionId => {
-        progress.sessions.push(sessionId);
-        await save();
-      },
-    });
-    // Refused before it joins progress, so no vendor or device value can block a later checkpoint.
-    if (!safeObservations(observations)) throw new Error(`unsafe device-cloud evidence from the ${target}`);
-    progress.results[target] = observations;
-    await advance(`${target}_verified`);
+  // The retained record is finalized only after end; still inspect every record on partial attempts.
+  for (const sessionId of progress.sessions) {
+    try { await runtime.endSession(sessionId); }
+    catch { failures.push(new Error("a device-cloud session did not end before its record audit")); }
   }
-
-  const audit = await auditRecords(runtime, progress, [
-    [live, () => runtime.liveSession(input.sessionLabel)],
-    [fixture, () => runtime.fixtureSession(progress.epoch)],
-  ], save);
-  await advance("records_audited");
+  let audit: Record<string, DeviceCloudObservation> | undefined;
+  try {
+    audit = progress.sessions.length === 0 ? { records: 0, recordsExposingLinks: 0, recordsWithMedia: 0 } :
+      await auditRecords(runtime, progress, driven, save);
+    await advance("records_audited");
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "the device-cloud journey, session end or record audit failed");
   await advance("evidence_complete");
   return {
     passed: true,

@@ -362,6 +362,10 @@ test("a later passing observation cannot erase a diagnostic host fault or restar
   expect(fake.performed).toEqual([]);
 });
 
+test("a temporary-failure campaign worker is still a failed observation before hold-resume support", () => {
+  expect(nextStep(state("qualifying"), snapshot({ campaign: { status: "failed", detail: "campaign exited 75" } }), config).operation).toBe("stop");
+});
+
 test("a retry request on a new tracking issue for the same version re-selects the failed release", () => {
   // v0.7.5: order #369's "Closes #368" closed the request when it merged; the retry request opened #374.
   const failed = { ...state("diagnostic-required"), failedMain: "a".repeat(40), candidateCommit: "b".repeat(40) };

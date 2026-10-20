@@ -39,6 +39,7 @@ import {
   type StableQualificationLaneModules,
 } from "./stable-qualification.ts";
 import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-qualification.ts";
+import { DeviceCloudAvailabilityHold, deviceCloudHolds } from "./device-cloud-availability.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
 // Derived exactly as the orchestrator derives it, so this suite cannot pass against a predecessor
@@ -1115,6 +1116,21 @@ lane_persistence
 });
 
 describe("resumable receipt lanes", () => {
+  test("availability remains failed with additive closed schema-3 evidence", async () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const hold = new DeviceCloudAvailabilityHold({
+      kind: "device-cloud-availability", stage: "allocation", target: "ipad", vendors: ["testingbot"],
+      reason: "pinned-pool-busy", waitedMs: 600_000, epoch: "11111111-2222-4333-8444-555555555555",
+    });
+    const error = await executeReceiptLane(receipt, "deviceCloud", async () => {}, async checkpoint => {
+      await checkpoint({ progress: { epoch: hold.evidence.epoch, cleanupRequired: false } });
+      throw hold;
+    }).catch((error: unknown) => error);
+    expect(deviceCloudHolds(error)).toEqual([hold.evidence]);
+    expect(receipt.schemaVersion).toBe(3);
+    expect(receipt.lanes.deviceCloud).toMatchObject({ status: "failed", evidence: { availabilityHold: hold.evidence } });
+  });
+
   test("checkpoints running evidence, persists a pass, and skips an already passed lane", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     const states: string[] = [];

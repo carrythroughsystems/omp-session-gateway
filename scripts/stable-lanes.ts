@@ -128,13 +128,20 @@ async function retainedMacPushRuntime(context: ExternalLaneContext & RetainedMac
 }
 
 async function retainedMacCloudRuntime(context: ExternalLaneContext & RetainedMacLaneContext) {
-  const fixture = await stageRetainedMacFixture(context, "device-cloud");
   return createDeviceCloudRuntime({
     identity: liveIdentity(context),
     workspace: join(context.identity.receiptRoot, "device-cloud"),
-    fixture: { ...fixture, base: `${fixture.home}/qual-tools/device-cloud/fixtures` },
+    fixture: retainedMacCloudFixture(context),
     environment: process.env,
   });
+}
+
+/** Creating the factory performs no remote work; the runtime invokes it under the Pixel lease. */
+export function retainedMacCloudFixture(context: ExternalLaneContext & RetainedMacLaneContext) {
+  return async () => {
+    const fixture = await stageRetainedMacFixture(context, "device-cloud");
+    return { ...fixture, base: `${fixture.home}/qual-tools/device-cloud/fixtures` };
+  };
 }
 
 const windows: ExternalLaneModule = {
@@ -175,7 +182,7 @@ const androidPush: ExternalLaneModule<RetainedMacLaneContext> = {
 
 const deviceCloud: ExternalLaneModule<RetainedMacLaneContext> = {
   preflight: async context => {
-    await admitDeviceCloud(context.environment);
+    await admitDeviceCloud(context.environment, "free");
   },
   run: async context =>
     runDeviceCloud({

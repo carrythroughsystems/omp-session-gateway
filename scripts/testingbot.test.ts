@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   pageEvaluationScript,
+  TestingBotApi,
+  WebDriverSession,
   readTestingBotCredentials,
   runOp,
   startAllowlistProxy,
@@ -37,6 +39,25 @@ function opFixture(whoami: Record<string, unknown>): { readonly calls: OpCall[];
 }
 
 const SERVICE_ACCOUNT = { url: "https://my.1password.com/", user_type: "SERVICE_ACCOUNT" };
+
+test("failed identified-session checkpoint ends the session before any browser command", async () => {
+  const calls: string[] = [];
+  const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL, options?: RequestInit) => {
+    calls.push(`${options?.method} ${new URL(String(url)).pathname}`);
+    return Response.json({ value: options?.method === "DELETE" ? null : { sessionId: "session-checkpoint-0001", capabilities: {} } });
+  }, { preconnect: () => {} }));
+  try {
+    await expect(WebDriverSession.create({ key: KEY, secret: SECRET }, {}, async () => { throw new Error("checkpoint failed"); })).rejects.toThrow("checkpoint failed");
+    expect(calls).toEqual(["POST /wd/hub/session", "DELETE /wd/hub/session/session-checkpoint-0001"]);
+  } finally { mock.mockRestore(); }
+});
+
+test("oversized retained records fail without truncation or reflected content", async () => {
+  const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => new Response("SYNTHETIC-RECORD-CONTENT".repeat(100_000)), { preconnect: () => {} }));
+  try {
+    await expect(new TestingBotApi({ key: KEY, secret: SECRET }).testRecord("session-record-0001")).rejects.toThrow("oversized response");
+  } finally { mock.mockRestore(); }
+});
 
 describe("TestingBot credentials through the 1Password service account", () => {
   let root: string;
@@ -217,6 +238,7 @@ describe("page evaluation", () => {
     ["an Error whose message quotes a link", `(() => { throw new TypeError("could not open ${LINK}"); })()`, "TypeError"],
     ["a rejected string", `Promise.reject("${LINK}")`, "unnamed rejection"],
     ["an Error with a crafted name", `(() => { const error = new Error("x"); error.name = "${LINK}"; throw error; })()`, "unnamed rejection"],
+    ["an all-letter crafted error name", `(() => { const error = new Error("x"); error.name = "SyntheticSecretWindow"; throw error; })()`, "unnamed rejection"],
   ])("reports only the kind of %s", async (_name, expression, reported) => {
     const result = await evaluate(expression);
     expect(result).toEqual({ ok: false, error: reported });

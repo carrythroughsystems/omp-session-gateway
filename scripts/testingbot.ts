@@ -55,6 +55,34 @@ export interface TestRecord {
   readonly screenshots: number;
 }
 
+async function boundedVendorText(response: Response): Promise<string> {
+  if (response.body === null) throw new Error("TestingBot returned an empty response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) break;
+      bytes += result.value.byteLength;
+      if (bytes > MAX_RECORD_BYTES) {
+        await reader.cancel();
+        throw new Error("TestingBot returned an oversized response");
+      }
+      chunks.push(result.value);
+    }
+  } finally { reader.releaseLock(); }
+  const buffer = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(buffer);
+}
+
+function vendorJson(text: string): unknown {
+  try { return JSON.parse(text); }
+  catch { throw new Error("TestingBot returned invalid JSON"); }
+}
+
 export interface OpResult {
   readonly exitCode: number;
   readonly stdout: string;
@@ -163,13 +191,15 @@ export class TestingBotApi {
   /** The real-device catalog, or only the devices free right now. */
   async devices(scope: "all" | "available"): Promise<readonly CloudDevice[]> {
     const response = await this.#get(scope === "all" ? "/devices" : "/devices/available", "device catalog");
-    const listing: unknown = response === undefined ? [] : await response.json();
+    if (response === undefined) throw new Error("TestingBot device catalog is unavailable");
+    const listing = vendorJson(await boundedVendorText(response));
     if (!Array.isArray(listing)) throw new Error("TestingBot returned an invalid device catalog");
-    return listing.flatMap(entry =>
-      isRecord(entry) && typeof entry.name === "string" && typeof entry.platform_name === "string" && typeof entry.version === "string"
-        ? [{ name: entry.name, platform: entry.platform_name, version: entry.version }]
-        : [],
-    );
+    return listing.map(entry => {
+      if (!isRecord(entry) || typeof entry.name !== "string" || entry.name.length < 1 || entry.name.length > 100 ||
+        !["iOS", "Android"].includes(String(entry.platform_name)) || typeof entry.version !== "string" ||
+        !/^[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}$/u.test(entry.version)) throw new Error("TestingBot returned an invalid device catalog");
+      return { name: entry.name, platform: entry.platform_name as string, version: entry.version };
+    });
   }
 
   /** The retained record of one WebDriver session, which TestingBot keys by session id. */
@@ -177,15 +207,14 @@ export class TestingBotApi {
     if (!TESTINGBOT_SESSION_ID.test(sessionId)) throw new Error("invalid TestingBot session id");
     const response = await this.#get(`/tests/${sessionId}`, "test record");
     if (response === undefined) return undefined;
-    const text = await response.text();
-    if (text.length > MAX_RECORD_BYTES) throw new Error("TestingBot returned an oversized test record");
-    const record: unknown = JSON.parse(text);
+    const text = await boundedVendorText(response);
+    const record = vendorJson(text);
     if (!isRecord(record)) throw new Error("TestingBot returned an invalid test record");
     return {
       complete: record.state === "COMPLETE",
       text: JSON.stringify(record),
       video: record.video !== false,
-      screenshots: Array.isArray(record.thumbs) ? record.thumbs.length : 0,
+      screenshots: Array.isArray(record.thumbs) ? record.thumbs.length : 1,
     };
   }
 }
@@ -239,7 +268,7 @@ export function pageEvaluationScript(expression: string): string {
   return `const done = arguments[arguments.length - 1];
     Promise.resolve().then(() => (${expression})).then(
       value => done({ ok: true, value }),
-      error => done({ ok: false, error: error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : "unnamed rejection" }));`;
+      error => done({ ok: false, error: error instanceof Error && ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError", "EvalError", "DOMException"].includes(error.name) ? error.name : "unnamed rejection" }));`;
 }
 
 /** One W3C session on a real device. Page evaluations return only their structured result. */
@@ -262,8 +291,14 @@ export class WebDriverSession implements JourneyPage {
       throw new Error("TestingBot started no identifiable session");
     }
     const session = new WebDriverSession(value.sessionId, authorization);
-    await created(session.id);
-    await session.#command("timeouts", "POST", "/timeouts", { script: 90_000, pageLoad: 90_000 });
+    try {
+      await created(session.id);
+      await session.#command("timeouts", "POST", "/timeouts", { script: 90_000, pageLoad: 90_000 });
+    } catch (error) {
+      try { await endWebDriverSession(credentials, session.id); }
+      catch { throw new AggregateError([error, new Error("TestingBot identified session could not be ended after setup failure")], "TestingBot session setup and release failed"); }
+      throw error;
+    }
     return { session, capabilities: isRecord(value.capabilities) ? value.capabilities : {} };
   }
 
