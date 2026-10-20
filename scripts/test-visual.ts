@@ -1,11 +1,19 @@
 import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "@playwright/test";
+import { startDashboardFixture, type SyntheticFixtureAuthority } from "../apps/web/e2e/fixture-server.ts";
+import { assertPercyLogsSafe } from "../apps/web/visual/snapshot-safety.ts";
 import { VISUAL_PHASES, VISUAL_PROJECTS, VISUAL_STATES, VISUAL_UPLOAD_REASONS } from "../apps/web/visual/safe-reporter.ts";
 
 export type VisualMode = "local" | "upload";
 export interface VisualProcessResult { code: number; stdout: string; stderr: string }
-export type VisualProcess = (command: string[], environment: NodeJS.ProcessEnv) => Promise<VisualProcessResult>;
+export type VisualProcess = (command: string[], environment: NodeJS.ProcessEnv, timeoutMs?: number) => Promise<VisualProcessResult>;
 export type VisualRuntimeResolver = (executable: string) => string | null;
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = createRequire(import.meta.url).resolve("@percy/cli");
@@ -14,6 +22,7 @@ const CLI_EXECUTABLE = fileURLToPath(new URL("../bin/run.cjs", pathToFileURL(CLI
 const CONFIG = "apps/web/playwright.visual.config.ts";
 const MISSING_TOKEN = "visual upload: PERCY_TOKEN is required";
 const MISSING_NODE = "visual upload: Node.js is required for Percy";
+export const LOG_AUDIT_SUCCESS = "visual-audit: states=18 logs=passed planted=rejected";
 // @percy/cli 1.32.11 bin/run.cjs:13-16 prints this unconditionally, even on Node 24.
 // Our exact major pin and native Node >=20 already satisfy this future-major announcement.
 export const PERCY_RUNTIME_NOTICE = "Heads up! The next major version of @percy/cli will require Node 20+. Either pin @percy/cli to its current major version, or make sure your setup runs on Node 20+, before the next major release.";
@@ -79,14 +88,19 @@ export function visualProcessReasons(result: VisualProcessResult, upload: boolea
   // The sole nonfatal diagnostic is the exact pinned entry-point announcement, not SDK output.
   const stderr = result.stderr.replace(/\u001b\[[0-9;]*m/gu, "").split("\n")
     .filter(line => !requireFinalization || line !== PERCY_RUNTIME_NOTICE).join("\n");
-  // All other warnings/errors remain fatal. Never print their contents.
-  if (stderr.trim() !== "" || /Percy is not running|\bwarning\b|skipping visual tests|Percy is disabled/iu.test(result.stdout)) {
-    reasons.push("sdk-warning");
-    if (requireFinalization) {
-      const diagnostics = `${stderr}\n${result.stdout}`.replace(/\u001b\[[0-9;]*m/gu, "");
-      const categories = CLI_DIAGNOSTICS.filter(([, pattern]) => pattern.test(diagnostics)).map(([code]) => code);
-      reasons.push(...(categories.length ? categories : ["cli-unknown-diagnostic"]));
+  const stdout = result.stdout.replace(/\u001b\[[0-9;]*m/gu, "");
+  const categories: string[] = [];
+  for (const line of [...stdout.split("\n"), ...stderr.split("\n")]) {
+    if (requireFinalization && line === PERCY_RUNTIME_NOTICE) continue;
+    for (const [category, pattern] of CLI_DIAGNOSTICS) {
+      if (pattern.test(line) && !categories.includes(category)) categories.push(category);
     }
+  }
+  // All other warnings/errors remain fatal. Never print their contents.
+  if (categories.length !== 0 || stderr.trim() !== "" || /Percy is not running|\bwarning\b|skipping visual tests|Percy is disabled/iu.test(stdout)) {
+    reasons.push("sdk-warning");
+    if (categories.length !== 0) reasons.push(...categories);
+    else if (requireFinalization) reasons.push("cli-unknown-diagnostic");
   }
   if (!result.stdout.split("\n").includes(expected)) reasons.push("missing-summary");
   if (requireFinalization && !/\[percy\] Finalized build #\d+:/u.test(result.stdout.replace(/\u001b\[[0-9;]*m/gu, ""))) reasons.push("not-finalized");
@@ -99,20 +113,117 @@ export function assertVisualResult(result: VisualProcessResult, upload: boolean)
   }
 }
 
-async function execute(command: string[], environment: NodeJS.ProcessEnv): Promise<VisualProcessResult> {
+async function execute(command: string[], environment: NodeJS.ProcessEnv, timeoutMs = 13 * 60_000): Promise<VisualProcessResult> {
   const child = Bun.spawn(command, { cwd: ROOT, env: environment, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const stop = (): void => { child.kill("SIGTERM"); };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  const deadline = setTimeout(stop, 13 * 60_000);
+  const deadline = setTimeout(stop, timeoutMs);
+  const hardDeadline = setTimeout(() => child.kill("SIGKILL"), timeoutMs + 5_000);
   try {
     const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
     return { code, stdout, stderr };
   } finally {
     clearTimeout(deadline);
+    clearTimeout(hardDeadline);
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
   }
+}
+
+/**
+ * Native-Node testing host: real discovery/SDK/18-state suite, no vendor effects. A private pipe
+ * supplies one ephemeral authority so the retained fixture guard covers every worker's logs.
+ */
+export async function runPercyLogAuditHost(bunExecutable: string): Promise<void> {
+  // These transitive paths are selected through the installed, pinned CLI, not hoisted imports.
+  const requirePercy = createRequire(CLI);
+  const { default: Percy } = await import(pathToFileURL(requirePercy.resolve("@percy/core")).href);
+  const { redactSecrets } = await import(pathToFileURL(requirePercy.resolve("@percy/core/utils")).href);
+  const { default: logger } = await import(pathToFileURL(requirePercy.resolve("@percy/logger")).href);
+  const authority: SyntheticFixtureAuthority = {
+    roomId: "visualAudit" + randomBytes(8).toString("base64url"),
+    encodedRoomKey: randomBytes(32).toString("base64url"),
+    encodedControlEntropy: randomBytes(16).toString("base64url"),
+  };
+  const fixture = await startDashboardFixture([], { syntheticAuthority: authority });
+  const directory = process.platform === "win32" ? undefined : await mkdtemp(join(tmpdir(), "opv-"));
+  const pipe = directory === undefined ? `\\\\.\\pipe\\omp-percy-audit-${randomUUID()}` : join(directory, "s");
+  const authorityServer = createServer(socket => socket.end(JSON.stringify(authority)));
+  const percy = new Percy({ testing: true, port: 0, projectType: "web", token: "web_local-synthetic-testing-only" });
+  percy.skipDiscovery = false;
+  percy.testing.build = { id: "local-synthetic-build" };
+  let failed = false;
+  let phase = "setup";
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      authorityServer.once("error", rejectListen);
+      authorityServer.listen(pipe, resolveListen);
+    });
+    if (directory !== undefined) await chmod(pipe, 0o600);
+    await percy.start();
+    phase = "suite";
+    const child = spawn(bunExecutable, ["scripts/test-visual.ts", "upload"], {
+      cwd: ROOT,
+      env: {
+        ...visualEnvironment(process.env),
+        PERCY_SERVER_ADDRESS: percy.address(),
+        PERCY_LOGS_IN_MEMORY: "1",
+        PERCY_CLIENT_ERROR_LOGS: "false",
+        OMP_VISUAL_PERCY_CHILD: "1",
+        OMP_VISUAL_AUDIT_PIPE: pipe,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", data => { stdout += String(data); });
+    child.stderr.on("data", data => { stderr += String(data); });
+    const deadline = setTimeout(() => child.kill("SIGTERM"), 5 * 60_000);
+    const hardDeadline = setTimeout(() => child.kill("SIGKILL"), 5 * 60_000 + 5_000);
+    try {
+      const code = await new Promise<number | null>((resolveExit, rejectExit) => {
+        child.once("error", rejectExit);
+        child.once("close", resolveExit);
+      });
+      if (visualProcessReasons({ code: code ?? 1, stdout, stderr }, true, false).length !== 0) throw new Error();
+    } finally {
+      clearTimeout(deadline);
+      clearTimeout(hardDeadline);
+    }
+    const requests = percy.testing.requests ?? [];
+    if (!percy.browser.isConnected() ||
+      requests.filter((request: { method: string; url: string }) => request.method === "POST" && request.url === "/percy/snapshot").length !== 18) throw new Error();
+    const readCliLogs = async (): Promise<unknown[]> => {
+      const response = await fetch(new URL("/test/logs", percy.address()), { signal: AbortSignal.timeout(5_000) });
+      const body: unknown = await response.json();
+      if (!response.ok || body === null || typeof body !== "object" || !("logs" in body) || !Array.isArray(body.logs)) throw new Error();
+      // Exactly the selection used by @percy/core sendBuildLogs; CI-stream entries are excluded.
+      return body.logs.filter(entry => !(entry !== null && typeof entry === "object" && "debug" in entry && entry.debug === "ci"));
+    };
+    phase = "logs";
+    assertPercyLogsSafe(redactSecrets(await readCliLogs()), fixture);
+    phase = "planted";
+    // Memory-only SDK namespace; testing mode never calls sendBuildLogs or uploads this canary.
+    logger("sdk").error(authority.roomId.slice(0, 16));
+    let rejected = false;
+    try { assertPercyLogsSafe(redactSecrets(await readCliLogs()), fixture); }
+    catch { rejected = true; }
+    if (!rejected) throw new Error();
+  } catch {
+    failed = true;
+  } finally {
+    const cleanup = await Promise.allSettled([
+      percy.stop(),
+      fixture.stop(),
+      new Promise<void>(resolveClose => authorityServer.close(() => resolveClose())),
+    ]);
+    if (directory !== undefined) await rm(directory, { recursive: true, force: true });
+    logger.instance.reset();
+    failed ||= cleanup.some(result => result.status === "rejected");
+  }
+  if (failed) throw new Error(`visual log audit: ${phase} failed`);
+  process.stdout.write(`${LOG_AUDIT_SUCCESS}\n`);
 }
 
 export async function requirePercyServer(environment: NodeJS.ProcessEnv): Promise<void> {
@@ -154,7 +265,11 @@ export async function runVisual(
       throw new Error("visual upload: healthy Percy server required");
     }
     process.stdout.write("visual-runner: phase=server reason=healthy\n");
-    const result = await run(playwright, { ...clean, PERCY_SERVER_ADDRESS: environment.PERCY_SERVER_ADDRESS ?? "http://127.0.0.1:5338", PERCY_LOGS_IN_MEMORY: "1", PERCY_CLIENT_ERROR_LOGS: "false", OMP_VISUAL_MODE: "upload", NO_COLOR: "" });
+    const result = await run(playwright, {
+      ...clean, PERCY_SERVER_ADDRESS: environment.PERCY_SERVER_ADDRESS ?? "http://127.0.0.1:5338",
+      PERCY_LOGS_IN_MEMORY: "1", PERCY_CLIENT_ERROR_LOGS: "false", OMP_VISUAL_MODE: "upload", NO_COLOR: "",
+      ...(environment.OMP_VISUAL_AUDIT_PIPE === undefined ? {} : { OMP_VISUAL_AUDIT_PIPE: environment.OMP_VISUAL_AUDIT_PIPE }),
+    });
     for (const line of safeVisualLines(`${result.stdout}\n${result.stderr}`)) process.stdout.write(`${line}\n`);
     // The worker requires 18 submissions; only its owning CLI can finalize the build.
     const reasons = visualProcessReasons(result, true, false);
@@ -181,6 +296,17 @@ export async function runVisual(
     assertVisualResult(result, false);
     return;
   }
+  const auditScript = `import { runPercyLogAuditHost } from ${JSON.stringify(import.meta.url)}; try { await runPercyLogAuditHost(process.argv[1]); } catch { process.stderr.write("visual log audit: failed\\n"); process.exitCode = 1; }`;
+  const audit = await run([percyRuntime!, "--input-type=module", "--eval", auditScript, process.execPath], {
+    ...clean, PERCY_SERVER_HOST: "127.0.0.1", PERCY_BROWSER_EXECUTABLE: chromium.executablePath(),
+    PERCY_LOGS_IN_MEMORY: "1", PERCY_CLIENT_ERROR_LOGS: "false", PERCY_DROPIN_DISABLE: "true",
+    // No responsive recapture: also prevents the core's unnecessary startup device lookup.
+    PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS: "true",
+  }, 5 * 60_000);
+  if (audit.code !== 0 || audit.stderr.trim() !== "" || !audit.stdout.split("\n").includes(LOG_AUDIT_SUCCESS)) {
+    throw new Error("visual upload: log audit failed");
+  }
+  process.stdout.write(`${LOG_AUDIT_SUCCESS}\n`);
   const result = await run([percyRuntime!, CLI_EXECUTABLE, "exec", "--", process.execPath, "scripts/test-visual.ts", "upload"], {
     ...clean,
     PERCY_TOKEN: environment.PERCY_TOKEN,
@@ -190,6 +316,7 @@ export async function runVisual(
     PERCY_LOGS_IN_MEMORY: "1",
     PERCY_CLIENT_ERROR_LOGS: "false",
     PERCY_DROPIN_DISABLE: "true",
+    PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS: "true",
     OMP_VISUAL_PERCY_CHILD: "1",
     NO_COLOR: "1",
   });
@@ -205,7 +332,7 @@ export async function runVisual(
 if (import.meta.main) {
   try { await runVisual(Bun.argv.slice(2), process.env); }
   catch (error) {
-    const allowed = [MISSING_TOKEN, MISSING_NODE, "visual: choose local or upload", "visual: build failed", "visual local: validation failed", "visual upload: healthy Percy server required", "visual upload: submissions failed", "visual upload: incomplete or failed Percy build"];
+    const allowed = [MISSING_TOKEN, MISSING_NODE, "visual: choose local or upload", "visual: build failed", "visual local: validation failed", "visual upload: healthy Percy server required", "visual upload: submissions failed", "visual upload: log audit failed", "visual upload: incomplete or failed Percy build"];
     const message = error instanceof Error && allowed.includes(error.message) ? error.message : "visual: execution failed";
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;

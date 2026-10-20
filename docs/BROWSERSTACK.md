@@ -42,7 +42,12 @@ Source and script-disabled serialized geometry must agree, including the 560px d
 the client's existing 880px bounded embedded body and requires exact geometry parity, not a
 900px inner transcript. Asset discovery is
 restricted to the fixture host, uses Playwright's installed Chromium, and keeps JavaScript off.
-No Percy output, trace, screenshot, video, raw SDK diagnostics or error-log upload is retained.
+Responsive recapture and responsive-asset discovery are disabled: each snapshot already uses its
+source viewport. `PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS=true` also prevents the pinned core's
+unnecessary startup device-details lookup in both the testing host and live CLI.
+No local Percy capture output, trace, screenshot, video or raw SDK diagnostics are retained as CI
+artifacts. Percy redacts and uploads its **CLI logs with every build**; disabling client error-log
+collection disables **CI logs only**, not CLI logs.
 
 ## Set up the Percy project
 
@@ -55,6 +60,16 @@ Do not launch Percy with Bun: its HTTP API can appear started but never answer t
 health request, creating a build with zero snapshots.
 The SDK's automatic drop-in baseline provider is disabled explicitly; this lane never seeds or
 auto-approves committed screenshots.
+
+Upload mode first runs this same 18-state suite against the installed native-Node Percy testing
+host, with real asset discovery but no vendor effects and no real token. A private pipe supplies
+one ephemeral synthetic authority shared by those fixtures; it is never exposed by the returned
+`DashboardFixture`, or placed in argv, the environment, output or a file. After all 18 submissions,
+the retained fixture guard and both leak scanners check the exact redacted `clilogs` candidate
+(non-`ci` logger records, including metadata). A planted SDK-log canary must also be rejected.
+This five-minute-bounded preflight must
+pass before the real Percy CLI starts; it emits only
+`visual-audit: states=18 logs=passed planted=rejected`. Local mode still never starts Percy.
 
 1. Create a dedicated **web** Percy project for these synthetic fixtures, connected to this
    repository. Do not share a project/token with production captures or real sessions.
@@ -105,8 +120,9 @@ guard rejection and server rejection. `phase=percy` reports child exit, diagnost
 counts or missing finalization. Use these categories to select the failing boundary; do not
 enable raw logs, traces, screenshots or vendor error-log collection to diagnose it.
 CLI diagnostics are further classified by stable messages from the pinned packages (baseline,
-config, discovery, SDK update, log upload, layout mode, lockfile, proxy, Node or serialization);
-unknown diagnostics remain a failure too. The sole nonfatal category is `cli-runtime-notice`:
+config, discovery, SDK update, log upload, layout mode, lockfile, proxy, Node or serialization).
+Every line of both stdout and stderr is classified; unknown diagnostics remain a failure too.
+The sole nonfatal category is `cli-runtime-notice`:
 the exact unconditional `bin/run.cjs` announcement in CLI 1.32.11 about its next major requiring
 Node 20+. The exact CLI major pin and native Node 24.22.0 already satisfy it. Its fixed code is
 visible; any changed/additional line and every SDK warning still fail.

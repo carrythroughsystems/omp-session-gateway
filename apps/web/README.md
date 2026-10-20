@@ -50,3 +50,7 @@ and header-alignment checks rather than the normal View width.
 This advisory signal does not replace functional e2e or qualification. Project setup, eligible
 CI events and review policy are in [BrowserStack](../../docs/BROWSERSTACK.md).
 Failures report only closed-set phases/reasons and bounded counts, never raw Percy/browser text.
+Upload mode additionally runs an 18-state testing-host preflight and scans the redacted CLI logs
+Percy would receive; the vendor uploads CLI logs with builds even while CI-log upload is disabled.
+The retained fixture guard must also reject a planted SDK-log canary. This preflight never runs
+in local mode or uses a real token.

@@ -48,6 +48,17 @@ function assertTextSafe(text: string, fixture: Pick<DashboardFixture, "assertNoC
   }
 }
 
+/** The exact CLI-log payload is a third-party sink too, including structured metadata. */
+export function assertPercyLogsSafe(logs: unknown, fixture: Pick<DashboardFixture, "assertNoCapabilityMaterial">): void {
+  try {
+    const text = JSON.stringify(logs);
+    if (typeof text !== "string") throw new Error();
+    assertTextSafe(text, fixture);
+  } catch {
+    throw new Error("visual log audit: unsafe CLI logs");
+  }
+}
+
 /** Check the exact serializer result, including hidden/form state, diagnostics and resource bytes. */
 export function assertSerializedSnapshotSafe(
   value: unknown,
@@ -167,6 +178,7 @@ export async function submitSnapshot(
     }
   };
   sdk.request.post = async (path, data) => {
+    if (reason) throw new Error("visual upload: submission rejected");
     if (path !== "/percy/snapshot") {
       reason = "sdk-endpoint";
       throw new Error("visual upload: unexpected SDK request");

@@ -441,8 +441,18 @@ embedded/executable and resource surfaces fail. There is no live relay or produc
 connection. Local mode starts no Percy and strips all Percy credentials. Eligible upload mode
 requires a healthy Percy server, exactly 18 submissions and successful build finalization.
 Forks and every gateway-ci dispatch receive no token and explicitly report not uploaded.
-No traces, screenshots, videos, raw diagnostics, log uploads or Percy output enter CI artifacts;
-Percy CLI logs stay in memory and client error-log collection is disabled.
+No traces, screenshots, videos, raw diagnostics or Percy output enter CI artifacts. Local CLI
+logs stay in memory, but Percy redacts and uploads its **CLI logs with each build**. Setting
+`PERCY_CLIENT_ERROR_LOGS=false` disables the separate **CI-log** upload only, not CLI logs.
+Vendor redaction is not the capability boundary: structured log metadata is scanned too.
+Before the real upload starts, upload mode runs the identical 18-state suite against a native-Node
+Percy testing host with real asset discovery and no vendor effects. A private local pipe supplies
+one distinctive ephemeral authority to those fixtures; its guard stays in host memory. After all
+18 submissions, the host reads the testing server's logger records, selects non-`ci` entries and
+applies the pinned CLI redactor exactly as `sendBuildLogs` does. The resulting `clilogs` candidate
+must pass that fixture's full/segment/escape guard plus the capability and identifier scanners.
+A planted SDK-log canary must fail the same scan without repeating it. The audit has a five-minute
+deadline, passes no real token, and never calls `sendBuildLogs`; local mode remains Percy-free.
 Only closed-set phase/reason codes and bounded counts may pass through nested process output.
 The CLI runs under native Node (exactly pinned in CI); the Bun worker requires a responsive API
 and active build before a snapshot can be submitted.

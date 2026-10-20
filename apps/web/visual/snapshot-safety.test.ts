@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { Page } from "@playwright/test";
 import { readFile, readdir } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import type percySnapshot from "@percy/playwright";
 import { startDashboardFixture, type DashboardFixture } from "../e2e/fixture-server.ts";
 import { INITIAL_SESSIONS } from "../e2e/synthetic-product-fixture.ts";
-import { assertSerializedSnapshotSafe, snapshotOptions, submitSnapshot } from "./snapshot-safety.ts";
+import { assertPercyLogsSafe, assertSerializedSnapshotSafe, snapshotOptions, submitSnapshot } from "./snapshot-safety.ts";
 
 let fixture: DashboardFixture;
 let canary = "";
@@ -56,6 +57,25 @@ test("fixture keeps authority closure-owned and rejects full material, every seg
     }
   }
   fixture.assertNoCapabilityMaterial("authored synthetic fixture prose");
+});
+
+test("audit fixtures share supplied synthetic authority without exposing it on the fixture", async () => {
+  const authority = {
+    roomId: "visualAudit" + randomBytes(8).toString("base64url"),
+    encodedRoomKey: randomBytes(32).toString("base64url"),
+    encodedControlEntropy: randomBytes(16).toString("base64url"),
+  };
+  const audited = await startDashboardFixture([], { syntheticAuthority: authority });
+  try {
+    const diagnostic = JSON.stringify(audited);
+    for (const value of [authority.roomId, authority.encodedRoomKey, `${authority.roomId}.${authority.encodedRoomKey}`]) {
+      expect(diagnostic.includes(value)).toBe(false);
+      rejectedWithoutEcho(() => audited.assertNoCapabilityMaterial(value), value);
+      rejectedWithoutEcho(() => assertPercyLogsSafe([{ debug: "sdk", message: value.slice(0, 16) }], audited), value.slice(0, 16));
+    }
+  } finally {
+    await audited.stop();
+  }
 });
 
 test("hidden attributes, materialized form values, inline styles and text all fail without echo", () => {
@@ -116,4 +136,31 @@ test("last-mile SDK guard rejects swallowed errors, warnings, no-ops and mutated
       return undefined;
     }, sdk);
     expect(uploads).toBe(1);
+});
+
+test("an SDK warning prevents the subsequent snapshot POST entirely", async () => {
+  const page = {} as Page;
+  let uploads = 0;
+  const sdk = {
+    request: { post: async (_path: string, _data: Record<string, unknown>) => { uploads++; return { body: { success: true } }; } },
+    logger: { log: (_namespace: string, _level: string, _message: unknown): unknown => undefined },
+  };
+  await expect(submitSnapshot(page, "directory-empty / visual-phone-390x844", fixture, snapshotOptions(390, 844), async () => {
+    sdk.logger.log("playwright", "warn", canary);
+    try {
+      await sdk.request.post("/percy/snapshot", { domSnapshot: { html: "<p>synthetic</p>", resources: [], warnings: [] } });
+    } catch {}
+    return undefined;
+  }, sdk)).rejects.toThrow("visual upload: submission failed (sdk-warning)");
+  expect(uploads).toBe(0);
+});
+
+test("CLI-log auditing scans SDK messages and structured metadata without echoing canaries", () => {
+  assertPercyLogsSafe([{ debug: "core", message: "Captured synthetic snapshots", meta: { count: 18 } }], fixture);
+  for (const logs of [
+    [{ debug: "sdk", level: "error", message: canary }],
+    [{ debug: "sdk", level: "warn", message: room.slice(0, 16) }],
+    [{ debug: "core", message: "synthetic", meta: { nested: key.slice(0, 16) } }],
+    [{ debug: "core", message: ["fixture-private", "sensitive-net", "ts", "net"].join(".") }],
+  ]) rejectedWithoutEcho(() => assertPercyLogsSafe(logs, fixture), canary);
 });

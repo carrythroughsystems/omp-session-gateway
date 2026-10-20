@@ -56,6 +56,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Fail closed on classified Percy diagnostics from either output stream and refuse snapshot
+  POSTs after an SDK warning. Upload mode now audits the exact redacted CLI-log candidate after
+  an isolated 18-state testing-host run and proves a planted SDK-log canary is rejected. Document
+  that Percy uploads CLI logs with every build; the opt-out disables CI logs only.
 - Run the Percy CLI under native Node instead of Bun's incompatible HTTP server layer, and pin
   its CI Node 24.22.0 LTS runtime. Preserve sanitized phase/reason/count diagnostics through both
   runner layers so a created build with zero accepted snapshots cannot hide its failing boundary.

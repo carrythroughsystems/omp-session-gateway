@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { basename, dirname } from "node:path";
-import { PERCY_RUNTIME_NOTICE, assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
+import { LOG_AUDIT_SUCCESS, PERCY_RUNTIME_NOTICE, assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
 
 const localSuccess = { code: 0, stdout: "visual: validated=18 submitted=0 outcome=passed\n", stderr: "" };
 const uploadSuccess = { code: 0, stdout: "visual: validated=18 submitted=18 outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n", stderr: "" };
+const auditSuccess = { code: 0, stdout: LOG_AUDIT_SUCCESS + "\n", stderr: "" };
 
 test("local mode starts only the build and Playwright without Percy credentials or controls", async () => {
   const calls: Array<{ command: string[]; environment: NodeJS.ProcessEnv }> = [];
@@ -43,7 +44,7 @@ test("upload uses the explicitly selected setup-node executable rather than anot
     PERCY_TOKEN: "synthetic-test-token", OMP_VISUAL_NODE_EXECUTABLE: selected, PATH: "/nonexistent",
   }, async command => {
     commands.push(command);
-    return commands.length === 1 ? { code: 0, stdout: "", stderr: "" } : uploadSuccess;
+    return commands.length === 1 ? { code: 0, stdout: "", stderr: "" } : commands.length === 2 ? auditSuccess : uploadSuccess;
   }, executable => { requested.push(executable); return selected; });
   expect(commands[1]?.[0]).toBe(selected);
   expect(requested).toEqual([selected]);
@@ -58,23 +59,39 @@ test("modes are closed and never fall back on a failure or invalid selection", a
 });
 
 test("upload launches the pinned CLI with the Playwright browser and isolated log controls", async () => {
-  const calls: Array<{ command: string[]; environment: NodeJS.ProcessEnv }> = [];
-  await runVisual(["upload"], { PERCY_TOKEN: "synthetic-test-token", PERCY_ENABLE: "0", PERCY_PARALLEL_TOTAL: "-1" }, async (command, environment) => {
-    calls.push({ command, environment });
-    return calls.length === 1 ? { code: 0, stdout: "", stderr: "" } : uploadSuccess;
+  const calls: Array<{ command: string[]; environment: NodeJS.ProcessEnv; timeoutMs: number | undefined }> = [];
+  await runVisual(["upload"], { PERCY_TOKEN: "synthetic-test-token", PERCY_ENABLE: "0", PERCY_PARALLEL_TOTAL: "-1" }, async (command, environment, timeoutMs) => {
+    calls.push({ command, environment, timeoutMs });
+    return calls.length === 1 ? { code: 0, stdout: "", stderr: "" } : calls.length === 2 ? auditSuccess : uploadSuccess;
   }, () => "synthetic-node");
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(3);
   expect(calls[0]?.environment.PERCY_TOKEN).toBeUndefined();
-  expect(calls[1]?.command[0]).toBe("synthetic-node");
-  expect(basename(calls[1]?.command[1] ?? "")).toBe("run.cjs");
-  expect(basename(dirname(calls[1]?.command[1] ?? ""))).toBe("bin");
-  expect(calls[1]?.environment.PERCY_BROWSER_EXECUTABLE?.includes("chromium")).toBe(true);
-  expect(calls[1]?.environment.PERCY_SERVER_HOST).toBe("127.0.0.1");
-  expect(calls[1]?.environment.PERCY_CLIENT_ERROR_LOGS).toBe("false");
-  expect(calls[1]?.environment.PERCY_DROPIN_DISABLE).toBe("true");
-  expect(calls[1]?.environment.PERCY_LOGS_IN_MEMORY).toBe("1");
-  expect(calls[1]?.environment.PERCY_ENABLE).toBeUndefined();
-  expect(calls[1]?.environment.PERCY_PARALLEL_TOTAL).toBeUndefined();
+  expect(calls[1]?.environment.PERCY_TOKEN).toBeUndefined();
+  expect(calls[1]?.timeoutMs).toBe(5 * 60_000);
+  expect(calls[1]?.environment.PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS).toBe("true");
+  expect(calls[1]?.command).toContain("--eval");
+  expect(calls[2]?.command[0]).toBe("synthetic-node");
+  expect(basename(calls[2]?.command[1] ?? "")).toBe("run.cjs");
+  expect(basename(dirname(calls[2]?.command[1] ?? ""))).toBe("bin");
+  expect(calls[2]?.environment.PERCY_BROWSER_EXECUTABLE?.includes("chromium")).toBe(true);
+  expect(calls[2]?.environment.PERCY_SERVER_HOST).toBe("127.0.0.1");
+  expect(calls[2]?.environment.PERCY_CLIENT_ERROR_LOGS).toBe("false");
+  expect(calls[2]?.environment.PERCY_DROPIN_DISABLE).toBe("true");
+  expect(calls[2]?.environment.PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS).toBe("true");
+  expect(calls[2]?.environment.PERCY_LOGS_IN_MEMORY).toBe("1");
+  expect(calls[2]?.environment.PERCY_ENABLE).toBeUndefined();
+  expect(calls[2]?.environment.PERCY_PARALLEL_TOTAL).toBeUndefined();
+  expect(calls[2]?.timeoutMs).toBeUndefined();
+});
+
+test("a failed log-audit preflight prevents starting the real Percy CLI", async () => {
+  const commands: string[][] = [];
+  await expect(runVisual(["upload"], { PERCY_TOKEN: "synthetic-test-token" }, async command => {
+    commands.push(command);
+    return commands.length === 1 ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "unsafe synthetic diagnostic" };
+  }, () => "synthetic-node")).rejects.toThrow("visual upload: log audit failed");
+  expect(commands).toHaveLength(2);
+  expect(commands.some(command => command.some(argument => basename(argument) === "run.cjs"))).toBe(false);
 });
 
 test("upload rejects disabled Percy, swallowed warnings, incomplete counts and finalize failures", () => {
@@ -149,6 +166,25 @@ test("classified and unknown CLI diagnostics still fail a finalized 18-snapshot 
     expect(() => assertVisualResult(result, true)).toThrow("visual upload: incomplete or failed Percy build");
   }
 });
+
+for (const [diagnostic, category] of [
+  ["Skipping baseline setup", "cli-baseline-warning"],
+  ["Invalid snapshot options:", "cli-config-warning"],
+  ["Skipping resource: synthetic", "cli-discovery-warning"],
+  ["[SDK Update Available] synthetic", "cli-sdk-update"],
+  ["Could not send the builds logs", "cli-log-upload-warning"],
+  ["VRA is Percy's recommended visual review mode", "cli-layout-mode-warning"],
+  ["buildDepTree: OLD lockfile failed to parse", "cli-lockfile-warning"],
+  ["system level proxy", "cli-proxy-warning"],
+  ["MaxListenersExceededWarning", "cli-node-warning"],
+  ["Encountered snapshot serialization warnings", "cli-serialization-warning"],
+] as const) {
+  test(`classified stdout diagnostic ${category} fails a finalized build`, () => {
+    const result = { ...uploadSuccess, stdout: `${uploadSuccess.stdout}[percy] ${diagnostic}\n` };
+    expect(visualProcessReasons(result, true)).toContain(category);
+    expect(() => assertVisualResult(result, true)).toThrow("visual upload: incomplete or failed Percy build");
+  });
+}
 
 test("only the exact pinned entry-point future-Node notice is nonfatal", () => {
   const notice = { ...uploadSuccess, stderr: PERCY_RUNTIME_NOTICE + "\n" };

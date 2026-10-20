@@ -284,7 +284,11 @@ without starting Percy or passing credentials. Upload mode rechecks the exact SD
 a healthy session, all submissions and finalization, and never falls back. No live OMP, real
 transcript, production gateway, capability canary or third-party runtime asset belongs in this
 flow. Synthetic authority stays in source-context memory; serialized HTML/resources fail if it
-appears. These renders are not functional browser tests or signed-candidate qualification.
+appears. Before uploading, a native-Node testing host runs the same 18 states without a real token
+or vendor effects. A private pipe supplies a shared ephemeral synthetic authority; the retained
+fixture guard and both scanners check the exact redacted non-`ci` log candidate and reject a
+planted SDK-log canary. Percy uploads those redacted CLI logs with builds; the separate CI-log
+upload is disabled. These renders are not functional browser tests or signed-candidate qualification.
 See [BrowserStack](BROWSERSTACK.md) and ADR-035 for vendor-role and access policy.
 
 ## 4. Why not process scanning or terminal automation?

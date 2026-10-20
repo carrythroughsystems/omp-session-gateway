@@ -2,6 +2,7 @@ import { once } from "node:events";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
+import { createConnection } from "node:net";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
@@ -20,6 +21,49 @@ const distRoot = resolve(fileURLToPath(new URL("../dist/", import.meta.url)));
 
 export interface DashboardFixtureOptions {
   readonly roomKey?: Uint8Array;
+  /** In-memory audit input only; ordinary and README fixtures keep random authority. */
+  readonly syntheticAuthority?: SyntheticFixtureAuthority;
+}
+
+export interface SyntheticFixtureAuthority {
+  readonly roomId: string;
+  readonly encodedRoomKey: string;
+  readonly encodedControlEntropy: string;
+}
+
+function parseSyntheticAuthority(value: unknown): SyntheticFixtureAuthority {
+  if (value === null || typeof value !== "object" ||
+    !("roomId" in value) || typeof value.roomId !== "string" || !/^[A-Za-z0-9_-]{22}$/u.test(value.roomId) ||
+    !("encodedRoomKey" in value) || typeof value.encodedRoomKey !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value.encodedRoomKey) ||
+    !("encodedControlEntropy" in value) || typeof value.encodedControlEntropy !== "string" || !/^[A-Za-z0-9_-]{22}$/u.test(value.encodedControlEntropy)) {
+    throw new Error("visual log audit: invalid synthetic authority");
+  }
+  return {
+    roomId: value.roomId,
+    encodedRoomKey: value.encodedRoomKey,
+    encodedControlEntropy: value.encodedControlEntropy,
+  };
+}
+
+/** Authority crosses only a private local pipe, never argv, environment, files or fixture properties. */
+export async function readSyntheticAuditAuthority(pipe: string): Promise<SyntheticFixtureAuthority> {
+  try {
+    const text = await new Promise<string>((resolveRead, rejectRead) => {
+      const socket = createConnection(pipe);
+      let text = "";
+      socket.setEncoding("utf8");
+      socket.setTimeout(5_000, () => socket.destroy(new Error("visual log audit: authority timeout")));
+      socket.on("data", chunk => {
+        text += chunk;
+        if (text.length > 1_024) socket.destroy(new Error("visual log audit: oversized authority"));
+      });
+      socket.on("error", rejectRead);
+      socket.on("end", () => resolveRead(text));
+    });
+    return parseSyntheticAuthority(JSON.parse(text));
+  } catch {
+    throw new Error("visual log audit: authority unavailable");
+  }
 }
 
 export interface FixtureLaunchRequest {
@@ -52,11 +96,14 @@ export async function startDashboardFixture(
   const launchRequests: FixtureLaunchRequest[] = [];
   let serviceWorkerVersion = 0;
   let revision = 1;
-  const roomId = randomBytes(16).toString("base64url");
-  const roomKey = options.roomKey === undefined ? randomBytes(32) : Buffer.from(options.roomKey);
+  const authority = options.syntheticAuthority === undefined ? undefined : parseSyntheticAuthority(options.syntheticAuthority);
+  const roomId = authority?.roomId ?? randomBytes(16).toString("base64url");
+  const roomKey = authority !== undefined ? Buffer.from(authority.encodedRoomKey, "base64url")
+    : options.roomKey === undefined ? randomBytes(32) : Buffer.from(options.roomKey);
   if (roomKey.byteLength !== 32) throw new Error("dashboard fixture room key must be 32 bytes");
   const viewCapability = `${roomId}.${roomKey.toString("base64url")}`;
-  const controlCapability = `${roomId}.${Buffer.concat([roomKey, randomBytes(16)]).toString("base64url")}`;
+  const controlEntropy = authority === undefined ? randomBytes(16) : Buffer.from(authority.encodedControlEntropy, "base64url");
+  const controlCapability = `${roomId}.${Buffer.concat([roomKey, controlEntropy]).toString("base64url")}`;
   // Keep the canaries closure-owned: consumers get a predicate, never secret properties.
   const forbiddenMaterial = new Set<string>();
   for (const value of [viewCapability, controlCapability, roomId, roomKey.toString("base64url")]) {

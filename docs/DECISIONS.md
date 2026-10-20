@@ -1359,8 +1359,17 @@ external runtime asset or qualified-platform claim changes. Extract the determin
 fixture without changing its defaults. Use the installed `@percy/dom` serializer with the SDK's
 options, then scan its HTML and every serialized resource using closure-owned exact/segment/escape
 canary checks and the capability/identifier scanners. Recheck the exact SDK POST in memory. A hit
-or warning fails before submission, without repeating source data in diagnostics. Keep Percy
-JavaScript rendering off and discovery restricted to the fixture host and installed Chromium.
+or SDK warning refuses the POST before submission, without repeating source data in diagnostics.
+Keep Percy JavaScript rendering off and discovery restricted to the fixture host and installed Chromium.
+
+CLI diagnostics are classified on every line of both streams. Percy uploads redacted CLI logs
+with every build; disabling CI-log collection does not disable CLI-log upload. Upload mode must
+first exercise the identical 18 states against the installed native-Node testing host, without
+a real token or vendor effects, then scan the exact redacted non-`ci` logger records that form
+`clilogs`, including metadata. A private pipe supplies one ephemeral synthetic authority, and its
+retained fixture guard plus both leak scanners must accept the real run and reject a planted
+SDK-log canary. The audit is bounded to five minutes and never calls `sendBuildLogs`; ordinary
+and README fixture defaults remain random and unchanged. Local mode does not start the audit.
 
 Local validation invokes no Percy and supplies no token. Upload mode requires credentials, a
 healthy server, all 18 submissions and a finalized build; it cannot silently no-op or fall back.

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { test, type Browser, type Page } from "@playwright/test";
 import type { SessionMetadata } from "../../../packages/protocol/src/index.ts";
-import { startDashboardFixture, type DashboardFixture } from "../e2e/fixture-server.ts";
+import { readSyntheticAuditAuthority, startDashboardFixture, type DashboardFixture } from "../e2e/fixture-server.ts";
 import {
   GATEWAY_WAITING, INITIAL_SESSIONS, RELEASE_WAITING, installSyntheticProductFixture,
 } from "../e2e/synthetic-product-fixture.ts";
@@ -102,12 +102,17 @@ async function validateNegativeGuards(browser: Browser, fixture: DashboardFixtur
 for (const state of VISUAL_STATES) {
   test(state, async ({ browser, context, page }, info) => {
     let phase = "fixture";
-    const roomKey = randomBytes(32);
+    const authority = process.env.OMP_VISUAL_AUDIT_PIPE === undefined ? undefined
+      : await readSyntheticAuditAuthority(process.env.OMP_VISUAL_AUDIT_PIPE);
+    const roomKey = authority === undefined ? randomBytes(32) : Buffer.from(authority.encodedRoomKey, "base64url");
     const waiting = metadataOnly(GATEWAY_WAITING);
     const sessions = state === "directory-empty" ? [] : state === "directory-needs-you" || state === "collab-control-ask"
       ? [waiting, metadataOnly(RELEASE_WAITING), ...INITIAL_SESSIONS.slice(1)]
       : [...INITIAL_SESSIONS];
-    const fixture = await startDashboardFixture(sessions, { roomKey });
+    const fixture = await startDashboardFixture(sessions, {
+      roomKey,
+      ...(authority === undefined ? {} : { syntheticAuthority: authority }),
+    });
     let unexpectedRequests = 0;
     try {
       await installSyntheticProductFixture(context, roomKey, { readOnly: state === "collab-view", transcript: TRANSCRIPT, randomSeed: 42 });
