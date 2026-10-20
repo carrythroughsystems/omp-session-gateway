@@ -2,7 +2,9 @@
 import { ALLOCATION_REPORT_EXPRESSION, type BrowserAllocationReport } from "./device-cloud-qualification.ts";
 import { deviceCloudMachineOutcome } from "./device-cloud-availability.ts";
 import { admitDeviceCloud } from "./device-cloud-runtime.ts";
-import { TestingBotApi, WebDriverSession, endWebDriverSession, readTestingBotCredentials, serviceAccountTokenFile } from "./testingbot.ts";
+import { TestingBotApi, readTestingBotCredentials } from "./testingbot.ts";
+import { WebDriverSession, endWebDriverSession } from "./device-cloud-webdriver.ts";
+import { serviceAccountTokenFile } from "./device-cloud-common.ts";
 
 const PROBES = [
   { name: "iPhone 16 Pro", platform: "iOS", browser: "safari", family: "iphone", floor: 26 },
@@ -45,7 +47,7 @@ async function main(): Promise<void> {
     let failed = false;
     try {
       started += 1;
-      const allocation = await WebDriverSession.create(credentials, {
+      const allocation = await WebDriverSession.create("testingbot", credentials.key, credentials.secret, {
         platformName: probe.platform, browserName: probe.browser,
         "appium:deviceName": device.name, "appium:platformVersion": device.version,
         "tb:options": { realDevice: true, name: "omp public allocation attestation", screenrecorder: false, screenshot: false, recordLogs: false, public: false, maxduration: 180, idletimeout: 90 },
@@ -61,7 +63,7 @@ async function main(): Promise<void> {
       report = observed;
     } catch { failed = true; }
     if (id !== undefined) {
-      try { await endWebDriverSession(credentials, id); }
+      try { await endWebDriverSession("testingbot", credentials.key, credentials.secret, id); }
       catch { failed = true; }
       const finalize = Date.now() + 180_000;
       let audited = false;

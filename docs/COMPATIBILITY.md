@@ -238,7 +238,7 @@ Tested functional coverage, Supported families or Qualified rows to the matrices
 
 Real-device cloud rows (ADR-032) are qualified **in the browser on a cloud device**: the stable
 campaign's `deviceCloud` lane passed on the named real device, OS, and browser version in
-TestingBot's cloud, each as the device itself reported it. The limits are part of that claim.
+the vendor named for that target, each as the device itself reported it. The limits are part of that claim.
 Tailscale Serve saw the orchestrator's allowlisted login, not the phone's own; alerts were proven
 with the device unlocked and the app in the background; and lock, Airplane, Doze, force-stop, and
 cellular behavior are qualified only on the Pixel.
@@ -248,6 +248,15 @@ pool with no free eligible device produces a failed attempt with closed availabi
 evidence (CLI exit 75); auth, transport, audit and cleanup failures remain diagnostic. Wider
 model pools and capability-free allocation probes are Tested tooling evidence only. They add
 no qualified devices or versions to the signed-release tables above.
+
+New device-cloud receipts attribute vendor and tunnel version to each target. TestingBot remains
+the only iPhone vendor and the only cloud Home Screen/background-alert proof. iPad Safari and
+Samsung Chrome may use BrowserStack when their TestingBot pool is empty; mixed receipts never
+attribute BrowserStack's devices to TestingBot. Android remains Samsung-only, with a corroborated
+hardware code. Legacy homogeneous receipts retain their original summaries. The 2026-10-20
+BrowserStack public-page allocations (iPad 10th/Safari 27.0 and Galaxy S26 SM-S942B/Android
+16.0.0/Chrome 152.0.7977.54) are Tested allocation and retention evidence only, not qualification
+of these versions or completion of the collaboration journey.
 
 ## Exact OMP baseline
 

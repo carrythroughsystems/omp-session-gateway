@@ -28,10 +28,11 @@ function transientNetworkError(error: unknown): boolean {
  * here, because a write that reached the provider must not run twice. HTTP and thrown network
  * failures share five attempts; the last response is returned or the last error is thrown.
  * Programming errors and caller cancellation are final. Each caller keeps its own status handling.
+ * Retained-surface callers may inspect a retry body before cancellation; a failed inspection is final.
  */
 export async function readProvider(
   read: () => Promise<Response>,
-  options: { readonly sleep?: (milliseconds: number) => Promise<void> } = {},
+  options: { readonly sleep?: (milliseconds: number) => Promise<void>; readonly beforeRetry?: (response: Response) => Promise<void> } = {},
 ): Promise<Response> {
   const sleep = options.sleep ?? (async (milliseconds: number) => void (await Bun.sleep(milliseconds)));
   for (let attempt = 1; ; attempt += 1) {
@@ -43,6 +44,7 @@ export async function readProvider(
     }
     if (response !== undefined) {
       if (response.status < 500 || attempt >= PROVIDER_READ_ATTEMPTS) return response;
+      if (options.beforeRetry !== undefined) await options.beforeRetry(response);
       await response.body?.cancel();
     }
     await sleep(2_000 * 2 ** (attempt - 1));

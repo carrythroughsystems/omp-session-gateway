@@ -4,17 +4,13 @@ import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  pageEvaluationScript,
   TestingBotApi,
-  WebDriverSession,
   readTestingBotCredentials,
-  runOp,
-  startAllowlistProxy,
   startTunnel,
   stopTunnel,
-  type OpRunner,
-  type ProcessEntry,
 } from "./testingbot.ts";
+import { runOp, startAllowlistProxy, type OpRunner, type ProcessEntry } from "./device-cloud-common.ts";
+import { WebDriverSession, pageEvaluationScript } from "./device-cloud-webdriver.ts";
 
 // Built at runtime so no token-shaped literal sits in the repository.
 const TOKEN = `ops_${"SYNTHETICserviceAccount".repeat(3)}`;
@@ -47,7 +43,7 @@ test("failed identified-session checkpoint ends the session before any browser c
     return Response.json({ value: options?.method === "DELETE" ? null : { sessionId: "session-checkpoint-0001", capabilities: {} } });
   }, { preconnect: () => {} }));
   try {
-    await expect(WebDriverSession.create({ key: KEY, secret: SECRET }, {}, async () => { throw new Error("checkpoint failed"); })).rejects.toThrow("checkpoint failed");
+    await expect(WebDriverSession.create("testingbot", KEY, SECRET, {}, async () => { throw new Error("checkpoint failed"); })).rejects.toThrow("checkpoint failed");
     expect(calls).toEqual(["POST /wd/hub/session", "DELETE /wd/hub/session/session-checkpoint-0001"]);
   } finally { mock.mockRestore(); }
 });

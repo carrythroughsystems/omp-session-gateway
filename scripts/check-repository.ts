@@ -75,18 +75,31 @@ const nonProviderFetches: Readonly<Record<string, readonly string[]>> = {
   "test-visual.ts": ['new URL("/percy/healthcheck"', 'new URL("/test/logs"'],
 };
 
-function checkProviderReads(rel: string, text: string): string[] {
+export function checkProviderReads(rel: string, text: string): string[] {
   if (!/^scripts\/.+\.ts$/u.test(rel) || rel.endsWith(".test.ts")) return [];
   const failures: string[] = [];
   for (const match of text.matchAll(/\b(?:globalThis\.)?fetch\s*\(\s*([^,\n]+)/gu)) {
     const target = match[1]?.trim().replace(/\);$/u, "");
     const before = text.slice(0, match.index);
+    if (rel === "scripts/browserstack.ts" && target === '`${API}/sessions/${sessionId}.json`') {
+      const after = text.slice(match.index! + match[0].length);
+      if (!/readProvider\(\s*\(\)\s*=>\s*$/u.test(before) && /^,\s*\{\s*method:\s*"DELETE"/u.test(after)) continue;
+      failures.push(`${rel}:${before.split("\n").length}: BrowserStack record deletion must be a single unretried DELETE`);
+      continue;
+    }
+    if (rel === "scripts/device-cloud-webdriver.ts" && target === '`${connection.endpoint}${path}`') {
+      if (/const send = \(\) => $/u.test(before) &&
+        text.includes('const response = method === "GET" ? await readProvider(send) : await send();') &&
+        text.includes('endpoint: "https://hub.testingbot.com/wd/hub"') &&
+        text.includes('endpoint: "https://hub.browserstack.com/wd/hub"')) continue;
+      failures.push(`${rel}:${before.split("\n").length}: cloud WebDriver dispatcher must pin endpoints and retry GET only`);
+      continue;
+    }
     if (/readProvider\(\s*\(\)\s*=>\s*$/u.test(before)) continue;
     if (target !== undefined && nonProviderFetches[rel.slice("scripts/".length)]?.includes(target)) continue;
-    // These two dispatchers share a closure but replay it ONLY for GET. Match the gate as well
+    // This dispatcher shares a closure but replays it ONLY for GET. Match the gate as well
     // as the target, so removing the read retry or retrying writes fails repository admission.
-    if (((rel === "scripts/windows-qualification-runtime.ts" && target === "url") ||
-      (rel === "scripts/testingbot.ts" && target === '`${HUB}${path}`')) &&
+    if ((rel === "scripts/windows-qualification-runtime.ts" && target === "url") &&
       /const send = \(\) => $/u.test(before) &&
       text.includes('const response = method === "GET" ? await readProvider(send) : await send();')) continue;
     failures.push(rel + ":" + (before.split("\n").length) + ": unreviewed direct fetch; use readProvider for idempotent provider reads or document the exact non-provider target");

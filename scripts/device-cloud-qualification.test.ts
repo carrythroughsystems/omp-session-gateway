@@ -16,10 +16,12 @@ import {
   type DeviceCloudTarget,
   type BrowserAllocationReport,
 } from "./device-cloud-qualification.ts";
+import type { DeviceCloudVendor } from "./device-cloud-common.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudHolds } from "./device-cloud-availability.ts";
 import { createPixelLease, type PixelLease } from "./stable-qualification.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import { TestingBotApi } from "./testingbot.ts";
+import { BrowserStackAuditFailure, prepareBrowserStackLocal } from "./browserstack.ts";
 
 // Distinctive synthetic links: never a real capability shape, so the repository leak scans stay green.
 const LINKS: Record<string, Record<"view" | "control", string>> = {
@@ -61,6 +63,8 @@ function harness(options: {
   readonly failing?: string;
   readonly hold?: DeviceCloudTarget;
   readonly auditFails?: boolean;
+  readonly vendors?: Partial<Record<DeviceCloudTarget, DeviceCloudVendor>>;
+  readonly sessionIds?: Partial<Record<DeviceCloudTarget, string>>;
   /** What a target's device reports instead of its first pinned model. */
   readonly evidence?: Partial<Record<DeviceCloudTarget, Record<string, DeviceCloudObservation>>>;
 } = {}): Harness {
@@ -102,18 +106,27 @@ function harness(options: {
         kind: "device-cloud-availability", stage: "allocation", target, vendors: ["testingbot"],
         reason: "pinned-pool-busy", waitedMs: 600_000, epoch: attempt.epoch,
       });
-      await attempt.created(`session-${target}-0001`);
+      const vendor = options.vendors?.[target] ?? "testingbot";
+      if (vendor === "browserstack") await attempt.startingTunnel(vendor);
+      await attempt.allocating(vendor);
+      await attempt.created({ vendor, target, sessionId: options.sessionIds?.[target] ?? `session-${target}-0001` });
       effect(`verify ${target}`);
       if (options.generationChangesAt === target) generations[options.generationChanges ?? "fixture"] += 1;
-      return options.evidence?.[target] ?? {
+      return {
+        vendor: vendor === "testingbot" ? "TestingBot" : "BrowserStack", tunnelVersion: vendor === "testingbot" ? "4.9" : "8.9",
         device: DEVICE_CLOUD_PROFILES[target].models[0]!, os: "26.6", viewReadOnly: true, controlWritable: true, sinkFindings: 0,
+        ...options.evidence?.[target],
       };
     },
-    endSession: async sessionId => {
+    endSession: async ({ sessionId }) => {
       effect(`end ${sessionId}`);
     },
-    record: async sessionId => {
+    record: async ({ vendor, sessionId }, remember) => {
       effect(`audit ${sessionId}`);
+      if (vendor === "browserstack") await remember?.([{
+        url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${sessionId}/synthetic-log`,
+        buildId: "c".repeat(40), kind: "text",
+      }]);
       if (options.auditFails) throw new Error("vendor audit failed");
       return {
         complete: true,
@@ -122,6 +135,7 @@ function harness(options: {
         screenshots: 0,
       };
     },
+    removeRecord: async ({ sessionId }, removal) => { effect(`remove ${sessionId}`); await removal.markDeleted(); },
     launch: async (launched, mode) => LINKS[launched.instanceId]![mode],
     removeWorkspace: async () => {
       effect("workspace remove");
@@ -159,6 +173,11 @@ async function failure(promise: Promise<unknown>): Promise<string> {
   throw new Error("expected a rejection");
 }
 
+function errorMessages(error: unknown): string {
+  return error instanceof AggregateError ? [error.message, ...error.errors.map(errorMessages)].join("\n") :
+    error instanceof Error ? error.message : String(error);
+}
+
 describe("device-cloud lane", () => {
   test("records every session before driving it, passes, and releases everything before giving up the lease", async () => {
     const lane = harness();
@@ -175,8 +194,7 @@ describe("device-cloud lane", () => {
       expect(firstRecorded).toBeLessThan(verified);
     }
     expect(lane.effects.filter(effect => effect.endsWith("(unleased)"))).toEqual([]);
-    expect(lane.effects.slice(-6)).toEqual([
-      "end session-iphone-0001", "end session-ipad-0001", "end session-android-0001",
+    expect(lane.effects.slice(-3)).toEqual([
       "tunnel stop", "fixture stop", "workspace remove",
     ]);
 
@@ -196,16 +214,16 @@ describe("device-cloud lane", () => {
         if (active.size >= 2) throw new Error("the vendor refuses a third concurrent session");
         return lane.runtime.verify(target, {
           ...attempt,
-          created: async sessionId => {
-            active.add(sessionId);
+          created: async reference => {
+            active.add(`${reference.vendor}:${reference.sessionId}`);
             maximumActive = Math.max(maximumActive, active.size);
-            await attempt.created(sessionId);
+            await attempt.created(reference);
           },
         });
       },
-      endSession: async sessionId => {
-        await lane.runtime.endSession(sessionId);
-        active.delete(sessionId);
+      endSession: async reference => {
+        await lane.runtime.endSession(reference);
+        active.delete(`${reference.vendor}:${reference.sessionId}`);
       },
     };
     expect(await runDeviceCloud({ ...input(lane), runtime })).toMatchObject({ passed: true });
@@ -277,7 +295,7 @@ describe("device-cloud lane", () => {
     expect(await failure(runDeviceCloud(input(lane)))).toContain("verify ipad failed");
     expect(lane.effects.filter(effect => effect.endsWith("(unleased)"))).toEqual([]);
     expect(lane.effects.slice(-5)).toEqual([
-      "end session-iphone-0001", "end session-ipad-0001", "tunnel stop", "fixture stop", "workspace remove",
+      "audit session-iphone-0001", "audit session-ipad-0001", "tunnel stop", "fixture stop", "workspace remove",
     ]);
     expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(false);
   });
@@ -297,10 +315,10 @@ describe("device-cloud lane", () => {
   ])("a vendor record holding %s fails the lane without repeating it", async (_name, leaked) => {
     const lane = harness({ record: sessionId => JSON.stringify({ steps: sessionId.includes("ipad") ? `returned ${leaked}` : "clean" }) });
     const message = await failure(runDeviceCloud(input(lane)));
-    expect(message).toContain("1 of 3 TestingBot test records contain a live View or Control link");
+    expect(message).toContain("1 of 3 cloud test records contain a live View or Control link");
     const saved = JSON.stringify(lane.checkpoints);
     for (const text of [message, saved]) expect(text).not.toContain("SYNTHETIC-CLOUD-");
-    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).results.audit).toEqual({ records: 3, recordsExposingLinks: 1, recordsWithMedia: 0 });
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).results.audit).toMatchObject({ records: 3, recordsExposingLinks: 1, recordsWithMedia: 0 });
   });
 
   test.each(["duplicate-key", "escaped-value"] as const)("audits raw and canonical retained JSON without dropping a %s leak", async form => {
@@ -319,8 +337,8 @@ describe("device-cloud lane", () => {
     try {
       const lane = harness();
       const api = new TestingBotApi({ key: "synthetic-key", secret: "synthetic-secret" });
-      const message = await failure(runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime, record: sessionId => api.testRecord(sessionId) } }));
-      expect(message).toContain(form === "duplicate-key" ? "device-cloud retained-record audits failed" : "3 of 3 TestingBot test records contain a live View or Control link");
+      const message = await failure(runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime, record: ({ sessionId }) => api.testRecord(sessionId) } }));
+      expect(message).toContain(form === "duplicate-key" ? "device-cloud retained-record audits failed" : "3 of 3 cloud test records contain a live View or Control link");
       expect(message).not.toContain(leaked);
       expect(JSON.stringify(lane.checkpoints)).not.toContain(leaked);
     } finally { mock.mockRestore(); }
@@ -343,7 +361,10 @@ describe("device-cloud lane", () => {
     const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
     expect(deviceCloudHolds(error)).toBeUndefined();
     expect(pixelUnrestored(error)).toBe("failing" in options);
-    expect(lane.effects).toContain("workspace remove");
+    if ("failing" in options) {
+      expect(lane.effects).not.toContain("fixture stop");
+      expect(lane.effects).not.toContain("workspace remove");
+    } else expect(lane.effects).toContain("workspace remove");
   });
 
   test.each(["fixture", "live"] as const)("a %s generation change before the audit fails instead of searching for the wrong links", async kind => {
@@ -368,19 +389,19 @@ describe("device-cloud lane", () => {
     expect(second.effects).toEqual([]);
     await cleanupDeviceCloud(input(second, interrupted));
     expect(second.effects).toEqual([
-      "end session-iphone-0001", "end session-ipad-0001", "tunnel stop", "fixture stop", "workspace remove",
+      "tunnel stop", "fixture stop", "workspace remove",
     ]);
   });
 
-  test("a release that cannot finish leaves the attempt dirty, and cleanup retries every step", async () => {
+  test("a release that cannot finish stays dirty and retries the unfinished cleanup", async () => {
     const run = harness({ failing: "tunnel stop" });
-    expect(await failure(runDeviceCloud(input(run)))).toBe("device-cloud cleanup failed: tunnel");
+    expect(await failure(runDeviceCloud(input(run)))).toBe("device-cloud cleanup failed: testingbotTunnel");
     const progress = run.checkpoints.at(-1);
     expect(parseDeviceCloudProgress(progress)).toMatchObject({ phase: "evidence_complete", cleanupRequired: true });
 
     const cleanup = harness({ failing: "tunnel stop" });
-    expect(await failure(cleanupDeviceCloud(input(cleanup, progress)))).toBe("device-cloud cleanup failed: tunnel");
-    expect(cleanup.effects.slice(-2)).toEqual(["fixture stop", "workspace remove"]);
+    expect(await failure(cleanupDeviceCloud(input(cleanup, progress)))).toBe("device-cloud cleanup failed: testingbotTunnel");
+    expect(cleanup.effects).toEqual(["tunnel stop"]);
     expect(cleanup.checkpoints).toEqual([]);
     expect(deviceCloudNeedsCleanup(progress)).toBe(true);
   });
@@ -396,6 +417,252 @@ describe("device-cloud lane", () => {
   });
 });
 
+describe("mixed-vendor ownership and partial failure", () => {
+  const vendors = { ipad: "browserstack", android: "browserstack" } as const;
+  const sessionIds = { ipad: "a".repeat(40), android: "b".repeat(40) };
+
+  test("identical session IDs at different vendors remain separate owned resources", async () => {
+    const lane = harness({ vendors, sessionIds: { ...sessionIds, iphone: sessionIds.ipad } });
+    const ended: string[] = [];
+    const audited: string[] = [];
+    const removed: string[] = [];
+    const result = await runDeviceCloud({
+      ...input(lane),
+      runtime: {
+        ...lane.runtime,
+        endSession: async reference => { ended.push(`${reference.vendor}:${reference.sessionId}`); await lane.runtime.endSession(reference); },
+        record: async (reference, remember) => { audited.push(`${reference.vendor}:${reference.sessionId}`); return lane.runtime.record(reference, remember); },
+        removeRecord: async (reference, removal) => { expect(removal.artifacts.length).toBeGreaterThan(0); removed.push(reference.vendor); await removal.markDeleted(); },
+      },
+    });
+    expect(result).toMatchObject({ vendor: "mixed", tunnelVersion: "per-target", audit: { testingbotRecords: 1, browserstackRecords: 2, lingeringSignedArtifacts: 0 } });
+    expect(JSON.stringify(result)).not.toContain("https://bs-selenium-logs");
+    expect(ended).toEqual([`testingbot:${sessionIds.ipad}`, `browserstack:${sessionIds.ipad}`, `browserstack:${sessionIds.android}`]);
+    expect(audited).toEqual(ended);
+    expect(removed).toEqual(["browserstack", "browserstack"]);
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.sessions).toEqual([sessionIds.ipad]);
+    expect(progress.resources?.map(resource => [resource.vendor, resource.ended, resource.recordRemoved])).toEqual([
+      ["testingbot", true, false], ["browserstack", true, true], ["browserstack", true, true],
+    ]);
+  });
+
+  test("audits every vendor after a later target fails and never replays a primary write", async () => {
+    const lane = harness({ vendors, sessionIds, failing: "verify android" });
+    await expect(runDeviceCloud(input(lane))).rejects.toThrow("verify android");
+    for (const sessionId of ["session-iphone-0001", ...Object.values(sessionIds)]) expect(lane.effects).toContain(`audit ${sessionId}`);
+    expect(lane.effects.filter(effect => effect.startsWith("verify "))).toEqual(["verify iphone", "verify ipad", "verify android"]);
+    for (const sessionId of Object.values(sessionIds)) expect(lane.effects).toContain(`remove ${sessionId}`);
+  });
+
+  test("one vendor's missing record does not skip the other vendor's record audit", async () => {
+    const lane = harness({ vendors, sessionIds });
+    const audited: string[] = [];
+    await expect(runDeviceCloud({
+      ...input(lane), runtime: {
+        ...lane.runtime,
+        record: async (reference, remember) => {
+          audited.push(reference.vendor);
+          if (reference.target === "iphone") throw new Error("primary record unavailable");
+          return lane.runtime.record(reference, remember);
+        },
+      },
+    })).rejects.toThrow("could not be audited");
+    expect(audited).toEqual(["testingbot", "browserstack", "browserstack"]);
+  });
+
+  test("the identical exact-16 window scan rejects BrowserStack retained text", async () => {
+    const leaked = LINKS["instance-live"]!.control.slice(22, 38);
+    const lane = harness({ vendors, sessionIds, record: sessionId => sessionId === sessionIds.ipad ? leaked : "clean" });
+    const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("1 of 3 cloud test records");
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(JSON.stringify(lane.checkpoints)).not.toContain(leaked);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).results.audit).toMatchObject({ recordsExposingLinks: 1, browserstackRecords: 2 });
+  });
+
+  test.each([false, true])("compact default-relay capabilities do not confuse navigation origins with link windows (leak=%s)", async leak => {
+    // Default-relay links are room.key, not origin-prefixed URLs. These strings remain synthetic.
+    const capability = "SYNTHETIC_ROOM.SYNTHETIC_BROWSERSTACK_CAPABILITY_NOT_A_REAL_KEY";
+    const navigation = JSON.stringify({ command: "navigate", url: `${identity.origin}/`, result: null });
+    const lane = harness({ vendors, sessionIds, record: sessionId =>
+      navigation + (leak && sessionId === sessionIds.ipad ? capability.slice(22, 38) : "") });
+    const attempt = runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime, launch: async () => capability } });
+    if (leak) {
+      const error = await attempt.catch((error: unknown) => error);
+      expect(errorMessages(error)).toContain("1 of 3 cloud test records");
+      expect(pixelUnrestored(error)).toBe(true);
+      expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.target === "ipad")?.incident).toBe(true);
+    } else expect(await attempt).toMatchObject({ passed: true, audit: { recordsExposingLinks: 0 } });
+  });
+
+  test("an allocation with no known session stays dirty and blocks the Pixel lease", async () => {
+    const lane = harness();
+    const error = await runDeviceCloud({
+      ...input(lane), runtime: {
+        ...lane.runtime,
+        verify: async (_target, attempt) => {
+          await attempt.allocating("testingbot");
+          throw new Error("ambiguous primary session creation");
+        },
+      },
+    }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.cleanupRequired).toBe(true);
+    expect(progress.resources).toEqual([{ vendor: "testingbot", target: "iphone", ended: false, audited: false, recordRemoved: false }]);
+    expect(lane.effects).not.toContain("workspace remove");
+    expect(lane.effects.filter(effect => effect.startsWith("verify "))).toEqual([]);
+  });
+
+  test("failed BrowserStack deletion stays dirty and flags the lease", async () => {
+    const lane = harness({ vendors, sessionIds });
+    const error = await runDeviceCloud({
+      ...input(lane), runtime: { ...lane.runtime, removeRecord: async () => { throw new Error("absence unverified"); } },
+    }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(true);
+    expect(lane.effects.filter(effect => effect === "tunnel stop")).toHaveLength(2);
+    expect(lane.effects).not.toContain("fixture stop");
+    expect(lane.effects).not.toContain("workspace remove");
+  });
+
+  async function interruptedDeletion() {
+    const lane = harness({ vendors, sessionIds });
+    await expect(runDeviceCloud({
+      ...input(lane), runtime: { ...lane.runtime, removeRecord: async () => { throw new Error("not absent"); } },
+    })).rejects.toThrow();
+    return parseDeviceCloudProgress(structuredClone(lane.checkpoints.at(-1)));
+  }
+
+  test.each(["unchanged", "changed", "unavailable"] as const)("fresh cleanup audits only recoverable generations (%s)", async state => {
+    const progress = await interruptedDeletion();
+    expect(progress.resources?.filter(resource => resource.vendor === "browserstack").every(resource => resource.artifacts?.length === 1)).toBe(true);
+    const recovery = harness({ vendors, sessionIds });
+    const runtime: DeviceCloudRuntime = {
+      ...recovery.runtime,
+      fixtureSession: async () => state === "unavailable" ? undefined : {
+        ...(await recovery.runtime.liveSession(LIVE_LABEL))!, instanceId: "instance-fixture", generation: state === "changed" ? 2 : 1,
+      },
+      removeRecord: async (reference, removal) => {
+        expect(recovery.effects).toContain(`audit ${reference.sessionId}`);
+        expect(removal.artifacts).toHaveLength(1);
+        await recovery.runtime.removeRecord(reference, removal);
+      },
+    };
+    const result = await cleanupDeviceCloud({ ...input(recovery, progress), runtime });
+    expect(result).toMatchObject({ restored: true, unauditedRecordsDeleted: state === "unchanged" ? 0 : 2 });
+    expect(JSON.stringify(result)).not.toContain("https://bs-selenium-logs");
+    const final = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
+    for (const resource of final.resources!.filter(resource => resource.vendor === "browserstack")) {
+      expect(resource.recordRemoved).toBe(true);
+      expect(resource.artifacts).toEqual([]);
+      expect(resource.audited).toBe(true); // Earlier successful audit remains a historical stage.
+      expect(resource.unauditedDeletion === true).toBe(state !== "unchanged");
+    }
+  });
+
+  test("fresh cleanup detects an exact-16 link hit, deletes for confidentiality, and persists an incident", async () => {
+    const progress = await interruptedDeletion();
+    const leaked = LINKS["instance-live"]!.control.slice(22, 38);
+    const recovery = harness({ vendors, sessionIds, record: sessionId => sessionId === sessionIds.ipad ? leaked : "clean" });
+    const runtime = {
+      ...recovery.runtime,
+      fixtureSession: async () => ({ ...(await recovery.runtime.liveSession(LIVE_LABEL))!, instanceId: "instance-fixture" }),
+    };
+    const error = await cleanupDeviceCloud({ ...input(recovery, progress), runtime }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(String(error)).toContain("incident");
+    expect(recovery.effects).toContain(`remove ${sessionIds.ipad}`);
+    const final = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
+    expect(final.resources?.find(resource => resource.target === "ipad")).toMatchObject({ recordRemoved: true, incident: true, audited: true });
+    expect(final.cleanupRequired).toBe(true);
+    expect(JSON.stringify(recovery.checkpoints)).not.toContain(leaked);
+    await expect(cleanupDeviceCloud({ ...input(harness(), final), runtime })).rejects.toThrow("incident");
+  });
+
+  test("a late signed artifact hit uses the same exact-16 scanner and cannot be restored", async () => {
+    const progress = await interruptedDeletion();
+    const leaked = LINKS["instance-live"]!.view.slice(22, 38);
+    const recovery = harness({ vendors, sessionIds });
+    const runtime: DeviceCloudRuntime = {
+      ...recovery.runtime,
+      fixtureSession: async () => ({ ...(await recovery.runtime.liveSession(LIVE_LABEL))!, instanceId: "instance-fixture" }),
+      removeRecord: async (_reference, removal) => { await removal.inspect({ complete: true, text: leaked, video: false, screenshots: 0 }); await removal.markDeleted(); },
+    };
+    await expect(cleanupDeviceCloud({ ...input(recovery, progress), runtime })).rejects.toThrow("incident");
+    expect(deviceCloudNeedsCleanup(recovery.checkpoints.at(-1))).toBe(true);
+    expect(JSON.stringify(recovery.checkpoints)).not.toContain(leaked);
+  });
+  test("a post-DELETE absence retry preserves the audited/deleted stages and does not invent unaudited deletions", async () => {
+    const lane = harness({ vendors, sessionIds });
+    await expect(runDeviceCloud({
+      ...input(lane), runtime: { ...lane.runtime, removeRecord: async (_reference, removal) => {
+        await removal.markDeleted();
+        throw new Error("signed artifacts still present");
+      } },
+    })).rejects.toThrow();
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    for (const resource of progress.resources!.filter(resource => resource.vendor === "browserstack")) {
+      expect(resource).toMatchObject({ audited: true, recordDeleted: true, recordRemoved: false });
+      expect(resource.unauditedDeletion).toBeUndefined();
+    }
+    expect(lane.effects.filter(effect => effect.startsWith("audit "))).toHaveLength(3);
+    const recovery = harness({ vendors, sessionIds });
+    const result = await cleanupDeviceCloud({ ...input(recovery, progress), runtime: {
+      ...recovery.runtime,
+      record: async () => { throw new Error("must not re-fetch a deleted API record"); },
+    } });
+    expect(result).toMatchObject({ restored: true, unauditedRecordsDeleted: 0 });
+    expect(parseDeviceCloudProgress(recovery.checkpoints.at(-1)).resources?.filter(resource => resource.vendor === "browserstack").every(resource =>
+      resource.audited && resource.recordDeleted && resource.recordRemoved)).toBe(true);
+  });
+  test("a post-DELETE body-audit failure remains an incident after a later successful absence retry", async () => {
+    const progress = await interruptedDeletion();
+    for (const resource of progress.resources!.filter(resource => resource.vendor === "browserstack")) resource.recordDeleted = true;
+    const recovery = harness({ vendors, sessionIds });
+    await expect(cleanupDeviceCloud({ ...input(recovery, progress), runtime: {
+      ...recovery.runtime, removeRecord: async () => { throw new BrowserStackAuditFailure("retained body invalid"); },
+    } })).rejects.toThrow("incident");
+    const interrupted = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
+    expect(interrupted.resources?.filter(resource => resource.vendor === "browserstack").every(resource => resource.incident)).toBe(true);
+    await expect(cleanupDeviceCloud(input(harness({ vendors, sessionIds }), interrupted))).rejects.toThrow("incident");
+    expect(interrupted.cleanupRequired).toBe(true);
+  });
+  test.each(["end", "record", "local", "fixture"] as const)("release preserves recovery dependencies after %s failure", async step => {
+    const progress = await interruptedDeletion();
+    if (step === "end") progress.resources!.find(resource => resource.target === "ipad")!.ended = false;
+    const recovery = harness({ vendors, sessionIds });
+    const runtime: DeviceCloudRuntime = {
+      ...recovery.runtime,
+      endSession: async reference => { if (step === "end" && reference.target === "ipad") throw new Error("end failed"); await recovery.runtime.endSession(reference); },
+      removeRecord: async (reference, removal) => { if (step === "record") throw new Error("record not absent"); await recovery.runtime.removeRecord(reference, removal); },
+      tunnel: async (operation, epoch, vendor) => { if (step === "local" && vendor === "browserstack") throw new Error("Local still running"); await recovery.runtime.tunnel(operation, epoch, vendor); },
+      fixture: async (operation, epoch) => { if (step === "fixture") throw new Error("fixture stop failed"); await recovery.runtime.fixture(operation, epoch); },
+    };
+    const error = await cleanupDeviceCloud({ ...input(recovery, progress), runtime }).catch((error: unknown) => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(recovery.effects).not.toContain("workspace remove");
+    expect(recovery.effects).not.toContain("fixture stop");
+    expect(deviceCloudNeedsCleanup(progress)).toBe(true);
+  });
+  test("a Local download failure owns no fallback tunnel and a later TestingBot-only attempt proceeds", async () => {
+    const lane = harness();
+    const runtime: DeviceCloudRuntime = { ...lane.runtime, verify: async (target, attempt) => {
+      if (target === "ipad") await prepareBrowserStackLocal({
+        binary: "/synthetic/cache/BrowserStackLocal", directory: "/synthetic/never-created", identifier: "omp-dc-bs-1234abcd",
+      }, () => attempt.startingTunnel("browserstack"), async () => { throw new Error("Local download failed"); });
+      return lane.runtime.verify(target, attempt);
+    } };
+    await expect(runDeviceCloud({ ...input(lane), runtime })).rejects.toThrow("Local download failed");
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.cleanupRequired).toBe(false);
+    expect(progress.tunnels).toEqual(["testingbot"]);
+    const next = harness();
+    expect(await runDeviceCloud(input(next, progress))).toMatchObject({ passed: true, vendor: "TestingBot" });
+  });
+});
+
 describe("device-cloud progress", () => {
   const valid = {
     lane: "deviceCloud", epoch: "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b", binding: "9".repeat(64), phase: "iphone_verified",
@@ -404,6 +671,15 @@ describe("device-cloud progress", () => {
 
   test("accepts the exact shape", () => {
     expect(parseDeviceCloudProgress(valid).sessions).toEqual(["session-iphone-0001"]);
+  });
+
+  test("rejects BrowserStack iPhone ownership and evidence attributed to the wrong vendor", () => {
+    const resources = [{ vendor: "browserstack", target: "iphone", sessionId: "a".repeat(40), ended: true, audited: false, recordRemoved: false }];
+    expect(() => parseDeviceCloudProgress({ ...valid, sessions: [], resources, tunnels: ["browserstack"] })).toThrow();
+    expect(() => parseDeviceCloudProgress({
+      ...valid, sessions: [], phase: "ipad_verified", resources: [{ ...resources[0], target: "ipad" }], tunnels: ["browserstack"],
+      results: { ipad: { vendor: "TestingBot", device: "iPad (10th generation)", os: "27.0" } },
+    })).toThrow("vendor");
   });
 
   test.each([
@@ -444,11 +720,11 @@ describe("device allocation", () => {
   }
 
   test("records what each device reports about itself", async () => {
-    expect(attestAllocation("iphone", requested.iphone, await parsed({ capabilities: ios("iPhone 17 Pro Max"), userAgent: IPHONE_UA, touchPoints: 5 })))
+    expect(attestAllocation("testingbot", "iphone", requested.iphone, await parsed({ capabilities: ios("iPhone 17 Pro Max"), userAgent: IPHONE_UA, touchPoints: 5 })))
       .toEqual({ device: "iPhone 17 Pro Max", os: "26.6", browser: "safari", browserVersion: "26.6" });
-    expect(attestAllocation("ipad", requested.ipad, await parsed({ capabilities: ios("iPad (9th generation)"), userAgent: IPAD_UA, touchPoints: 5 })))
+    expect(attestAllocation("testingbot", "ipad", requested.ipad, await parsed({ capabilities: ios("iPad (9th generation)"), userAgent: IPAD_UA, touchPoints: 5 })))
       .toEqual({ device: "iPad (9th generation)", os: "26.6", browser: "safari", browserVersion: "26.6" });
-    expect(attestAllocation("android", requested.android, await parsed({ capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5, hints })))
+    expect(attestAllocation("testingbot", "android", requested.android, await parsed({ capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5, hints })))
       .toEqual({ device: "Galaxy S26", model: "SM-S942B", os: "16.0.0", browser: "chrome", browserVersion: "145.0.7632.159" });
   });
 
@@ -466,6 +742,6 @@ describe("device allocation", () => {
     ["a different Galaxy hardware model", "android", { capabilities: galaxy, userAgent: GALAXY_UA, touchPoints: 5, hints: { ...hints, model: "SM-S921B" } }, "canonical model"],
   ] as const)("refuses %s", async (_name, target, report, message) => {
     const observed = await parsed(report);
-    expect(() => attestAllocation(target, requested[target], observed)).toThrow(message);
+    expect(() => attestAllocation("testingbot", target, requested[target], observed)).toThrow(message);
   });
 });

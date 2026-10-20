@@ -1,5 +1,17 @@
 import { expect, test } from "bun:test";
-import { checkUnsafeFinally } from "./check-repository.ts";
+import { checkProviderReads, checkUnsafeFinally } from "./check-repository.ts";
+
+test("cloud transport may retry only GET, and record DELETE is never replayed", () => {
+  const source = 'const connection = { endpoint: "https://hub.testingbot.com/wd/hub", fallback: { endpoint: "https://hub.browserstack.com/wd/hub" } };\n' +
+    'const send = () => fetch(`${connection.endpoint}${path}`, { method });\n' +
+    'const response = method === "GET" ? await readProvider(send) : await send();';
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", source)).toEqual([]);
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", source.replace('method === "GET"', 'method !== "DELETE"'))).toHaveLength(1);
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", source.replace("const send = () => fetch", "const send = () => readProvider(() => fetch"))).toHaveLength(1);
+  const deletion = 'const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE" });';
+  expect(checkProviderReads("scripts/browserstack.ts", deletion)).toEqual([]);
+  expect(checkProviderReads("scripts/browserstack.ts", deletion.replace("await fetch", "await readProvider(() => fetch"))).toHaveLength(1);
+});
 
 test("reports both abrupt completions through nested blocks without leaking past finally", () => {
   const source = [

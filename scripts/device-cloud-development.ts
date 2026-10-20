@@ -1,6 +1,6 @@
 /** Isolated Tested-only journey runner. Never starts a stable campaign or approves a release. */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { cleanupDeviceCloud, runDeviceCloud, type DeviceCloudProgress, type DeviceCloudTargetAttempt } from "./device-cloud-qualification.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudMachineOutcome } from "./device-cloud-availability.ts";
@@ -14,6 +14,7 @@ export async function runDeviceCloudDevelopment(argv: readonly string[]) {
   let origin: string | undefined;
   let sessionLabel: string | undefined;
   let holdAfterIphone = false;
+  let mixedVendors = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--identity") identityPath = argv[++index];
@@ -21,13 +22,15 @@ export async function runDeviceCloudDevelopment(argv: readonly string[]) {
     else if (arg === "--origin") origin = argv[++index];
     else if (arg === "--session-label") sessionLabel = argv[++index];
     else if (arg === "--hold-after-iphone") holdAfterIphone = true;
+    else if (arg === "--mixed-vendors") mixedVendors = true;
     else throw new Error("unknown development-runner argument");
   }
   if (identityPath === undefined || macHost === undefined || origin === undefined || sessionLabel === undefined ||
     !/^[A-Za-z_][A-Za-z0-9._-]*@[A-Za-z0-9.-]+$/u.test(macHost) ||
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(sessionLabel) || new URL(origin).origin !== origin || !origin.startsWith("https://")) {
-    throw new Error("usage: device-cloud-development --identity <private-json> --mac-host <user@host> --origin <https-origin> --session-label <isolated-label> [--hold-after-iphone]");
+    throw new Error("usage: device-cloud-development --identity <private-json> --mac-host <user@host> --origin <https-origin> --session-label <isolated-label> [--hold-after-iphone | --mixed-vendors]");
   }
+  if (holdAfterIphone && mixedVendors) throw new Error("choose either a hold proof or a mixed-vendor journey");
   const identity = JSON.parse(await readFile(resolve(identityPath), "utf8")) as ExternalLaneIdentity;
   if (typeof identity.receiptRoot !== "string" || !identity.receiptRoot.includes("device-cloud-development") ||
     identity.candidate?.archivePath === undefined || identity.tag !== identity.candidate.tag || !/^[a-f0-9]{64}$/u.test(identity.candidate.archiveSha256)) {
@@ -43,8 +46,10 @@ export async function runDeviceCloudDevelopment(argv: readonly string[]) {
   const checkpoint = async (value: Record<string, unknown>) => {
     progress = value as DeviceCloudProgress;
     await mkdir(root, { recursive: true, mode: 0o700 });
+    await chmod(root, 0o700);
     const temporary = `${path}.tmp`;
     await writeFile(temporary, `${JSON.stringify({ evidenceClass: "Tested", progress })}\n`, { mode: 0o600 });
+    await chmod(temporary, 0o600);
     await rename(temporary, path);
   };
   const target = macHost;
@@ -62,6 +67,7 @@ export async function runDeviceCloudDevelopment(argv: readonly string[]) {
   const runtime = await createDeviceCloudRuntime({
     identity: { tag: identity.tag, candidate: identity.candidate, omp: identity.omp, origin }, workspace: join(root, "work"),
     fixture: retainedMacCloudFixture(context), environment: process.env,
+    ...(mixedVendors ? { developmentForceFallback: true as const } : {}),
   });
   let sessions = 0;
   let expired = false;

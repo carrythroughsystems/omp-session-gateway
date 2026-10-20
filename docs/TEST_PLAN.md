@@ -298,7 +298,38 @@ service-worker registration, which has no `getNotifications`, and against cache 
 holding the needle. It also runs the sweep that a vendor-logged driver uses, which reports sink
 names and counts, never the page text that held the link.
 
-A real run exercises TestingBot's iPhone, iPad, and Android devices through the tunnel against the
+BrowserStack and shared transport tests add:
+
+- fallback only for an empty eligible iPad/Android pool, never for iPhone or after a primary write;
+  lazy fallback prerequisites, the exact Mobile/five-parallel plan and the 2027-10-20 cutoff;
+- exact iPad alias and Safari attestation, Samsung-only Chrome with matching model/OS/browser;
+  refusal of HTTP-200 schema errors, bounded responses and unreviewed retained surfaces;
+- equal IDs at different vendors remain distinct; unknown creation stays dirty; every vendor's
+  partial record audit runs even when another record fails, and deletion failure blocks the lease;
+- duplicate JSON keys are refused before reference discovery, and raw plus strict canonical
+  escaped values are scanned; candidate-origin
+  navigation text passes because default-relay capabilities are compact `room.key` strings,
+  while a capability's interior 16-character window fails without being persisted;
+- missing required logs, retained media (including opaque failed-command screenshots) and
+  unverified deletion fail; even clean identical signed artifacts must become absent;
+- private durable inventories include initially-404 references and survive DELETE/process loss;
+  late content is audited, unresolved references keep cleanup dirty, and returned evidence has no URLs;
+- property-style full-JSON discovery at varied object/array paths, pinned disjoint storage/dashboard
+  origins, top-level dashboard references counted without fetching, and unknown origins refused;
+- raw/canonical post-audit API bodies are scanned before absence; post-DELETE retries preserve
+  monotonic audited/deleted/absent milestones rather than inventing unaudited deletions;
+- crash cleanup re-audits unchanged generations, counts unaudited deletions if links cannot be
+  reconstructed, and persists link/media incidents instead of manufacturing a clean audit;
+- key-free lane argv, exact two-host argv, canonical ownership through symlinked ancestors,
+  shared loopback-only listener refusal and the existing
+  plain-HTTP/alternate-host/port/loopback/LAN/tailnet denial matrix;
+- retitled descendants/orphans and PID reuse, a real retitled macOS child, proved not-started
+  idempotent cleanup, preparation failure before tunnel ownership, a later TestingBot-only attempt,
+  and fixture/workspace preservation after each record/tunnel/fixture release failure;
+- release summaries preserve historical golden bytes, attribute mixed targets individually,
+  and refuse BrowserStack iPhone or non-Samsung/mismatched Android evidence.
+
+A real run exercises the selected vendors' iPhone, iPad, and Android devices through the tunnels against the
 candidate gateway, the iPhone's Home Screen alert, and the vendor-record audit; ADR-032 lists what
 it proves and what stays Pixel-only.
 `bun scripts/device-cloud-attestation.ts --admission` is a read-only free-inventory probe.
@@ -312,6 +343,11 @@ new allocations after 40 minutes, and always attempts production audit/release; 
 and session-duration bounds still apply to in-flight work. `--hold-after-iphone` injects a marked
 development-only iPad hold for partial-attempt audit testing. Its private results are explicitly
 Tested and cannot approve a release. Equipment availability must be confirmed before running it.
+`--mixed-vendors` selects TestingBot iPhone plus BrowserStack iPad/Samsung only in this isolated
+runner; it cannot be combined with `--hold-after-iphone` and is not a production policy override.
+The [release contract matrix](RELEASE.md#browserstack-device-cloud-fallback) records the bounded
+public-page and crash-cleanup proofs. The capability-opening mixed journey remains a separately
+scheduled development check, never an automatic extension of those probes.
 
 ## 2. Secret-leak test harness
 

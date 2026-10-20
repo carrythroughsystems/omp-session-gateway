@@ -18,7 +18,11 @@ import { isRecord } from "../packages/collab-client/upstream/src/tool-render/uti
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { fixtureModelError } from "./omp-fixture.ts";
 import type { OmpPins, PixelLease } from "./stable-qualification.ts";
-import { TESTINGBOT_SESSION_ID, TESTINGBOT_TUNNEL, type TestRecord } from "./testingbot.ts";
+import { TESTINGBOT_TUNNEL } from "./testingbot.ts";
+import { TESTINGBOT_SESSION_ID, BROWSERSTACK_SESSION_ID } from "./device-cloud-webdriver.ts";
+import type { TestRecord, DeviceCloudVendor, CloudArtifact, CloudRecordRemoval } from "./device-cloud-common.ts";
+import { BROWSERSTACK_LOCAL, BROWSERSTACK_MODELS, BrowserStackAuditFailure, browserStackModel, validateBrowserStackArtifacts } from "./browserstack.ts";
+import { RetainedVendorJsonError } from "./device-cloud-record-json.ts";
 
 export interface DeviceCloudIdentity {
   readonly tag: string;
@@ -30,6 +34,32 @@ export interface DeviceCloudIdentity {
 
 export const DEVICE_CLOUD_TARGETS = ["iphone", "ipad", "android"] as const;
 export type DeviceCloudTarget = (typeof DEVICE_CLOUD_TARGETS)[number];
+
+export const DEVICE_CLOUD_VENDOR_POLICY = {
+  iphone: ["testingbot"], ipad: ["testingbot", "browserstack"], android: ["testingbot", "browserstack"],
+} as const;
+
+export interface DeviceCloudSessionRef {
+  readonly vendor: DeviceCloudVendor;
+  readonly target: DeviceCloudTarget;
+  readonly sessionId: string;
+}
+
+export interface DeviceCloudResource {
+  vendor: DeviceCloudVendor;
+  target: DeviceCloudTarget;
+  /** Absent means creation was intended but its outcome is not known. Never infer absence. */
+  sessionId?: string;
+  ended: boolean;
+  audited: boolean;
+  recordRemoved: boolean;
+  /** Monotonic acknowledgement/absence of the API record, before signed-object absence. */
+  recordDeleted?: boolean;
+  /** Private recovery inventory, never included in returned evidence. */
+  artifacts?: CloudArtifact[];
+  unauditedDeletion?: boolean;
+  incident?: boolean;
+}
 
 export interface DeviceProfile {
   readonly platform: "iOS" | "Android";
@@ -76,6 +106,10 @@ export interface DeviceCloudProgress extends Record<string, unknown> {
   cleanupRequired: boolean;
   /** Every WebDriver session this attempt created, recorded before the session is driven. */
   sessions: string[];
+  /** Additive schema-3 ownership. sessions remains the TestingBot-only projection. */
+  resources?: DeviceCloudResource[];
+  tunnels?: DeviceCloudVendor[];
+  auditSessions?: Record<"live" | "fixture", Pick<SessionMetadata, "instanceId" | "generation">>;
   results: DeviceCloudResults;
 }
 
@@ -83,8 +117,10 @@ export interface DeviceCloudTargetAttempt {
   readonly epoch: string;
   /** The campaign's live OMP session, which every web journey drives. */
   readonly session: SessionMetadata;
-  /** Persists a WebDriver session id before the session is driven. */
-  readonly created: (sessionId: string) => Promise<void>;
+  readonly allocating: (vendor: DeviceCloudVendor) => Promise<void>;
+  readonly startingTunnel: (vendor: DeviceCloudVendor) => Promise<void>;
+  /** Persists vendor-qualified identity before any subsequent command. */
+  readonly created: (reference: DeviceCloudSessionRef) => Promise<void>;
 }
 
 export interface DeviceCloudRuntime {
@@ -96,11 +132,12 @@ export interface DeviceCloudRuntime {
   fixture(operation: "start" | "stop", epoch: string): Promise<void>;
   fixtureSession(epoch: string): Promise<SessionMetadata | undefined>;
   liveSession(label: string): Promise<SessionMetadata | undefined>;
-  tunnel(operation: "start" | "stop", epoch: string): Promise<void>;
+  tunnel(operation: "start" | "stop", epoch: string, vendor: DeviceCloudVendor): Promise<void>;
   /** Allocates a device, runs the target's journeys, and ends its session. */
   verify(target: DeviceCloudTarget, attempt: DeviceCloudTargetAttempt): Promise<Record<string, DeviceCloudObservation>>;
-  endSession(sessionId: string): Promise<void>;
-  record(sessionId: string): Promise<TestRecord | undefined>;
+  endSession(reference: DeviceCloudSessionRef): Promise<void>;
+  record(reference: DeviceCloudSessionRef, remember?: (artifacts: readonly CloudArtifact[]) => Promise<void>, inspect?: CloudRecordRemoval["inspect"]): Promise<TestRecord | undefined>;
+  removeRecord(reference: DeviceCloudSessionRef, removal: CloudRecordRemoval): Promise<void>;
   /** A live capability through the candidate gateway's launch contract, for the record audit only. */
   launch(session: SessionMetadata, mode: "view" | "control"): Promise<string>;
   removeWorkspace(epoch: string): Promise<void>;
@@ -129,12 +166,15 @@ const VERSION = /^[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}$/u;
  * reaches progress otherwise: a free-form field could carry a link or reflect a credential.
  */
 const OBSERVATION_TEXT: Readonly<Record<string, (value: string) => boolean>> = {
-  device: value => Object.values(DEVICE_CLOUD_PROFILES).some(profile => profile.models.includes(value)),
+  device: value => Object.values(DEVICE_CLOUD_PROFILES).some(profile => profile.models.includes(value)) ||
+    Object.values(BROWSERSTACK_MODELS).some(models => models.some(model => model.canonical === value)),
   model: value => /^SM-[A-Z0-9]{1,12}$/u.test(value),
   os: value => VERSION.test(value),
   browser: value => value === "safari" || value === "chrome",
   browserVersion: value => VERSION.test(value),
   pushServiceHost: value => value === "web.push.apple.com",
+  vendor: value => value === "TestingBot" || value === "BrowserStack",
+  tunnelVersion: value => value === TESTINGBOT_TUNNEL.version || value === BROWSERSTACK_LOCAL.version,
 };
 
 function safeObservations(result: Record<string, unknown>): boolean {
@@ -173,9 +213,10 @@ export const ALLOCATION_REPORT_EXPRESSION = `(async () => {
 })()`;
 
 export interface AllocationReport {
-  /** The capabilities TestingBot returned for the session it allocated. */
+  /** The capabilities the selected vendor returned for its allocated session. */
   readonly capabilities: Record<string, unknown>;
   readonly browser: BrowserAllocationReport;
+  readonly vendorRecord?: { readonly device: string; readonly os: string; readonly osVersion: string; readonly browser: string };
 }
 
 /**
@@ -186,6 +227,7 @@ export interface AllocationReport {
  * through Chrome's client hints, and its evidence names the requested model beside that code.
  */
 export function attestAllocation(
+  vendor: DeviceCloudVendor,
   target: DeviceCloudTarget,
   requested: { readonly name: string; readonly version: string },
   report: AllocationReport,
@@ -194,7 +236,17 @@ export function attestAllocation(
   const text = (value: unknown) => (typeof value === "string" ? value : "");
   const leading = (version: string, parts: number) => version.split(".").slice(0, parts).join(".");
   const { capabilities, browser } = report;
-  if (!eligibleDevice(profile, { ...requested, platform: profile.platform })) throw new Error(`the ${target} requested model or OS is not eligible`);
+  const fallback = vendor === "browserstack" && target !== "iphone"
+    ? browserStackModel(target, { ...requested, platform: target === "ipad" ? "ios" : "android" }) : undefined;
+  if (vendor === "browserstack") {
+    const allocation = report.vendorRecord;
+    if (fallback === undefined || allocation === undefined || allocation.device !== requested.name ||
+      allocation.os !== fallback.platform || !VERSION.test(allocation.osVersion) ||
+      leading(allocation.osVersion, 1) !== leading(requested.version, 1) ||
+      allocation.browser !== (target === "ipad" ? "ipad" : "chrome_android")) {
+      throw new Error("BrowserStack allocation does not match the pinned target, model, OS and browser");
+    }
+  } else if (!eligibleDevice(profile, { ...requested, platform: profile.platform })) throw new Error(`the ${target} requested model or OS is not eligible`);
   if (
     text(capabilities.platformName).toLowerCase() !== profile.platform.toLowerCase() ||
     text(capabilities.browserName).toLowerCase() !== profile.browser
@@ -211,8 +263,9 @@ export function attestAllocation(
     }
     const model = text(capabilities.deviceName);
     if (model !== requested.name) throw new Error(`TestingBot allocated another model for the ${target}`);
-    if (leading(safari, 2) !== leading(requested.version, 2) || browser.os !== leading(safari, 2)) throw new Error(`the ${target} runs another iOS release`);
-    return { device: model, os: leading(safari, 2), browser: "safari", browserVersion: safari };
+    const parts = vendor === "browserstack" ? requested.version.split(".").length : 2;
+    if (leading(safari, parts) !== leading(requested.version, parts) || browser.os !== leading(safari, 2)) throw new Error(`the ${target} runs another iOS release`);
+    return { device: fallback?.canonical ?? model, os: leading(safari, 2), browser: "safari", browserVersion: safari };
   }
   const version = text(browser.browserVersion);
   const release = text(browser.os);
@@ -222,8 +275,9 @@ export function attestAllocation(
   }
   if (!VERSION.test(release) || leading(release, 1) !== leading(requested.version, 1)) throw new Error(`the ${target} runs another Android release`);
   if (!/^SM-[A-Z0-9]{1,12}$/u.test(model)) throw new Error(`the ${target} is not a Galaxy phone`);
-  if (!SAMSUNG_MODEL_CODES[requested.name]?.includes(model)) throw new Error(`the ${target} Galaxy hardware does not match its canonical model`);
-  return { device: requested.name, model, os: release, browser: "chrome", browserVersion: version };
+  const canonical = fallback?.canonical ?? requested.name;
+  if (!SAMSUNG_MODEL_CODES[canonical]?.includes(model)) throw new Error(`the ${target} Galaxy hardware does not match its canonical model`);
+  return { device: canonical, model, os: release, browser: "chrome", browserVersion: version };
 }
 
 /** Binds progress to the candidate, OMP, origin, device profiles, and tunnel it was recorded against. */
@@ -240,18 +294,63 @@ function binding(identity: DeviceCloudIdentity): string {
   return createHash("sha256").update(JSON.stringify([
     identity.tag, identity.candidate.sourceCommit, identity.candidate.archiveSha256, identity.omp, identity.origin,
     DEVICE_CLOUD_PROFILES, SAMSUNG_MODEL_CODES, TESTINGBOT_TUNNEL.sha256,
+    DEVICE_CLOUD_VENDOR_POLICY, BROWSERSTACK_MODELS, BROWSERSTACK_LOCAL.sha256, "connect-policy-2",
   ])).digest("hex");
 }
 
 /** Refuses anything but the exact progress shape, and any evidence that could carry a secret. */
 export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
   if (
-    !isRecord(value) || Object.keys(value).sort().join(",") !== "binding,cleanupRequired,epoch,lane,phase,results,sessions" ||
+    !isRecord(value) || Object.keys(value).some(key => !["binding", "cleanupRequired", "epoch", "lane", "phase", "results", "sessions", "resources", "tunnels", "auditSessions"].includes(key)) ||
     value.lane !== "deviceCloud" || typeof value.epoch !== "string" || !EPOCH.test(value.epoch) ||
     typeof value.binding !== "string" || !/^[a-f0-9]{64}$/u.test(value.binding) || typeof value.cleanupRequired !== "boolean" ||
     !DEVICE_CLOUD_PHASES.some(phase => phase === value.phase)
   ) {
     throw new Error("invalid device-cloud progress");
+  }
+  if (value.auditSessions !== undefined) {
+    if (!isRecord(value.auditSessions) || Object.keys(value.auditSessions).sort().join(",") !== "fixture,live" ||
+      Object.values(value.auditSessions).some(session => !isRecord(session) || Object.keys(session).sort().join(",") !== "generation,instanceId" ||
+        typeof session.instanceId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/u.test(session.instanceId) ||
+        !Number.isSafeInteger(session.generation) || (session.generation as number) < 1)) throw new Error("invalid device-cloud audit generation identities");
+  }
+  if (value.resources !== undefined || value.tunnels !== undefined) {
+    if (!Array.isArray(value.resources) || value.resources.length > 3 || !Array.isArray(value.tunnels) ||
+      value.tunnels.length > 2 || new Set(value.tunnels).size !== value.tunnels.length ||
+      value.tunnels.some(vendor => vendor !== "testingbot" && vendor !== "browserstack")) throw new Error("invalid device-cloud vendor ownership");
+    const targets = new Set<string>();
+    const references = new Set<string>();
+    for (const resource of value.resources) {
+      if (!isRecord(resource) || Object.keys(resource).some(key => !["audited", "ended", "recordRemoved", "recordDeleted", "target", "vendor", "sessionId", "artifacts", "unauditedDeletion", "incident"].includes(key)) ||
+        (resource.vendor !== "testingbot" && resource.vendor !== "browserstack") ||
+        !DEVICE_CLOUD_TARGETS.some(target => target === resource.target) || typeof resource.target !== "string" ||
+        (resource.vendor === "browserstack" && resource.target === "iphone") ||
+        typeof resource.ended !== "boolean" || typeof resource.audited !== "boolean" || typeof resource.recordRemoved !== "boolean" ||
+        targets.has(resource.target)) throw new Error("invalid device-cloud allocation resource");
+      targets.add(resource.target);
+      if (resource.sessionId === undefined) {
+        if (resource.ended || resource.audited || resource.recordRemoved || value.cleanupRequired !== true) throw new Error("inconsistent pending cloud allocation");
+      } else {
+        if (typeof resource.sessionId !== "string" || !(resource.vendor === "testingbot" ? TESTINGBOT_SESSION_ID : BROWSERSTACK_SESSION_ID).test(resource.sessionId) ||
+          references.has(`${resource.vendor}:${resource.sessionId}`)) throw new Error("invalid vendor-qualified cloud session");
+        references.add(`${resource.vendor}:${resource.sessionId}`);
+      }
+      if (resource.artifacts !== undefined) {
+        if (resource.vendor !== "browserstack" || typeof resource.sessionId !== "string" || !Array.isArray(resource.artifacts)) throw new Error("invalid private cloud artifact inventory");
+        validateBrowserStackArtifacts(resource.sessionId, resource.artifacts);
+        if (resource.recordRemoved && resource.artifacts.length > 0) throw new Error("removed cloud record retains unchecked references");
+      }
+      for (const field of ["recordDeleted", "unauditedDeletion", "incident"]) {
+        if (resource[field] !== undefined && (resource.vendor !== "browserstack" || typeof resource[field] !== "boolean")) throw new Error("invalid cloud deletion audit state");
+      }
+      if ((resource.recordDeleted === true && (!resource.ended || resource.sessionId === undefined)) ||
+        (resource.recordRemoved && resource.recordDeleted === false)) throw new Error("invalid cloud deletion stage");
+      if (value.cleanupRequired === false && resource.incident === true) throw new Error("unresolved cloud retention incident");
+      if (!value.tunnels.includes(resource.vendor) || (resource.recordRemoved && (!resource.ended || resource.vendor !== "browserstack"))) throw new Error("inconsistent cloud resource lifecycle");
+      if (value.cleanupRequired === false && (!resource.ended || (resource.vendor === "browserstack" && !resource.recordRemoved))) throw new Error("unreleased cloud resource");
+    }
+    const projected = value.resources.filter(resource => resource.vendor === "testingbot" && resource.sessionId !== undefined).map(resource => resource.sessionId);
+    if (JSON.stringify(projected) !== JSON.stringify(value.sessions)) throw new Error("invalid legacy cloud session projection");
   }
   const sessions = value.sessions;
   if (
@@ -266,6 +365,10 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
       throw new Error("invalid device-cloud result");
     }
     if (!safeObservations(result)) throw new Error("unsafe device-cloud evidence");
+    if (key !== "audit" && Array.isArray(value.resources)) {
+      const resource = value.resources.find(resource => resource.target === key);
+      if (resource === undefined || result.vendor !== (resource.vendor === "testingbot" ? "TestingBot" : "BrowserStack")) throw new Error("device-cloud evidence vendor does not match its owned session");
+    }
   }
   if ((value.phase === "restored") === value.cleanupRequired) throw new Error("inconsistent device-cloud cleanup state");
   return value as DeviceCloudProgress;
@@ -273,6 +376,70 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
 
 export function deviceCloudNeedsCleanup(progress: unknown): boolean {
   return progress !== undefined && parseDeviceCloudProgress(progress).cleanupRequired;
+}
+
+function ownedResources(progress: DeviceCloudProgress): DeviceCloudResource[] {
+  return progress.resources ?? progress.sessions.map((sessionId, index) => ({
+    vendor: "testingbot", target: DEVICE_CLOUD_TARGETS[index]!, sessionId, ended: false, audited: false, recordRemoved: false,
+  }));
+}
+
+function sessionReference(resource: DeviceCloudResource): DeviceCloudSessionRef {
+  if (resource.sessionId === undefined) throw new Error("an ambiguous cloud allocation requires operator reconciliation");
+  return { vendor: resource.vendor, target: resource.target, sessionId: resource.sessionId };
+}
+
+function recordExposure(links: readonly string[]): (record: TestRecord) => { leaks: boolean; media: boolean } {
+  const windows = new Set<string>();
+  for (const link of links) for (let index = 0; index + 16 <= link.length; index += 1) windows.add(link.slice(index, index + 16));
+  return record => {
+    let leaks = links.some(link => record.text.includes(link));
+    for (let index = 0; !leaks && index + 16 <= record.text.length; index += 1) leaks = windows.has(record.text.slice(index, index + 16));
+    return { leaks, media: record.video || record.screenshots > 0 };
+  };
+}
+
+function rememberArtifacts(resource: DeviceCloudResource, save: () => Promise<void>): CloudRecordRemoval["remember"] {
+  return async (artifacts, incident) => {
+    const previousInventory = resource.artifacts;
+    const previousIncident = resource.incident;
+    const merged = [...(previousInventory ?? [])];
+    let changed = previousInventory === undefined || (incident !== undefined && resource.incident !== true);
+    let postAuditReference = false;
+    for (const artifact of artifacts) {
+      const previous = merged.find(item => item.url === artifact.url);
+      if (previous === undefined) { merged.push(artifact); changed = true; postAuditReference ||= resource.audited; }
+      else if (previous.kind !== artifact.kind || previous.buildId !== artifact.buildId) throw new Error("cloud artifact identity changed");
+    }
+    validateBrowserStackArtifacts(sessionReference(resource).sessionId, merged);
+    if (!changed) return;
+    resource.artifacts = merged;
+    if (incident !== undefined || postAuditReference) resource.incident = true;
+    try { await save(); }
+    catch (error) {
+      if (previousInventory === undefined) delete resource.artifacts;
+      else resource.artifacts = previousInventory;
+      if (previousIncident === undefined) delete resource.incident;
+      else resource.incident = previousIncident;
+      throw error;
+    }
+    // A record re-read must stop before fetching late references; removal still proceeds.
+    if (postAuditReference && incident === undefined) throw new BrowserStackAuditFailure("post-audit retained reference");
+  };
+}
+
+function artifactRecovery(resource: DeviceCloudResource, save: () => Promise<void>, inspect: CloudRecordRemoval["inspect"], audited = () => resource.audited): CloudRecordRemoval {
+  return {
+    get artifacts() { return resource.artifacts ?? []; },
+    get deleted() { return resource.recordDeleted === true; },
+    markDeleted: async () => {
+      if (resource.recordDeleted) return;
+      resource.recordDeleted = true;
+      if (!audited()) resource.unauditedDeletion = true;
+      await save();
+    },
+    remember: rememberArtifacts(resource, save), inspect,
+  };
 }
 
 async function waitFor<T>(
@@ -302,46 +469,86 @@ async function auditRecords(
   driven: readonly (readonly [SessionMetadata, () => Promise<SessionMetadata | undefined>])[],
   save: () => Promise<void>,
 ): Promise<Record<string, DeviceCloudObservation>> {
-  const records: TestRecord[] = [];
+  const records: { resource: DeviceCloudResource; record: TestRecord }[] = [];
   const failures: Error[] = [];
-  for (const sessionId of progress.sessions) {
+  const needles: string[] = [];
+  let generationsMatch = true, launchFailed = false;
+  for (const [before, reread] of driven) {
+    const current = await reread().catch(() => undefined);
+    if (current === undefined || current.instanceId !== before.instanceId || current.generation !== before.generation) {
+      generationsMatch = false;
+      continue;
+    }
+    for (const mode of ["view", "control"] as const) {
+      try { needles.push(await runtime.launch(current, mode)); }
+      catch { launchFailed = true; }
+    }
+  }
+  const exposure = recordExposure(needles);
+  for (const resource of ownedResources(progress)) {
     try {
-      records.push(await waitFor(runtime, "test record finalization", async () => {
-        const record = await runtime.record(sessionId);
+      const record = await waitFor(runtime, "test record finalization", async () => {
+        const inspect = resource.vendor === "browserstack" ? async (record: TestRecord) => {
+          const found = exposure(record);
+          if ((found.leaks || found.media) && !resource.incident) { resource.incident = true; await save(); }
+        } : undefined;
+        const record = await runtime.record(sessionReference(resource), resource.vendor === "browserstack" ? rememberArtifacts(resource, save) : undefined, inspect);
         return record?.complete === true ? record : undefined;
-      }, RECORD_FINALIZATION_MS));
-    } catch {
+      }, RECORD_FINALIZATION_MS);
+      records.push({ resource, record });
+    } catch (error) {
+      if (resource.vendor === "browserstack" && (error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError)) {
+        resource.incident = true;
+        await save();
+      }
       failures.push(new Error("a device-cloud retained record could not be audited"));
     }
   }
-  const needles: string[] = [];
   for (const [before, reread] of driven) {
     const current = await reread();
-    if (current === undefined || current.instanceId !== before.instanceId || current.generation !== before.generation) {
+    if (!generationsMatch || current === undefined || current.instanceId !== before.instanceId || current.generation !== before.generation) {
       throw new Error("a device-cloud session changed generation before its vendor records were audited");
     }
-    for (const mode of ["view", "control"] as const) {
-      const link = await runtime.launch(current, mode);
-      needles.push(link);
+  }
+  if (launchFailed) throw new Error("a device-cloud capability could not be fetched for its retained-record audit");
+  let exposing = 0;
+  let withMedia = 0;
+  for (const { resource, record } of records) {
+    const { leaks, media } = exposure(record);
+    if (leaks) exposing += 1;
+    if (media) withMedia += 1;
+    resource.audited ||= !leaks && !media;
+    if (resource.vendor === "browserstack" && (leaks || media)) resource.incident = true;
+    try { await save(); } catch { failures.push(new Error("a cloud record audit could not be checkpointed")); }
+    if (resource.vendor === "browserstack" && resource.ended) {
+      try {
+        await runtime.removeRecord(sessionReference(resource), artifactRecovery(resource, save, async later => {
+          const found = exposure(later);
+          if ((found.leaks || found.media) && !resource.incident) {
+            resource.incident = true;
+            await save();
+          }
+        }));
+        resource.recordRemoved = true;
+        resource.artifacts = [];
+        await save();
+        if (resource.incident) throw new Error("BrowserStack retained-record incident");
+      } catch (error) {
+        if (error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError) { resource.incident = true; await save(); }
+        failures.push(new Error("BrowserStack record removal could not be verified"));
+      }
     }
   }
-  const windows = new Set<string>();
-  for (const link of needles) {
-    for (let index = 0; index + 16 <= link.length; index += 1) windows.add(link.slice(index, index + 16));
-  }
-  const exposing = records.filter(record => {
-    if (needles.some(link => record.text.includes(link))) return true;
-    for (let index = 0; index + 16 <= record.text.length; index += 1) {
-      if (windows.has(record.text.slice(index, index + 16))) return true;
-    }
-    return false;
-  }).length;
-  const withMedia = records.filter(record => record.video || record.screenshots > 0).length;
-  const audit = { records: records.length, recordsExposingLinks: exposing, recordsWithMedia: withMedia };
+  const audit = {
+    records: records.length, recordsExposingLinks: exposing, recordsWithMedia: withMedia, lingeringSignedArtifacts: 0,
+    testingbotRecords: records.filter(({ resource }) => resource.vendor === "testingbot").length,
+    browserstackRecords: records.filter(({ resource }) => resource.vendor === "browserstack").length,
+    dashboardReferences: records.reduce((sum, { record }) => sum + (record.dashboardReferences ?? 0), 0),
+  };
   progress.results.audit = audit;
   await save();
-  if (exposing > 0) failures.push(new Error(`${exposing} of ${records.length} TestingBot test records contain a live View or Control link`));
-  if (withMedia > 0) failures.push(new Error(`TestingBot kept video or screenshots for ${withMedia} of ${records.length} sessions`));
+  if (exposing > 0) failures.push(new Error(`${exposing} of ${records.length} cloud test records contain a live View or Control link`));
+  if (withMedia > 0) failures.push(new Error(`cloud vendors kept video or screenshots for ${withMedia} of ${records.length} sessions`));
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) throw new AggregateError(failures, "device-cloud retained-record audits failed");
   return audit;
@@ -370,26 +577,44 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
       if (!session.canView || !session.canControl) throw new Error("a device-cloud session does not offer View and Control");
     }
     driven.push([live, () => runtime.liveSession(input.sessionLabel)], [fixture, () => runtime.fixtureSession(progress.epoch)]);
+    progress.auditSessions = {
+      live: { instanceId: live.instanceId, generation: live.generation },
+      fixture: { instanceId: fixture.instanceId, generation: fixture.generation },
+    };
     await advance("fixture_ready");
-    await runtime.tunnel("start", progress.epoch);
+    progress.tunnels!.push("testingbot");
+    await save();
+    await runtime.tunnel("start", progress.epoch, "testingbot");
     await advance("tunnel_ready");
     for (const target of DEVICE_CLOUD_TARGETS) {
-      const firstSession = progress.sessions.length;
       const targetFailures: unknown[] = [];
       let observations: Record<string, DeviceCloudObservation> | undefined;
       try {
         observations = await runtime.verify(target, {
           epoch: progress.epoch,
           session: live,
-          created: async sessionId => {
-            progress.sessions.push(sessionId);
+          allocating: async vendor => {
+            if (progress.resources!.some(resource => resource.target === target) || (target === "iphone" && vendor !== "testingbot")) throw new Error("invalid cloud allocation intent");
+            progress.resources!.push({ vendor, target, ended: false, audited: false, recordRemoved: false });
+            await save();
+          },
+          startingTunnel: async vendor => {
+            if (!progress.tunnels!.includes(vendor)) { progress.tunnels!.push(vendor); await save(); }
+          },
+          created: async reference => {
+            const resource = progress.resources!.find(resource => resource.target === target);
+            if (resource === undefined || resource.vendor !== reference.vendor || reference.target !== target || resource.sessionId !== undefined ||
+              !(reference.vendor === "testingbot" ? TESTINGBOT_SESSION_ID : BROWSERSTACK_SESSION_ID).test(reference.sessionId) ||
+              progress.resources!.some(owned => owned.vendor === reference.vendor && owned.sessionId === reference.sessionId)) throw new Error("cloud session does not match its allocation intent");
+            resource.sessionId = reference.sessionId;
+            if (reference.vendor === "testingbot") progress.sessions.push(reference.sessionId);
             await save();
           },
         });
       } catch (error) { targetFailures.push(error); }
       // Targets are sequential: never retain active devices behind the next allocation.
-      for (let index = firstSession; index < progress.sessions.length; index += 1) {
-        try { await runtime.endSession(progress.sessions[index]!); }
+      for (const resource of ownedResources(progress).filter(resource => resource.target === target && !resource.ended)) {
+        try { await runtime.endSession(sessionReference(resource)); resource.ended = true; await save(); }
         catch { targetFailures.push(new Error("a device-cloud target session did not end before the next allocation")); }
       }
       if (targetFailures.length === 1) throw targetFailures[0];
@@ -403,13 +628,14 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
     failures.push(error);
   }
   // The retained record is finalized only after end; still inspect every record on partial attempts.
-  for (const sessionId of progress.sessions) {
-    try { await runtime.endSession(sessionId); }
+  for (const resource of ownedResources(progress)) {
+    if (resource.ended) continue;
+    try { await runtime.endSession(sessionReference(resource)); resource.ended = true; await save(); }
     catch { failures.push(new Error("a device-cloud session did not end before its record audit")); }
   }
   let audit: Record<string, DeviceCloudObservation> | undefined;
   try {
-    audit = progress.sessions.length === 0 ? { records: 0, recordsExposingLinks: 0, recordsWithMedia: 0 } :
+    audit = ownedResources(progress).length === 0 ? { records: 0, recordsExposingLinks: 0, recordsWithMedia: 0 } :
       await auditRecords(runtime, progress, driven, save);
     await advance("records_audited");
   } catch (error) {
@@ -420,8 +646,8 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
   await advance("evidence_complete");
   return {
     passed: true,
-    vendor: "TestingBot",
-    tunnelVersion: TESTINGBOT_TUNNEL.version,
+    vendor: progress.resources!.every(resource => resource.vendor === "testingbot") ? "TestingBot" : "mixed",
+    tunnelVersion: progress.resources!.every(resource => resource.vendor === "testingbot") ? TESTINGBOT_TUNNEL.version : "per-target",
     targets: Object.fromEntries(DEVICE_CLOUD_TARGETS.map(target => [target, progress.results[target]])),
     audit,
   };
@@ -431,7 +657,8 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
  * Ends every recorded session, stops the tunnel and fixture, and removes the workspace. Each step
  * runs even if another fails, and only a complete release marks the attempt restored.
  */
-async function release(runtime: DeviceCloudRuntime, progress: DeviceCloudProgress, save: () => Promise<void>): Promise<Record<string, unknown>> {
+async function release(input: DeviceCloudLaneInput, progress: DeviceCloudProgress, save: () => Promise<void>): Promise<Record<string, unknown>> {
+  const { runtime } = input;
   try {
     const failures: string[] = [];
     const attempt = async (step: string, action: () => Promise<void>) => {
@@ -442,26 +669,80 @@ async function release(runtime: DeviceCloudRuntime, progress: DeviceCloudProgres
         failures.push(step);
       }
     };
+    let links: string[] | undefined;
+    if (ownedResources(progress).some(resource => resource.vendor === "browserstack" && !resource.recordRemoved) && progress.auditSessions !== undefined) {
+      try {
+        const live = await runtime.liveSession(input.sessionLabel), fixture = await runtime.fixtureSession(progress.epoch);
+        if (live !== undefined && fixture !== undefined && ([["live", live], ["fixture", fixture]] as const).every(([kind, session]) =>
+          session.instanceId === progress.auditSessions![kind].instanceId && session.generation === progress.auditSessions![kind].generation)) {
+          links = [];
+          for (const session of [live, fixture]) for (const mode of ["view", "control"] as const) links.push(await runtime.launch(session, mode));
+        }
+      } catch { links = undefined; }
+    }
+    const exposure = recordExposure(links ?? []);
     await attempt("sessions", async () => {
       let ended = 0;
-      for (const sessionId of progress.sessions) {
+      for (const resource of ownedResources(progress)) {
         try {
-          await runtime.endSession(sessionId);
+          if (!resource.ended) { await runtime.endSession(sessionReference(resource)); resource.ended = true; await save(); }
+          if (resource.vendor === "browserstack" && !resource.recordRemoved) {
+            const inspect = async (record: TestRecord) => {
+              const found = exposure(record);
+              if ((found.leaks || found.media) && !resource.incident) { resource.incident = true; await save(); }
+            };
+            let audited = resource.audited;
+            const recovery = artifactRecovery(resource, save, inspect, () => audited);
+            if (!resource.recordDeleted && !resource.incident) {
+              try {
+                const { record } = await waitFor(runtime, "cleanup record finalization", async () => {
+                  const record = await runtime.record(sessionReference(resource), recovery.remember, recovery.inspect);
+                  return record === undefined || record.complete ? { record } : undefined;
+                }, RECORD_FINALIZATION_MS);
+                if (record?.complete === true) {
+                  await inspect(record);
+                  audited = links !== undefined && !resource.incident;
+                  resource.audited ||= audited;
+                  await save();
+                }
+              } catch {
+                // Delete for confidentiality, but a malformed/missing required surface is not
+                // the permitted case of unavailable generation identities.
+                resource.incident = true;
+                audited = false;
+                await save();
+              }
+            }
+            await runtime.removeRecord(sessionReference(resource), recovery);
+            resource.recordRemoved = true;
+            resource.artifacts = [];
+            await save();
+          }
+          if (resource.incident) throw new Error("cloud retained-record incident");
           ended += 1;
-        } catch {
+        } catch (error) {
+          if (error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError) {
+            resource.incident = true;
+            await save();
+          }
           // Keep ending the others.
         }
       }
-      if (ended !== progress.sessions.length) throw new Error("a TestingBot session did not end");
+      if (ended !== ownedResources(progress).length) throw new Error("a cloud session or record was not released");
     });
-    await attempt("tunnel", () => runtime.tunnel("stop", progress.epoch));
-    await attempt("fixture", () => runtime.fixture("stop", progress.epoch));
-    await attempt("workspace", () => runtime.removeWorkspace(progress.epoch));
+    if (ownedResources(progress).some(resource => resource.incident === true)) failures.push("retained-record incident");
+    for (const vendor of progress.tunnels ?? ["testingbot"]) {
+      await attempt(`${vendor}Tunnel`, () => runtime.tunnel("stop", progress.epoch, vendor));
+    }
+    // Preserve generation identities and Local ownership until every upstream release is proven.
+    if (failures.length === 0) await attempt("fixture", () => runtime.fixture("stop", progress.epoch));
+    if (failures.length === 0) await attempt("workspace", () => runtime.removeWorkspace(progress.epoch));
     if (failures.length > 0) throw new Error(`device-cloud cleanup failed: ${failures.join(", ")}`);
     progress.cleanupRequired = false;
     progress.phase = "restored";
     await save();
-    return { epoch: progress.epoch, restored: true, sessionsEnded: progress.sessions.length, tunnelStopped: true, fixtureStopped: true };
+    return { epoch: progress.epoch, restored: true, sessionsEnded: ownedResources(progress).length, tunnelStopped: true, fixtureStopped: true,
+      unauditedRecordsDeleted: ownedResources(progress).filter(resource => resource.unauditedDeletion === true).length };
   } catch (error) {
     // createPixelLease's existing restoration helper recognizes this flag through aggregates.
     throw Object.assign(error instanceof Error ? error : new Error("device-cloud cleanup failed"), { pixelUnrestored: true });
@@ -482,7 +763,7 @@ export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Recor
   // tunnel, or fixture remain.
   return input.pixel("deviceCloud", async () => {
     const progress: DeviceCloudProgress = {
-      lane: "deviceCloud", epoch: randomUUID(), binding: bind, phase: "attempt_started", cleanupRequired: true, sessions: [], results: {},
+      lane: "deviceCloud", epoch: randomUUID(), binding: bind, phase: "attempt_started", cleanupRequired: true, sessions: [], resources: [], tunnels: [], results: {},
     };
     // Only progress the parser accepts is saved, so the cleanup lane can always read it back.
     const save = async () => { await input.checkpoint(structuredClone(parseDeviceCloudProgress(progress))); };
@@ -495,9 +776,9 @@ export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Recor
       failure = error;
     }
     try {
-      await release(runtime, progress, save);
+      await release(input, progress, save);
     } catch (releaseError) {
-      failure = failure === undefined ? releaseError : new AggregateError([failure, releaseError], "the device-cloud attempt and its release failed");
+      failure = Object.assign(failure === undefined ? releaseError as Error : new AggregateError([failure, releaseError], "the device-cloud attempt and its release failed"), { pixelUnrestored: true });
     }
     if (result === undefined || failure !== undefined) throw failure;
     return result;
@@ -510,5 +791,5 @@ export async function cleanupDeviceCloud(input: DeviceCloudLaneInput): Promise<R
   if (progress.binding !== binding(input.identity)) throw new Error("device-cloud progress belongs to a different candidate, origin, or device profile");
   if (!progress.cleanupRequired) return { epoch: progress.epoch, restored: true };
   return input.pixel("deviceCloud-cleanup", () =>
-    release(input.runtime, progress, async () => { await input.checkpoint(structuredClone(parseDeviceCloudProgress(progress))); }));
+    release(input, progress, async () => { await input.checkpoint(structuredClone(parseDeviceCloudProgress(progress))); }));
 }

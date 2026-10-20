@@ -516,6 +516,96 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   the existing Pixel-lease guard refuses queued device work until cleanup recovery.
 - TestingBot credentials are supplied only through child-process environment variables and in-memory
   request headers, never command-line arguments, receipts, or logs.
+- BrowserStack is a fixed fallback for iPad Safari and Samsung Chrome only, never iPhone. Selection
+  occurs only on a valid empty TestingBot eligible pool, before a primary write; failures cannot
+  trigger vendor switching. Vendor-qualified ownership prevents colliding IDs from deleting or
+  auditing the wrong account's session, and an ambiguous create remains dirty.
+- BrowserStack Local 8.9 uses the pinned Darwin x64 artifact under Rosetta, force-local, exact host
+  inclusion and force-proxy through the same loopback CONNECT proxy. Include/exclude filters cover
+  all ports and do not replace the proxy's exact authority check. Local's listeners must be
+  loopback-only; cleanup closes the proxy first, then stops only processes with the exact pinned
+  executable and unique attempt working directory, including respawned children. Both paths are
+  realpath-resolved; process enumeration never depends on argv or a `BrowserStackLocal` title.
+  Private 0600 PID/birth identities and parent lineage retain ownership of retitled descendants;
+  exact executable/cwd finds orphaned children and birth checks reject reused PIDs. A missing
+  never-created directory is releasable only when a process snapshot proves no matching executable
+  lineage; ambiguous ownership fails closed. Binary/directory preparation precedes tunnel intent.
+- **Explicit argv exception, single-user orchestrator only:** the lane never places the BrowserStack
+  key in argv, URLs, receipts or logs. It creates only a 0600 key config in the attempt's owned 0700
+  directory and supplies `--config-file`. The pinned vendor binary expands the key into its child's
+  argv; same-user processes already can read the 1Password service-account token. This is accepted
+  exposure, not argv secrecy. Prefer a dedicated BrowserStack team-member key (the plan permits
+  unlimited users), and rotate on suspected exposure. Local stdout/stderr are discarded and its
+  readiness log is a private FIFO, not an evidence file. Stop and crash recovery remove both files.
+- BrowserStack's mandatory text logs, session JSON and every known log/media surface receive the
+  same bounded raw-plus-canonical and exact-16 audit, including partial failures. Signed artifact
+  references come only from JSON parsed by the shared duplicate-key-rejecting parser. JSON logs
+  use it too; ordinary plaintext logs remain raw-only and never supply references. Signed artifact
+  requests carry no account authorization, refuse redirects and unreviewed origins. No recording
+  setting proves vendor-internal absence. Video disabled plus clean indicators and the observed
+  missing-object S3 403 is accepted as no retained media observed; media returning 200 fails.
+  Media detection rejects nonempty screenshot/video/visual fields, including opaque failed-command
+  screenshot payloads, not just familiar media URLs. Only null, false, empty-string and empty-list
+  markers are treated as disabled; the documented disabled-video URL is fetched separately.
+  Only an entire JSON string value that is one well-formed absolute HTTP(S) URL is a reference:
+  one case-insensitive `://`, its hostname appearing exactly once, and no comma.
+  Keys are never references; any key or non-reference value containing `://` or a pinned artifact
+  or dashboard hostname, case-insensitively, fails closed rather than extracting or repairing URLs.
+  Before accepting any retained JSON body, a census independently counts every pinned hostname in
+  raw text and strict canonical JSON; each count must equal its accepted reference occurrences,
+  including duplicates, or fail with `unaccounted BrowserStack artifact reference`.
+  The census also covers canonical text percent-decoded to a fixpoint within four passes (malformed
+  escapes stay literal; excess depth fails closed), requires one decoded `://` per reference, and
+  restricts dashboard presentations to `[A-Za-z0-9_-]+` path segments and `[A-Za-z0-9_-]*` query
+  keys/values, without userinfo, ports or fragments.
+  `browserstack-pins.json` defines disjoint origin sets:
+  reviewed API/S3 artifact-storage origins are fetched, scanned, privately inventoried and
+  absence-verified; only entire top-level `browser_url`/`public_url` strings on the pinned dashboard
+  origin (`automate.browserstack.com`) are presentation references, counted but never fetched/followed.
+  Their contents are the already-audited session record, whose API deletion proves removal.
+  Any other origin anywhere, or a dashboard-host URL embedded in longer text or in another field,
+  fails closed. Duplicate references retain the same inventory and media-classification checks.
+  A reference received before finalized build identification is an `unbound retained reference`:
+  persist an incident and fail closed, never queue volatile references for later discovery.
+  Clean later metadata still permits deletion and absence checks, but cannot clear that incident;
+  fresh cleanup after a crash also remains blocked until operator incident handling.
+  Any exact artifact URL first declared after the audit, including pre-DELETE reads, atomically
+  checkpoints its inventory and a `post-audit retained reference` incident while deletion/absence
+  verification continues without late auditing; keys use the value media classifier and any
+  case-insensitive `data:` or media-pattern key fails closed.
+  Post-audit schema, census or body-validation failures atomically checkpoint a `post-audit
+  unvalidated record` incident and individually validated pinned-origin whole-value URLs recovered
+  from strict JSON, then continue DELETE and bounded absence checks rather than accepting the
+  body or inferring references from malformed JSON; checkpoint failures themselves still halt.
+  A missing artifact inventory blocks restoration only after record/all-log absence verification,
+  while XML/text artifact errors remain raw-scanned and hostname-censused rather than JSON-parsed
+  unless declared JSON, preserving clean 404 and the reviewed media-403 absence evidence.
+  DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
+  signed artifact** are required before removal/restoration, including references returning 404 at
+  the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.
+  No lingering-clean-text exception remains. Any already-audited artifact that starts serving
+  content is inspected again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
+  Signed references persist only in private 0600 recovery progress (inside its 0700 directory),
+  until verified absent. They never enter returned evidence, public summaries or logs; do not
+  publish the private receipt. Recovery does not rely on an in-memory inventory or a saved clean
+  flag. It re-audits finalized raw surfaces using the exact whole-link/16-character scan when both
+  recorded session generations still match. If those links cannot be reconstructed, deletion
+  still proceeds for confidentiality, but `unauditedRecordsDeleted` explicitly counts it and the
+  deletion receives no new clean-audit claim. Audit, API deletion and artifact absence are
+  monotonic stages: a post-DELETE 404 never downgrades an earlier audit into an unaudited deletion.
+  Every non-media retained-surface response body is scanned before rejection, both before and
+  after the initial audit, whatever its HTTP status. This includes rejected DELETE acknowledgements,
+  signed-artifact checks, 200s while waiting for 404, and transient 5xx bodies before a GET retry
+  discards them. Raw scanning precedes parsing; declared JSON also receives the strict canonical
+  scan and reference discovery. A capability hit checkpoints an incident before the original
+  status/format rejection or retry proceeds. Image/video bodies remain unread and report retained
+  media instead; plan, catalog and Local-download transport bodies are not retained surfaces.
+  An audit hit or unverifiable required surface is a persisted
+  incident: deletion is attempted, but cleanup remains failed for operator incident handling.
+  Deletion is defense in depth after the audit, not its replacement.
+  Release proceeds through records, tunnels, fixture, then workspace. Unverified records or Local
+  termination retain the fixture/generation and workspace for recovery; fixture-stop failure also
+  preserves the workspace. Closing the proxy and removing the key config still happen on failure.
 - The iPhone turns background alerts off before its session ends. If its attempt fails first, the
   subscription stays on the candidate gateway until qualification cleanup uninstalls the gateway,
   and any alerts sent meanwhile carry only session metadata.
@@ -568,7 +658,7 @@ Before release, prove:
 - cross-origin launches fail; any future WebAuthn endpoints must enforce the same exact-origin boundary;
 - malformed and oversized IPC/API input stays bounded;
 - gateway restart starts empty and discovery polling repopulates only live hosts;
-- every test record TestingBot kept from the stable campaign's cloud devices contains neither
+- every test record either vendor kept from the stable campaign's cloud devices contains neither
   session's live View or Control link, and the tunnel can reach nothing but the candidate origin and
   its `connect-src` sources;
 - release binaries bind loopback only and match published checksums.

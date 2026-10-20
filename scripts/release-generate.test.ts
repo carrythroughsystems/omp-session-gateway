@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateRelease, RELEASE_TEXT, runReleaseGenerate, type ReleaseGenerateOptions } from "./release-generate.ts";
+import { cloudReleaseEvidence, generateRelease, RELEASE_TEXT, runReleaseGenerate, type ReleaseGenerateOptions } from "./release-generate.ts";
 import { historicalTrees, normalizeHistoricalTree } from "./fixtures/release-generate/historical.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -32,6 +32,44 @@ const recordBefore: Record<string, string> = { ...normalizeHistoricalTree(origin
 const recorded = generateRelease(recordBefore, recordOptions);
 const cases = { prepare: { before: prepareBefore, options: prepareOptions, result: prepared }, approve: { before: approveBefore, options: approveOptions, result: approved }, record: { before: recordBefore, options: recordOptions, result: recorded } };
 const goldens = await fixture("golden.json") as Record<string, Record<string, string>>;
+
+describe("cloud vendor release attribution", () => {
+  interface CloudEvidence {
+    passed: boolean; vendor: string; tunnelVersion: string;
+    targets: Record<"iphone" | "ipad" | "android", Record<string, string | number | boolean>>;
+    audit: Record<string, number>;
+  }
+  const legacy = (receipt as { lanes: { deviceCloud: { evidence: { result: CloudEvidence } } } }).lanes.deviceCloud.evidence.result;
+  function mixed(): CloudEvidence {
+    const result = structuredClone(legacy);
+    result.vendor = "mixed";
+    result.tunnelVersion = "per-target";
+    for (const name of ["iphone", "ipad", "android"] as const) Object.assign(result.targets[name], {
+      vendor: name === "iphone" ? "TestingBot" : "BrowserStack", tunnelVersion: name === "iphone" ? "4.9" : "8.9",
+    });
+    Object.assign(result.targets.ipad, { device: "iPad (10th generation)", os: "27.0", browserVersion: "27.0" });
+    Object.assign(result.audit, { testingbotRecords: 1, browserstackRecords: 2, lingeringSignedArtifacts: 0 });
+    return result;
+  }
+  test("keeps legacy wording and attributes each mixed target, not a global vendor guess", () => {
+    expect(cloudReleaseEvidence(legacy).summary).toBe("TestingBot real devices, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6); iPad (9th generation) (26.6, safari 26.6); Galaxy S25 (15.0.0, chrome 149.0.7827.159). Home Screen alerts do not qualify lock-screen presentation.");
+    const projected = cloudReleaseEvidence(mixed());
+    expect(projected.devices.iphone).toContain("TestingBot, tunnel 4.9:");
+    expect(projected.devices.ipad).toContain("BrowserStack, tunnel 8.9: iPad (10th generation)");
+    expect(projected.devices.android).toContain("BrowserStack, tunnel 8.9: Galaxy S25");
+    expect(projected.summary).toContain("only on the TestingBot iPhone");
+  });
+  test.each(["iphone vendor", "Android OEM", "Android hardware", "browser", "aggregate vendor", "audit counts"] as const)("refuses inconsistent %s", kind => {
+    const invalid = mixed();
+    if (kind === "iphone vendor") invalid.targets.iphone.vendor = "BrowserStack";
+    if (kind === "Android OEM") invalid.targets.android.device = "Google Pixel 10 Pro";
+    if (kind === "Android hardware") invalid.targets.android.model = "SM-S921B";
+    if (kind === "browser") invalid.targets.ipad.browser = "chrome";
+    if (kind === "aggregate vendor") invalid.vendor = "TestingBot";
+    if (kind === "audit counts") invalid.audit.browserstackRecords = 0;
+    expect(() => cloudReleaseEvidence(invalid)).toThrow();
+  });
+});
 
 test("the visible historical archive preserves every replaced v0.7.4 operator fact and link", async () => {
   const changes = await fixture("v0.7.4.prose-changes.json") as { before: string }[];

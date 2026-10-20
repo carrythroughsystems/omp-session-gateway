@@ -19,6 +19,35 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Add BrowserStack Automate Mobile as an immediate pre-write fallback for empty TestingBot
+  iPad and Samsung Android pools, keeping iPhone/Home Screen Push TestingBot-only and targets
+  sequential. Pin Local 8.9 under Rosetta with the documented single-user child-argv exception,
+  shared CONNECT containment, private crash-cleaned config, vendor-qualified ownership,
+  per-target release attribution, complete retained-record audits and verified record deletion.
+  Persist signed artifact inventories only in private recovery progress, require every artifact
+  absent before restoration, and re-audit crash cleanup or count unaudited deletions explicitly.
+  Detect opaque failed-command media and canonicalize Local ownership through symlinked paths.
+  Accept references only as whole HTTP(S) string values with one scheme/hostname occurrence and
+  no comma; reject reference-like keys or other values, retaining the exact dashboard exemption.
+  Require each pinned hostname's raw and canonical JSON census to equal accepted reference counts.
+  Extend that census to bounded fixpoint percent-decoded text and a single decoded scheme per
+  reference, with character-class-pinned dashboard paths/queries and no userinfo, ports or fragments.
+  Persist an incident for any unbound pre-build reference instead of retaining volatile pending
+  references; deletion/absence checks still proceed, but fresh cleanup cannot clear the incident.
+  Atomically checkpoint post-audit artifact references with an incident while continuing only
+  deletion/absence verification across crashes, and reject data/media keys using value classification.
+  Keep DELETE and bounded absence checks running after post-audit validation failures by atomically
+  recording an unvalidated-record incident and safely recovered strict-JSON whole-value references.
+  Verify record/log absence before failing for missing inventory, and accept clean XML/text artifact
+  404 or reviewed media-403 bodies after raw scans/censuses without falsely requiring JSON.
+  Scan every non-media retained-surface body before rejection,
+  whatever its status, including pre/post-audit errors and transient GET-retry bodies, and persist
+  capability hits as incidents. Preserve monotonic cleanup stages and recovery dependencies on
+  release failure.
+  Identify retitled Local descendants by PID/birth lineage, not argv; prepare before owning a tunnel.
+  Keep signed-log expiry limits explicit and refuse the fallback entitlement from 2027-10-20
+  without a reviewed renewal. Public-page development probes do not qualify a release.
+
 - Widen TestingBot's modern iPhone and Samsung device pools with explicit OS floors and canonical
   Galaxy hardware checks; keep A55 disabled pending an observed hardware-code proof. Check free
   inventory during read-only preflight and distinguish typed availability holds (exit 75) from
