@@ -152,6 +152,8 @@ Every row is **supported**: tested in CI on each change, bug reports accepted. *
 
 [TestingBot](https://testingbot.com) supports this project with free real-device testing through its open-source program.
 
+This project is tested with BrowserStack.
+
 ### Known limits
 
 - **Tailscale TUN mode is required** — Userspace networking hides peer identities behind loopback, so the gateway refuses requests; if `doctor` reports `loopbackTrustSound: false`, switch Tailscale to TUN mode rather than bypassing auth.
