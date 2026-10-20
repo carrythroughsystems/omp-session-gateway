@@ -1296,6 +1296,8 @@ storage origins are artifacts; a pinned storage hostname outside any extracted U
 on the separately pinned dashboard origin is a count-only presentation of the API record.
 Other origins, embedded dashboard URLs or other dashboard-field uses fail closed; duplicate and
 media-classification checks remain unchanged. Audit/deletion/absence milestones never regress.
+Comma/second-scheme tokens are ambiguous and fail closed; early references remain pending for build-bound
+validation/inventory, and an operation ending without that build identity fails closed.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
 Rejected DELETE and signed-artifact bodies and transient 5xx bodies before GET retry are included;

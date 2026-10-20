@@ -33,6 +33,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   whatever its status, including pre/post-audit errors and transient GET-retry bodies, and persist
   capability hits as incidents. Preserve monotonic cleanup stages and recovery dependencies on
   release failure.
+  Reject ambiguous comma/second-scheme tokens and retain early references for build-bound
+  validation/inventory, failing closed if pending references never acquire a build identity.
   Identify retitled Local descendants by PID/birth lineage, not argv; prepare before owning a tunnel.
   Keep signed-log expiry limits explicit and refuse the fallback entitlement from 2027-10-20
   without a reviewed renewal. Public-page development probes do not qualify a release.

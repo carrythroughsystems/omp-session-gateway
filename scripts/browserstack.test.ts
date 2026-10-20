@@ -475,6 +475,16 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(() => browserStackReferences(id, build, { reason: `See ${artifact} and https://unreviewed.example/${id}/log` })).toThrow(BrowserStackAuditFailure);
     expect(() => browserStackReferences(id, build, { reason: `See http://${new URL(artifact).hostname}/${id}/log` })).toThrow(BrowserStackAuditFailure);
   });
+  test.each([",", "", ";"])("comma/scheme/semicolon-joined artifact references fail closed (separator=%j)", async separator => {
+    const joined = `${artifact}${separator}${nestedArtifact.replace("https:", "hTtPs:")}`;
+    expect(() => browserStackReferences(id, build, { insights: [{ reason: `See ${joined}` }] })).toThrow("ambiguous BrowserStack artifact reference");
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, reason: joined } }) });
+    await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+    expect(fixture.calls).toHaveLength(1);
+  });
+  test.each([`${artifact},synthetic-tail`, `${artifact}&related=${nestedArtifact}`])("a comma or another scheme anywhere in one HTTP token is ambiguous: %s", value => {
+    expect(() => browserStackReferences(id, build, { reason: value })).toThrow("ambiguous BrowserStack artifact reference");
+  });
   test.each(placements)("class invariant: unreviewed origin anywhere at %s fails closed", async (_name, place) => {
     const fixture = provider({ raw: JSON.stringify({ automation_session: place(`https://unreviewed.example/${id}/opaque`) }) });
     await expect(fixture.audit()).rejects.toThrow("unreviewed");
@@ -567,6 +577,70 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(hit).toBeLessThan(audited);
     expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")?.incident).toBe(true);
     expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
+  });
+  test("a session retry-only signed reference is inventoried after build discovery and its log persists an incident", async () => {
+    const fixture = provider({
+      retry: { surface: "session", reply: {
+        text: JSON.stringify({ insights: [{ reason: `See ${nestedArtifact} for retained details` }] }),
+        status: 502, type: "application/json",
+      } },
+      nestedLog: `synthetic retry-only retained fragment ${replayWindow}`,
+    });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("cloud test records contain a live View or Control link");
+    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(2);
+    expect(lane.checkpoints.some(checkpoint => parseDeviceCloudProgress(checkpoint).resources?.some(resource =>
+      resource.artifacts?.some(reference => reference.url === nestedArtifact && reference.buildId === build)))).toBe(true);
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.results.audit).toMatchObject({ recordsExposingLinks: 1 });
+    expect(progress.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
+    expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
+  });
+  test("pending retry references fail closed if the final session read has no build identity", async () => {
+    const fixture = provider({
+      retry: { surface: "session", reply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 502, type: "application/json" } },
+      sessionReply: { text: '{"error":"synthetic final rejection"}', status: 401, type: "application/json" },
+    });
+    await expect(fixture.audit()).rejects.toThrow("pending artifact references have no build identity");
+    expect(fixture.calls).toHaveLength(2);
+    expect(fixture.calls.some(call => call.url === nestedArtifact)).toBe(false);
+  });
+  test.each([
+    `https://unreviewed.example/${id}/nested.txt`,
+    "https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/synthetic-unrelated/nested.txt",
+  ])("pending references receive the same origin and build-path validation: %s", async url => {
+    const fixture = provider({ retry: { surface: "session", reply: { text: JSON.stringify({ insights: { reason: url } }), status: 502, type: "application/json" } } });
+    await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+    expect(fixture.calls).toHaveLength(2);
+  });
+  test.each(["running", "done"])("a %s session with references but no build identity fails closed", async status => {
+    const { build_hashed_id: _build, ...withoutBuild } = record;
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...withoutBuild, status, insights: { reason: nestedArtifact } } }) });
+    await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+    expect(fixture.calls).toHaveLength(1);
+  });
+  test.each(["audit", "cleanup"])("an absent %s session body with pending references fails closed instead of discarding them", async operation => {
+    const fixture = provider({ sessionReply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 404, type: "application/json" } });
+    const result = operation === "audit" ? fixture.audit() : fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    await expect(result).rejects.toThrow("pending artifact references have no build identity");
+    expect(fixture.calls).toHaveLength(1);
+  });
+  test("fresh cleanup also inventories retry-only references once its build is reconstructed", async () => {
+    const fixture = provider({ retry: { surface: "session", reply: { text: JSON.stringify({ insights: { reason: nestedArtifact } }), status: 502, type: "application/json" } } });
+    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    expect(fixture.removal.artifacts).toContainEqual({ url: nestedArtifact, buildId: build, kind: "text" });
+    expect(fixture.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
+  });
+  test("pre-finalization references with a known build are privately inventoried", async () => {
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, status: "running", insights: { reason: nestedArtifact } } }) });
+    expect((await fixture.audit())?.complete).toBe(false);
+    expect(fixture.removal.artifacts).toContainEqual({ url: nestedArtifact, buildId: build, kind: "text" });
+  });
+  test("pre-finalization without references or a build identity remains incomplete", async () => {
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { hashed_id: id, status: "running" } }) });
+    expect((await fixture.audit())?.complete).toBe(false);
+    expect(fixture.removal.artifacts).toEqual([]);
   });
   test("rejected media bodies stay unread and report media without scanning their bytes", async () => {
     const fixture = provider({ postDeleteArtifactReply: { text: replayWindow, status: 401, type: "video/mp4" } });

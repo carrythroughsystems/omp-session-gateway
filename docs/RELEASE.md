@@ -775,6 +775,8 @@ depth, including URLs embedded in longer `reason`/`insights` text. Pinned artifa
 not covered by an extracted URL token (scheme-less references) fail closed. The dashboard exemption
 still requires the entire top-level `browser_url`/`public_url` string to be a pinned dashboard URL;
 embedded dashboard URLs and unknown origins fail closed. Duplicate/classification checks still apply.
+Comma/second-scheme tokens fail as ambiguous, and early references remain pending until the build
+identity permits validation/inventory or fail closed if that identity is never obtained.
 The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
 deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
 from every retained surface, before or after the audit and whatever their HTTP status, are scanned

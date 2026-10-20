@@ -558,6 +558,8 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   Their contents are the already-audited session record, whose API deletion proves removal.
   Any other origin anywhere, or a dashboard-host URL embedded in longer text or in another field,
   fails closed. Duplicate references retain the same inventory and media-classification checks.
+  Tokens containing a comma or a second HTTP(S) scheme fail as ambiguous, and references seen before
+  build identification remain pending for validation/inventory or fail closed if no build is obtained.
   DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
   signed artifact** are required before removal/restoration, including references returning 404 at
   the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.

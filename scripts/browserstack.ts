@@ -103,20 +103,24 @@ export function validateBrowserStackArtifacts(sessionId: string, artifacts: read
   }
 }
 
-/** One discovery rule for metadata, JSON logs and post-DELETE bodies; never field projections. */
-export function browserStackReferences(sessionId: string, buildId: string, value: unknown, sessionMetadata = false): {
-  artifacts: CloudArtifact[]; dashboardReferences: number;
+type BrowserStackReference = Pick<CloudArtifact, "url" | "kind">;
+
+function requirePendingBuildIdentity(buildId: string | undefined, pending: readonly BrowserStackReference[]): void {
+  if (buildId === undefined && pending.length > 0) throw new BrowserStackAuditFailure("BrowserStack pending artifact references have no build identity");
+}
+
+/** Collect without inventing a build identity when an earlier retained body arrives first. */
+function browserStackReferenceCandidates(value: unknown, sessionMetadata: boolean): {
+  artifacts: BrowserStackReference[]; dashboardReferences: number;
 } {
-  const artifacts: CloudArtifact[] = [];
+  const artifacts: BrowserStackReference[] = [];
   const dashboards = new Set<string>();
   const walk = (value: unknown, key = "", depth = 0): void => {
     if (typeof value === "string") {
       const reference = (token: string, url: URL): void => {
         if (token === value && DASHBOARD_ORIGINS.has(url.origin) && sessionMetadata && depth === 1 && (key === "browser_url" || key === "public_url") &&
           url.username === "" && url.password === "" && url.hash === "") { dashboards.add(token); return; }
-        const artifact: CloudArtifact = { url: token, buildId, kind: /screenshot|video|visual|^screen$/iu.test(key) || MEDIA_URL.test(token) ? "media" : "text" };
-        // Embedded references have exactly the same closed-origin and classification checks.
-        validateBrowserStackArtifacts(sessionId, [artifact]);
+        const artifact: BrowserStackReference = { url: token, kind: /screenshot|video|visual|^screen$/iu.test(key) || MEDIA_URL.test(token) ? "media" : "text" };
         const previous = artifacts.find(item => item.url === token);
         if (previous === undefined) artifacts.push(artifact);
         else if (previous.kind !== artifact.kind) throw new BrowserStackAuditFailure("BrowserStack artifact classification changed");
@@ -129,6 +133,7 @@ export function browserStackReferences(sessionId: string, buildId: string, value
       for (const match of value.matchAll(HTTP_URL_TOKEN)) {
         uncovered(end, match.index);
         const token = match[0];
+        if (token.includes(",") || /https?:\/\//iu.test(token.slice(1))) throw new BrowserStackAuditFailure("ambiguous BrowserStack artifact reference");
         let url: URL;
         try { url = new URL(token); } catch { throw new BrowserStackAuditFailure("invalid BrowserStack artifact reference"); }
         reference(token, url);
@@ -148,8 +153,18 @@ export function browserStackReferences(sessionId: string, buildId: string, value
     }
   };
   walk(value);
-  validateBrowserStackArtifacts(sessionId, artifacts);
+  if (artifacts.length > 64) throw new BrowserStackAuditFailure("invalid BrowserStack artifact inventory");
   return { artifacts, dashboardReferences: dashboards.size };
+}
+
+/** One discovery rule for metadata, JSON logs and post-DELETE bodies; never field projections. */
+export function browserStackReferences(sessionId: string, buildId: string, value: unknown, sessionMetadata = false): {
+  artifacts: CloudArtifact[]; dashboardReferences: number;
+} {
+  const found = browserStackReferenceCandidates(value, sessionMetadata);
+  const artifacts = found.artifacts.map(reference => ({ ...reference, buildId }));
+  validateBrowserStackArtifacts(sessionId, artifacts);
+  return { artifacts, dashboardReferences: found.dashboardReferences };
 }
 
 function mergeArtifacts(sessionId: string, artifacts: CloudArtifact[], added: readonly CloudArtifact[]): void {
@@ -255,14 +270,18 @@ export class BrowserStackApi {
   async testRecord(sessionId: string, remember?: (artifacts: readonly CloudArtifact[]) => Promise<void>, inspect?: CloudRecordRemoval["inspect"]): Promise<TestRecord | undefined> {
     const texts: string[] = [];
     const artifacts: CloudArtifact[] = [];
+    const pending: BrowserStackReference[] = [];
     let buildId: string | undefined;
     let dashboardReferences = 0, screenshots = 0, bytes = 0, video = false;
     const inventory = async (json: unknown, sessionMetadata = false): Promise<void> => {
-      if (buildId === undefined) return;
-      const found = browserStackReferences(sessionId, buildId, json, sessionMetadata);
-      mergeArtifacts(sessionId, artifacts, found.artifacts);
+      const found = browserStackReferenceCandidates(json, sessionMetadata);
+      pending.push(...found.artifacts);
       dashboardReferences += found.dashboardReferences;
+      if (buildId === undefined) return;
+      const identity = buildId;
+      mergeArtifacts(sessionId, artifacts, pending.map(reference => ({ ...reference, buildId: identity })));
       await remember?.([...artifacts]);
+      pending.length = 0;
     };
     const append = async (response: Response): Promise<string | undefined> => {
       const contentType = response.headers.get("content-type") ?? "";
@@ -284,20 +303,30 @@ export class BrowserStackApi {
       return raw;
     };
     const inspectResponse = async (response: Response): Promise<void> => { await append(response); };
-    const session = await this.#session(sessionId, inspect, inspectResponse);
+    let session: { readonly record: Record<string, unknown>; readonly raw: string } | undefined;
+    try {
+      session = await this.#session(sessionId, inspect, inspectResponse);
+      if (session !== undefined) {
+        const record = session.record;
+        if (typeof record.build_hashed_id === "string" && BROWSERSTACK_SESSION_ID.test(record.build_hashed_id)) buildId = record.build_hashed_id;
+        await inventory(record, true);
+      }
+    } catch (error) {
+      requirePendingBuildIdentity(buildId, pending);
+      throw error;
+    }
+    requirePendingBuildIdentity(buildId, pending);
     if (session === undefined) return undefined;
     const { record, raw } = session;
     if (record.status === "running") return { complete: false, text: "", video: false, screenshots: 0 };
     if (Object.keys(record).some(field => !(RECORD_FIELDS as readonly string[]).includes(field))) throw new Error("BrowserStack returned an unreviewed retained-record field");
     if (!["done", "failed", "timeout", "passed"].includes(String(record.status)) || typeof record.build_hashed_id !== "string" || !BROWSERSTACK_SESSION_ID.test(record.build_hashed_id)) throw new Error("BrowserStack record has unknown finalization state");
-    buildId = record.build_hashed_id;
     const metadata = retainedSession(record, raw);
     await inspect?.(metadata);
     texts.push(metadata.text);
     screenshots ||= metadata.screenshots;
     bytes += Buffer.byteLength(metadata.text);
     if (bytes > 2_000_000) throw new Error("BrowserStack returned oversized aggregate records");
-    await inventory(record, true);
     if (typeof record.video_url !== "string" || record.video_url === "") throw new Error("BrowserStack returned no video retention indicator");
     for (const surface of LOG_SURFACES) {
       const response = await this.#get(`/sessions/${sessionId}/${surface}`, inspectResponse);
@@ -334,11 +363,15 @@ export class BrowserStackApi {
   async deleteRecord(sessionId: string, removal: CloudRecordRemoval, clock: { now(): number; pause(milliseconds: number): Promise<void> } = { now: Date.now, pause: Bun.sleep }): Promise<void> {
     validateBrowserStackArtifacts(sessionId, removal.artifacts);
     const artifacts = [...removal.artifacts];
+    const pending: BrowserStackReference[] = [];
     let buildId = artifacts[0]?.buildId;
     const discover = async (json: unknown, sessionMetadata = false) => {
+      pending.push(...browserStackReferenceCandidates(json, sessionMetadata).artifacts);
       if (buildId === undefined) return;
-      mergeArtifacts(sessionId, artifacts, browserStackReferences(sessionId, buildId, json, sessionMetadata).artifacts);
+      const identity = buildId;
+      mergeArtifacts(sessionId, artifacts, pending.map(reference => ({ ...reference, buildId: identity })));
       await removal.remember([...artifacts]);
+      pending.length = 0;
     };
     const inspect = async (response: Response, session = false): Promise<string | undefined> => {
       const contentType = response.headers.get("content-type") ?? "";
@@ -363,8 +396,15 @@ export class BrowserStackApi {
       }
       return raw;
     };
-    const existing = await this.#get(`/sessions/${sessionId}.json`, async response => { await inspect(response, true); });
-    await inspect(existing, true);
+    let existing: Response;
+    try {
+      existing = await this.#get(`/sessions/${sessionId}.json`, async response => { await inspect(response, true); });
+      await inspect(existing, true);
+    } catch (error) {
+      requirePendingBuildIdentity(buildId, pending);
+      throw error;
+    }
+    requirePendingBuildIdentity(buildId, pending);
     if (existing.status !== 200 && existing.status !== 404) throw new Error("BrowserStack record cleanup state is unknown");
     if (existing.status === 200 && !removal.deleted && !this.#removalStarted.has(sessionId)) {
       this.#removalStarted.add(sessionId);
