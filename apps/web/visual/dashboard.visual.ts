@@ -155,6 +155,12 @@ for (const state of VISUAL_STATES) {
           await page.locator('.triage-bar[data-kind="hold"]').waitFor();
         }
       }
+      phase = "motion";
+      // The pinned transcript has entrance animations that do not honor reduced-motion.
+      // Percy replays CSS, so disable visual motion in both the source and serialized DOM.
+      await page.addStyleTag({
+        content: "*, *::before, *::after { animation: none !important; transition: none !important; caret-color: transparent !important; }",
+      });
       await page.evaluate(async () => {
         await document.fonts.ready;
         // The build identity is intentionally not a visual baseline input.
@@ -165,6 +171,9 @@ for (const state of VISUAL_STATES) {
         window.scrollTo(0, 0);
         await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       });
+      if (await page.evaluate(() => document.getAnimations().filter(animation => animation.playState === "running").length) !== 0) {
+        throw new Error("visual state: active visual motion");
+      }
       phase = "geometry";
       const source = await geometry(page);
       if (source.overflow) { phase = "source-overflow"; throw new Error("visual geometry: overflow"); }

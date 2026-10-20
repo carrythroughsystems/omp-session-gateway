@@ -6,7 +6,7 @@ export const VISUAL_STATES = [
 export type VisualState = typeof VISUAL_STATES[number];
 export const VISUAL_PROJECTS = ["visual-phone-390x844", "visual-tablet-810x1080", "visual-desktop-1280x800"] as const;
 export const VISUAL_PHASES: Readonly<Record<string, true>> = {
-  fixture: true, directory: true, alerts: true, state: true, geometry: true, guard: true, submit: true, cleanup: true,
+  fixture: true, directory: true, alerts: true, state: true, motion: true, geometry: true, guard: true, submit: true, cleanup: true,
   "negative-hidden-attribute": true, "negative-form-value": true, "negative-inline-style": true,
   "negative-text": true, "negative-textual-resource": true, "negative-surface": true,
   "source-overflow": true, "source-network": true, "source-transcript": true, "source-header": true,

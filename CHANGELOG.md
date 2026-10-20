@@ -61,6 +61,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   runner layers so a created build with zero accepted snapshots cannot hide its failing boundary.
 - Disable automatic Percy drop-in baseline seeding; baseline approval stays manual. Classify CLI
   diagnostics without exposing their text, while keeping known and unknown warnings fatal.
+- Resolve Percy Node executables through the platform-native lookup (including Windows), and
+  disable test-only CSS animation replay so source/serialized parity does not capture entrance motion.
 - Poll for the installed WebAPK's DevTools page target before judging the published-byte smoke render, with a fail-closed deadline and sanitized timeout diagnostics.
 - Open sessions on tablet and desktop widths are no longer squeezed into the directory's 35rem
   column (#411, #412). The directory's `main` rule also sized the embedded client's `<main>`, so the

@@ -6,6 +6,7 @@ import { VISUAL_PHASES, VISUAL_PROJECTS, VISUAL_STATES, VISUAL_UPLOAD_REASONS } 
 export type VisualMode = "local" | "upload";
 export interface VisualProcessResult { code: number; stdout: string; stderr: string }
 export type VisualProcess = (command: string[], environment: NodeJS.ProcessEnv) => Promise<VisualProcessResult>;
+export type VisualRuntimeResolver = (executable: string) => string | null;
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = createRequire(import.meta.url).resolve("@percy/cli");
 // CLI's exported index is dist/index.js; its pinned package's executable is bin/run.cjs.
@@ -130,6 +131,7 @@ export async function runVisual(
   args: readonly string[],
   environment: NodeJS.ProcessEnv,
   run: VisualProcess = execute,
+  resolveRuntime: VisualRuntimeResolver = Bun.which,
 ): Promise<void> {
   if (args.length !== 1 || (args[0] !== "local" && args[0] !== "upload")) throw new Error("visual: choose local or upload");
   const upload = args[0] === "upload";
@@ -156,9 +158,9 @@ export async function runVisual(
   if (upload && !environment.PERCY_TOKEN?.trim()) throw new Error(MISSING_TOKEN);
   // Percy is a Node CLI. Bun's http.Server compatibility can start its API without serving
   // requests, yielding a created build with zero snapshots. Keep our worker on pinned Bun.
-  const percyRuntime = upload ? Bun.which(environment.OMP_VISUAL_NODE_EXECUTABLE ?? "node", {
-    PATH: environment.PATH ?? process.env.PATH ?? "",
-  }) : undefined;
+  // Let the platform resolver honor Windows Path/PATHEXT and native delimiters. The real
+  // environment is already inherited; an artificial uppercase PATH loses Windows resolution.
+  const percyRuntime = upload ? resolveRuntime(environment.OMP_VISUAL_NODE_EXECUTABLE ?? "node") : undefined;
   if (upload && !percyRuntime) {
     process.stdout.write("visual-runner: phase=percy reason=node-missing\n");
     throw new Error(MISSING_NODE);

@@ -27,6 +27,7 @@ The states are `directory-empty`, `directory-all-clear`, `directory-needs-you`,
 `settings-enabled-session`, `collab-view`, and `collab-control-ask`. Each snapshot is named
 `state / project`: **18 distinct snapshots**, each serialized at its own width. The clock and
 randomness are fixed; locale is en-US, timezone UTC, theme dark, reduced motion on, DPR 1.
+Test-only styles also disable CSS animation/transition replay; an active animation fails the lane.
 Directory asks contain metadata only. Collaboration prose and code are explicitly authored
 synthetic content, never a recorded conversation. The shared fixture preserves README capture
 defaults; this lane does not regenerate media.

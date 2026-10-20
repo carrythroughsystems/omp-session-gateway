@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
+import { basename, dirname } from "node:path";
 import { assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
 
 const localSuccess = { code: 0, stdout: "visual: validated=18 submitted=0 outcome=passed\n", stderr: "" };
@@ -30,20 +31,22 @@ test("upload refuses missing native Node before creating any child", async () =>
   let calls = 0;
   await expect(runVisual(["upload"], {
     PERCY_TOKEN: "synthetic-test-token", OMP_VISUAL_NODE_EXECUTABLE: "/nonexistent/percy-node",
-  }, async () => { calls++; return uploadSuccess; })).rejects.toThrow("visual upload: Node.js is required for Percy");
+  }, async () => { calls++; return uploadSuccess; }, () => null)).rejects.toThrow("visual upload: Node.js is required for Percy");
   expect(calls).toBe(0);
 });
 
 test("upload uses the explicitly selected setup-node executable rather than another PATH node", async () => {
-  const selected = Bun.which("node")!;
+  const selected = process.platform === "win32" ? "C:\\synthetic\\node.exe" : "/synthetic/node";
   const commands: string[][] = [];
+  const requested: string[] = [];
   await runVisual(["upload"], {
     PERCY_TOKEN: "synthetic-test-token", OMP_VISUAL_NODE_EXECUTABLE: selected, PATH: "/nonexistent",
   }, async command => {
     commands.push(command);
     return commands.length === 1 ? { code: 0, stdout: "", stderr: "" } : uploadSuccess;
-  });
+  }, executable => { requested.push(executable); return selected; });
   expect(commands[1]?.[0]).toBe(selected);
+  expect(requested).toEqual([selected]);
 });
 
 test("modes are closed and never fall back on a failure or invalid selection", async () => {
@@ -59,11 +62,12 @@ test("upload launches the pinned CLI with the Playwright browser and isolated lo
   await runVisual(["upload"], { PERCY_TOKEN: "synthetic-test-token", PERCY_ENABLE: "0", PERCY_PARALLEL_TOTAL: "-1" }, async (command, environment) => {
     calls.push({ command, environment });
     return calls.length === 1 ? { code: 0, stdout: "", stderr: "" } : uploadSuccess;
-  });
+  }, () => "synthetic-node");
   expect(calls).toHaveLength(2);
   expect(calls[0]?.environment.PERCY_TOKEN).toBeUndefined();
-  expect(calls[1]?.command[0]).toBe(Bun.which("node")!);
-  expect(calls[1]?.command[1]?.endsWith("/bin/run.cjs")).toBe(true);
+  expect(calls[1]?.command[0]).toBe("synthetic-node");
+  expect(basename(calls[1]?.command[1] ?? "")).toBe("run.cjs");
+  expect(basename(dirname(calls[1]?.command[1] ?? ""))).toBe("bin");
   expect(calls[1]?.environment.PERCY_BROWSER_EXECUTABLE?.includes("chromium")).toBe(true);
   expect(calls[1]?.environment.PERCY_SERVER_HOST).toBe("127.0.0.1");
   expect(calls[1]?.environment.PERCY_CLIENT_ERROR_LOGS).toBe("false");
