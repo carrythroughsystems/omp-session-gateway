@@ -153,6 +153,8 @@ Every row is **supported**: tested in CI on each change, bug reports accepted. *
 [TestingBot](https://testingbot.com) supports this project with free real-device testing through its open-source program.
 
 This project is tested with BrowserStack.
+The [Percy visual-review scope](docs/BROWSERSTACK.md#percy-scope) is advisory and synthetic-only,
+separate from functional browser tests and release device qualification.
 
 ### Known limits
 

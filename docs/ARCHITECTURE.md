@@ -270,6 +270,27 @@ A compromised or unlocked phone with valid tailnet identity is also capable of r
 until the device is revoked. WebAuthn user verification is proposed in ADR-008 and not implemented;
 it is not an additional Control gate operators can rely on today.
 
+### Test-only Percy flow
+
+The advisory visual lane is outside the runtime architecture:
+
+`built dashboard + pinned client → loopback synthetic fixture + in-page relay stub → Chromium at
+each source viewport → installed @percy/dom serialization → exact-material/capability/identifier
+guards → Percy SDK → host-restricted, JavaScript-disabled discovery → advisory visual build`.
+
+The shared deterministic fixture also supplies README capture without changing its default
+content or ordering. Local visual validation checks all 18 states and source/serialized geometry
+without starting Percy or passing credentials. Upload mode rechecks the exact SDK POST, requires
+a healthy session, all submissions and finalization, and never falls back. No live OMP, real
+transcript, production gateway, capability canary or third-party runtime asset belongs in this
+flow. Synthetic authority stays in source-context memory; serialized HTML/resources fail if it
+appears. Before uploading, a native-Node testing host runs the same 18 states without a real token
+or vendor effects. A private pipe supplies a shared ephemeral synthetic authority; the retained
+fixture guard and both scanners check the exact redacted non-`ci` log candidate and reject a
+planted SDK-log canary. Percy uploads those redacted CLI logs with builds; the separate CI-log
+upload is disabled. These renders are not functional browser tests or signed-candidate qualification.
+See [BrowserStack](BROWSERSTACK.md) and ADR-035 for vendor-role and access policy.
+
 ## 4. Why not process scanning or terminal automation?
 
 Process enumeration can find PIDs but cannot safely attach OMP's browser collaboration protocol to an existing interactive context or recover a capability without reading process memory. Simulated keystrokes, terminal scraping, QR decoding, and clipboard monitoring are fragile and create additional secret channels.

@@ -71,6 +71,8 @@ const nonProviderFetches: Readonly<Record<string, readonly string[]>> = {
   "post-release-smoke.ts": ['`${config.http.publicOrigin}/api/v1/sessions`', '`http://127.0.0.1:${port}/json/list`'],
   "relay-soak.ts": ['`${config.gatewayOrigin}/api/v1/sessions`', '`${config.gatewayOrigin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`'],
   "stable-qualification.ts": ['`${origin}/api/v1/sessions`', '`${origin}/api/v1/sessions/${encodeURIComponent(instanceId)}/launch`', '`http://127.0.0.1:${port}/api/v1/health`'],
+  // Single-shot local Percy session health; upload mode must never silently no-op.
+  "test-visual.ts": ['new URL("/percy/healthcheck"', 'new URL("/test/logs"'],
 };
 
 function checkProviderReads(rel: string, text: string): string[] {
@@ -333,6 +335,8 @@ async function main(): Promise<void> {
     ...Object.keys(collabClientPackage.dependencies ?? {}),
     "@types/bun",
     "@playwright/test",
+    "@percy/cli",
+    "@percy/playwright",
   ]) {
     if (!ignoredBunDependencies.has(dependency)) {
       errors.push(`dependabot.yml: ${dependency} must move with its pinned runtime owner, not Dependabot`);

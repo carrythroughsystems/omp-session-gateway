@@ -211,3 +211,45 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         timeout-minutes: 10
       - run: bun run test:browser
+
+  visual-review:
+    # Advisory, synthetic-only uploads: never execute on or lend secrets to the fleet.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+      - name: Verify pinned Bun
+        run: test "$(bun --version)" = 1.4.0
+      - name: Set up native Percy Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.22.0
+          package-manager-cache: false
+      - name: Select pinned Percy Node
+        id: percy-node
+        run: |
+          test "$(node --version)" = v24.22.0
+          printf 'executable=%s\n' "$(node --print process.execPath)" >> "$GITHUB_OUTPUT"
+      - run: bun install --frozen-lockfile
+      - name: Install source Chromium
+        run: bunx playwright install chromium
+        timeout-minutes: 10
+      - name: Validate synthetic visual states locally
+        run: bun run test:visual
+      - name: Upload guarded Percy snapshots
+        if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.runner == 'github-hosted') }}
+        env:
+          PERCY_TOKEN: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.runner == 'github-hosted')) && secrets.PERCY_TOKEN || '' }}
+          OMP_VISUAL_NODE_EXECUTABLE: ${{ steps.percy-node.outputs.executable }}
+        run: bun run test:visual:percy
+      - name: Record local-only visual review
+        if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || (github.event_name == 'workflow_dispatch' && inputs.runner != 'github-hosted') }}
+        run: |
+          printf '%s\n' 'Percy not uploaded: fork or gateway-ci dispatch; all 18 synthetic states validated locally without a repository secret.' >> "$GITHUB_STEP_SUMMARY"

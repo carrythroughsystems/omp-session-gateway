@@ -318,6 +318,15 @@ Bounded title/project canaries are allowed in encrypted push and visible notific
   collab-client memory, the encrypted relay frame, and the receiving OMP test session;
 - scan private push state, intercepted encrypted-payload plaintext, visible notification title/body/data, notification tags, app badges, and request-route history against the selected detail contract;
 
+The Percy harness additionally scans the installed serializer's full HTML and every serialized
+resource, including decoded bytes, before submission and again at the SDK POST. The fixture's
+closure-owned full/room/key/16-character/escaped-material guard and both repository leak scanners
+must fail on hidden attributes, current form values, inline styles, text, textual resources and
+unsafe diagnostics without echoing matches. Negative tests reject unreviewed resources and
+executable surfaces, SDK warnings/no-ops, unhealthy sessions and failed finalization. The safe
+reporter emits only allowlisted state/project/phase names and counts; no trace, screenshot,
+recording, raw SDK log or Percy output is retained as a CI artifact.
+
 ## 3. Integration tests
 
 - OMP-shaped discovery/query fixture -> poller -> registry -> PWA card -> per-launch link;
@@ -605,9 +614,23 @@ blocking a merge.
 | `windows-service-lifecycle` | Windows contracts and ACLs, install, readiness-token isolation and rotation, uninstall, and a standard (non-elevated) user's install, reinstall, daemon readiness, and uninstall | gating |
 | `linux-arm64-source-checkout` | Native aarch64 typecheck, build, `bun test`, and the pinned mainline OMP registry fixtures | advisory |
 | `coverage` | `bun run test:coverage` and the Codecov upload | advisory |
+| `visual-review` | Fixed GitHub-hosted Ubuntu: `bun run test:visual` validates all 18 deterministic synthetic states and source/serialized geometry; eligible same-repository PRs, main pushes and GitHub-hosted dispatches then require guarded Percy uploads and finalization | advisory |
 
 `coverage` is advisory by design: its upload sets `fail_ci_if_error: false`, so a merge never
 depends on a third-party service being reachable.
+
+`visual-review` always validates locally without a token. Forks and all gateway-ci dispatches
+are explicitly **not uploaded** and receive no Percy secret. Eligible uploads fail visibly on
+missing credentials, SDK warnings, an unavailable vendor, incomplete submission or finalization;
+no retries or `continue-on-error` mask the result. The six states are empty/all-clear/needs-you
+directory, Settings with Session alerts enabled, connected View and connected Control Ask, each at
+390×844, 810×1080 and 1280×800 with a fixed clock/randomness, en-US/UTC, dark theme, reduced
+motion and DPR 1. Directory asks are metadata-only, collaboration prose/code are authored synthetic,
+and the desktop contract remains a 560px directory, 900px View transcript and aligned session
+header. Control Ask preserves the client's 880px bounded embedded body and checks exact
+source/serialized parity and session-header alignment instead of imposing a 900px inner transcript.
+Percy re-rendering is neither functional browser coverage nor signed-release device qualification;
+maintainer setup and first-build/deliberate-diff acceptance are in [BrowserStack](BROWSERSTACK.md).
 
 Separately, `upstream-canary.yml` runs `canary` and `canary-windows` daily, by dispatch, and on
 pull requests touching its workflow, scripts, fixture, or registry reader. It runs the ten stages

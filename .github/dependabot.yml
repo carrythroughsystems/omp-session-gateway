@@ -18,6 +18,9 @@ updates:
       - dependency-name: "@types/bun"
       # Canonical media records the exact capture tool and browser; move this only when recapturing.
       - dependency-name: "@playwright/test"
+      # Visual baselines and serializer/security contracts move with reviewed capture-tool bumps.
+      - dependency-name: "@percy/cli"
+      - dependency-name: "@percy/playwright"
   - package-ecosystem: github-actions
     directory: /
     schedule:

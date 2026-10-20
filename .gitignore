@@ -4,6 +4,7 @@ build/
 coverage/
 playwright-report/
 test-results/
+.percy/
 *.log
 *.tmp
 .DS_Store

@@ -1341,3 +1341,52 @@ still execute no repository or upstream code; the existing promotion and qualifi
 
 See [Unattended release driver](RELEASE.md#unattended-release-driver) for installation and the
 kill switch.
+
+## ADR-035 — Advisory Percy review of capability-free serialized fixtures
+
+**Status:** Accepted
+
+**Date:** 2026-10-20
+
+**Context:** BrowserStack's open-source sponsorship includes Percy Professional, Automate Mobile
+and Live until 2027-10-20. Visual rendering, functional browser behavior and signed-candidate
+qualification are different evidence. Percy uploads serialized DOM and resources, not only pixels;
+even the fixture's synthetic capability-shaped canaries must not cross that boundary.
+
+**Decision:** Add a bounded, test-time, advisory Percy lane over six authored synthetic states at
+390×844, 810×1080 and 1280×800 (18 unique snapshots). No production source, runtime dependency,
+external runtime asset or qualified-platform claim changes. Extract the deterministic README
+fixture without changing its defaults. Use the installed `@percy/dom` serializer with the SDK's
+options, then scan its HTML and every serialized resource using closure-owned exact/segment/escape
+canary checks and the capability/identifier scanners. Recheck the exact SDK POST in memory. A hit
+or SDK warning refuses the POST before submission, without repeating source data in diagnostics.
+Keep Percy JavaScript rendering off and discovery restricted to the fixture host and installed Chromium.
+
+CLI diagnostics are classified on every line of both streams. Percy uploads redacted CLI logs
+with every build; disabling CI-log collection does not disable CLI-log upload. Upload mode must
+first exercise the identical 18 states against the installed native-Node testing host, without
+a real token or vendor effects, then scan the exact redacted non-`ci` logger records that form
+`clilogs`, including metadata. A private pipe supplies one ephemeral synthetic authority, and its
+retained fixture guard plus both leak scanners must accept the real run and reject a planted
+SDK-log canary. The audit is bounded to five minutes and never calls `sendBuildLogs`; ordinary
+and README fixture defaults remain random and unchanged. Local mode does not start the audit.
+
+Local validation invokes no Percy and supplies no token. Upload mode requires credentials, a
+healthy server, all 18 submissions and a finalized build; it cannot silently no-op or fall back.
+CI always validates locally on fixed GitHub-hosted Ubuntu. Only same-repository PRs, main pushes
+and GitHub-hosted manual dispatches may upload; forks and every gateway-ci dispatch are explicitly
+local-only and receive no Percy secret. The token belongs only to the upload step. Failures are
+visible but the status is advisory, never a required merge or release gate.
+
+Vendor roles stay distinct: **Percy** is advisory visual review; **TestingBot** is the release
+`deviceCloud` vendor; **Automate** is the `deviceCloud` fallback under the separate ADR-032
+amendment; **Live** is manual review of capability-free fixtures only, never a production gateway.
+This decision does not implement or change device-cloud routing, tunnels, receipts or qualification.
+
+**Consequences:** Maintainers choose Percy renderers and approve intentional baseline changes;
+no automatic approval is allowed. First-service acceptance requires an observed 18-snapshot build
+and a deliberate CSS perturbation producing a reviewable diff. Local proofs alone do not establish
+an upload. No traces, recordings, raw SDK diagnostics or Percy output are committed or uploaded as
+CI artifacts. Review capture-tool pins with baselines. Review sponsorship renewal on 2027-09-20,
+before expiry on 2027-10-20; if uploads end, update credentials, CI expectations and attribution
+together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.md).
