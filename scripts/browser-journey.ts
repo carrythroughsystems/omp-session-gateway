@@ -43,27 +43,13 @@ export interface CollaborationJourneyResult {
 }
 
 /**
- * True once the controlling worker is the settled one whose only shell cache holds this document's
- * app bundle, and that bundle is the expected release bundle when one is given. The first visit
- * after a gateway upgrade installs and activates the new shell, and the page then reloads itself if
- * it is idle (ADR-018); driving View/Control before that settles races the reload.
+ * Names the first unmet condition of a settled installed shell, or "ready": the controlling worker is
+ * the activated one whose only shell cache holds this document's app bundle, and that bundle is the
+ * expected release bundle when one is given. The first visit after a gateway upgrade installs and
+ * activates the new shell, and the page then reloads itself if it is idle (ADR-018); driving
+ * View/Control before that settles races the reload. Every result is a closed code.
  */
-function currentShellExpression(expectedAppAsset: string | undefined): string {
-  return `(async () => {
-  const expected = ${JSON.stringify(expectedAppAsset ?? null)};
-  const registration = await navigator.serviceWorker.getRegistration("/");
-  const controller = navigator.serviceWorker.controller;
-  if (registration?.active?.state !== "activated" || registration.installing !== null || registration.waiting !== null) return false;
-  if (controller === null || controller.state !== "activated") return false;
-  const asset = performance.getEntriesByType("resource").map(entry => new URL(entry.name).pathname).find(path => /^\\/assets\\/app\\.[0-9a-f]+\\.js$/.test(path));
-  if (asset === undefined || (expected !== null && asset !== expected)) return false;
-  const shells = (await caches.keys()).filter(name => name.startsWith("omp-sessions-shell-"));
-  return shells.length === 1 && (await (await caches.open(shells[0])).match(asset)) !== undefined;
-})()`;
-}
-
-/** Names the first unmet readiness condition; "ready-late" means it held by the time of this read. */
-function shellDiagnosticExpression(expectedAppAsset: string | undefined): string {
+function shellStateExpression(expectedAppAsset: string | undefined): string {
   return `(async () => {
   try {
     const expected = ${JSON.stringify(expectedAppAsset ?? null)};
@@ -71,7 +57,9 @@ function shellDiagnosticExpression(expectedAppAsset: string | undefined): string
     if (registration === undefined) return "no-registration";
     if (registration.installing !== null) return "sw-installing";
     if (registration.waiting !== null) return "sw-waiting";
-    if (registration.active?.state !== "activated") return "sw-not-active";
+    if (registration.active === null) return "sw-no-active";
+    if (registration.active.state === "activating") return "sw-activating";
+    if (registration.active.state !== "activated") return "sw-active-other";
     const controller = navigator.serviceWorker.controller;
     if (controller === null) return "uncontrolled";
     if (controller.state !== "activated") return "controller-not-active";
@@ -81,10 +69,11 @@ function shellDiagnosticExpression(expectedAppAsset: string | undefined): string
     const shells = (await caches.keys()).filter(name => name.startsWith("omp-sessions-shell-"));
     if (shells.length !== 1) return "shell-caches:" + shells.length;
     if ((await (await caches.open(shells[0])).match(asset)) === undefined) return "asset-not-cached";
-    return "ready-late";
+    return "ready";
   } catch { return "evaluation-error"; }
 })()`;
 }
+const SHELL_STATE = /^(?:no-registration|sw-installing|sw-waiting|sw-no-active|sw-activating|sw-active-other|uncontrolled|controller-not-active|no-app-asset|asset-mismatch|asset-not-cached|ready|evaluation-error|shell-caches:(?:0|[1-9][0-9]{0,9}))$/u;
 
 async function pause(milliseconds: number): Promise<void> {
   const paused = Promise.withResolvers<void>();
@@ -99,24 +88,29 @@ export async function runCollaborationJourney(
 ): Promise<CollaborationJourneyResult> {
     await page.navigate(`${options.origin}/`);
 
-    let failedReads = 0;
     const waitFor = async (name: string, expression: string, attempts = 60): Promise<void> => {
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        if (await page.evaluate<boolean>(expression).catch(() => { failedReads += 1; return false; })) return;
+        if (await page.evaluate<boolean>(expression).catch(() => false)) return;
         await pause(500);
       }
       throw new Error(`${name} did not become ready`);
     };
 
     options.announce?.("installed shell");
-    try { await waitFor("installed application shell", currentShellExpression(options.expectedAppAsset), 120); }
-    catch {
-      const diagnostic = await page.evaluate<unknown>(shellDiagnosticExpression(options.expectedAppAsset)).catch(() => "evaluation-error");
-      const code = typeof diagnostic === "string" &&
-        /^(?:no-registration|sw-installing|sw-waiting|sw-not-active|uncontrolled|controller-not-active|no-app-asset|asset-mismatch|asset-not-cached|ready-late|evaluation-error|shell-caches:(?:0|[1-9][0-9]{0,9}))$/u.test(diagnostic)
-        ? diagnostic : "evaluation-error";
-      // Failed reads separate a page whose state never settled from evaluations that kept failing.
-      throw new Error(`installed application shell did not become ready (${code}; ${failedReads} of 120 reads failed)`);
+    // The distinct states the shell passed through name where a stalled install stopped.
+    const states: string[] = [];
+    let failedReads = 0;
+    for (let read = 0; ; read += 1) {
+      const state = await page.evaluate<unknown>(shellStateExpression(options.expectedAppAsset)).catch(() => { failedReads += 1; return undefined; });
+      if (state === "ready") break;
+      if (state !== undefined) {
+        const code = typeof state === "string" && SHELL_STATE.test(state) ? state : "evaluation-error";
+        if (states.at(-1) !== code && states.length < 8) states.push(code);
+      }
+      if (read === 119) {
+        throw new Error(`installed application shell did not become ready (${states.join(">") || "no state"}; ${failedReads} of 120 reads failed)`);
+      }
+      await pause(500);
     }
     // Start from a document the settled worker controlled from load, so no update reload can follow.
     await page.navigate(`${options.origin}/`);
