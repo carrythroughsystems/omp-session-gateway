@@ -874,8 +874,9 @@ without mistaking quoted placeholder brackets for retained containers.
 A running-session media hit survives clean finalization and still blocks restoration after
 verified deletion, and every non-media-labelled retained body is byte-signature checked under the
 same bound before decoding/text scanning while declared image/video bodies remain unread media hits.
-A retained body declaring a charset other than UTF-8/US-ASCII, or decoding with a NUL, is an
-unreviewed text encoding: an incident that still deletes the record but never restores.
+A retained body declaring any charset other than UTF-8/US-ASCII, repeating its charset parameter,
+or decoding with a NUL is an unreviewed text encoding: an incident that still deletes the record
+but never restores.
 Post-audit validation/schema/census errors atomically checkpoint a `post-audit unvalidated record`
 incident with safely recoverable pinned-origin whole-value URLs from strict JSON and still proceed
 through DELETE and bounded record/log/artifact absence checks, never heuristic recovery of malformed

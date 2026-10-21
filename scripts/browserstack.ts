@@ -136,9 +136,10 @@ async function readRetainedBody(response: Response): Promise<{ readonly text: st
   if (decoded.media) return decoded;
   // BOM-prefixed UTF-16/32 already fails strict UTF-8 decoding above. Without a BOM, ASCII text in
   // those encodings is valid UTF-8 interleaved with NULs, which would hide every capability window
-  // from the text scan, so a NUL or any declared charset other than UTF-8 fails closed.
-  const charset = /;\s*charset=([^;]*)/iu.exec(response.headers.get("content-type") ?? "")?.[1]?.trim();
-  if ((charset !== undefined && !REVIEWED_CHARSET.test(charset)) || decoded.text.includes("\u0000")) {
+  // from the text scan, so a NUL, a repeated charset parameter, or any declared charset other than
+  // UTF-8 fails closed.
+  const charsets = [...(response.headers.get("content-type") ?? "").matchAll(/;\s*charset\s*=\s*([^;]*)/giu)].map(match => match[1]!.trim());
+  if (charsets.length > 1 || charsets.some(charset => !REVIEWED_CHARSET.test(charset)) || decoded.text.includes("\u0000")) {
     throw new BrowserStackAuditFailure("BrowserStack retained body has an unreviewed text encoding");
   }
   return decoded;
