@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.7.8] — 2026-10-21
+
+This release uses stock OMP v18.12.5 as its engineering baseline. The 26 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.
+
 ### Added
 
 - Advisory Percy visual review of 18 deterministic, authored synthetic states across phone,
