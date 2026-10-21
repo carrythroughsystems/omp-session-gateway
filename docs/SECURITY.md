@@ -603,6 +603,8 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   and bodies not declared image/video receive bounded-byte PNG/JPEG/GIF/WebP/MP4/WebM/plausible-BMP
   signature checks before decoding and the existing memory-only text scans, while declared media
   still count as media without reading their bodies.
+  Retained text is audited only as UTF-8: a declared charset other than UTF-8/US-ASCII, or a NUL in
+  a decoded body (UTF-16/32 text without a byte-order mark), is an unreviewed encoding and an incident.
   No lingering-clean-text exception remains. Any already-audited artifact that starts serving
   content is inspected again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
   Signed references persist only in private 0600 recovery progress (inside its 0700 directory),

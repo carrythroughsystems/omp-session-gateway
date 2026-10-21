@@ -1338,6 +1338,8 @@ and nonempty containers or media-prefixed strings without classifying quoted pla
 Running and finalized session reads share media classification without a running video exemption,
 and all bodies outside declared image/video receive bounded leading-byte image/video detection
 before decoding and text scans, preserving incidents across later clean records without reading declared media.
+Retained text is audited as UTF-8 only; any other declared charset, or a decoded NUL that would
+interleave UTF-16/32 text past the window scan, fails closed as an unreviewed encoding.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
 Rejected DELETE and signed-artifact bodies and transient 5xx bodies before GET retry are included;

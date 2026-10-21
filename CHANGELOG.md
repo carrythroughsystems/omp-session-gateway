@@ -158,6 +158,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Preserve running-session media incidents across clean finalization and detect binary image/video
   signatures in non-media-labelled retained bodies before decoding, retaining the existing bounds,
   decoded text scans and declared-media body cancellations.
+- Refuse BrowserStack retained text in any encoding other than UTF-8: a declared non-UTF-8 charset or
+  a decoded NUL (UTF-16/32 without a byte-order mark) is an incident, so interleaved text cannot hide
+  a capability window from the scan.
 
 ## [v0.7.7] — 2026-10-13
 

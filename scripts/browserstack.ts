@@ -122,13 +122,26 @@ function retainedContent(raw: string, contentType: string | null): { text: strin
   return { text: canonical === raw ? raw : `${raw}\n${canonical}`, media: BASE64_IMAGE.test(raw) || retainedMedia(json), json };
 }
 
+/** Retained text is audited as UTF-8; any other declared charset is refused (observed: utf-8 or none). */
+const REVIEWED_CHARSET = /^(?:"?(?:utf-8|us-ascii)"?)$/iu;
+
 async function readRetainedBody(response: Response): Promise<{ readonly text: string; readonly media: boolean }> {
+  let decoded: { readonly text: string; readonly media: boolean };
   try {
     const bytes = await boundedVendorBytes(response, "BrowserStack");
     const media = binaryMedia(bytes);
-    return { text: new TextDecoder("utf-8", { fatal: !media }).decode(bytes), media };
+    decoded = { text: new TextDecoder("utf-8", { fatal: !media }).decode(bytes), media };
   }
   catch { throw new BrowserStackAuditFailure("BrowserStack retained body could not be read within its audit bound"); }
+  if (decoded.media) return decoded;
+  // BOM-prefixed UTF-16/32 already fails strict UTF-8 decoding above. Without a BOM, ASCII text in
+  // those encodings is valid UTF-8 interleaved with NULs, which would hide every capability window
+  // from the text scan, so a NUL or any declared charset other than UTF-8 fails closed.
+  const charset = /;\s*charset=([^;]*)/iu.exec(response.headers.get("content-type") ?? "")?.[1]?.trim();
+  if ((charset !== undefined && !REVIEWED_CHARSET.test(charset)) || decoded.text.includes("\u0000")) {
+    throw new BrowserStackAuditFailure("BrowserStack retained body has an unreviewed text encoding");
+  }
+  return decoded;
 }
 
 /** A validated storage object's rotating authorization query is not its identity. */

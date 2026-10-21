@@ -1536,6 +1536,24 @@ describe("BrowserStack complete retention and deletion", () => {
     await expect(lane.attempt).resolves.toMatchObject({ passed: true, audit: { recordsWithMedia: 0 } });
   });
   test.each([
+    ["UTF-16LE text without a charset", new Uint8Array(Buffer.from(`synthetic retained fragment ${replayWindow}`, "utf16le")), "text/plain"],
+    ["an ASCII body declared UTF-16LE", "synthetic retained fragment", "text/plain; charset=utf-16le"],
+    ["an ASCII body declared Latin-1", "synthetic retained fragment", "text/plain; charset=ISO-8859-1"],
+  ] as const)("%s is an unreviewed encoding: an incident that still deletes the record", async (_case, text, type) => {
+    const fixture = provider({ artifactReply: { text, status: 200, type } });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("could not be audited");
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ incident: true, recordDeleted: true });
+    expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
+  });
+  test.each(["text/plain; charset=utf-8", "text/plain; charset=UTF-8", 'text/plain; charset="utf-8"', "text/plain; charset=us-ascii"])("a clean body declared %s stays clean", async type => {
+    const fixture = provider({ artifactReply: { text: "synthetic clean text log", status: 200, type } });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).resolves.toMatchObject({ passed: true, audit: { recordsWithMedia: 0 } });
+  });
+  test.each([
     [{ takesScreenshot: true }, false],
     [{ video: "false" }, false],
     [{ disableAutomaticScreenshots: true }, false],
