@@ -35,7 +35,7 @@
     "media:check": "bun scripts/media/check-readme-media.ts"
   },
   "devDependencies": {
-    "@percy/cli": "1.32.11",
+    "@percy/cli": "1.32.12",
     "@percy/playwright": "1.1.2",
     "@playwright/test": "1.62.1",
     "@types/bun": "1.4.0",
