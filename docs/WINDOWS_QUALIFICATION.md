@@ -56,7 +56,7 @@ candidate and predecessor archive paths, the OMP lock identity, whole-object che
 the exclusive Pixel lease. This module never downloads substitute gateway bytes during a stable
 run and cannot mark a stable receipt passed on its own.
 
-The controller is the operator's Mac with Bun 1.4.0, FreeRDP 3.32.1 (`sdl-freerdp`), and pywinrm
+The controller is the operator's Mac with Bun 1.4.0, FreeRDP 3.32.2 (`sdl-freerdp`), and pywinrm
 0.5.0 in `~/.local/share/omp-session-gateway/qualification/venv`. Keep the Vultr credential in
 the private `~/.vultr-apikey` file and the tagged Tailscale join credential and API
 credential in the existing private qualification files. Preflight checks current egress, provider
