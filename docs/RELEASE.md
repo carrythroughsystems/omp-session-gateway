@@ -871,6 +871,9 @@ echoes, queried artifacts require all six reviewed `X-Amz-*` keys exactly once w
 Any finalized `video_url` outside the mandatory pinned session-bound dashboard presentation is
 an incident, and text logs also inspect unquoted/single-quoted media keys and `=` assignments
 without mistaking quoted placeholder brackets for retained containers.
+A running-session media hit survives clean finalization and still blocks restoration after
+verified deletion, and every non-media-labelled retained body is byte-signature checked under the
+same bound before decoding/text scanning while declared image/video bodies remain unread media hits.
 Post-audit validation/schema/census errors atomically checkpoint a `post-audit unvalidated record`
 incident with safely recoverable pinned-origin whole-value URLs from strict JSON and still proceed
 through DELETE and bounded record/log/artifact absence checks, never heuristic recovery of malformed

@@ -155,6 +155,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Require the pinned session-bound BrowserStack `video_url` presentation on finalized records,
   and detect text-log media under unquoted/single/double-quoted keys and `:`/`=` assignments
   without treating quoted placeholders as retained containers.
+- Preserve running-session media incidents across clean finalization and detect binary image/video
+  signatures in non-media-labelled retained bodies before decoding, retaining the existing bounds,
+  decoded text scans and declared-media body cancellations.
 
 ## [v0.7.7] — 2026-10-13
 

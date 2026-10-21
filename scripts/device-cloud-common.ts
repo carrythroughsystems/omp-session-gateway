@@ -30,7 +30,7 @@ export interface TestRecord {
   readonly dashboardReferences?: number;
 }
 
-export async function boundedVendorText(response: Response, vendor: string, maximum = 2_000_000): Promise<string> {
+export async function boundedVendorBytes(response: Response, vendor: string, maximum = 2_000_000): Promise<Uint8Array> {
   if (response.body === null) throw new Error(`${vendor} returned an empty response`);
   if (maximum < 1) { await response.body.cancel(); throw new Error(`${vendor} returned an oversized response`); }
   const declared = response.headers.get("content-length");
@@ -56,7 +56,11 @@ export async function boundedVendorText(response: Response, vendor: string, maxi
   const buffer = new Uint8Array(bytes);
   let offset = 0;
   for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  return buffer;
+}
+
+export async function boundedVendorText(response: Response, vendor: string, maximum = 2_000_000): Promise<string> {
+  return new TextDecoder("utf-8", { fatal: true }).decode(await boundedVendorBytes(response, vendor, maximum));
 }
 
 export function vendorJson(text: string, vendor: string): unknown {

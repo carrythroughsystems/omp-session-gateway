@@ -599,6 +599,10 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   exclusion, and text-body media keys accept bare/single/double-quoted names with `:` or `=` only
   for nonempty containers or quoted/unquoted media-prefixed strings, never quoted placeholders
   such as `"[REDACTED]"`.
+  Every running/finalized session read is media-classified with no running `video_url` exemption,
+  and bodies not declared image/video receive bounded-byte PNG/JPEG/GIF/WebP/MP4/WebM/plausible-BMP
+  signature checks before decoding and the existing memory-only text scans, while declared media
+  still count as media without reading their bodies.
   No lingering-clean-text exception remains. Any already-audited artifact that starts serving
   content is inspected again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
   Signed references persist only in private 0600 recovery progress (inside its 0700 directory),

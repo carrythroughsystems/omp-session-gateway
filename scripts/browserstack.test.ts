@@ -8,7 +8,7 @@ import {
 } from "./browserstack.ts";
 import { attestAllocation, cleanupDeviceCloud, parseDeviceCloudProgress, runDeviceCloud, type DeviceCloudLaneInput, type DeviceCloudRuntime } from "./device-cloud-qualification.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
-import { requireLoopbackListeners } from "./device-cloud-common.ts";
+import { boundedVendorBytes, boundedVendorText, requireLoopbackListeners } from "./device-cloud-common.ts";
 import type { CloudArtifact, CloudRecordRemoval, TestRecord } from "./device-cloud-common.ts";
 import pins from "./browserstack-pins.json";
 
@@ -61,7 +61,7 @@ const observedRecord = {
 let restore: (() => void) | undefined;
 afterEach(() => { restore?.(); restore = undefined; });
 
-interface RetainedReply { text: string; status: number; type: string }
+interface RetainedReply { text: string | Uint8Array<ArrayBuffer>; status: number; type: string }
 function retainedReply(reply: RetainedReply): Response {
   return new Response(reply.text, { status: reply.status, headers: { "content-type": reply.type } });
 }
@@ -237,6 +237,27 @@ function errorMessages(error: unknown): string {
 }
 
 describe("BrowserStack fixed policy inputs", () => {
+  test("bounded byte reads preserve binary data without relaxing the existing UTF-8 text decoder", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    expect(await boundedVendorBytes(new Response(bytes), "BrowserStack", bytes.length)).toEqual(bytes);
+    await expect(boundedVendorText(new Response(bytes), "BrowserStack", bytes.length)).rejects.toThrow();
+  });
+  test("bounded bytes retain the declared and streaming size limits", async () => {
+    await expect(boundedVendorBytes(new Response("synthetic", { headers: { "content-length": "9" } }), "BrowserStack", 8)).rejects.toThrow("oversized");
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1, 2])); controller.enqueue(new Uint8Array([3, 4])); },
+      cancel() { cancelled = true; },
+    });
+    await expect(boundedVendorBytes(new Response(stream), "BrowserStack", 3)).rejects.toThrow("oversized");
+    expect(cancelled).toBe(true);
+  });
+  test("the existing text reader still decodes a bounded UTF-8 character split across chunks", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([0xe2])); controller.enqueue(new Uint8Array([0x82, 0xac])); controller.close(); },
+    });
+    expect(await boundedVendorText(new Response(stream), "BrowserStack", 3)).toBe("€");
+  });
   test("pins disjoint storage, dashboard and documentation origins", () => {
     expect(pins.artifactOrigins).toEqual([
       "https://api.browserstack.com", "https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com", "https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com",
@@ -996,6 +1017,41 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack"))
       .toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
   });
+  test.each([
+    { video_url: "data:video/mp4;base64,SYNTHETIC_RUNNING_VIDEO" },
+    { video_url: "data:image/png;base64,SYNTHETIC_RUNNING_IMAGE" },
+    { video_url: { payload: "SYNTHETIC_RUNNING_MEDIA" } },
+    { video_url: ["SYNTHETIC_RUNNING_MEDIA"] },
+    { insights: { screenshot: "data:image/png;base64,SYNTHETIC_RUNNING_IMAGE" } },
+    { insights: { visual: { payload: "SYNTHETIC_RUNNING_MEDIA" } } },
+  ])("running session media remains an incident after a clean finalized record: %j", async media => {
+    const running = { hashed_id: id, status: "running", ...media };
+    const fixture = provider({ retry: { surface: "session", reply: {
+      text: JSON.stringify({ automation_session: running }), status: 200, type: "application/json",
+    } } });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("incident");
+    expect(fixture.inspected.some(record => !record.complete && record.screenshots > 0)).toBe(true);
+    const hit = lane.checkpoints.findIndex(progress => parseDeviceCloudProgress(progress).resources?.some(resource => resource.incident));
+    const finalized = lane.checkpoints.findIndex(progress => parseDeviceCloudProgress(progress).results.audit !== undefined);
+    expect(hit).toBeGreaterThanOrEqual(0);
+    expect(finalized).toBeGreaterThan(hit);
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.cleanupRequired).toBe(true);
+    expect(progress.resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+    expect(fixture.calls.filter(call => call.url === artifact)).toHaveLength(2);
+    expect(fixture.clock.now()).toBe(2_000);
+  });
+  test("a running record without a video indicator stays clean when it finalizes", async () => {
+    const fixture = provider({ retry: { surface: "session", reply: {
+      text: JSON.stringify({ automation_session: { hashed_id: id, status: "running" } }), status: 200, type: "application/json",
+    } } });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).resolves.toMatchObject({ passed: true, audit: { recordsWithMedia: 0 } });
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.some(resource => resource.incident)).toBe(false);
+  });
   test("the observed finalized Galaxy record audits clean without fetching presentation or docs hosts", async () => {
     const fixture = provider({
       raw: JSON.stringify({ automation_session: observedRecord }),
@@ -1411,6 +1467,74 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(resource?.incident === true).toBe(media);
     expect(resource?.recordRemoved).toBe(true);
   }
+  function binaryBody(header: readonly number[], suffix = "SYNTHETIC_BINARY_BODY"): Uint8Array<ArrayBuffer> {
+    return new Uint8Array([...header, ...new TextEncoder().encode(suffix)]);
+  }
+  function bitmapBody(): Uint8Array<ArrayBuffer> {
+    const bytes = new Uint8Array(58), view = new DataView(bytes.buffer);
+    bytes.set([0x42, 0x4d]);
+    view.setUint32(2, bytes.length, true);
+    view.setUint32(10, 54, true);
+    view.setUint32(14, 40, true);
+    view.setInt32(18, 1, true);
+    view.setInt32(22, 1, true);
+    view.setUint16(26, 1, true);
+    view.setUint16(28, 24, true);
+    return bytes;
+  }
+  const binaryBodies: readonly (readonly [string, Uint8Array<ArrayBuffer>])[] = [
+    ["PNG", binaryBody([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+    ["JPEG", binaryBody([0xff, 0xd8, 0xff])],
+    ["GIF87a", binaryBody([0x47, 0x49, 0x46, 0x38, 0x37, 0x61])],
+    ["GIF89a", binaryBody([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])],
+    ["WebP", binaryBody([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50])],
+    ["MP4", binaryBody([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70])],
+    ["WebM", binaryBody([0x1a, 0x45, 0xdf, 0xa3])],
+    ["BMP", bitmapBody()],
+  ];
+  test.each(binaryBodies)("a signed .txt artifact containing raw %s bytes is a media incident despite text/plain", async (_kind, bytes) => {
+    const fixture = provider({ artifactReply: { text: bytes, status: 200, type: "text/plain" } });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("kept video or screenshots");
+    expect(fixture.inspected.some(record => record.screenshots > 0)).toBe(true);
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.results.audit).toMatchObject({ recordsWithMedia: 1 });
+    expect(progress.resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+  });
+  test.each(["text/plain", "application/json", "application/octet-stream"])("raw PNG bytes in a retained log are media before rejecting their %s format", async type => {
+    const fixture = provider({ logReply: { text: binaryBodies[0]![1], status: 200, type } });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).rejects.toThrow();
+    expect(fixture.inspected.some(record => record.screenshots > 0)).toBe(true);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+  });
+  test("binary classification still scans decoded retained text for capability windows", async () => {
+    const bytes = binaryBody([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], `synthetic retained fragment ${replayWindow}`);
+    const fixture = provider({ artifactReply: { text: bytes, status: 200, type: "text/plain" } });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).rejects.toThrow();
+    expect(fixture.inspected.some(record => record.text.includes(replayWindow) && record.screenshots > 0)).toBe(true);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).results.audit)
+      .toMatchObject({ recordsWithMedia: 1, recordsExposingLinks: 1 });
+    expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
+  });
+  test("a mislabeled binary 404 during absence verification cannot erase a media incident", async () => {
+    const fixture = provider({ postDeleteArtifactReply: { text: binaryBodies[0]![1], status: 404, type: "text/plain" } });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("incident");
+    expect(fixture.inspected.some(record => record.screenshots > 0)).toBe(true);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+  });
+  test.each(["synthetic clean text log", "BM synthetic log without a plausible image header", "GIF87 synthetic text", "RIFF synthetic WAVE text", "ftyp synthetic text at the wrong offset"])("clean non-media bytes stay clean: %s", async text => {
+    const fixture = provider({ artifactReply: { text, status: 200, type: "text/plain" } });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).resolves.toMatchObject({ passed: true, audit: { recordsWithMedia: 0 } });
+  });
   test.each([
     [{ takesScreenshot: true }, false],
     [{ video: "false" }, false],

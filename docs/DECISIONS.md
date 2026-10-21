@@ -1335,6 +1335,9 @@ optional, and differing top-level/nested WebDriver ids are unidentified even wit
 Finalized session metadata requires the exact pinned `video_url` presentation before media
 exemption, while text media-key detection accepts unquoted or either-quoted keys with `:`/`=`
 and nonempty containers or media-prefixed strings without classifying quoted placeholders as media.
+Running and finalized session reads share media classification without a running video exemption,
+and all bodies outside declared image/video receive bounded leading-byte image/video detection
+before decoding and text scans, preserving incidents across later clean records without reading declared media.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
 Rejected DELETE and signed-artifact bodies and transient 5xx bodies before GET retry are included;
