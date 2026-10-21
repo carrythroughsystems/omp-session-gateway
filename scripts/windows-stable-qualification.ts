@@ -251,7 +251,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       await save();
     },
     transportProbe: async probe => {
-      requireFact(progress.phase === "transport_ready" && !progress.settled, "transport observation outside admission");
+      requireFact(!progress.settled, "transport observation outside active step");
       const probes = progress.transportProbes ??= [];
       if (probes.at(-1)?.startedAt === probe.startedAt) probes[probes.length - 1] = { ...probe };
       else probes.push({ ...probe });
