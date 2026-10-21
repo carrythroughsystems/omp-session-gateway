@@ -127,9 +127,40 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - The embedded-ask browser test now waits out the relay client's backoff after the relay
   returns. Its 5-second wait failed on slow runners, because each held reconnect doubles the
   retry delay to as much as 15 seconds under the test's fixed jitter.
+- The deviceCloud lane reads TestingBot's iPhone session start correctly. TestingBot answers with
+  a W3C `value` and also echoes the session id at the top level. The lane took that wrapper for
+  the capabilities, so it refused every such allocation as "another platform or browser". This
+  was found by the first Studio development run. Session start now reads the W3C `value`, still
+  accepts JSON Wire responses, and treats two different session ids as an unidentified create.
+- The iPhone Home Screen install now expands Safari's shortened share sheet on every observed iOS
+  26 release. The expansion cell is labelled "View More" on 26.4 but "More" on 26.2, so the second
+  development run could not find Add to Home Screen on an iPhone Air. The lane taps only that
+  cell, never Safari's toolbar More button, which dismisses the sheet. Each install step now waits
+  for the element it needs instead of a fixed pause, because an iPhone 17 Pro Max that had passed
+  four times once rendered its menu's Share action later than the former 1.5-second pause.
+- Pin the BrowserStack `browser_url`, `public_url`, `logs`, `video_url` and insight `optimize_url`
+  shapes found by the third Studio development run, keeping dashboard/docs hosts unfetched and
+  retaining only fixed audit/parser causes in memory while progress and receipts remain generic.
+- Resolve the BrowserStack contracts exposed by Studio development runs four and five: accept the
+  observed S26 `SM-S942U1`, ignore non-media capability echoes, track re-signed logs by object
+  identity with the latest persisted URL, diagnose installed-shell timeouts with closed codes,
+  and distinguish completed incident removals from unverified removal.
 - The local Percy health test allows 30 seconds, the portable lane's per-test default. On a
   cold Windows runner, starting Node and loading `@percy/core` took longer than its former
   10-second limit.
+- Close the PR #421 review gaps: detect nested/raw image retention without treating capability
+  echoes as media, persist every failed BrowserStack audit through deletion/crash recovery,
+  reject conflicting WebDriver ids regardless of capabilities shape, and permit only complete
+  six-key signed-artifact queries plus optional `response-content-type`.
+- Require the pinned session-bound BrowserStack `video_url` presentation on finalized records,
+  and detect text-log media under unquoted/single/double-quoted keys and `:`/`=` assignments
+  without treating quoted placeholders as retained containers.
+- Preserve running-session media incidents across clean finalization and detect binary image/video
+  signatures in non-media-labelled retained bodies before decoding, retaining the existing bounds,
+  decoded text scans and declared-media body cancellations.
+- Refuse BrowserStack retained text in any encoding other than UTF-8. A declared non-UTF-8 or
+  repeated charset, or a decoded NUL (UTF-16/32 without a byte-order mark), is an incident, so
+  interleaved text cannot hide a capability window from the scan.
 
 ## [v0.7.7] — 2026-10-13
 

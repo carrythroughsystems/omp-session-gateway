@@ -779,7 +779,7 @@ Documentation is distinguished from live observations; no claim covers vendor-in
 | Account and entitlement | [Plan API](https://www.browserstack.com/docs/automate/api-reference/selenium/plan); read-only 1Password identity/field reads | `SERVICE_ACCOUNT` at `my.1password.com`; both fields readable. Plan HTTP 200: `Automate Mobile`, group/team maximum 5, running/queued 0, queue maximum 5. `terminal_access=Public` is not session privacy evidence. No expiry field. |
 | W3C real mobile | [Official Selenium example](https://www.browserstack.com/docs/automate/selenium/oxygen) | Fixed `https://hub.browserstack.com/wd/hub`, Basic header only. `browserName=safari/chrome`; `bstack:options` contains exact `deviceName`, `osVersion`, `realMobile:true`, `local:true`, `localIdentifier`. Both target allocations succeeded. An initial `enableTelemetry` option was refused (HTTP 200/status 13, empty session ID); it is not sent. |
 | Catalog / availability | [Browser API](https://www.browserstack.com/docs/automate/api-reference/selenium/browser) | 5,244 rows. Eligible reviewed aliases: `iPad 10th`/iOS 27 (`ipad`), `Samsung Galaxy S26`/Android 16.0, S25/15.0, S24/16.0 or 14.0 (`android`, Chrome). `samsung` means Samsung Internet and is refused. iPad 9th rows were below the iPadOS 26 floor; no A55 alias was present. No documented per-model free-device API was identified; plan concurrency is not availability. |
-| Allocation identity | Bounded public-page session capabilities, REST session identity and device-side version report | iPad 10th: Safari 27.0, iPadOS 27.0. Samsung Galaxy S26: Chrome 152.0.7977.54, Android 16.0.0, `SM-S942B`. Android's capability `deviceName` is a serial, not evidence; exact REST model and Chrome hardware hints corroborate it. **Attestation gate passed.** |
+| Allocation identity | Bounded public-page session capabilities, REST session identity and device-side version report | iPad 10th: Safari 27.0, iPadOS 27.0. Samsung Galaxy S26: Chrome 152.0.7977.54, Android 16.0.0, `SM-S942B`. A 2026-10-20 BrowserStack follow-up probe also reported S26 `SM-S942U1`. Android's capability `deviceName` is a serial, not evidence; exact REST model and Chrome hardware hints corroborate it. **Attestation gate passed.** |
 | Local artifact | [Downloads](https://www.browserstack.com/docs/local-testing/releases-and-downloads), [official Python loader](https://raw.githubusercontent.com/browserstack/browserstack-local-python/master/browserstack/local_binary.py), downloaded bytes | Official Darwin x64 8.9, Mach-O x86_64, runs under Rosetta. Exact ZIP/binary pins below; an unversioned URL changing bytes fails closed. |
 | Forced routing | [Binary parameters](https://www.browserstack.com/docs/local-testing/binary-params), [tunnel firewall](https://www.browserstack.com/local-testing/tunnel-firewall) | `--force-local` plus exact `--include-hosts` rejects nonincluded names; exclusion supersedes inclusion. `--only` is ineffective with force-local and is not used. Filters cover all ports/protocols, so the exact CONNECT allowlist remains authoritative. |
 | Browser upstream / containment | [Proxy configuration](https://www.browserstack.com/docs/automate/selenium/test-behind-proxy/configure-settings), [binary parameters](https://www.browserstack.com/docs/local-testing/binary-params) | `--local-proxy-host 127.0.0.1`, lane-owned port, `--force-proxy`, unique local identifier, dashboard/proxy discovery disabled. Before allocation, seven proxy denials (plain HTTP, wrong port, alternate name, loopback address/name, LAN, tailnet) returned 403 with zero trap connections. During successful iPad/Samsung probes, Local forwarded only example.com CONNECTs (one/two). **Observed proxy gate passed.** |
@@ -841,25 +841,42 @@ fetched and scanned if it starts serving content. Exhaustion leaves `recordRemov
 cleanup dirty; retry through `deviceCloudCleanup`, retaining the original progress.
 Only a whole JSON string value containing one well-formed absolute HTTP(S) URL is a reference:
 one case-insensitive `://`, its hostname exactly once, and no comma; keys are never references.
-Any other key/value containing `://` or a pinned artifact/dashboard hostname fails closed.
-Every retained JSON body must pass independent raw/canonical hostname censuses whose counts equal
+Any other key/value containing `://` or a pinned artifact/dashboard/documentation hostname fails closed.
+Every retained JSON body must pass independent raw/canonical artifact/dashboard hostname censuses whose counts equal
 accepted reference occurrences, including duplicates; mismatches are `unaccounted BrowserStack
 artifact reference` failures, not permission to guess delimiters or follow nested URLs.
 The census additionally checks canonical text percent-decoded to a fixpoint within four passes
 (malformed escapes stay literal; excess depth fails closed), requires one decoded `://` per
-reference, and restricts dashboard presentations to `[A-Za-z0-9_-]+` path segments and
-`[A-Za-z0-9_-]*` query keys/values without userinfo, ports or fragments.
-Only entire top-level `browser_url`/`public_url` values retain the pinned-dashboard exemption.
-A real dashboard URL rejected by this shape-agnostic rule is a diagnostic requiring observed
-evidence and a reviewed fix, never runtime loosening; the mixed-vendor development run must
-establish the real path before release, because no saved observed dashboard shape exists.
+reference.
+The capability-free BrowserStack probes on 2026-10-20 pin `browser_url`, `public_url`, `logs` and
+`video_url` to the observed record-bound dashboard paths and exact query grammars, plus
+only the three observed time-breakdown components' `optimize_url` documentation links under
+`/docs/`, with neither host fetched and documentation excluded from the artifact census.
+An unreviewed real URL remains a diagnostic requiring evidence and a reviewed pin update, never
+runtime loosening; fixed audit/parser causes are available in memory while progress/receipts stay generic.
 A pre-build/pre-finalization reference persists an `unbound retained reference` incident and fails
 closed immediately, with no volatile pending list; later clean metadata permits deletion and
 absence checks but neither normal nor fresh crash cleanup clears the incident or authorizes restoration.
-An exact artifact URL first declared after auditing, even in the pre-DELETE GET, atomically
+A new artifact object (origin plus pathname) first declared after auditing, even in the pre-DELETE GET, atomically
 checkpoints its inventory plus a `post-audit retained reference` incident and receives only
 deletion/absence verification rather than late auditing, including after a crash; keys also use
 value media classification and any `data:`/media-pattern key fails closed.
+Recovery normalizes old signature inventories to the last URL per origin/path identity without
+clearing incidents, ignores boolean/text capability-flag echoes as media, and reports only closed
+installed-shell codes and an explicit removed-under-incident status when deletion succeeds.
+Every BrowserStack record-audit failure persists an incident through deletion and crash recovery,
+nested media containers and long raw image-signature runs remain media despite ignored capability
+echoes, queried artifacts require all six reviewed `X-Amz-*` keys exactly once with only
+`response-content-type` optional, and conflicting WebDriver session ids fail regardless of capabilities shape.
+Any finalized `video_url` outside the mandatory pinned session-bound dashboard presentation is
+an incident, and text logs also inspect unquoted/single-quoted media keys and `=` assignments
+without mistaking quoted placeholder brackets for retained containers.
+A running-session media hit survives clean finalization and still blocks restoration after
+verified deletion, and every non-media-labelled retained body is byte-signature checked under the
+same bound before decoding/text scanning while declared image/video bodies remain unread media hits.
+A retained body declaring any charset other than UTF-8/US-ASCII, repeating its charset parameter,
+or decoding with a NUL is an unreviewed text encoding: an incident that still deletes the record
+but never restores.
 Post-audit validation/schema/census errors atomically checkpoint a `post-audit unvalidated record`
 incident with safely recoverable pinned-origin whole-value URLs from strict JSON and still proceed
 through DELETE and bounded record/log/artifact absence checks, never heuristic recovery of malformed

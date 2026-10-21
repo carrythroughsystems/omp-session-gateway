@@ -21,7 +21,10 @@ import type { OmpPins, PixelLease } from "./stable-qualification.ts";
 import { TESTINGBOT_TUNNEL } from "./testingbot.ts";
 import { TESTINGBOT_SESSION_ID, BROWSERSTACK_SESSION_ID } from "./device-cloud-webdriver.ts";
 import type { TestRecord, DeviceCloudVendor, CloudArtifact, CloudRecordRemoval } from "./device-cloud-common.ts";
-import { BROWSERSTACK_LOCAL, BROWSERSTACK_MODELS, BrowserStackAuditFailure, browserStackModel, validateBrowserStackArtifacts } from "./browserstack.ts";
+import {
+  BROWSERSTACK_LOCAL, BROWSERSTACK_MODELS, BrowserStackAuditFailure, browserStackArtifactIdentity, browserStackModel,
+  mergeBrowserStackArtifacts,
+} from "./browserstack.ts";
 import { RetainedVendorJsonError } from "./device-cloud-record-json.ts";
 
 export interface DeviceCloudIdentity {
@@ -81,7 +84,7 @@ export const DEVICE_CLOUD_PROFILES: Readonly<Record<DeviceCloudTarget, DevicePro
 export const SAMSUNG_MODEL_CODES: Readonly<Record<string, readonly string[]>> = {
   "Galaxy S24": ["SM-S921B"],
   "Galaxy S25": ["SM-S931B"],
-  "Galaxy S26": ["SM-S942B"],
+  "Galaxy S26": ["SM-S942B", "SM-S942U1"],
 };
 
 export function eligibleDevice(profile: DeviceProfile, device: { readonly name: string; readonly platform: string; readonly version: string }): boolean {
@@ -337,8 +340,10 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
       }
       if (resource.artifacts !== undefined) {
         if (resource.vendor !== "browserstack" || typeof resource.sessionId !== "string" || !Array.isArray(resource.artifacts)) throw new Error("invalid private cloud artifact inventory");
-        validateBrowserStackArtifacts(resource.sessionId, resource.artifacts);
-        if (resource.recordRemoved && resource.artifacts.length > 0) throw new Error("removed cloud record retains unchecked references");
+        const artifacts: CloudArtifact[] = [];
+        mergeBrowserStackArtifacts(resource.sessionId, artifacts, resource.artifacts);
+        resource.artifacts = artifacts;
+        if (resource.recordRemoved && artifacts.length > 0) throw new Error("removed cloud record retains unchecked references");
       }
       for (const field of ["recordDeleted", "unauditedDeletion", "incident"]) {
         if (resource[field] !== undefined && (resource.vendor !== "browserstack" || typeof resource[field] !== "boolean")) throw new Error("invalid cloud deletion audit state");
@@ -404,14 +409,11 @@ function rememberArtifacts(resource: DeviceCloudResource, save: () => Promise<vo
     const previousInventory = resource.artifacts;
     const previousIncident = resource.incident;
     const merged = [...(previousInventory ?? [])];
-    let changed = previousInventory === undefined || (incident !== undefined && resource.incident !== true);
-    let postAuditReference = false;
-    for (const artifact of artifacts) {
-      const previous = merged.find(item => item.url === artifact.url);
-      if (previous === undefined) { merged.push(artifact); changed = true; postAuditReference ||= resource.audited; }
-      else if (previous.kind !== artifact.kind || previous.buildId !== artifact.buildId) throw new Error("cloud artifact identity changed");
-    }
-    validateBrowserStackArtifacts(sessionReference(resource).sessionId, merged);
+    const audited = resource.audited ? new Set(merged.map(browserStackArtifactIdentity)) : undefined;
+    mergeBrowserStackArtifacts(sessionReference(resource).sessionId, merged, artifacts);
+    const postAuditReference = audited !== undefined && merged.some(artifact => !audited.has(browserStackArtifactIdentity(artifact)));
+    const changed = previousInventory === undefined || (incident !== undefined && resource.incident !== true) ||
+      merged.some((artifact, index) => artifact.url !== previousInventory?.[index]?.url);
     if (!changed) return;
     resource.artifacts = merged;
     if (incident !== undefined || postAuditReference) resource.incident = true;
@@ -497,11 +499,12 @@ async function auditRecords(
       }, RECORD_FINALIZATION_MS);
       records.push({ resource, record });
     } catch (error) {
-      if (resource.vendor === "browserstack" && (error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError)) {
+      const safeCause = error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError;
+      if (resource.vendor === "browserstack") {
         resource.incident = true;
         await save();
       }
-      failures.push(new Error("a device-cloud retained record could not be audited"));
+      failures.push(new Error("a device-cloud retained record could not be audited", safeCause ? { cause: error } : undefined));
     }
   }
   for (const [before, reread] of driven) {
@@ -532,11 +535,12 @@ async function auditRecords(
         resource.recordRemoved = true;
         resource.artifacts = [];
         await save();
-        if (resource.incident) throw new Error("BrowserStack retained-record incident");
       } catch (error) {
         if (error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError) { resource.incident = true; await save(); }
         failures.push(new Error("BrowserStack record removal could not be verified"));
+        continue;
       }
+      if (resource.incident) failures.push(new Error("BrowserStack record removed under a retained-record incident"));
     }
   }
   const audit = {

@@ -546,30 +546,31 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   missing-object S3 403 is accepted as no retained media observed; media returning 200 fails.
   Media detection rejects nonempty screenshot/video/visual fields, including opaque failed-command
   screenshot payloads, not just familiar media URLs. Only null, false, empty-string and empty-list
-  markers are treated as disabled; the documented disabled-video URL is fetched separately.
+  markers are treated as disabled; dashboard `video_url` is an audited indicator, never a fetch target.
   Only an entire JSON string value that is one well-formed absolute HTTP(S) URL is a reference:
   one case-insensitive `://`, its hostname appearing exactly once, and no comma.
-  Keys are never references; any key or non-reference value containing `://` or a pinned artifact
-  or dashboard hostname, case-insensitively, fails closed rather than extracting or repairing URLs.
-  Before accepting any retained JSON body, a census independently counts every pinned hostname in
-  raw text and strict canonical JSON; each count must equal its accepted reference occurrences,
+  Keys are never references; any key or non-reference value containing `://` or a pinned artifact,
+  dashboard or documentation hostname, case-insensitively, fails closed rather than extracting or repairing URLs.
+  Before accepting any retained JSON body, a census independently counts every pinned
+  artifact/dashboard hostname in raw text and strict canonical JSON; each count must equal its accepted reference occurrences,
   including duplicates, or fail with `unaccounted BrowserStack artifact reference`.
   The census also covers canonical text percent-decoded to a fixpoint within four passes (malformed
-  escapes stay literal; excess depth fails closed), requires one decoded `://` per reference, and
-  restricts dashboard presentations to `[A-Za-z0-9_-]+` path segments and `[A-Za-z0-9_-]*` query
-  keys/values, without userinfo, ports or fragments.
+  escapes stay literal; excess depth fails closed) and requires one decoded `://` per reference.
   `browserstack-pins.json` defines disjoint origin sets:
   reviewed API/S3 artifact-storage origins are fetched, scanned, privately inventoried and
-  absence-verified; only entire top-level `browser_url`/`public_url` strings on the pinned dashboard
-  origin (`automate.browserstack.com`) are presentation references, counted but never fetched/followed.
-  Their contents are the already-audited session record, whose API deletion proves removal.
+  absence-verified; dashboard presentations are counted but never fetched/followed.
+  Capability-free BrowserStack probes on 2026-10-20 pin top-level `browser_url`, `public_url`, `logs`
+  and `video_url` to exact record-bound dashboard paths and query grammars (no userinfo, ports or fragments), and accept only
+  `insights.summary.time_breakdown.{browserstack_time,user_time,capabilities_impact}.optimize_url`
+  links under `/docs/` on the separately pinned documentation origin (no query; optional safe fragment), never fetched or included in the artifact census.
+  A dashboard presentation's content is the already-audited session record, whose API deletion proves removal.
   Any other origin anywhere, or a dashboard-host URL embedded in longer text or in another field,
   fails closed. Duplicate references retain the same inventory and media-classification checks.
   A reference received before finalized build identification is an `unbound retained reference`:
   persist an incident and fail closed, never queue volatile references for later discovery.
   Clean later metadata still permits deletion and absence checks, but cannot clear that incident;
   fresh cleanup after a crash also remains blocked until operator incident handling.
-  Any exact artifact URL first declared after the audit, including pre-DELETE reads, atomically
+  Any artifact object (origin plus pathname) first declared after the audit, including pre-DELETE reads, atomically
   checkpoints its inventory and a `post-audit retained reference` incident while deletion/absence
   verification continues without late auditing; keys use the value media classifier and any
   case-insensitive `data:` or media-pattern key fails closed.
@@ -581,8 +582,30 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   while XML/text artifact errors remain raw-scanned and hostname-censused rather than JSON-parsed
   unless declared JSON, preserving clean 404 and the reviewed media-403 absence evidence.
   DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
-  signed artifact** are required before removal/restoration, including references returning 404 at
+  artifact object** are required before removal/restoration, including references returning 404 at
   the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.
+  Text-log media keys include nonempty objects/arrays and `http(s):`, `data:` or reviewed
+  base64-prefixed strings, and raw `iVBORw0KGgo`, `/9j/`, `R0lGOD` or `UklGR` runs followed by at
+  least 64 base64 characters count as media; re-signed objects retain origin/path identity and the
+  latest private URL without clearing
+  incidents, and installed-shell timeouts and completed incident removals use closed-code,
+  stage-accurate diagnostics rather than page strings.
+  When present, artifact queries require `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`,
+  `X-Amz-Expires`, `X-Amz-SignedHeaders` and `X-Amz-Signature` exactly once with only
+  `response-content-type` optional, every BrowserStack record-audit failure persists an incident
+  without broadening trusted error causes, and conflicting WebDriver session identifiers are
+  unidentified regardless of capabilities shape.
+  Finalized `video_url` must match the session-bound dashboard video presentation before any media
+  exclusion, and text-body media keys accept bare/single/double-quoted names with `:` or `=` only
+  for nonempty containers or quoted/unquoted media-prefixed strings, never quoted placeholders
+  such as `"[REDACTED]"`.
+  Every running/finalized session read is media-classified with no running `video_url` exemption,
+  and bodies not declared image/video receive bounded-byte PNG/JPEG/GIF/WebP/MP4/WebM/plausible-BMP
+  signature checks before decoding and the existing memory-only text scans, while declared media
+  still count as media without reading their bodies.
+  Retained text is audited only as UTF-8: any declared charset other than UTF-8/US-ASCII, a repeated
+  charset parameter, or a NUL in a decoded body (UTF-16/32 text without a byte-order mark) is an
+  unreviewed encoding and an incident.
   No lingering-clean-text exception remains. Any already-audited artifact that starts serving
   content is inspected again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
   Signed references persist only in private 0600 recovery progress (inside its 0700 directory),

@@ -1192,7 +1192,7 @@ iPhone 17 Pro, iPhone 16, iPhone 16 Pro, iPhone Air, then iPhone 17, all on iOS 
 iPad pool remains only iPad (9th generation), on iPadOS 26 or later; obsolete catalog iPads are not
 fallbacks. Safari reports Apple family and release, not the exact model: iPhone/iPad model
 evidence remains the vendor's allocated-session report. The Samsung-only Android pool is Galaxy
-S26, S25, S24, then A55, on Android 14 or later. Observed Chrome hardware codes must match the checked-in canonical mapping: S26 SM-S942B,
+S26, S25, S24, then A55, on Android 14 or later. Observed Chrome hardware codes must match the checked-in canonical mapping: S26 SM-S942B or SM-S942U1 (the latter observed on BrowserStack 2026-10-20),
 S25 SM-S931B, S24 SM-S921B.
 Galaxy A55 remains disabled: the bounded 2026-10-20 public-page probe found no free device, so its observed hardware code awaits proof.
 The same bounded probe ended and audited three capability-free sessions: iPhone 16 Pro
@@ -1297,19 +1297,22 @@ while explicitly counting `unauditedRecordsDeleted` if links cannot be reconstru
 hits and unverifiable required surfaces remain incidents even after deletion. Unverified cleanup
 blocks the Pixel lease. Only whole JSON string values that are well-formed absolute HTTP(S) URLs
 are references: one case-insensitive `://`, their hostname exactly once, and no comma.
-Keys are never references; any other key/value containing `://` or a pinned artifact/dashboard
-hostname fails closed. Every retained JSON body must pass a census: each pinned hostname's raw
+Keys are never references; any other key/value containing `://` or a pinned artifact/dashboard/documentation
+hostname fails closed. Every retained JSON body must pass a census: each pinned artifact/dashboard hostname's raw
 and canonical counts independently equal its accepted reference occurrences, including duplicates,
 or fail with `unaccounted BrowserStack artifact reference`. No delimiter extraction, repair or
-pending-reference list remains. Only entire top-level `browser_url`/`public_url` values on the
-pinned dashboard origin remain count-only presentations; other origins/placements fail closed.
+pending-reference list remains; dashboard presentations remain count-only and other
+origins/placements fail closed.
 The census also checks canonical text percent-decoded to a four-pass-bounded fixpoint and one
-decoded `://` per reference, while dashboard presentations have character-class-pinned path
-segments/query tokens and forbid userinfo, ports and fragments without guessing exact paths.
+decoded `://` per reference.
+The 2026-10-20 BrowserStack probes pin top-level `browser_url`, `public_url`, `logs` and `video_url`
+to their exact record-bound dashboard forms and permit only the three observed
+`insights.summary.time_breakdown` components' `optimize_url` documentation `/docs/` links, never fetching
+either host or counting documentation links in the artifact census.
 A reference before finalized build identification persists an `unbound retained reference`
 incident immediately: deletion and absence checks still proceed from later clean metadata, but
 restoration stays blocked after a crash or successful deletion until operator incident handling.
-Any exact artifact URL first declared after the audit atomically checkpoints its inventory and a
+Any artifact object (origin plus pathname) first declared after the audit atomically checkpoints its inventory and a
 `post-audit retained reference` incident before deletion/absence verification continues, never late
 auditing, including in fresh cleanup; keys use value media classification and `data:`/media-pattern
 keys fail closed.
@@ -1321,6 +1324,22 @@ Missing inventory still requires record/all-log absence verification before the 
 error, and artifact XML/text errors receive raw capability/hostname scans with JSON parsing only
 for JSON Content-Type, preserving 404 and the reviewed media-403 absence rule without false incidents.
 Duplicate/media-classification checks and monotonic audit/deletion/absence milestones remain.
+Rotating signed queries update only the latest private URL for a storage object's origin/path
+identity (including normalized crash checkpoints without incident clearing), text-log media keys
+include nonempty containers and media-prefixed strings, long raw image-signature runs count
+anywhere while boolean/plain-string capability echoes stay excluded, and closed installed-shell
+diagnostics distinguish successful incident removal from unverified removal.
+Any BrowserStack record-audit failure persists an incident independently of typed diagnostic causes,
+artifact queries require all six reviewed `X-Amz-*` keys exactly once with only `response-content-type`
+optional, and differing top-level/nested WebDriver ids are unidentified even without a capabilities object.
+Finalized session metadata requires the exact pinned `video_url` presentation before media
+exemption, while text media-key detection accepts unquoted or either-quoted keys with `:`/`=`
+and nonempty containers or media-prefixed strings without classifying quoted placeholders as media.
+Running and finalized session reads share media classification without a running video exemption,
+and all bodies outside declared image/video receive bounded leading-byte image/video detection
+before decoding and text scans, preserving incidents across later clean records without reading declared media.
+Retained text is audited as UTF-8 only; any other or repeated declared charset, or a decoded NUL
+that would interleave UTF-16/32 text past the window scan, fails closed as an unreviewed encoding.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
 Rejected DELETE and signed-artifact bodies and transient 5xx bodies before GET retry are included;

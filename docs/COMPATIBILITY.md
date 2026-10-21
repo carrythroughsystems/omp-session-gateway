@@ -257,6 +257,7 @@ hardware code. Legacy homogeneous receipts retain their original summaries. The 
 BrowserStack public-page allocations (iPad 10th/Safari 27.0 and Galaxy S26 SM-S942B/Android
 16.0.0/Chrome 152.0.7977.54) are Tested allocation and retention evidence only, not qualification
 of these versions or completion of the collaboration journey.
+A later capability-free BrowserStack S26 probe on 2026-10-20 also observed `SM-S942U1`, as allocation evidence only.
 
 ## Exact OMP baseline
 
