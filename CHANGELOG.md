@@ -143,6 +143,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   observed S26 `SM-S942U1`, ignore non-media capability echoes, track re-signed logs by object
   identity with the latest persisted URL, diagnose installed-shell timeouts with closed codes,
   and distinguish completed incident removals from unverified removal.
+- The local Percy health test allows 30 seconds, the portable lane's per-test default. On a
+  cold Windows runner, starting Node and loading `@percy/core` took longer than its former
+  10-second limit.
 
 ## [v0.7.7] — 2026-10-13
 
