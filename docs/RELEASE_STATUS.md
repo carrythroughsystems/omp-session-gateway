@@ -1998,6 +1998,19 @@ Recorded 2026-10-03. Published-byte smoke passed against the stable source and d
 
 This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
 
+## Engineering baseline v18.12.5 — source pins only
+
+On 2026-10-21 (#423), `scripts/upstream-pins.ts` derived the stock OMP v18.12.5 source pin
+`d5cd750e41fede277f9eb933455da92a0738915e`, tree `1d19bf65af4446fa9bfda4ed0a7d09315b02d9c8`, and
+the Darwin arm64 and Windows x64 native hashes from official npm tarballs after verifying
+registry integrity. Source review from v18.12.3 found registry v1, the discovery file format and
+socket paths, the relay protocol, `collab.autoStart`, and every collaboration, `collab-web`, and
+`packages/wire/src/index.ts` source unchanged; can1357/oh-my-pi#16361 documents GitLab MR
+references for the extension `ctx.annotations` API in `docs/extensions.md` and the version bumps
+touch `package.json`, neither of which changes what the gateway reads or sends. The embedded
+client stays at v18.4.2. No canary, candidate, campaign, or platform qualification is claimed;
+the published matrix above is unchanged.
+
 ## Engineering baseline v18.12.3 — source pins only
 
 On 2026-10-19 (#409), `scripts/upstream-pins.ts` derived the stock OMP v18.12.3 source pin

@@ -12,7 +12,7 @@ requires Bun `1.4.0`, TUN-mode Tailscale Serve, an exact login allowlist, and th
 | Surface | Pin or contract | Notes |
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
-| Engineering host baseline | `v18.12.3` (`53a0377db6845e0dae606146130766ec92d407fd`) | Exact OMP source and tree (`51822a49a4cc7eebabdb1e848c79f8aa873deb40`) in `UPSTREAM.lock.json` |
+| Engineering host baseline | `v18.12.5` (`d5cd750e41fede277f9eb933455da92a0738915e`) | Exact OMP source and tree (`1d19bf65af4446fa9bfda4ed0a7d09315b02d9c8`) in `UPSTREAM.lock.json` |
 | Embedded browser client | `v18.4.2` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.4.2`) | Independent browser-client provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); it does not import the `collab-web` Markdown-rendering changes upstream shipped in v18.4.12, the render-coalescing changes in v18.8.0 ([can1357/oh-my-pi#14728](https://github.com/can1357/oh-my-pi/pull/14728)), or the eval-output rendering changes in v18.12.3 ([can1357/oh-my-pi#12730](https://github.com/can1357/oh-my-pi/pull/12730)) |
 | Gateway runtime | Bun `1.4.0` | Required runtime for the CLI, daemon, and release archives |
 
@@ -24,7 +24,7 @@ For the current published release and its qualified hardware matrix, see
 Under registry v1, the gateway validates the fields it reads and ignores unknown additive fields
 (ADR-028). Any snapshot naming prompt, question, options, prefill, answer, requestId, or count is
 refused. The minimum host version stayed unchanged when the engineering baseline later moved to
-v18.12.3.
+v18.12.5.
 
 Hosts from OMP `18.2.9` onward (upstream
 [PR #12844](https://github.com/can1357/oh-my-pi/pull/12844)) may include optional boolean `busy`

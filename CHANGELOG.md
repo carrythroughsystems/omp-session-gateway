@@ -68,6 +68,15 @@ The format is based on Keep a Changelog and Semantic Versioning.
   references, with a parse-site invariant against lenient bypasses. Application asset checks
   return only an in-page comparison boolean to vendor command logs.
 
+- Move the OMP engineering baseline to published v18.12.5 (#423), with pins derived by
+  `scripts/upstream-pins.ts`. Registry v1, the discovery file format and socket paths, the relay
+  protocol, `collab.autoStart`, `packages/wire/src/index.ts`, and every collaboration and
+  `collab-web` source are unchanged from v18.12.3. Within the tracked paths, only
+  `docs/extensions.md` documents GitLab MR references for `ctx.annotations`
+  (can1357/oh-my-pi#16361) and the version bumps touch `package.json`; neither changes what the
+  gateway reads or sends. The embedded client remains at v18.4.2. No qualification is claimed;
+  published v0.7.7 stays bound to OMP v18.10.2.
+
 - Move the OMP engineering baseline to published v18.12.3 (#409), with pins derived by
   `scripts/upstream-pins.ts`. Registry v1, the discovery file format and socket paths, the relay
   protocol, `collab.autoStart`, and the collaboration `host.ts`, `registry.ts`, `settings.ts`,
