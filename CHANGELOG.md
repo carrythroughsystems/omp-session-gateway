@@ -135,7 +135,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - The iPhone Home Screen install now expands Safari's shortened share sheet on every observed iOS
   26 release. The expansion cell is labelled "View More" on 26.4 but "More" on 26.2, so the second
   development run could not find Add to Home Screen on an iPhone Air. The lane taps only that
-  cell, never Safari's toolbar More button, which dismisses the sheet.
+  cell, never Safari's toolbar More button, which dismisses the sheet. Each install step now waits
+  for the element it needs instead of a fixed pause, because an iPhone 17 Pro Max that had passed
+  four times once rendered its menu's Share action later than the former 1.5-second pause.
 - Pin the BrowserStack `browser_url`, `public_url`, `logs`, `video_url` and insight `optimize_url`
   shapes found by the third Studio development run, keeping dashboard/docs hosts unfetched and
   retaining only fixed audit/parser causes in memory while progress and receipts remain generic.

@@ -292,7 +292,12 @@ async function assertCleanSinks(session: WebDriverSession, label: string): Promi
   if (sweep.findingCount !== 0) throw new Error("a View capability reached browser sinks");
 }
 
-/** Adds the current Safari page to the Home Screen and opens the installed app. Exported for its test. */
+/**
+ * Adds the current Safari page to the Home Screen and opens the installed app. Each step waits for
+ * the element it needs rather than a fixed pause: on 2026-10-20 an iPhone 17 Pro Max that had
+ * passed four times rendered its page menu's Share action later than the former 1.5 s pause.
+ * Exported for its test.
+ */
 export async function installHomeScreenApp(session: TestingBotNativeSession): Promise<void> {
   await session.context("NATIVE_APP");
   let share = await session.find(`type == "XCUIElementTypeButton" AND (label == "Share" OR name == "ShareButton")`);
@@ -300,32 +305,32 @@ export async function installHomeScreenApp(session: TestingBotNativeSession): Pr
     const more = await session.find(`type == "XCUIElementTypeButton" AND (label == "More" OR label CONTAINS "Page Menu" OR name == "MoreButton")`);
     if (more === undefined) throw new Error("Safari offered neither Share nor More");
     await session.click(more);
-    await Bun.sleep(1_500);
-    share = await session.find(`label == "Share"`);
+    share = await pollNative(session, `label == "Share"`, 10_000);
   }
   if (share === undefined) throw new Error("Safari's Share action was unavailable");
   await session.click(share);
-  await Bun.sleep(2_500);
+  // iOS 26 shortens the share sheet's actions; Add to Home Screen sits behind its expansion cell,
+  // labelled "View More" on 26.4 and "More" on 26.2 (observed 2026-10-20). Only a cell matches:
+  // Safari's own toolbar keeps a "More" button on screen while the sheet is open.
+  const expansion = `type == "XCUIElementTypeCell" AND (label == "View More" OR label == "More")`;
+  await pollNative(session, `label == "Add to Home Screen" OR (${expansion})`, 10_000);
   let add = await session.find(`label == "Add to Home Screen"`);
   if (add === undefined) {
-    // iOS 26 shortens the share sheet's actions; Add to Home Screen sits behind its expansion cell,
-    // labelled "View More" on 26.4 and "More" on 26.2 (observed 2026-10-20). Only a cell matches:
-    // Safari's own toolbar keeps a "More" button on screen while the sheet is open.
-    const expand = await session.find(`type == "XCUIElementTypeCell" AND (label == "View More" OR label == "More")`);
+    const expand = await session.find(expansion);
     if (expand !== undefined) {
       await session.click(expand);
-      await Bun.sleep(2_000);
+      add = await pollNative(session, `label == "Add to Home Screen"`, 10_000);
     }
-    add = await session.find(`label == "Add to Home Screen"`);
   }
   if (add === undefined) throw new Error("Safari's Add to Home Screen action was unavailable");
   await session.click(add);
-  await Bun.sleep(2_500);
-  const confirm = await session.find(`type == "XCUIElementTypeButton" AND label == "Add"`);
+  const confirm = await pollNative(session, `type == "XCUIElementTypeButton" AND label == "Add"`, 10_000);
   if (confirm === undefined) throw new Error("the Add to Home Screen sheet had no Add button");
   await session.click(confirm);
-  await Bun.sleep(4_000);
-  // A second icon would be another customer's leftover or an earlier attempt's; tapping either is a guess.
+  await pollNative(session, HOME_SCREEN_ICON, 15_000);
+  // Let the Home Screen settle: a second icon would be another customer's leftover or an earlier
+  // attempt's, and tapping either is a guess.
+  await Bun.sleep(2_000);
   const icons = await session.findAll(HOME_SCREEN_ICON);
   if (icons.length !== 1) throw new Error(`expected exactly one OMP Home Screen icon, found ${icons.length}`);
   await session.click(icons[0]!);
