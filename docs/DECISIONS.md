@@ -1326,8 +1326,12 @@ for JSON Content-Type, preserving 404 and the reviewed media-403 absence rule wi
 Duplicate/media-classification checks and monotonic audit/deletion/absence milestones remain.
 Rotating signed queries update only the latest private URL for a storage object's origin/path
 identity (including normalized crash checkpoints without incident clearing), text-log media keys
-require media-prefixed string values instead of capability flags, and closed installed-shell
+include nonempty containers and media-prefixed strings, long raw image-signature runs count
+anywhere while boolean/plain-string capability echoes stay excluded, and closed installed-shell
 diagnostics distinguish successful incident removal from unverified removal.
+Any BrowserStack record-audit failure persists an incident independently of typed diagnostic causes,
+artifact queries require all six reviewed `X-Amz-*` keys exactly once with only `response-content-type`
+optional, and differing top-level/nested WebDriver ids are unidentified even without a capabilities object.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
 Rejected DELETE and signed-artifact bodies and transient 5xx bodies before GET retry are included;

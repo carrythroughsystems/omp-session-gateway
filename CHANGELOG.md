@@ -146,6 +146,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - The local Percy health test allows 30 seconds, the portable lane's per-test default. On a
   cold Windows runner, starting Node and loading `@percy/core` took longer than its former
   10-second limit.
+- Close the PR #421 review gaps: detect nested/raw image retention without treating capability
+  echoes as media, persist every failed BrowserStack audit through deletion/crash recovery,
+  reject conflicting WebDriver ids regardless of capabilities shape, and permit only complete
+  six-key signed-artifact queries plus optional `response-content-type`.
 
 ## [v0.7.7] — 2026-10-13
 

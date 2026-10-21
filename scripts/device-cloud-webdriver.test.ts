@@ -72,9 +72,17 @@ test.each([
   expect(created.capabilities).toMatchObject({ platformName: "iOS", browserName: "safari", deviceName: "iPhone 16" });
 });
 
-test("a session start naming two different ids is unidentified and never checkpointed", async () => {
+test.each([IPHONE, undefined, null, [], "SYNTHETIC_INVALID_CAPABILITIES", false, 42])("a session start naming two different ids is unidentified regardless of capabilities: %j", async capabilities => {
   const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () =>
-    Response.json({ sessionId: TESTINGBOT_ID, status: 0, value: { sessionId: "tb-synthetic-session-0002", capabilities: IPHONE } }), { preconnect: () => {} }));
+    Response.json({ sessionId: TESTINGBOT_ID, status: 0, value: { sessionId: "tb-synthetic-session-0002", capabilities } }), { preconnect: () => {} }));
+  restore = () => mock.mockRestore();
+  await expect(WebDriverSession.create("testingbot", username, password, {}, async () => { throw new Error("must not checkpoint"); }))
+    .rejects.toThrow("two session ids");
+  expect(mock).toHaveBeenCalledTimes(1);
+});
+test.each([200, 503])("conflicting session ids stay unidentified even in a classified HTTP-%s error", async status => {
+  const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () =>
+    Response.json({ sessionId: TESTINGBOT_ID, status: 13, value: { sessionId: "tb-synthetic-session-0002", error: "session not created" } }, { status }), { preconnect: () => {} }));
   restore = () => mock.mockRestore();
   await expect(WebDriverSession.create("testingbot", username, password, {}, async () => { throw new Error("must not checkpoint"); }))
     .rejects.toThrow("two session ids");

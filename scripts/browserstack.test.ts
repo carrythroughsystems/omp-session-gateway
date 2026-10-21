@@ -15,10 +15,18 @@ import pins from "./browserstack-pins.json";
 const credentials = { username: "synthetic-browserstack-user", accessKey: "synthetic-browserstack-key" };
 const id = "a".repeat(40), build = "b".repeat(40);
 const apiOrigin = "https://api.browserstack.com/automate";
-const artifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/console.txt?synthetic=true`;
-const oldSignature = `${artifact.split("?")[0]}?X-Amz-Date=SYNTHETIC_OLD_DATE&X-Amz-Expires=604800&X-Amz-Signature=SYNTHETIC_OLD_SIGNATURE`;
-const newSignature = `${artifact.split("?")[0]}?X-Amz-Date=SYNTHETIC_NEW_DATE&X-Amz-Expires=604800&X-Amz-Signature=SYNTHETIC_NEW_SIGNATURE`;
-const nestedArtifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/nested.txt?synthetic=true`;
+function signedQuery(label: string): string {
+  return new URLSearchParams({
+    "X-Amz-Algorithm": "SYNTHETIC_ALGORITHM", "X-Amz-Credential": "SYNTHETIC_CREDENTIAL",
+    "X-Amz-Date": `${label}_DATE`, "X-Amz-Expires": "604800", "X-Amz-SignedHeaders": "host",
+    "X-Amz-Signature": `${label}_SIGNATURE`,
+  }).toString();
+}
+const artifactQuery = signedQuery("SYNTHETIC_DEFAULT");
+const artifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/console.txt?${artifactQuery}`;
+const oldSignature = `${artifact.split("?")[0]}?${signedQuery("SYNTHETIC_OLD")}`;
+const newSignature = `${artifact.split("?")[0]}?${signedQuery("SYNTHETIC_NEW")}`;
+const nestedArtifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/nested.txt?${artifactQuery}`;
 const video = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/video.mp4`;
 const replayCapability = "SYNTHETIC_REPLAY_ROOM.SYNTHETIC_R1_R2_WINDOW_CANARY_NOT_A_REAL_KEY";
 const replayWindow = replayCapability.slice(28, 44);
@@ -35,11 +43,11 @@ const presentation = {
 const documentation = "https://www.browserstack.com/docs/automate/selenium/synthetic-optimization#synthetic-fragment";
 const observedArtifacts = {
   browser_console_logs_url: artifact,
-  har_logs_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/har.txt?synthetic=true`,
-  selenium_logs_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/selenium.txt?synthetic=true`,
-  browser_profiling_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/profiling.txt?synthetic=true`,
-  session_terminal_logs_url: `https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com/${id}/session-terminal.txt?response-content-type=text%2Fplain`,
-  build_terminal_logs_url: `https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com/${build}/build-terminal.txt?response-content-type=text%2Fplain`,
+  har_logs_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/har.txt?${artifactQuery}`,
+  selenium_logs_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/selenium.txt?${artifactQuery}`,
+  browser_profiling_url: `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/profiling.txt?${artifactQuery}`,
+  session_terminal_logs_url: `https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com/${id}/session-terminal.txt?${artifactQuery}&response-content-type=text%2Fplain`,
+  build_terminal_logs_url: `https://bs-selenium-logs-use.s3.us-east-1.amazonaws.com/${build}/build-terminal.txt?${artifactQuery}&response-content-type=text%2Fplain`,
 };
 const observedRecord = {
   ...record, device: "Samsung Galaxy S26", os: "android", os_version: "16.0", browser: "chrome_android",
@@ -119,7 +127,7 @@ function provider(options: {
         (options.disappearsAfter !== undefined && ++postDeleteReads > options.disappearsAfter)))) return new Response("absent", { status: 404 });
       return new Response(deleted && options.changed ? "changed after audit" : "No messages were logged", { headers: { "content-type": "text/plain" } });
     }
-    if (pins.artifactOrigins.some(origin => url === `${origin}/${id}/nested.txt?synthetic=true`)) return deleted ? new Response("absent", { status: 404 }) : new Response(options.nestedLog ?? "Nested synthetic log", { headers: { "content-type": "text/plain" } });
+    if (pins.artifactOrigins.some(origin => url === `${origin}/${id}/nested.txt?${artifactQuery}`)) return deleted ? new Response("absent", { status: 404 }) : new Response(options.nestedLog ?? "Nested synthetic log", { headers: { "content-type": "text/plain" } });
     if (options.additionalArtifacts?.includes(url)) return deleted ? new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404, headers: { "content-type": "application/xml" } }) : new Response("synthetic observed log", { headers: { "content-type": "text/plain" } });
     if (url === video) {
       if (options.media) return new Response("synthetic-media", { headers: { "content-type": "video/mp4" } });
@@ -490,7 +498,7 @@ describe("BrowserStack complete retention and deletion", () => {
   }
   test.each(placements)("class invariant: storage URL at %s is fetched, privately inventoried and absence-checked", async (_name, place) => {
     for (const origin of pins.artifactOrigins) {
-      const nested = `${origin}/${id}/nested.txt?synthetic=true`;
+      const nested = `${origin}/${id}/nested.txt?${artifactQuery}`;
       const fixture = provider({ raw: JSON.stringify({ automation_session: place(nested) }) });
       await fixture.audit();
       expect(fixture.removal.artifacts.some(item => item.url === nested)).toBe(true);
@@ -516,6 +524,46 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(progress.results.audit).toMatchObject({ recordsExposingLinks: 1 });
     expect(progress.resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordRemoved: true });
     expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
+  });
+  const unavailableRequiredLog = { retry: { surface: "log", reply: {
+    text: "SYNTHETIC_UNAVAILABLE_REQUIRED_LOG", status: 401, type: "text/plain",
+  } } } as const;
+  test("an untyped required-log audit failure persists an incident before clean deletion and absence", async () => {
+    const fixture = provider(unavailableRequiredLog);
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("could not be audited");
+    expect(lane.errors).toContain("BrowserStack required retained log is unavailable");
+    expect(lane.checkpoints.map(parseDeviceCloudProgress).some(progress => progress.resources?.some(resource =>
+      resource.vendor === "browserstack" && resource.incident === true && !resource.recordDeleted))).toBe(true);
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.cleanupRequired).toBe(true);
+    expect(progress.resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ audited: false, incident: true, recordDeleted: true, recordRemoved: true });
+    expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(fixture.calls.filter(call => call.url === `${apiOrigin}/sessions/${id}/logs`)).toHaveLength(2);
+    expect(fixture.calls.filter(call => call.url === artifact)).toHaveLength(1);
+  });
+  test("an untyped required-log failure survives a crash before release and fresh clean cleanup", async () => {
+    const fixture = provider(unavailableRequiredLog);
+    const crashed = auditedAttempt(fixture, { crashOnIncident: true });
+    await expect(crashed.attempt).rejects.toThrow();
+    const progress = structuredClone(crashed.checkpoints.at(-1));
+    expect(parseDeviceCloudProgress(progress).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ audited: false, incident: true, recordRemoved: false });
+    expect(fixture.calls.some(call => call.method === "DELETE")).toBe(false);
+    restore?.();
+    const fresh = provider();
+    const recovery = auditedAttempt(fresh, { progress });
+    await expect(recovery.attempt).rejects.toThrow("incident");
+    const deletion = fresh.calls.findIndex(call => call.method === "DELETE");
+    expect(deletion).toBeGreaterThanOrEqual(0);
+    expect(fresh.calls.findIndex(call => call.url.endsWith("/logs"))).toBeGreaterThan(deletion);
+    expect(fresh.calls.filter(call => call.url === artifact)).toHaveLength(1);
+    const after = parseDeviceCloudProgress(recovery.checkpoints.at(-1));
+    expect(after.cleanupRequired).toBe(true);
+    expect(after.resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ audited: false, incident: true, recordDeleted: true, recordRemoved: true });
   });
   const lateMetadata = JSON.stringify({ automation_session: { ...record, insights: { reference: nestedArtifact } } });
   const signedMetadata = (url: string) => JSON.stringify({ automation_session: { ...record, browser_console_logs_url: url } });
@@ -594,6 +642,32 @@ describe("BrowserStack complete retention and deletion", () => {
       const inventory: CloudArtifact[] = [{ url: oldSignature, buildId: build, kind: "text" }];
       expect(() => mergeBrowserStackArtifacts(id, inventory, [changed])).toThrow("BrowserStack artifact identity changed");
     }
+  });
+  const signatureKeys = ["X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders", "X-Amz-Signature"];
+  test("query-free references and complete signatures with an optional content type retain object identity", () => {
+    const base = artifact.split("?")[0]!;
+    const typed = `${newSignature}&response-content-type=text%2Fplain`;
+    expect(browserStackReferences(id, build, { reason: [base, artifact, typed] }).artifacts)
+      .toEqual([{ url: typed, buildId: build, kind: "text" }]);
+  });
+  test.each(["versionId", "response-content-disposition", "X-Amz-Security-Token", "synthetic", "version%49d"])("an unreviewed artifact query key fails closed: %s", key => {
+    const unreviewed = `${artifact}&${key}=SYNTHETIC_UNREVIEWED_VALUE`;
+    expect(() => browserStackReferences(id, build, { reason: unreviewed })).toThrow("unreviewed BrowserStack artifact reference");
+    const inventory: CloudArtifact[] = [{ url: artifact, buildId: build, kind: "text" }];
+    expect(() => mergeBrowserStackArtifacts(id, inventory, [{ url: unreviewed, buildId: build, kind: "text" }])).toThrow(BrowserStackAuditFailure);
+    expect(inventory[0]?.url).toBe(artifact);
+  });
+  test.each([...signatureKeys, "response-content-type"])("duplicate signed-artifact query keys fail closed: %s", key => {
+    const prefix = key === "response-content-type" ? `${artifact}&response-content-type=text%2Fplain` : artifact;
+    expect(() => browserStackReferences(id, build, { reason: `${prefix}&${key}=SYNTHETIC_DUPLICATE` })).toThrow(BrowserStackAuditFailure);
+  });
+  test.each(signatureKeys)("a partial artifact signature without %s fails closed", key => {
+    const partial = new URL(artifact);
+    partial.searchParams.delete(key);
+    expect(() => browserStackReferences(id, build, { reason: partial.href })).toThrow(BrowserStackAuditFailure);
+  });
+  test.each(["", "response-content-type=text%2Fplain"])("an empty or content-type-only artifact query fails closed: %s", query => {
+    expect(() => browserStackReferences(id, build, { reason: `${artifact.split("?")[0]}?${query}` })).toThrow(BrowserStackAuditFailure);
   });
   const lateBody = JSON.stringify({ reference: nestedArtifact });
   function lateReference(surface: string): NonNullable<Parameters<typeof provider>[0]> {
@@ -985,7 +1059,7 @@ describe("BrowserStack complete retention and deletion", () => {
   });
   test.each(["%2E", "%2e", "%252E"])("the decoded census detects hidden hostname-only keys, values and artifact queries (dots=%s)", async escape => {
     const host = new URL(nestedArtifact).hostname.replaceAll(".", escape);
-    for (const json of [{ [host]: "synthetic" }, { hint: host }, { reason: `${artifact}&host=${host}` }]) {
+    for (const json of [{ [host]: "synthetic" }, { hint: host }, { reason: artifact.replace("SYNTHETIC_DEFAULT_SIGNATURE", host) }]) {
       const fixture = provider({ log: JSON.stringify(json), logType: "application/json" });
       await expect(fixture.audit()).rejects.toThrow("unaccounted BrowserStack artifact reference");
       restore?.();
@@ -997,9 +1071,9 @@ describe("BrowserStack complete retention and deletion", () => {
   });
   test("percent decoding leaves malformed escapes literal and accepts a clean four-pass fixpoint", () => {
     for (const suffix of ["%zz%2G%tail%", "%41%42%43", "%25252541"]) {
-      expect(browserStackReferences(id, build, { reason: `${artifact}&note=${suffix}` }).artifacts).toHaveLength(1);
+      expect(browserStackReferences(id, build, { reason: artifact.replace("SYNTHETIC_DEFAULT_SIGNATURE", suffix) }).artifacts).toHaveLength(1);
     }
-    expect(() => browserStackReferences(id, build, { reason: `${artifact}&note=%2525252541` })).toThrow("unaccounted BrowserStack artifact reference");
+    expect(() => browserStackReferences(id, build, { reason: artifact.replace("SYNTHETIC_DEFAULT_SIGNATURE", "%2525252541") })).toThrow("unaccounted BrowserStack artifact reference");
   });
   test.each([
     "?auth_token=synthetic.dotted", "?dotted.key=synthetic", "?auth_token=synthetic%2Esuffix",
@@ -1276,6 +1350,13 @@ describe("BrowserStack complete retention and deletion", () => {
     [{ takesScreenshot: true }, false],
     [{ video: "false" }, false],
     [{ disableAutomaticScreenshots: true }, false],
+    [{ screenshot: 1 }, false],
+    [{ screenshot: null }, false],
+    [{ screenshot: "" }, false],
+    [{ screenshot: [] }, false],
+    [{ screenshot: {} }, false],
+    [{ screenshot: { value: "iVBORw0KGgoSYNTHETIC_NESTED_IMAGE" } }, true],
+    [{ screenshot: [{ value: "SYNTHETIC_NESTED_IMAGE" }] }, true],
     [{ screenshot: "data:image/png;base64,SYNTHETIC_TEXT_IMAGE" }, true],
     [{ video: "https://media.invalid/SYNTHETIC_TEXT_VIDEO.mp4" }, true],
     [{ screenshot: "iVBORw0KGgoSYNTHETIC_TEXT_PNG" }, true],
@@ -1284,7 +1365,7 @@ describe("BrowserStack complete retention and deletion", () => {
     [{ screenshot: "UklGRSYNTHETIC_TEXT_WEBP" }, true],
     [{ screen: "https://media.invalid/SYNTHETIC_OPAQUE_IMAGE" }, true],
     [{ unrelated: "https://media.invalid/SYNTHETIC_TEXT_VIDEO.mp4?synthetic=true" }, true],
-  ] as const)("text-log media requires a media-valued JSON string, not capability flags: %j", async (log, media) => {
+  ] as const)("text-log media includes media-valued strings and nonempty containers, not capability flags: %j", async (log, media) => {
     const fixture = provider({ log: JSON.stringify(log) });
     const lane = auditedAttempt(fixture);
     if (media) {
@@ -1296,6 +1377,25 @@ describe("BrowserStack complete retention and deletion", () => {
     const resource = parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack");
     expect(resource?.incident === true).toBe(media);
     expect(resource?.recordRemoved).toBe(true);
+  });
+  test.each(["iVBORw0KGgo", "/9j/", "R0lGOD", "UklGR"])("bare %s image runs in raw prose are media", async signature => {
+    const fixture = provider({ log: `synthetic image dump: ${signature}${"SYNTHETIC".repeat(8).slice(0, 64)} end` });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("kept video or screenshots");
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ incident: true, recordRemoved: true });
+  });
+  test.each(["iVBORw0KGgo", "/9j/", "R0lGOD", "UklGR"])("a short bare %s prefix alone is not an image run", async signature => {
+    const fixture = provider({ log: `synthetic short prefix: ${signature}${"SYNTHETIC".repeat(8).slice(0, 63)} end` });
+    expect((await fixture.audit())?.screenshots).toBe(0);
+  });
+  test.each(["log JSON", "session JSON"])("raw image runs are also detected outside media keys in %s", async surface => {
+    const payload = `iVBORw0KGgo${"SYNTHETIC".repeat(8)}`;
+    const fixture = provider(surface === "log JSON"
+      ? { log: JSON.stringify({ result: payload }), logType: "application/json" }
+      : { raw: JSON.stringify({ automation_session: { ...record, insights: { result: payload } } }) });
+    expect((await fixture.audit())?.screenshots).toBe(1);
   });
   test("an unreviewed HTTP media URL fails closed", async () => {
     const fixture = provider({ log: JSON.stringify({ value: { screen: "https://media.example/opaque.webm" } }), logType: "application/json" });

@@ -500,7 +500,7 @@ async function auditRecords(
       records.push({ resource, record });
     } catch (error) {
       const safeCause = error instanceof BrowserStackAuditFailure || error instanceof RetainedVendorJsonError;
-      if (resource.vendor === "browserstack" && safeCause) {
+      if (resource.vendor === "browserstack") {
         resource.incident = true;
         await save();
       }

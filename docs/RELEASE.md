@@ -864,6 +864,10 @@ value media classification and any `data:`/media-pattern key fails closed.
 Recovery normalizes old signature inventories to the last URL per origin/path identity without
 clearing incidents, ignores boolean/text capability-flag echoes as media, and reports only closed
 installed-shell codes and an explicit removed-under-incident status when deletion succeeds.
+Every BrowserStack record-audit failure persists an incident through deletion and crash recovery,
+nested media containers and long raw image-signature runs remain media despite ignored capability
+echoes, queried artifacts require all six reviewed `X-Amz-*` keys exactly once with only
+`response-content-type` optional, and conflicting WebDriver session ids fail regardless of capabilities shape.
 Post-audit validation/schema/census errors atomically checkpoint a `post-audit unvalidated record`
 incident with safely recoverable pinned-origin whole-value URLs from strict JSON and still proceed
 through DELETE and bounded record/log/artifact absence checks, never heuristic recovery of malformed

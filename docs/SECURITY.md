@@ -584,10 +584,17 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
   artifact object** are required before removal/restoration, including references returning 404 at
   the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.
-  Text-log media keys require `http(s):`, `data:` or a reviewed base64 image prefix in a string value,
-  re-signed storage objects retain origin/path identity and the latest private URL without clearing
+  Text-log media keys include nonempty objects/arrays and `http(s):`, `data:` or reviewed
+  base64-prefixed strings, and raw `iVBORw0KGgo`, `/9j/`, `R0lGOD` or `UklGR` runs followed by at
+  least 64 base64 characters count as media; re-signed objects retain origin/path identity and the
+  latest private URL without clearing
   incidents, and installed-shell timeouts and completed incident removals use closed-code,
   stage-accurate diagnostics rather than page strings.
+  When present, artifact queries require `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`,
+  `X-Amz-Expires`, `X-Amz-SignedHeaders` and `X-Amz-Signature` exactly once with only
+  `response-content-type` optional, every BrowserStack record-audit failure persists an incident
+  without broadening trusted error causes, and conflicting WebDriver session identifiers are
+  unidentified regardless of capabilities shape.
   No lingering-clean-text exception remains. Any already-audited artifact that starts serving
   content is inspected again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
   Signed references persist only in private 0600 recovery progress (inside its 0700 directory),

@@ -35,6 +35,9 @@ const REFERENCE_HOSTNAMES = [...new Set([...ARTIFACT_ORIGINS, ...DASHBOARD_ORIGI
 const DOCUMENTATION_HOSTNAMES = [...DOCUMENTATION_ORIGINS].map(origin => new URL(origin).hostname);
 const INSIGHT_COMPONENTS = new Set(["browserstack_time", "user_time", "capabilities_impact"]);
 const PRESENTATION_FIELDS = new Set(["browser_url", "public_url", "logs", "video_url"]);
+const ARTIFACT_SIGNATURE_KEYS = new Set([
+  "X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders", "X-Amz-Signature",
+]);
 
 export class BrowserStackAuditFailure extends Error {}
 
@@ -67,6 +70,7 @@ export function browserStackCapabilities(target: "ipad" | "android", device: Clo
 }
 
 const MEDIA_URL = /(?:data:(?:image|video)\/|https?:[^\s"'<>]*(?:\/(?:screenshots?|video)(?:[/?]|$)|\.(?:png|jpe?g|webp|gif|avif|svg|bmp|ico|mp4|webm|mov|m4v)(?:[?#]|$)))/iu;
+const BASE64_IMAGE = /(?:iVBORw0KGgo|\/9j\/|R0lGOD|UklGR)[A-Za-z0-9+/=]{64,}/u;
 
 /** Closed disabled markers; opaque screenshot payloads count too, not only familiar URLs. */
 function retainedMedia(value: unknown, key = ""): boolean {
@@ -86,11 +90,11 @@ function retainedMedia(value: unknown, key = ""): boolean {
 
 function retainedContent(raw: string, contentType: string | null): { text: string; media: boolean; json?: unknown } {
   // Plain text remains raw-only for reference discovery. JSON bodies reject duplicates.
-  if (!/(?:\/|\+)json(?:;|$)/iu.test(contentType ?? "")) return { text: raw, media: MEDIA_URL.test(raw) ||
-    /"(?:[^"]*(?:screenshot|video|visual)[^"]*|screen)"\s*:\s*"(?:https?:|data:|iVBORw0KGgo|\/9j\/|R0lGOD|UklGR)/iu.test(raw) };
+  if (!/(?:\/|\+)json(?:;|$)/iu.test(contentType ?? "")) return { text: raw, media: MEDIA_URL.test(raw) || BASE64_IMAGE.test(raw) ||
+    /"(?:[^"]*(?:screenshot|video|visual)[^"]*|screen)"\s*:\s*(?:"(?:https?:|data:|iVBORw0KGgo|\/9j\/|R0lGOD|UklGR)|\{(?!\s*\})|\[(?!\s*\]))/iu.test(raw) };
   const json = parseRetainedVendorJson(raw);
   const canonical = JSON.stringify(json);
-  return { text: canonical === raw ? raw : `${raw}\n${canonical}`, media: retainedMedia(json), json };
+  return { text: canonical === raw ? raw : `${raw}\n${canonical}`, media: BASE64_IMAGE.test(raw) || retainedMedia(json), json };
 }
 
 async function readRetainedBody(response: Response): Promise<string> {
@@ -104,6 +108,16 @@ export function browserStackArtifactIdentity(artifact: CloudArtifact): string {
   return `${url.origin}${url.pathname}`;
 }
 
+function reviewedArtifactQuery(url: URL): boolean {
+  if (!url.href.includes("?")) return true;
+  const keys = new Set<string>();
+  for (const key of url.searchParams.keys()) {
+    if ((!ARTIFACT_SIGNATURE_KEYS.has(key) && key !== "response-content-type") || keys.has(key)) return false;
+    keys.add(key);
+  }
+  return keys.size === ARTIFACT_SIGNATURE_KEYS.size + Number(keys.has("response-content-type"));
+}
+
 export function validateBrowserStackArtifacts(sessionId: string, artifacts: readonly CloudArtifact[]): void {
   if (!BROWSERSTACK_SESSION_ID.test(sessionId) || artifacts.length > 64) throw new BrowserStackAuditFailure("invalid BrowserStack artifact inventory");
   const seen = new Set<string>();
@@ -113,7 +127,7 @@ export function validateBrowserStackArtifacts(sessionId: string, artifacts: read
       !BROWSERSTACK_SESSION_ID.test(artifact.buildId) || (artifact.kind !== "text" && artifact.kind !== "media")) throw new BrowserStackAuditFailure("invalid BrowserStack artifact inventory");
     const parsed = referenceUrl(artifact.url);
     if (parsed === undefined) throw new BrowserStackAuditFailure("invalid BrowserStack artifact reference");
-    if (!ARTIFACT_ORIGINS.has(parsed.origin) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
+    if (!ARTIFACT_ORIGINS.has(parsed.origin) || !reviewedArtifactQuery(parsed) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
       (!parsed.pathname.includes(sessionId) && !parsed.pathname.includes(artifact.buildId))) throw new BrowserStackAuditFailure("unreviewed BrowserStack artifact reference");
     const identity = `${parsed.origin}${parsed.pathname}`;
     if (seen.has(identity)) throw new BrowserStackAuditFailure("invalid BrowserStack artifact inventory");
@@ -298,7 +312,7 @@ function recoverableArtifacts(sessionId: string, buildId: string | undefined, va
 function retainedSession(record: Record<string, unknown>, raw: string): TestRecord {
   if (Object.keys(record).some(field => !(RECORD_FIELDS as readonly string[]).includes(field))) throw new BrowserStackAuditFailure("BrowserStack returned an unreviewed retained-record field");
   return { complete: record.status !== "running", text: `${raw}\n${JSON.stringify(record)}`, video: false,
-    screenshots: Object.entries(record).some(([key, value]) => key !== "video_url" && retainedMedia(value, key)) ? 1 : 0 };
+    screenshots: BASE64_IMAGE.test(raw) || Object.entries(record).some(([key, value]) => key !== "video_url" && retainedMedia(value, key)) ? 1 : 0 };
 }
 
 export class BrowserStackApi {
@@ -374,7 +388,7 @@ export class BrowserStackApi {
   async #artifact(url: string, sessionId: string, buildId: string, beforeRetry?: (response: Response) => Promise<void>): Promise<Response> {
     let parsed: URL;
     try { parsed = new URL(url); } catch { throw new Error("invalid BrowserStack artifact reference"); }
-    if (!ARTIFACT_ORIGINS.has(parsed.origin) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
+    if (!ARTIFACT_ORIGINS.has(parsed.origin) || !reviewedArtifactQuery(parsed) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
       (!parsed.pathname.includes(sessionId) && !parsed.pathname.includes(buildId))) throw new Error("unreviewed BrowserStack artifact reference");
     // Signed references carry their own authorization. Never forward account authorization here.
     return readProvider(() => fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(30_000) }), beforeRetry === undefined ? undefined : { beforeRetry });

@@ -24,6 +24,8 @@ async function webDriverCommand(vendor: DeviceCloudVendor, authorization: string
   const response = method === "GET" ? await readProvider(send) : await send();
   const payload = vendorJson(await boundedVendorText(response, connection.name), connection.name);
   const value = isRecord(payload) ? payload.value : undefined;
+  if (operation === "session start" && isRecord(payload) && isRecord(value) &&
+    typeof payload.sessionId === "string" && typeof value.sessionId === "string" && payload.sessionId !== value.sessionId) throw new Error(`${connection.name} session start reported two session ids`);
   // BrowserStack reports schema refusal with HTTP 200, status 13, and an empty sessionId.
   if (!response.ok || (isRecord(payload) && typeof payload.status === "number" && payload.status !== 0) || (isRecord(value) && typeof value.error === "string")) {
     const code = isRecord(value) && typeof value.error === "string" && /^[a-z ]{1,40}$/u.test(value.error) ? value.error : "unknown error";
@@ -33,7 +35,6 @@ async function webDriverCommand(vendor: DeviceCloudVendor, authorization: string
     const wireId = typeof payload.sessionId === "string" && payload.sessionId !== "" ? payload.sessionId : undefined;
     // W3C nests the id and capabilities in `value`; TestingBot also echoes the id at the top level.
     if (typeof value.sessionId === "string" && isRecord(value.capabilities)) {
-      if (wireId !== undefined && wireId !== value.sessionId) throw new Error(`${connection.name} session start reported two session ids`);
       return value;
     }
     // JSON Wire Protocol: the id is top-level and `value` holds the capabilities themselves.
