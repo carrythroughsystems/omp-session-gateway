@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Allow up to 180 seconds for each authenticated WinRM probe on a fresh Windows qualification
+  instance, still capped by the shared 12-minute allocation/admission deadline and requiring
+  three consecutive successes spanning at least 60 seconds. Retain credential-free per-probe
+  start, first-response, signal and exit timing in Windows progress and evidence, including
+  failed admission and cleanup, without changing qualification pass gates.
+
 ## [v0.7.8] — 2026-10-21
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 26 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.

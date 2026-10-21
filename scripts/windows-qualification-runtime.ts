@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import pins from "./windows-qualification-pins.json";
 import { cleanupWindows, preflightWindows, runWindows, windowsCampaignLabel, windowsNeedsCleanup } from "./windows-stable-qualification.ts";
-import type { WindowsAdmission, WindowsArtifact, WindowsContext, WindowsFirewall, WindowsIdentity, WindowsInstance, WindowsPreflightInput, WindowsPrincipal, WindowsRuntime } from "./windows-stable-qualification.ts";
+import type { WindowsAdmission, WindowsArtifact, WindowsContext, WindowsFirewall, WindowsIdentity, WindowsInstance, WindowsPreflightInput, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
 import { parseCandidateTagArgs, parseQualificationPins, releaseArchivePath, verifyLaunchContracts, verifyRelease, waitForPublishedSession, waitForRevocation } from "./stable-qualification.ts";
 import { windowsHostScript } from "./upstream-canary.ts";
 import { OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
@@ -76,16 +76,62 @@ export function windowsPixelLauncher(activities: string, component: string): { p
   if (launchers.size !== 1 || !launcher) throw new Error("Pixel foreground launcher is ambiguous");
   return { packageName: launcher[0], category: launcher[1] };
 }
-async function command(argv: readonly string[], options: { cwd?: string; input?: string; timeoutMs?: number; allowedExitCodes?: readonly number[] } = {}): Promise<string> {
+/** Recognize only the helper's fixed, credential-free event; never retain raw stderr. */
+async function firstWinrmResponse(stream: ReadableStream<Uint8Array>, observed: (at: number) => void): Promise<void> {
+  const reader = stream.getReader(), decoder = new TextDecoder();
+  let pending = "", discarded = false, seen = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const part of decoder.decode(value, { stream: true }).split(/(\n)/u)) {
+        if (part === "\n") {
+          const match = !discarded && !seen ? /^WINRM_FIRST_RESPONSE ([0-9]{13})$/u.exec(pending) : null;
+          if (match) { seen = true; observed(Number(match[1])); }
+          pending = ""; discarded = false;
+        } else if (!discarded && pending.length + part.length <= 80) pending += part;
+        else discarded = true;
+      }
+    }
+  } finally { reader.releaseLock(); }
+}
+export async function command(argv: readonly string[], options: {
+  cwd?: string; input?: string; timeoutMs?: number; allowedExitCodes?: readonly number[];
+  transportProbe?: (probe: WindowsTransportProbe) => Promise<void>;
+} = {}): Promise<string> {
+  let probe: WindowsTransportProbe | undefined = options.transportProbe === undefined ? undefined : {
+    startedAt: Date.now(), timeoutMs: options.timeoutMs ?? 120_000, firstResponseLatencyMs: null, signalAt: null, exitedAt: null, exitCode: null,
+  };
+  if (probe) await options.transportProbe!({ ...probe });
+  let updates = Promise.resolve(), checkpointFailed = false, checkpointFailure: unknown;
+  const record = (patch: Partial<WindowsTransportProbe>) => {
+    if (!probe) return;
+    probe = { ...probe, ...patch };
+    const snapshot = probe;
+    updates = updates.then(() => options.transportProbe!(snapshot)).catch(error => {
+      if (!checkpointFailed) { checkpointFailed = true; checkpointFailure = error; }
+    });
+  };
   const proc = Bun.spawn([...argv], { cwd: options.cwd ?? root, stdin: options.input === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe" });
-  const deadline = setTimeout(() => proc.kill(), options.timeoutMs ?? 120_000);
+  const deadline = setTimeout(() => {
+    if (proc.exitCode !== null) return;
+    const signalAt = Date.now();
+    proc.kill();
+    record({ signalAt });
+  }, probe === undefined ? options.timeoutMs ?? 120_000 : Math.max(0, probe.startedAt + probe.timeoutMs - Date.now()));
+  const exited = proc.exited.then(code => { clearTimeout(deadline); return { code, at: Date.now() }; });
   try {
     if (options.input !== undefined) {
       if (proc.stdin === undefined || typeof proc.stdin === "number") throw new Error("subprocess input pipe unavailable");
       proc.stdin.write(options.input); proc.stdin.end();
     }
-    const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    if (!(options.allowedExitCodes ?? [0]).includes(code)) throw new Error(`${argv[0]?.split(/[\\/]/u).at(-1)} exited ${code}; output withheld`);
+    const [exit, out] = await Promise.all([exited, new Response(proc.stdout).text(), probe === undefined
+      ? new Response(proc.stderr).text()
+      : firstWinrmResponse(proc.stderr, at => record({ firstResponseLatencyMs: at - probe!.startedAt }))]);
+    record({ exitedAt: exit.at, exitCode: exit.code });
+    await updates;
+    if (checkpointFailed) throw checkpointFailure;
+    if (!(options.allowedExitCodes ?? [0]).includes(exit.code)) throw new Error(`${argv[0]?.split(/[\\/]/u).at(-1)} exited ${exit.code}; output withheld`);
     return out.trim();
   } finally { clearTimeout(deadline); }
 }
@@ -146,14 +192,14 @@ export async function verifyWindowsStaleLaunch(origin: string, session: Record<s
 }
 
 export async function waitForStableWindowsTransport(
-  probe: () => Promise<Record<string, unknown>>,
+  probe: (timeoutMs: number) => Promise<Record<string, unknown>>,
   clock: Pick<WindowsRuntime, "now" | "sleep">,
   deadline: number,
 ): Promise<Record<string, unknown>> {
   let samples = 0; let firstSuccess = 0;
   while (clock.now() < deadline) {
     try {
-      const observation = await probe();
+      const observation = await probe(Math.max(1, Math.min(180_000, deadline - clock.now())));
       const observedAt = clock.now();
       if (observedAt >= deadline) break;
       if (samples === 0) firstSuccess = observedAt;
@@ -246,7 +292,7 @@ export async function createWindowsRuntime(options: { development?: boolean } = 
     },
   };
   const guestScript = await readFile(join(import.meta.dir, "windows-qualification-guest.ps1"), "utf8");
-  const winrm = async (context: WindowsContext, script: string, input?: unknown, timeoutMs = 300_000, upload?: { sourcePath: string; destinationPath: string }, mutation = true, principal: WindowsPrincipal = "administrator"): Promise<Record<string, unknown>> => {
+  const winrm = async (context: WindowsContext, script: string, input?: unknown, timeoutMs = 300_000, upload?: { sourcePath: string; destinationPath: string }, mutation = true, principal: WindowsPrincipal = "administrator", transportProbe?: WindowsContext["transportProbe"]): Promise<Record<string, unknown>> => {
     const access = await loadAccess(context.epoch);
     if (mutation || !access.host) {
       const current = await provider.instance(access.instance);
@@ -259,7 +305,10 @@ export async function createWindowsRuntime(options: { development?: boolean } = 
       }
     }
     const credential = account(access, principal);
-    const result = JSON.parse(await command([python, join(import.meta.dir, "windows-winrm.py")], { input: JSON.stringify({ host: access.host, username: credential.account, password: credential.password, script, input, upload }), timeoutMs, allowedExitCodes: [0, 1] })) as { exitCode: number; stdout: string; diagnostic: string };
+    const result = JSON.parse(await command([python, join(import.meta.dir, "windows-winrm.py")], {
+      input: JSON.stringify({ host: access.host, username: credential.account, password: credential.password, script, input, upload, observeTransport: transportProbe !== undefined }),
+      timeoutMs, allowedExitCodes: [0, 1], ...(transportProbe === undefined ? {} : { transportProbe }),
+    })) as { exitCode: number; stdout: string; diagnostic: string };
     if (result.exitCode === -1) throw new Error(`WinRM transport not yet ready: ${result.diagnostic}`);
     if (result.exitCode !== 0) throw new Error(`WinRM guest failed (${result.exitCode}): ${result.diagnostic}`);
     try { return JSON.parse(result.stdout.trim()) as Record<string, unknown>; }
@@ -274,7 +323,8 @@ export async function createWindowsRuntime(options: { development?: boolean } = 
     try {
       return await winrm(context, guestScript, { origin: access.origin, ...identity, ...extra, action, epoch: context.epoch, pins,
         candidateVersion: releaseVersion(context.identity.candidate.tag), previousVersion: releaseVersion(context.identity.predecessor.tag),
-        login: environment.OMP_STABLE_WINDOWS_LOGIN ?? "alphastorm@github" }, timeoutMs, undefined, !["transport", "prelogin", "state", "ready", "interactive", "publication"].includes(action), principal);
+        login: environment.OMP_STABLE_WINDOWS_LOGIN ?? "alphastorm@github" }, timeoutMs, undefined, !["transport", "prelogin", "state", "ready", "interactive", "publication"].includes(action), principal,
+        action === "transport" ? context.transportProbe : undefined);
     } catch (error) { throw new Error(`Windows ${action}: ${error instanceof Error ? error.message : "guest operation failed"}`); }
   };
   const upload = async (context: WindowsContext, local: string, name: string) => {
@@ -398,7 +448,7 @@ export async function createWindowsRuntime(options: { development?: boolean } = 
           return true;
         }, Math.max(0, deadline - Date.now()), "provider Windows allocation");
         return waitForStableWindowsTransport(
-          () => ps(context, "transport", {}, Math.max(1, Math.min(75_000, deadline - Date.now()))),
+          timeoutMs => ps(context, "transport", {}, timeoutMs),
           { now: Date.now, sleep: Bun.sleep }, deadline,
         );
       }

@@ -5,6 +5,7 @@ import json
 import re
 import signal
 import sys
+import time
 
 from winrm.protocol import Protocol
 
@@ -72,6 +73,9 @@ def main():
     shell = protocol.open_shell()
     command = None
     try:
+        if request.get('observeTransport') is True:
+            # Fixed metadata only: no host, credential, payload, or diagnostic text.
+            print('WINRM_FIRST_RESPONSE ' + str(time.time_ns() // 1_000_000), file=sys.stderr, flush=True)
         command = protocol.run_command(shell, 'powershell.exe', [
             '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
             base64.b64encode(BOOTSTRAP.encode('utf-16-le')).decode('ascii'),
