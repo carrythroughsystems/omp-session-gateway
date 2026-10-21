@@ -868,6 +868,9 @@ Every BrowserStack record-audit failure persists an incident through deletion an
 nested media containers and long raw image-signature runs remain media despite ignored capability
 echoes, queried artifacts require all six reviewed `X-Amz-*` keys exactly once with only
 `response-content-type` optional, and conflicting WebDriver session ids fail regardless of capabilities shape.
+Any finalized `video_url` outside the mandatory pinned session-bound dashboard presentation is
+an incident, and text logs also inspect unquoted/single-quoted media keys and `=` assignments
+without mistaking quoted placeholder brackets for retained containers.
 Post-audit validation/schema/census errors atomically checkpoint a `post-audit unvalidated record`
 incident with safely recoverable pinned-origin whole-value URLs from strict JSON and still proceed
 through DELETE and bounded record/log/artifact absence checks, never heuristic recovery of malformed

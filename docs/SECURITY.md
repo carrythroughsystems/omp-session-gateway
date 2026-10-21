@@ -595,6 +595,10 @@ synthetic model key and no user data, and both revoked when the run stops them. 
   `response-content-type` optional, every BrowserStack record-audit failure persists an incident
   without broadening trusted error causes, and conflicting WebDriver session identifiers are
   unidentified regardless of capabilities shape.
+  Finalized `video_url` must match the session-bound dashboard video presentation before any media
+  exclusion, and text-body media keys accept bare/single/double-quoted names with `:` or `=` only
+  for nonempty containers or quoted/unquoted media-prefixed strings, never quoted placeholders
+  such as `"[REDACTED]"`.
   No lingering-clean-text exception remains. Any already-audited artifact that starts serving
   content is inspected again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
   Signed references persist only in private 0600 recovery progress (inside its 0700 directory),

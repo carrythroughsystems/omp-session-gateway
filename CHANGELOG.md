@@ -152,6 +152,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   echoes as media, persist every failed BrowserStack audit through deletion/crash recovery,
   reject conflicting WebDriver ids regardless of capabilities shape, and permit only complete
   six-key signed-artifact queries plus optional `response-content-type`.
+- Require the pinned session-bound BrowserStack `video_url` presentation on finalized records,
+  and detect text-log media under unquoted/single/double-quoted keys and `:`/`=` assignments
+  without treating quoted placeholders as retained containers.
 
 ## [v0.7.7] — 2026-10-13
 

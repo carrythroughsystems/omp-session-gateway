@@ -1332,6 +1332,9 @@ diagnostics distinguish successful incident removal from unverified removal.
 Any BrowserStack record-audit failure persists an incident independently of typed diagnostic causes,
 artifact queries require all six reviewed `X-Amz-*` keys exactly once with only `response-content-type`
 optional, and differing top-level/nested WebDriver ids are unidentified even without a capabilities object.
+Finalized session metadata requires the exact pinned `video_url` presentation before media
+exemption, while text media-key detection accepts unquoted or either-quoted keys with `:`/`=`
+and nonempty containers or media-prefixed strings without classifying quoted placeholders as media.
 Every non-media retained-surface body, before or after the audit and whatever its HTTP status,
 is scanned raw before rejection, with strict canonical scanning and discovery for declared JSON.
 Rejected DELETE and signed-artifact bodies and transient 5xx bodies before GET retry are included;

@@ -30,15 +30,15 @@ const nestedArtifact = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/
 const video = `https://bs-selenium-logs-usw.s3.us-west-1.amazonaws.com/${id}/video.mp4`;
 const replayCapability = "SYNTHETIC_REPLAY_ROOM.SYNTHETIC_R1_R2_WINDOW_CANARY_NOT_A_REAL_KEY";
 const replayWindow = replayCapability.slice(28, 44);
-const record = {
-  hashed_id: id, build_hashed_id: build, status: "done", device: "iPad 10th", os: "ios", os_version: "27.0",
-  browser: "ipad", video_url: video, browser_console_logs_url: artifact,
-};
 const presentation = {
   browser_url: `https://automate.browserstack.com/builds/${build}/sessions/${id}`,
   public_url: `https://automate.browserstack.com/builds/${build}/sessions/${id}?auth_token=${"SYNTHETIC_PUBLIC_ONLY_".padEnd(64, "X")}`,
   logs: `https://automate.browserstack.com/builds/${build}/sessions/${id}/logs`,
   video_url: `https://automate.browserstack.com/sessions/${id}/video?token=${"SYNTHETIC_VIDEO_ONLY_".padEnd(194, "X")}&source=TEST_SYN&diff=1.234567890`,
+};
+const record = {
+  hashed_id: id, build_hashed_id: build, status: "done", device: "iPad 10th", os: "ios", os_version: "27.0",
+  browser: "ipad", video_url: presentation.video_url, browser_console_logs_url: artifact,
 };
 const documentation = "https://www.browserstack.com/docs/automate/selenium/synthetic-optimization#synthetic-fragment";
 const observedArtifacts = {
@@ -940,13 +940,61 @@ describe("BrowserStack complete retention and deletion", () => {
     const browserUrl = presentation.browser_url;
     const publicUrl = presentation.public_url;
     const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, browser_url: browserUrl, public_url: publicUrl } }) });
-    expect((await fixture.audit())?.dashboardReferences).toBe(2);
+    expect((await fixture.audit())?.dashboardReferences).toBe(3);
     await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
     expect(fixture.calls.some(call => call.url === browserUrl || call.url === publicUrl)).toBe(false);
     expect(fixture.removal.artifacts.some(item => item.url.startsWith(pins.dashboardOrigins[0]!))).toBe(false);
     restore?.();
     const misplaced = provider({ raw: JSON.stringify({ automation_session: { ...record, insights: { browser_url: browserUrl } } }) });
     await expect(misplaced.audit()).rejects.toThrow("unreviewed");
+  });
+  test.each([
+    ["video data URI", "data:video/mp4;base64,SYNTHETIC_VIDEO_INDICATOR"],
+    ["image data URI", "data:image/png;base64,SYNTHETIC_IMAGE_INDICATOR"],
+    ["plain string", "SYNTHETIC_NON_URL_INDICATOR"],
+    ["storage URL", video],
+    ["another dashboard URL", presentation.browser_url],
+    ["wrong session", presentation.video_url.replace(id, "c".repeat(40))],
+    ["empty string", ""],
+    ["missing", undefined],
+    ["null", null],
+    ["boolean", false],
+    ["object", {}],
+    ["array", []],
+  ] as const)("finalized video_url rejects a %s instead of treating it as an exempt indicator", async (_name, value) => {
+    const metadata = { ...record, video_url: value };
+    expect(() => browserStackReferences(id, build, metadata, true)).toThrow(BrowserStackAuditFailure);
+    const fixture = provider({ raw: JSON.stringify({ automation_session: metadata }) });
+    await expect(fixture.audit()).rejects.toThrow(BrowserStackAuditFailure);
+    expect(fixture.calls).toHaveLength(1);
+  });
+  test("the pinned finalized video presentation is mandatory, counted and never fetched or inventoried", async () => {
+    const fixture = provider();
+    expect(await fixture.audit()).toMatchObject({ complete: true, video: false, screenshots: 0, dashboardReferences: 1 });
+    expect(fixture.removal.artifacts).toEqual([{ url: artifact, buildId: build, kind: "text" }]);
+    await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
+    expect(fixture.incidents).toEqual([]);
+    expect(fixture.calls.some(call => call.url === presentation.video_url || call.url === video)).toBe(false);
+  });
+  test.each(["data:video/mp4;base64,SYNTHETIC_LATE_VIDEO", undefined])("an invalid post-audit video indicator persists an incident while deletion still completes: %s", async value => {
+    const fixture = provider({ preDeleteSessionRaw: JSON.stringify({ automation_session: { ...record, video_url: value } }) });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("incident");
+    expect(fixture.incidents).toContain("post-audit unvalidated record");
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ audited: true, incident: true, recordDeleted: true, recordRemoved: true });
+  });
+  test("running metadata does not exempt an unvalidated video value from media detection", async () => {
+    const fixture = provider({ preDeleteSessionRaw: JSON.stringify({ automation_session: {
+      ...record, status: "running", video_url: "data:video/mp4;base64,SYNTHETIC_RUNNING_VIDEO",
+    } }) });
+    const lane = auditedAttempt(fixture);
+    const error = await lane.attempt.catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("incident");
+    expect(fixture.inspected.some(record => record.screenshots > 0)).toBe(true);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
   });
   test("the observed finalized Galaxy record audits clean without fetching presentation or docs hosts", async () => {
     const fixture = provider({
@@ -1279,12 +1327,16 @@ describe("BrowserStack complete retention and deletion", () => {
     const malformed = provider({ log: "not JSON", logType: "application/json" });
     await expect(malformed.api.testRecord(id)).rejects.toThrow();
   });
-  test.each([ ["missing required logs", { missingLogs: true }], ["oversized body", { large: true }], ["unknown video state", { videoStatus: 401 }] ] as const)("refuses %s", async (_name, options) => {
+  test.each([ ["missing required logs", { missingLogs: true }], ["oversized body", { large: true }] ] as const)("refuses %s", async (_name, options) => {
     const fixture = provider(options);
     await expect(fixture.api.testRecord(id)).rejects.toThrow();
   });
+  test("an unknown signed-media state remains a failure outside the dashboard video indicator", async () => {
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, insights: { recording: video } } }), videoStatus: 401 });
+    await expect(fixture.audit()).rejects.toThrow("video retention state is unknown");
+  });
   test("reports kept media and refuses new/unreviewed retained surfaces", async () => {
-    const fixture = provider({ media: true });
+    const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, insights: { recording: video } } }), media: true });
     expect((await fixture.api.testRecord(id))?.video).toBe(true);
     restore?.();
     const invalid = provider({ raw: JSON.stringify({ automation_session: { ...record, unreviewed_media_url: "https://unreviewed.example/video" } }) });
@@ -1335,7 +1387,7 @@ describe("BrowserStack complete retention and deletion", () => {
   test("fresh deletion reconstructs an inventory from the complete strictly parsed record", async () => {
     const fixture = provider();
     await fixture.api.deleteRecord(id, fixture.removal, fixture.clock);
-    expect(fixture.removal.artifacts).toHaveLength(2);
+    expect(fixture.removal.artifacts).toEqual([{ url: artifact, buildId: build, kind: "text" }]);
     expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
   });
   test.each([
@@ -1346,6 +1398,19 @@ describe("BrowserStack complete retention and deletion", () => {
     const fixture = provider({ log: JSON.stringify(log), logType: "application/json" });
     expect((await fixture.audit())?.screenshots).toBe(1);
   });
+  async function expectTextMedia(log: string, media: boolean): Promise<void> {
+    const fixture = provider({ log });
+    const lane = auditedAttempt(fixture);
+    if (media) {
+      const error = await lane.attempt.catch((error: unknown) => error);
+      expect(errorMessages(error)).toContain("kept video or screenshots for 1 of 3 sessions");
+      expect(errorMessages(error)).toContain("BrowserStack record removed under a retained-record incident");
+      expect(errorMessages(error)).not.toContain("BrowserStack record removal could not be verified");
+    } else await expect(lane.attempt).resolves.toMatchObject({ audit: { recordsWithMedia: 0 } });
+    const resource = parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack");
+    expect(resource?.incident === true).toBe(media);
+    expect(resource?.recordRemoved).toBe(true);
+  }
   test.each([
     [{ takesScreenshot: true }, false],
     [{ video: "false" }, false],
@@ -1366,17 +1431,31 @@ describe("BrowserStack complete retention and deletion", () => {
     [{ screen: "https://media.invalid/SYNTHETIC_OPAQUE_IMAGE" }, true],
     [{ unrelated: "https://media.invalid/SYNTHETIC_TEXT_VIDEO.mp4?synthetic=true" }, true],
   ] as const)("text-log media includes media-valued strings and nonempty containers, not capability flags: %j", async (log, media) => {
-    const fixture = provider({ log: JSON.stringify(log) });
-    const lane = auditedAttempt(fixture);
-    if (media) {
-      const error = await lane.attempt.catch((error: unknown) => error);
-      expect(errorMessages(error)).toContain("kept video or screenshots for 1 of 3 sessions");
-      expect(errorMessages(error)).toContain("BrowserStack record removed under a retained-record incident");
-      expect(errorMessages(error)).not.toContain("BrowserStack record removal could not be verified");
-    } else await expect(lane.attempt).resolves.toMatchObject({ audit: { recordsWithMedia: 0 } });
-    const resource = parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack");
-    expect(resource?.incident === true).toBe(media);
-    expect(resource?.recordRemoved).toBe(true);
+    await expectTextMedia(JSON.stringify(log), media);
+  });
+  test.each([
+    ["screenshot: {payload: opaque}", true],
+    ["'screenshot': {payload: opaque}", true],
+    ['"video" = [{payload: opaque}]', true],
+    ["visual=[opaque]", true],
+    ["video=data:video/mp4;base64,SYNTHETIC_VIDEO", true],
+    ["'screen'='https://media.invalid/SYNTHETIC_OPAQUE_MEDIA'", true],
+    ["screenshot=https://media.invalid/SYNTHETIC_OPAQUE_MEDIA", true],
+    ["visual=iVBORw0KGgoSYNTHETIC_IMAGE", true],
+    ["screen='data:application/octet-stream;base64,SYNTHETIC_SCREEN'", true],
+    ['screenshot: "[REDACTED]"', false],
+    ["screenshot='[REDACTED]'", false],
+    ['screenshot: "{payload: opaque}"', false],
+    ["takesScreenshot: true", false],
+    ["disableAutomaticScreenshots=true", false],
+    ['"video":"false"', false],
+    ["screen=null", false],
+    ["visual=1", false],
+    ["screenshot={}", false],
+    ["screenshot=[]", false],
+    ["screenResolution={value: SYNTHETIC}", false],
+  ] as const)("text media keys accept all reviewed quoting/separator forms without placeholder false positives: %s", async (log, media) => {
+    await expectTextMedia(log, media);
   });
   test.each(["iVBORw0KGgo", "/9j/", "R0lGOD", "UklGR"])("bare %s image runs in raw prose are media", async signature => {
     const fixture = provider({ log: `synthetic image dump: ${signature}${"SYNTHETIC".repeat(8).slice(0, 64)} end` });
