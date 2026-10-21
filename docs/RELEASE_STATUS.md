@@ -1,14 +1,21 @@
 # Release status
 
 <!-- release-generate:current:start -->
+## v0.7.8 preparation — not yet qualified or published
+
+**Prepared:** 2026-10-21. This release uses stock OMP v18.12.5 as its engineering baseline. The 26 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.
+
+- Planned qualification: Debian 13 x86-64; macOS 27.0 (26A428) arm64 in a Virtualization.framework guest (VirtualMac2,1, ADR-033); a disposable Windows Server 2025 host (the Administrator lifecycle and a fresh standard-user install); Chrome on the physical Pixel 10 Pro, including its background-Push lane; and real iPhone, iPad, and Galaxy devices in TestingBot's cloud. Every lane must pass against these exact signed bytes before stable promotion; the plan is not evidence.
+
+Published v0.7.7 remains the predecessor and current stable. The planned candidate tag is `v0.7.8-prealpha.1`; no qualification or publication is claimed. The stable lock stays unchanged until approval.
+<!-- release-generate:current:end -->
+
 ## Mainline v0.7.7 — published stable
 
-<!-- release-generate:publication:start -->
 **Updated:** 2026-10-13. [v0.7.7](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.7) was published at **2026-10-14T00:53:34Z** and is GitHub Latest. [Signed release workflow](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/38492573699).
 
 **Stable source:** `dabcf8984a12cb6203409805b5e385bc86771dce`.<br>
 **Stable archive SHA-256:** `3210337a76c2137346b55fb81b32df98ff56bddc725b0e0d754a71009328528e`.
-<!-- release-generate:publication:end -->
 
 **Candidate:** [v0.7.7-prealpha.2](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.7-prealpha.2).<br>
 **Source:** `c8da6e07cc62b7b855c509037a827f082b564c69`.<br>
@@ -461,7 +468,6 @@ Schema 3 campaign 2026-10-13T23:35:19.538Z–2026-10-14T00:25:51.856Z; orchestra
 
 **Runtime equivalence gate:** the approval driver must compare a clean stable-channel build with the qualified candidate before merging. The receipt does not prove that later build comparison. Only release-info.json, SBOM.spdx.json, STABLE_RELEASE.lock.json and schemas/stable-release.schema.json may differ.
 
-<!-- release-generate:smoke:start -->
 ### Published-byte Studio/Pixel verification
 
 Recorded 2026-10-13. Published-byte smoke passed against the stable source and digest above. Stock OMP 18.10.2, binary SHA-256 `df9f273cb0120795940f918f94a22aa8d7c667f2fd97ec21e74f841c2c878f3e`; app asset `/assets/app.5c4a35b3f50f.js`.
@@ -501,8 +507,6 @@ Recorded 2026-10-13. Published-byte smoke passed against the stable source and d
 ```
 
 This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
-<!-- release-generate:smoke:end -->
-<!-- release-generate:current:end -->
 
 ## Mainline v0.7.6 — published stable
 
@@ -1997,6 +2001,19 @@ Recorded 2026-10-03. Published-byte smoke passed against the stable source and d
 ```
 
 This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
+
+## Engineering baseline v18.12.5 — source pins only
+
+On 2026-10-21 (#423), `scripts/upstream-pins.ts` derived the stock OMP v18.12.5 source pin
+`d5cd750e41fede277f9eb933455da92a0738915e`, tree `1d19bf65af4446fa9bfda4ed0a7d09315b02d9c8`, and
+the Darwin arm64 and Windows x64 native hashes from official npm tarballs after verifying
+registry integrity. Source review from v18.12.3 found registry v1, the discovery file format and
+socket paths, the relay protocol, `collab.autoStart`, and every collaboration, `collab-web`, and
+`packages/wire/src/index.ts` source unchanged; can1357/oh-my-pi#16361 documents GitLab MR
+references for the extension `ctx.annotations` API in `docs/extensions.md` and the version bumps
+touch `package.json`, neither of which changes what the gateway reads or sends. The embedded
+client stays at v18.4.2. No canary, candidate, campaign, or platform qualification is claimed;
+the published matrix above is unchanged.
 
 ## Engineering baseline v18.12.3 — source pins only
 

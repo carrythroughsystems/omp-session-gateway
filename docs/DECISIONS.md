@@ -919,6 +919,29 @@ published v0.7.6 remains qualified on v18.8.9.
 
 ---
 
+**Engineering baseline update (2026-10-21):** Accept published mainline v18.12.5
+(`d5cd750e41fede277f9eb933455da92a0738915e`, tree `1d19bf65af4446fa9bfda4ed0a7d09315b02d9c8`)
+as the host engineering pin (#423), with registry v1 and minimum host `18.1.20` unchanged.
+`scripts/upstream-pins.ts` derived every pin. Relative to v18.12.3,
+`packages/coding-agent/src/collab` (including `host.ts`, `registry.ts`, and `settings.ts`),
+`docs/collab.md`, `extension-ui-controller.ts`, `modes/types.ts`, `builtin-registry.ts`,
+`builtin-collaboration.ts`, `packages/collab-web`, and `packages/wire/src/index.ts` are
+byte-identical, so the discovery file format, socket paths, registry v1, the relay protocol, and
+`collab.autoStart` behavior are unchanged.
+[can1357/oh-my-pi#16361](https://github.com/can1357/oh-my-pi/pull/16361)
+(merge `d1bffdfdcbf9ee36db8e5b4b72d24790dd00689f`; `9e8cdd6a238725e6707ec83f154bd7b12f4d9f4c`)
+documents in `docs/extensions.md` that a `ctx.annotations` `{ kind: "pr", ref }` diff source
+also accepts a GitLab MR URL or an `mr://` reference, an extension API the gateway neither reads
+nor sends. The v18.12.4 and v18.12.5 version bumps
+(`0b2352fa888a2fa5e28be197eaab4ef7879e53fe`, `d5cd750e41fede277f9eb933455da92a0738915e`) touch
+only `package.json`. `@oh-my-pi/pi-wire` 18.12.5 changes only its package version, and
+`@oh-my-pi/collab-web` stays 16.3.6; the embedded client keeps its v18.4.2 provenance and wire pin.
+
+This is source review only: no canary, candidate, or qualification is claimed for v18.12.5, and
+published v0.7.7 remains qualified on v18.10.2.
+
+---
+
 **Engineering baseline update (2026-10-19):** Accept published mainline v18.12.3
 (`53a0377db6845e0dae606146130766ec92d407fd`, tree `51822a49a4cc7eebabdb1e848c79f8aa873deb40`)
 as the host engineering pin (#409), with registry v1 and minimum host `18.1.20` unchanged.
