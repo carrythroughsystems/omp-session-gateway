@@ -57,7 +57,7 @@ export function parseReleaseClass(value: unknown = "patch"): ReleaseClass {
 /** Selection, preparation and promotion must agree on the same requested transition. */
 export function nextReleaseVersion(previousTag: string, releaseClass: ReleaseClass = "patch"): string {
   if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.test(previousTag)) throw new Error("expected exact published stable tag");
-  const [major, minor, patch] = previousTag.slice(1).split(".").map(BigInt);
+  const [major, minor, patch] = releaseVersion(previousTag).split(".").map(BigInt);
   return parseReleaseClass(releaseClass) === "minor" ? `${major}.${minor! + 1n}.0` : `${major}.${minor}.${patch! + 1n}`;
 }
 
