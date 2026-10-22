@@ -17,6 +17,21 @@ export const MAX_PUSH_ENDPOINT_BYTES = 4 * 1024;
 export const MAX_PUSH_SUBSCRIPTION_BYTES = 8 * 1024;
 export const MAX_REQUEST_ID_BYTES = 128;
 export const MAX_PUSH_PENDING_COUNT = 1_000;
+/**
+ * Public bootstrap contract for the PWA: this gateway's own source identity, the explicitly
+ * configured remote gateways it may contact directly, and the home document's speech opt-in.
+ * Versioned independently of the session wire so an older gateway (no route) and an unsupported
+ * version are distinguishable to the browser.
+ */
+export const CLIENT_CONFIG_VERSION = 1 as const;
+/** The implicit local source plus every configured remote target. */
+export const MAX_FLEET_SOURCES = 8;
+export const MAX_FLEET_TARGETS = MAX_FLEET_SOURCES - 1;
+/** Reserved for the gateway serving the document; remote targets may never use it. */
+export const LOCAL_FLEET_SOURCE_ID = "local";
+export const FLEET_SOURCE_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/u;
+export const MAX_FLEET_LABEL_CODEPOINTS = 64;
+export const MAX_CLIENT_CONFIG_BYTES = 32 * 1024;
 
 
 export type LaunchMode = "view" | "control";
@@ -215,4 +230,23 @@ export interface LaunchResponse {
 export interface ProblemResponse {
   readonly code: string;
   readonly message: string;
+}
+
+/** One gateway the browser may list and launch against. Never carries credentials. */
+export interface FleetSource {
+  readonly id: string;
+  readonly label: string;
+  /** Canonical `URL.origin`: scheme, host, and non-default port only. */
+  readonly origin: string;
+}
+
+export interface ClientConfigResponse {
+  readonly version: typeof CLIENT_CONFIG_VERSION;
+  /** The gateway serving this document; `id` is always `LOCAL_FLEET_SOURCE_ID`. */
+  readonly local: FleetSource;
+  /** Configured remote gateways in configuration order; the local source is not repeated. */
+  readonly targets: readonly FleetSource[];
+  readonly speech: {
+    readonly browserRecognition: boolean;
+  };
 }

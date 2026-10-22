@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/omp-session-gateway/client-config.schema.json",
+  "title": "OMP Session Gateway public client configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "local",
+    "targets",
+    "speech"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "local": {
+      "$ref": "#/$defs/source"
+    },
+    "targets": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+        "$ref": "#/$defs/source"
+      }
+    },
+    "speech": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "browserRecognition"
+      ],
+      "properties": {
+        "browserRecognition": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "origin"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "origin": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 256
+        }
+      }
+    }
+  }
+}

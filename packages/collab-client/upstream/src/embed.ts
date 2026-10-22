@@ -6,7 +6,7 @@ import "./styles/tokens.css";
 import "./styles/base.css";
 
 
-export type { CollabEmbedOptions, CollabEmbedState } from "./embed-contract";
+export type { CollabEmbedOptions, CollabEmbedState, GatewayProbeResult, PathHealthState } from "./embed-contract";
 let activeRoot: Root | undefined;
 let activeDispose: (() => void) | undefined;
 
