@@ -19,7 +19,7 @@
     },
     "apps/gateway": {
       "name": "@omp-session-gateway/gateway",
-      "version": "0.7.8",
+      "version": "0.8.0",
       "dependencies": {
         "@omp-session-gateway/protocol": "workspace:*",
         "web-push": "3.6.7",
@@ -30,14 +30,14 @@
     },
     "apps/web": {
       "name": "@omp-session-gateway/web",
-      "version": "0.7.8",
+      "version": "0.8.0",
       "dependencies": {
         "@omp-session-gateway/protocol": "workspace:*",
       },
     },
     "packages/collab-client": {
       "name": "@omp-session-gateway/collab-client",
-      "version": "0.7.8",
+      "version": "0.8.0",
       "dependencies": {
         "@oh-my-pi/pi-wire": "18.4.2",
         "katex": "0.18.5",
@@ -49,7 +49,7 @@
     },
     "packages/protocol": {
       "name": "@omp-session-gateway/protocol",
-      "version": "0.7.8",
+      "version": "0.8.0",
     },
   },
   "packages": {
