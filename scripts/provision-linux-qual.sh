@@ -137,11 +137,16 @@ readonly OPENRC_SYNTHETIC_ORIGIN="https://openrc-qual.example.invalid"
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omp-session-gateway-qual"
 readonly STATE_FILE="$STATE_DIR/${DROPLET_NAME}.json"
 readonly KNOWN_HOSTS="$STATE_DIR/${DROPLET_NAME}.known_hosts"
+readonly PROVIDER_EVIDENCE_DIR="${OMP_QUAL_EVIDENCE_DIR:-$STATE_DIR/provider-evidence}"
 
 LOCAL_TEMP=""
 DROPLET_JSON=""
 DROPLET_IP=""
 DROPLET_ID=""
+PROVIDER_EVIDENCE_RUN=""
+PROVIDER_REQUEST_NUMBER=0
+PROVIDER_BODY=""
+PROVIDER_STATUS=""
 HOURLY_RATE=""
 SSH_OPTS=()
 
@@ -196,9 +201,11 @@ droplet_exists_quietly() {
 # DigitalOcean's list endpoint can still report the droplet present, so without this a fully
 # successful destroy prints the "STILL BILLING" banner and teaches the operator to ignore it.
 DESTROY_CONFIRMED=0
+DESTROY_REQUESTED=0
 
 on_exit() {
   local code=$?
+  trap - EXIT
   if [ -n "$LOCAL_TEMP" ] && [ -d "$LOCAL_TEMP" ]; then rm -rf "$LOCAL_TEMP"; fi
   if [ "$DESTROY_CONFIRMED" -eq 0 ] && droplet_exists_quietly; then
     printf '\n'
@@ -206,8 +213,9 @@ on_exit() {
     printf '  #  %-54s#\n' "$DROPLET_NAME IS STILL RUNNING AND STILL BILLING"
     printf '  #  %-54s#\n' "run: $0 destroy"
     printf '  ############################################################\n'
+    if [ "$DESTROY_REQUESTED" -eq 1 ]; then code=1; fi
   fi
-  return "$code"
+  exit "$code"
 }
 
 need_command() {
@@ -232,6 +240,50 @@ state_write() {
 
 # ---------------------------------------------------------------------------- droplet queries
 
+# Capture response bodies/statuses outside LOCAL_TEMP, including failed requests. The existing
+# environment/doctl credential stays in memory and curl's stdin, never argv or retained evidence.
+provider_request() {
+  set +x
+  local method="$1" path="$2" body_file="${3:-}" timeout="${4:-30}"
+  local token response curl_exit=0 prefix
+  token="${DIGITALOCEAN_ACCESS_TOKEN:-}"
+  if [ -z "$token" ]; then token="$(doctl auth token 2>/dev/null)" || die "cannot read the existing doctl credential"; fi
+  case "$token" in
+    '' | *[!a-zA-Z0-9_-]*) die "DigitalOcean credential is missing or not a bearer token" ;;
+  esac
+  if [ -z "$PROVIDER_EVIDENCE_RUN" ]; then
+    mkdir -p "$PROVIDER_EVIDENCE_DIR" || die "cannot create provider evidence directory"
+    chmod 700 "$PROVIDER_EVIDENCE_DIR"
+    PROVIDER_EVIDENCE_RUN="$(mktemp -d "$PROVIDER_EVIDENCE_DIR/request.XXXXXX")" ||
+      die "cannot create provider evidence run"
+  fi
+  PROVIDER_REQUEST_NUMBER=$((PROVIDER_REQUEST_NUMBER + 1))
+  prefix="$PROVIDER_EVIDENCE_RUN/$PROVIDER_REQUEST_NUMBER"
+  local args=(--silent --show-error --connect-timeout 10 --max-time "$timeout"
+    --max-filesize 2097152 --request "$method" --write-out $'\n%{http_code}')
+  if [ -n "$body_file" ]; then args+=(--header "Content-Type: application/json" --data-binary "@$body_file"); fi
+  response="$(printf 'header = "Authorization: Bearer %s"\n' "$token" |
+    curl --disable --config - "${args[@]}" "https://api.digitalocean.com/v2$path")" || curl_exit=$?
+  PROVIDER_STATUS="${response##*$'\n'}"
+  PROVIDER_BODY="${response%$'\n'*}"
+  PROVIDER_BODY="${PROVIDER_BODY//"$token"/[REDACTED_CREDENTIAL]}"
+  printf '%s\n' "$PROVIDER_BODY" >"$prefix.body.json" || die "cannot retain provider response"
+  jq -n --arg method "$method" --arg path "$path" --arg status "$PROVIDER_STATUS" \
+    --argjson curl_exit "$curl_exit" \
+    '{method: $method, path: $path, http_status: $status, curl_exit: $curl_exit}' >"$prefix.request.json" ||
+    die "cannot retain provider response status"
+  [ "$curl_exit" -eq 0 ] || die "DigitalOcean $method $path transport failed; evidence: $prefix"
+}
+
+validate_droplet_identity() {
+  printf '%s' "$DROPLET_JSON" | jq -e --arg name "$DROPLET_NAME" --arg id "$DROPLET_ID" '
+    type == "object" and .name == $name and
+    (.id | type == "number" and . > 0 and . == floor) and
+    ($id == "" or (.id | tostring) == $id) and
+    (.tags | type == "array" and index($name) != null)' >/dev/null ||
+    die "DigitalOcean droplet identity does not match the retained id/name/tag; evidence: $PROVIDER_EVIDENCE_RUN"
+}
+
 size_hourly_rate() {
   doctl compute size list --output json |
     jq -r --arg slug "$DROPLET_SIZE" '.[] | select(.slug == $slug) | .price_hourly | tostring'
@@ -246,19 +298,81 @@ accrued_cost() {
     | "\(($hours * 100 | round) / 100) h elapsed, about $\((($hours * ($rate | tonumber)) * 100 | round) / 100) accrued"'
 }
 
-# Sets DROPLET_JSON/DROPLET_ID/DROPLET_IP. Never call this inside a command substitution: the
-# assignments would be lost with the subshell.
+# Presence is independent of network readiness. Only a 404 for the retained id or a valid empty
+# list without a retained id means absence. Never call inside a substitution: assignments matter.
 load_droplet() {
-  DROPLET_JSON="$(doctl compute droplet list --output json |
-    jq --arg name "$DROPLET_NAME" '[.[] | select(.name == $name)] | first // empty')"
-  [ -n "$DROPLET_JSON" ] || return 1
-  DROPLET_ID="$(printf '%s' "$DROPLET_JSON" | jq -r '.id')"
+  local timeout="${1:-30}" encoded_name
+  DROPLET_ID="$(state_read droplet_id)" || die "cannot read retained droplet id"
+  DROPLET_JSON=""
+  DROPLET_IP=""
+  if [ -z "$DROPLET_ID" ]; then
+    encoded_name="$(jq -nr --arg name "$DROPLET_NAME" '$name | @uri')"
+    provider_request GET "/droplets?tag_name=$encoded_name&per_page=200" "" "$timeout"
+    [ "$PROVIDER_STATUS" = 200 ] || die "DigitalOcean list returned HTTP $PROVIDER_STATUS, not absence"
+    printf '%s' "$PROVIDER_BODY" | jq -e '
+      (.droplets | type == "array") and (.links.pages.next // null) == null' >/dev/null ||
+      die "DigitalOcean droplet list is malformed or paginated, not absence"
+    if printf '%s' "$PROVIDER_BODY" | jq -e '.droplets | length == 0' >/dev/null; then return 1; fi
+    die "droplet tag $DROPLET_NAME exists without a retained create id; refusing adoption or deletion"
+  fi
+  case "$DROPLET_ID" in
+    *[!0-9]* | 0) die "invalid retained droplet id" ;;
+  esac
+  provider_request GET "/droplets/$DROPLET_ID" "" "$timeout"
+  if [ "$PROVIDER_STATUS" = 404 ]; then return 1; fi
+  [ "$PROVIDER_STATUS" = 200 ] || die "DigitalOcean droplet $DROPLET_ID returned HTTP $PROVIDER_STATUS, not absence"
+  DROPLET_JSON="$(printf '%s' "$PROVIDER_BODY" | jq -ce '.droplet')" ||
+    die "DigitalOcean droplet response is malformed, not absence"
+  validate_droplet_identity
+}
+
+read_droplet_ip() {
   DROPLET_IP="$(printf '%s' "$DROPLET_JSON" |
-    jq -r '[.networks.v4[] | select(.type == "public") | .ip_address] | first // ""')"
+    jq -r '[(.networks.v4 // [])[] | select(.type == "public") | .ip_address |
+      select(type == "string" and length > 0)] | first // ""')"
+}
+
+create_droplet() {
+  cloud_init_user_data >"$LOCAL_TEMP/cloud-init.yaml"
+  jq -n --arg name "$DROPLET_NAME" --arg image "$DROPLET_IMAGE" \
+    --arg size "$DROPLET_SIZE" --arg region "$DROPLET_REGION" --arg key "$SSH_KEY_ID" \
+    --rawfile user_data "$LOCAL_TEMP/cloud-init.yaml" \
+    '{name: $name, image: ($image | tonumber? // .), size: $size, region: $region,
+      ssh_keys: [($key | tonumber? // .)], tags: [$name], user_data: $user_data}' >"$LOCAL_TEMP/create.json" ||
+    die "cannot compose droplet create request"
+  provider_request POST /droplets "$LOCAL_TEMP/create.json"
+  [ "$PROVIDER_STATUS" = 202 ] || die "DigitalOcean create returned HTTP $PROVIDER_STATUS; inspect retained response before retrying"
+  DROPLET_JSON="$(printf '%s' "$PROVIDER_BODY" | jq -ce '.droplet')" ||
+    die "DigitalOcean create response is malformed; inspect retained response before retrying"
+  DROPLET_ID="$(printf '%s' "$DROPLET_JSON" |
+    jq -er '.id | select(type == "number" and . > 0 and . == floor) | tostring')" ||
+    die "DigitalOcean create did not return a valid id; inspect retained response before retrying"
+  # Retain a valid create id even if other metadata is incomplete. Every later effect rechecks
+  # id/name/tag identity; a malformed network or tag must not erase the cleanup handle.
+  state_write droplet_id "$DROPLET_ID" || die "cannot retain created droplet id $DROPLET_ID"
+  validate_droplet_identity
+}
+
+wait_for_droplet_network() {
+  local deadline=$((SECONDS + 150)) remaining delay
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -gt 30 ]; then remaining=30; fi
+    if load_droplet "$remaining"; then
+      read_droplet_ip || die "droplet $DROPLET_ID network response is malformed, not absence"
+      if [ -n "$DROPLET_IP" ] &&
+        [ "$(printf '%s' "$DROPLET_JSON" | jq -r '.status')" = active ]; then return 0; fi
+    fi
+    delay=$((deadline - SECONDS))
+    if [ "$delay" -gt 5 ]; then delay=5; fi
+    if [ "$delay" -gt 0 ]; then sleep "$delay"; fi
+  done
+  die "droplet $DROPLET_ID did not become active with public IPv4 within 150s; retained id and provider evidence require cleanup"
 }
 
 require_droplet() {
   load_droplet || die "no droplet named $DROPLET_NAME; run '$0 provision' first"
+  read_droplet_ip || die "droplet $DROPLET_ID network response is malformed, not absence"
   [ -n "$DROPLET_IP" ] || die "droplet $DROPLET_NAME has no public IPv4 address yet; retry shortly"
 }
 
@@ -318,11 +432,6 @@ wait_for() {
   done
   [ -z "$WAIT_LAST_OBSERVATION" ] || measure "$label last observation" "$WAIT_LAST_OBSERVATION"
   die "$label did not become ready within $((attempts * delay))s. The droplet is still running; inspect it with '$0 status'."
-}
-
-droplet_is_active() {
-  [ "$(doctl compute droplet list --output json |
-    jq -r --arg name "$DROPLET_NAME" '[.[] | select(.name == $name)] | first.status // ""')" = "active" ]
 }
 
 ssh_is_up() { ssh "${SSH_OPTS[@]}" "root@${DROPLET_IP}" true; }
@@ -665,27 +774,19 @@ cmd_provision() {
   step "Droplet"
   if load_droplet; then
     created="$(printf '%s' "$DROPLET_JSON" | jq -r '.created_at')"
-    measure "reusing existing droplet" "id $DROPLET_ID, $DROPLET_IP, created $created"
+    measure "reusing existing droplet" "id $DROPLET_ID, created $created"
     measure "cost so far" "$(accrued_cost "$created" "$HOURLY_RATE")"
   else
+    [ -z "$DROPLET_ID" ] || die "retained droplet $DROPLET_ID is not visible; reconcile it before provisioning again"
     note "creating $DROPLET_NAME ($DROPLET_SIZE, $DROPLET_IMAGE, $DROPLET_REGION)"
-    cloud_init_user_data >"$LOCAL_TEMP/cloud-init.yaml"
-    doctl compute droplet create "$DROPLET_NAME" \
-      --image "$DROPLET_IMAGE" \
-      --size "$DROPLET_SIZE" \
-      --region "$DROPLET_REGION" \
-      --ssh-keys "$SSH_KEY_ID" \
-      --tag-names "$DROPLET_NAME" \
-      --user-data-file "$LOCAL_TEMP/cloud-init.yaml" \
-      --wait --output json >"$LOCAL_TEMP/created.json"
-    load_droplet || die "droplet creation reported success but the droplet is not listed"
+    create_droplet
     created="$(printf '%s' "$DROPLET_JSON" | jq -r '.created_at')"
-    measure "created" "id $DROPLET_ID, $DROPLET_IP, created $created"
+    measure "created" "id $DROPLET_ID, created $created"
   fi
-  state_write droplet_id "$DROPLET_ID"
 
   step "Readiness"
-  wait_for "droplet status active" 30 5 droplet_is_active
+  wait_for_droplet_network
+  measure "public IPv4" "$DROPLET_IP"
   wait_for "ssh as root" 60 5 ssh_is_up
   wait_for "cloud-init finished" 60 10 cloud_init_done
   remote_root <<'REMOTE'
@@ -717,6 +818,7 @@ cmd_status() {
     measure "$DROPLET_NAME" "absent (nothing is billing)"
     return 0
   fi
+  read_droplet_ip || die "droplet $DROPLET_ID network response is malformed, not absence"
   local created
   created="$(printf '%s' "$DROPLET_JSON" | jq -r '.created_at')"
   measure "id / ip" "$DROPLET_ID / ${DROPLET_IP:-<none>}"
@@ -784,12 +886,16 @@ REMOTE
 # ---------------------------------------------------------------------------- destroy
 
 cmd_destroy() {
+  DESTROY_REQUESTED=1
   preflight_tools
   init_ssh_options
   HOURLY_RATE="$(size_hourly_rate)"
 
-  local present=0 node_id created code index deleted
-  if load_droplet; then present=1; fi
+  local present=0 node_id created code deadline remaining delay
+  if load_droplet; then
+    present=1
+    read_droplet_ip || DROPLET_IP=""
+  fi
   node_id="$(state_read ts_node_id)"
 
   step "Tailnet node removal"
@@ -826,27 +932,35 @@ REMOTE
   fi
 
   step "Droplet removal"
-  if [ "$present" -eq 0 ]; then
+  if [ -z "$DROPLET_ID" ]; then
     measure "$DROPLET_NAME" "already absent; nothing to delete"
+    DESTROY_CONFIRMED=1
   else
-    created="$(printf '%s' "$DROPLET_JSON" | jq -r '.created_at')"
-    measure "final cost" "$(accrued_cost "$created" "$HOURLY_RATE")"
-    doctl compute droplet delete "$DROPLET_NAME" --force
-    # DigitalOcean's list endpoint is eventually consistent right after a delete, so it can report
-    # the droplet absent and then present again moments later. Trust the poll that observed it gone
-    # rather than re-asking afterwards, which once failed a destroy that had actually succeeded.
-    deleted=0
-    for ((index = 1; index <= 30; index++)); do
-      if ! droplet_exists_quietly; then
-        deleted=1
+    if [ "$present" -eq 1 ]; then
+      created="$(printf '%s' "$DROPLET_JSON" | jq -r '.created_at')"
+      measure "final cost" "$(accrued_cost "$created" "$HOURLY_RATE")"
+    fi
+    provider_request DELETE "/droplets/$DROPLET_ID"
+    case "$PROVIDER_STATUS" in
+      204) ;;
+      404) DESTROY_CONFIRMED=1 ;;
+      *) die "DigitalOcean delete for $DROPLET_ID returned HTTP $PROVIDER_STATUS; droplet may still be billing" ;;
+    esac
+    deadline=$((SECONDS + 150))
+    while [ "$DESTROY_CONFIRMED" -eq 0 ] && [ "$SECONDS" -lt "$deadline" ]; do
+      remaining=$((deadline - SECONDS))
+      if [ "$remaining" -gt 30 ]; then remaining=30; fi
+      if ! load_droplet "$remaining"; then
         DESTROY_CONFIRMED=1
         break
       fi
-      sleep 5
+      delay=$((deadline - SECONDS))
+      if [ "$delay" -gt 5 ]; then delay=5; fi
+      if [ "$delay" -gt 0 ]; then sleep "$delay"; fi
     done
-    [ "$deleted" -eq 1 ] ||
-      die "delete was accepted but $DROPLET_NAME is still listed after 150s; check the DigitalOcean console"
-    measure "$DROPLET_NAME" "deleted and no longer listed"
+    [ "$DESTROY_CONFIRMED" -eq 1 ] ||
+      die "delete was accepted but droplet $DROPLET_ID has not returned HTTP 404 after 150s; check the DigitalOcean console"
+    measure "$DROPLET_NAME" "id $DROPLET_ID confirmed absent (HTTP 404)"
   fi
   rm -f "$KNOWN_HOSTS" "$STATE_FILE"
   measure "local state" "removed $STATE_DIR entries for $DROPLET_NAME"

@@ -442,9 +442,29 @@ forgotten, which is why:
 
 `destroy` is safe to run at any time, including when nothing exists and when the droplet is
 unreachable. It logs the node out of the tailnet, resets the Serve mapping, deletes the tailnet
-device record when `TS_API_KEY` is available, deletes the droplet, waits until it is no longer listed,
-and removes the local state and known-hosts entries. DigitalOcean bills whole hours and does not
+device record when `TS_API_KEY` is available, deletes the **retained create-response id**, requires
+HTTP 204/404 for that DELETE and HTTP 404 for absence, then removes the local state and known-hosts
+entries. Parse, transport and other HTTP failures leave state intact and fail teardown; a
+`STILL RUNNING AND STILL BILLING` reminder during `destroy` also makes its exit nonzero.
+DigitalOcean bills whole hours and does not
 refund a partial one, so destroying at minute five still costs one hour.
+
+Provision checkpoints the id in
+`${XDG_STATE_HOME:-$HOME/.local/state}/omp-session-gateway-qual/<name>.json` before any readiness
+read. It polls that id for active status and a public IPv4 for at most 150 seconds; null or missing
+networks are **not absence**. A retained id returning 404 on a later provision invocation is not
+permission to create another VM. A matching tag without a retained create id is never adopted or
+deleted automatically: inspect the retained create response and account inventory, then use an
+explicit owner-authorized id-based cleanup.
+
+Create/list/get/delete response bodies and HTTP statuses survive EXIT in the private
+`provider-evidence/` directory beside that state (override with `OMP_QUAL_EVIDENCE_DIR`). The workflow
+uploads only this credential-free directory as `droplet-provider-<run>-<attempt>`, including after
+failed provisioning or teardown, for 90 days. Authentication uses the existing environment token or
+`doctl auth` credential via curl stdin, not argv or evidence; an echoed credential is redacted before
+persistence. No request headers, token, cloud-init request body or SSH private key is uploaded.
+The API contract is [DigitalOcean's droplet API](https://docs.digitalocean.com/reference/api/reference/droplets/):
+202 accepts creation, 200 reads the resource, and 204/404 acknowledges deletion/absence.
 
 If `TS_API_KEY` is not set, `destroy` says so and names the device to remove by hand. Skipping that is
 how tailnets accumulate dead nodes across runs.
