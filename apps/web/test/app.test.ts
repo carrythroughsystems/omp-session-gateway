@@ -215,6 +215,23 @@ class FakeWindow extends EventTarget {
     return [...this.timers.values()].map(timer => timer.delay);
   }
 
+  /** Handles are monotonic, so a mark separates timers armed before an action from those it armed. */
+  timerMark(): number {
+    return this.#nextTimer;
+  }
+
+  pendingDelaysSince(mark: number): number[] {
+    return [...this.timers].filter(([handle]) => handle >= mark).map(([, timer]) => timer.delay);
+  }
+
+  runTimersSince(mark: number): void {
+    for (const [handle, timer] of [...this.timers]) {
+      if (handle < mark) continue;
+      this.timers.delete(handle);
+      timer.callback();
+    }
+  }
+
   scrollTo(_x: number, y: number): void {
     this.scrollY = y;
   }
@@ -327,6 +344,9 @@ interface BrowserHarness {
   runTimers(): void;
   runUndoTimer(): void;
   pendingDelays(): number[];
+  timerMark(): number;
+  pendingDelaysSince(mark: number): number[];
+  runTimersSince(mark: number): void;
   setVisibility(state: "visible" | "hidden"): void;
   freeze(): void;
   advanceClock(milliseconds: number): void;
@@ -744,6 +764,15 @@ async function bootApp(options: {
     },
     pendingDelays(): number[] {
       return window.pendingDelays();
+    },
+    timerMark(): number {
+      return window.timerMark();
+    },
+    pendingDelaysSince(mark): number[] {
+      return window.pendingDelaysSince(mark);
+    },
+    runTimersSince(mark): void {
+      window.runTimersSince(mark);
     },
     setVisibility(state): void {
       document.setVisibility(state);
@@ -1841,16 +1870,18 @@ describe("fleet directory bindings", () => {
       await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 2, 100);
       harness.elements.hostPicker.value = source === "local" ? "local\0https://sessions.example" : "remote\0https://remote.example";
       harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      let mark = harness.timerMark();
       harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
       await settleUntil(() => harness.elements.statusBanner.dataset.kind === "offline", 100);
       expect(harness.elements.statusBanner.textContent).toBe("The gateway returned an invalid launch response.");
       expect(harness.embedCalls).toHaveLength(0);
       expect(harness.elements.sessionList.querySelector(".working-row")?.disabled).toBeFalse();
-      expect(harness.pendingDelays()).not.toContain(10_000);
+      expect(harness.pendingDelaysSince(mark)).not.toContain(10_000);
       oversized = false;
+      mark = harness.timerMark();
       harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
       await settleUntil(() => harness.embedCalls.length === 1, 100);
-      expect(harness.pendingDelays()).not.toContain(10_000);
+      expect(harness.pendingDelaysSince(mark)).not.toContain(10_000);
       harness.window.dispatchEvent(new Event("pagehide"));
     }
   });
@@ -1877,17 +1908,18 @@ describe("fleet directory bindings", () => {
         },
       });
       await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 1, 100);
+      const mark = harness.timerMark();
       harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
       await settleUntil(() => harness.launchRequests.length === 1, 100);
       if (stage === "body") await settleUntil(() => bodyStarted, 100);
-      expect(harness.pendingDelays()).toContain(10_000);
-      harness.window.runTimersWithDelay(10_000);
+      expect(harness.pendingDelaysSince(mark)).toContain(10_000);
+      harness.runTimersSince(mark);
       await settleUntil(() => harness.elements.statusBanner.dataset.kind === "offline", 100);
       expect(harness.launchRequests[0]?.init.signal?.aborted).toBeTrue();
       expect(harness.elements.statusBanner.textContent).toBe("Gateway unavailable. Check your tailnet connection and try again.");
       expect(harness.embedCalls).toHaveLength(0);
       expect(harness.elements.sessionList.querySelector(".working-row")?.disabled).toBeFalse();
-      expect(harness.pendingDelays()).not.toContain(10_000);
+      expect(harness.pendingDelaysSince(mark)).not.toContain(10_000);
       harness.setVisibility("hidden");
     }
   });
@@ -1948,12 +1980,13 @@ describe("fleet directory bindings", () => {
     await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 1, 100);
     harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
     await settleUntil(() => harness.embedCalls.length === 1, 100);
+    const mark = harness.timerMark();
     harness.body.querySelector(".shell-control")?.dispatchEvent(new Event("click"));
     await settleUntil(() => harness.disposals.count === 1, 100);
     expect(harness.embedCalls).toHaveLength(1);
     expect(harness.body.querySelector(".gateway-shell")).toBeNull();
     expect(harness.elements.fleetStatus.children.some(row => row.dataset.state === "forbidden")).toBeTrue();
-    expect(harness.pendingDelays()).not.toContain(10_000);
+    expect(harness.pendingDelaysSince(mark)).not.toContain(10_000);
     harness.setVisibility("hidden");
   });
 

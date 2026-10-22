@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { checkProviderReads, checkUnsafeFinally } from "./check-repository.ts";
+import { checkDocumentTimers, checkProviderReads, checkUnsafeFinally } from "./check-repository.ts";
 
 test("cloud transport may retry only GET, and record DELETE is never replayed", () => {
   const source = 'const connection = { endpoint: "https://hub.testingbot.com/wd/hub", fallback: { endpoint: "https://hub.browserstack.com/wd/hub" } };\n' +
@@ -182,5 +182,31 @@ test("restricts enforcement to production TypeScript scripts and application sou
     "scripts/cleanup.js", "other/scripts/cleanup.ts",
   ]) {
     expect(checkUnsafeFinally(path, source)).toEqual([]);
+  }
+});
+
+test("document-context web sources schedule timers only through window or an injected clock", () => {
+  // The two shapes fleet.ts shipped with: a bare abort timer and a bare-global default clock.
+  const leaked = [
+    "const timer = setTimeout(() => controller.abort(), 4_000);",
+    "const clock = { setTimeout: (callback, delay) => Number(setTimeout(callback, delay)), clearTimeout: timer => clearTimeout(timer) };",
+    "try { work(); } finally { clearTimeout(timer); }",
+  ].join("\n");
+  expect(checkDocumentTimers("apps/web/src/fleet.ts", leaked)).toEqual([
+    "apps/web/src/fleet.ts:1: bare setTimeout; schedule through window or an injected clock",
+    "apps/web/src/fleet.ts:2: bare setTimeout; schedule through window or an injected clock",
+    "apps/web/src/fleet.ts:2: bare clearTimeout; schedule through window or an injected clock",
+    "apps/web/src/fleet.ts:3: bare clearTimeout; schedule through window or an injected clock",
+  ]);
+  const owned = [
+    "const timer = window.setTimeout(() => controller.abort(), 4_000);",
+    "window.clearTimeout(timer); this.time.setTimeout(run, 10_000); time?.clearTimeout(handle);",
+    "interface FleetClock { setTimeout(callback: () => void, delay: number): number; clearTimeout(timer: number): void; }",
+    "// a comment mentioning setTimeout( and 'setInterval(' in a string",
+  ].join("\n");
+  expect(checkDocumentTimers("apps/web/src/fleet.ts", owned)).toEqual([]);
+  // The worker global has no window; the gateway and scripts have their own lifecycles.
+  for (const path of ["apps/web/src/service-worker.ts", "apps/gateway/src/http.ts", "scripts/relay-soak.ts", "apps/web/test/app.test.ts", "apps/web/e2e/fixture-server.ts"]) {
+    expect(checkDocumentTimers(path, leaked)).toEqual([]);
   }
 });

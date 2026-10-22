@@ -44,9 +44,26 @@ export async function boundedJson(response: Response, maximum: number): Promise<
   return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
 }
 
-export async function loadClientConfig(origin: string): Promise<ClientConfigResponse | undefined> {
+interface FleetClock {
+  now(): number;
+  random(): number;
+  setTimeout(callback: () => void, delay: number): number;
+  clearTimeout(timer: number): void;
+}
+/**
+ * Every timer this document schedules goes through `window`, never the bare global: the page's
+ * owner (and the test harness standing in for it) can then cancel all of them together, so no
+ * poll, grace, or deadline callback can outlive the document that armed it.
+ */
+const clock: FleetClock = {
+  now: () => Date.now(), random: () => Math.random(),
+  setTimeout: (callback, delay) => window.setTimeout(callback, delay),
+  clearTimeout: timer => window.clearTimeout(timer),
+};
+
+export async function loadClientConfig(origin: string, time: FleetClock = clock): Promise<ClientConfigResponse | undefined> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 4_000);
+  const timer = time.setTimeout(() => controller.abort(), 4_000);
   try {
     const response = await fetch("/api/v1/client-config", {
       cache: "no-store", credentials: "same-origin", redirect: "error", signal: controller.signal,
@@ -56,20 +73,8 @@ export async function loadClientConfig(origin: string): Promise<ClientConfigResp
     const config = parseClientConfigResponse(await boundedJson(response, MAX_CLIENT_CONFIG_BYTES));
     if (config.local.origin !== origin) throw new Error("client configuration origin mismatch");
     return config;
-  } finally { clearTimeout(timer); }
+  } finally { time.clearTimeout(timer); }
 }
-
-interface FleetClock {
-  now(): number;
-  random(): number;
-  setTimeout(callback: () => void, delay: number): number;
-  clearTimeout(timer: number): void;
-}
-const clock: FleetClock = {
-  now: () => Date.now(), random: () => Math.random(),
-  setTimeout: (callback, delay) => Number(setTimeout(callback, delay)),
-  clearTimeout: timer => clearTimeout(timer),
-};
 
 /** One source owns one request, one revision domain and one visibility epoch. */
 export class FleetTransport {
