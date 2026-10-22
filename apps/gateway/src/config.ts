@@ -1,16 +1,35 @@
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  LOCAL_FLEET_SOURCE_ID,
+  MAX_FLEET_SOURCES,
+  MAX_FLEET_TARGETS,
+  ProtocolValidationError,
+  parseFleetLabel,
+  parseFleetOrigin,
+  parseFleetSourceId,
+  type FleetSource,
+} from "@omp-session-gateway/protocol";
 import { resolveOmpDiscoveryDirectory } from "./omp-registry.ts";
 
 export type AuthMode = "tailscale-serve" | "dev-localhost";
+export const FLEET_CONFIG_SINCE_VERSION = "0.8.0";
 
 export interface GatewayConfig {
   readonly http: {
     readonly hostname: "127.0.0.1" | "::1";
     readonly port: number;
     readonly publicOrigin: string;
+    readonly trustedDashboardOrigins: readonly string[];
+  };
+  readonly fleet: {
+    readonly label: string;
+    readonly targets: readonly FleetSource[];
+  };
+  readonly speech: {
+    readonly browserRecognition: boolean;
   };
   readonly auth: {
     readonly mode: AuthMode;
@@ -495,21 +514,123 @@ function requireDiscoveryDir(value: unknown): string | undefined {
   return value;
 }
 
+function configSection(record: Record<string, unknown>, name: string): Record<string, unknown> {
+  const value = record[name] === undefined ? {} : record[name];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("config sections must be objects");
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry === null) throw new Error(`${name}.${key} must not be null`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function fleetValue<T>(value: unknown, parse: (value: unknown) => T, message: string): T {
+  try {
+    return parse(value);
+  } catch (error) {
+    if (!(error instanceof ProtocolValidationError)) throw error;
+    throw new Error(message);
+  }
+}
+
+function fleetOrigin(value: unknown, mode: AuthMode, label: string): string {
+  const message = `${label} must be a canonical ${mode === "tailscale-serve" ? "https origin" : "https or loopback http origin"}`;
+  const origin = fleetValue(value, parseFleetOrigin, message);
+  if (mode === "tailscale-serve" && !origin.startsWith("https:")) throw new Error(message);
+  return origin;
+}
+
+function defaultFleetLabel(publicOrigin: string): string {
+  const host = new URL(publicOrigin).hostname;
+  return host === "127.0.0.1" || host === "[::1]" ? host : (host.split(".")[0] ?? host);
+}
+
+function trustedDashboardOrigins(value: unknown, mode: AuthMode, publicOrigin: string): readonly string[] {
+  if (!Array.isArray(value) || value.length > MAX_FLEET_SOURCES) {
+    throw new Error(`http.trustedDashboardOrigins must be an array of at most ${MAX_FLEET_SOURCES} origins`);
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const label = `http.trustedDashboardOrigins[${index}]`;
+    const origin = fleetOrigin(entry, mode, label);
+    if (origin === publicOrigin) throw new Error(`${label} must not equal http.publicOrigin`);
+    if (seen.has(origin)) throw new Error(`${label} duplicates another trusted dashboard origin`);
+    seen.add(origin);
+    return origin;
+  });
+}
+
+function fleetTargets(value: unknown, mode: AuthMode, publicOrigin: string): readonly FleetSource[] {
+  if (!Array.isArray(value) || value.length > MAX_FLEET_TARGETS) {
+    throw new Error(`fleet.targets must be an array of at most ${MAX_FLEET_TARGETS} sources`);
+  }
+  const ids = new Set<string>([LOCAL_FLEET_SOURCE_ID]);
+  const origins = new Set([publicOrigin]);
+  return value.map((entry: unknown, index) => {
+    const label = `fleet.targets[${index}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`${label} must be an object`);
+    }
+    const target = entry as Record<string, unknown>;
+    for (const key of Object.keys(target)) {
+      if (!["id", "label", "origin"].includes(key)) throw new Error(`unknown ${label} config key: ${key}`);
+    }
+    const id = fleetValue(target.id, parseFleetSourceId, `${label}.id must match ^[a-z][a-z0-9-]{0,31}$`);
+    if (ids.has(id)) throw new Error(`${label}.id must be unique and must not be local`);
+    const displayLabel = fleetValue(target.label, parseFleetLabel, `${label}.label must contain 1 to 64 display characters`);
+    const origin = fleetOrigin(target.origin, mode, `${label}.origin`);
+    if (origins.has(origin)) throw new Error(`${label}.origin must be unique and must not equal http.publicOrigin`);
+    ids.add(id);
+    origins.add(origin);
+    return { id, label: displayLabel, origin };
+  });
+}
+
+/** Remove only the authored keys older runtimes cannot parse; never mutate the parsed document. */
+export function projectPreFleetConfig(document: unknown): {
+  readonly document: Record<string, unknown>;
+  readonly removedKeys: readonly string[];
+} {
+  if (typeof document !== "object" || document === null || Array.isArray(document)) {
+    throw new Error("config must be an object");
+  }
+  const record = document as Record<string, unknown>;
+  const projected = { ...record };
+  const removedKeys: string[] = [];
+  if (record.http !== undefined) {
+    const http = configSection(record, "http");
+    if (Object.hasOwn(http, "trustedDashboardOrigins")) {
+      const { trustedDashboardOrigins: _trustedOrigins, ...legacyHttp } = http;
+      projected.http = legacyHttp;
+      removedKeys.push("http.trustedDashboardOrigins");
+    }
+  }
+  for (const key of ["fleet", "speech"]) {
+    if (Object.hasOwn(record, key)) {
+      delete projected[key];
+      removedKeys.push(key);
+    }
+  }
+  return { document: projected, removedKeys };
+}
+
 function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("config must be an object");
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (!["http", "auth", "registry", "omp"].includes(key)) throw new Error(`unknown config key: ${key}`);
+    if (!["http", "auth", "registry", "omp", "fleet", "speech"].includes(key)) throw new Error(`unknown config key: ${key}`);
   }
-  const http = (record.http ?? {}) as Record<string, unknown>;
-  const auth = (record.auth ?? {}) as Record<string, unknown>;
-  const registry = (record.registry ?? {}) as Record<string, unknown>;
-  const omp = (record.omp ?? {}) as Record<string, unknown>;
-  if ([http, auth, registry, omp].some(value => typeof value !== "object" || value === null || Array.isArray(value))) {
-    throw new Error("config sections must be objects");
-  }
+  const http = configSection(record, "http");
+  const auth = configSection(record, "auth");
+  const registry = configSection(record, "registry");
+  const omp = configSection(record, "omp");
+  const fleet = configSection(record, "fleet");
+  const speech = configSection(record, "speech");
   for (const key of Object.keys(http)) {
-    if (!["hostname", "port", "publicOrigin"].includes(key)) throw new Error(`unknown http config key: ${key}`);
+    if (!["hostname", "port", "publicOrigin", "trustedDashboardOrigins"].includes(key)) {
+      throw new Error(`unknown http config key: ${key}`);
+    }
   }
   for (const key of Object.keys(auth)) {
     if (!["mode", "allowedLogins", "trustIdentityWithoutTailnetDevice"].includes(key)) {
@@ -526,6 +647,12 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
   }
   for (const key of Object.keys(omp)) {
     if (!["discoveryDir", "queryTimeoutMs"].includes(key)) throw new Error(`unknown omp config key: ${key}`);
+  }
+  for (const key of Object.keys(fleet)) {
+    if (!["label", "targets"].includes(key)) throw new Error(`unknown fleet config key: ${key}`);
+  }
+  for (const key of Object.keys(speech)) {
+    if (key !== "browserRecognition") throw new Error(`unknown speech config key: ${key}`);
   }
   const hostname = http.hostname ?? defaults.http.hostname;
   if (hostname !== "127.0.0.1" && hostname !== "::1") throw new Error("http.hostname must be loopback");
@@ -569,8 +696,20 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
     "registry.ttlSeconds",
   );
   if (ttlSeconds <= heartbeatSeconds * 2) throw new Error("registry.ttlSeconds must exceed two heartbeat intervals");
+  const browserRecognition = speech.browserRecognition ?? false;
+  if (typeof browserRecognition !== "boolean") throw new Error("speech.browserRecognition must be a boolean");
   return {
-    http: { hostname, port, publicOrigin: publicOrigin.origin },
+    http: {
+      hostname,
+      port,
+      publicOrigin: publicOrigin.origin,
+      trustedDashboardOrigins: trustedDashboardOrigins(http.trustedDashboardOrigins ?? [], mode, publicOrigin.origin),
+    },
+    fleet: {
+      label: fleetValue(fleet.label ?? defaultFleetLabel(publicOrigin.origin), parseFleetLabel, "fleet.label must contain 1 to 64 display characters"),
+      targets: fleetTargets(fleet.targets ?? [], mode, publicOrigin.origin),
+    },
+    speech: { browserRecognition },
     // Written only when asserted, so an ordinary config keeps the shape it had before this field
     // existed and the safe reading is the absent one.
     auth: { mode, allowedLogins, ...(declaredTrust ? { trustIdentityWithoutTailnetDevice: true } : {}) },
@@ -607,7 +746,10 @@ export async function loadGatewayConfig(overrides: ConfigOverrides = {}): Promis
       hostname: "127.0.0.1",
       port: overrides.port ?? 4317,
       publicOrigin: overrides.publicOrigin ?? `http://127.0.0.1:${overrides.port ?? 4317}`,
+      trustedDashboardOrigins: [],
     },
+    fleet: { label: "127.0.0.1", targets: [] },
+    speech: { browserRecognition: false },
     auth: { mode: overrides.mode ?? "tailscale-serve", allowedLogins: [] },
     registry: { heartbeatSeconds: 10, ttlSeconds: 35, maxSessions: 100 },
     omp: { discoveryDir: resolveOmpDiscoveryDirectory(), queryTimeoutMs: 1_500 },
@@ -641,6 +783,7 @@ export async function loadGatewayConfig(overrides: ConfigOverrides = {}): Promis
   if (mode === "tailscale-serve" && config.auth.allowedLogins.length === 0) {
     throw new Error("tailscale-serve mode requires at least one allowed login");
   }
+  const authoredFleet = configSection(loaded as Record<string, unknown>, "fleet");
   return {
     ...config,
     auth: { ...config.auth, mode },
@@ -648,6 +791,13 @@ export async function loadGatewayConfig(overrides: ConfigOverrides = {}): Promis
       ...config.http,
       port,
       publicOrigin: publicOrigin.origin,
+      trustedDashboardOrigins: trustedDashboardOrigins(config.http.trustedDashboardOrigins, mode, publicOrigin.origin),
+    },
+    fleet: {
+      label: authoredFleet.label === undefined
+        ? fleetValue(defaultFleetLabel(publicOrigin.origin), parseFleetLabel, "fleet.label must contain 1 to 64 display characters")
+        : config.fleet.label,
+      targets: fleetTargets(config.fleet.targets, mode, publicOrigin.origin),
     },
     paths: { ...paths, configPath },
   };
@@ -676,7 +826,11 @@ export async function readPrivateTextFile(path: string, maximumBytes: number): P
   }
 }
 
-export async function writePrivateTextFile(path: string, content: string): Promise<void> {
+export async function writePrivateTextFile(
+  path: string,
+  content: string,
+  options: { readonly exclusive?: boolean } = {},
+): Promise<void> {
   const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const handle = await open(temporaryPath, "wx", 0o600);
   try {
@@ -686,7 +840,14 @@ export async function writePrivateTextFile(path: string, content: string): Promi
     await handle.close();
   }
   try {
-    await rename(temporaryPath, path);
+    if (options.exclusive === true) {
+      if (process.platform === "win32") await applyWindowsAcl(temporaryPath, false);
+      // A hard link publishes the completed file atomically and, unlike rename, never replaces a
+      // pre-existing rollback backup, including one another rollback created concurrently.
+      await link(temporaryPath, path);
+    } else {
+      await rename(temporaryPath, path);
+    }
     if (process.platform === "win32") await applyWindowsAcl(path, false);
     else await chmod(path, 0o600);
   } finally {
@@ -740,7 +901,12 @@ export async function writeGatewayConfigFile(options: {
     snapshot.content === undefined ? undefined : await loadGatewayConfig({ configPath: paths.configPath });
   const priorDocument = snapshot.content === undefined
     ? undefined
-    : JSON.parse(snapshot.content) as { readonly omp?: Partial<GatewayConfig["omp"]> };
+    : JSON.parse(snapshot.content) as {
+        readonly http?: { readonly trustedDashboardOrigins?: readonly string[] };
+        readonly omp?: Partial<GatewayConfig["omp"]>;
+        readonly fleet?: { readonly label?: string; readonly targets?: readonly FleetSource[] };
+        readonly speech?: Partial<GatewayConfig["speech"]>;
+      };
   const mode = options.mode ?? "tailscale-serve";
   const origin = new URL(options.publicOrigin);
   if (origin.origin !== options.publicOrigin || (mode === "tailscale-serve" && origin.protocol !== "https:")) {
@@ -752,13 +918,18 @@ export async function writeGatewayConfigFile(options: {
   }
   await assertPrivateDirectory(paths.configDir, true);
   await assertPrivateDirectory(paths.stateDir, true);
-  const configDocument: Pick<GatewayConfig, "http" | "auth" | "registry"> & { readonly omp?: Partial<GatewayConfig["omp"]> } = {
+  const configDocument = {
     // Preserve authored overrides without freezing home-derived defaults into a new config.
     ...(priorDocument?.omp === undefined ? {} : { omp: priorDocument.omp }),
+    ...(priorDocument?.fleet === undefined ? {} : { fleet: priorDocument.fleet }),
+    ...(priorDocument?.speech === undefined ? {} : { speech: priorDocument.speech }),
     http: {
       hostname: priorConfig?.http.hostname ?? "127.0.0.1",
       port: validatePort(options.port ?? priorConfig?.http.port ?? 4317),
       publicOrigin: origin.origin,
+      ...(priorDocument?.http?.trustedDashboardOrigins === undefined
+        ? {}
+        : { trustedDashboardOrigins: priorDocument.http.trustedDashboardOrigins }),
     },
     auth: {
       mode,
@@ -778,6 +949,9 @@ export async function writeGatewayConfigFile(options: {
   };
   const authoredConfig = parseConfigObject(configDocument, {
     ...configDocument,
+    http: { ...configDocument.http, trustedDashboardOrigins: priorConfig?.http.trustedDashboardOrigins ?? [] },
+    fleet: priorConfig?.fleet ?? { label: defaultFleetLabel(origin.origin), targets: [] },
+    speech: priorConfig?.speech ?? { browserRecognition: false },
     omp: priorConfig?.omp ?? { discoveryDir: resolveOmpDiscoveryDirectory(), queryTimeoutMs: 1_500 },
     paths,
   });
@@ -786,6 +960,9 @@ export async function writeGatewayConfigFile(options: {
     authoredConfig.http.hostname === priorConfig.http.hostname &&
     authoredConfig.http.port === priorConfig.http.port &&
     authoredConfig.http.publicOrigin === priorConfig.http.publicOrigin &&
+    JSON.stringify(authoredConfig.http.trustedDashboardOrigins) === JSON.stringify(priorConfig.http.trustedDashboardOrigins) &&
+    JSON.stringify(authoredConfig.fleet) === JSON.stringify(priorConfig.fleet) &&
+    authoredConfig.speech.browserRecognition === priorConfig.speech.browserRecognition &&
     authoredConfig.auth.mode === priorConfig.auth.mode &&
     authoredConfig.auth.allowedLogins.length === priorConfig.auth.allowedLogins.length &&
     authoredConfig.auth.allowedLogins.every((login, index) => login === priorConfig.auth.allowedLogins[index]) &&

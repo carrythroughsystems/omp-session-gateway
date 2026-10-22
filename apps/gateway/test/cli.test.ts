@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { main, pollUntilReady, readinessBudgetMs } from "../src/cli.ts";
-import { defaultGatewayPaths, type GatewayConfig } from "../src/config.ts";
+import { defaultGatewayPaths, writePrivateTextFile, type GatewayConfig } from "../src/config.ts";
 import { GATEWAY_VERSION } from "../src/installation.ts";
 import { serviceDefinition } from "../src/service.ts";
 
@@ -85,6 +85,56 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
     await rm(root, { recursive: true, force: true });
   }
 }, 10_000);
+
+test("development serve flags still load authored fleet and speech from the default config path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-cli-fleet-"));
+  const portReservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
+  const port = portReservation.port!;
+  portReservation.stop(true);
+  const origin = `http://127.0.0.1:${port}`;
+  const configDir = join(root, "config", "omp-session-gateway");
+  await mkdir(configDir, { recursive: true, mode: 0o700 });
+  const configPath = join(configDir, "config.json");
+  const authored = `${JSON.stringify({
+    http: { trustedDashboardOrigins: ["http://127.0.0.1:4412"] },
+    fleet: { label: "Dev studio", targets: [{ id: "dev-target", label: "Other dev host", origin: "http://127.0.0.1:4413" }] },
+    speech: { browserRecognition: true },
+  })}\n`;
+  await writePrivateTextFile(configPath, authored);
+  const subprocess = Bun.spawn([
+    process.execPath, GATEWAY_CLI, "serve", "--dev-localhost", "--port", String(port), "--origin", origin,
+  ], {
+    cwd: REPOSITORY_ROOT, env: sandboxEnvironment(root), stdin: "ignore", stdout: "ignore", stderr: "pipe",
+  });
+  try {
+    let response: Response | undefined;
+    const deadline = Date.now() + readinessBudgetMs();
+    while (Date.now() < deadline) {
+      if (subprocess.exitCode !== null) throw new Error(await new Response(subprocess.stderr).text());
+      try {
+        response = await fetch(`${origin}/api/v1/client-config`, { signal: AbortSignal.timeout(500) });
+        break;
+      } catch {
+        await Bun.sleep(20);
+      }
+    }
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({
+      version: 1,
+      local: { id: "local", label: "Dev studio", origin },
+      targets: [{ id: "dev-target", label: "Other dev host", origin: "http://127.0.0.1:4413" }],
+      speech: { browserRecognition: true },
+    });
+    expect(await readFile(configPath, "utf8")).toBe(authored);
+  } finally {
+    subprocess.kill("SIGTERM");
+    if (!(await Promise.race([subprocess.exited.then(() => true), Bun.sleep(2_000).then(() => false)]))) {
+      subprocess.kill(9);
+      await subprocess.exited;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}, 75_000);
 
 /**
  * The option table in `cli.ts` is the whole guard between a mistyped operator command and a
@@ -1143,5 +1193,153 @@ describe("install runtime pruning", () => {
     expect(state.current).toBe(state.names[34]);
     expect(state.predecessor).toBe(state.names[1]);
     expect(run.stdout).toContain("retained 3, removed 0, failed 32");
+  });
+});
+
+async function runFleetRollback(
+  version: string,
+  mode: "success" | "existing-backup" | "failed-start" = "success",
+  authored: "all" | "defaults" | "none" = "all",
+): Promise<SandboxRun> {
+  return runInSandbox(async root => {
+    const entry = join(root, "rollback-fixture.ts");
+    const modulePath = (name: string) => JSON.stringify(fileURLToPath(new URL(`../src/${name}.ts`, import.meta.url)));
+    await writeFile(entry, String.raw`
+import { mock } from "bun:test";
+import { lstat, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import * as installation from ${modulePath("installation")};
+import * as service from ${modulePath("service")};
+import { loadGatewayConfig, loadOrCreateReadinessToken, writeGatewayConfigFile, writePrivateTextFile } from ${modulePath("config")};
+const root = ${JSON.stringify(root)};
+const mode = ${JSON.stringify(mode)};
+const authored = ${JSON.stringify(authored)};
+let config = await writeGatewayConfigFile({
+  publicOrigin: "https://studio.example.ts.net", allowedLogins: ["user@example.com"],
+});
+const document = JSON.parse(await readFile(config.paths.configPath, "utf8"));
+if (authored !== "none") {
+  document.http.trustedDashboardOrigins = authored === "all" ? ["https://dashboard.example.ts.net"] : [];
+  document.fleet = authored === "all" ? {
+    label: " Authored studio ", targets: [{ id: "remote", label: "Remote", origin: "https://remote.example.ts.net" }],
+  } : {};
+  document.speech = { browserRecognition: authored === "all" };
+}
+const before = JSON.stringify(document) + " \n";
+await writePrivateTextFile(config.paths.configPath, before);
+config = await loadGatewayConfig();
+await loadOrCreateReadinessToken(config);
+const backupPath = join(config.paths.configDir, "config.pre-rollback.json");
+if (mode === "existing-backup") await writePrivateTextFile(backupPath, "earlier backup\n");
+const runtime = {
+  directory: join(root, ${JSON.stringify(version + "-000000000001")}),
+  cliPath: join(root, "retained-cli.js"), readinessProtocol: "instance-v1",
+};
+const authoritative = {
+  directory: join(root, "0.8.0-000000000002"),
+  cliPath: join(root, "current-cli.js"), readinessProtocol: "instance-v1",
+};
+const installed = [];
+let activated = false;
+mock.module(${modulePath("service")}, () => ({
+  ...service,
+  userServiceStatus: async () => ({ installed: true, active: false }),
+  installUserService: async (cfg, start, cli) => {
+    installed.push({ cli, document: JSON.parse(await readFile(cfg.paths.configPath, "utf8")) });
+    if (mode === "failed-start" && installed.length === 1) throw new Error("synthetic service failure");
+    return { identifier: "omp-session-gateway" };
+  },
+}));
+mock.module(${modulePath("installation")}, () => ({
+  ...installation,
+  resolveRollbackTarget: async () => ({ from: "current", runtime, selection: "explicit" }),
+  currentInstalledRuntime: async () => authoritative,
+  activateRuntime: async () => { activated = true; },
+}));
+const { main } = await import(${JSON.stringify(GATEWAY_CLI)});
+let failure = "";
+try { await main(["rollback"]); } catch (error) { failure = error.message; }
+let backup = null;
+let backupMode = null;
+try {
+  backup = await readFile(backupPath, "utf8");
+  backupMode = (await lstat(backupPath)).mode & 0o777;
+} catch (error) { if (error.code !== "ENOENT") throw error; }
+console.log(JSON.stringify({
+  before, after: await readFile(config.paths.configPath, "utf8"), backup, backupMode, installed, activated, failure,
+}));
+`);
+    return [process.execPath, entry];
+  });
+}
+
+describe("rollback fleet configuration projection", () => {
+  test("backs up full authored bytes before older runtime activation and explains restoration", async () => {
+    const run = await runFleetRollback("0.7.8");
+    expect(run.exitCode).toBe(0);
+    const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+    expect(state.failure).toBe("");
+    expect(state.backup).toBe(state.before);
+    if (POSIX) expect(state.backupMode).toBe(0o600);
+    const projected = JSON.parse(state.after);
+    expect(projected.http.trustedDashboardOrigins).toBeUndefined();
+    expect(projected.fleet).toBeUndefined();
+    expect(projected.speech).toBeUndefined();
+    expect(projected.auth).toEqual(JSON.parse(state.before).auth);
+    expect(state.installed).toHaveLength(1);
+    expect(state.installed[0].document).toEqual(projected);
+    expect(state.activated).toBe(true);
+    expect(run.stdout).toContain("removed http.trustedDashboardOrigins, fleet, speech");
+    expect(run.stdout).toContain("To restore: first install 0.8.0 or newer");
+    expect(run.stdout).toContain("restart the gateway, and reload the PWA");
+    expect(run.stdout).not.toContain("Configuration and readiness token were preserved.");
+  });
+
+  test("treats authored empty/default fields as incompatible, but leaves legacy files byte-identical", async () => {
+    const defaults = await runFleetRollback("0.8.0-beta.1", "success", "defaults");
+    const projected = JSON.parse(defaults.stdout.trimEnd().split("\n").at(-1) ?? "");
+    expect(projected.failure).toBe("");
+    expect(projected.backup).toBe(projected.before);
+    expect(JSON.parse(projected.after).fleet).toBeUndefined();
+    const legacy = await runFleetRollback("0.7.8", "success", "none");
+    const unchanged = JSON.parse(legacy.stdout.trimEnd().split("\n").at(-1) ?? "");
+    expect(unchanged.failure).toBe("");
+    expect(unchanged.after).toBe(unchanged.before);
+    expect(unchanged.backup).toBeNull();
+  });
+
+  test("keeps authored fields for runtimes at or newer than the fleet boundary", async () => {
+    for (const version of ["0.8.0", "0.9.0"]) {
+      const run = await runFleetRollback(version);
+      const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+      expect(state.failure).toBe("");
+      expect(state.after).toBe(state.before);
+      expect(state.backup).toBeNull();
+      expect(state.installed[0].document).toEqual(JSON.parse(state.before));
+      expect(run.stdout).toContain("Configuration and readiness token were preserved.");
+    }
+  });
+
+  test("refuses an existing backup before configuration or service mutation", async () => {
+    const run = await runFleetRollback("0.7.8", "existing-backup");
+    const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+    expect(state.failure).toContain("already exists; restore or move that backup first");
+    expect(state.after).toBe(state.before);
+    expect(state.backup).toBe("earlier backup\n");
+    expect(state.installed).toEqual([]);
+    expect(state.activated).toBe(false);
+  });
+
+  test("restores authored bytes before repairing the current service after a failed rollback", async () => {
+    const run = await runFleetRollback("0.7.8", "failed-start");
+    const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+    expect(state.failure).toBe("synthetic service failure");
+    expect(state.after).toBe(state.before);
+    expect(state.backup).toBe(state.before);
+    expect(state.installed).toHaveLength(2);
+    expect(state.installed[0].document.fleet).toBeUndefined();
+    expect(state.installed[1].document).toEqual(JSON.parse(state.before));
+    expect(state.activated).toBe(false);
+    expect(run.stdout).toContain("Rollback failed; restored the authored configuration.");
   });
 });

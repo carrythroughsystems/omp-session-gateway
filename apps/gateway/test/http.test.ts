@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { SecretCapability, type ObservedSessionInput } from "@omp-session-gateway/protocol";
 import type { GatewayConfig } from "../src/config.ts";
+import { requestHasTrustedDashboardContext, requestHasValidMutationContext } from "../src/auth.ts";
 import { createHttpHandler } from "../src/http.ts";
+import { finalizeHttpResponse } from "../src/http-policy.ts";
 import { SafeLogger } from "../src/logger.ts";
 import { PushService } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
@@ -29,6 +31,9 @@ const validateSessionList = schemaValidator.compile(
 const validateSessionEvent = schemaValidator.compile(
   await Bun.file(new URL("../../../schemas/sse-event.schema.json", import.meta.url)).json(),
 );
+const validateClientConfig = schemaValidator.compile(
+  await Bun.file(new URL("../../../schemas/client-config.schema.json", import.meta.url)).json(),
+);
 
 function config(mode: GatewayConfig["auth"]["mode"] = "tailscale-serve"): GatewayConfig {
   return {
@@ -36,7 +41,10 @@ function config(mode: GatewayConfig["auth"]["mode"] = "tailscale-serve"): Gatewa
       hostname: "127.0.0.1",
       port: 4317,
       publicOrigin: mode === "dev-localhost" ? "http://127.0.0.1:4317" : origin,
+      trustedDashboardOrigins: [],
     },
+    fleet: { label: "gateway", targets: [] },
+    speech: { browserRecognition: false },
     // Declared rather than measured so this suite does not depend on whether the machine running it
     // has Tailscale in TUN mode. The measured path is covered by "loopback identity trust" below,
     // which builds a config without this field.
@@ -1153,5 +1161,314 @@ describe("HTTP boundary", () => {
     expect(lines.join("\n")).not.toContain(viewCapability);
     expect(lines.join("\n")).not.toContain(controlCapability);
     expect(lines.join("\n")).not.toContain("denied@example.com");
+  });
+});
+
+describe("browser-direct fleet boundary", () => {
+  const dashboard = "https://dashboard.example.ts.net";
+  const target = { id: "remote", label: "Remote", origin: "https://remote.example.ts.net" };
+  const launchPath = "/api/v1/sessions/http-instance-000001/launch";
+
+  function fleetConfig(): GatewayConfig {
+    const base = config();
+    return {
+      ...base,
+      http: { ...base.http, trustedDashboardOrigins: [dashboard] },
+      fleet: { label: "Studio", targets: [target] },
+      speech: { browserRecognition: true },
+    };
+  }
+
+  function remoteLaunch(headers: Record<string, string> = {}, body = JSON.stringify({ mode: "view", generation: 3 })): Request {
+    return request(launchPath, {
+      method: "POST",
+      headers: { Origin: dashboard, "Sec-Fetch-Site": "cross-site", "Content-Type": "application/json", ...headers },
+      body,
+    });
+  }
+
+  function preflight(path = launchPath, method = "POST", headers: Record<string, string> = {}, identity?: string): Request {
+    return request(path, {
+      method: "OPTIONS",
+      headers: { Origin: dashboard, "Access-Control-Request-Method": method, ...headers },
+    }, identity);
+  }
+
+  function expectCors(response: Response, allowedOrigin = dashboard): void {
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe(allowedOrigin);
+    expect(response.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+    expect(response.headers.get("Vary")).toBe("Origin");
+    expect(response.headers.get("Cache-Control")).toContain("no-store");
+  }
+
+  function expectNoCors(response: Response): void {
+    for (const key of ["Access-Control-Allow-Origin", "Access-Control-Allow-Credentials", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers"]) {
+      expect(response.headers.get(key)).toBeNull();
+    }
+  }
+
+  test("serves the named public client config only through authenticated same-origin requests", async () => {
+    const gatewayConfig = fleetConfig();
+    const handler = createTestHttpHandler({ config: gatewayConfig, registry: populatedRegistry(), staticAssets: assets });
+    for (const headers of [{}, { Origin: origin }]) {
+      const response = await handler(request("/api/v1/client-config", { headers }), peer);
+      expect(response.status).toBe(200);
+      expectNoCors(response);
+      expect(response.headers.get("Cache-Control")).toContain("no-store");
+      const body = await response.json();
+      expect(validateClientConfig(body)).toBe(true);
+      expect(body).toEqual({
+        version: 1,
+        local: { id: "local", label: "Studio", origin },
+        targets: [target],
+        speech: { browserRecognition: true },
+      });
+      expect(JSON.stringify(body)).not.toContain("allowed@example.com");
+      expect(JSON.stringify(body)).not.toContain("/private");
+      expect(JSON.stringify(body)).not.toContain(dashboard);
+    }
+    for (const foreign of [dashboard, "https://untrusted.example", "null"]) {
+      const response = await handler(request("/api/v1/client-config", { headers: { Origin: foreign } }), peer);
+      expect(response.status).toBe(403);
+      expectNoCors(response);
+    }
+    expect((await handler(request("/api/v1/client-config", {}, ""), peer)).status).toBe(403);
+    expect((await handler(request("/api/v1/client-config?extra=1"), peer)).status).toBe(400);
+    expect(validateClientConfig({
+      version: 2, local: { id: "local", label: "Studio", origin }, targets: [], speech: { browserRecognition: false },
+    })).toBe(false);
+  });
+
+  test("admits configured dashboards for metadata and generation-bound launch without credentials", async () => {
+    const handler = createTestHttpHandler({ config: fleetConfig(), registry: populatedRegistry(), staticAssets: assets });
+    const list = await handler(request("/api/v1/sessions", { headers: { Origin: dashboard } }), peer);
+    expect(list.status).toBe(200);
+    expectCors(list);
+    expect(validateSessionList(await list.json())).toBe(true);
+    for (const site of [undefined, "same-site", "cross-site"]) {
+      const launch = remoteLaunch();
+      if (site === undefined) launch.headers.delete("Sec-Fetch-Site");
+      else launch.headers.set("Sec-Fetch-Site", site);
+      const response = await handler(launch, peer);
+      expect(response.status).toBe(200);
+      expectCors(response);
+      expect(await response.json()).toEqual({ mode: "view", generation: 3, capability: viewCapability });
+    }
+    const local = await handler(launchRequest(), peer);
+    expect(local.status).toBe(200);
+    expectNoCors(local);
+    const noOrigin = await handler(request("/api/v1/sessions"), peer);
+    expect(noOrigin.status).toBe(200);
+    expectNoCors(noOrigin);
+  });
+
+  test("refuses untrusted, null, malformed and multiple dashboard origins", async () => {
+    const handler = createTestHttpHandler({ config: fleetConfig(), registry: populatedRegistry(), staticAssets: assets });
+    for (const foreign of [
+      "https://untrusted.example", "null", dashboard + "/", "not an origin", `${dashboard}, ${dashboard}`,
+      `${dashboard} https://untrusted.example`,
+    ]) {
+      for (const req of [
+        request("/api/v1/sessions", { headers: { Origin: foreign } }),
+        request("/api/v1/sessions?extra=1", { headers: { Origin: foreign } }),
+        remoteLaunch({ Origin: foreign }),
+      ]) {
+        const response = await handler(req, peer);
+        expect(response.status).toBe(403);
+        expectNoCors(response);
+      }
+    }
+    const multiple = request("/api/v1/sessions", { headers: [["Origin", dashboard], ["Origin", "https://untrusted.example"]] });
+    expectNoCors(await handler(multiple, peer));
+    const unconfigured = createTestHttpHandler({ config: config(), registry: populatedRegistry(), staticAssets: assets });
+    const denied = await unconfigured(request("/api/v1/sessions", { headers: { Origin: dashboard } }), peer);
+    expect(denied.status).toBe(403);
+    expectNoCors(denied);
+  });
+
+  test("requires the separate trusted-dashboard launch context without weakening local mutations", async () => {
+    const gatewayConfig = fleetConfig();
+    const handler = createTestHttpHandler({ config: gatewayConfig, registry: populatedRegistry(), staticAssets: assets });
+    for (const headers of [
+      { "Sec-Fetch-Site": "none" }, { "Sec-Fetch-Site": "same-origin" }, { "Content-Type": "Application/JSON" },
+      { "Content-Type": "application/json; charset=utf-8" }, { "Content-Type": "text/plain" },
+    ]) {
+      const response = await handler(remoteLaunch(headers), peer);
+      expect(response.status).toBe(403);
+      expectCors(response);
+    }
+    const missingOrigin = remoteLaunch();
+    missingOrigin.headers.delete("Origin");
+    expect((await handler(missingOrigin, peer)).status).toBe(403);
+    const untrusted = remoteLaunch({ Origin: "https://untrusted.example" });
+    expect(requestHasTrustedDashboardContext(untrusted, gatewayConfig.http.trustedDashboardOrigins)).toBeUndefined();
+  });
+
+  test("admits route-specific authenticated preflights without querying OMP or spending launch tokens", async () => {
+    let launches = 0;
+    const handler = createHttpHandler({
+      config: fleetConfig(), registry: populatedRegistry(), staticAssets: assets,
+      launchResolver: { async resolve() { launches += 1; return { status: "missing" }; } },
+    });
+    for (let index = 0; index < 25; index += 1) {
+      const response = await handler(preflight(), peer);
+      expect(response.status).toBe(204);
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe(dashboard);
+      expect(response.headers.get("Access-Control-Allow-Methods")).toBe("POST");
+      expect(response.headers.get("Access-Control-Allow-Headers")).toBe("Content-Type");
+      expect(response.headers.get("Vary")).toBe("Origin, Access-Control-Request-Method, Access-Control-Request-Headers");
+      expect(response.headers.get("Cache-Control")).toContain("no-store");
+      expect(response.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+      expect(response.headers.get("Access-Control-Max-Age")).toBeNull();
+      expect(await response.text()).toBe("");
+    }
+    expect(launches).toBe(0);
+    for (const requested of ["content-type", "CONTENT-TYPE"]) {
+      expect((await handler(preflight(launchPath, "POST", { "Access-Control-Request-Headers": requested }), peer)).status).toBe(204);
+    }
+    const get = await handler(preflight("/api/v1/sessions", "GET"), peer);
+    expect(get.status).toBe(204);
+    expect(get.headers.get("Access-Control-Allow-Methods")).toBe("GET");
+    expect(get.headers.get("Access-Control-Allow-Headers")).toBeNull();
+    expect((await handler(remoteLaunch(), peer)).status).toBe(404);
+    expect(launches).toBe(1);
+  });
+
+  test("preflight cannot bypass identity trust, loopback, allowlist or second-hop checks", async () => {
+    const base = fleetConfig();
+    const gatewayConfig: GatewayConfig = { ...base, auth: { mode: "tailscale-serve", allowedLogins: base.auth.allowedLogins } };
+    const handler = createTestHttpHandler({
+      config: gatewayConfig, registry: populatedRegistry(), staticAssets: assets, tailnetPresent: () => true,
+    });
+    const unsound = createTestHttpHandler({
+      config: gatewayConfig, registry: populatedRegistry(), staticAssets: assets, tailnetPresent: () => false,
+    });
+    for (const response of [
+      await handler(preflight(launchPath, "POST", {}, ""), peer),
+      await handler(preflight(launchPath, "POST", {}, "other@example.com"), peer),
+      await handler(preflight(), { address: "192.168.1.20" }),
+      await handler(preflight(launchPath, "POST", { "X-Forwarded-Host": "other.example" }), peer),
+      await unsound(preflight(), peer),
+    ]) {
+      expect(response.status).toBe(403);
+      expectNoCors(response);
+    }
+  });
+
+  test("rejects wrong preflight methods, extra headers and every non-fleet route without CORS", async () => {
+    const handler = createTestHttpHandler({ config: fleetConfig(), registry: populatedRegistry(), staticAssets: assets });
+    for (const req of [
+      preflight(launchPath, "GET"), preflight("/api/v1/sessions", "POST"), preflight(launchPath, "post"),
+      preflight(launchPath, "POST", { "Access-Control-Request-Headers": "x-extra" }),
+      preflight(launchPath, "POST", { "Access-Control-Request-Headers": "content-type, x-extra" }),
+      preflight(launchPath, "POST", { "Access-Control-Request-Headers": "content-type, content-type" }),
+      preflight("/api/v1/sessions", "GET", { "Access-Control-Request-Headers": "content-type" }),
+      preflight(launchPath, "POST", { Origin: "null" }),
+      preflight(launchPath, "POST", { Origin: "https://untrusted.example" }),
+      ...["/api/v1/events", "/api/v1/client-config", "/api/v1/push/config", "/api/v1/health", "/api/v1/unknown"].map(path => preflight(path, "GET")),
+    ]) {
+      const response = await handler(req, peer);
+      expect(response.status).toBe(403);
+      expectNoCors(response);
+    }
+    const missingOrigin = preflight();
+    missingOrigin.headers.delete("Origin");
+    const missingMethod = preflight();
+    missingMethod.headers.delete("Access-Control-Request-Method");
+    for (const req of [missingOrigin, missingMethod]) {
+      const response = await handler(req, peer);
+      expect(response.status).toBe(403);
+      expectNoCors(response);
+    }
+    const noTrust = createTestHttpHandler({ config: config(), registry: populatedRegistry(), staticAssets: assets });
+    const denied = await noTrust(preflight(), peer);
+    expect(denied.status).toBe(403);
+    expectNoCors(denied);
+    for (const path of ["/api/v1/events", "/api/v1/client-config", "/api/v1/push/config", "/api/v1/unknown"]) {
+      const response = await handler(request(path, { headers: { Origin: dashboard } }), peer);
+      expect(response.status).toBe(403);
+      expectNoCors(response);
+    }
+    const health = await handler(request("/api/v1/health", { headers: { Origin: dashboard } }), peer);
+    expect(health.status).toBe(200);
+    expectNoCors(health);
+    const asset = await handler(request("/assets/app.0123456789ab.js", { headers: { Origin: dashboard } }), peer);
+    expectNoCors(asset);
+  });
+
+  test("trusted-dashboard origins never authorize local push mutations", async () => {
+    const handler = createTestHttpHandler({ config: fleetConfig(), registry: populatedRegistry(), staticAssets: assets });
+    for (const method of ["POST", "DELETE"]) {
+      const mutation = request("/api/v1/push/subscription", {
+        method, headers: { Origin: dashboard, "Content-Type": "application/json" }, body: "{}",
+      });
+      expect(requestHasValidMutationContext(mutation, origin)).toBe(false);
+      const response = await handler(mutation, peer);
+      expect(response.status).toBe(403);
+      expectNoCors(response);
+    }
+  });
+
+  test("adds readable CORS to admitted problems including identity denial and unexpected failures", async () => {
+    const gatewayConfig = fleetConfig();
+    const handler = createTestHttpHandler({ config: gatewayConfig, registry: populatedRegistry(), staticAssets: assets });
+    const unauthenticated = remoteLaunch();
+    unauthenticated.headers.delete("Tailscale-User-Login");
+    for (const [req, status] of [
+      [remoteLaunch({}, "{bad"), 400],
+      [remoteLaunch({ Origin: dashboard }, JSON.stringify({ mode: "view", generation: 2 })), 409],
+      [request("/api/v1/sessions/missing0/launch", {
+        method: "POST", headers: { Origin: dashboard, "Content-Type": "application/json" }, body: JSON.stringify({ mode: "view", generation: 3 }),
+      }), 404],
+      [unauthenticated, 403],
+      [request("/api/v1/sessions?extra=1", { headers: { Origin: dashboard } }), 400],
+    ] as const) {
+      const response = await handler(req, peer);
+      expect(response.status).toBe(status);
+      expectCors(response);
+    }
+    const crash = createHttpHandler({
+      config: gatewayConfig, registry: populatedRegistry(), staticAssets: assets,
+      launchResolver: { async resolve() { throw new Error("private failure detail"); } },
+    });
+    const failure = await crash(remoteLaunch(), peer);
+    expect(failure.status).toBe(500);
+    expectCors(failure);
+    expect(await failure.json()).toEqual({ code: "internal_error", message: "Internal server error" });
+    for (let index = 0; index < 21; index += 1) await handler(remoteLaunch(), peer);
+    const limited = await handler(remoteLaunch(), peer);
+    expect(limited.status).toBe(429);
+    expectCors(limited);
+    for (const status of [400, 403, 404, 409, 413, 415, 429, 500]) {
+      const finalized = finalizeHttpResponse(Response.json({ code: "fixture" }, { status }), gatewayConfig, {
+        document: false, noStore: true, corsOrigin: dashboard,
+      });
+      expectCors(finalized);
+    }
+  });
+
+  test("extends only document CSP and microphone policy, preserving asset and bootstrap caching", async () => {
+    const handler = createTestHttpHandler({ config: fleetConfig(), registry: populatedRegistry(), staticAssets: assets });
+    for (const path of ["/", "/index.html", "/client/", "/update/", "/collab/http-instance-000001?request=http-request-000001"]) {
+      const response = await handler(request(path), peer);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Security-Policy")).toContain(`connect-src 'self' wss://my.omp.sh ${target.origin};`);
+      expect(response.headers.get("Content-Security-Policy")).not.toContain(dashboard);
+      expect(response.headers.get("Permissions-Policy")).toContain("microphone=(self)");
+      expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+      expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
+      expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+      expect(response.headers.get("Cache-Control")).toContain(path === "/" || path === "/index.html" ? "no-cache" : "no-store");
+      expectNoCors(response);
+    }
+    for (const path of ["/api/v1/sessions", "/api/v1/client-config", "/api/v1/unknown", "/assets/app.0123456789ab.js", "/api/v1/events"]) {
+      const response = await handler(request(path), peer);
+      expect(response.headers.get("Content-Security-Policy")).not.toContain(target.origin);
+      expect(response.headers.get("Permissions-Policy")).toContain("microphone=()");
+      if (path === "/api/v1/events") await response.body?.cancel();
+      if (path.startsWith("/assets/")) expect(response.headers.get("Cache-Control")).toContain("immutable");
+    }
+    const disabled = createTestHttpHandler({ config: config(), registry: populatedRegistry(), staticAssets: assets });
+    expect((await disabled(request("/"), peer)).headers.get("Permissions-Policy")).toContain("microphone=()");
   });
 });

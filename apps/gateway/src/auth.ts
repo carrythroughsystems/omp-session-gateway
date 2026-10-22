@@ -151,3 +151,16 @@ export function requestHasValidMutationContext(request: Request, expectedOrigin:
   const fetchSite = request.headers.get("Sec-Fetch-Site");
   return fetchSite === null || fetchSite === "same-origin";
 }
+
+/** A narrowly opted-in dashboard may launch, but never inherits the local mutation context. */
+export function requestHasTrustedDashboardContext(
+  request: Request,
+  trustedOrigins: readonly string[],
+): string | undefined {
+  const origin = request.headers.get("Origin");
+  if (origin === null || !trustedOrigins.includes(origin)) return undefined;
+  const fetchSite = request.headers.get("Sec-Fetch-Site");
+  if (fetchSite !== null && fetchSite !== "same-site" && fetchSite !== "cross-site") return undefined;
+  if (request.headers.get("Content-Type") !== "application/json") return undefined;
+  return origin;
+}
