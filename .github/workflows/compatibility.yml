@@ -55,8 +55,23 @@ jobs:
       - name: Verify pinned Bun
         run: test "$(bun --version)" = 1.4.0
       - run: bun install --frozen-lockfile
-      # Firefox and WebKit need system libraries the runner image lacks. The bound keeps an apt
-      # mirror stall (see browser-notifications in ci.yml) from holding the check.
-      - run: bunx playwright install --with-deps chromium firefox webkit
+      # Firefox and WebKit need system libraries the runner image lacks. Bound downloads before
+      # installing so a slow mirror can fall back without interrupting a dpkg transaction.
+      - name: Install browsers with bounded apt mirror fallback
+        run: |
+          set -euo pipefail
+          apt_config=/etc/apt/apt.conf.d/99-omp-browser-core
+          download_config=/etc/apt/apt.conf.d/99-omp-browser-core-download
+          trap 'sudo rm -f "$apt_config" "$download_config"' EXIT
+          printf '%s\n' 'Acquire::Retries "2";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' |
+            sudo tee "$apt_config" >/dev/null
+          printf '%s\n' 'APT::Get::Download-Only "true";' | sudo tee "$download_config" >/dev/null
+          if ! sudo timeout --kill-after=10s 180s env PATH="$PATH" "$(command -v bun)" x playwright install-deps chromium firefox webkit; then
+            echo "::warning::Primary apt download attempt failed; retrying once through archive.ubuntu.com"
+            sudo sed -i 's/azure[.]archive[.]ubuntu[.]com/archive.ubuntu.com/g' /etc/apt/apt-mirrors.txt
+            sudo timeout --kill-after=10s 180s env PATH="$PATH" "$(command -v bun)" x playwright install-deps chromium firefox webkit
+          fi
+          sudo rm "$download_config"
+          bunx playwright install --with-deps chromium firefox webkit
         timeout-minutes: 10
       - run: bun run test:browser:compat
