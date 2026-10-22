@@ -118,6 +118,9 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 28 changel
 
 ### Fixed
 
+- Read the release's tag endpoint before declaring it absent from GitHub's release list
+  (#437). Keep the same release-policy and signed-asset checks when a newly published
+  candidate is missing from the list; a missing tag or failed lookup still fails closed.
 - Retain the Linux qualification droplet's create id before waiting for its public IPv4.
   Null networks and parse/API errors no longer mean resource absence; teardown deletes the
   bound id, requires HTTP 204/404 and fails if billing remains. Preserve credential-free
