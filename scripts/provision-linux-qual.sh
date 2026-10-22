@@ -263,7 +263,7 @@ provider_request() {
     --max-filesize 2097152 --request "$method" --write-out $'\n%{http_code}')
   if [ -n "$body_file" ]; then args+=(--header "Content-Type: application/json" --data-binary "@$body_file"); fi
   response="$(printf 'header = "Authorization: Bearer %s"\n' "$token" |
-    curl --config - "${args[@]}" "https://api.digitalocean.com/v2$path")" || curl_exit=$?
+    curl --disable --config - "${args[@]}" "https://api.digitalocean.com/v2$path")" || curl_exit=$?
   PROVIDER_STATUS="${response##*$'\n'}"
   PROVIDER_BODY="${response%$'\n'*}"
   PROVIDER_BODY="${PROVIDER_BODY//"$token"/[REDACTED_CREDENTIAL]}"
@@ -344,10 +344,13 @@ create_droplet() {
   [ "$PROVIDER_STATUS" = 202 ] || die "DigitalOcean create returned HTTP $PROVIDER_STATUS; inspect retained response before retrying"
   DROPLET_JSON="$(printf '%s' "$PROVIDER_BODY" | jq -ce '.droplet')" ||
     die "DigitalOcean create response is malformed; inspect retained response before retrying"
-  validate_droplet_identity
-  DROPLET_ID="$(printf '%s' "$DROPLET_JSON" | jq -r '.id')"
-  # This checkpoint must precede every readiness read and survives the EXIT trap.
+  DROPLET_ID="$(printf '%s' "$DROPLET_JSON" |
+    jq -er '.id | select(type == "number" and . > 0 and . == floor) | tostring')" ||
+    die "DigitalOcean create did not return a valid id; inspect retained response before retrying"
+  # Retain a valid create id even if other metadata is incomplete. Every later effect rechecks
+  # id/name/tag identity; a malformed network or tag must not erase the cleanup handle.
   state_write droplet_id "$DROPLET_ID" || die "cannot retain created droplet id $DROPLET_ID"
+  validate_droplet_identity
 }
 
 wait_for_droplet_network() {

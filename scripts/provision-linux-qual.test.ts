@@ -213,6 +213,21 @@ test.skipIf(process.platform === "win32")("IPv4 readiness exhaustion retains the
   }
 }, 15_000);
 
+test.skipIf(process.platform === "win32")("incomplete create metadata cannot discard the returned cleanup id", async () => {
+  const fixture = await dropletHarness({ createBody: { droplet: { ...PROVIDER_DROPLET, tags: null } } });
+  try {
+    const provision = await fixture.run("provision");
+    expect(provision.exitCode).toBe(1);
+    expect(provision.stderr).toContain("identity does not match");
+    expect(await Bun.file(fixture.stateFile).json()).toEqual({ droplet_id: "4242" });
+    expect(await fixture.evidence()).toContain('"tags":null');
+    // Later GET metadata must prove the bound name/tag before the exact-id cleanup can proceed.
+    expect((await fixture.run("destroy")).exitCode).toBe(0);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 for (const [name, scenario, bound, reason] of [
   ["malformed list", { listBody: { droplets: null } }, false, "list is malformed"],
   ["unbound tag", { listBody: { droplets: [PROVIDER_DROPLET] } }, false, "refusing adoption or deletion"],
