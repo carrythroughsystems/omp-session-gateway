@@ -94,7 +94,6 @@ jobs:
       # Pinned here rather than left to the script's default so the droplet name this workflow checks
       # for, refuses to adopt, and destroys is the same string in every step.
       OMP_QUAL_NAME: omp-gateway-qual
-      OMP_QUAL_EVIDENCE_DIR: ${{ runner.temp }}/droplet-provider-evidence
       # The script hardcodes this slug for asset downloads, so the preflight must check the same repo
       # rather than `github.repository`; on a fork those two are not the same place.
       REPO_SLUG: carrythroughsystems/omp-session-gateway
@@ -123,6 +122,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           install -m 0755 doctl "$RUNNER_TEMP/bin/doctl"
           printf '%s\n' "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+          # `runner.temp` is not an allowed context in a job-level `env`; export the evidence
+          # directory from the first step so every later step and the script see one path.
+          printf 'OMP_QUAL_EVIDENCE_DIR=%s\n' "$RUNNER_TEMP/droplet-provider-evidence" >>"$GITHUB_ENV"
           # `gh` and `jq` come from the runner image and are therefore floating. Printing their
           # versions is what makes a run reproducible after the fact, since `gh attestation download`
           # produces the bundles the droplet then verifies offline.
