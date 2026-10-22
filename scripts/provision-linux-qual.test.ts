@@ -6,6 +6,311 @@ import { expect, test } from "bun:test";
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
+const PROVIDER_TEST_TOKEN = "synthetic-provider-credential-not-real";
+const PROVIDER_DROPLET = {
+  id: 4242,
+  name: "omp-gateway-qual",
+  tags: ["omp-gateway-qual"],
+  created_at: "2026-01-01T00:00:00Z",
+  status: "active",
+  networks: { v4: [{ type: "public", ip_address: "192.0.2.42" }] },
+};
+
+async function dropletHarness(scenario: Record<string, unknown>, bound = false) {
+  const home = await mkdtemp(join(tmpdir(), "omp-droplet-presence-"));
+  const bin = join(home, "bin");
+  const state = join(home, "state", "omp-session-gateway-qual");
+  const stateFile = join(state, "omp-gateway-qual.json");
+  const evidenceRoot = join(home, "evidence");
+  await Promise.all([mkdir(bin), mkdir(state, { recursive: true })]);
+  await writeFile(join(home, "scenario.json"), JSON.stringify(scenario));
+  if (bound) {
+    await writeFile(stateFile, '{"droplet_id":"4242"}');
+    await writeFile(join(home, "created"), "");
+  }
+  await writeFile(
+    join(bin, "doctl"),
+    `#!/bin/bash
+case "$*" in
+  "auth token") printf '%s\\n' "$PROVIDER_TEST_TOKEN" ;;
+  "compute droplet list --format Name --no-header")
+    if [ -f "$PROVIDER_FIXTURE/created" ] && [ ! -f "$PROVIDER_FIXTURE/deleted" ]; then
+      printf 'omp-gateway-qual\\n'
+    fi ;;
+  *) exit 91 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
+  await writeFile(
+    join(bin, "curl"),
+    String.raw`#!/usr/bin/env bun
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const root = process.env.PROVIDER_FIXTURE;
+const scenario = JSON.parse(readFileSync(root + "/scenario.json", "utf8"));
+const args = process.argv.slice(2);
+const config = await Bun.stdin.text();
+if (config !== 'header = "Authorization: Bearer ' + process.env.PROVIDER_TEST_TOKEN + '"\n') process.exit(92);
+const method = args[args.indexOf("--request") + 1];
+const url = args.at(-1);
+const calls = existsSync(root + "/calls.json") ? JSON.parse(readFileSync(root + "/calls.json", "utf8")) : [];
+const stateFile = root + "/state/omp-session-gateway-qual/omp-gateway-qual.json";
+calls.push({method, url, args, savedId: existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")).droplet_id : null});
+writeFileSync(root + "/calls.json", JSON.stringify(calls));
+const droplet = JSON.parse(process.env.PROVIDER_DROPLET);
+let status, body;
+if (method === "GET" && url.includes("/droplets?")) {
+  status = scenario.listStatus ?? 200;
+  body = scenario.listBody ?? {droplets: [], links: {}};
+} else if (method === "POST" && url.endsWith("/droplets")) {
+  status = scenario.createStatus ?? 202;
+  body = scenario.createBody ?? {droplet: {...droplet, networks: null}};
+  if (status === 202) writeFileSync(root + "/created", "");
+  const bodyPath = args[args.indexOf("--data-binary") + 1].slice(1);
+  const request = JSON.parse(readFileSync(bodyPath, "utf8"));
+  if (request.name !== droplet.name || request.tags[0] !== droplet.name || request.ssh_keys[0] !== 4242) process.exit(93);
+} else if (url.endsWith("/droplets/4242") && method === "GET") {
+  if (existsSync(root + "/deleted")) {
+    status = 404;
+    body = {id: "not_found"};
+  } else {
+    status = scenario.getStatus ?? 200;
+    const reads = calls.filter(call => call.method === "GET" && call.url.endsWith("/droplets/4242")).length;
+    body = scenario.getBodies?.[Math.min(reads - 1, scenario.getBodies.length - 1)] ?? {droplet};
+  }
+} else if (url.endsWith("/droplets/4242") && method === "DELETE") {
+  status = scenario.deleteStatus ?? 204;
+  body = status === 204 ? "" : {message: "synthetic delete response"};
+  if (status === 204 || status === 404) writeFileSync(root + "/deleted", "");
+} else {
+  process.exit(94);
+}
+if (scenario.echoCredential) body = {message: process.env.PROVIDER_TEST_TOKEN};
+process.stdout.write((typeof body === "string" ? body : JSON.stringify(body)) + "\n" + status);
+process.exit(scenario.transportExit ?? 0);
+`,
+    { mode: 0o700 },
+  );
+  const run = async (command: string, storedCredential = false, extra = "") => {
+    const harness = `
+source "$1"
+preflight_tools() { :; }
+preflight_ssh_key() { :; }
+preflight_catalog() { HOURLY_RATE=0.0625; }
+size_hourly_rate() { printf 0.0625; }
+ssh_is_up() { return 0; }
+cloud_init_done() { return 0; }
+remote_root() { cat >/dev/null; }
+provision_init_facts() { :; }
+report_imported_images() { :; }
+sleep() { SECONDS=$((SECONDS + $1)); }
+${extra}
+main "$2"
+`;
+    const child = Bun.spawn(
+      ["/bin/bash", "-c", harness, "test", join(REPOSITORY_ROOT, "scripts/provision-linux-qual.sh"), command],
+      {
+        cwd: REPOSITORY_ROOT,
+        env: {
+          ...process.env,
+          HOME: home,
+          XDG_STATE_HOME: join(home, "state"),
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          OMP_QUAL_NAME: "omp-gateway-qual",
+          OMP_QUAL_INIT: "openrc",
+          OMP_QUAL_SSH_KEY_ID: "4242",
+          OMP_QUAL_EVIDENCE_DIR: evidenceRoot,
+          DIGITALOCEAN_ACCESS_TOKEN: storedCredential ? "" : PROVIDER_TEST_TOKEN,
+          PROVIDER_TEST_TOKEN,
+          PROVIDER_FIXTURE: home,
+          PROVIDER_DROPLET: JSON.stringify(PROVIDER_DROPLET),
+          TS_AUTHKEY: "",
+          TS_API_KEY: "",
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr };
+  };
+  return {
+    home,
+    stateFile,
+    run,
+    calls: async () =>
+      (await Bun.file(join(home, "calls.json")).json()) as {
+        method: string;
+        url: string;
+        args: string[];
+        savedId: string | null;
+      }[],
+    evidence: async () => {
+      const contents: string[] = [];
+      for await (const path of new Bun.Glob("**/*").scan({ cwd: evidenceRoot, onlyFiles: true })) {
+        contents.push(await Bun.file(join(evidenceRoot, path)).text());
+      }
+      return contents.join("\n");
+    },
+    dispose: () => rm(home, { recursive: true, force: true }),
+  };
+}
+
+test.skipIf(process.platform === "win32")("droplet create id survives null networks and binds readiness and deletion", async () => {
+  const fixture = await dropletHarness({
+    getBodies: [
+      { droplet: { ...PROVIDER_DROPLET, networks: null } },
+      { droplet: { ...PROVIDER_DROPLET, networks: { v4: null } } },
+      { droplet: PROVIDER_DROPLET },
+    ],
+  });
+  try {
+    const provision = await fixture.run("provision", true);
+    expect(provision.exitCode).toBe(0);
+    expect(await Bun.file(fixture.stateFile).json()).toEqual({ droplet_id: "4242" });
+    const reads = (await fixture.calls()).filter(call => call.url.endsWith("/droplets/4242"));
+    expect(reads).toHaveLength(3);
+    expect(reads.every(call => call.savedId === "4242")).toBe(true);
+    expect(provision.stdout).toContain("192.0.2.42");
+    const destroy = await fixture.run("destroy");
+    expect(destroy.exitCode).toBe(0);
+    expect(destroy.stdout).toContain("id 4242 confirmed absent (HTTP 404)");
+    expect(await Bun.file(fixture.stateFile).exists()).toBe(false);
+    const calls = await fixture.calls();
+    expect(calls.filter(call => call.method === "POST")).toHaveLength(1);
+    expect(calls.filter(call => call.method === "DELETE").map(call => call.url)).toEqual([
+      "https://api.digitalocean.com/v2/droplets/4242",
+    ]);
+    const evidence = await fixture.evidence();
+    for (const status of ["200", "202", "204", "404"]) expect(evidence).toContain(`"http_status": "${status}"`);
+    expect(evidence).toContain('"networks":null');
+    expect(evidence + JSON.stringify(calls) + provision.stdout + provision.stderr + destroy.stdout + destroy.stderr)
+      .not.toContain(PROVIDER_TEST_TOKEN);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test.skipIf(process.platform === "win32")("IPv4 readiness exhaustion retains the create id and still permits exact-id cleanup", async () => {
+  const fixture = await dropletHarness({ getBodies: [{ droplet: { ...PROVIDER_DROPLET, networks: null } }] });
+  try {
+    const provision = await fixture.run("provision");
+    expect(provision.exitCode).toBe(1);
+    expect(provision.stderr).toContain("did not become active with public IPv4 within 150s");
+    expect(await Bun.file(fixture.stateFile).json()).toEqual({ droplet_id: "4242" });
+    const reads = (await fixture.calls()).filter(call => call.url.endsWith("/droplets/4242"));
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.length).toBeLessThanOrEqual(30);
+    expect((await fixture.run("destroy")).exitCode).toBe(0);
+    expect(await fixture.evidence()).toContain('"http_status": "202"');
+  } finally {
+    await fixture.dispose();
+  }
+}, 15_000);
+
+test.skipIf(process.platform === "win32")("incomplete create metadata cannot discard the returned cleanup id", async () => {
+  const fixture = await dropletHarness({ createBody: { droplet: { ...PROVIDER_DROPLET, tags: null } } });
+  try {
+    const provision = await fixture.run("provision");
+    expect(provision.exitCode).toBe(1);
+    expect(provision.stderr).toContain("identity does not match");
+    expect(await Bun.file(fixture.stateFile).json()).toEqual({ droplet_id: "4242" });
+    expect(await fixture.evidence()).toContain('"tags":null');
+    // Later GET metadata must prove the bound name/tag before the exact-id cleanup can proceed.
+    expect((await fixture.run("destroy")).exitCode).toBe(0);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+for (const [name, scenario, bound, reason] of [
+  ["malformed list", { listBody: { droplets: null } }, false, "list is malformed"],
+  ["unbound tag", { listBody: { droplets: [PROVIDER_DROPLET] } }, false, "refusing adoption or deletion"],
+  ["malformed get", { getBodies: ["not json"] }, true, "response is malformed"],
+  ["HTTP read error", { getStatus: 503 }, true, "HTTP 503, not absence"],
+  ["identity mismatch", { getBodies: [{ droplet: { ...PROVIDER_DROPLET, id: 9999 } }] }, true, "identity does not match"],
+  ["transport error", { transportExit: 28 }, true, "transport failed"],
+] as const) {
+  test.skipIf(process.platform === "win32")(`droplet ${name} cannot turn into absence or a delete`, async () => {
+    const fixture = await dropletHarness(scenario, bound);
+    try {
+      const result = await fixture.run("destroy");
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(reason);
+      expect(result.stdout).not.toContain("already absent");
+      expect((await fixture.calls()).some(call => call.method === "DELETE")).toBe(false);
+      expect(await Bun.file(fixture.stateFile).exists()).toBe(bound);
+      expect(await fixture.evidence()).toContain('"http_status"');
+    } finally {
+      await fixture.dispose();
+    }
+  });
+}
+
+for (const status of [204, 404, 500]) {
+  test.skipIf(process.platform === "win32")(`droplet DELETE HTTP ${status} determines teardown disposition`, async () => {
+    const fixture = await dropletHarness({ deleteStatus: status }, true);
+    try {
+      const result = await fixture.run("destroy");
+      expect(result.exitCode).toBe(status === 500 ? 1 : 0);
+      expect(await Bun.file(fixture.stateFile).exists()).toBe(status === 500);
+      expect(await fixture.evidence()).toContain(`"http_status": "${status}"`);
+      if (status === 500) {
+        expect(result.stderr).toContain("delete for 4242 returned HTTP 500");
+        expect(result.stdout).toContain("STILL RUNNING AND STILL BILLING");
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+}
+
+test.skipIf(process.platform === "win32")("a valid empty list and an exact-id 404 are real absence, not permission to create again", async () => {
+  const empty = await dropletHarness({});
+  const missing = await dropletHarness({ getStatus: 404, deleteStatus: 404 }, true);
+  try {
+    expect((await empty.run("destroy")).exitCode).toBe(0);
+    expect((await empty.calls()).map(call => call.method)).toEqual(["GET"]);
+    const provision = await missing.run("provision");
+    expect(provision.exitCode).toBe(1);
+    expect(provision.stderr).toContain("reconcile it before provisioning again");
+    expect((await missing.calls()).some(call => call.method === "POST")).toBe(false);
+    expect((await missing.run("destroy")).exitCode).toBe(0);
+    expect(await Bun.file(missing.stateFile).exists()).toBe(false);
+  } finally {
+    await Promise.all([empty.dispose(), missing.dispose()]);
+  }
+});
+
+test.skipIf(process.platform === "win32")("provider error evidence removes an echoed credential before persistence", async () => {
+  const fixture = await dropletHarness({ getStatus: 503, echoCredential: true }, true);
+  try {
+    const result = await fixture.run("destroy");
+    expect(result.exitCode).toBe(1);
+    const evidence = await fixture.evidence();
+    expect(evidence).toContain("[REDACTED_CREDENTIAL]");
+    expect(evidence + result.stdout + result.stderr + JSON.stringify(await fixture.calls())).not.toContain(PROVIDER_TEST_TOKEN);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test.skipIf(process.platform === "win32")("the billing reminder cannot leave a destroy command green", async () => {
+  const fixture = await dropletHarness({}, true);
+  try {
+    const result = await fixture.run("destroy", false, "cmd_destroy() { DESTROY_REQUESTED=1; return 0; }");
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("STILL RUNNING AND STILL BILLING");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test.skipIf(process.platform === "win32")("rollback refuses a non-private predecessor config before service operations", async () => {
   const home = await mkdtemp(join(tmpdir(), "omp-rollback-config-private-"));
   const state = join(home, ".local", "state", "omp-session-gateway");

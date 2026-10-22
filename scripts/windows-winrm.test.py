@@ -57,9 +57,33 @@ class WinrmFramingTests(unittest.TestCase):
     def run_request(self, **payload):
         request = {'host': '192.0.2.10', 'username': 'Administrator', 'password': 'synthetic-transport-only', **payload}
         output = io.StringIO()
-        with patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))), contextlib.redirect_stdout(output):
+        self.stderr = io.StringIO()
+        with patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(self.stderr):
             self.adapter['main']()
         return json.loads(output.getvalue())
+
+    def test_first_response_marker_precedes_guest_execution_and_has_no_payload(self):
+        original = Transport.run_command
+        def after_first_response(instance, *args, **options):
+            self.assertEqual(self.stderr.getvalue(), 'WINRM_FIRST_RESPONSE 1800000000123\n')
+            return original(instance, *args, **options)
+        with patch('time.time_ns', return_value=1800000000123000000), \
+                patch.object(Transport, 'run_command', after_first_response):
+            result = self.run_request(script='synthetic-private-script', observeTransport=True)
+        self.assertEqual(result['exitCode'], 0)
+        self.assertEqual(self.stderr.getvalue(), 'WINRM_FIRST_RESPONSE 1800000000123\n')
+        self.assertTrue(Transport.closed)
+
+    def test_missing_authenticated_reply_emits_no_first_response_marker(self):
+        with patch.object(Transport, 'open_shell', side_effect=ConnectionError('synthetic refusal')):
+            with self.assertRaises(ConnectionError):
+                self.run_request(script='synthetic', observeTransport=True)
+        self.assertEqual(self.stderr.getvalue(), '')
+
+    def test_ordinary_operations_do_not_emit_transport_markers(self):
+        self.run_request(script='synthetic')
+        self.assertEqual(self.stderr.getvalue(), '')
 
     def test_script_and_credential_never_enter_remote_arguments(self):
         script = 'param($p) "synthetic command"'

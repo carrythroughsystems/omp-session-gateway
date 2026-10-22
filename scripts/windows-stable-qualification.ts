@@ -36,6 +36,14 @@ export interface WindowsInstance {
   readonly power_status?: string;
 }
 export interface WindowsFirewall { readonly id: string; readonly description?: string }
+export interface WindowsTransportProbe {
+  readonly startedAt: number;
+  readonly timeoutMs: number;
+  readonly firstResponseLatencyMs: number | null;
+  readonly signalAt: number | null;
+  readonly exitedAt: number | null;
+  readonly exitCode: number | null;
+}
 export interface WindowsProvider {
   instances(): Promise<WindowsInstance[]>;
   firewalls(): Promise<WindowsFirewall[]>;
@@ -51,6 +59,7 @@ export interface WindowsContext {
   readonly epoch: string;
   readonly identity: WindowsIdentity;
   readonly beforeEffect: () => Promise<void>;
+  readonly transportProbe?: (probe: WindowsTransportProbe) => Promise<void>;
 }
 export type WindowsGuestAction = "transport" | "stage" | "installPredecessor" | "upgrade" | "doctor" | "reboot" |
   "prelogin" | "ready" | "publish" | "launch" | "stopOmp" | "revoked" | "rotate" | "rollback" | "restore" |
@@ -103,6 +112,8 @@ interface Progress extends Record<string, unknown> {
   startedAt: number;
   timings: Partial<Record<Phase, number>>;
   facts: Partial<Record<typeof FACTS[number], number | boolean>>;
+  /** Older immutable receipts predate this additive diagnostic field. */
+  transportProbes?: WindowsTransportProbe[];
 }
 export interface WindowsLaneInput {
   readonly identity: WindowsIdentity;
@@ -151,6 +162,7 @@ function binding(identity: WindowsIdentity): string {
 function parseProgress(value: unknown, expected?: string): Progress {
   requireFact(record(value), "invalid Windows progress");
   const keys = ["binding", "cleanupRequired", "epoch", "facts", "lane", "phase", "schemaVersion", "settled", "startedAt", "timings"];
+  if (Object.hasOwn(value, "transportProbes")) keys.push("transportProbes");
   requireFact(JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys), "unknown Windows progress fields");
   requireFact(value.schemaVersion === 1 && value.lane === "windows" && typeof value.epoch === "string" && UUID.test(value.epoch) &&
     typeof value.binding === "string" && SHA.test(value.binding) && (expected === undefined || value.binding === expected) &&
@@ -163,6 +175,21 @@ function parseProgress(value: unknown, expected?: string): Progress {
   requireFact(Object.keys(timings).length === observedPhases.length && observedPhases.every(phase => Object.hasOwn(timings, phase)), "incomplete Windows phase history");
   for (const [key, item] of Object.entries(value.timings)) requireFact(PHASES.includes(key as Phase) && typeof item === "number" && Number.isFinite(item) && item >= 0, "invalid Windows timing");
   for (const [key, item] of Object.entries(value.facts)) requireFact(FACTS.includes(key as typeof FACTS[number]) && (typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item) && item >= 0)), "invalid Windows observation");
+  if (value.transportProbes !== undefined) {
+    requireFact(Array.isArray(value.transportProbes), "invalid Windows transport probes");
+    for (const probe of value.transportProbes) {
+      requireFact(record(probe) && JSON.stringify(Object.keys(probe).sort()) === JSON.stringify(
+        ["exitCode", "exitedAt", "firstResponseLatencyMs", "signalAt", "startedAt", "timeoutMs"]), "unknown Windows transport probe fields");
+      const integer = (item: unknown): item is number => typeof item === "number" && Number.isSafeInteger(item);
+      requireFact(integer(probe.startedAt) && probe.startedAt > 0 && integer(probe.timeoutMs) && probe.timeoutMs >= 1 && probe.timeoutMs <= 180_000,
+        "invalid Windows transport probe start");
+      for (const key of ["signalAt", "exitedAt"] as const) requireFact(probe[key] === null || (integer(probe[key]) && probe[key] >= probe.startedAt), "invalid Windows transport probe timestamp");
+      requireFact((probe.exitedAt === null) === (probe.exitCode === null) && (probe.exitCode === null || integer(probe.exitCode)), "invalid Windows transport probe exit");
+      requireFact(probe.firstResponseLatencyMs === null || (integer(probe.firstResponseLatencyMs) && probe.firstResponseLatencyMs >= 0 &&
+        (probe.exitedAt === null || probe.firstResponseLatencyMs <= Number(probe.exitedAt) - probe.startedAt)), "invalid Windows transport first response");
+      requireFact(probe.signalAt === null || probe.exitedAt === null || Number(probe.signalAt) <= Number(probe.exitedAt), "Windows transport signal follows exit");
+    }
+  }
   return structuredClone(value) as Progress;
 }
 export function windowsNeedsCleanup(progress: unknown): boolean {
@@ -194,6 +221,7 @@ function evidence(progress: Progress, identity: WindowsIdentity): Record<string,
   const artifact = ({ tag, sourceCommit, archiveSha256 }: WindowsArtifact) => ({ tag, sourceCommit, archiveSha256 });
   return { epoch: progress.epoch, candidate: artifact(identity.candidate), predecessor: artifact(identity.predecessor),
     omp: pins.omp, bunVersion: pins.bunVersion, timings: progress.timings, observations: progress.facts,
+    transportProbes: progress.transportProbes ?? [],
     doctor: { true: progress.facts.doctorTrue, total: progress.facts.doctorChecks,
       falseChecks: [["identityAllowed", "doctorIdentityAllowed"], ["pwa", "doctorPwa"], ["sessionHealth", "doctorSessionHealth"],
         ["publisherHealth", "doctorPublisherHealth"], ["securityHeaders", "doctorSecurityHeaders"]].filter(([, key]) => progress.facts[key as typeof FACTS[number]] === false).map(([name]) => name) } };
@@ -215,12 +243,21 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   }
   await preflightWindows({ identity: input.identity, ...(resumed ? { epoch: resumed.epoch } : {}) }, runtime);
   const progress: Progress = resumed ?? { schemaVersion: 1, lane: "windows", epoch: runtime.uuid(), binding: digest,
-    phase: "intent_checkpointed", settled: true, cleanupRequired: true, startedAt: runtime.now(), timings: {}, facts: {} };
+    phase: "intent_checkpointed", settled: true, cleanupRequired: true, startedAt: runtime.now(), timings: {}, facts: {}, transportProbes: [] };
   const save = async () => { parseProgress(progress, digest); await input.checkpoint(structuredClone(progress)); };
-  const context: WindowsContext = { epoch: progress.epoch, identity: input.identity, beforeEffect: async () => {
-    requireFact(runtime.now() - progress.startedAt < 3 * 60 * 60_000, "Windows resource lifetime bound reached");
-    await save();
-  } };
+  const context: WindowsContext = { epoch: progress.epoch, identity: input.identity,
+    beforeEffect: async () => {
+      requireFact(runtime.now() - progress.startedAt < 3 * 60 * 60_000, "Windows resource lifetime bound reached");
+      await save();
+    },
+    transportProbe: async probe => {
+      requireFact(!progress.settled, "transport observation outside active step");
+      const probes = progress.transportProbes ??= [];
+      if (probes.at(-1)?.startedAt === probe.startedAt) probes[probes.length - 1] = { ...probe };
+      else probes.push({ ...probe });
+      await save();
+    },
+  };
   const label = windowsCampaignLabel(progress.epoch);
   await save();
   const resumeIndex = resumed ? PHASES.indexOf(resumed.phase) : -1;
