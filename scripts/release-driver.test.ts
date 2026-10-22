@@ -71,8 +71,8 @@ import { createStableQualificationReceipt } from "./stable-qualification.ts";
 import type { ExternalLaneModule, StableQualificationLaneModules, StableQualificationReceipt } from "./stable-qualification.ts";
 import { readDeviceCloudOutcomeFile, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
 
-import { REQUIRED_CHECKS, ROUTINE_EVIDENCE_STEPS, RoutineHoldError } from "./release-policy.ts";
-const authority = { policy: "policy-1", protectedChanges: [], sourceReviewed: true, sourceFresh: true, patchRelease: true };
+import { REQUIRED_CHECKS, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineSourceHold } from "./release-policy.ts";
+const authority = { policy: "policy-1", protectedChanges: [], sourceReviewed: true, sourceFresh: true, releaseClassAllowed: true };
 const evidence = { head: "b".repeat(40), tree: "c".repeat(40), candidate: "v0.7.5-prealpha.1", candidateCommit: "e".repeat(40), candidateDigest: "f".repeat(64), policy: authority.policy, steps: ROUTINE_EVIDENCE_STEPS };
 const config = { bot: "alphastorm-release", founder: "alphastorm" };
 const issue: TrackingIssue = { number: 400, title: "Upstream tracking: v18.8.3", author: "github-actions[bot]", request: "42:1", url: "https://github.com/carrythroughsystems/omp-session-gateway/issues/400" };
@@ -88,6 +88,55 @@ function order(overrides: Partial<PullRequest> = {}): PullRequest {
 function snapshot(overrides: Partial<RepositorySnapshot> = {}): RepositorySnapshot {
   return { main: "a".repeat(40), upstreamTag: "v18.8.3", latestStable: "v0.7.4", tags: ["v0.7.4", "v0.7.4-prealpha.1"], issues: [{ ...issue }], authority, evidence, ...overrides };
 }
+test("explicit minor request selects 0.8.0 instead of the unpublished 0.7.8 chain", () => {
+  const minor = { ...issue, releaseClass: "minor" as const };
+  const step = nextStep(undefined, snapshot({ latestStable: "v0.7.7", issues: [minor], tags: ["v0.7.8-prealpha.5"] }), config);
+  expect(step.operation).toBe("select");
+  if (step.operation !== "idle") {
+    expect(step.patch?.version).toBe("0.8.0");
+    expect(step.patch?.candidate).toBe("v0.8.0-prealpha.1");
+    expect(step.patch?.issue).toEqual(minor);
+  }
+});
+test("request identities bind OMP version and class to successful filing jobs", async () => {
+  class Requests extends StudioDriver {
+    jobs = [{ name: "Request OMP v18.8.3", conclusion: "success" }];
+    override async pages<T>(): Promise<T[]> {
+      return [
+        { number: 439, title: issue.title, user: { login: issue.author }, created_at: "legacy", html_url: issue.url, labels: [] },
+        { number: 441, title: issue.title, user: { login: issue.author }, created_at: "minor", html_url: issue.url, labels: [{ name: "release-minor" }] },
+      ] as T[];
+    }
+    override async api<T>(path: string): Promise<T | undefined> {
+      return (path.startsWith("actions/workflows/") ? { workflow_runs: [{ id: 42, run_attempt: 1 }] } : { jobs: this.jobs }) as T;
+    }
+  }
+  const runtime = new Requests(driverConfig(), true);
+  expect((await runtime.issues()).map(value => [value.number, value.releaseClass, value.request])).toEqual([[439, "patch", "42:1"]]);
+  runtime.jobs = [{ name: "Request OMP v18.8.3 (minor)", conclusion: "skipped" }];
+  expect((await runtime.issues()).map(value => value.number)).toEqual([439]);
+  runtime.jobs = [{ name: "Request OMP v18.8.3 (minor)", conclusion: "success" }];
+  expect((await runtime.issues()).map(value => [value.number, value.releaseClass, value.request])).toEqual([
+    [439, "patch", "legacy"], [441, "minor", "42:1"],
+  ]);
+  expect(selectRequest(await runtime.issues())?.number).toBe(441);
+});
+test("a completed patch does not close an outstanding minor request", async () => {
+  const minor = { ...issue, number: 441, releaseClass: "minor" as const };
+  class Closing extends StudioDriver {
+    closed: string[] = [];
+    override async issues() { return [issue, minor]; }
+    override async announce() {}
+    override async gh<T>(args: string[]): Promise<T | undefined> { this.closed.push(args[3]!); return undefined; }
+  }
+  const runtime = new Closing(driverConfig(), false);
+  const close: Decision = { operation: "close", phase: "closed", detail: "fulfilled" };
+  await runtime.perform(close, state("recorded"));
+  expect(runtime.closed).toEqual([`repos/${REPOSITORY}/issues/400`]);
+  runtime.closed = [];
+  await runtime.perform(close, { ...state("recorded"), issue: minor });
+  expect(runtime.closed).toEqual([`repos/${REPOSITORY}/issues/400`, `repos/${REPOSITORY}/issues/441`]);
+});
 class FakeDriver implements DriverPort {
   state: DriverState | undefined;
   repo = snapshot();
@@ -209,6 +258,16 @@ describe("review remediations", () => {
     expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
     runtime.title = "feat(gateway): title edited after merge"; runtime.subject = "fix(gateway): immutable reviewed fix";
     expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(true);
+  });
+  test("runtime and policy admit the exact requested minor class, not an arbitrary minor jump", async () => {
+    const runtime = new SourceRuntime(driverConfig(), true);
+    runtime.subject = "fix(gateway): immutable reviewed fix";
+    const minor = { ...state(), previousStable: "v0.7.7", version: "0.8.0", candidate: "v0.8.0-prealpha.1",
+      issue: { ...issue, releaseClass: "minor" as const } };
+    const observed = await runtime.authority(minor, minor.selectedMain);
+    expect(routineSourceHold(observed)).toBeUndefined();
+    expect(routineSourceHold(await runtime.authority({ ...minor, version: "0.9.0" }, minor.selectedMain))).toBe("out-of-class");
+    expect(routineSourceHold(await runtime.authority({ ...minor, issue }, minor.selectedMain))).toBe("out-of-class");
   });
   test("R1 release-record classification refuses files outside generator output", async () => {
     const runtime = new SourceRuntime(driverConfig(), true);
@@ -355,6 +414,17 @@ test("diagnostic rerequest requires a new green dispatch, main fix, and recovere
   const step = nextStep(failed, repo, config);
   expect(step.operation).toBe("rerequest");
   if (step.operation !== "idle") { expect(step.patch?.candidate).toBe("v0.7.5-prealpha.2"); expect(step.patch?.candidateCommit).toBeUndefined(); }
+});
+
+test("diagnostic rerequests cannot change the pinned release class", () => {
+  const failed = { ...state("diagnostic-required"), failedMain: "a".repeat(40) };
+  const minor = { ...issue, request: "43:1", releaseClass: "minor" as const };
+  expect(nextStep(failed, snapshot({ main: "d".repeat(40), issues: [minor] }), config).operation).toBe("idle");
+  const minorFailed = { ...failed, issue: { ...issue, releaseClass: "minor" as const }, version: "0.8.0", candidate: "v0.8.0-prealpha.1" };
+  expect(nextStep(minorFailed, snapshot({ main: "d".repeat(40), issues: [{ ...issue, request: "43:1" }] }), config).operation).toBe("idle");
+  const step = nextStep(minorFailed, snapshot({ main: "d".repeat(40), issues: [minor], tags: ["v0.8.0-prealpha.1"] }), config);
+  expect(step.operation).toBe("rerequest");
+  if (step.operation !== "idle") expect(step.patch?.candidate).toBe("v0.8.0-prealpha.2");
 });
 
 test("a later passing observation cannot erase a diagnostic host fault or restart the failed candidate", async () => {

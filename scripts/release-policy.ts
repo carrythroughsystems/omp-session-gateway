@@ -49,6 +49,18 @@ export function generatedReleaseFilesMatch(kind: GeneratedReleaseKind | undefine
     .every(path => paths.includes(path) && (!routineProtectedPath(path) || (kind === "prepare" && path === "scripts/build-release.ts"))));
 }
 
+export type ReleaseClass = "patch" | "minor";
+export function parseReleaseClass(value: unknown = "patch"): ReleaseClass {
+  if (value !== "patch" && value !== "minor") throw new Error("release class must be patch or minor");
+  return value;
+}
+/** Selection, preparation and promotion must agree on the same requested transition. */
+export function nextReleaseVersion(previousTag: string, releaseClass: ReleaseClass = "patch"): string {
+  if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.test(previousTag)) throw new Error("expected exact published stable tag");
+  const [major, minor, patch] = previousTag.slice(1).split(".").map(BigInt);
+  return parseReleaseClass(releaseClass) === "minor" ? `${major}.${minor! + 1n}.0` : `${major}.${minor}.${patch! + 1n}`;
+}
+
 export const ROUTINE_HOLD_REASONS = ["authority-path-changed", "policy-changed", "out-of-class", "stale-source",
   "missing-evidence", "head-tree-changed", "unexpected-merger", "pr-identity-changed", "required-checks-missing",
   "merge-tree-changed", "merge-missing", "merge-signature-missing", "generated-content-mismatch"] as const;
@@ -69,7 +81,7 @@ export interface RoutineAuthority {
   sourceReviewed: boolean;
   unreviewedCommit?: string;
   sourceFresh: boolean;
-  patchRelease: boolean;
+  releaseClassAllowed: boolean;
 }
 export interface RoutineSubject {
   head?: string | undefined; tree?: string | undefined; candidate: string;
@@ -85,7 +97,7 @@ export function routineSourceHold(authority: RoutineAuthority | undefined, expec
   if (!authority) return "missing-evidence";
   if (authority.protectedChanges.length) return "authority-path-changed";
   if (expectedPolicy !== undefined && authority.policy !== expectedPolicy) return "policy-changed";
-  if (!authority.patchRelease || !authority.sourceReviewed) return "out-of-class";
+  if (!authority.releaseClassAllowed || !authority.sourceReviewed) return "out-of-class";
   if (!authority.sourceFresh) return "stale-source";
   return undefined;
 }

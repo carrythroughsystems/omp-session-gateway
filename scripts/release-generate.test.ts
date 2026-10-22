@@ -128,6 +128,36 @@ test("fresh attempts preserve the existing cut and incorporate new Unreleased fi
   expect(repeated).toEqual(result);
 });
 
+test("minor preparation folds the unpublished patch cut and recounts all entries together", () => {
+  const tree = Object.fromEntries(Object.entries({ ...prepareBefore, ...prepared }).map(([path, bytes]) =>
+    [path, bytes.replaceAll("0.7.4", "0.7.8").replaceAll("0.7.3", "0.7.7")]));
+  tree["CHANGELOG.md"] = tree["CHANGELOG.md"]!.replace("## [Unreleased]\n", "## [Unreleased]\n\n### Added\n\n- Minor fleet configuration.\n");
+  const options = { command: "prepare" as const, version: "0.8.0", date: "2026-10-22", releaseClass: "minor" as const };
+  const result = generateRelease(tree, options);
+  expect(result["CHANGELOG.md"]).not.toContain("## [v0.7.8]");
+  expect(result["CHANGELOG.md"]).toContain("## [v0.8.0]");
+  expect(result["CHANGELOG.md"]).toContain("- Minor fleet configuration.");
+  expect(result["CHANGELOG.md"]).toContain("bun scripts/upstream-pins.ts");
+  const metadata = JSON.parse(result[RELEASE_TEXT]!);
+  expect(metadata.version).toBe("0.8.0");
+  expect(metadata.candidateTag).toBe("v0.8.0-prealpha.1");
+  expect(result["CHANGELOG.md"]).toContain(metadata.summary);
+  expect(generateRelease({ ...tree, ...result }, options)).toEqual(result);
+  expect(result["STABLE_RELEASE.lock.json"]).toBeUndefined();
+  expect(result["UPSTREAM.lock.json"]).toBeUndefined();
+});
+
+test("minor retarget refuses edited summaries, qualified cuts, wrong classes and version skips", () => {
+  const tree = { ...prepareBefore, ...prepared };
+  const options = { command: "prepare" as const, version: "0.8.0", date: "2026-10-22", releaseClass: "minor" as const };
+  const metadata = JSON.parse(tree[RELEASE_TEXT]!);
+  expect(() => generateRelease({ ...tree, [RELEASE_TEXT]: JSON.stringify({ ...metadata, summary: "hand-edited summary" }) }, options)).toThrow("prepared changelog");
+  expect(() => generateRelease({ ...tree, [RELEASE_TEXT]: JSON.stringify({ ...metadata, qualification: {} }) }, options)).toThrow("package and published stable");
+  expect(() => generateRelease(tree, { ...options, releaseClass: "patch" })).toThrow("requested release class");
+  for (const version of ["0.8.1", "0.9.0", "1.0.0"]) expect(() => generateRelease(tree, { ...options, version })).toThrow("requested release class");
+  expect(() => generateRelease(tree, { ...options, version: "0.7.4" })).toThrow("requested release class");
+});
+
 describe("historical predecessor receipt", () => {
   // Adapt a complete fixture without changing the original recorded receipt or golden bytes.
   const tree = Object.fromEntries(Object.entries(approveBefore).map(([path, bytes]) => [path, bytes.replaceAll("0.7.4", "0.7.6").replaceAll("0.7.3", "0.7.5")]));
@@ -261,5 +291,10 @@ test("CLI writes only the computed files; missing inputs exit 1 without writes",
     const child = Bun.spawn([process.execPath, join(root, "scripts/release-generate.ts"), "record", "v0.7.4", "--date", "2026-10-03"], { cwd: directory, stdout: "pipe", stderr: "pipe" });
     expect(await child.exited).toBe(1);
     expect(await new Response(child.stderr).text()).toContain("missing required --smoke");
+    await expect(runReleaseGenerate(["prepare", "0.8.0", "--release-class", "major", "--date", "2026-10-22"], directory)).rejects.toThrow("release class");
+    expect(await readFile(join(directory, "package.json"), "utf8")).toBe(prepared["package.json"]!);
+    await runReleaseGenerate(["prepare", "0.8.0", "--release-class", "minor", "--date", "2026-10-22"], directory);
+    expect(JSON.parse(await readFile(join(directory, "package.json"), "utf8")).version).toBe("0.8.0");
+    expect(JSON.parse(await readFile(join(directory, RELEASE_TEXT), "utf8")).candidateTag).toBe("v0.8.0-prealpha.1");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

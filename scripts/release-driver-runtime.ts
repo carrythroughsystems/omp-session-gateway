@@ -12,7 +12,7 @@ import { downloadReleaseAssets } from "./release-download.ts";
 import { compareReleaseArchives } from "./release-runtime-compare.ts";
 import { assertDeviceCloudResumeEligible, validateStableQualificationReceipt, type StableQualificationLaneModules, type StableQualificationReceipt } from "./stable-qualification.ts";
 import { parseDeviceCloudMachineOutcome, readDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
-import { REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineProtectedPath, routineSourceHold, generatedReleaseKind, generatedReleaseFilesMatch } from "./release-policy.ts";
+import { nextReleaseVersion, parseReleaseClass, REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineProtectedPath, routineSourceHold, generatedReleaseKind, generatedReleaseFilesMatch } from "./release-policy.ts";
 import type { RoutineAuthority, RoutineEvidence } from "./release-policy.ts";
 import { runAdb } from "./android-device.ts";
 
@@ -220,7 +220,7 @@ export class StudioDriver implements DriverPort {
   async load(): Promise<DriverState | undefined> {
     const state = await jsonFile<DriverState>(join(this.config.stateDir, "state.json"));
     if (state !== undefined && (state.schemaVersion !== 1 || !Number.isSafeInteger(state.sequence) || requestVersion(state.issue) === undefined)) throw new Error("unsupported/corrupt release-driver state");
-    if (state !== undefined) campaignAttempt(state);
+    if (state !== undefined) { campaignAttempt(state); parseReleaseClass(state.issue.releaseClass); }
     return state;
   }
   async save(state: DriverState): Promise<void> {
@@ -243,21 +243,26 @@ export class StudioDriver implements DriverPort {
       checksPassed: REQUIRED_CHECKS.every(name => runs.some(run => run.name === name && run.status === "completed" && run.conclusion === "success" && run.app.slug === "github-actions")), files, url: pr.html_url };
   }
   async issues(): Promise<TrackingIssue[]> {
-    const raw = await this.pages<{ number: number; title: string; user: { login: string }; html_url: string; created_at: string; pull_request?: unknown }>("issues?state=open&creator=github-actions%5Bbot%5D&per_page=100");
-    const issues = raw.filter(issue => issue.pull_request === undefined).map(issue => ({ number: issue.number, title: issue.title, author: issue.user.login, request: issue.created_at, url: issue.html_url })).filter(issue => requestVersion(issue) !== undefined);
+    const raw = await this.pages<{ number: number; title: string; user: { login: string }; html_url: string; created_at: string; labels?: { name: string }[]; pull_request?: unknown }>("issues?state=open&creator=github-actions%5Bbot%5D&per_page=100");
+    const issues: TrackingIssue[] = raw.filter(issue => issue.pull_request === undefined).map(issue => ({
+      number: issue.number, title: issue.title, author: issue.user.login, request: issue.created_at, url: issue.html_url,
+      releaseClass: parseReleaseClass(issue.labels?.some(label => label.name === "release-minor") ? "minor" : "patch"),
+    })).filter(issue => requestVersion(issue) !== undefined);
     if (issues.length === 0) return issues;
     const requests = await this.api<{ workflow_runs: WorkflowRun[] }>("actions/workflows/release-request.yml/runs?status=success&per_page=100", true);
-    const unmatched = new Set(issues.map(issue => requestVersion(issue)!));
+    const jobName = (issue: TrackingIssue) => `Request OMP ${requestVersion(issue)}${issue.releaseClass === "minor" ? " (minor)" : ""}`;
+    const unmatched = new Set(issues.map(jobName));
     for (const run of requests?.workflow_runs ?? []) {
       if (unmatched.size === 0) break;
       const jobs = await this.api<{ jobs: { name: string; conclusion: string }[] }>(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
-      for (const version of unmatched) {
-        if (!jobs!.jobs.some(job => job.name === `Request OMP ${version}` && job.conclusion === "success")) continue;
-        for (const issue of issues) if (requestVersion(issue) === version) issue.request = `${run.id}:${run.run_attempt}`;
-        unmatched.delete(version);
+      for (const name of unmatched) {
+        if (!jobs!.jobs.some(job => job.name === name && job.conclusion === "success")) continue;
+        for (const issue of issues) if (jobName(issue) === name) issue.request = `${run.id}:${run.run_attempt}`;
+        unmatched.delete(name);
       }
     }
-    return issues;
+    // A mutable label alone cannot opt a legacy patch request into minor-release authority.
+    return issues.filter(issue => issue.releaseClass !== "minor" || !unmatched.has(jobName(issue)));
   }
   async workflow(tag: string, source: string): Promise<"passed" | "failed" | "pending"> {
     const result = await this.api<{ workflow_runs: WorkflowRun[] }>(`actions/workflows/signed-release.yml/runs?event=push&head_sha=${source}&per_page=100`);
@@ -412,11 +417,10 @@ export class StudioDriver implements DriverPort {
       }
       if (!reviewed) { sourceReviewed = false; unreviewedCommit = commit.sha; break; }
     }
-    const previous = (state.previousStable ?? "v0.0.0").replace(/^v/u, "").split(".").map(BigInt);
-    const version = state.version.split(".").map(BigInt);
     return { policy, protectedChanges, sourceReviewed, ...(unreviewedCommit === undefined ? {} : { unreviewedCommit }),
       sourceFresh: pr ? main === (pr.merged ? pr.mergeCommit : state.candidateCommit) : main === state.selectedMain,
-      patchRelease: version[0] === previous[0] && version[1] === previous[1] && version[2] === previous[2]! + 1n };
+      releaseClassAllowed: state.previousStable !== undefined
+        && state.version === nextReleaseVersion(state.previousStable, parseReleaseClass(state.issue.releaseClass)) };
   }
   async evidence(state: DriverState): Promise<RoutineEvidence | undefined> {
     const result = await jsonFile<JobObservation & { evidence?: RoutineEvidence }>(join(this.jobDirectory("approve", state), "result.json"));
@@ -526,7 +530,7 @@ export class StudioDriver implements DriverPort {
     const directory = await this.checkout(`${state.issue.number}-${state.candidate}-${kind}`, remote?.object.sha ?? source, branch);
     if (remote === undefined) {
       const args = [process.execPath, "scripts/release-generate.ts", kind, kind === "prepare" ? state.version : `v${state.version}`, "--date", state.date];
-      if (kind === "prepare") args.push("--candidate-tag", state.candidate);
+      if (kind === "prepare") args.push("--candidate-tag", state.candidate, "--release-class", parseReleaseClass(state.issue.releaseClass));
       if (kind === "approve") args.push("--receipt", this.receipt(state), "--candidate-tag", state.candidate);
       if (kind === "record") args.push("--smoke", join(this.jobDirectory("smoke", state), "smoke.json"), "--status", join(this.jobDirectory("smoke", state), "status.json"), "--publication", join(this.config.stateDir, `${state.candidate}-publication.json`));
       // A committed local head is the crash checkpoint before a push; never regenerate its content.
@@ -713,7 +717,8 @@ export class StudioDriver implements DriverPort {
       case "open-record": return { recordPr: (await this.openPr("record", state)).number };
       case "merge-record": await this.merge(step.pr!, false); return {};
       case "close":
-        for (const issue of await this.issues()) if (compareVersions(requestVersion(issue)!, requestVersion(state.issue)!) <= 0) {
+        for (const issue of await this.issues()) if (compareVersions(requestVersion(issue)!, requestVersion(state.issue)!) <= 0
+          && (issue.releaseClass !== "minor" || state.issue.releaseClass === "minor")) {
           const body = `release-driver: closed — fulfilled by v${state.version}\nhttps://github.com/${REPOSITORY}/releases/tag/v${state.version}\n<!-- release-driver-close:${state.issue.number}:${issue.number}:${state.version} -->`;
           // The selected issue receives its single transition comment through the state outbox.
           if (issue.number !== state.issue.number) await this.announce(issue.number, body, `<!-- release-driver-close:${state.issue.number}:${issue.number}:${state.version} -->`);

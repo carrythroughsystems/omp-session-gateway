@@ -10,6 +10,14 @@ on:
         required: true
         default: latest
         type: string
+      release_class:
+        description: Gateway version transition
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
 
 permissions: {}
 
@@ -27,6 +35,8 @@ jobs:
     outputs:
       omp_version: ${{ steps.resolve.outputs.omp_version }}
       lock_tag: ${{ steps.resolve.outputs.lock_tag }}
+      release_class: ${{ steps.resolve.outputs.release_class }}
+      class_suffix: ${{ steps.resolve.outputs.class_suffix }}
       should_request: ${{ steps.resolve.outputs.should_request }}
     steps:
       # Read only the request ref's lock; do not install or execute repository/PR code here.
@@ -41,6 +51,7 @@ jobs:
         env:
           OMP_INPUT: ${{ github.event_name == 'schedule' && 'latest' || inputs.omp_version }}
           REQUEST_EVENT: ${{ github.event_name }}
+          RELEASE_CLASS: ${{ github.event_name == 'schedule' && 'patch' || inputs.release_class }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -62,6 +73,8 @@ jobs:
           const different = requested.findIndex((part, index) => part !== baseline[index]);
           const belowBaseline = different !== -1 && requested[different] < baseline[different];
           const scheduled = process.env.REQUEST_EVENT === "schedule";
+          const releaseClass = scheduled ? "patch" : process.env.RELEASE_CLASS;
+          if (releaseClass !== "patch" && releaseClass !== "minor") throw new Error("release class must be patch or minor");
           if (!scheduled && belowBaseline) {
             throw new Error(`Requested v${version} is lower than lock baseline ${lock.tag}`);
           }
@@ -77,10 +90,12 @@ jobs:
             if (openRequests !== "") skipReason = `open bot-authored tracking request #${openRequests.split("\n")[0]} already exists`;
           }
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `omp_version=${version}\nlock_tag=${lock.tag}\nshould_request=${skipReason === undefined}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `release_class=${releaseClass}\nclass_suffix=${releaseClass === "minor" ? " (minor)" : ""}\n`);
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
             "## Release request resolution",
             `- Exact stock OMP: v${version}`,
             `- Dispatched lock baseline: ${lock.tag}`,
+            `- Gateway release class: ${releaseClass}`,
             skipReason === undefined
               ? `- Request: ${different === -1 ? "fixes-only (equal to baseline)" : "upstream refresh"}`
               : `- Scheduled release request skipped: ${skipReason}.`,
@@ -132,7 +147,7 @@ jobs:
 
   file:
     # A late scheduled skip must skip this job, not succeed and renew the driver's request identity.
-    name: Request OMP v${{ needs.resolve.outputs.omp_version }}
+    name: Request OMP v${{ needs.resolve.outputs.omp_version }}${{ needs.resolve.outputs.class_suffix }}
     needs: [resolve, canary, recheck]
     if: ${{ needs.resolve.outputs.should_request == 'true' && needs.canary.outputs.passed == 'true' && needs.recheck.outputs.should_file == 'true' }}
     runs-on: ubuntu-24.04
@@ -145,6 +160,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OMP_VERSION: ${{ needs.resolve.outputs.omp_version }}
           LOCK_TAG: ${{ needs.resolve.outputs.lock_tag }}
+          RELEASE_CLASS: ${{ needs.resolve.outputs.release_class }}
           REQUEST_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
@@ -154,13 +170,24 @@ jobs:
             printf 'invalid resolved request or lock baseline\n' >&2
             exit 1
           fi
+          if [[ "$RELEASE_CLASS" != patch && "$RELEASE_CLASS" != minor ]]; then
+            printf 'release class must be patch or minor\n' >&2
+            exit 1
+          fi
           title="Upstream tracking: v$OMP_VERSION"
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           gh label create release-request --repo "$GITHUB_REPOSITORY" --color 0e8a16 --force >/dev/null
+          minor=false
+          labels=(--label release-request)
+          if [[ "$RELEASE_CLASS" == minor ]]; then
+            minor=true
+            gh label create release-minor --repo "$GITHUB_REPOSITORY" --color 5319e7 --force >/dev/null
+            labels+=(--label release-minor)
+          fi
           # Pagination avoids missing an older identical open request. Only bot-authored issues
           # satisfy the Carrythrough tracking contract; pull requests and human lookalikes do not.
           matches=$(gh api --method GET --paginate "repos/$GITHUB_REPOSITORY/issues" -f state=open -f per_page=100 \
-            --jq ".[] | select(.pull_request == null and .user.login == \"github-actions[bot]\" and .title == \"$title\") | [.number, any(.labels[]; .name == \"release-request\")] | @tsv")
+            --jq ".[] | select(.pull_request == null and .user.login == \"github-actions[bot]\" and .title == \"$title\" and (any(.labels[]; .name == \"release-minor\") == $minor)) | [.number, any(.labels[]; .name == \"release-request\")] | @tsv")
           if [[ -n "$matches" ]]; then
             IFS=$'\t' read -r issue labeled <<<"${matches%%$'\n'*}"
             if [[ "$labeled" != true ]]; then
@@ -169,8 +196,8 @@ jobs:
             issue_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/issues/$issue"
             result=reused
           else
-            body=$(printf 'Requested by @%s after the exact-version canary passed.\n\nRun: %s\n\nLock baseline at the dispatched ref: %s.\n' "$REQUEST_ACTOR" "$run_url" "$LOCK_TAG")
-            issue_url=$(gh issue create --repo "$GITHUB_REPOSITORY" --label release-request --title "$title" --body "$body")
+            body=$(printf 'Requested by @%s after the exact-version canary passed.\n\nRun: %s\n\nLock baseline at the dispatched ref: %s.\n\nGateway release class: %s.\n' "$REQUEST_ACTOR" "$run_url" "$LOCK_TAG" "$RELEASE_CLASS")
+            issue_url=$(gh issue create --repo "$GITHUB_REPOSITORY" "${labels[@]}" --title "$title" --body "$body")
             result=created
           fi
           # Reusing a request never posts a comment or rewrites its human note.
@@ -178,6 +205,7 @@ jobs:
             printf '## Release request\n'
             printf -- '- Exact stock OMP: v%s\n' "$OMP_VERSION"
             printf -- '- Lock baseline: %s\n' "$LOCK_TAG"
+            printf -- '- Gateway release class: %s\n' "$RELEASE_CLASS"
             printf -- '- Canary: passed on Linux and Windows\n'
             printf -- '- Tracking issue (%s): %s\n' "$result" "$issue_url"
             printf -- '- Requested by: @%s\n' "$REQUEST_ACTOR"

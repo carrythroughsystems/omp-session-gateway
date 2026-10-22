@@ -22,7 +22,7 @@ pinned Bun `1.4.0` first on `PATH`.
 
 The manual path requires an explicit maintainer decision for scope/publication, live qualification
 and installed-byte smoke. The standing routine driver below already has authority for these steps
-within its patch-release class and existing resource caps; it does not ask again per release.
+within its requested patch/minor release class and existing resource caps; it does not ask again per release.
 
 1. **Prepare the candidate.** One `chore(release): prepare X.Y.Z` PR bumps the version in the five
    `package.json` files, `PRODUCT_VERSION` in `apps/gateway/src/diagnostics.ts` and
@@ -89,14 +89,28 @@ it skips the filing job with a summary instead. The filing job stays skipped, no
 so the driver cannot count the skip as an explicit re-request. Scheduled runs never request
 fixes-only releases. A newly filed weekly issue is consumed normally.
 
-Manual requests are unchanged: dispatch the workflow on `main` with `omp_version` (default `latest`).
+Manual requests dispatch the workflow on `main` with `omp_version` (default `latest`) and
+`release_class` (`patch` by default, or explicit `minor`). Scheduled requests are always `patch`.
 It resolves the exact stock npm version, refuses a version below `UPSTREAM.lock.json`, and calls
 the existing Linux/Windows canary. A red canary retains its existing canary-issue reporting and
 opens no tracking issue. A green run opens or reuses `Upstream tracking: vX.Y.Z` with the
 `release-request` label, using `GITHUB_TOKEN` in a job that never checks out or executes PR code.
 Equality with the lock is a fixes-only request: it is still filed and Carrythrough does not start
-an order. The issue body is for humans; the driver never parses it. A successful request job's
-`Request OMP vX.Y.Z` name and Actions run/attempt identify explicit re-requests without issue edits.
+an order. Patch and minor requests keep the same exact upstream title, but minor requests carry
+the `release-minor` label and reuse only an issue of that class. Thus a minor request does not
+rebind an existing patch request. The issue body is for humans; the driver never parses it.
+A successful request job's `Request OMP vX.Y.Z` (patch) or `Request OMP vX.Y.Z (minor)` name and
+Actions run/attempt bind the version and class and identify explicit re-requests without issue
+edits. A minor label without a matching successful filing job grants no authority. The selected
+class is persisted with the request; diagnostic re-requests cannot switch it, and completing a
+patch release does not close an outstanding minor request.
+
+The driver derives the gateway target from the latest stable tag: `patch` increments the patch,
+while `minor` increments the minor and resets the patch to zero. No arbitrary version or major
+transition is accepted. For example, with published `v0.7.7`, use
+`gh workflow run release-request.yml --ref main -f omp_version=18.12.5 -f release_class=minor`
+to request `v0.8.0`; unpublished `v0.7.8-prealpha.N` tags remain immutable. Leave an older patch
+request open until the new minor request succeeds, then annotate/close it as superseded.
 
 `bun scripts/release-driver.ts plan` is read-only, including local state. It can use the existing
 read-only gh session before bot credentials are installed. `tick` advances at most one step:
@@ -131,7 +145,7 @@ No driver push targets `main`. Strict branch protection and signed-commit requir
 force; GitHub supplies the signed squash merge. Auto-merge stays disabled.
 
 The promotion PR remains the reviewable exact-subject artifact. Standing authority permits only
-the next patch version, eligible upstream baseline orders, and fixes/performance fixes/reverts
+the requested next patch or explicit next minor version, eligible upstream baseline orders, and fixes/performance fixes/reverts
 already reviewed and merged by the configured maintainer. The installed checkout is the separately
 reviewed setup baseline. Later source commits require an associated merged main PR in those
 classes or a bot-owned generated release record; unclassified/direct source commits refuse.
@@ -196,6 +210,16 @@ Release prose lives in `scripts/release-text.json`, not in the workflow. The exi
 `site-coherence.test.ts` and `release-policy.ts` remain gates, not bypassable renderer assertions.
 The golden v0.7.4 fixtures use a sanitized real candidate receipt and compare generated surfaces
 with committed release history; the fixture notes describe the retained public evidence.
+
+`prepare X.Y.Z --release-class minor --date YYYY-MM-DD` uses the same next-minor predicate
+as selection and promotion. It may supersede an unqualified, unpublished next-patch preparation:
+the package/workspace/constants move to the next minor; that prepared CHANGELOG section and
+`[Unreleased]` are folded into one new cut; the generator recounts all bullets and regenerates
+`release-text.json` together. The old summary must still match its companion metadata; never
+hand-recount either header. Qualified/published preparations, unrelated versions, duplicate cuts
+and edited summaries refuse. The published stable lock and OMP baseline stay unchanged.
+Installing this class-aware control change is the separately reviewed job-free Studio setup path,
+not a release-bot self-upgrade. No main changes may land between prepare and approve.
 
 ### Repository transfer window (Studio driver)
 

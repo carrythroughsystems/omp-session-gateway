@@ -19,7 +19,7 @@ interface WorkflowJob {
   readonly steps?: WorkflowStep[];
 }
 const workflow = Bun.YAML.parse(await Bun.file(new URL("../.github/workflows/release-request.yml", import.meta.url)).text()) as {
-  on: { schedule: { cron: string }[]; workflow_dispatch: { inputs: { omp_version: Record<string, unknown> } } };
+  on: { schedule: { cron: string }[]; workflow_dispatch: { inputs: { omp_version: Record<string, unknown>; release_class: Record<string, unknown> } } };
   permissions: Record<string, string>;
   jobs: Record<"resolve" | "canary" | "recheck" | "file", WorkflowJob>;
 };
@@ -47,6 +47,7 @@ interface FixtureOptions {
   lock?: string;
   pages?: IssueFixture[][];
   failIssues?: boolean;
+  releaseClass?: string;
 }
 
 // Exercise the shipped scripts with an isolated npm/gh transport. Real node and jq execute the
@@ -104,6 +105,7 @@ ${runStep(job).run}
         GITHUB_RUN_ID: "42",
         REQUEST_EVENT: options.event ?? "schedule",
         REQUEST_ACTOR: "maintainer",
+        RELEASE_CLASS: options.releaseClass ?? "patch",
         OMP_INPUT: options.event === "workflow_dispatch" ? "18.10.0" : "latest",
         OMP_VERSION: typeof options.version === "string" ? options.version : "18.10.0",
         LOCK_TAG: options.lock ?? "v18.9.3",
@@ -138,6 +140,9 @@ test("weekly scheduling and downstream gates preserve the request identity and p
   expect(workflow.on.workflow_dispatch.inputs.omp_version).toEqual({
     description: "Stock OMP npm version or dist-tag to request", required: true, default: "latest", type: "string",
   });
+  expect(workflow.on.workflow_dispatch.inputs.release_class).toEqual({
+    description: "Gateway version transition", required: true, default: "patch", type: "choice", options: ["patch", "minor"],
+  });
   expect(workflow.permissions).toEqual({});
   expect(workflow.jobs.resolve.permissions).toEqual({ contents: "read", issues: "read" });
   expect(workflow.jobs.resolve.outputs?.should_request).toBe("${{ steps.resolve.outputs.should_request }}");
@@ -150,7 +155,7 @@ test("weekly scheduling and downstream gates preserve the request identity and p
   expect(workflow.jobs.recheck.needs).toEqual(["resolve", "canary"]);
   expect(workflow.jobs.recheck.if).toBe("${{ needs.resolve.outputs.should_request == 'true' && needs.canary.outputs.passed == 'true' }}");
   expect(workflow.jobs.recheck.outputs?.should_file).toBe("${{ steps.recheck.outputs.should_file }}");
-  expect(workflow.jobs.file.name).toBe("Request OMP v${{ needs.resolve.outputs.omp_version }}");
+  expect(workflow.jobs.file.name).toBe("Request OMP v${{ needs.resolve.outputs.omp_version }}${{ needs.resolve.outputs.class_suffix }}");
   expect(workflow.jobs.file.needs).toEqual(["resolve", "canary", "recheck"]);
   expect(workflow.jobs.file.if).toBe("${{ needs.resolve.outputs.should_request == 'true' && needs.canary.outputs.passed == 'true' && needs.recheck.outputs.should_file == 'true' }}");
   expect(workflow.jobs.file.permissions).toEqual({ issues: "write" });
@@ -167,7 +172,7 @@ test("weekly scheduling and downstream gates preserve the request identity and p
 shellTest("scheduled resolution requests one exact latest version when the numeric baseline is older", async () => {
   const result = await exerciseStep("resolve");
   expect(result.code, result.stderr).toBe(0);
-  expect(result.output).toBe("omp_version=18.10.0\nlock_tag=v18.9.3\nshould_request=true\n");
+  expect(result.output).toBe("omp_version=18.10.0\nlock_tag=v18.9.3\nshould_request=true\nrelease_class=patch\nclass_suffix=\n");
   expect(result.summary).toContain("Request: upstream refresh");
   expect(result.calls).toContain("npm view @oh-my-pi/pi-coding-agent@latest version --json");
   expect(result.calls).toContain("gh api --method GET --paginate");
@@ -279,4 +284,35 @@ shellTest("manual filing still reuses only the identical request without comment
   expect(result.code, result.stderr).toBe(0);
   expect(result.calls).toContain("gh issue create");
   expect(result.summary).toContain("Tracking issue (created)");
+});
+
+shellTest("manual minor requests carry their class and do not reuse the same OMP patch request", async () => {
+  const options: FixtureOptions = { event: "workflow_dispatch", version: "18.9.3", releaseClass: "minor", pages: [[tracking(439)]] };
+  const resolved = await exerciseStep("resolve", options);
+  expect(resolved.code, resolved.stderr).toBe(0);
+  expect(resolved.output).toContain("release_class=minor\nclass_suffix= (minor)\n");
+  const filed = await exerciseStep("file", options);
+  expect(filed.code, filed.stderr).toBe(0);
+  expect(filed.calls).toContain("--label release-request --label release-minor --title Upstream tracking: v18.9.3");
+  expect(filed.summary).toContain("Tracking issue (created)");
+  const minorIssue = tracking(441, undefined, { labels: [{ name: "release-request" }, { name: "release-minor" }] });
+  const repeated = await exerciseStep("file", { ...options, pages: [[tracking(439), minorIssue]] });
+  expect(repeated.code, repeated.stderr).toBe(0);
+  expect(repeated.summary).toContain("issues/441");
+  expect(repeated.calls).not.toContain("gh issue create");
+  const patch = await exerciseStep("file", { ...options, releaseClass: "patch", pages: [[minorIssue]] });
+  expect(patch.code, patch.stderr).toBe(0);
+  expect(patch.summary).toContain("Tracking issue (created)");
+});
+
+shellTest("scheduled requests remain patch-only and invalid manual classes refuse before issue writes", async () => {
+  const scheduled = await exerciseStep("resolve", { releaseClass: "minor" });
+  expect(scheduled.code, scheduled.stderr).toBe(0);
+  expect(scheduled.output).toContain("release_class=patch\n");
+  for (const job of ["resolve", "file"] as const) {
+    const invalid = await exerciseStep(job, { event: "workflow_dispatch", releaseClass: "major" });
+    expect(invalid.code).not.toBe(0);
+    expect(invalid.stderr).toContain("release class must be patch or minor");
+    expect(invalid.calls).not.toMatch(/gh (?:label|issue) /u);
+  }
 });
