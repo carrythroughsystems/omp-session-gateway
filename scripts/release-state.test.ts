@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { assertReleaseState } from "./release-state.ts";
+import { describe, expect, spyOn, test } from "bun:test";
+import { assertReleaseState, findReleaseByTag } from "./release-state.ts";
 
 const TAG = "v0.2.1";
 function assets(tag = TAG): { name: string; state: string; digest: string }[] {
@@ -27,6 +27,79 @@ function expectedState(draft: boolean, prerelease: boolean, latest: boolean) {
   const assetDigests = Object.fromEntries(assets().map(asset => [asset.name, asset.digest]));
   return { tag: TAG, draft, prerelease, latest, assetDigests };
 }
+
+describe("GitHub release discovery", () => {
+  const base = "https://api.github.com/repos/carrythroughsystems/omp-session-gateway/releases";
+  const token = "synthetic-github-release-read";
+  function responses(list: unknown, tagged: unknown, tagStatus = 200) {
+    const calls: string[] = [];
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL, options?: RequestInit) => {
+      const target = String(url);
+      calls.push(target);
+      expect(new Headers(options?.headers).get("Authorization")).toBe("Bearer " + token);
+      if (target === base + "?per_page=100") return Response.json(list);
+      expect(target).toBe(base + "/tags/" + encodeURIComponent(TAG));
+      return Response.json(tagged, { status: tagStatus });
+    }, { preconnect: () => {} }));
+    return { calls, mock };
+  }
+
+  test("keeps a listed draft without an extra lookup", async () => {
+    const draft = release();
+    const { calls, mock } = responses([draft], null, 404);
+    try {
+      expect(await findReleaseByTag(base, TAG, token)).toEqual(draft);
+      expect(calls).toEqual([base + "?per_page=100"]);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("finds a published release by tag after a list miss", async () => {
+    const published = release({ draft: false });
+    const { calls, mock } = responses([release({ tag_name: "v0.2.0" })], published);
+    try {
+      const found = await findReleaseByTag(base, TAG, token);
+      expect(found).toEqual(published);
+      expect(() => assertReleaseState(found, TAG, expectedState(false, false, true))).not.toThrow();
+      expect(calls).toEqual([base + "?per_page=100", base + "/tags/" + TAG]);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("fails not-found when both the list and tag endpoint miss", async () => {
+    const { calls, mock } = responses([], { message: "Not Found" }, 404);
+    try {
+      await expect(findReleaseByTag(base, TAG, token)).rejects.toThrow("GitHub release tag was not found");
+      expect(calls).toEqual([base + "?per_page=100", base + "/tags/" + TAG]);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("does not mask an invalid list or a tag lookup permission failure", async () => {
+    for (const [list, status, error, count] of [
+      [{ message: "unexpected list shape" }, 200, "GitHub release list is invalid", 1],
+      [[], 403, "GitHub release lookup failed with status 403", 2],
+    ] as const) {
+      const { calls, mock } = responses(list, release({ draft: false }), status);
+      try {
+        await expect(findReleaseByTag(base, TAG, token)).rejects.toThrow(error);
+        expect(calls).toHaveLength(count);
+      } finally { mock.mockRestore(); }
+    }
+  });
+
+  test("tag fallback retains identity, policy, and signed-asset validation", async () => {
+    for (const changed of [
+      release({ tag_name: "v0.2.0", draft: false }),
+      release({ draft: false, prerelease: true }),
+      release({ draft: false, assets: assets().slice(1) }),
+      release({ draft: false, assets: assets().map(asset => ({ ...asset, digest: "sha256:" + "f".repeat(64) })) }),
+    ]) {
+      const { mock } = responses([], changed);
+      try {
+        const found = await findReleaseByTag(base, TAG, token);
+        expect(() => assertReleaseState(found, TAG, expectedState(false, false, true))).toThrow();
+      } finally { mock.mockRestore(); }
+    }
+  });
+});
 
 describe("GitHub release state", () => {
   test("accepts a complete not-Latest stable draft and a published Latest release", () => {

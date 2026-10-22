@@ -93,6 +93,17 @@ async function githubJson(url: string, token: string, allowNotFound = false): Pr
   return response.json();
 }
 
+export async function findReleaseByTag(base: string, tag: string, token: string): Promise<unknown> {
+  const releases = await githubJson(base + "?per_page=100", token);
+  if (!Array.isArray(releases)) throw new Error("GitHub release list is invalid");
+  const listed = releases.find(value => record(value, "GitHub release").tag_name === tag);
+  if (listed !== undefined) return listed;
+  // A newly published release can be absent from the list while its tag endpoint is visible.
+  const release = await githubJson(base + "/tags/" + encodeURIComponent(tag), token, true);
+  if (release === null) throw new Error("GitHub release tag was not found");
+  return release;
+}
+
 if (import.meta.main) {
   const [repository, tag, draft, prerelease, latest, assetRoot] = Bun.argv.slice(2);
   const token = process.env.GH_TOKEN;
@@ -112,10 +123,7 @@ if (import.meta.main) {
   }
   try {
     const base = "https://api.github.com/repos/" + repository + "/releases";
-    const releases = await githubJson(base + "?per_page=100", token);
-    if (!Array.isArray(releases)) throw new Error("GitHub release list is invalid");
-    const release = releases.find(value => record(value, "GitHub release").tag_name === tag);
-    if (release === undefined) throw new Error("GitHub release tag was not found");
+    const release = await findReleaseByTag(base, tag, token);
     const latestRelease = await githubJson(base + "/latest", token, true);
     const latestTag = latestRelease === null ? null : record(latestRelease, "GitHub latest release").tag_name;
     assertReleaseState(release, typeof latestTag === "string" ? latestTag : null, {
