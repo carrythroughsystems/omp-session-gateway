@@ -36,6 +36,8 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 28 changel
 
 ### Changed
 
+- Update the development-only Percy CLI from 1.32.11 to 1.32.12; keep the pinned Bun
+  runtime and bundled production dependencies unchanged.
 - Add BrowserStack Automate Mobile as an immediate pre-write fallback for empty TestingBot
   iPad and Samsung Android pools, keeping iPhone/Home Screen Push TestingBot-only and targets
   sequential. Pin Local 8.9 under Rosetta with the documented single-user child-argv exception,

@@ -5,7 +5,7 @@
     "": {
       "name": "omp-session-gateway",
       "devDependencies": {
-        "@percy/cli": "1.32.11",
+        "@percy/cli": "1.32.12",
         "@percy/playwright": "1.1.2",
         "@playwright/test": "1.62.1",
         "@types/bun": "1.4.0",
@@ -79,45 +79,45 @@
 
     "@omp-session-gateway/web": ["@omp-session-gateway/web@workspace:apps/web"],
 
-    "@percy/cli": ["@percy/cli@1.32.11", "", { "dependencies": { "@percy/cli-app": "1.32.11", "@percy/cli-build": "1.32.11", "@percy/cli-command": "1.32.11", "@percy/cli-config": "1.32.11", "@percy/cli-doctor": "1.32.11", "@percy/cli-exec": "1.32.11", "@percy/cli-snapshot": "1.32.11", "@percy/cli-upload": "1.32.11", "@percy/client": "1.32.11", "@percy/logger": "1.32.11" }, "bin": { "percy": "bin/run.cjs" } }, "sha512-iqaF++MTGZA9AG2mh2ult/R1zb52KJslPkzep+Rr/TvNLAqkT0nfu+hO7Al6W2NIBeHdSToEDfQSkDYUI0mNqQ=="],
+    "@percy/cli": ["@percy/cli@1.32.12", "", { "dependencies": { "@percy/cli-app": "1.32.12", "@percy/cli-build": "1.32.12", "@percy/cli-command": "1.32.12", "@percy/cli-config": "1.32.12", "@percy/cli-doctor": "1.32.12", "@percy/cli-exec": "1.32.12", "@percy/cli-snapshot": "1.32.12", "@percy/cli-upload": "1.32.12", "@percy/client": "1.32.12", "@percy/logger": "1.32.12" }, "bin": { "percy": "bin/run.cjs" } }, "sha512-0YMBD13fecEnOp191PjTvkCJOIY7SGSdXf/o3W6+5Lj3urfqo+q2AXysgxn4dSfxWtbnUOLy95Md/3R6GTUnHA=="],
 
-    "@percy/cli-app": ["@percy/cli-app@1.32.11", "", { "dependencies": { "@percy/cli-command": "1.32.11", "@percy/cli-exec": "1.32.11" } }, "sha512-/B36Psycy435JXB+/Y0NOXW6+QLN7RwKh113RNtcV7nsw6nBY7hy6FEYoxsvEWx7b2OVZ+wBvYkDJ7cBD6ajxg=="],
+    "@percy/cli-app": ["@percy/cli-app@1.32.12", "", { "dependencies": { "@percy/cli-command": "1.32.12", "@percy/cli-exec": "1.32.12" } }, "sha512-cK8rUduoxw3uxB35eyCivg8lWI2K1ZK9YBNAu1NmE5iA0ihdmoVlxGNnGdVzz8xlDzpCB50np2EsGoxlVF0F1w=="],
 
-    "@percy/cli-build": ["@percy/cli-build@1.32.11", "", { "dependencies": { "@percy/cli-command": "1.32.11" } }, "sha512-4Bgtk0oUMepPDfvIqkbbKegzQsotWBV39E+nariOwy9SNszFk4co0ncfDRRu/zcEUVIfNnSsQGWQPioLOJcVYg=="],
+    "@percy/cli-build": ["@percy/cli-build@1.32.12", "", { "dependencies": { "@percy/cli-command": "1.32.12" } }, "sha512-1ibCp/dn875d2hPtEXqPizXUbibAbzIW828A/GglfQl0ICogfaSSYbYW1WLXcyb7RhBv1l+0I/P3RCWRjQ9IFA=="],
 
-    "@percy/cli-command": ["@percy/cli-command@1.32.11", "", { "dependencies": { "@percy/config": "1.32.11", "@percy/core": "1.32.11", "@percy/logger": "1.32.11", "glob-to-regexp": "^0.4.1" }, "optionalDependencies": { "snyk-nodejs-lockfile-parser": "2.10.4" }, "bin": { "percy-cli-readme": "bin/readme.js" } }, "sha512-l9OGARP3S59DRKXpwNqOES2MdVMpPwS8RxQ7AVWm4vZhiDUraoFKeonvEy8tb+JI5QHFuDsg5JWPoAHlXtoiMQ=="],
+    "@percy/cli-command": ["@percy/cli-command@1.32.12", "", { "dependencies": { "@percy/config": "1.32.12", "@percy/core": "1.32.12", "@percy/logger": "1.32.12", "glob-to-regexp": "^0.4.1" }, "optionalDependencies": { "snyk-nodejs-lockfile-parser": "2.10.4" }, "bin": { "percy-cli-readme": "bin/readme.js" } }, "sha512-6ELBm2pxXtBTIa6PoDWSZ7tPCAxudWn/bUwl4vF0YejrcdtFWNznbGxWTYb6fe27HGJY+KOpfxqeFkaAuZkbsw=="],
 
-    "@percy/cli-config": ["@percy/cli-config@1.32.11", "", { "dependencies": { "@percy/cli-command": "1.32.11" } }, "sha512-fo/lp4IbLL6P43D3dj+dTcmO0MpPcxbskEViZJm98hXD6zvnodw8Ip6xz/TdLr3r95QE6787mc718Msjfyg7nA=="],
+    "@percy/cli-config": ["@percy/cli-config@1.32.12", "", { "dependencies": { "@percy/cli-command": "1.32.12" } }, "sha512-Gemq5raNyc+D/OAPLRUZZWQWpg0947p9ehS9v4qQsNtG2HWtuUogVVpNAdjvAobvniMM7UU3VyeAJKlCYIlytQ=="],
 
-    "@percy/cli-doctor": ["@percy/cli-doctor@1.32.11", "", { "dependencies": { "@percy/cli-command": "1.32.11", "@percy/client": "1.32.11", "@percy/config": "1.32.11", "@percy/core": "1.32.11", "@percy/env": "1.32.11", "@percy/logger": "1.32.11", "@percy/monitoring": "1.32.11", "minimatch": "^9.0.0", "ws": "^8.17.1" } }, "sha512-/3V9Z8DNe40xpqIJcrupUsDG5EPBVaUuYn7nWXxaZVfXFwFwMUuQtdvglhtbNj+EC1wekntv9eSP5KKwUjAp1g=="],
+    "@percy/cli-doctor": ["@percy/cli-doctor@1.32.12", "", { "dependencies": { "@percy/cli-command": "1.32.12", "@percy/client": "1.32.12", "@percy/config": "1.32.12", "@percy/core": "1.32.12", "@percy/env": "1.32.12", "@percy/logger": "1.32.12", "@percy/monitoring": "1.32.12", "minimatch": "^9.0.0", "ws": "^8.17.1" } }, "sha512-Bq6sbz+4ZxiDxg1qjKPxURy3diqgd6ATfcZ8mOTIzd+hauTBF6dUhGjGecEZrUggsmscwH/SPjw/ThnlrKAOag=="],
 
-    "@percy/cli-exec": ["@percy/cli-exec@1.32.11", "", { "dependencies": { "@percy/cli-command": "1.32.11", "@percy/logger": "1.32.11", "cross-spawn": "^7.0.3", "which": "^2.0.2" } }, "sha512-Pwin/AL4We5Wr4BFZi16gK+ARWhRvnhSBCLrOWoGBp0KAWFfeYg4nBh4zHQvvqwE8+kWidjHRdH8gzCbjyyELw=="],
+    "@percy/cli-exec": ["@percy/cli-exec@1.32.12", "", { "dependencies": { "@percy/cli-command": "1.32.12", "@percy/logger": "1.32.12", "cross-spawn": "^7.0.3", "which": "^2.0.2" } }, "sha512-gi9fYh3DoirN2GqRviyUggeE4jHajkqRIJlka9Aqdk5LGXIi9HNGH46JM5IeEiq8G9N04Ub32hJIyY+qvAqaVg=="],
 
-    "@percy/cli-pdf": ["@percy/cli-pdf@1.32.11", "", { "dependencies": { "@percy/logger": "1.32.11", "pdfjs-dist": "^2.16.105" } }, "sha512-G1gO5rK+uvItiuYLSrslWGla54AjYw9dHAEJSA48U5T703naFvPwYVC8cRWIXQA7W96G4VMQX9Nhi4reWoqPbg=="],
+    "@percy/cli-pdf": ["@percy/cli-pdf@1.32.12", "", { "dependencies": { "@percy/logger": "1.32.12", "pdfjs-dist": "^2.16.105" } }, "sha512-25UmAAppOV1ILJSiQZS6gznQZiSDiauOhrQV/4B5cdbCfXcwxCp73USnkPpdEnO8ZMfYZa9ykV3Lq+anPz9vRg=="],
 
-    "@percy/cli-snapshot": ["@percy/cli-snapshot@1.32.11", "", { "dependencies": { "@percy/cli-command": "1.32.11", "yaml": "^2.0.0" } }, "sha512-TcVKYcHFmBhrxHZGmQQl8PkHYCxSDbBdnFTtByv2xVNV0QdjUpdUztPBO2KPEARdIa9cH6bDdQzDrvGSUN5JXw=="],
+    "@percy/cli-snapshot": ["@percy/cli-snapshot@1.32.12", "", { "dependencies": { "@percy/cli-command": "1.32.12", "yaml": "^2.0.0" } }, "sha512-ppq1E8zCsILAdWniFYm6oa2uFFoSzl/hBrUfTBeqa38xLLme6fqjoE+6WnEBy8NWiKyF/mVtlbm/rtyT8fnP6A=="],
 
-    "@percy/cli-upload": ["@percy/cli-upload@1.32.11", "", { "dependencies": { "@percy/cli-command": "1.32.11", "fast-glob": "^3.2.11", "probe-image-size": "^7.3.0" } }, "sha512-h8+pvVzN+KBgoaXbTVvDGxUbHIAkDmnIoYxH2aRaF2sogi2wJxN9rKld+BKpo1x37fEztmk9WhrVArsRp6dJOg=="],
+    "@percy/cli-upload": ["@percy/cli-upload@1.32.12", "", { "dependencies": { "@percy/cli-command": "1.32.12", "fast-glob": "^3.2.11", "probe-image-size": "^7.3.0" } }, "sha512-nzwrWuLESpmtcdw9at4TXQmjW7rMcfZOveSJA+XNMV/fXJMnyuzVceY0QkfA8eG7R+735DVr5HpciiyphhWSfQ=="],
 
-    "@percy/client": ["@percy/client@1.32.11", "", { "dependencies": { "@percy/config": "1.32.11", "@percy/env": "1.32.11", "@percy/logger": "1.32.11", "pac-proxy-agent": "^7.0.2", "pako": "^2.1.0" } }, "sha512-zNYjMRHKbNbfnGJY2k5I/Ef9vVhCd+KNiETn1ytGzZau2aPyPD4vGPSp6fsapDjyz3cqI0NFJkOa42IknPfS2Q=="],
+    "@percy/client": ["@percy/client@1.32.12", "", { "dependencies": { "@percy/config": "1.32.12", "@percy/env": "1.32.12", "@percy/logger": "1.32.12", "pac-proxy-agent": "^7.0.2", "pako": "^2.1.0" } }, "sha512-+AJV29SYYwMv8PoJ5cKgKScPTOkBeENlpqovJqV8zJOg81pXGvnkdG2sL4/FUPceLXsR5VQPYoRRXsxXf7UuSQ=="],
 
-    "@percy/config": ["@percy/config@1.32.11", "", { "dependencies": { "@percy/logger": "1.32.11", "ajv": "^8.6.2", "cosmiconfig": "^8.0.0", "yaml": "^2.0.0" } }, "sha512-UWb830yLe/d6H0Q/HTS0P89CgMU2zPlOU/Ep1xnmJjeDrzHI/Skl1p7oBeZC+Q2sN0Tzm0JFZKyJWVX9chooBw=="],
+    "@percy/config": ["@percy/config@1.32.12", "", { "dependencies": { "@percy/logger": "1.32.12", "ajv": "^8.6.2", "cosmiconfig": "^8.0.0", "yaml": "^2.0.0" } }, "sha512-qdCgPM5s2YibK0MpdR51Os0NusXBliyDeJCzq+MohzluSgKdNa8Upki0jLTB0FV8P8GiudeHAfKVrfCJCWQJSA=="],
 
-    "@percy/core": ["@percy/core@1.32.11", "", { "dependencies": { "@grpc/grpc-js": "^1.14.3", "@grpc/proto-loader": "^0.8.0", "@percy/client": "1.32.11", "@percy/config": "1.32.11", "@percy/dom": "1.32.11", "@percy/logger": "1.32.11", "@percy/monitoring": "1.32.11", "@percy/webdriver-utils": "1.32.11", "adm-zip": "^0.6.0", "busboy": "^1.6.0", "content-disposition": "^0.5.4", "cross-spawn": "^7.0.3", "fast-glob": "^3.2.11", "fast-xml-parser": "^4.4.1", "micromatch": "^4.0.8", "mime-types": "^2.1.34", "pako": "^2.1.0", "path-to-regexp": "^6.3.0", "rimraf": "^3.0.2", "ws": "^8.17.1", "yaml": "^2.4.1" }, "optionalDependencies": { "@percy/cli-doctor": "1.32.11", "@percy/cli-pdf": "1.32.11" } }, "sha512-yBlyVGSf5bLm85IlR0hn9r+FrB5OUoiqN4hHhJFCXWkM8q03/rMIYYf/hyNs6jeIlsin15p3q6qtIMJEVbg3uA=="],
+    "@percy/core": ["@percy/core@1.32.12", "", { "dependencies": { "@grpc/grpc-js": "^1.14.3", "@grpc/proto-loader": "^0.8.0", "@percy/client": "1.32.12", "@percy/config": "1.32.12", "@percy/dom": "1.32.12", "@percy/logger": "1.32.12", "@percy/monitoring": "1.32.12", "@percy/webdriver-utils": "1.32.12", "adm-zip": "^0.6.0", "busboy": "^1.6.0", "content-disposition": "^0.5.4", "cross-spawn": "^7.0.3", "fast-glob": "^3.2.11", "fast-xml-parser": "^4.4.1", "micromatch": "^4.0.8", "mime-types": "^2.1.34", "pako": "^2.1.0", "path-to-regexp": "^6.3.0", "rimraf": "^3.0.2", "ws": "^8.17.1", "yaml": "^2.4.1" }, "optionalDependencies": { "@percy/cli-doctor": "1.32.12", "@percy/cli-pdf": "1.32.12" } }, "sha512-/la9BIUYMtCD5hk/EHxAGFrvNLAo4l6XreE/dkIuTzg41z1oQqYInoeehQzDjLtIlkdEYp4h935TAuWJkXa36g=="],
 
-    "@percy/dom": ["@percy/dom@1.32.11", "", {}, "sha512-COyiNn9K+VMVgnYe18Mr2ap05GhaMnYYLMW7aQc30h+8QzxhnLfejlvp8Wt3bG2j06/ZCoVFQLtrlXeEZvodPw=="],
+    "@percy/dom": ["@percy/dom@1.32.12", "", {}, "sha512-NCuRKiRJ1co4DuVOTiZK0pFkGOTFetQI5lpRa0e6oXHTEiAlQLvujAPb5Z+0d72ALae97adWZgQSgepm8DxwLQ=="],
 
-    "@percy/env": ["@percy/env@1.32.11", "", { "dependencies": { "@percy/logger": "1.32.11" } }, "sha512-BNoClU5dbKboxiXDyLCDSD24RpQiHjnP6N5L6kbC3xb/PYI7NB/CXO7wsG4V5+xRvXxNVm1GZV8E28+Q1cDfOg=="],
+    "@percy/env": ["@percy/env@1.32.12", "", { "dependencies": { "@percy/logger": "1.32.12" } }, "sha512-wZY6gHbExXdR08i4TfOAuyo/0p8Cfl9V+W+eWteHJ3RQoXpOd7FAGj/VCcJDOMJz5sTYDZscMwUHxvWe7T+KqA=="],
 
-    "@percy/logger": ["@percy/logger@1.32.11", "", {}, "sha512-Y7cNlo4tYuHHloKKAUtWUymT3K5aABil6DwwlKcxbyTfhgCHy1WfYg8D4ki3NCzqrCkmOJgCcTXx9U3dqMvHtw=="],
+    "@percy/logger": ["@percy/logger@1.32.12", "", {}, "sha512-vWPPxs0/BMulyQdt3cTrKinrPvFQujfcLO0oCzSWjmoBXPl9FI+ymf2UoO/1X7IrU5zU3lod27GB6uG7uo9gNQ=="],
 
-    "@percy/monitoring": ["@percy/monitoring@1.32.11", "", { "dependencies": { "@percy/config": "1.32.11", "@percy/logger": "1.32.11", "@percy/sdk-utils": "1.32.11", "systeminformation": "^5.25.11" } }, "sha512-nfmZJ/xKWM58aA4X/r+OG2ksoK+YJ8dvyUx+s8TMzfejkYKwOFcFDKlcmNvllV4lelai3466/DyMMN85EVDkuQ=="],
+    "@percy/monitoring": ["@percy/monitoring@1.32.12", "", { "dependencies": { "@percy/config": "1.32.12", "@percy/logger": "1.32.12", "@percy/sdk-utils": "1.32.12", "systeminformation": "^5.25.11" } }, "sha512-6wlpBE8hWqzUgtKsA5UORBp9/JhpKdHtct11jVLen+Xjnt2E/NR2Nwhkem3EBQPn33uKae0/rc0nRBQ7JIpaAA=="],
 
     "@percy/playwright": ["@percy/playwright@1.1.2", "", { "dependencies": { "@percy/sdk-utils": "^1.32.0" }, "peerDependencies": { "@percy/cli": ">=1.32.3", "@playwright/test": ">=1.49.0", "playwright-core": ">=1" }, "optionalPeers": ["@percy/cli", "@playwright/test"] }, "sha512-IghZHmh1+R3gvneOd//+HbN2xg6e6qgnMy9yJ5V7vWJ49JpkHeU5Esjs1qI9EqFMHKAg0zOorDQ0mJRglQpkyw=="],
 
     "@percy/sdk-utils": ["@percy/sdk-utils@1.32.11", "", { "dependencies": { "pac-proxy-agent": "^7.0.2" } }, "sha512-B30TcM4rkCIXFmJs7a+2f9IBRC2eSqlNbZYND8nPpcsLXk4x027PJoZSFGZ2KI7kPGfNAJC39t785VK0s2ZugQ=="],
 
-    "@percy/webdriver-utils": ["@percy/webdriver-utils@1.32.11", "", { "dependencies": { "@percy/config": "1.32.11", "@percy/sdk-utils": "1.32.11" } }, "sha512-luEIU+y5kQTecMB34b44t/aRKHVWwkYMsgiQqX7r357A3iJyXvdE5yWgsh2mAtTS1GUAbxTx67dQ0JB7DlqOZg=="],
+    "@percy/webdriver-utils": ["@percy/webdriver-utils@1.32.12", "", { "dependencies": { "@percy/config": "1.32.12", "@percy/sdk-utils": "1.32.12" } }, "sha512-wEuOx2bMEdvKXJq7eApAiKbLuBA3pgWh1rWp1NkeAeTdl3V9wMOYGlkkdstEYqvoLlDi3RxFWAUb5syMJvKvvQ=="],
 
     "@playwright/test": ["@playwright/test@1.62.1", "", { "dependencies": { "playwright": "1.62.1" }, "bin": { "playwright": "cli.js" } }, "sha512-DTcUc8qii+cpHvtOwggMtBRMjKZHXYWdw8syRYu2vtzuq4Wxphqq4NfCs5Zt44L6mA8rfDfj+PHnxFc/FeK6mQ=="],
 
@@ -572,6 +572,10 @@
     "yargs": ["yargs@17.7.3", "", { "dependencies": { "cliui": "^8.0.1", "escalade": "^3.1.1", "get-caller-file": "^2.0.5", "require-directory": "^2.1.1", "string-width": "^4.2.3", "y18n": "^5.0.5", "yargs-parser": "^21.1.1" } }, "sha512-GZtjxm/J/4TSxuL3FNYjCmLktBTnIw/rVmKSIyKeYAZpmJB2ig9VauCC5xsa82GNKVKDAqpOn3KVzNt0zmrU0g=="],
 
     "yargs-parser": ["yargs-parser@21.1.1", "", {}, "sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw=="],
+
+    "@percy/monitoring/@percy/sdk-utils": ["@percy/sdk-utils@1.32.12", "", { "dependencies": { "pac-proxy-agent": "^7.0.2" } }, "sha512-UhbFtLe+xs6k+FnQO6w4JCBgr7rY8U8suxzKqfZ9fnXizQXfSVQqxkm+F/4oWjSAMN9arDWTVCh5D3PNe5Impw=="],
+
+    "@percy/webdriver-utils/@percy/sdk-utils": ["@percy/sdk-utils@1.32.12", "", { "dependencies": { "pac-proxy-agent": "^7.0.2" } }, "sha512-UhbFtLe+xs6k+FnQO6w4JCBgr7rY8U8suxzKqfZ9fnXizQXfSVQqxkm+F/4oWjSAMN9arDWTVCh5D3PNe5Impw=="],
 
     "@snyk/dep-graph/tslib": ["tslib@2.8.1", "", {}, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
 
