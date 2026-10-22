@@ -65,9 +65,8 @@ permissions: {}
 
 # One group with a constant name, not keyed on ref: the droplet name is global, so two runs on any two
 # refs would collide. This guard is load-bearing rather than hygiene — two runs of this lane have
-# already collided over that fixed name in practice. `provision` is idempotent by name, so the second
-# run would adopt the first run's droplet, install over the top of its lanes, reboot it underneath
-# them, and then destroy it while the first run was still measuring. `cancel-in-progress` stays false
+# already collided over that fixed name in practice. Provision now refuses an existing tag without
+# its retained create id; the constant group also prevents competing creates. `cancel-in-progress` stays false
 # because cancelling a run can end it before its teardown step, which is the one failure that leaks a
 # billing droplet.
 concurrency:
@@ -95,6 +94,7 @@ jobs:
       # Pinned here rather than left to the script's default so the droplet name this workflow checks
       # for, refuses to adopt, and destroys is the same string in every step.
       OMP_QUAL_NAME: omp-gateway-qual
+      OMP_QUAL_EVIDENCE_DIR: ${{ runner.temp }}/droplet-provider-evidence
       # The script hardcodes this slug for asset downloads, so the preflight must check the same repo
       # rather than `github.repository`; on a fork those two are not the same place.
       REPO_SLUG: carrythroughsystems/omp-session-gateway
@@ -419,10 +419,10 @@ jobs:
           case "$PROVISION_OUTCOME" in
             success | failure | cancelled)
               if ./scripts/provision-linux-qual.sh destroy; then
-                printf 'teardown: droplet destroyed and tailnet record deleted\n' >>"$GITHUB_STEP_SUMMARY"
+                printf 'teardown: droplet absence confirmed; tailnet result is in the teardown log\n' >>"$GITHUB_STEP_SUMMARY"
               else
                 status=1
-                printf '::error title=Teardown failed::%s may still exist and may still be billing at the selected size rate. Run ./scripts/provision-linux-qual.sh destroy from an authenticated workstation, and check the DigitalOcean console for a droplet tagged %s.\n' \
+                printf '::error title=Teardown failed::%s may still exist and may still be billing at the selected size rate. Inspect the retained provider response id and the DigitalOcean inventory for tag %s; do not infer absence from a parse or API error.\n' \
                   "$OMP_QUAL_NAME" "$OMP_QUAL_NAME"
                 printf 'teardown: FAILED, %s may still be billing\n' "$OMP_QUAL_NAME" >>"$GITHUB_STEP_SUMMARY"
               fi
@@ -469,3 +469,13 @@ jobs:
               done
           fi
           exit "$status"
+
+      - name: Retain credential-free droplet API responses
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: droplet-provider-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/droplet-provider-evidence
+          # A preflight can refuse before the first provider request.
+          if-no-files-found: ignore
+          retention-days: 90

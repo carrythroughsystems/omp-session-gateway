@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.7.8] — 2026-10-22
 
-This release uses stock OMP v18.12.5 as its engineering baseline. The 27 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.12.5 as its engineering baseline. The 28 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.
 
 ### Added
 
@@ -118,6 +118,10 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 27 changel
 
 ### Fixed
 
+- Retain the Linux qualification droplet's create id before waiting for its public IPv4.
+  Null networks and parse/API errors no longer mean resource absence; teardown deletes the
+  bound id, requires HTTP 204/404 and fails if billing remains. Preserve credential-free
+  provider response bodies and statuses as workflow artifacts, including failed cleanup.
 - Allow up to 180 seconds for each authenticated WinRM probe on a fresh Windows qualification
   instance, still capped by the shared 12-minute allocation/admission deadline and requiring
   three consecutive successes spanning at least 60 seconds. Retain credential-free per-probe
