@@ -64,6 +64,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [PROTOCOL.md](PROTOCOL.md) for curren
 
 **Consequences:** Requires Tailscale on both devices and initial login. Avoids public ingress and supplies authenticated identity headers.
 
+**Amendment — 2026-10-22:** Every gateway keeps this loopback and Tailscale Serve boundary; opt-in cross-origin read and launch access from explicitly trusted dashboard origins uses browser-direct CORS without server-side proxying ([ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)).
+
 ---
 
 ## ADR-005 — Keep the existing E2EE relay for v1
@@ -100,6 +102,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [PROTOCOL.md](PROTOCOL.md) for curren
 
 **Consequences:** Simple proxy behavior, reconnection, observability, and security. No secret crosses SSE.
 
+**Amendment — 2026-10-22:** SSE (`GET /api/v1/events`) remains same-origin to the hosting gateway; remote fleet targets are polled via browser-direct `GET /api/v1/sessions` ([ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)).
+
 ---
 
 ## ADR-008 — Optional WebAuthn gate, not native biometrics
@@ -124,6 +128,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [PROTOCOL.md](PROTOCOL.md) for curren
 **Decision:** Add a small pinned/upstreamable in-memory bootstrap API to `collab-web` and pass the just-in-time capability directly from the PWA. A same-origin `MessageChannel` is acceptable for a separate client page. Ephemeral fragment removal is a temporary compatibility fallback only.
 
 **Consequences:** Requires a small collab-web integration change, but materially reduces accidental persistence and makes the security invariant testable. Reload intentionally returns to the session directory.
+
+**Amendment — 2026-10-22:** Capabilities launched from a configured remote fleet origin are passed into the same hosting-document in-memory bootstrap without URL fragments or storage ([ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)).
 
 ---
 
@@ -323,6 +329,8 @@ Residual, accepted: a page loaded before this change never accepts, so its tap w
 and then opens the route; in the WebAPK that route may still replace the open document. Pages
 reload into current code when idle (ADR-018), so this lasts only while an older collaboration stays
 open.
+
+**Amendment — 2026-10-22:** Web Push subscriptions, VAPID state, notifications, app badges, and worker tap routes remain strictly scoped to the originating home gateway; remote fleet targets are never pushed or routed through the home service worker ([ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)).
 
 ---
 
@@ -658,6 +666,8 @@ session keeps running and consuming its ordinary resources until OMP itself stop
 device's row is hidden. Exact ask/generation scoping makes later work visible automatically, and
 the permanent restore surface prevents local state from becoming irrecoverable.
 
+**Amendment — 2026-10-22:** Device-local Hold and Hide records are source-qualified with `sourceId` and `sourceOrigin` in `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2` while keeping the same non-secret bounds ([ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)).
+
 ## ADR-027 — Ship the couch-flow visual system with a Settings sheet and a precached client
 
 **Status:** Accepted
@@ -755,6 +765,8 @@ the [release ledger](RELEASE_STATUS.md). Windows, background Web Push, specializ
 branch/resume remain unqualified. The approved fresh 30-minute relay check passed; eight-hour
 endurance is **not rerun or claimed**, with prolonged-operation risk accepted. No old test count,
 signed receipt, native result, or relay endurance result is transferred.
+
+**Amendment — 2026-10-22:** Each gateway continues to read only its local OMP discovery directory and resolve capabilities only at launch; multi-host directory access is browser-direct ([ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)) and Tern-hosted OMP uses this native discovery path unchanged ([ADR-038](#adr-038--tern-is-an-execution-environment-not-an-integration)).
 
 **Engineering baseline update (2026-09-24):** Accept exact mainline v18.3.0
 (`62bc57be1b03ef0802a33cf7f5f530e534527531`, tree `b36226cce6a225a4c0d2c2162da223d61d7123da`) as the
@@ -1016,6 +1028,8 @@ running v0.6.2, backgrounding the Home Screen app for 15 seconds, 2 minutes, and
 in Control. The context above overstates `pagehide`: the bfcache restore serves a page that did enter
 the bfcache, while the iPhone keeps the page and its client alive. An e2e test now fails if visibility
 alone tears the client down. This was a targeted device check, not a qualification lane.
+
+**Amendment — 2026-10-22:** In-memory resume launch intent includes the originating source binding so `pagehide`/`pageshow` relaunches against the exact host that served the session without retaining a capability ([ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)).
 
 ## ADR-030 — Claim support for CI-tested platform families, separately from qualification
 
@@ -1624,3 +1638,66 @@ an upload. No traces, recordings, raw SDK diagnostics or Percy output are commit
 CI artifacts. Review capture-tool pins with baselines. Review sponsorship renewal on 2027-09-20,
 before expiry on 2027-10-20; if uploads end, update credentials, CI expectations and attribution
 together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.md).
+
+---
+
+## ADR-036 — Federated dashboard origins through browser-direct CORS
+
+**Status:** Accepted
+
+**Date:** 2026-10-22
+
+**Context:** An operator running OMP across multiple workstations on the same tailnet wants one installed **OMP Sessions** PWA to list and open sessions across those hosts without switching apps or copying links. A server-side gateway proxy or fleet aggregator is incompatible with the Tailscale Serve trust model: each gateway authenticates the caller from the local Serve identity headers on its loopback listener and cannot impersonate the user's tailnet identity to another node or trust a forwarded `Tailscale-User-Login` header.
+
+**Decision:** Support opt-in browser-direct federation across at most 8 total sources (`local` plus up to 7 configured `fleet.targets` on the dashboard gateway, and up to 8 `http.trustedDashboardOrigins` on each target gateway):
+
+- The hosting gateway serves `GET /api/v1/client-config` (`Cache-Control: no-store`, same-origin only; `403` when an `Origin` header is present and differs from `http.publicOrigin`; `404` on older gateways) returning `{ version: 1, local, targets, speech }` projected from named fields only.
+- A target gateway admits cross-origin requests only when the request `Origin` header is an exact match in `http.trustedDashboardOrigins` (canonical `URL.origin` spelling; `https:` in `tailscale-serve` mode, loopback `http://127.0.0.1:<port>` or `http://[::1]:<port>` allowed only in `dev-localhost` mode; never `*`, `null`, or `http.publicOrigin`).
+- Exact-origin admission is an explicit browser trust decision distinct from Tailscale authentication: a remote gateway that lists an origin in `http.trustedDashboardOrigins` trusts JavaScript served by that dashboard origin to read its session metadata and request View or Control capabilities using the viewer's own authorized Tailscale identity. Normal target-gateway authorization (loopback peer, TUN-mode Serve check, second-hop refusal, `auth.allowedLogins`, rate limits, and generation/freshness revalidation) still runs on every request.
+- The cross-origin surface is restricted to `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and `OPTIONS` preflight on those two paths. `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets never receive CORS headers. Admitted responses add `Access-Control-Allow-Origin: <exact origin>` and `Vary: Origin` (never `Access-Control-Allow-Credentials`), including problem responses (`400`/`403`/`404`/`409`/`413`/`415`/`429`/`500`) so the browser can distinguish `403` authorization denial from network/CORS failure. Cross-origin `POST .../launch` requires `Origin` in `http.trustedDashboardOrigins`, `Sec-Fetch-Site` absent or in `{same-site, cross-site}` (`none` and `same-origin` rejected on the cross-origin path), and exact `Content-Type: application/json`, leaving `requestHasValidMutationContext` unchanged for same-origin launches and push mutations.
+- Document HTML responses extend `Content-Security-Policy` `connect-src` with each configured `fleet.targets[].origin` (never `http.trustedDashboardOrigins`).
+- The PWA keeps snapshot + SSE for `local` and polls each remote target's `GET /api/v1/sessions` every 10 seconds while visible (`mode: "cors"`, `credentials: "omit"`, `cache: "no-store"`, `redirect: "error"`), keys sessions in page memory by `SourceKey = id + "\0" + origin` (never sent on the wire), passes a source-bound `probeGateway` callback into the embedded client, and stores source-qualified triage records (`sourceId`, `sourceOrigin`) under `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`. Web Push, notifications, and app badges stay scoped to the home gateway only (one PWA per host for background alerts; no fleet push).
+- Rolling back with `omp-gateway rollback` to a retained runtime older than `FLEET_CONFIG_SINCE_VERSION` (`0.8.0`) while `http.trustedDashboardOrigins`, `fleet`, or `speech` is authored writes the full authored document to `<configDir>/config.pre-rollback.json` (mode `0600`, atomic; refusing rollback if that file already exists) and rewrites `config.json` without those three keys before starting the older target. Upgrades and reinstalls preserve the keys verbatim.
+
+**Consequences:** When `fleet.targets` and `http.trustedDashboardOrigins` are empty, the default single-host boundary and traffic profile are unchanged. Cold start of the installed PWA depends on the home gateway; if the home gateway is down while a remote host is up, the operator can open the remote gateway's Tailscale Serve origin directly. Removing an origin from `http.trustedDashboardOrigins` immediately blocks new cross-origin reads and launches from that dashboard (and a readable `403` disposes an active shell from that source in the dashboard), but does not revoke an already issued OMP capability on the relay until the OMP host stops collaboration or rotates the generation.
+
+---
+
+## ADR-037 — Speech input: keyboard dictation baseline and opt-in browser speech recognition
+
+**Status:** Accepted
+
+**Date:** 2026-10-22
+
+**Context:** Reported in [#380](https://github.com/carrythroughsystems/omp-session-gateway/issues/380). Users steering a session or answering a request in **Control** want voice input without weakening capability isolation, introducing a speech-to-text backend, or risking accidental submission of an unreviewed transcription. Unlike the Photo flow (where `<input type="file" capture="environment">` opens the OS camera sheet without script access, allowing `Permissions-Policy: camera=()`), in-page Web Speech API recognition (`SpeechRecognition` / `webkitSpeechRecognition`) requires document-level `Permissions-Policy: microphone=(self)` in browsers that gate speech recognition on the `microphone` policy feature. HTTP headers apply to the hosting document as a whole and cannot distinguish read-only **View** from writable **Control**.
+
+**Decision:** Document OS keyboard dictation as the default zero-configuration path, and provide an opt-in in-page Web Speech recognizer gated by `speech.browserRecognition` (default `false`):
+
+- When `speech.browserRecognition` is `false` (default), every response keeps `Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()`, and no in-page microphone button is shown. OS keyboard dictation works under `microphone=()` because the operating system's keyboard handles audio capture outside page script and inserts text into the standard composer `<textarea>`.
+- When `speech.browserRecognition` is `true`, only document HTML responses switch `Permissions-Policy` to `microphone=(self)` (keeping `camera=()` and all other directives unchanged); API, SSE, problem, and static asset responses keep `microphone=()`.
+- Because document headers cannot distinguish **View** and **Control** components in the single-page app, **Control-only enforcement lives in the collaboration client**: the speech control renders and can start only when `browserRecognitionEnabled` is `true`, the client is in writable **Control** with a healthy connection, and `SpeechRecognition` or `webkitSpeechRecognition` is available. Switching or downgrading to **View**, losing connection health, hiding the page, or unmounting the shell aborts active recognition immediately.
+- Speech recognition is a two-step draft flow: recognized text accumulates in a review panel until the user explicitly taps **Use text** to copy it into the composer, and **Use text** never submits the prompt (**Send** remains a separate explicit action).
+- In a federated session ([ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)), the hosting home document's `speech.browserRecognition` setting and `Permissions-Policy` header are authoritative.
+
+**Consequences:** No speech-to-text server, third-party script, API key, or audio persistence is added to the gateway or client, and no audio or unsubmitted draft crosses the gateway or the encrypted OMP relay before the user taps **Send**. When the opt-in in-page recognizer is used, the browser or OS speech implementation may transmit captured audio to its vendor speech service outside the encrypted OMP relay and before any prompt is sent; the UI shows an explicit disclosure before starting recognition, and no on-device recognition claim is made.
+
+---
+
+## ADR-038 — Tern is an execution environment, not an integration
+
+**Status:** Accepted
+
+**Date:** 2026-10-22
+
+**Context:** Operators run interactive `omp` processes inside Tern panes, tabs, and windows (locally or on remote workstations) and expect those sessions to appear in **OMP Sessions**. Upstream `pi-wire` also ships a Tern Surface Protocol (`tsp.ts`) module. Adding a Tern-specific discovery adapter, calling a Tern API, or scraping terminal panes would duplicate mainline OMP's local registry and couple the gateway to terminal multiplexer internals.
+
+**Decision:** Treat Tern strictly as an execution environment for stock OMP, not a gateway integration surface:
+
+- Session identity remains OMP's `instanceId` and `generation`, published to `~/.omp/run/collab-hosts` (or `~/.<PI_CONFIG_DIR>/run/collab-hosts`) whenever `collab.autoStart` is `view` or `control` ([ADR-028](#adr-028--consume-mainline-omp-discovery-and-resolve-capabilities-only-at-launch)).
+- The gateway ships no Tern adapter, calls no Tern API, reads no `tsp.ts` frames, and performs no terminal or pane scraping. Tern pane, tab, or window IDs are at most auxiliary operator locators, never gateway session identities.
+- Multiple Tern windows or panes mirroring the same `omp` process share one OMP discovery entry and appear as one session row.
+- A remote Tern pane running `omp` on another host is discovered by the gateway running as that user on that execution host (and accessed either on that host's PWA or via browser-direct federation under [ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)), never through local terminal inspection on the viewing machine.
+- Launching **View** or **Control** from **OMP Sessions** always opens OMP's collaboration client in the browser; it never focuses, attaches to, or sends keystrokes to a native Tern pane.
+- A host without Tern installed is unaffected: `omp-gateway install`, `doctor`, discovery polling, and session launches have no Tern dependency.
+
+**Consequences:** Tern-hosted OMP works through the unchanged native discovery and launch path with zero Tern-specific gateway code. Support and qualification claims for Tern-hosted sessions follow the standard Tested / Supported / Qualified vocabulary ([ADR-030](#adr-030--claim-support-for-ci-tested-platform-families-separately-from-qualification)).

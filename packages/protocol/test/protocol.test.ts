@@ -9,6 +9,8 @@ import {
   parseOmpLinkReply,
   observedSessionFromSnapshot,
   parseJsonFrame,
+  parseClientConfigResponse,
+  parseFleetOrigin,
   parseLaunchRequest,
   parseLaunchResponse,
   parseAttentionPushMessage,
@@ -436,6 +438,55 @@ describe("strict protocol validation", () => {
         prompt: "PROMPT_CONTENT_CANARY",
       }),
     ).toThrow(ProtocolValidationError);
+  });
+  test("validates the public client configuration and rejects aliased or colliding sources", () => {
+    const local = { id: "local", label: "SF Studio", origin: "https://studio.example.ts.net" };
+    const nyc = { id: "nyc", label: "NYC", origin: "https://nyc.example.ts.net" };
+    const config = { version: 1 as const, local, targets: [nyc], speech: { browserRecognition: false } };
+    expect(parseClientConfigResponse(config)).toEqual(config);
+    expect(parseClientConfigResponse({ ...config, targets: [] }).targets).toEqual([]);
+    expect(parseClientConfigResponse({ ...config, speech: { browserRecognition: true } }).speech.browserRecognition).toBe(
+      true,
+    );
+    expect(parseFleetOrigin("http://127.0.0.1:4318")).toBe("http://127.0.0.1:4318");
+    expect(parseFleetOrigin("http://[::1]:4318")).toBe("http://[::1]:4318");
+
+    const rejected: unknown[] = [
+      { ...config, version: 2 },
+      { ...config, extra: true },
+      { ...config, local: { ...local, id: "studio" } },
+      { ...config, targets: [{ ...nyc, id: "local" }] },
+      { ...config, targets: [{ ...nyc, origin: local.origin }] },
+      { ...config, targets: [nyc, { ...nyc, label: "NYC again" }] },
+      { ...config, targets: [nyc, { ...nyc, id: "nyc-2" }] },
+      { ...config, targets: Array.from({ length: 8 }, (_, index) => ({ ...nyc, id: `t${index}`, origin: `https://t${index}.example.ts.net` })) },
+      { ...config, targets: [{ ...nyc, token: "x" }] },
+      { ...config, targets: [{ ...nyc, id: "NYC" }] },
+      { ...config, targets: [{ ...nyc, label: "  " }] },
+      { ...config, targets: [{ ...nyc, label: "x".repeat(65) }] },
+      { ...config, speech: {} },
+      { ...config, speech: { browserRecognition: "yes" } },
+    ];
+    for (const value of rejected) {
+      expect(() => parseClientConfigResponse(value)).toThrow(ProtocolValidationError);
+    }
+    for (const origin of [
+      "https://nyc.example.ts.net/",
+      "https://nyc.example.ts.net/path",
+      "https://nyc.example.ts.net?x=1",
+      "https://nyc.example.ts.net#frag",
+      "https://user:secret@nyc.example.ts.net",
+      "https://NYC.example.ts.net",
+      "https://nyc.example.ts.net:443",
+      "http://nyc.example.ts.net",
+      "http://localhost:4318",
+      "http://10.0.0.5:4318",
+      "wss://nyc.example.ts.net",
+      "null",
+      "",
+    ]) {
+      expect(() => parseFleetOrigin(origin)).toThrow(ProtocolValidationError);
+    }
   });
 
 });

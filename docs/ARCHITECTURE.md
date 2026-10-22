@@ -53,6 +53,7 @@ Responsibilities:
 - embed or serve a pinned build/integration of OMP's existing `collab-web` client;
 - persist private VAPID/subscription material separately from the memory-only session registry and send metadata-only Web Push attention/resolution envelopes;
 - provide `install`, `status`, `doctor`, token rotation, and `uninstall` through `omp-gateway`.
+- serve `GET /api/v1/client-config` (same-origin only, `no-store`) and, when `http.trustedDashboardOrigins` is configured, admit browser-direct CORS requests from those exact origins only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and their `OPTIONS` preflights (`apps/gateway/src/http-policy.ts`, [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)) without server-side proxying or fleet push.
 
 The registry is intentionally empty after daemon restart. The next host poll repopulates it; no capability store exists.
 
@@ -80,26 +81,15 @@ and build identity — live in one Settings sheet behind a persistent masthead c
 clear` summary claims "You'll get pinged" only while alerts are enabled and otherwise offers the
 Settings path.
 
-The PWA never prefetches capabilities. It receives metadata from `GET /api/v1/sessions` and
-`GET /api/v1/events`, then requests one capability after an explicit tap.
+The PWA never prefetches capabilities. On bootstrap it fetches same-origin `GET /api/v1/client-config` (`cache: "no-store"`, `credentials: "same-origin"`, `redirect: "error"`, 4-second timeout, bounded to `MAX_CLIENT_CONFIG_BYTES`). A `404` response from an older gateway falls back to local-only operation with browser speech recognition disabled and no error banner. A `200` response whose body fails schema validation, reports an unsupported version, or has `local.origin !== location.origin` keeps the local directory running, creates no remote sources, and shows `Fleet configuration unavailable — reload this app` with a **Reload** action.
 
-Couch triage is a device-local presentation layer over that authoritative metadata. **Hold for
-desk** stores only the exact `(instanceId, requestId, heldAt)` identity of an ask and skips it in
-this device's FIFO rotation; it does not clear gateway attention, reduce the pending count or app
-badge, or affect another device. **Hide** is available only on non-attention rows and stores
-only `(instanceId, generation, dismissedAt)`; it hides the row on this device, performs no network
-mutation, and never stops the OMP process. A five-second Undo and a persistent **Show all** surface
-make dismissals reversible. Active-shell Hold commits only after the next launch succeeds; a launch
-failure leaves the current ask in rotation and offers retry without unmounting its collaboration
-shell.
+For the local source (`id: "local"`), the PWA receives metadata from `GET /api/v1/sessions` and `GET /api/v1/events`. When `fleet.targets` (up to 7 remote sources, 8 total with `local`) is configured, the PWA polls each remote target's `GET <origin>/api/v1/sessions` directly from the browser (`mode: "cors"`, `credentials: "omit"`, `cache: "no-store"`, `redirect: "error"`, 5-second timeout, 8 MiB response bound) immediately on visible start and every 10 seconds while visible, with at most one request in flight per source and jittered exponential failure backoff (1 s to 30 s). It never opens a remote `EventSource` or fetches remote `client-config`, `health`, or `push` routes. Each session is keyed in page memory by `SourceKey = id + "\0" + origin` and `SessionRef = { sourceKey, instanceId, generation, requestId? }`; the composite source key is never concatenated into an OMP `instanceId` or sent over the network.
 
-Authoritative snapshots and upserts remove a held record when its exact ask changes or clears, and
-remove a dismissal when the session disappears, its generation changes, or it needs attention.
-Transport failures do not erase either record. Optional `busy` distinguishes sampled activity from
-idle/unknown, not successful completion. The PWA must not invent a Completed state or label local dismissal
-as Close or Exit. These bounded records contain no title, path, model, prompt, answer, transcript,
-or collaboration capability.
+A native `<select>` labeled **Host** filters the directory across **All hosts**, the local host label, and configured `fleet.targets` in configuration order; filter state lives in volatile page/history state only and never changes background polling. Every session row, hero card, held row, and active collaboration shell bar displays its host label. **All clear** and **No live sessions** render only when every source in the selected scope has a fresh snapshot; otherwise the directory names the unavailable hosts without claiming fleet-wide all-clear or background-alert coverage for them. Under **All hosts**, waiting sessions are ordered by first observation of each exact ask in this browser (`observed waiting order`, tie-broken by `sourceKey` then `instanceId`); a single selected host keeps `ask.since` FIFO. A readable `403` from a remote source clears its rows, marks it forbidden, cancels its pending launches, stops automatic polling until explicit **Retry** or a foreground transition, and disposes an active shell from that source. Timeouts, network errors, CORS-opaque responses, malformed payloads, and other HTTP failures keep the source's last rows visibly stale and non-launchable for a 35-second grace window before removing them while retaining the host's error row (`Cannot reach this host from this app.`).
 
+Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and offers retry without unmounting its collaboration shell.
+
+Authoritative snapshots and upserts remove a held record when its exact ask changes or clears, and remove a dismissal when the session disappears, its generation changes, or it needs attention. Transport failures do not erase either record. Optional `busy` distinguishes sampled activity from idle/unknown, not successful completion. The PWA must not invent a Completed state or label local dismissal as Close or Exit. These bounded records contain no title, path, model, prompt, answer, transcript, or collaboration capability.
 An explicit Settings-sheet action enables background Web Push. Permission is never requested on load.
 The gateway sends strict Push v2 attention/clear and activity-stop envelopes with bounded identity and a
 bounded pending count. Private detail uses a fixed title with no body; Session (the default) adds
@@ -159,6 +149,11 @@ registry record, service-worker route, URL, browser-storage record, or new relay
 The host and model provider receive the normalized prompt exactly as they would an image attached
 locally in OMP; ordinary OMP transcript/provider retention therefore still applies.
 
+
+`startCollabWithCapability` also accepts `probeGateway` and `browserRecognitionEnabled` on `CollabEmbedOptions`:
+
+- **`probeGateway`:** replaces the default same-origin `GET /api/v1/health` recovery probe with a source-bound, coalesced `GET <source>/api/v1/sessions` check that resolves `"healthy"` only when the body parses as a valid session list, `"forbidden"` on a readable `403`, and `"unavailable"` on any other failure. On `"forbidden"`, `gatewayHealth.state` transitions to `"forbidden"` with no relay refresh and no automatic probe retry (a later visibility or online transition may probe once more). Non-embedded callers that omit `probeGateway` keep the default same-origin `/api/v1/health` probe.
+- **`browserRecognitionEnabled`:** reflects the hosting document's `speech.browserRecognition` setting ([ADR-037](DECISIONS.md#adr-037--speech-input-keyboard-dictation-baseline-and-opt-in-browser-speech-recognition)). OS keyboard dictation works in the composer `<textarea>` under the default `Permissions-Policy: microphone=()`. When `speech.browserRecognition: true` is configured on the home gateway, document HTML responses set `Permissions-Policy: microphone=(self)` and the composer enables an opt-in Web Speech (`SpeechRecognition` / `webkitSpeechRecognition`) microphone control in writable **Control** sessions only. Recognized text stays in a reviewable draft buffer until the user taps **Use text**, which inserts into the composer without sending; **Send** remains a separate explicit action.
 A same-origin child window plus `MessageChannel` is acceptable only when the browser preserves a distinct exact-origin opener: open `/client/` synchronously during the tap, fetch the capability in the opener, transfer it with a same-origin `postMessage`, and never put it into a URL or DOM attribute. Installed Android PWA launch must use the preferred same-document mount because Chrome may reuse the standalone window without an opener.
 
 The pinned client uses the in-memory bootstrap. Do not introduce a fragment-based compatibility
@@ -298,6 +293,8 @@ Process enumeration can find PIDs but cannot safely attach OMP's browser collabo
 Mainline OMP exposes the supported discovery/query surface needed here. Consume it rather than
 private deep imports, process inspection, or a second collaboration controller.
 
+The same rule applies to Tern ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration)): Tern is an execution environment, not a gateway integration target. An interactive `omp` process started inside a Tern pane publishes to `~/.omp/run/collab-hosts` through stock OMP's local registry, and the gateway reads no Tern API, `tsp.ts` surface, or pane state.
+
 ## 5. Availability behavior
 
 - Gateway unavailable: OMP continues normally and its discovery publication remains independent. The
@@ -334,7 +331,7 @@ private deep imports, process inspection, or a second collaboration controller.
 
 ### 6.1 Staging, readiness proof, and activation
 
-`omp-gateway install` snapshots any existing `config.json`, validates the prior managed service and runtime, and refuses to proceed while an unmanaged service or an authenticated foreground listener occupies the prior or requested loopback endpoint. When upgrading an existing configuration, it preserves an omitted `--port`, `http.hostname`, `auth.trustIdentityWithoutTailnetDevice`, `registry` settings, and explicitly authored `omp` overrides without freezing home-derived defaults into `config.json`, and avoids rewriting unchanged configuration bytes. It removes any retired `publisher-token` left in the private config directory. An unreadable or missing `readiness-token` is repaired only when the prior service is inactive and its loopback endpoint is unoccupied.
+`omp-gateway install` snapshots any existing `config.json`, validates the prior managed service and runtime, and refuses to proceed while an unmanaged service or an authenticated foreground listener occupies the prior or requested loopback endpoint. When upgrading an existing configuration, it preserves an omitted `--port`, `http.hostname`, `http.trustedDashboardOrigins`, `auth.trustIdentityWithoutTailnetDevice`, `registry` settings, explicitly authored `omp` overrides, `fleet`, and `speech` verbatim without freezing home-derived defaults into `config.json`, and avoids rewriting unchanged configuration bytes. It removes any retired `publisher-token` left in the private config directory. An unreadable or missing `readiness-token` is repaired only when the prior service is inactive and its loopback endpoint is unoccupied.
 
 The installer stages the runtime payload into `<stateDir>/installation/versions/<version>-<sha256-12>` and writes `installation.json` recording the version, full payload SHA-256 digest, and `"readinessProtocol": "instance-v1"`. Reinstalling an already-staged payload revalidates its manifest and content hash in place.
 
@@ -351,6 +348,6 @@ After a readiness-proven `install` commits `current.json` and `history.json`, `p
 
 ### 6.3 Rollback, token rotation, and uninstall
 
-- **`rollback [--to <version-dir>]`:** resolves the previous distinct entry in `history.json` (or the requested retained directory), revalidates its manifest and payload digest, rewrites the user service definition, verifies authenticated loopback readiness when the service is active, and updates `current.json` and `history.json`. If the target fails readiness, `rollback` rebuilds the service definition from the unchanged `current.json` runtime and verifies its readiness before reporting failure.
+- **`rollback [--to <version-dir>]`:** resolves the previous distinct entry in `history.json` (or the requested retained directory), revalidates its manifest and payload digest, rewrites the user service definition, verifies authenticated loopback readiness when the service is active, and updates `current.json` and `history.json`. When rolling back to a retained runtime whose version is older than `FLEET_CONFIG_SINCE_VERSION` (`0.8.0`) while `http.trustedDashboardOrigins`, `fleet`, or `speech` is authored in `config.json`, `rollback` atomically writes the full authored document to `<configDir>/config.pre-rollback.json` (mode `0600`, refusing rollback if that backup file already exists) and rewrites `config.json` without those three keys before starting the target runtime. If the target fails readiness, `rollback` rebuilds the service definition from the unchanged `current.json` runtime and verifies its readiness before reporting failure.
 - **`rotate-readiness-token`:** verifies service ownership and the active runtime before atomically replacing `readiness-token` (refusing non-file paths or unsafe parent directories). If the active service cannot restart and prove readiness on the fresh token, the CLI stops the service fail-closed and keeps the fresh token rather than restoring the potentially exposed token.
 - **`uninstall [--no-stop]`:** derives the fixed current-user service definition path without parsing `config.json`, stops the service, and removes its autostart registration while preserving `config.json`, `readiness-token`, `push.json`, and staged runtimes. `--no-stop` is accepted only when the service is already inactive.

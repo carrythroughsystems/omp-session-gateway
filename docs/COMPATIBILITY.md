@@ -39,6 +39,32 @@ macOS Virtualization.framework guest under ADR-033; see [Status vocabulary](#sta
   browsers older than Chrome and Edge 111, Firefox 121, and Safari 16.2 render incorrectly.
 - **Windows** starts the gateway at interactive logon, not at unattended boot.
 
+- **Terminal environments.** Tern is an execution environment for stock OMP, not a separate gateway
+  integration ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration)).
+  Sessions started inside Tern use the same `collab.autoStart` setting and `~/.omp/run/collab-hosts`
+  registry as any other terminal ([Running OMP inside Tern](OMP_INTEGRATION.md#running-omp-inside-tern)),
+  and the [Status vocabulary](#status-vocabulary) (**Tested**, **Supported**, **Qualified**,
+  **Smoke-tested**) applies without a separate Tern row. Developer-workstation execution inside Tern was
+  **smoke-tested on 2026-10-22** (not CI, not release qualification) on macOS (Apple silicon) with Tern
+  `0.9.5` (build `2863c37`), stock OMP `18.12.6` (Homebrew install, one patch release above the
+  `v18.12.5` engineering host baseline pin), `~/.omp` (`PI_CONFIG_DIR` unset), `~/.omp/run/collab-hosts`,
+  `collab.autoStart = control`, and two `dev-localhost` gateways in desktop Chrome: two fresh sessions
+  started with `tern new tab --cwd <dir> -- env OMP_SKIP_SETUP=1 omp …` published within ~13 s while
+  `OmpHostReader` observed all three Tern-hosted hosts (`access: control`, `relayConnected: true`) and
+  ignored ~220 stale publications; the home PWA showed `All hosts` / `Home` / `Remote` with six
+  independent rows for the three colliding Tern `instanceId`s, launched home **View** and remote
+  **View**/**Control** via `OPTIONS …/launch` `204` + `POST …/launch` `200` with no credentials, echoed
+  a synthetic prompt (`401`), routed and answered a real metadata-only ask (`inputRequired: true` →
+  `false`), isolated a stopped remote gateway (`Remote: Cannot reach this host from this app.` with
+  **Retry** and `Host coverage incomplete — Unavailable: Remote`), and exercised keyboard-dictation help
+  plus the opt-in speech flow via an injected fake `SpeechRecognition` constructor (no microphone used).
+  Still pending and not exercised: any phone or installed PWA, the HTTPS Tailscale Serve path (identity
+  headers and real CORS over Serve), Wi-Fi/cellular transitions, session replacement/reconnect/shutdown
+  while inside Tern beyond closing the panes, native browser speech recognition on any device, and Pixel
+  or iPhone keyboard dictation; issue
+  [#380](https://github.com/carrythroughsystems/omp-session-gateway/issues/380)'s installed-iPhone
+  acceptance is therefore not satisfied yet
+  ([TEST_PLAN.md](TEST_PLAN.md#g-tern-multi-host-federation-and-speech-input-acceptance-matrix)).
 ## Current claim
 
 <!-- release-generate:release:start -->
@@ -334,7 +360,7 @@ Three compatibility surfaces change independently:
 | Surface | Current version | Current behavior |
 |---|---|---|
 | Gateway client of OMP discovery/query | 1, mainline OMP `>= 18.1.20` | Validates consumed discovery and reply fields and ignores unknown additive v1 fields; snapshot polling and per-launch link resolution. |
-| PWA to gateway HTTP API | `/api/v1` | Metadata-only list/SSE; generation-bound launch plus `409 mode_unavailable`. |
+| PWA to gateway HTTP API | `/api/v1` | Metadata-only list/SSE, `GET /api/v1/client-config`, generation-bound launch plus `409 mode_unavailable`, and opt-in exact-origin CORS (`http.trustedDashboardOrigins`) on `/api/v1/sessions` and `/api/v1/sessions/:instanceId/launch`. |
 | Pinned OMP browser client | Exact source/provenance in the client lock | In-memory bootstrap; not a claim to support arbitrary client/wire combinations. |
 
 There is no gateway-owned publisher protocol and no cross-version publisher fallback. Unknown
@@ -389,8 +415,8 @@ unchanged browser or relay behavior does not inherit these passes.
 | `dev-localhost` HTTP mode | Development only | Never a remote, LAN, or production deployment path. |
 | Tailscale Funnel or public reverse tunnel | Unsupported | Must not be enabled or documented as a normal deployment path. |
 
-WebAuthn control gating, a Trusted Web Activity, native Android applications, and multi-host
-federation remain deferred. Background Web Push is qualified on the Pixel by each stable
+WebAuthn control gating, a Trusted Web Activity, native Android applications, server-side
+multi-host proxying, and fleet-wide push remain deferred. Background Web Push is qualified on the Pixel by each stable
 campaign's background-Push lane (ADR-031): the exact-version closed-app, lock-screen,
 tap-to-current-Control, stale-generation, force-stop, network-change, Doze, and forbidden-sink
 matrix, with force-stop and Doze recorded as observed variants. From v0.6.2, the real-device cloud

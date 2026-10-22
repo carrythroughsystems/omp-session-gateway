@@ -701,6 +701,10 @@ describe("notification service worker", () => {
       { method: "POST", mode: "same-origin", url: "https://sessions.example/assets/app.0123456789ab.js" },
       { method: "GET", mode: "navigate", url: "https://sessions.example/" },
       { method: "GET", mode: "same-origin", url: "https://sessions.example/api/v1/sessions" },
+      { method: "GET", mode: "same-origin", url: "https://sessions.example/api/v1/client-config" },
+      { method: "GET", mode: "cors", url: "https://remote.example/api/v1/sessions" },
+      { method: "POST", mode: "cors", url: "https://remote.example/api/v1/sessions/collision-0001/launch" },
+      { method: "GET", mode: "cors", url: "https://remote.example/assets/app.0123456789ab.js" },
       { method: "GET", mode: "same-origin", url: "https://sessions.example/client/" },
       { method: "GET", mode: "same-origin", url: "https://sessions.example/assets/app.0123456789ab.js?x=1" },
     ];

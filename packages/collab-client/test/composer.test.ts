@@ -1,6 +1,7 @@
 import type { AssistantMessage, ImageContent, SessionEntry } from "@oh-my-pi/pi-wire";
 import { describe, expect, test } from "bun:test";
-import { photoPromptAcknowledged } from "../upstream/src/components/shell/Composer";
+import type { KeyboardEvent } from "react";
+import { photoPromptAcknowledged, shouldSubmitOnEnter } from "../upstream/src/components/shell/Composer";
 import { recommendedOptionIndex } from "../upstream/src/components/shell/ask-recommendation";
 import type { ActiveTool, GuestSnapshot } from "../upstream/src/lib/client";
 
@@ -9,6 +10,23 @@ const OPTIONS = [
   { label: "Implement ADR-0036 locally", description: "Apply the compatibility fix in the gateway." },
   { label: "Wait for upstream", description: "Leave the current behavior unchanged." },
 ];
+
+describe("composer Enter and composition guard", () => {
+  for (const [key, shiftKey, isComposing, composing, expected] of [
+    ["Enter", false, false, false, true],
+    ["Enter", true, false, false, false],
+    ["Enter", false, true, false, false],
+    ["Enter", false, false, true, false],
+    ["Enter", false, true, true, false],
+    ["Process", false, false, false, false],
+    ["a", false, false, false, false],
+  ] as const) {
+    test(`${key} shift=${shiftKey} native composition=${isComposing} deferred composition=${composing}`, () => {
+      const event = { key, shiftKey, nativeEvent: { isComposing } } as KeyboardEvent<HTMLTextAreaElement>;
+      expect(shouldSubmitOnEnter(event, composing)).toBe(expected);
+    });
+  }
+});
 
 function askArgs(recommended?: number): Record<string, unknown> {
   return {

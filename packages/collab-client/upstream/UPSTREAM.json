@@ -40,6 +40,8 @@
     "Preserve upstream rejected-currency and half-streamed delimiter semantics across the retained npm marked parser",
     "Force the transcript to its tail when an initial or recovered connection becomes live without discarding transcript windowing",
     "Retain explicit Show earlier expansion, oldest-entry ID anchoring, and full-history tool-result pairing because gateway tests encode phone reading behavior across live appends and reconnects; combine upstream row-based prepend anchoring",
-    "Exclude OMP's pi artwork: omit OmpMark.tsx and its HeaderBar/ConnectScreen imports and rendering"
+    "Exclude OMP's pi artwork: omit OmpMark.tsx and its HeaderBar/ConnectScreen imports and rendering",
+    "Provide keyboard-dictation guidance and opt-in bounded browser speech for live Control drafts, with destination-bound cancellation and explicit review, Use text, and Send separation",
+    "Probe the launching gateway through an injected selected-source callback and treat a readable authorization loss as terminal for automatic recovery, allowing a fresh probe only on foreground, pageshow, or online transitions"
   ]
 }

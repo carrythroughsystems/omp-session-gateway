@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import {
   type ConfigOverrides,
   type GatewayConfig,
+  FLEET_CONFIG_SINCE_VERSION,
   assertReadinessTokenPrivate,
   captureGatewayConfigFile,
   defaultGatewayPaths,
@@ -14,6 +15,7 @@ import {
   loadReadinessToken,
   readinessTokenMatches,
   publicOriginHttpsPort,
+  projectPreFleetConfig,
   readPrivateTextFile,
   removeLegacyPublisherToken,
   restoreGatewayConfigFile,
@@ -38,7 +40,9 @@ async function privateRoot(): Promise<string> {
 
 function configForRoot(root: string): GatewayConfig {
   return {
-    http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "http://127.0.0.1:4317" },
+    http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "http://127.0.0.1:4317", trustedDashboardOrigins: [] },
+    fleet: { label: "127.0.0.1", targets: [] },
+    speech: { browserRecognition: false },
     auth: { mode: "dev-localhost", allowedLogins: [] },
     omp: { discoveryDir: join(root, "omp", "run", "collab-hosts"), queryTimeoutMs: 1_500 },
     registry: { heartbeatSeconds: 10, ttlSeconds: 35, maxSessions: 10 },
@@ -626,6 +630,156 @@ describe("config key admission", () => {
   }, 20_000);
 });
 
+describe("fleet and speech configuration", () => {
+  const target = { id: "remote", label: "Remote host", origin: "https://remote.example.ts.net" };
+
+  test("derives the local label and leaves old documents byte-identical", async () => {
+    for (const [document, label] of [
+      [serveDocument({ http: { publicOrigin: "https://studio.example.ts.net" } }), "studio"],
+      [devDocument(), "127.0.0.1"],
+      [devDocument({ http: { hostname: "::1", publicOrigin: "http://[::1]:4317" } }), "[::1]"],
+    ] as const) {
+      const text = `${JSON.stringify(document)}  \n`;
+      const configPath = await configFixture(text);
+      const loaded = await loadGatewayConfig({ configPath });
+      expect(loaded.http.trustedDashboardOrigins).toEqual([]);
+      expect(loaded.fleet).toEqual({ label, targets: [] });
+      expect(loaded.speech).toEqual({ browserRecognition: false });
+      expect(await readFile(configPath, "utf8")).toBe(text);
+    }
+    const overridden = await loadDocument(serveDocument(), { publicOrigin: "https://new-label.example.ts.net" });
+    expect(overridden.fleet.label).toBe("new-label");
+  });
+
+  test("normalizes bounded display labels and enables only explicitly authored speech", async () => {
+    const loaded = await loadDocument({
+      ...serveDocument(),
+      http: { publicOrigin: "https://studio.example.ts.net", trustedDashboardOrigins: [target.origin] },
+      fleet: { label: "  Stu\u202edio e\u0301\u0001  ", targets: [{ ...target, label: " Re\u0301mote\u202e " }] },
+      speech: { browserRecognition: true },
+    });
+    expect(loaded.fleet.label).toBe("Studio é");
+    expect(loaded.fleet.targets).toEqual([{ ...target, label: "Rémote" }]);
+    expect(loaded.http.trustedDashboardOrigins).toEqual([target.origin]);
+    expect(loaded.speech.browserRecognition).toBe(true);
+  });
+
+  test("admits HTTPS everywhere and loopback HTTP only in development, including after overrides", async () => {
+    const localTarget = { ...target, origin: "http://[::1]:4412" };
+    const document = {
+      ...devDocument(),
+      http: { publicOrigin: "http://127.0.0.1:4317", trustedDashboardOrigins: ["http://127.0.0.1:4412"] },
+      fleet: { targets: [localTarget] },
+    };
+    expect((await loadDocument(document)).fleet.targets).toEqual([localTarget]);
+    const production = {
+      ...serveDocument(),
+      fleet: { targets: [localTarget] },
+    };
+    await expect(loadDocument(production)).rejects.toThrow("fleet.targets[0].origin must be a canonical https origin");
+    await expect(loadDocument(serveDocument({ http: { trustedDashboardOrigins: [localTarget.origin] } }))).rejects.toThrow(
+      "http.trustedDashboardOrigins[0] must be a canonical https origin",
+    );
+    await expect(loadDocument({
+      ...document,
+      auth: { mode: "dev-localhost", allowedLogins: ["user@example.com"] },
+    }, { mode: "tailscale-serve", publicOrigin: "https://studio.example.ts.net" })).rejects.toThrow(
+      "must be a canonical https origin",
+    );
+  });
+
+  test("rejects noncanonical, unbounded and non-loopback fleet origins with a field path", async () => {
+    for (const invalid of [
+      "null", "https://REMOTE.example/", "https://remote.example:443", "https://remote.example/path",
+      "https://user:pass@remote.example", "https://remote.example?x=1", "https://remote.example#x",
+      "http://localhost:4412", "http://192.168.1.5:4412", "ftp://remote.example", "https://" + "a".repeat(250), 1, null,
+    ]) {
+      await expect(loadDocument({
+        ...devDocument(),
+        fleet: { targets: [target, { ...target, id: "other", origin: invalid }] },
+      })).rejects.toThrow("fleet.targets[1].origin must be a canonical https or loopback http origin");
+      await expect(loadDocument(devDocument({ http: { trustedDashboardOrigins: [invalid] } }))).rejects.toThrow(
+        "http.trustedDashboardOrigins[0] must be a canonical https or loopback http origin",
+      );
+    }
+  });
+
+  test("rejects source collisions, duplicate origins and count overflows", async () => {
+    const sources = Array.from({ length: 7 }, (_, index) => ({
+      id: `host-${index}`, label: `Host ${index}`, origin: `https://host-${index}.example.ts.net`,
+    }));
+    expect((await loadDocument({ ...serveDocument(), fleet: { targets: sources } })).fleet.targets).toEqual(sources);
+    const dashboards = [...sources.map(source => source.origin), "https://eighth.example.ts.net"];
+    expect((await loadDocument(serveDocument({ http: { trustedDashboardOrigins: dashboards } }))).http.trustedDashboardOrigins).toEqual(dashboards);
+    for (const [targets, message] of [
+      [[{ ...target, id: "local" }], ".id must be unique"],
+      [[target, { ...target, origin: "https://other.example" }], ".id must be unique"],
+      [[target, { ...target, id: "other" }], ".origin must be unique"],
+      [[{ ...target, origin: "https://gateway.example.ts.net" }], ".origin must be unique"],
+      [[...sources, { ...target, id: "eighth" }], "at most 7"],
+    ] as const) {
+      await expect(loadDocument({ ...serveDocument(), fleet: { targets } })).rejects.toThrow(message);
+    }
+    for (const [trustedDashboardOrigins, message] of [
+      [[target.origin, target.origin], "duplicates"],
+      [["https://gateway.example.ts.net"], "must not equal http.publicOrigin"],
+      [[...dashboards, "https://ninth.example"], "at most 8"],
+    ] as const) {
+      await expect(loadDocument(serveDocument({ http: { trustedDashboardOrigins } }))).rejects.toThrow(message);
+    }
+    await expect(loadDocument({ ...serveDocument(), fleet: { targets: [target] } }, {
+      publicOrigin: target.origin,
+    })).rejects.toThrow("must not equal http.publicOrigin");
+  });
+
+  test("rejects unknown keys, missing target fields, nulls, wrong types and label/id bounds", async () => {
+    for (const document of [
+      { ...devDocument(), fleet: null },
+      { ...devDocument(), speech: null },
+      { ...devDocument(), http: null },
+      { ...devDocument(), fleet: { label: null } },
+      { ...devDocument(), fleet: { targets: null } },
+      { ...devDocument(), speech: { browserRecognition: null } },
+      devDocument({ http: { trustedDashboardOrigins: null } }),
+      { ...devDocument(), fleet: { targets: [null] } },
+      { ...devDocument(), fleet: { targets: [{ id: "remote", label: "Remote" }] } },
+      { ...devDocument(), fleet: { targets: [target.origin] } },
+      { ...devDocument(), fleet: { targets: {} } },
+      devDocument({ http: { trustedDashboardOrigins: target.origin } }),
+      { ...devDocument(), speech: { browserRecognition: "true" } },
+    ]) await expect(loadDocument(document)).rejects.toThrow();
+    await expect(loadDocument({ ...devDocument(), fleet: { unknown: true } })).rejects.toThrow("unknown fleet config key: unknown");
+    await expect(loadDocument({ ...devDocument(), speech: { unknown: true } })).rejects.toThrow("unknown speech config key: unknown");
+    await expect(loadDocument({ ...devDocument(), fleet: { targets: [{ ...target, extra: true }] } })).rejects.toThrow(
+      "unknown fleet.targets[0] config key: extra",
+    );
+    for (const id of ["", "Remote", "-remote", "a".repeat(33), null]) {
+      await expect(loadDocument({ ...devDocument(), fleet: { targets: [{ ...target, id }] } })).rejects.toThrow(".id must match");
+    }
+    for (const label of ["", " \u202e\u0001 ", "a".repeat(65), null, 1]) {
+      await expect(loadDocument({ ...devDocument(), fleet: { label } })).rejects.toThrow("fleet.label");
+      await expect(loadDocument({ ...devDocument(), fleet: { targets: [{ ...target, label }] } })).rejects.toThrow(".label");
+    }
+    expect((await loadDocument({ ...devDocument(), fleet: { label: "\u{1F3A4}".repeat(64) } })).fleet.label).toBe("\u{1F3A4}".repeat(64));
+  });
+
+  test("projects only authored fleet keys without mutating or materializing defaults", () => {
+    expect(FLEET_CONFIG_SINCE_VERSION).toBe("0.8.0");
+    const document = {
+      ...serveDocument({ http: { trustedDashboardOrigins: [] } }),
+      fleet: {},
+      speech: { browserRecognition: false },
+      omp: { queryTimeoutMs: 2_000 },
+    };
+    const original = JSON.stringify(document);
+    const projection = projectPreFleetConfig(document);
+    expect(projection.removedKeys).toEqual(["http.trustedDashboardOrigins", "fleet", "speech"]);
+    expect(projection.document).toEqual({ ...serveDocument(), omp: document.omp });
+    expect(JSON.stringify(document)).toBe(original);
+    expect(projectPreFleetConfig(serveDocument())).toEqual({ document: serveDocument(), removedKeys: [] });
+  });
+});
+
 describe("registry bounds admission", () => {
   test("refuses a heartbeat outside its bounds or of the wrong shape", async () => {
     for (const heartbeatSeconds of [1, 61, 10.5, "10", true]) {
@@ -920,6 +1074,17 @@ describe("private directory admission", () => {
 });
 
 describe("private text files", () => {
+  test("atomically creates an owner-only backup and refuses to replace an existing path", async () => {
+    const root = await privateRoot();
+    const path = join(root, "config.pre-rollback.json");
+    await writePrivateTextFile(path, "authored bytes\n", { exclusive: true });
+    expect(await readFile(path, "utf8")).toBe("authored bytes\n");
+    if (process.platform !== "win32") expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    await expect(writePrivateTextFile(path, "replacement\n", { exclusive: true })).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(path, "utf8")).toBe("authored bytes\n");
+    expect(await readdir(root)).toEqual(["config.pre-rollback.json"]);
+  });
+
   test("refuses a size limit that cannot bound a read", async () => {
     const path = join(await privateRoot(), "push-state.json");
     await writeFile(path, "x", { mode: 0o600 });
@@ -1154,6 +1319,7 @@ describe("production config authoring", () => {
       hostname: "127.0.0.1",
       port: 4317,
       publicOrigin: "https://gateway.example.ts.net",
+      trustedDashboardOrigins: [],
     });
     expect(written.auth.mode).toBe("tailscale-serve");
     expect(written.auth.allowedLogins).toEqual(["user@example.com", "other@example.com"]);
@@ -1205,6 +1371,7 @@ describe("production config authoring", () => {
       hostname: "::1",
       port: 5432,
       publicOrigin: "https://new-gateway.example.ts.net",
+      trustedDashboardOrigins: [],
     });
     expect(preserved.auth).toEqual({
       mode: "tailscale-serve",
@@ -1224,6 +1391,40 @@ describe("production config authoring", () => {
     expect(overridden.auth.trustIdentityWithoutTailnetDevice).toBe(true);
     expect(overridden.registry).toEqual(priorDocument.registry);
     expect((await loadGatewayConfig({ configPath: paths.configPath })).omp).toEqual(priorDocument.omp);
+  }, 20_000);
+
+  test("preserves authored fleet and speech sections verbatim on reinstall and leaves unchanged bytes alone", async () => {
+    const paths = await isolatedHome();
+    await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+    const document = {
+      ...serveDocument({ http: { trustedDashboardOrigins: ["https://dashboard.example.ts.net"] } }),
+      fleet: {
+        label: "  Studio e\u0301  ",
+        targets: [{ id: "remote", label: " Remote\u202e ", origin: "https://remote.example.ts.net" }],
+      },
+      speech: { browserRecognition: true },
+    };
+    const text = `${JSON.stringify(document)} \n`;
+    await writePrivateTextFile(paths.configPath, text);
+    const options = { publicOrigin: "https://gateway.example.ts.net", allowedLogins: ["user@example.com"] };
+    await writeGatewayConfigFile(options);
+    expect(await readFile(paths.configPath, "utf8")).toBe(text);
+    await writeGatewayConfigFile({ ...options, port: 4411 });
+    const rewritten = JSON.parse(await readFile(paths.configPath, "utf8"));
+    expect(rewritten.http.trustedDashboardOrigins).toEqual(["https://dashboard.example.ts.net"]);
+    expect(rewritten.fleet).toEqual(document.fleet);
+    expect(rewritten.speech).toEqual(document.speech);
+    const loaded = await loadGatewayConfig();
+    expect(loaded.fleet.label).toBe("Studio é");
+    expect(loaded.fleet.targets[0]?.label).toBe("Remote");
+    for (const authored of [{ fleet: {}, speech: {} }, { fleet: { targets: [] }, speech: { browserRecognition: false } }]) {
+      await writePrivateTextFile(paths.configPath, JSON.stringify({ ...serveDocument(), ...authored }));
+      await writeGatewayConfigFile({ ...options, port: 4412 });
+      const preserved = JSON.parse(await readFile(paths.configPath, "utf8"));
+      expect(preserved.fleet).toEqual(authored.fleet);
+      expect(preserved.speech).toEqual(authored.speech);
+      expect(preserved.http.trustedDashboardOrigins).toBeUndefined();
+    }
   }, 20_000);
 
   test("preserves partial OMP overrides without freezing derived discovery defaults", async () => {

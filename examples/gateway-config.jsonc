@@ -2,7 +2,10 @@
   "http": {
     "hostname": "127.0.0.1",
     "port": 4317,
-    "publicOrigin": "https://host.tailnet.ts.net"
+    "publicOrigin": "https://host.example.ts.net",
+    // Opt-in: exact dashboard origins allowed to list and launch on this host.
+    // The target must separately allow the user's Tailscale login below.
+    "trustedDashboardOrigins": []
   },
   "auth": {
     "mode": "tailscale-serve",
@@ -12,5 +15,16 @@
     "heartbeatSeconds": 10,
     "ttlSeconds": 35,
     "maxSessions": 100
+  },
+  "fleet": {
+    // Optional; defaults to the public origin's first DNS label.
+    "label": "host",
+    // Dashboard-side opt-in; at most seven explicitly configured gateway origins.
+    // Each target must trust this dashboard's publicOrigin. Reload the PWA after edits.
+    "targets": []
+  },
+  "speech": {
+    // Keyboard dictation remains available without this optional browser recognizer.
+    "browserRecognition": false
   }
 }

@@ -39,8 +39,12 @@
           <h1 id="directory-title">Sessions</h1>
           <p id="directory-count" class="count-pill" hidden></p>
         </div>
+        <label id="host-picker-label" class="host-picker" hidden>Host
+          <select id="host-picker" aria-label="Host"></select>
+        </label>
       </header>
       <div id="status-banner" class="status" data-kind="loading" role="status">Loading sessions…</div>
+      <section id="fleet-status" aria-label="Host availability" aria-live="polite" hidden></section>
       <section id="empty-state" class="empty-state" hidden>
         <svg class="empty-mark" width="64" height="64" viewBox="0 0 96 96" aria-hidden="true">
           <rect x="12" y="16" width="72" height="10" rx="2" fill="#E8ECEF" />
@@ -82,6 +86,7 @@
       </header>
       <section class="sheet-section" aria-labelledby="sheet-alerts-title">
         <h3 id="sheet-alerts-title" class="sheet-section-title">Background alerts</h3>
+        <p id="alert-scope" class="notify-note"></p>
         <button id="notify" class="notify" type="button" data-state="checking" disabled>Checking background alerts…</button>
         <p id="notify-note" class="notify-note">Alerts work with the app closed for input requests or activity stops. After revalidation, requests open Control; activity stops open View.</p>
         <fieldset id="notification-detail-options" hidden>

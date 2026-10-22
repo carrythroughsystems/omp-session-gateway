@@ -15,7 +15,9 @@ import {
 } from "../src/service.ts";
 
 const config: GatewayConfig = {
-  http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "https://gateway.example.ts.net" },
+  http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "https://gateway.example.ts.net", trustedDashboardOrigins: [] },
+  fleet: { label: "gateway", targets: [] },
+  speech: { browserRecognition: false },
   auth: { mode: "tailscale-serve", allowedLogins: ["user@example.com"] },
   omp: { discoveryDir: "/Users/test/.omp/run/collab-hosts", queryTimeoutMs: 1_500 },
   registry: { heartbeatSeconds: 10, ttlSeconds: 35, maxSessions: 100 },

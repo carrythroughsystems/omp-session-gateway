@@ -17,7 +17,9 @@ const roots: string[] = [];
 
 function config(): GatewayConfig {
   return {
-    http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "https://gateway.example.ts.net" },
+    http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "https://gateway.example.ts.net", trustedDashboardOrigins: [] },
+    fleet: { label: "gateway", targets: [] },
+    speech: { browserRecognition: false },
     auth: { mode: "tailscale-serve", allowedLogins: ["allowed@example.com"] },
     omp: { discoveryDir: "/private/omp/run/collab-hosts", queryTimeoutMs: 1_500 },
     registry: { heartbeatSeconds: 10, ttlSeconds: 35, maxSessions: 10 },
@@ -228,7 +230,7 @@ describe("Tailscale doctor parsing", () => {
   test("matches an exact bracketed IPv6 loopback proxy", () => {
     const ipv6Config: GatewayConfig = {
       ...config(),
-      http: { hostname: "::1", port: 4317, publicOrigin: "https://gateway.example.ts.net" },
+      http: { ...config().http, hostname: "::1" },
     };
     expect(
       serveConfigurationMatches(
@@ -279,7 +281,7 @@ describe("Tailscale doctor parsing", () => {
     expect(funnelConfigurationDisabled(funneled, config())).toBe(false);
     const customPortConfig: GatewayConfig = {
       ...config(),
-      http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "https://gateway.example.ts.net:8443" },
+      http: { ...config().http, publicOrigin: "https://gateway.example.ts.net:8443" },
     };
     expect(funnelConfigurationDisabled(sharedNode, customPortConfig)).toBe(false);
   });

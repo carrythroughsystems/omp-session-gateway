@@ -543,12 +543,13 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     }, { keyBytes: [...roomKey] });
 
     let initialHealthFailures = 0;
-    await page.route("**/api/v1/health", route => {
+    await page.goto(fixture.origin);
+    await expect(page.getByRole("button", { name: "Open request" })).toBeVisible();
+    await page.route(`${fixture.origin}/api/v1/sessions`, route => {
       initialHealthFailures += 1;
       return route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
     });
 
-    await page.goto(fixture.origin);
     await page.getByRole("button", { name: "Open request" }).click();
     await expect.poll(() => initialHealthFailures, { timeout: 4_000 }).toBeGreaterThanOrEqual(2);
     await page.evaluate(() => {
@@ -560,7 +561,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     });
     await expect(page.locator(".conn-chip")).toHaveText("Reconnecting…");
     await expect(page.locator(".sh-ask-option").first()).toBeFocused();
-    await page.unroute("**/api/v1/health");
+    await page.unroute(`${fixture.origin}/api/v1/sessions`);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "connected", { timeout: 5_000 });
 
@@ -635,7 +636,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     );
     await expect(page.locator(".triage-action")).toHaveText("Try again");
     expect(await page.evaluate(() =>
-      JSON.parse(localStorage.getItem("omp.sessions.held-asks.v1") ?? "[]"),
+      JSON.parse(localStorage.getItem("omp.sessions.held-asks.v2") ?? "[]"),
     )).toEqual([]);
 
     await page.locator(".triage-action").click();
@@ -647,12 +648,14 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
       requestId: undefined,
     });
     expect(await page.evaluate(() =>
-      JSON.parse(localStorage.getItem("omp.sessions.held-asks.v1") ?? "null"),
+      JSON.parse(localStorage.getItem("omp.sessions.held-asks.v2") ?? "null"),
     )).toEqual([
       {
         instanceId: "standalone-launch-0001",
         requestId: "standalone-request-0001",
         heldAt: expect.any(String),
+        sourceId: "local",
+        sourceOrigin: fixture.origin,
       },
     ]);
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "hold");
@@ -747,7 +750,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".sh-composer")).toHaveCount(1);
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "clear");
 
-    await page.route("**/api/v1/health", route =>
+    await page.route(`${fixture.origin}/api/v1/sessions`, route =>
       route.fulfill({ status: 503, contentType: "application/json", body: "{}" }),
     );
     await page.evaluate(() => {
@@ -760,7 +763,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect(page.locator(".conn-chip")).toHaveText("Gateway unavailable", { timeout: 5_000 });
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "clear");
-    await page.unroute("**/api/v1/health");
+    await page.unroute(`${fixture.origin}/api/v1/sessions`);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect(page.locator(".conn-chip")).toHaveText("Relay unavailable", { timeout: 7_000 });
     await page.locator(".shell-title").click();
@@ -978,14 +981,16 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".triage-copy")).toHaveText("Mac/session ended · exit 0");
     await expect(page.locator(".triage-action")).toHaveText("Back to Sessions");
     await expect(page.locator(".sh-ended")).toHaveCount(0);
-    const healthRequestsAtEnd = fixture.requests.filter(request => request === "GET /api/v1/health").length;
+    const snapshotsAtEnd = fixture.requests.filter(request => request === "GET /api/v1/sessions").length;
     await page.locator(".triage-action").evaluate(element => {
       element.setAttribute("data-terminal-action", "original");
       (element as HTMLElement).focus();
     });
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    // The directory refreshes once on foreground recovery, but the terminal client must not probe.
+    await expect.poll(() => fixture.requests.filter(request => request === "GET /api/v1/sessions").length).toBe(snapshotsAtEnd + 1);
     await page.waitForTimeout(100);
-    expect(fixture.requests.filter(request => request === "GET /api/v1/health")).toHaveLength(healthRequestsAtEnd);
+    expect(fixture.requests.filter(request => request === "GET /api/v1/sessions")).toHaveLength(snapshotsAtEnd + 1);
     await expect(page.locator('[data-terminal-action="original"]')).toBeFocused();
 
     await page.locator(".triage-action").click();
