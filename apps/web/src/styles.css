@@ -257,6 +257,66 @@ h1 {
   gap: 0.15rem;
 }
 
+.host-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.host-picker select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 2.75rem;
+  flex: 1;
+  padding: 0.5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.45rem;
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+}
+
+.host-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.shell-host {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-copy,
+.shell-heading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.125rem;
+}
+
+.shell-heading {
+  align-items: center;
+}
+
+.fleet-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface);
+  color: var(--body);
+}
+
 .status-title {
   color: var(--ink);
   font-family: var(--font-sans);
@@ -1416,12 +1476,20 @@ body.collab-shell-active {
   }
 
   .shell-title {
-    grid-area: title;
     justify-self: stretch;
     max-width: none;
     padding: 0 0.35rem 0.1rem;
     font-size: 0.86rem;
     text-align: left;
+  }
+
+  .shell-heading {
+    grid-area: title;
+    align-items: stretch;
+  }
+
+  .shell-host {
+    padding-inline: 0.35rem;
   }
 }
 

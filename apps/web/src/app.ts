@@ -13,13 +13,21 @@ import {
   type LaunchMode,
   type NotificationLaunchIntent,
   type SessionEvent,
-  type SessionMetadata,
+  type SessionMetadata as Metadata,
+  type FleetSource,
   type PushDetailLevel,
 } from "@omp-session-gateway/protocol";
 import type {
   CollabEmbedOptions,
   CollabEmbedState,
 } from "../../../packages/collab-client/upstream/src/embed-contract";
+import {
+  FleetTransport, loadClientConfig, sourceKey, sessionKey, recordKey, recordRef,
+  readSourceRecords, boundedJson, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
+  type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
+} from "./fleet";
+
+type SessionMetadata = Metadata & { readonly sourceKey: SourceKey };
 
 type PathHealth = CollabEmbedState["gatewayHealth"];
 
@@ -56,6 +64,10 @@ const notificationButton = requiredElement<HTMLButtonElement>("#notify");
 const notificationDisclosure = requiredElement<HTMLElement>("#notify-note");
 const directoryTitle = requiredElement<HTMLElement>("#directory-title");
 const directoryCount = requiredElement<HTMLElement>("#directory-count");
+const hostPicker = requiredElement<HTMLSelectElement>("#host-picker");
+const hostPickerLabel = requiredElement<HTMLElement>("#host-picker-label");
+const fleetStatus = requiredElement<HTMLElement>("#fleet-status");
+const alertScope = requiredElement<HTMLElement>("#alert-scope");
 const notificationSettings = requiredElement<HTMLDialogElement>("#notification-settings");
 const notificationSettingsClose = requiredElement<HTMLButtonElement>("#notification-settings-close");
 const settingsButton = requiredElement<HTMLButtonElement>("#settings");
@@ -76,33 +88,26 @@ const CONNECTION_EXTENDED_MS = 3_000;
 const CONNECTION_RECOVERED_MS = 1_800;
 const TRANSPORT_GUIDANCE_DELAY_MS = 45_000;
 const LOCAL_ACTION_UNDO_MS = 5_000;
-const HELD_ASKS_STORAGE_KEY = "omp.sessions.held-asks.v1";
-const DISMISSED_SESSIONS_STORAGE_KEY = "omp.sessions.dismissed.v1";
-const MAX_LOCAL_STORAGE_BYTES = 512_000;
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/u;
+const HELD_ASKS_STORAGE_KEY = HELD_KEY;
+const DISMISSED_SESSIONS_STORAGE_KEY = DISMISSED_KEY;
 type TransportFailureKind = "offline" | "tailnet" | "desktop" | "gateway";
 
-interface HeldAsk {
-  readonly instanceId: string;
-  readonly requestId: string;
-  readonly heldAt: string;
-}
-
-interface DismissedSession {
-  readonly instanceId: string;
-  readonly generation: number;
-  readonly dismissedAt: string;
-}
-
-interface PendingDismissToast {
-  readonly instanceId: string;
-  readonly generation: number;
+interface PendingDismissToast extends SessionRef {
   readonly timeout: number;
 }
 
+let localSource: FleetSource = { id: "local", label: "This host", origin: location.origin };
+const localKey = sourceKey(localSource);
+const sources = new Map<SourceKey, FleetSource>([[localKey, localSource]]);
+const remotes = new Map<SourceKey, FleetTransport>();
+let selectedScope: SourceKey | "all" = "all";
+let browserRecognitionEnabled = false;
+let fleetBootstrapFailed = false;
+let localFresh = false;
+const observedAsks = new Map<string, number>();
 const sessions = new Map<string, SessionMetadata>();
-const heldAsks = readHeldAsks();
-const dismissedSessions = readDismissedSessions();
+let heldAsks = new Map<string, HeldAsk>();
+let dismissedSessions = new Map<string, DismissedSession>();
 let events: EventSource | undefined;
 let directoryLoaded = false;
 let authorizationDenied = false;
@@ -120,7 +125,19 @@ let transportFailureKind: TransportFailureKind | undefined;
 let transportGuidanceTimeout: number | undefined;
 let notificationRegistration: ServiceWorkerRegistration | undefined;
 let applicationServerKey: string | undefined;
-let pendingLaunches = 0;
+interface LaunchAttempt {
+  readonly id: number;
+  readonly epoch: number;
+  readonly ref: SessionRef;
+  readonly mode: LaunchMode;
+  readonly scope: SourceKey | "all";
+  readonly sourceEpoch: number | undefined;
+  readonly controller: AbortController;
+  settled: boolean;
+}
+let launchSequence = 0;
+let selectionEpoch = 0;
+let pendingLaunch: LaunchAttempt | undefined;
 let workerUpdatePending = false;
 let updateReloadTimeout: number | undefined;
 let pendingDismissToast: PendingDismissToast | undefined;
@@ -135,7 +152,9 @@ type NotificationControlState =
   | "unavailable";
 
 interface DirectoryHistoryState {
-  readonly order: readonly string[];
+  readonly version: 2;
+  readonly scope: SourceKey | "all";
+  readonly order: readonly SessionRef[];
   readonly scrollY: number;
 }
 
@@ -147,9 +166,8 @@ interface DashboardSnapshot {
   readonly historyState: DirectoryHistoryState;
 }
 
-interface ActiveCollabShell {
-  readonly instanceId: string;
-  readonly generation: number;
+interface ActiveCollabShell extends SessionRef {
+  readonly scope: SourceKey | "all";
   readonly openedRequestId?: string;
   readonly mode: LaunchMode;
   readonly connectionChip: HTMLElement;
@@ -167,9 +185,8 @@ interface ActiveCollabShell {
   recoveredTimeout?: number;
 }
 
-interface DisposedShellResume {
-  readonly instanceId: string;
-  readonly generation: number;
+interface DisposedShellResume extends SessionRef {
+  readonly scope: SourceKey | "all";
   readonly mode: LaunchMode;
   readonly requestId?: string;
 }
@@ -308,7 +325,7 @@ function applyActivatedWorkerUpdate(): void {
   clearUpdateReloadTimeout();
   if (
     !workerUpdatePending ||
-    pendingLaunches > 0 ||
+    pendingLaunch !== undefined ||
     pendingNotificationRoute ||
     activeCollabShell !== undefined ||
     location.pathname === "/client/"
@@ -343,6 +360,8 @@ function acceptNotificationRoute(event: MessageEvent): void {
   const intent = parseNotificationData(event.data.data);
   if (intent === undefined) return;
   event.ports[0]?.postMessage({ type: "omp-notification-route-accepted", version: PUSH_API_VERSION });
+  selectionEpoch += 1;
+  cancelLaunch();
   pendingNotificationLaunch = intent;
   pendingNotificationRoute = true;
   notificationRouteStatusLocked = true;
@@ -515,17 +534,26 @@ function parseDirectoryHistoryState(value: unknown): DirectoryHistoryState | und
   const record = directory as Record<string, unknown>;
   if (
     !Array.isArray(record.order) ||
-    !record.order.every(
-      item => typeof item === "string" && INSTANCE_ID_PATTERN.test(item),
-    ) ||
-    new Set(record.order).size !== record.order.length ||
+    record.order.length > MAX_SESSIONS * sources.size ||
     typeof record.scrollY !== "number" ||
     !Number.isFinite(record.scrollY) ||
     record.scrollY < 0
   ) {
     return undefined;
   }
-  return { order: [...record.order], scrollY: record.scrollY };
+  const order: SessionRef[] = [];
+  for (const item of record.order) {
+    if (record.version === undefined && typeof item === "string" && INSTANCE_ID_PATTERN.test(item)) {
+      const session = sessions.get(sessionKey({ sourceKey: localKey, instanceId: item }));
+      if (session !== undefined) order.push({ sourceKey: localKey, instanceId: item, generation: session.generation });
+    } else if (record.version === 2 && typeof item === "object" && item !== null &&
+      typeof item.sourceKey === "string" && sources.has(item.sourceKey) &&
+      typeof item.instanceId === "string" && INSTANCE_ID_PATTERN.test(item.instanceId) &&
+      Number.isSafeInteger(item.generation) && item.generation > 0) {
+      order.push({ sourceKey: item.sourceKey, instanceId: item.instanceId, generation: item.generation });
+    } else return undefined;
+  }
+  return { version: 2, scope: typeof record.scope === "string" && sources.has(record.scope) ? record.scope : "all", order, scrollY: record.scrollY };
 }
 
 function clearTransportFailureTracking(): void {
@@ -675,8 +703,10 @@ function scheduleReconnect(): void {
 }
 function markEventStreamInterrupted(source: EventSource, epoch: number): boolean {
   if (events !== source || epoch !== directoryEpoch) return false;
+  localFresh = false;
   clearEventLiveness();
   eventStreamStale = true;
+  render();
   showTransportFailure(navigator.onLine === false ? "offline" : "gateway");
   scheduleReconnect();
   return true;
@@ -701,41 +731,8 @@ function sessionTitle(session: SessionMetadata): string {
   return session.title || session.cwdLabel || "OMP session";
 }
 
-function localRecordKey(instanceId: string, suffix: string | number): string {
-  return `${instanceId}\0${suffix}`;
-}
-
-function isCanonicalTimestamp(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const parsed = Date.parse(value);
-  return !Number.isNaN(parsed) && new Date(parsed).toISOString() === value;
-}
-
-function exactLocalRecord(value: unknown, keys: readonly string[]): Record<string, unknown> | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  const actualKeys = Object.keys(record);
-  if (actualKeys.length !== keys.length || keys.some(key => !Object.hasOwn(record, key))) return undefined;
-  return record;
-}
-
-function readLocalRecordArray(key: string): readonly unknown[] {
-  if (typeof localStorage === "undefined") return [];
-  try {
-    const serialized = localStorage.getItem(key);
-    if (serialized === null) return [];
-    if (serialized.length > MAX_LOCAL_STORAGE_BYTES) throw new Error("local records exceed bound");
-    const value: unknown = JSON.parse(serialized);
-    if (!Array.isArray(value) || value.length > MAX_SESSIONS) throw new Error("invalid local records");
-    return value;
-  } catch {
-    try {
-      localStorage.removeItem(key);
-    } catch {
-      // Local routing state is optional; storage denial must not break the directory.
-    }
-    return [];
-  }
+function localRecordKey(ref: Pick<SessionRef, "sourceKey" | "instanceId">, suffix: string | number): string {
+  return `${sessionKey(ref)}\0${suffix}`;
 }
 
 function writeLocalRecords(key: string, records: Iterable<HeldAsk | DismissedSession>): void {
@@ -745,60 +742,6 @@ function writeLocalRecords(key: string, records: Iterable<HeldAsk | DismissedSes
   } catch {
     // Local routing state is optional; keep the live in-memory decision for this page.
   }
-}
-
-function readHeldAsks(): Map<string, HeldAsk> {
-  const records = new Map<string, HeldAsk>();
-  let sanitized = false;
-  for (const value of readLocalRecordArray(HELD_ASKS_STORAGE_KEY)) {
-    const record = exactLocalRecord(value, ["instanceId", "requestId", "heldAt"]);
-    if (
-      record === undefined ||
-      typeof record.instanceId !== "string" ||
-      !INSTANCE_ID_PATTERN.test(record.instanceId) ||
-      typeof record.requestId !== "string" ||
-      !REQUEST_ID_PATTERN.test(record.requestId) ||
-      !isCanonicalTimestamp(record.heldAt)
-    ) {
-      sanitized = true;
-      continue;
-    }
-    const held: HeldAsk = {
-      instanceId: record.instanceId,
-      requestId: record.requestId,
-      heldAt: record.heldAt,
-    };
-    records.set(localRecordKey(held.instanceId, held.requestId), held);
-  }
-  if (sanitized) writeLocalRecords(HELD_ASKS_STORAGE_KEY, records.values());
-  return records;
-}
-
-function readDismissedSessions(): Map<string, DismissedSession> {
-  const records = new Map<string, DismissedSession>();
-  let sanitized = false;
-  for (const value of readLocalRecordArray(DISMISSED_SESSIONS_STORAGE_KEY)) {
-    const record = exactLocalRecord(value, ["instanceId", "generation", "dismissedAt"]);
-    if (
-      record === undefined ||
-      typeof record.instanceId !== "string" ||
-      !INSTANCE_ID_PATTERN.test(record.instanceId) ||
-      !Number.isSafeInteger(record.generation) ||
-      (record.generation as number) < 1 ||
-      !isCanonicalTimestamp(record.dismissedAt)
-    ) {
-      sanitized = true;
-      continue;
-    }
-    const dismissed: DismissedSession = {
-      instanceId: record.instanceId,
-      generation: record.generation as number,
-      dismissedAt: record.dismissedAt,
-    };
-    records.set(localRecordKey(dismissed.instanceId, dismissed.generation), dismissed);
-  }
-  if (sanitized) writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, records.values());
-  return records;
 }
 
 function setBoundedLocalRecord<RecordType>(map: Map<string, RecordType>, key: string, record: RecordType): void {
@@ -815,14 +758,14 @@ function isHeld(session: SessionMetadata): boolean {
   return (
     session.inputRequired &&
     session.ask !== undefined &&
-    heldAsks.has(localRecordKey(session.instanceId, session.ask.requestId))
+    heldAsks.has(localRecordKey(session, session.ask.requestId))
   );
 }
 
 function isDismissed(session: SessionMetadata): boolean {
   return (
     !session.inputRequired &&
-    dismissedSessions.has(localRecordKey(session.instanceId, session.generation))
+    dismissedSessions.has(localRecordKey(session, session.generation))
   );
 }
 
@@ -832,10 +775,12 @@ function cancelPendingDismissToast(): void {
   localActionToast.hidden = true;
 }
 
-function reconcileLocalRecords(): void {
+function reconcileLocalRecords(authority: SourceKey = localKey): void {
   let heldChanged = false;
   for (const [key, held] of heldAsks) {
-    const session = sessions.get(held.instanceId);
+    const ref = recordRef(held);
+    if (ref.sourceKey !== authority) continue;
+    const session = sessions.get(sessionKey(ref));
     if (!session?.inputRequired || session.ask?.requestId !== held.requestId) {
       heldAsks.delete(key);
       heldChanged = true;
@@ -843,7 +788,9 @@ function reconcileLocalRecords(): void {
   }
   let dismissedChanged = false;
   for (const [key, dismissed] of dismissedSessions) {
-    const session = sessions.get(dismissed.instanceId);
+    const ref = recordRef(dismissed);
+    if (ref.sourceKey !== authority) continue;
+    const session = sessions.get(sessionKey(ref));
     if (
       session === undefined ||
       session.generation !== dismissed.generation ||
@@ -856,8 +803,8 @@ function reconcileLocalRecords(): void {
   if (heldChanged) writeLocalRecords(HELD_ASKS_STORAGE_KEY, heldAsks.values());
   if (dismissedChanged) writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, dismissedSessions.values());
 
-  if (pendingDismissToast !== undefined) {
-    const session = sessions.get(pendingDismissToast.instanceId);
+  if (pendingDismissToast !== undefined && pendingDismissToast.sourceKey === authority) {
+    const session = sessions.get(sessionKey(pendingDismissToast));
     if (
       session === undefined ||
       session.generation !== pendingDismissToast.generation ||
@@ -868,10 +815,159 @@ function reconcileLocalRecords(): void {
   }
 }
 
-function replaceSessionSnapshot(nextSessions: readonly SessionMetadata[]): void {
-  sessions.clear();
-  for (const session of nextSessions) sessions.set(session.instanceId, session);
-  reconcileLocalRecords();
+function replaceSessionSnapshot(nextSessions: readonly Metadata[], authority: SourceKey = localKey, fresh = true): void {
+  for (const [key, session] of sessions) {
+    if (session.sourceKey === authority) sessions.delete(key);
+  }
+  for (const metadata of nextSessions) {
+    const session = { ...metadata, sourceKey: authority };
+    sessions.set(sessionKey(session), session);
+    observeAsk(session);
+  }
+  if (fresh) reconcileLocalRecords(authority);
+  const currentAsks = new Set([...sessions.values()].flatMap(session =>
+    session.ask === undefined ? [] : [localRecordKey(session, session.ask.requestId)]));
+  for (const key of observedAsks.keys()) if (!currentAsks.has(key)) observedAsks.delete(key);
+}
+
+function observeAsk(session: SessionMetadata): void {
+  if (session.ask === undefined) return;
+  const key = localRecordKey(session, session.ask.requestId);
+  if (!observedAsks.has(key)) observedAsks.set(key, Date.now());
+}
+
+function scopedSessions(scope = selectedScope): SessionMetadata[] {
+  return [...sessions.values()].filter(session => scope === "all" || session.sourceKey === scope);
+}
+
+function sourceFresh(key: SourceKey): boolean {
+  return key === localKey ? localFresh : remotes.get(key)?.status === "fresh";
+}
+
+function scopeComplete(scope = selectedScope): boolean {
+  return [...sources.keys()].filter(key => scope === "all" || key === scope).every(sourceFresh);
+}
+
+function hostLabel(ref: Pick<SessionRef, "sourceKey">): string {
+  return sources.get(ref.sourceKey)?.label ?? "Unavailable host";
+}
+
+let localProbe: Promise<SnapshotResult> | undefined;
+async function probeSource(key: SourceKey, signal: AbortSignal): Promise<SnapshotResult> {
+  if (signal.aborted) return "unavailable";
+  if (key !== localKey) return await remotes.get(key)?.probe(signal) ?? "unavailable";
+  localProbe ??= (async (): Promise<SnapshotResult> => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 5_000);
+    try {
+      const response = await fetch("/api/v1/sessions", {
+        cache: "no-store", credentials: "same-origin", redirect: "error", signal: controller.signal,
+      });
+      if (response.status === 403) return "forbidden";
+      if (!response.ok) return "unavailable";
+      parseSessionListResponse(await boundedJson(response, SNAPSHOT_BYTES));
+      return "healthy";
+    } catch { return "unavailable"; }
+    finally { window.clearTimeout(timeout); localProbe = undefined; }
+  })();
+  const { promise, resolve } = Promise.withResolvers<SnapshotResult>();
+  const abort = (): void => { signal.removeEventListener("abort", abort); resolve("unavailable"); };
+  signal.addEventListener("abort", abort, { once: true });
+  void localProbe.then(result => {
+    signal.removeEventListener("abort", abort);
+    resolve(signal.aborted ? "unavailable" : result);
+  });
+  return await promise;
+}
+
+function cancelLaunch(source?: SourceKey): void {
+  if (pendingLaunch === undefined || (source !== undefined && pendingLaunch.ref.sourceKey !== source)) return;
+  pendingLaunch.settled = true;
+  pendingLaunch.controller.abort();
+  pendingLaunch = undefined;
+}
+
+function remoteChanged(remote: FleetTransport): void {
+  replaceSessionSnapshot(remote.snapshot?.sessions ?? [], remote.key, remote.status === "fresh");
+  if (remote.status === "forbidden") {
+    cancelLaunch(remote.key);
+    if (activeCollabShell?.sourceKey === remote.key) returnToDirectory();
+  }
+  render();
+  if (remote.status === "fresh") reconcileActiveCollabShell();
+  if (remote.status === "forbidden") applyActivatedWorkerUpdate();
+}
+
+function renderFleetStatus(): void {
+  fleetStatus.replaceChildren();
+  if (fleetBootstrapFailed) {
+    const row = createTextElement("div", "status-guidance fleet-status-row", "Fleet configuration unavailable — reload this app");
+    const reload = createTextElement("button", "status-action", "Reload");
+    reload.addEventListener("click", () => location.reload());
+    row.append(reload);
+    fleetStatus.append(row);
+  }
+  if (sources.size > 1 && (selectedScope === "all" || selectedScope === localKey) && !localFresh) {
+    const detail = authorizationDenied ? "Access withdrawn."
+      : directoryLoaded ? `Live updates unavailable.${lastFreshAt === undefined ? "" : ` Stale since ${new Date(lastFreshAt).toLocaleTimeString()}.`}`
+        : "Loading sessions…";
+    const row = createTextElement("div", "status-guidance fleet-status-row", `${localSource.label}: ${detail}`);
+    row.dataset.sourceKey = localKey;
+    row.dataset.state = authorizationDenied ? "forbidden" : directoryLoaded ? "stale" : "loading";
+    const retry = createTextElement("button", "status-action", "Retry");
+    retry.addEventListener("click", () => void refreshAndConnect());
+    row.append(retry);
+    fleetStatus.append(row);
+  }
+  for (const [key, remote] of remotes) {
+    if ((selectedScope !== "all" && selectedScope !== key) || remote.status === "fresh") continue;
+    const detail = remote.status === "loading" || (remote.status === "stale" && remote.staleSince === undefined) ? "Refreshing sessions…"
+      : remote.status === "forbidden" ? "Access withdrawn."
+        : `Cannot reach this host from this app.${remote.snapshot !== undefined && remote.staleSince !== undefined ? ` Stale since ${new Date(remote.staleSince).toLocaleTimeString()}.` : ""}`;
+    const row = createTextElement("div", "status-guidance fleet-status-row", `${remote.source.label}: ${detail}`);
+    row.dataset.sourceKey = key;
+    row.dataset.state = remote.status;
+    if (remote.status !== "loading") {
+      const retry = createTextElement("button", "status-action", "Retry");
+      retry.addEventListener("click", () => void remote.refresh(true));
+      row.append(retry);
+    }
+    fleetStatus.append(row);
+  }
+  fleetStatus.hidden = fleetStatus.childElementCount === 0;
+}
+
+async function initializeFleet(): Promise<void> {
+  try {
+    const config = await loadClientConfig(location.origin);
+    if (config !== undefined) {
+      localSource = config.local;
+      sources.set(localKey, localSource);
+      browserRecognitionEnabled = config.speech.browserRecognition;
+      for (const target of config.targets) {
+        const key = sourceKey(target);
+        sources.set(key, target);
+        remotes.set(key, new FleetTransport(target, remoteChanged));
+      }
+    }
+  } catch { fleetBootstrapFailed = true; }
+  if (typeof localStorage !== "undefined") {
+    const configured = [...sources.values()];
+    heldAsks = readSourceRecords(localStorage, HELD_KEY, configured) as Map<string, HeldAsk>;
+    dismissedSessions = readSourceRecords(localStorage, DISMISSED_KEY, configured) as Map<string, DismissedSession>;
+  }
+  hostPicker.replaceChildren();
+  for (const [key, label] of [["all", "All hosts"], ...[...sources].map(([key, source]) => [key, source.label])] as [string, string][]) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = label;
+    hostPicker.append(option);
+  }
+  hostPicker.value = selectedScope;
+  hostPickerLabel.hidden = sources.size === 1;
+  alertScope.textContent = `Alerts cover this host (${localSource.label}) only. Remote hosts need their own installed PWA for alerts.`;
+  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  renderFleetStatus();
 }
 
 function elapsedLabel(startedAt: number): string {
@@ -898,7 +994,12 @@ function modelSlug(model: string): string {
   return separator >= 0 && separator + 1 < model.length ? model.slice(separator + 1) : model;
 }
 
-function compareWaiting(left: SessionMetadata, right: SessionMetadata): number {
+function compareWaiting(left: SessionMetadata, right: SessionMetadata, scope = selectedScope): number {
+  if (scope === "all" && sources.size > 1) {
+    const first = observedAsks.get(localRecordKey(left, left.ask?.requestId ?? "")) ?? 0;
+    const second = observedAsks.get(localRecordKey(right, right.ask?.requestId ?? "")) ?? 0;
+    return first - second || left.sourceKey.localeCompare(right.sourceKey) || left.instanceId.localeCompare(right.instanceId);
+  }
   const leftSince = left.ask?.since ?? left.lastSeenAt;
   const rightSince = right.ask?.since ?? right.lastSeenAt;
   return leftSince === rightSince
@@ -906,16 +1007,17 @@ function compareWaiting(left: SessionMetadata, right: SessionMetadata): number {
     : leftSince.localeCompare(rightSince);
 }
 
-function orderedWaitingSessions(): SessionMetadata[] {
-  return [...sessions.values()].filter(session => session.inputRequired && !isHeld(session)).sort(compareWaiting);
+function orderedWaitingSessions(scope = selectedScope): SessionMetadata[] {
+  return scopedSessions(scope).filter(session => session.inputRequired && !isHeld(session))
+    .sort((left, right) => compareWaiting(left, right, scope));
 }
 
-function orderedHeldSessions(): SessionMetadata[] {
-  return [...sessions.values()].filter(isHeld).sort(compareWaiting);
+function orderedHeldSessions(scope = selectedScope): SessionMetadata[] {
+  return scopedSessions(scope).filter(isHeld).sort((left, right) => compareWaiting(left, right, scope));
 }
 
-function orderedWorkingSessions(): SessionMetadata[] {
-  return [...sessions.values()]
+function orderedWorkingSessions(scope = selectedScope): SessionMetadata[] {
+  return scopedSessions(scope)
     .filter(session => !session.inputRequired && !isDismissed(session))
     .sort((left, right) => {
       const started = right.startedAt.localeCompare(left.startedAt);
@@ -924,7 +1026,7 @@ function orderedWorkingSessions(): SessionMetadata[] {
 }
 
 function orderedDismissedSessions(): SessionMetadata[] {
-  return [...sessions.values()].filter(isDismissed).sort((left, right) =>
+  return scopedSessions().filter(isDismissed).sort((left, right) =>
     left.instanceId.localeCompare(right.instanceId),
   );
 }
@@ -944,13 +1046,14 @@ function createQueueKicker(label: string, detail?: string): HTMLElement {
 }
 
 function createSessionSummary(session: SessionMetadata): HTMLElement {
-  const values = [session.cwdLabel, session.model].filter(
+  const values = [hostLabel(session), session.cwdLabel, session.model].filter(
     (value): value is string => value !== undefined && value.length > 0,
   );
   return createTextElement("p", "session-summary", values.join(" · ") || "Live OMP session");
 }
 
 async function closeHeldAskNotification(held: HeldAsk): Promise<void> {
+  if (recordRef(held).sourceKey !== localKey) return;
   if (!("serviceWorker" in navigator)) return;
   try {
     const registration = notificationRegistration ?? (await navigator.serviceWorker.ready);
@@ -967,7 +1070,7 @@ async function closeHeldAskNotification(held: HeldAsk): Promise<void> {
 }
 
 function holdSession(session: SessionMetadata, rerender = true): boolean {
-  const current = sessions.get(session.instanceId);
+  const current = sessions.get(sessionKey(session));
   const ask = current?.ask;
   if (
     current === undefined ||
@@ -979,11 +1082,13 @@ function holdSession(session: SessionMetadata, rerender = true): boolean {
     return false;
   }
   const held: HeldAsk = {
+    sourceId: sources.get(session.sourceKey)!.id,
+    sourceOrigin: sources.get(session.sourceKey)!.origin,
     instanceId: current.instanceId,
     requestId: ask.requestId,
     heldAt: new Date().toISOString(),
   };
-  setBoundedLocalRecord(heldAsks, localRecordKey(held.instanceId, held.requestId), held);
+  setBoundedLocalRecord(heldAsks, recordKey(held, held.requestId), held);
   writeLocalRecords(HELD_ASKS_STORAGE_KEY, heldAsks.values());
   void closeHeldAskNotification(held);
   if (rerender) render();
@@ -992,7 +1097,7 @@ function holdSession(session: SessionMetadata, rerender = true): boolean {
 
 function requeueHeldSession(session: SessionMetadata): void {
   if (session.ask === undefined) return;
-  heldAsks.delete(localRecordKey(session.instanceId, session.ask.requestId));
+  heldAsks.delete(localRecordKey(session, session.ask.requestId));
   writeLocalRecords(HELD_ASKS_STORAGE_KEY, heldAsks.values());
   render();
 }
@@ -1003,7 +1108,8 @@ function showDismissToast(session: SessionMetadata): void {
   localActionToast.hidden = false;
   const timeout = window.setTimeout(() => {
     if (
-      pendingDismissToast?.instanceId === session.instanceId &&
+      pendingDismissToast?.sourceKey === session.sourceKey &&
+      pendingDismissToast.instanceId === session.instanceId &&
       pendingDismissToast.generation === session.generation
     ) {
       pendingDismissToast = undefined;
@@ -1011,6 +1117,7 @@ function showDismissToast(session: SessionMetadata): void {
     }
   }, LOCAL_ACTION_UNDO_MS);
   pendingDismissToast = {
+    sourceKey: session.sourceKey,
     instanceId: session.instanceId,
     generation: session.generation,
     timeout,
@@ -1018,7 +1125,7 @@ function showDismissToast(session: SessionMetadata): void {
 }
 
 function dismissSession(session: SessionMetadata): void {
-  const current = sessions.get(session.instanceId);
+  const current = sessions.get(sessionKey(session));
   if (
     current === undefined ||
     current.generation !== session.generation ||
@@ -1027,13 +1134,15 @@ function dismissSession(session: SessionMetadata): void {
     return;
   }
   const dismissed: DismissedSession = {
+    sourceId: sources.get(session.sourceKey)!.id,
+    sourceOrigin: sources.get(session.sourceKey)!.origin,
     instanceId: current.instanceId,
     generation: current.generation,
     dismissedAt: new Date().toISOString(),
   };
   setBoundedLocalRecord(
     dismissedSessions,
-    localRecordKey(dismissed.instanceId, dismissed.generation),
+    recordKey(dismissed, dismissed.generation),
     dismissed,
   );
   writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, dismissedSessions.values());
@@ -1046,14 +1155,16 @@ function undoPendingDismissal(): void {
   if (pending === undefined) return;
   window.clearTimeout(pending.timeout);
   pendingDismissToast = undefined;
-  dismissedSessions.delete(localRecordKey(pending.instanceId, pending.generation));
+  dismissedSessions.delete(localRecordKey(pending, pending.generation));
   writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, dismissedSessions.values());
   localActionToast.hidden = true;
   render();
 }
 
 function restoreDismissedSessions(): void {
-  dismissedSessions.clear();
+  for (const [key, record] of dismissedSessions) {
+    if (selectedScope === "all" || recordRef(record).sourceKey === selectedScope) dismissedSessions.delete(key);
+  }
   writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, dismissedSessions.values());
   cancelPendingDismissToast();
   render();
@@ -1066,13 +1177,15 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   button.type = "button";
   button.className = "working-row";
   button.dataset.instanceId = session.instanceId;
-  button.disabled = !session.canView;
+  button.dataset.sourceKey = session.sourceKey;
+  button.disabled = !session.canView || !sourceFresh(session.sourceKey);
   button.setAttribute("aria-label", `View ${sessionTitle(session)}`);
   const copy = document.createElement("span");
   copy.className = "working-copy";
   const details = document.createElement("span");
   details.className = "working-details";
   details.append(
+    createTextElement("span", "host-label", hostLabel(session)),
     createTextElement("span", "row-time", uptimeLabel(session)),
     createTextElement("span", "session-activity", session.busy === true ? "· Working" : session.busy === false ? "· Idle" : "· Activity unknown"),
   );
@@ -1103,14 +1216,18 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
   button.type = "button";
   button.className = "queue-row";
   button.dataset.instanceId = session.instanceId;
-  button.disabled = mode === "control" ? !session.canControl : !session.canView;
+  button.dataset.sourceKey = session.sourceKey;
+  button.disabled = !sourceFresh(session.sourceKey) || (mode === "control" ? !session.canControl : !session.canView);
   button.setAttribute(
     "aria-label",
     session.canControl ? `Open request in ${sessionTitle(session)}` : `View ${sessionTitle(session)}`,
   );
+  const copy = document.createElement("span");
+  copy.className = "row-copy";
+  copy.append(createTextElement("span", "row-title", sessionTitle(session)), createTextElement("span", "host-label", hostLabel(session)));
   button.append(
     createTextElement("span", "row-dot row-dot-waiting", ""),
-    createTextElement("span", "row-title", sessionTitle(session)),
+    copy,
     createTextElement("span", "row-time", waitingLabel(session)),
     createTextElement("span", "row-chevron", "›"),
   );
@@ -1125,15 +1242,19 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   const row = document.createElement("div");
   row.className = "held-row";
   row.dataset.instanceId = session.instanceId;
+  row.dataset.sourceKey = session.sourceKey;
 
   const open = document.createElement("button");
   open.type = "button";
   open.className = "held-open";
-  open.disabled = mode === "control" ? !session.canControl : !session.canView;
+  open.disabled = !sourceFresh(session.sourceKey) || (mode === "control" ? !session.canControl : !session.canView);
   open.setAttribute("aria-label", `Open held request in ${sessionTitle(session)}`);
+  const copy = document.createElement("span");
+  copy.className = "row-copy";
+  copy.append(createTextElement("span", "row-title", sessionTitle(session)), createTextElement("span", "host-label", hostLabel(session)));
   open.append(
     createTextElement("span", "row-dot row-dot-held", ""),
-    createTextElement("span", "row-title", sessionTitle(session)),
+    copy,
     createTextElement("span", "row-time", waitingLabel(session)),
   );
   open.addEventListener("click", () =>
@@ -1169,20 +1290,22 @@ function renderAllClear(
 ): void {
   const summary = document.createElement("div");
   summary.className = "all-clear-summary";
-  const alertsLive = notificationState === "enabled";
+  const alertsLive = notificationState === "enabled" && (sources.size === 1 || selectedScope === localKey);
   const message = document.createElement("div");
   message.className = "all-clear-message";
   message.append(
-    createTextElement("h2", "all-clear-title", "All clear"),
+    createTextElement("h2", "all-clear-title", scopeComplete() ? "All clear" : "Host coverage incomplete"),
     createTextElement(
       "p",
       "all-clear-copy",
-      `Nothing needs you.${alertsLive ? " Alerts are on for input requests and activity stops." : ""}`,
+      scopeComplete()
+        ? `Nothing needs you.${alertsLive ? " Alerts are on for input requests and activity stops." : ""}`
+        : `Unavailable: ${[...sources].filter(([key]) => (selectedScope === "all" || key === selectedScope) && !sourceFresh(key)).map(([, source]) => source.label).join(", ")}.`,
     ),
   );
   summary.append(createTextElement("span", "all-clear-dot", ""), message);
   // Keep the ping promise honest: without an active subscription, surface the path to one.
-  if (notificationState === "idle" || notificationState === "blocked") {
+  if ((sources.size === 1 || selectedScope === localKey) && (notificationState === "idle" || notificationState === "blocked")) {
     const hint = document.createElement("button");
     hint.type = "button";
     hint.className = "alerts-hint";
@@ -1210,14 +1333,15 @@ function renderWaitingQueue(
     summary.className = "all-held-summary";
     summary.append(
       createTextElement("span", "row-dot row-dot-held", ""),
-      createTextElement("strong", "", `Queue clear · ${held.length} on hold — handle at desk`),
+      createTextElement("strong", "", scopeComplete() ? `Queue clear · ${held.length} on hold — handle at desk` : `${held.length} on hold · some hosts unavailable`),
     );
     sessionList.append(summary);
   } else {
-    sessionList.append(createQueueKicker("Up next", waitingLabel(hero)));
+    sessionList.append(createQueueKicker("Up next", selectedScope === "all" && sources.size > 1 ? "observed waiting order" : waitingLabel(hero)));
     const article = document.createElement("article");
     article.className = "queue-hero";
     article.dataset.instanceId = hero.instanceId;
+    article.dataset.sourceKey = hero.sourceKey;
     const askPreview = createTextElement(
       "p",
       "ask-preview",
@@ -1246,7 +1370,7 @@ function renderWaitingQueue(
     primary.type = "button";
     primary.className = "action action-request";
     primary.textContent = hero.canControl ? "Open request" : "View transcript";
-    primary.disabled = hero.canControl ? false : !hero.canView;
+    primary.disabled = !sourceFresh(hero.sourceKey) || (hero.canControl ? false : !hero.canView);
     primary.addEventListener("click", () => {
       const mode: LaunchMode = hero.canControl ? "control" : "view";
       void launch(hero, mode, primary, hero.ask?.requestId);
@@ -1266,6 +1390,7 @@ function renderWaitingQueue(
       transcript.type = "button";
       transcript.className = "hero-alt";
       transcript.textContent = "Transcript";
+      transcript.disabled = !sourceFresh(hero.sourceKey);
       transcript.addEventListener("click", () => void launch(hero, "view", transcript));
       alternatives.append(transcript);
     }
@@ -1290,15 +1415,17 @@ function renderWaitingQueue(
 
 function render(): void {
   if (activeCollabShell !== undefined) return;
+  renderFleetStatus();
   sessionList.replaceChildren();
-  if (!directoryLoaded) {
+  if (!directoryLoaded && sessions.size === 0) {
     emptyState.hidden = true;
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
     return;
   }
-  emptyState.hidden = sessions.size > 0;
-  if (sessions.size === 0) {
+  const visibleSessions = scopedSessions();
+  emptyState.hidden = visibleSessions.length > 0 || !scopeComplete();
+  if (visibleSessions.length === 0) {
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
     sessionList.className = "session-list";
@@ -1443,6 +1570,11 @@ function scheduleConnectionRender(shell: ActiveCollabShell, delay: number, kind:
 function renderConnectionState(shell: ActiveCollabShell): void {
   const state = shell.latestEmbedState;
   if (state === undefined || activeCollabShell !== shell) return;
+  if (state.gatewayHealth.state === "forbidden") {
+    clearConnectionTimers(shell);
+    setConnectionState(shell.connectionChip, "offline", "Access withdrawn — return to sessions");
+    return;
+  }
 
   if (state.phase === "ended") {
     clearConnectionTimers(shell);
@@ -1538,6 +1670,8 @@ function returnToDirectory(historyValue?: unknown): void {
  * landed, so a resume can decide against current metadata rather than the pre-background copy.
  */
 function restoreDirectory(historyValue?: unknown): Promise<boolean> {
+  cancelLaunch();
+  selectionEpoch += 1;
   collabShellDisposedOnPageHide = false;
   disposedShellResume = undefined;
   const snapshot = dashboardSnapshot;
@@ -1546,6 +1680,8 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
     return Promise.resolve(false);
   }
   const historyState = parseDirectoryHistoryState(historyValue) ?? snapshot.historyState;
+  selectedScope = historyState.scope;
+  hostPicker.value = selectedScope;
   disposeActiveCollab?.();
   disposeActiveCollab = undefined;
   activeCollabShell = undefined;
@@ -1555,7 +1691,8 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
   dashboardSnapshot = undefined;
   history.replaceState({ ompDirectory: historyState }, "", "/");
   window.scrollTo(0, historyState.scrollY);
-  const refreshed = refreshAndConnect();
+  const refreshed = Promise.all([refreshAndConnect(), ...[...remotes.values()].map(remote => remote.refresh())])
+    .then(([local]) => local);
   applyActivatedWorkerUpdate();
   return refreshed;
 }
@@ -1574,8 +1711,10 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
 async function resumeDisposedCollabShell(): Promise<void> {
   const resume = disposedShellResume;
   const restored = await restoreDirectory();
-  if (resume === undefined || !restored) return;
-  const session = sessions.get(resume.instanceId);
+  if (resume === undefined || (!restored && resume.sourceKey === localKey)) return;
+  selectedScope = resume.scope;
+  hostPicker.value = selectedScope;
+  const session = sessions.get(sessionKey(resume));
   if (session === undefined || session.generation !== resume.generation) return;
   if (!(resume.mode === "control" ? session.canControl : session.canView)) return;
   const requestId = session.ask?.requestId === resume.requestId ? resume.requestId : undefined;
@@ -1584,7 +1723,7 @@ async function resumeDisposedCollabShell(): Promise<void> {
 
 async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: SessionMetadata): Promise<void> {
   const currentRequestId = current.ask?.requestId;
-  const authoritativeCurrent = sessions.get(current.instanceId);
+  const authoritativeCurrent = sessions.get(sessionKey(current));
   if (
     currentRequestId === undefined ||
     authoritativeCurrent?.generation !== current.generation ||
@@ -1594,21 +1733,21 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
     return;
   }
 
-  const next = orderedWaitingSessions().find(
-    session => session.instanceId !== current.instanceId || session.ask?.requestId !== currentRequestId,
+  const next = orderedWaitingSessions(shell.scope).find(
+    session => sourceFresh(session.sourceKey) && (sessionKey(session) !== sessionKey(current) || session.ask?.requestId !== currentRequestId),
   );
   if (next !== undefined) {
     shell.answerShown = true;
     showTriageBar(shell, "sending", "Opening next request…");
     const mode: LaunchMode = next.canControl ? "control" : "view";
-    const opened = await launch(next, mode, undefined, next.ask?.requestId);
+    const opened = await launch(next, mode, undefined, next.ask?.requestId, shell.scope);
     if (opened) {
       holdSession(current, false);
       return;
     }
     if (activeCollabShell !== shell) return;
     shell.answerShown = false;
-    const latestCurrent = sessions.get(current.instanceId);
+    const latestCurrent = sessions.get(sessionKey(current));
     if (
       latestCurrent?.generation !== current.generation ||
       latestCurrent.ask?.requestId !== currentRequestId
@@ -1627,11 +1766,11 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
   }
   if (!holdSession(current, false)) return;
   shell.answerShown = true;
-  const held = orderedHeldSessions().length;
+  const held = orderedHeldSessions(shell.scope).length;
   showTriageBar(
     shell,
     "clear",
-    `Queue clear · ${held} on hold — handle at desk`,
+    scopeComplete(shell.scope) ? `Queue clear · ${held} on hold — handle at desk` : `${held} on hold · some hosts unavailable`,
     "Sessions",
     returnToDirectory,
   );
@@ -1647,7 +1786,8 @@ function reconcileActiveCollabShell(): void {
   ) {
     return;
   }
-  const current = sessions.get(shell.instanceId);
+  if (!sourceFresh(shell.sourceKey)) return;
+  const current = sessions.get(sessionKey(shell));
   if (current === undefined || current.generation !== shell.generation) {
     shell.answerShown = true;
     clearConnectionTimers(shell);
@@ -1671,29 +1811,31 @@ function reconcileActiveCollabShell(): void {
   if (shell.openedRequestId === undefined) return;
 
   shell.answerShown = true;
-  const waiting = orderedWaitingSessions();
-  const next = waiting.find(session => session.canControl);
+  const waiting = orderedWaitingSessions(shell.scope);
+  const next = waiting.find(session => session.canControl && sourceFresh(session.sourceKey));
   if (waiting.length > 0 && next !== undefined) {
     const copy =
       waiting.length === 1
         ? "✓ Answered — 1 more needs you"
         : `✓ Answered — ${waiting.length} more need you`;
     showTriageBar(shell, "next", copy, "Next ask →", () =>
-      void launch(next, "control", undefined, next.ask?.requestId),
+      void launch(next, "control", undefined, next.ask?.requestId, shell.scope),
     );
     return;
   }
-  const working = orderedWorkingSessions().length;
+  const working = orderedWorkingSessions(shell.scope).length;
   showTriageBar(
     shell,
     "clear",
-    `✓ Answered — all clear · ${working} live`,
+    scopeComplete(shell.scope) ? `✓ Answered — all clear · ${working} live` : "Answered — some hosts are unavailable",
     "Sessions",
     returnToDirectory,
   );
 }
 
+let collabStylesheetLoad: Promise<HTMLLinkElement> | undefined;
 async function loadCollabStylesheet(): Promise<HTMLLinkElement> {
+  if (collabStylesheetLoad !== undefined) return await collabStylesheetLoad;
   const existing = document.querySelector<HTMLLinkElement>("link[data-omp-collab-styles]");
   if (existing !== null) return existing;
   const link = document.createElement("link");
@@ -1706,8 +1848,10 @@ async function loadCollabStylesheet(): Promise<HTMLLinkElement> {
       once: true,
     });
   });
+  collabStylesheetLoad = loaded;
   document.head.append(link);
-  return await loaded;
+  try { return await loaded; }
+  catch (error) { collabStylesheetLoad = undefined; link.remove(); throw error; }
 }
 
 let collabClientWarmed = false;
@@ -1743,10 +1887,16 @@ function enterCollabClient(
   setStatus("ready", "");
   if (dashboardSnapshot === undefined) {
     const historyState: DirectoryHistoryState = {
+      version: 2,
+      scope: selectedScope,
       scrollY: window.scrollY,
       order: [...sessionList.querySelectorAll<HTMLElement>("[data-instance-id]")]
-        .map(element => element.dataset.instanceId)
-        .filter((instanceId): instanceId is string => instanceId !== undefined),
+        .flatMap(element => {
+          const current = sessions.get(sessionKey({
+            sourceKey: element.dataset.sourceKey ?? localKey, instanceId: element.dataset.instanceId ?? "",
+          }));
+          return current === undefined ? [] : [{ sourceKey: current.sourceKey, instanceId: current.instanceId, generation: current.generation }];
+        }),
     };
     dashboardSnapshot = {
       children: [...document.body.children] as HTMLElement[],
@@ -1774,8 +1924,8 @@ function enterCollabClient(
   control.textContent = "Control";
   control.hidden = mode === "control" || !session.canControl;
   control.addEventListener("click", () => {
-    const current = sessions.get(session.instanceId) ?? session;
-    void launch(current, "control", control, current.ask?.requestId);
+    const current = sessions.get(sessionKey(session)) ?? session;
+    void launch(current, "control", control, current.ask?.requestId, shellState.scope);
   });
   const connection = createTextElement("span", "conn-chip", "Connecting…");
   setConnectionState(connection, "reconnecting", "Connecting…");
@@ -1785,7 +1935,10 @@ function enterCollabClient(
   const shellActions = document.createElement("span");
   shellActions.className = "shell-actions";
   shellActions.append(control, connection);
-  bar.append(back, title, shellActions);
+  const heading = document.createElement("span");
+  heading.className = "shell-heading";
+  heading.append(title, createTextElement("span", "host-label shell-host", hostLabel(session)));
+  bar.append(back, heading, shellActions);
 
   const container = document.createElement("div");
   container.id = "root";
@@ -1837,6 +1990,8 @@ function enterCollabClient(
   document.title = `${sessionTitle(session)} · OMP Sessions`;
 
   const shellState: ActiveCollabShell = {
+    sourceKey: session.sourceKey,
+    scope: selectedScope,
     instanceId: session.instanceId,
     generation: session.generation,
     ...(requestId === undefined ? {} : { openedRequestId: requestId }),
@@ -1876,6 +2031,8 @@ function enterCollabClient(
   const handlePageHide = (): void => {
     collabShellDisposedOnPageHide = true;
     disposedShellResume = {
+      sourceKey: session.sourceKey,
+      scope: shellState.scope,
       instanceId: session.instanceId,
       generation: session.generation,
       mode,
@@ -1902,6 +2059,8 @@ function enterCollabClient(
         focusPendingRequest: requestId !== undefined,
         shellOwnsLifecycle: true,
         onStateChange: updateConnection,
+        browserRecognitionEnabled,
+        probeGateway: signal => probeSource(session.sourceKey, signal),
       },
     );
     disposeActiveCollab = dispose;
@@ -1917,7 +2076,33 @@ async function launch(
   mode: LaunchMode,
   button?: HTMLButtonElement,
   requestId?: string,
+  scope = selectedScope,
 ): Promise<boolean> {
+  if (!sourceFresh(session.sourceKey)) return false;
+  const source = sources.get(session.sourceKey);
+  if (source === undefined) return false;
+  selectedScope = scope;
+  hostPicker.value = scope;
+  pendingNotificationLaunch = undefined;
+  pendingNotificationRoute = false;
+  cancelLaunch();
+  const attempt: LaunchAttempt = {
+    id: ++launchSequence, epoch: selectionEpoch,
+    ref: { sourceKey: session.sourceKey, instanceId: session.instanceId, generation: session.generation,
+      ...(requestId === undefined ? {} : { requestId }) },
+    mode, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
+    controller: new AbortController(), settled: false,
+  };
+  pendingLaunch = attempt;
+  const currentAttempt = (): boolean => {
+    const current = sessions.get(sessionKey(attempt.ref));
+    return pendingLaunch === attempt && !attempt.settled && !attempt.controller.signal.aborted &&
+      selectionEpoch === attempt.epoch && selectedScope === attempt.scope &&
+      remotes.get(attempt.ref.sourceKey)?.epoch === attempt.sourceEpoch &&
+      sources.get(attempt.ref.sourceKey) === source && sourceFresh(attempt.ref.sourceKey) &&
+      current?.generation === attempt.ref.generation &&
+      (requestId === undefined || current.ask?.requestId === requestId);
+  };
   const sourceShell = activeCollabShell;
   const idleLabel = button?.textContent ?? (mode === "view" ? "View" : "Control");
   if (button !== undefined) {
@@ -1928,24 +2113,32 @@ async function launch(
   } else if (sourceShell === undefined) {
     setStatus("loading", mode === "view" ? "Opening view…" : "Opening control…");
   }
-  pendingLaunches += 1;
-  let settled = false;
   const settle = (): void => {
-    if (settled) return;
-    settled = true;
-    pendingLaunches -= 1;
+    attempt.settled = true;
+    if (pendingLaunch === attempt) pendingLaunch = undefined;
   };
 
   const resetButton = (): void => {
     if (button === undefined) return;
-    button.disabled = mode === "view" && !session.canView;
+    button.disabled = !sourceFresh(session.sourceKey) || (mode === "view" ? !session.canView : !session.canControl);
     delete button.dataset.busy;
     button.removeAttribute("aria-busy");
     button.textContent = idleLabel;
   };
   let stylesheet: HTMLLinkElement | undefined;
   let startCollabWithCapability: StartCollabWithCapability;
+  const discard = (): false => {
+    settle();
+    resetButton();
+    if (pendingLaunch === undefined && activeCollabShell === undefined && stylesheet !== undefined) {
+      stylesheet.remove();
+      collabStylesheetLoad = undefined;
+    }
+    applyActivatedWorkerUpdate();
+    return false;
+  };
   const fail = (kind: "offline" | "unauthorized" | "expired", message: string): boolean => {
+    if (pendingLaunch !== attempt) return discard();
     settle();
     resetButton();
     if (sourceShell !== undefined && activeCollabShell === sourceShell) {
@@ -1955,7 +2148,7 @@ async function launch(
           "sending",
           mode === "view" ? "Opening view…" : "Opening control…",
         );
-        void launch(session, mode, button, requestId);
+        void launch(session, mode, button, requestId, scope);
       });
       return true;
     }
@@ -1963,6 +2156,7 @@ async function launch(
     if (activeCollabShell === undefined) {
       if (location.pathname === "/client/") history.replaceState(null, "", "/");
       stylesheet?.remove();
+      collabStylesheetLoad = undefined;
     }
     setStatus(kind, message);
     applyActivatedWorkerUpdate();
@@ -1981,9 +2175,11 @@ async function launch(
     return false;
   }
 
+  if (!currentAttempt()) return discard();
   let response: Response;
   try {
-    response = await fetch(`/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
+    const remote = session.sourceKey !== localKey;
+    response = await fetch(`${remote ? source.origin : ""}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1992,20 +2188,30 @@ async function launch(
         ...(mode === "control" && requestId !== undefined ? { requestId } : {}),
       }),
       cache: "no-store",
-      credentials: "same-origin",
+      credentials: remote ? "omit" : "same-origin",
+      ...(remote ? { mode: "cors" as const, redirect: "error" as const } : {}),
+      signal: attempt.controller.signal,
     });
   } catch {
     fail("offline", "Gateway unavailable. Check your tailnet connection and try again.");
     return false;
   }
 
+  if (!currentAttempt()) return discard();
   if (!response.ok) {
     if (response.status === 403) {
-      authorizationDenied = true;
-      fail("unauthorized", "This tailnet identity is not authorized.");
+      if (session.sourceKey === localKey) {
+        authorizationDenied = true;
+        fail("unauthorized", "This tailnet identity is not authorized.");
+      } else {
+        settle();
+        resetButton();
+        remotes.get(session.sourceKey)?.forbid();
+        applyActivatedWorkerUpdate();
+      }
     } else if (response.status === 404 || response.status === 409) {
       const preservedShell = fail("expired", "That session changed or expired. Try again.");
-      if (!preservedShell && await refreshAndConnect()) {
+      if (!preservedShell && (session.sourceKey === localKey ? await refreshAndConnect() : await remotes.get(session.sourceKey)?.refresh() === "healthy")) {
         setStatus("expired", "That session changed or expired. The list has been refreshed.");
       }
     } else {
@@ -2020,9 +2226,10 @@ async function launch(
     if (payload.mode !== mode || payload.generation !== session.generation) {
       throw new Error("invalid launch response");
     }
+    if (!currentAttempt()) return discard();
     capability = payload.capability;
-    settle();
     enterCollabClient(capability, startCollabWithCapability, session, mode, requestId);
+    settle();
     capability = undefined;
     return true;
   } catch {
@@ -2037,14 +2244,25 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
   directoryRevision = event.revision;
   authorizationDenied = false;
   directoryLoaded = true;
+  localFresh = true;
   lastFreshAt = Date.now();
   if (event.type === "snapshot") {
     replaceSessionSnapshot(event.sessions);
   } else if (event.type === "session_upsert") {
-    sessions.set(event.session.instanceId, event.session);
+    const session = { ...event.session, sourceKey: localKey };
+    const previous = sessions.get(sessionKey(session));
+    if (previous?.ask !== undefined && previous.ask.requestId !== session.ask?.requestId) {
+      observedAsks.delete(localRecordKey(previous, previous.ask.requestId));
+    }
+    sessions.set(sessionKey(session), session);
+    observeAsk(session);
   } else {
-    const current = sessions.get(event.instanceId);
-    if (current?.generation === event.generation) sessions.delete(event.instanceId);
+    const key = sessionKey({ sourceKey: localKey, instanceId: event.instanceId });
+    const current = sessions.get(key);
+    if (current?.generation === event.generation) {
+      if (current.ask !== undefined) observedAsks.delete(localRecordKey(current, current.ask.requestId));
+      sessions.delete(key);
+    }
   }
   if (event.type !== "snapshot") reconcileLocalRecords();
   render();
@@ -2077,7 +2295,10 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     if (response.status === 403) {
       authorizationDenied = true;
       directoryLoaded = false;
-      sessions.clear();
+      localFresh = false;
+      replaceSessionSnapshot([], localKey, false);
+      cancelLaunch(localKey);
+      if (activeCollabShell?.sourceKey === localKey) returnToDirectory();
       render();
       setStatus("unauthorized", "This tailnet identity is not authorized.");
       return false;
@@ -2088,6 +2309,7 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     directoryRevision = payload.revision;
     authorizationDenied = false;
     directoryLoaded = true;
+    localFresh = true;
     lastFreshAt = Date.now();
     replaceSessionSnapshot(payload.sessions);
     render();
@@ -2095,6 +2317,8 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     return true;
   } catch {
     if (epoch !== directoryEpoch || (controller.signal.aborted && !timedOut)) return false;
+    localFresh = false;
+    render();
     authorizationDenied = false;
     showTransportFailure(
       navigator.onLine === false ? "offline" : timedOut || responseReceived ? "desktop" : "tailnet",
@@ -2144,6 +2368,7 @@ function connectEvents(epoch: number): void {
       return;
     }
     lastFreshAt = Date.now();
+    localFresh = true;
     armEventLiveness(source, epoch);
     if (!notificationRouteStatusLocked) setStatus("ready", "");
   });
@@ -2160,17 +2385,19 @@ async function resolvePendingNotificationRoute(): Promise<void> {
   pendingNotificationRoute = false;
   const pending = pendingNotificationLaunch;
   pendingNotificationLaunch = undefined;
-  const session = pending === undefined ? undefined : sessions.get(pending.instanceId);
+  const session = pending === undefined ? undefined : sessions.get(sessionKey({ sourceKey: localKey, instanceId: pending.instanceId }));
   // A tap for the collaboration this page already shows keeps it: an activity stop never
   // downgrades Control to View, and an attention tap relaunches only to gain Control.
   const shell = activeCollabShell;
   const shown =
     shell !== undefined &&
     session !== undefined &&
+    shell.sourceKey === localKey &&
     shell.instanceId === session.instanceId &&
     shell.generation === session.generation;
   if (pending?.kind === "activity_stop" && session?.generation === pending.generation && session.canView) {
     if (shown) return;
+    selectedScope = localKey;
     if (shell !== undefined) showTriageBar(shell, "sending", "Opening view…");
     await launch(session, "view");
   } else if (
@@ -2180,6 +2407,7 @@ async function resolvePendingNotificationRoute(): Promise<void> {
     session.canControl
   ) {
     if (shown && shell.mode === "control") return;
+    selectedScope = localKey;
     if (shell !== undefined) showTriageBar(shell, "sending", "Opening control…");
     await launch(session, "control", undefined, pending.requestId);
   } else if (shell !== undefined) {
@@ -2215,6 +2443,16 @@ async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
   if (!authorizationDenied && epoch === directoryEpoch) scheduleReconnect();
   return false;
 }
+hostPicker.addEventListener("change", () => {
+  selectedScope = sources.has(hostPicker.value) ? hostPicker.value : "all";
+  selectionEpoch += 1;
+  cancelLaunch();
+  pendingNotificationLaunch = undefined;
+  pendingNotificationRoute = false;
+  history.replaceState({ ompDirectory: { version: 2, scope: selectedScope, order: [], scrollY: window.scrollY } }, "", "/");
+  render();
+  applyActivatedWorkerUpdate();
+});
 settingsButton.addEventListener("click", () => notificationSettings.showModal());
 notificationButton.addEventListener("click", () => void toggleBackgroundNotifications());
 notificationSettingsClose.addEventListener("click", () => notificationSettings.close());
@@ -2237,14 +2475,30 @@ for (const input of notificationDetailInputs) {
 }
 window.addEventListener("pageshow", event => {
   if (!event.persisted) return;
+  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
   if (collabShellDisposedOnPageHide) {
     void resumeDisposedCollabShell();
     return;
   }
   void refreshAndConnect();
 });
-window.addEventListener("online", () => void refreshAndConnect());
+window.addEventListener("online", () => {
+  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  void refreshAndConnect();
+});
+window.addEventListener("pagehide", () => {
+  selectionEpoch += 1;
+  cancelLaunch();
+  for (const remote of remotes.values()) remote.setVisible(false);
+});
+window.addEventListener("popstate", () => {
+  selectionEpoch += 1;
+  cancelLaunch();
+});
 window.addEventListener("offline", () => {
+  localFresh = false;
+  render();
+  for (const remote of remotes.values()) remote.setVisible(false);
   directoryEpoch += 1;
   directoryRevision = -1;
   snapshotController?.abort();
@@ -2271,6 +2525,8 @@ window.addEventListener("offline", () => {
  * failure or a retry: nothing failed, and becoming visible rebuilds it from a fresh snapshot.
  */
 document.addEventListener("freeze", () => {
+  localFresh = false;
+  for (const remote of remotes.values()) remote.setVisible(false);
   directoryEpoch += 1;
   directoryRevision = -1;
   snapshotController?.abort();
@@ -2292,14 +2548,18 @@ document.addEventListener("freeze", () => {
  * a timer that was frozen with it.
  */
 document.addEventListener("visibilitychange", () => {
+  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
   if (document.visibilityState !== "visible") {
     clearTransportFailureTracking();
     return;
   }
   if (authorizationDenied || directoryStreamIsLive()) return;
+  localFresh = false;
+  render();
   void refreshAndConnect();
 });
 
 const applicationWorkerRegistration = initializeApplicationWorker();
 void initializeNotifications(applicationWorkerRegistration);
+await initializeFleet();
 await refreshAndConnect();

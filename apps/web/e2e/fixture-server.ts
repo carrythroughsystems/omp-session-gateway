@@ -6,7 +6,7 @@ import { createConnection } from "node:net";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
-import { parseNotificationRoute, type SessionEvent, type SessionMetadata } from "@omp-session-gateway/protocol";
+import { parseNotificationRoute, type FleetSource, type SessionEvent, type SessionMetadata } from "@omp-session-gateway/protocol";
 
 const MIME_TYPES: Readonly<Record<string, string>> = {
   ".css": "text/css; charset=utf-8",
@@ -18,6 +18,8 @@ const MIME_TYPES: Readonly<Record<string, string>> = {
   ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 const distRoot = resolve(fileURLToPath(new URL("../dist/", import.meta.url)));
+const fixtureCsp = (origins: readonly string[]): string =>
+  `default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' wss://my.omp.sh${origins.map(value => ` ${value}`).join("")}; manifest-src 'self'; worker-src 'self'`;
 
 export interface DashboardFixtureOptions {
   readonly roomKey?: Uint8Array;
@@ -77,6 +79,9 @@ export interface DashboardFixture {
   readonly origin: string;
   readonly requests: readonly string[];
   readonly launchRequests: readonly FixtureLaunchRequest[];
+  readonly requestLog: readonly FixtureRequestLog[];
+  configureFleet(label: string, targets: readonly FleetSource[], trustedOrigins: readonly string[]): void;
+  setListFailure(failure: "forbidden" | "timeout" | "malformed" | undefined): void;
   assertNoCapabilityMaterial(text: string): void;
   disconnectEvents(): number;
   remove(instanceId: string, generation: number): void;
@@ -84,6 +89,14 @@ export interface DashboardFixture {
   stop(): Promise<void>;
   upsert(session: SessionMetadata): void;
   upgradeServiceWorker(): void;
+}
+
+export interface FixtureRequestLog {
+  readonly method: string;
+  readonly path: string;
+  readonly origin: string | null;
+  readonly fetchMode: string | null;
+  readonly credentialsPresent: boolean;
 }
 
 export async function startDashboardFixture(
@@ -94,6 +107,12 @@ export async function startDashboardFixture(
   const streams = new Set<ServerResponse>();
   const requests: string[] = [];
   const launchRequests: FixtureLaunchRequest[] = [];
+  const requestLog: FixtureRequestLog[] = [];
+  let label = "This host";
+  let targets: readonly FleetSource[] = [];
+  let trustedOrigins: readonly string[] = [];
+  let listFailure: "forbidden" | "timeout" | "malformed" | undefined;
+  let origin = "";
   let serviceWorkerVersion = 0;
   let revision = 1;
   const authority = options.syntheticAuthority === undefined ? undefined : parseSyntheticAuthority(options.syntheticAuthority);
@@ -142,7 +161,63 @@ export async function startDashboardFixture(
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const method = request.method ?? "GET";
       requests.push(`${method} ${url.pathname}`);
+      const requestOrigin = request.headers.origin;
+      requestLog.push({
+        method, path: url.pathname, origin: requestOrigin ?? null,
+        fetchMode: request.headers["sec-fetch-mode"] as string ?? null,
+        credentialsPresent: request.headers.cookie !== undefined || request.headers.authorization !== undefined,
+      });
+      response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+      response.setHeader("Content-Security-Policy", fixtureCsp([]));
+      response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+      response.setHeader("Referrer-Policy", "no-referrer");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.setHeader("X-Frame-Options", "DENY");
+      response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()");
+      const launchPath = /^\/api\/v1\/sessions\/[^/]+\/launch$/u.test(url.pathname);
+      const routeMethod = url.pathname === "/api/v1/sessions" ? "GET" : launchPath ? "POST" : undefined;
+      const admitted = requestOrigin !== undefined && trustedOrigins.includes(requestOrigin) &&
+        routeMethod !== undefined && (method === routeMethod || method === "OPTIONS");
+      if (url.pathname.startsWith("/api/")) {
+        response.setHeader("Cache-Control", "no-store, max-age=0");
+        response.setHeader("Pragma", "no-cache");
+        if (requestOrigin !== undefined && requestOrigin !== origin && !admitted) {
+          response.writeHead(403).end('{"error":"forbidden"}');
+          return;
+        }
+      }
+      if (method === "OPTIONS") {
+        const requestedHeaders = request.headers["access-control-request-headers"];
+        if (!admitted || url.search !== "" || request.headers["access-control-request-method"] !== routeMethod ||
+          (requestedHeaders !== undefined && (routeMethod !== "POST" || requestedHeaders.toString().toLowerCase() !== "content-type"))) {
+          response.writeHead(403).end('{"error":"forbidden"}');
+          return;
+        }
+        response.setHeader("Access-Control-Allow-Origin", requestOrigin!);
+        response.setHeader("Access-Control-Allow-Methods", routeMethod!);
+        if (routeMethod === "POST") response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+        response.setHeader("Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers");
+        response.writeHead(204).end();
+        return;
+      }
+      if (admitted) {
+        response.setHeader("Access-Control-Allow-Origin", requestOrigin!);
+        response.setHeader("Vary", "Origin");
+      }
+      if (method === "GET" && url.pathname === "/api/v1/client-config") {
+        if (url.search !== "") { response.writeHead(400).end(); return; }
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify({
+          version: 1, local: { id: "local", label, origin }, targets,
+          speech: { browserRecognition: false },
+        }));
+        return;
+      }
       if (method === "GET" && url.pathname === "/api/v1/sessions") {
+        if (url.search !== "") { response.writeHead(400).end(); return; }
+        if (listFailure === "timeout") return;
+        if (listFailure === "forbidden") { response.writeHead(403).end('{"error":"forbidden"}'); return; }
+        if (listFailure === "malformed") { response.writeHead(200).end('{"invalid":true}'); return; }
         response.writeHead(200, {
           "Cache-Control": "no-store, max-age=0",
           "Content-Type": "application/json; charset=utf-8",
@@ -197,6 +272,12 @@ export async function startDashboardFixture(
       }
       const launchMatch = /^\/api\/v1\/sessions\/([^/]+)\/launch$/u.exec(url.pathname);
       if (method === "POST" && launchMatch !== null) {
+        const fetchSite = request.headers["sec-fetch-site"];
+        const contextValid = request.headers["content-type"] === "application/json" && (
+          admitted ? fetchSite === undefined || fetchSite === "same-site" || fetchSite === "cross-site"
+            : requestOrigin === origin && (fetchSite === undefined || fetchSite === "same-origin")
+        );
+        if (!contextValid) { response.writeHead(403).end('{"error":"forbidden"}'); return; }
         let requestBody = "";
         for await (const chunk of request) {
           requestBody += String(chunk);
@@ -283,8 +364,11 @@ export async function startDashboardFixture(
         const servedBody = relative === "service-worker.js" && serviceWorkerVersion > 0
           ? Buffer.concat([body, Buffer.from(`\n// fixture update ${serviceWorkerVersion}\n`)])
           : body;
+        if (relative === "index.html") response.setHeader("Content-Security-Policy", fixtureCsp(targets.map(target => target.origin)));
         response.writeHead(200, {
-          "Cache-Control": relative === "service-worker.js" ? "no-cache" : "public, max-age=60",
+          "Cache-Control": relative === "index.html"
+            ? pathname === "/" ? "no-cache" : "no-store, max-age=0"
+            : relative === "service-worker.js" ? "no-cache" : "public, max-age=31536000, immutable",
           "Content-Type": MIME_TYPES[extname(candidate)] ?? "application/octet-stream",
         });
         response.end(servedBody);
@@ -299,11 +383,19 @@ export async function startDashboardFixture(
   await once(server, "listening");
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("fixture server did not bind TCP");
+  origin = `http://127.0.0.1:${address.port}`;
 
   return {
-    origin: `http://127.0.0.1:${address.port}`,
+    origin,
     requests,
     launchRequests,
+    requestLog,
+    configureFleet(nextLabel, nextTargets, nextTrusted): void {
+      label = nextLabel;
+      targets = nextTargets;
+      trustedOrigins = nextTrusted;
+    },
+    setListFailure(failure): void { listFailure = failure; },
     assertNoCapabilityMaterial(text): void {
       // Decode ordinary mixed escaping before checking, without retaining or echoing input.
       let normalized = text;

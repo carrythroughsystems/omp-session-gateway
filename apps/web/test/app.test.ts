@@ -1,6 +1,14 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, mock, test } from "bun:test";
 import { MAX_SESSIONS, type SessionMetadata } from "@omp-session-gateway/protocol";
 import fc, { type AsyncCommand } from "fast-check";
+import type { CollabEmbedOptions } from "../../../packages/collab-client/upstream/src/embed-contract";
+
+let embedStart: (options: CollabEmbedOptions) => () => void;
+mock.module("fleet-test-collab", () => ({
+  startCollabWithCapability(_container: unknown, _capability: string, _dispose: () => void, options: CollabEmbedOptions): () => void {
+    return embedStart(options);
+  },
+}));
 
 const GLOBAL_NAMES = [
   "window",
@@ -15,6 +23,8 @@ const GLOBAL_NAMES = [
   "fetch",
   "localStorage",
   "HTMLElement",
+  "__COLLAB_CLIENT_MODULE__",
+  "__COLLAB_CLIENT_STYLESHEET__",
 ] as const;
 const nativeGlobals = Object.fromEntries(
   GLOBAL_NAMES.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
@@ -67,6 +77,7 @@ class FakeElement extends EventTarget {
   textContent: string | null = "";
   type = "";
   value = "";
+  parent: FakeElement | undefined;
 
   constructor(readonly tagName: string) {
     super();
@@ -78,10 +89,20 @@ class FakeElement extends EventTarget {
 
   append(...children: FakeElement[]): void {
     this.children.push(...children);
+    for (const child of children) {
+      child.parent = this;
+      if (child.tagName === "link") queueMicrotask(() => child.dispatchEvent(new Event("load")));
+    }
   }
 
   replaceChildren(...children: FakeElement[]): void {
-    this.children.splice(0, this.children.length, ...children);
+    this.children.splice(0, this.children.length);
+    this.append(...children);
+  }
+
+  remove(): void {
+    const index = this.parent?.children.indexOf(this) ?? -1;
+    if (index >= 0) this.parent?.children.splice(index, 1);
   }
 
   setAttribute(name: string, value: string): void {
@@ -118,6 +139,8 @@ class FakeElement extends EventTarget {
     const matches = (element: FakeElement): boolean => {
       if (selector.startsWith(".")) return element.className.split(/\s+/u).includes(selector.slice(1));
       if (selector.startsWith("#")) return element.id === selector.slice(1);
+      if (selector === "[data-instance-id]") return element.dataset.instanceId !== undefined;
+      if (selector === "link[data-omp-collab-styles]") return element.tagName === "link" && element.dataset.ompCollabStyles !== undefined;
       return element.tagName.toLowerCase() === selector.toLowerCase();
     };
     const found: FakeElement[] = [];
@@ -203,6 +226,9 @@ class FakeWindow extends EventTarget {
 }
 
 class FakeDocument extends EventTarget {
+  readonly head = new FakeElement("head");
+  readonly body = new FakeElement("body");
+  title = "OMP Sessions";
   readonly documentElement = {
     dataset: {} as Record<string, string>,
     style: {} as Record<string, string>,
@@ -214,10 +240,11 @@ class FakeDocument extends EventTarget {
     readonly detailInputs: readonly FakeElement[],
   ) {
     super();
+    this.body.append(...Object.values(bySelector));
   }
 
   querySelector(selector: string): FakeElement | null {
-    return this.bySelector[selector] ?? null;
+    return this.bySelector[selector] ?? this.head.querySelector(selector) ?? this.body.querySelector(selector);
   }
 
   querySelectorAll(selector: string): FakeElement[] {
@@ -289,6 +316,8 @@ interface BrowserHarness {
     readonly statusBanner: FakeElement;
     readonly directoryTitle: FakeElement;
     readonly directoryCount: FakeElement;
+    readonly hostPicker: FakeElement;
+    readonly fleetStatus: FakeElement;
     readonly localActionToast: FakeElement;
     readonly localActionToastCopy: FakeElement;
     readonly localActionToastUndo: FakeElement;
@@ -317,6 +346,12 @@ interface BrowserHarness {
   readonly window: FakeWindow;
   readonly localStorage: FakeStorage;
   readonly notifications: readonly FakeBrowserNotification[];
+  readonly body: FakeElement;
+  readonly launchRequests: { path: string; init: RequestInit }[];
+  readonly embedCalls: CollabEmbedOptions[];
+  readonly disposals: { count: number };
+  setRemoteStatus(status: number): void;
+  notify(data: unknown): void;
   addNotification(tag: string, data: unknown): FakeBrowserNotification;
   emit(type: "snapshot" | "session_upsert" | "session_remove" | "keepalive", payload: unknown): void;
   setList(revision: number, sessions: readonly SessionMetadata[], status?: number): void;
@@ -368,6 +403,10 @@ async function bootApp(options: {
   readonly pathname?: string;
   readonly search?: string;
   readonly storage?: FakeStorage;
+  readonly clientConfig?: unknown;
+  readonly remoteSessions?: readonly SessionMetadata[];
+  readonly remotePayload?: unknown;
+  readonly launchGate?: Promise<void>;
   readonly suffix: string;
 }): Promise<BrowserHarness> {
   FakeEventSource.instances.length = 0;
@@ -401,6 +440,8 @@ async function bootApp(options: {
   directoryTitle.textContent = "Sessions";
   const directoryCount = new FakeElement("p");
   directoryCount.hidden = true;
+  const hostPicker = new FakeElement("select");
+  const fleetStatus = new FakeElement("section");
   const bySelector: Record<string, FakeElement> = {
     "#session-list": sessionList,
     "#empty-state": emptyState,
@@ -409,6 +450,10 @@ async function bootApp(options: {
     "#notify-note": notificationDisclosure,
     "#directory-title": directoryTitle,
     "#directory-count": directoryCount,
+    "#host-picker": hostPicker,
+    "#host-picker-label": new FakeElement("label"),
+    "#fleet-status": fleetStatus,
+    "#alert-scope": new FakeElement("p"),
     "#local-action-toast": localActionToast,
     "#local-action-toast-copy": localActionToastCopy,
     "#local-action-toast-undo": localActionToastUndo,
@@ -455,6 +500,14 @@ async function bootApp(options: {
   let listRevision = 1;
   let listSessions = [...options.initialSessions];
   let listStatus = 200;
+  let remoteStatus = 200;
+  const launchRequests: { path: string; init: RequestInit }[] = [];
+  const embedCalls: CollabEmbedOptions[] = [];
+  const disposals = { count: 0 };
+  embedStart = options => {
+    embedCalls.push(options);
+    return () => { disposals.count += 1; };
+  };
   const workerMessages: unknown[] = [];
   let hangingListRequests = 0;
   let failedListRequests = 0;
@@ -546,6 +599,19 @@ async function bootApp(options: {
     const path = typeof input === "string" ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
     fetchPaths.push(path);
     fetchLocations.push(location.pathname + location.search);
+    if (path === "/api/v1/client-config") {
+      return options.clientConfig === undefined ? new Response(null, { status: 404 }) : Response.json(options.clientConfig);
+    }
+    if (path === "https://remote.example/api/v1/sessions") {
+      if (remoteStatus !== 200) return new Response(null, { status: remoteStatus });
+      return Response.json(options.remotePayload ?? { revision: 1, sessions: options.remoteSessions ?? [] });
+    }
+    if (path.endsWith("/launch")) {
+      launchRequests.push({ path, init });
+      await options.launchGate;
+      const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+      return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+    }
     if (path === "/api/v1/push/config") {
       return Response.json({ version: 2, applicationServerKey: "V".repeat(87) });
     }
@@ -593,6 +659,11 @@ async function bootApp(options: {
     fetch: { configurable: true, value: fetch },
     isSecureContext: { configurable: true, value: true },
     HTMLElement: { configurable: true, value: class extends EventTarget {} },
+    __COLLAB_CLIENT_MODULE__: {
+      configurable: true,
+      value: "fleet-test-collab",
+    },
+    __COLLAB_CLIENT_STYLESHEET__: { configurable: true, value: "/test-client.css" },
   });
 
   // app.ts bootstraps at import time, so a cache-busted test module is required for an isolated page.
@@ -617,6 +688,8 @@ async function bootApp(options: {
       notificationDetailInputs,
       directoryTitle,
       directoryCount,
+      hostPicker,
+      fleetStatus,
       localActionToast,
       localActionToastCopy,
       localActionToastUndo,
@@ -633,6 +706,14 @@ async function bootApp(options: {
     window,
     localStorage,
     notifications,
+    body: document.body,
+    launchRequests,
+    embedCalls,
+    disposals,
+    setRemoteStatus(status): void { remoteStatus = status; },
+    notify(data): void {
+      serviceWorker.dispatchEvent(new MessageEvent("message", { data: { type: "omp-notification-route", version: 2, data } }));
+    },
     addNotification(tag, data): FakeBrowserNotification {
       const notification = new FakeBrowserNotification(tag, data);
       notifications.push(notification);
@@ -1351,18 +1432,22 @@ describe("dashboard attention and notifications", () => {
     expect(harness.elements.sessionList.querySelector(".held-row")?.dataset.instanceId).toBe(
       first.instanceId,
     );
-    const stored = JSON.parse(storage.getItem("omp.sessions.held-asks.v1") ?? "null") as unknown;
+    const stored = JSON.parse(storage.getItem("omp.sessions.held-asks.v2") ?? "null") as unknown;
     expect(stored).toEqual([
       {
         instanceId: first.instanceId,
         requestId: first.ask?.requestId,
         heldAt: expect.any(String),
+        sourceId: "local",
+        sourceOrigin: "https://sessions.example",
       },
     ]);
     expect(Object.keys((stored as Record<string, unknown>[])[0] ?? {}).sort()).toEqual([
       "heldAt",
       "instanceId",
       "requestId",
+      "sourceId",
+      "sourceOrigin",
     ]);
 
     const reloaded = await bootApp({
@@ -1378,7 +1463,7 @@ describe("dashboard attention and notifications", () => {
     expect(reloaded.elements.sessionList.querySelector(".queue-hero")?.dataset.instanceId).toBe(
       first.instanceId,
     );
-    expect(storage.getItem("omp.sessions.held-asks.v1")).toBe("[]");
+    expect(storage.getItem("omp.sessions.held-asks.v2")).toBe("[]");
   });
 
   test("shows an all-held queue and forgets a hold when the exact ask changes", async () => {
@@ -1430,7 +1515,7 @@ describe("dashboard attention and notifications", () => {
     expect(harness.elements.sessionList.querySelector(".queue-hero")?.dataset.instanceId).toBe(
       first.instanceId,
     );
-    expect(JSON.parse(harness.localStorage.getItem("omp.sessions.held-asks.v1") ?? "null")).toEqual([
+    expect(JSON.parse(harness.localStorage.getItem("omp.sessions.held-asks.v2") ?? "null")).toEqual([
       expect.objectContaining({
         instanceId: second.instanceId,
         requestId: second.ask?.requestId,
@@ -1461,24 +1546,28 @@ describe("dashboard attention and notifications", () => {
     expect(harness.elements.localActionToast.hidden).toBeFalse();
     expect(harness.elements.localActionToastCopy.textContent).toStartWith("Hidden “Dismiss One”");
     const stored = JSON.parse(
-      harness.localStorage.getItem("omp.sessions.dismissed.v1") ?? "null",
+      harness.localStorage.getItem("omp.sessions.dismissed.v2") ?? "null",
     ) as Record<string, unknown>[];
     expect(stored).toEqual([
       {
         instanceId: first.instanceId,
         generation: first.generation,
         dismissedAt: expect.any(String),
+        sourceId: "local",
+        sourceOrigin: "https://sessions.example",
       },
     ]);
     expect(Object.keys(stored[0] ?? {}).sort()).toEqual([
       "dismissedAt",
       "generation",
       "instanceId",
+      "sourceId",
+      "sourceOrigin",
     ]);
 
     harness.elements.localActionToastUndo.dispatchEvent(new Event("click"));
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(2);
-    expect(harness.localStorage.getItem("omp.sessions.dismissed.v1")).toBe("[]");
+    expect(harness.localStorage.getItem("omp.sessions.dismissed.v2")).toBe("[]");
 
     harness.elements.sessionList.querySelectorAll(".dismiss-session")[0]?.dispatchEvent(new Event("click"));
     harness.runUndoTimer();
@@ -1494,7 +1583,7 @@ describe("dashboard attention and notifications", () => {
     expect(restore?.textContent).toBe("Show all");
     restore?.dispatchEvent(new Event("click"));
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(2);
-    expect(harness.localStorage.getItem("omp.sessions.dismissed.v1")).toBe("[]");
+    expect(harness.localStorage.getItem("omp.sessions.dismissed.v2")).toBe("[]");
   });
 
   test("scopes dismissals to one generation and never hides a later attention request", async () => {
@@ -1528,7 +1617,7 @@ describe("dashboard attention and notifications", () => {
       session: replacement,
     });
     expect(reloaded.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
-    expect(storage.getItem("omp.sessions.dismissed.v1")).toBe("[]");
+    expect(storage.getItem("omp.sessions.dismissed.v2")).toBe("[]");
 
     reloaded.elements.sessionList.querySelector(".dismiss-session")?.dispatchEvent(new Event("click"));
     const attention = session(initial.instanceId, {
@@ -1548,7 +1637,7 @@ describe("dashboard attention and notifications", () => {
       initial.instanceId,
     );
     expect(reloaded.elements.localActionToast.hidden).toBeTrue();
-    expect(storage.getItem("omp.sessions.dismissed.v1")).toBe("[]");
+    expect(storage.getItem("omp.sessions.dismissed.v2")).toBe("[]");
   });
 
   test("sanitizes malformed, oversized, and excess local routing records", async () => {
@@ -1592,12 +1681,14 @@ describe("dashboard attention and notifications", () => {
     });
     expect(sanitized.elements.sessionList.querySelectorAll(".held-row")).toHaveLength(1);
     expect(sanitized.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
-    expect(JSON.parse(sanitizedStorage.getItem("omp.sessions.held-asks.v1") ?? "null")).toEqual([
-      heldRecord,
+    expect(JSON.parse(sanitizedStorage.getItem("omp.sessions.held-asks.v2") ?? "null")).toEqual([
+      { ...heldRecord, sourceId: "local", sourceOrigin: "https://sessions.example" },
     ]);
-    expect(JSON.parse(sanitizedStorage.getItem("omp.sessions.dismissed.v1") ?? "null")).toEqual([
-      dismissedRecord,
+    expect(JSON.parse(sanitizedStorage.getItem("omp.sessions.dismissed.v2") ?? "null")).toEqual([
+      { ...dismissedRecord, sourceId: "local", sourceOrigin: "https://sessions.example" },
     ]);
+    expect(sanitizedStorage.getItem("omp.sessions.held-asks.v1")).toBeNull();
+    expect(sanitizedStorage.getItem("omp.sessions.dismissed.v1")).toBeNull();
 
     const oversizedStorage = new FakeStorage();
     oversizedStorage.setItem("omp.sessions.held-asks.v1", "x".repeat(512_001));
@@ -1643,17 +1734,235 @@ describe("dashboard attention and notifications", () => {
     });
     harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
     harness.elements.sessionList.querySelector(".dismiss-session")?.dispatchEvent(new Event("click"));
-    const heldBefore = harness.localStorage.getItem("omp.sessions.held-asks.v1");
-    const dismissedBefore = harness.localStorage.getItem("omp.sessions.dismissed.v1");
+    const heldBefore = harness.localStorage.getItem("omp.sessions.held-asks.v2");
+    const dismissedBefore = harness.localStorage.getItem("omp.sessions.dismissed.v2");
 
     harness.failNextListRequest();
     harness.window.dispatchEvent(new Event("online"));
     await settleUntil(() => harness.elements.statusBanner.dataset.kind === "tailnet");
 
-    expect(harness.localStorage.getItem("omp.sessions.held-asks.v1")).toBe(heldBefore);
-    expect(harness.localStorage.getItem("omp.sessions.dismissed.v1")).toBe(dismissedBefore);
+    expect(harness.localStorage.getItem("omp.sessions.held-asks.v2")).toBe(heldBefore);
+    expect(harness.localStorage.getItem("omp.sessions.dismissed.v2")).toBe(dismissedBefore);
     expect(harness.elements.sessionList.querySelectorAll(".held-row")).toHaveLength(1);
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
+  });
+});
+
+describe("fleet directory bindings", () => {
+  const config = {
+    version: 1,
+    local: { id: "local", label: "Home", origin: "https://sessions.example" },
+    targets: [{ id: "remote", label: "Remote", origin: "https://remote.example" }],
+    speech: { browserRecognition: false },
+  };
+
+  test("404 is silent local-only; malformed and mismatched configuration keep the local directory with Reload", async () => {
+    const local = session("bootstrap-local-0001");
+    const older = await bootApp({ permission: "denied", initialSessions: [local], suffix: "bootstrap-404" });
+    expect(older.elements.fleetStatus.hidden).toBeTrue();
+    for (const [index, clientConfig] of [
+      { ...config, version: 2 },
+      { ...config, local: { ...config.local, origin: "https://wrong.example" } },
+      { ...config, extra: true },
+    ].entries()) {
+      const harness = await bootApp({ permission: "denied", initialSessions: [local], clientConfig, suffix: `bootstrap-invalid-${index}` });
+      expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
+      expect(harness.elements.fleetStatus.children[0]?.textContent).toBe("Fleet configuration unavailable — reload this app");
+      harness.elements.fleetStatus.querySelector("button")?.dispatchEvent(new Event("click"));
+      expect(harness.reloads.count).toBe(1);
+      expect(harness.fetchPaths.some(path => path.startsWith("https://remote.example"))).toBeFalse();
+    }
+  });
+
+  test("colliding ids have independent held records and remote Hold never closes home notifications", async () => {
+    const waiting = session("fleet-collision-0001", { inputRequired: true });
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [waiting], remoteSessions: [waiting],
+      clientConfig: config, suffix: "fleet-held-collision",
+    });
+    await settleUntil(() => harness.elements.directoryCount.textContent === "2 waiting", 100);
+    const notification = harness.addNotification(`omp-attention-${waiting.instanceId}`, { requestId: waiting.ask?.requestId });
+    harness.elements.hostPicker.value = "remote\0https://remote.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    expect(harness.elements.directoryCount.textContent).toBe("1 waiting");
+    harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    await Promise.resolve();
+    expect(notification.closed).toBeFalse();
+    harness.elements.hostPicker.value = "local\0https://sessions.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    expect(harness.elements.sessionList.querySelector(".queue-hero")).not.toBeNull();
+    harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => notification.closed);
+    const held = JSON.parse(harness.localStorage.getItem("omp.sessions.held-asks.v2")!);
+    expect(held.map((record: { sourceId: string }) => record.sourceId).sort()).toEqual(["local", "remote"]);
+    harness.elements.hostPicker.value = "all";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    expect(harness.elements.sessionList.querySelectorAll(".held-row")).toHaveLength(2);
+    harness.setVisibility("hidden");
+  });
+
+  test("colliding dismissals, Undo, and picker counts stay source-scoped", async () => {
+    const same = session("fleet-dismiss-0001");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [same], remoteSessions: [same],
+      clientConfig: config, suffix: "fleet-dismiss-collision",
+    });
+    await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 2, 100);
+    harness.elements.hostPicker.value = "remote\0https://remote.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    harness.elements.sessionList.querySelector(".dismiss-session")?.dispatchEvent(new Event("click"));
+    harness.elements.hostPicker.value = "all";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
+    expect(harness.elements.sessionList.querySelector(".working-row")?.dataset.sourceKey).toBe("local\0https://sessions.example");
+    harness.elements.localActionToastUndo.dispatchEvent(new Event("click"));
+    expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(2);
+    harness.setVisibility("hidden");
+  });
+
+  test("malformed remote data cannot assert fleet all-clear or erase home rows", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [session("fleet-home-0001")],
+      clientConfig: config, remotePayload: { malformed: true }, suffix: "fleet-incomplete",
+    });
+    await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "unavailable", 100);
+    expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("Host coverage incomplete");
+    expect(harness.elements.sessionList.querySelector(".all-clear-copy")?.textContent).toBe("Unavailable: Remote.");
+    harness.elements.hostPicker.value = "local\0https://sessions.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("All clear");
+    harness.setVisibility("hidden");
+  });
+
+  test("remote launch freezes the origin and options; 403 disposes only its active shell", async () => {
+    const same = session("fleet-launch-0001");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [same], remoteSessions: [same],
+      clientConfig: config, suffix: "fleet-launch-origin",
+    });
+    await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 2, 100);
+    harness.elements.hostPicker.value = "remote\0https://remote.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.embedCalls.length === 1, 100);
+    expect(harness.embedCalls).toHaveLength(1);
+    expect(harness.launchRequests[0]).toMatchObject({
+      path: `https://remote.example/api/v1/sessions/${same.instanceId}/launch`,
+      init: { mode: "cors", credentials: "omit", cache: "no-store", redirect: "error" },
+    });
+    expect(harness.body.querySelector(".shell-host")?.textContent).toBe("Remote");
+    expect(harness.embedCalls[0]?.probeGateway).toBeFunction();
+    expect(harness.embedCalls[0]?.browserRecognitionEnabled).toBeFalse();
+    harness.setRemoteStatus(403);
+    harness.window.dispatchEvent(new Event("online"));
+    await settleUntil(() => harness.disposals.count === 1, 100);
+    expect(harness.body.querySelector(".gateway-shell")).toBeNull();
+    expect(harness.elements.fleetStatus.children[0]?.dataset.state).toBe("forbidden");
+    harness.setVisibility("hidden");
+  });
+
+  test("a changed selection discards a late launch result and notification intents never bind a remote collision", async () => {
+    const gate = Promise.withResolvers<void>();
+    const same = session("fleet-late-0001");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [same], remoteSessions: [same],
+      clientConfig: config, suffix: "fleet-launch-late", launchGate: gate.promise,
+    });
+    await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 2, 100);
+    harness.elements.hostPicker.value = "remote\0https://remote.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.launchRequests.length === 1, 100);
+    harness.elements.hostPicker.value = "local\0https://sessions.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    gate.resolve();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    expect(harness.embedCalls).toHaveLength(0);
+    harness.elements.hostPicker.value = "remote\0https://remote.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    harness.notify({ version: 2, type: "activity_stop", instanceId: same.instanceId, generation: 1 });
+    await settleUntil(() => harness.embedCalls.length === 1, 100);
+    expect(harness.embedCalls).toHaveLength(1);
+    expect(harness.launchRequests[1]?.path).toBe(`/api/v1/sessions/${same.instanceId}/launch`);
+    expect(harness.body.querySelector(".shell-host")?.textContent).toBe("Home");
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  test("remote bfcache resume keeps its binding even when the home directory is forbidden", async () => {
+    const same = session("fleet-resume-0001");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [same], remoteSessions: [same],
+      clientConfig: config, suffix: "fleet-remote-resume",
+    });
+    await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 2, 100);
+    harness.elements.hostPicker.value = "remote\0https://remote.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.embedCalls.length === 1, 100);
+    harness.window.dispatchEvent(new Event("pagehide"));
+    harness.setList(2, [], 403);
+    const show = new Event("pageshow");
+    Object.defineProperty(show, "persisted", { value: true });
+    harness.window.dispatchEvent(show);
+    await settleUntil(() => harness.embedCalls.length === 2, 100);
+    expect(harness.launchRequests.map(request => request.path)).toEqual([
+      `https://remote.example/api/v1/sessions/${same.instanceId}/launch`,
+      `https://remote.example/api/v1/sessions/${same.instanceId}/launch`,
+    ]);
+    expect(harness.body.querySelector(".shell-host")?.textContent).toBe("Remote");
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  test("a foreground epoch change rejects an older launch even after fresh metadata arrives", async () => {
+    const gate = Promise.withResolvers<void>();
+    const same = session("fleet-epoch-0001");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], remoteSessions: [same],
+      clientConfig: config, suffix: "fleet-launch-epoch", launchGate: gate.promise,
+    });
+    await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 1, 100);
+    harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.launchRequests.length === 1, 100);
+    harness.setVisibility("hidden");
+    harness.setVisibility("visible");
+    await settleUntil(() => harness.elements.fleetStatus.hidden, 100);
+    gate.resolve();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    expect(harness.embedCalls).toHaveLength(0);
+    harness.setVisibility("hidden");
+  });
+
+  test("Hold-to-next crosses colliding host identities only in its captured All hosts scope", async () => {
+    for (const scope of ["all", "local\0https://sessions.example"]) {
+      const same = session("fleet-hold-next-0001", { inputRequired: true });
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [same], remoteSessions: [same],
+        clientConfig: config, suffix: `fleet-hold-next-${scope === "all" ? "all" : "local"}`,
+      });
+      await settleUntil(() => harness.elements.directoryCount.textContent === "2 waiting", 100);
+      harness.elements.hostPicker.value = scope;
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      harness.elements.sessionList.querySelector(".action-request")?.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.embedCalls.length === 1, 100);
+      const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
+      harness.embedCalls[0]?.onStateChange?.({
+        phase: "live", endedReason: null, requestPending: true, responsePending: false,
+        gatewayHealth: health, relayHealth: health,
+      });
+      expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Hold → next");
+      harness.body.querySelector(".triage-action")?.dispatchEvent(new Event("click"));
+      if (scope === "all") {
+        await settleUntil(() => harness.embedCalls.length === 2, 100);
+        expect(harness.launchRequests.map(request => request.path).sort()).toEqual([
+          `/api/v1/sessions/${same.instanceId}/launch`,
+          `https://remote.example/api/v1/sessions/${same.instanceId}/launch`,
+        ]);
+      } else {
+        expect(harness.embedCalls).toHaveLength(1);
+        expect(harness.body.querySelector(".triage-copy")?.textContent).toBe("Queue clear · 1 on hold — handle at desk");
+      }
+      harness.window.dispatchEvent(new Event("pagehide"));
+    }
   });
 });
 

@@ -28,6 +28,47 @@ The dashboard receives metadata only. It must not render transcripts, prefetch c
 
 The service worker may cache only immutable versioned application-shell assets. It must bypass `/api/`, `/client/`, launch responses, and collaboration navigation. Use no third-party runtime scripts, fonts, analytics, or CDNs.
 
+## Multiple configured hosts
+
+`GET /api/v1/client-config` is loaded once per document, bounded to 32 KiB with a four-second
+deadline. A 404 retains the local-only experience; malformed, unsupported or origin-mismatched
+configuration leaves the local directory usable and offers Reload. Configuration changes need
+a reload. The native Host picker scopes counts and actions, not transport work.
+
+`fleet.ts` owns DOM-free remote transport and persistence helpers. Each configured remote origin
+is fetched directly with CORS, omitted credentials, no-store and redirects refused. There is no
+gateway proxy, remote SSE, remote configuration discovery, remote health endpoint or fleet push.
+Visible pages poll every ten seconds with one coalesced request per host, a five-second deadline
+and an 8 MiB body cap. Transient failures retain disabled stale rows for 35 seconds, then remove
+them; a readable 403 clears rows immediately and stops automatic polling until Retry or foreground
+transition. Hiding/freezing aborts work without recording a failure. Each source owns its epoch,
+request sequence and revision domain; a completed full snapshot can have a lower revision after
+a remote daemon restarts.
+
+Session identity includes both the configured source ID and canonical origin. Launches freeze
+that binding, generation, requested mode, optional ask identity and selection epoch. A newer intent,
+picker change, pagehide, or withdrawn source cancels the old attempt; a late response cannot mount
+another host's same-ID session. View-to-Control, Hold-to-next, history, and bfcache resume retain
+the binding. All-hosts attention uses this browser's first-observed waiting order, not clocks from
+different hosts. Single-host queues retain ask timestamp FIFO.
+
+Hold and Hide persist only bounded metadata records in `omp.sessions.held-asks.v2` and
+`omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the previous record shapes.
+V1 records migrate to the local source; the old key is removed only after the v2 write succeeds.
+Removed or rebound source records are discarded. Transport failures never prune these decisions.
+Push and notification intents always address the home host, even when remote instance IDs collide.
+Remote Hold never enumerates home notifications. Alerts for other hosts require their own PWA install.
+
+The embedded client receives a bounded source-bound sessions probe and the home configuration's
+`speech.browserRecognition` opt-in. Keyboard dictation remains the baseline. In-page recognition,
+when enabled and supported, is Control-only; accepting recognized text and sending it are separate
+actions owned by the pinned collaboration client.
+
+Focused checks: `bun --cwd=apps/web run typecheck` and `bun test apps/web/test`.
+`e2e/fleet.e2e.ts` runs two real loopback origins with reciprocal exact-origin CORS, verifies
+preflight and credential omission, and audits a metadata-only request log for forbidden remote
+SSE/configuration/push traffic. Browser coverage uses the repository's normal browser runner.
+
 ## Synthetic visual review
 
 From the repository root, `bun run test:visual` builds the real dashboard/client and validates six
