@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.8.0] — 2026-10-22
+
+This release uses stock OMP v18.12.5 as its engineering baseline. The 38 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.
+
 ### Added
 
 - Explicit `release_class=minor` release requests select the next minor version, bind that class
@@ -21,10 +25,6 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 - Document HTML responses extend `Content-Security-Policy` `connect-src` with configured `fleet.targets[].origin` (never `http.trustedDashboardOrigins`) and set `Permissions-Policy: microphone=(self)` only when `speech.browserRecognition` is `true`; API, SSE, problem, and static asset responses retain `connect-src 'self' wss://my.omp.sh` and `microphone=()`.
 - Migrate device-local triage storage in `localStorage` to `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2` carrying `sourceId` and `sourceOrigin`. `omp-gateway install` preserves `http.trustedDashboardOrigins`, `fleet`, and `speech` verbatim, while `omp-gateway rollback` to a retained runtime older than `FLEET_CONFIG_SINCE_VERSION` (`0.8.0`) writes the full authored document to `<configDir>/config.pre-rollback.json` (`0600`, refusing if that file already exists), removes `http.trustedDashboardOrigins`, `fleet`, and `speech` from `config.json`, and prints restore steps (install `0.8.0` or newer, replace `config.json` with the backup, restart, reload the PWA); the next release must therefore be `0.8.0`.
-
-## [v0.7.8] — 2026-10-22
-
-This release uses stock OMP v18.12.5 as its engineering baseline. The 28 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.
 
 ### Added
 
