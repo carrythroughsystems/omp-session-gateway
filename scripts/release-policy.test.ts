@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import { REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_HOLD_REASONS, ROUTINE_EVIDENCE_STEPS, GENERATED_RELEASE_PATHS, generatedReleaseKind, generatedReleaseFilesMatch, routineProtectedPath, routineReleaseHold, assertStableReleaseQualification, releasePolicy, releaseVersion } from "./release-policy.ts";
+import { nextReleaseVersion, parseReleaseClass, REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_HOLD_REASONS, ROUTINE_EVIDENCE_STEPS, GENERATED_RELEASE_PATHS, generatedReleaseKind, generatedReleaseFilesMatch, routineProtectedPath, routineReleaseHold, assertStableReleaseQualification, releasePolicy, releaseVersion } from "./release-policy.ts";
 
 
 describe("standing routine release authority", () => {
   const input = () => ({
     subject: { head: "head", tree: "tree", candidate: "candidate", candidateCommit: "commit", candidateDigest: "digest", policy: "policy" },
-    authority: { policy: "policy", protectedChanges: [] as string[], sourceReviewed: true, sourceFresh: true, patchRelease: true },
+    authority: { policy: "policy", protectedChanges: [] as string[], sourceReviewed: true, sourceFresh: true, releaseClassAllowed: true },
     evidence: { head: "head", tree: "tree", candidate: "candidate", candidateCommit: "commit", candidateDigest: "digest", policy: "policy", steps: [...ROUTINE_EVIDENCE_STEPS] as string[] },
     pr: { author: "bot", base: "main", headRepository: "repo", headRef: "branch", head: "head", tree: "tree", state: "open" as const, draft: false, merged: true, checksPassed: true, behind: false, mergedBy: "bot", mergeTree: "tree", mergeCommit: "merge", mergeVerified: true, files: [] as { filename: string; previous_filename?: string }[] },
     bot: "bot", repository: "repo", branch: "branch", merged: true,
@@ -33,12 +33,20 @@ describe("standing routine release authority", () => {
     const subject = input(); mutations[reason](subject);
     expect(routineReleaseHold(subject)).toBe(reason);
   });
-  test("admits the reviewed exact patch subject, never a missing subject or changed digest", () => {
+  test("admits the reviewed requested class, never a missing subject or changed digest", () => {
     expect(routineReleaseHold(input())).toBeUndefined();
     const missing = input(); missing.evidence.candidateDigest = "wrong";
     expect(routineReleaseHold(missing)).toBe("missing-evidence");
-    const minor = input(); minor.authority.patchRelease = false;
-    expect(routineReleaseHold(minor)).toBe("out-of-class");
+    const wrongClass = input(); wrongClass.authority.releaseClassAllowed = false;
+    expect(routineReleaseHold(wrongClass)).toBe("out-of-class");
+  });
+  test("patch is the default; minor means exactly the next minor with patch zero", () => {
+    expect(parseReleaseClass()).toBe("patch");
+    expect(nextReleaseVersion("v0.7.7")).toBe("0.7.8");
+    expect(nextReleaseVersion("v0.7.7", "minor")).toBe("0.8.0");
+    expect(nextReleaseVersion("v1.9.99", "minor")).toBe("1.10.0");
+    for (const invalid of ["major", "", null, "MINOR"]) expect(() => parseReleaseClass(invalid)).toThrow("release class");
+    for (const invalid of ["0.7.7", "v00.7.7", "v0.7.8-prealpha.1"]) expect(() => nextReleaseVersion(invalid)).toThrow("published stable");
   });
   test.each([".github/workflows/release-request.yml", ".github/workflows/signed-release.yml", ".github/CODEOWNERS", "scripts/release-policy.ts", "scripts/release-driver-runtime.ts", "scripts/release-host-lease.ts", "scripts/post-release-smoke.ts", "scripts/stable-qualification.ts", "scripts/check-repository.ts", "schemas/stable-release.schema.json", "docs/RELEASE.md"])("protects authority, signer, permissions and quality path %s", path => {
     expect(routineProtectedPath(path)).toBe(true);

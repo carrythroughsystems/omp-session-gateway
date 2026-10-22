@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { assertStableReleaseQualification, releaseVersion } from "./release-policy.ts";
+import { assertStableReleaseQualification, nextReleaseVersion, parseReleaseClass, releaseVersion, type ReleaseClass } from "./release-policy.ts";
 import { externalCleanupCurrent, validateStableQualificationReceipt } from "./stable-qualification.ts";
 import { historicalPredecessor } from "./post-release-smoke.ts";
 import { SAMSUNG_MODEL_CODES } from "./device-cloud-qualification.ts";
@@ -19,7 +19,7 @@ const EVIDENCE = ["debian", "macos", "windows", "android", "androidPush", "devic
 export type ReleaseTree = Readonly<Record<string, string>>;
 type ObjectValue = Record<string, unknown>;
 type Options = { version: string; date: string } & (
-  | { command: "prepare"; candidateTag?: string }
+  | { command: "prepare"; candidateTag?: string; releaseClass?: ReleaseClass }
   | { command: "approve"; receipt: unknown; candidateTag: string }
   | { command: "record"; smoke: unknown; status: unknown; publication: unknown }
 );
@@ -329,10 +329,11 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
     const candidateTag = options.candidateTag ?? `${tag}-prealpha.1`;
     if (!new RegExp(`^${escapePattern(tag)}-prealpha\\.[1-9][0-9]*$`, "u").test(candidateTag)) throw new Error("candidate tag does not match prepared version");
     const previous = text(stable.releaseTag, "published stable", /^v\d+\.\d+\.\d+$/u);
-    if (!alreadyPrepared && packageVersion !== releaseVersion(previous)) throw new Error("package and published stable versions disagree");
-    const oldParts = releaseVersion(previous).split(".").map(Number), parts = version.split(".").map(Number);
-    const firstDifference = parts.findIndex((part, i) => part !== oldParts[i]);
-    if (firstDifference < 0 || parts[firstDifference]! < oldParts[firstDifference]!) throw new Error("prepared version must advance published stable");
+    const releaseClass = parseReleaseClass(options.releaseClass);
+    equal(version, nextReleaseVersion(previous, releaseClass), "requested release class");
+    const retarget = releaseClass === "minor" && packageVersion === nextReleaseVersion(previous, "patch")
+      && data.qualification === undefined && data.publication === undefined;
+    if (!alreadyPrepared && !retarget && packageVersion !== releaseVersion(previous)) throw new Error("package and published stable versions disagree");
     for (const path of PACKAGES) {
       equal(object(JSON.parse(get(path)), path).version, packageVersion, `${path} version`);
       out[path] = replaceOne(get(path), /"version": "[^"]+"/u, `"version": "${version}"`);
@@ -351,15 +352,16 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
     let pending = changelog.match(/\n## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|$)/u)?.[1];
     if (pending === undefined) throw new Error("missing unreleased cut");
     let changelogBase = changelog;
-    if (alreadyPrepared) {
-      equal(data.version, version, "prepared release text");
+    if (alreadyPrepared || retarget) {
+      equal(data.version, packageVersion, "prepared release text");
       if (!data.summary) throw new Error("prepared release has no summary");
-      const section = new RegExp(`\\n## \\[${escapePattern(tag)}\\] — [^\\n]+\\n\\n([\\s\\S]*?)(?=\\n## \\[|$)`, "u");
+      const section = new RegExp(`\\n## \\[v${escapePattern(String(packageVersion))}\\] — [^\\n]+\\n\\n([\\s\\S]*?)(?=\\n## \\[|$)`, "u");
       const old = changelog.match(section);
       if (!old || !old[1]!.startsWith(data.summary)) throw new Error("prepared changelog section is missing or edited");
       pending = [pending.trim(), old[1]!.slice(data.summary.length).trim()].filter(Boolean).join("\n\n");
       changelogBase = changelog.replace(section, "");
-    } else if (changelog.includes(`## [${tag}]`)) throw new Error("duplicate release cut");
+    }
+    if (changelogBase.includes(`## [${tag}]`)) throw new Error("duplicate release cut");
     const bullets = pending.match(/^- .*(?:\n {2}.*)*/gmu) ?? [];
     const summary = `This release uses stock OMP ${baseline} as its engineering baseline. ${bullets.length ? `The ${bullets.length} changelog ${bullets.length === 1 ? "entry below records" : "entries below record"} the changes since ${previous}.` : `It renews signed-artifact qualification since ${previous}; no changelog changes were recorded.`} Historical receipts do not qualify these bytes.`;
     out["CHANGELOG.md"] = replaceOne(changelogBase, /\n## \[Unreleased\]\n[\s\S]*?(?=\n## \[|$)/u, `\n## [Unreleased]\n\n## [${tag}] — ${options.date}\n\n${summary}\n${pending.trim() ? `\n${pending.trim()}\n` : ""}`);
@@ -467,18 +469,18 @@ export function releaseInputPaths(command: Options["command"]): string[] {
 export async function runReleaseGenerate(argv: readonly string[], root = process.cwd()): Promise<string[]> {
   const [command, version, ...rest] = argv;
   if (command !== "prepare" && command !== "approve" && command !== "record") throw new Error("usage: release-generate.ts prepare|approve|record VERSION --date YYYY-MM-DD [inputs]");
-  const allowed = command === "prepare" ? ["--date", "--candidate-tag"] : command === "approve" ? ["--date", "--receipt", "--candidate-tag"] : ["--date", "--smoke", "--status", "--publication"];
+  const allowed = command === "prepare" ? ["--date", "--candidate-tag", "--release-class"] : command === "approve" ? ["--date", "--receipt", "--candidate-tag"] : ["--date", "--smoke", "--status", "--publication"];
   const flags: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {
     const flag = rest[i]!, value = rest[i + 1];
     if (!allowed.includes(flag) || flags[flag] !== undefined || !value || value.startsWith("--")) throw new Error(`invalid or duplicate argument: ${flag}`);
     flags[flag] = value;
   }
-  for (const flag of allowed) if (!(command === "prepare" && flag === "--candidate-tag") && !flags[flag]) throw new Error(`missing required ${flag}`);
+  for (const flag of allowed) if (!(command === "prepare" && ["--candidate-tag", "--release-class"].includes(flag)) && !flags[flag]) throw new Error(`missing required ${flag}`);
   if (!version) throw new Error("missing release version");
   const input = async (flag: string) => JSON.parse(await readFile(resolve(root, flags[flag]!), "utf8")) as unknown;
   const base = { version, date: flags["--date"]! };
-  const options: Options = command === "prepare" ? { ...base, command, ...(flags["--candidate-tag"] ? { candidateTag: flags["--candidate-tag"] } : {}) } : command === "approve"
+  const options: Options = command === "prepare" ? { ...base, command, releaseClass: parseReleaseClass(flags["--release-class"]), ...(flags["--candidate-tag"] ? { candidateTag: flags["--candidate-tag"] } : {}) } : command === "approve"
     ? { ...base, command, receipt: await input("--receipt"), candidateTag: flags["--candidate-tag"]! }
     : { ...base, command, smoke: await input("--smoke"), status: await input("--status"), publication: await input("--publication") };
   const tree = Object.fromEntries(await Promise.all(releaseInputPaths(command).map(async path => [path, await readFile(resolve(root, path), "utf8")])));

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { runDriver } from "./release-driver-runtime.ts";
-import { RoutineHoldError, routineReleaseHold, routineSourceHold } from "./release-policy.ts";
-import type { RoutineAuthority, RoutineEvidence, RoutineHoldReason } from "./release-policy.ts";
+import { nextReleaseVersion, parseReleaseClass, RoutineHoldError, routineReleaseHold, routineSourceHold } from "./release-policy.ts";
+import type { ReleaseClass, RoutineAuthority, RoutineEvidence, RoutineHoldReason } from "./release-policy.ts";
 import type { DeviceCloudHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet } from "./device-cloud-outcome.ts";
 
@@ -19,6 +19,8 @@ export interface TrackingIssue {
   author: string;
   /** Creation time or the newest successful release-request workflow run/attempt; never issue body text. */
   request: string;
+  /** Legacy requests are patch releases; minor requests require a matching successful filing job. */
+  releaseClass?: ReleaseClass;
   url: string;
 }
 export interface PullRequest {
@@ -223,9 +225,7 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
   if (state === undefined || state.phase === "closed") {
     const issue = selectRequest(repo.issues);
     if (issue === undefined) return idle("no open tracking issue; idle");
-    const parts = repo.latestStable.replace(/^v/u, "").split(".");
-    compareVersions(repo.latestStable, repo.latestStable);
-    const version = `${parts[0]}.${parts[1]}.${BigInt(parts[2]!) + 1n}`;
+    const version = nextReleaseVersion(repo.latestStable, parseReleaseClass(issue.releaseClass));
     return decision("select", "selected", `request ${requestVersion(issue)} for gateway v${version}`, { patch: {
       schemaVersion: 1, sequence: 0, issue, version, candidate: nextCandidate(version, repo.tags), selectedMain: repo.main, previousStable: repo.latestStable, date,
     }, links: [issue.url] });
@@ -236,8 +236,9 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
     if (state.stableCommit !== undefined) return idle("diagnostic-required after approval/publication; preserve the immutable release and reconcile manually");
     // An order PR's "Closes #N" closes the tracking issue when it merges, so a retry request for the
     // same version opens a new one (v0.7.5: #369 closed #368; the retry opened #374).
-    const request = repo.issues.find(issue => issue.number === state.issue.number)
-      ?? selectRequest(repo.issues.filter(issue => requestVersion(issue) === requestVersion(state.issue)));
+    const matching = repo.issues.filter(issue => requestVersion(issue) === requestVersion(state.issue)
+      && parseReleaseClass(issue.releaseClass) === parseReleaseClass(state.issue.releaseClass));
+    const request = matching.find(issue => issue.number === state.issue.number) ?? selectRequest(matching);
     if (request === undefined || request.request === state.issue.request || repo.main === state.failedMain) return idle("diagnostic-required; no retry without a new request and a main fix");
     if (repo.hostRecoveryRequired) return idle("diagnostic-required; recover the failed release-host lease before a new candidate");
     return decision("rerequest", "selected", "new request after a main fix; preserve failed receipt and use next prealpha", { patch: {
