@@ -1,6 +1,6 @@
 import {
   MAX_CLIENT_CONFIG_BYTES, MAX_SESSIONS, INSTANCE_ID_PATTERN,
-  parseClientConfigResponse, parseSessionListResponse,
+  parseClientConfigResponse, parseSessionListResponse, parseFleetSourceId, parseFleetOrigin,
   type ClientConfigResponse, type FleetSource, type SessionListResponse,
 } from "@omp-session-gateway/protocol";
 
@@ -234,6 +234,7 @@ export function readSourceRecords(
   storage: Pick<Storage, "getItem" | "setItem" | "removeItem">,
   key: typeof HELD_KEY | typeof DISMISSED_KEY,
   sources: readonly FleetSource[],
+  authoritative: boolean,
 ): Map<string, HeldAsk | DismissedSession> {
   const records = new Map<string, HeldAsk | DismissedSession>();
   const previous = key.replace(/v2$/u, "v1");
@@ -253,8 +254,14 @@ export function readSourceRecords(
         const keys = held ? ["instanceId", "requestId", "heldAt"] : ["instanceId", "generation", "dismissedAt"];
         if (!migrate) keys.push("sourceId", "sourceOrigin");
         if (Object.keys(record).length !== keys.length || keys.some(name => !Object.hasOwn(record, name))) continue;
-        const source = migrate ? sources.find(source => source.id === "local") : sources.find(source =>
+        let source: Pick<FleetSource, "id" | "origin"> | undefined = migrate ? sources.find(source => source.id === "local") : sources.find(source =>
           source.id === record.sourceId && source.origin === record.sourceOrigin);
+        // A failed bootstrap cannot prove removal or rebinding; retain valid inert records.
+        if (source === undefined && !authoritative && !migrate) {
+          try {
+            source = { id: parseFleetSourceId(record.sourceId), origin: parseFleetOrigin(record.sourceOrigin) };
+          } catch { continue; }
+        }
         if (source === undefined || typeof record.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(record.instanceId)) continue;
         const base = { sourceId: source.id, sourceOrigin: source.origin, instanceId: record.instanceId };
         if (held && typeof record.requestId === "string" && /^[A-Za-z0-9_-]{16,128}$/u.test(record.requestId) && timestamp(record.heldAt)) {
@@ -266,8 +273,10 @@ export function readSourceRecords(
         }
       }
     }
-    storage.setItem(key, JSON.stringify([...records.values()]));
-    if (migrate || storage.getItem(previous) !== null) storage.removeItem(previous);
+    if (authoritative) {
+      storage.setItem(key, JSON.stringify([...records.values()]));
+      if (migrate || storage.getItem(previous) !== null) storage.removeItem(previous);
+    }
   } catch { /* Optional storage: retain in-memory decisions even if migration cannot commit. */ }
   return records;
 }

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, mock, test } from "bun:test";
-import { MAX_SESSIONS, type SessionMetadata } from "@omp-session-gateway/protocol";
+import { MAX_FRAME_BYTES, MAX_SESSIONS, type SessionMetadata } from "@omp-session-gateway/protocol";
 import fc, { type AsyncCommand } from "fast-check";
 import type { CollabEmbedOptions } from "../../../packages/collab-client/upstream/src/embed-contract";
 
@@ -404,9 +404,11 @@ async function bootApp(options: {
   readonly search?: string;
   readonly storage?: FakeStorage;
   readonly clientConfig?: unknown;
+  readonly clientConfigStatus?: number;
   readonly remoteSessions?: readonly SessionMetadata[];
   readonly remotePayload?: unknown;
   readonly launchGate?: Promise<void>;
+  readonly launchResponse?: (path: string, init: RequestInit) => Promise<Response>;
   readonly suffix: string;
 }): Promise<BrowserHarness> {
   FakeEventSource.instances.length = 0;
@@ -600,6 +602,7 @@ async function bootApp(options: {
     fetchPaths.push(path);
     fetchLocations.push(location.pathname + location.search);
     if (path === "/api/v1/client-config") {
+      if (options.clientConfigStatus !== undefined) return new Response(null, { status: options.clientConfigStatus });
       return options.clientConfig === undefined ? new Response(null, { status: 404 }) : Response.json(options.clientConfig);
     }
     if (path === "https://remote.example/api/v1/sessions") {
@@ -608,6 +611,7 @@ async function bootApp(options: {
     }
     if (path.endsWith("/launch")) {
       launchRequests.push({ path, init });
+      if (options.launchResponse !== undefined) return await options.launchResponse(path, init);
       await options.launchGate;
       const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
       return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
@@ -1772,6 +1776,185 @@ describe("fleet directory bindings", () => {
       expect(harness.reloads.count).toBe(1);
       expect(harness.fetchPaths.some(path => path.startsWith("https://remote.example"))).toBeFalse();
     }
+  });
+
+  test("failed configuration preserves inert remote Hold and Hide records until an authoritative bootstrap", async () => {
+    const waiting = session("bootstrap-held-0001", { inputRequired: true });
+    const working = session("bootstrap-hidden-0001");
+    const held = {
+      sourceId: "remote", sourceOrigin: "https://remote.example", instanceId: waiting.instanceId,
+      requestId: waiting.ask!.requestId, heldAt: "2026-07-21T10:00:00.000Z",
+    };
+    const dismissed = {
+      sourceId: "remote", sourceOrigin: "https://remote.example", instanceId: working.instanceId,
+      generation: working.generation, dismissedAt: "2026-07-21T10:00:00.000Z",
+    };
+    const storage = new FakeStorage();
+    const heldBytes = JSON.stringify([held], null, 2);
+    const dismissedBytes = JSON.stringify([dismissed], null, 2);
+    storage.setItem("omp.sessions.held-asks.v2", heldBytes);
+    storage.setItem("omp.sessions.dismissed.v2", dismissedBytes);
+    const failed = await bootApp({
+      permission: "denied", initialSessions: [waiting, working], storage,
+      clientConfigStatus: 500, suffix: "bootstrap-preserve-remote",
+    });
+    expect(storage.getItem("omp.sessions.held-asks.v2")).toBe(heldBytes);
+    expect(storage.getItem("omp.sessions.dismissed.v2")).toBe(dismissedBytes);
+    expect(failed.elements.sessionList.querySelectorAll(".held-row")).toHaveLength(0);
+    expect(failed.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
+    expect(failed.elements.sessionList.querySelector(".queue-hero")?.dataset.sourceKey).toBe("local\0https://sessions.example");
+    expect(failed.fetchPaths.some(path => path.startsWith("https://remote.example"))).toBeFalse();
+    // A local action must also preserve the inert remote records in the whole-map write.
+    failed.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    failed.elements.sessionList.querySelector(".dismiss-session")?.dispatchEvent(new Event("click"));
+    expect(JSON.parse(storage.getItem("omp.sessions.held-asks.v2")!)).toContainEqual(held);
+    expect(JSON.parse(storage.getItem("omp.sessions.dismissed.v2")!)).toContainEqual(dismissed);
+    const recovered = await bootApp({
+      permission: "denied", initialSessions: [waiting, working], remoteSessions: [waiting, working],
+      storage, clientConfig: config, suffix: "bootstrap-rebind-remote",
+    });
+    await settleUntil(() => recovered.elements.sessionList.querySelectorAll(".held-row").length === 2, 100);
+    recovered.elements.hostPicker.value = "remote\0https://remote.example";
+    recovered.elements.hostPicker.dispatchEvent(new Event("change"));
+    expect(recovered.elements.sessionList.querySelectorAll(".held-row")).toHaveLength(1);
+    expect(recovered.elements.sessionList.querySelector(".held-row")?.dataset.sourceKey).toBe("remote\0https://remote.example");
+    expect(recovered.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
+    expect(recovered.elements.sessionList.querySelector(".dismissed-control")?.querySelector("span")?.textContent).toBe("1 hidden on this device");
+    recovered.setVisibility("hidden");
+  });
+
+  test("oversized local and remote launch bodies fail without mounting and leave the directory usable", async () => {
+    for (const source of ["local", "remote"]) {
+      const current = session("bounded-launch-0001");
+      let oversized = true;
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [current], remoteSessions: [current],
+        clientConfig: config, suffix: `launch-body-bound-${source}`,
+        async launchResponse(_path, init): Promise<Response> {
+          const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+          return Response.json({
+            mode: body.mode, generation: body.generation,
+            capability: oversized ? "x".repeat(MAX_FRAME_BYTES + 1) : ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__"),
+          });
+        },
+      });
+      await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 2, 100);
+      harness.elements.hostPicker.value = source === "local" ? "local\0https://sessions.example" : "remote\0https://remote.example";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "offline", 100);
+      expect(harness.elements.statusBanner.textContent).toBe("The gateway returned an invalid launch response.");
+      expect(harness.embedCalls).toHaveLength(0);
+      expect(harness.elements.sessionList.querySelector(".working-row")?.disabled).toBeFalse();
+      expect(harness.pendingDelays()).not.toContain(10_000);
+      oversized = false;
+      harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.embedCalls.length === 1, 100);
+      expect(harness.pendingDelays()).not.toContain(10_000);
+      harness.window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
+  test("remote launch deadlines abort stalled headers and bodies through the gateway-unavailable path", async () => {
+    for (const stage of ["headers", "body"]) {
+      const current = session("stalled-launch-0001");
+      let bodyStarted = false;
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], remoteSessions: [current],
+        clientConfig: config, suffix: `launch-timeout-${stage}`,
+        async launchResponse(_path, init): Promise<Response> {
+          if (stage === "headers") {
+            const { promise, reject } = Promise.withResolvers<Response>();
+            init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+            return await promise;
+          }
+          return new Response(new ReadableStream<Uint8Array>({
+            start(controller): void {
+              bodyStarted = true;
+              init.signal!.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")), { once: true });
+            },
+          }));
+        },
+      });
+      await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 1, 100);
+      harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.launchRequests.length === 1, 100);
+      if (stage === "body") await settleUntil(() => bodyStarted, 100);
+      expect(harness.pendingDelays()).toContain(10_000);
+      harness.window.runTimersWithDelay(10_000);
+      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "offline", 100);
+      expect(harness.launchRequests[0]?.init.signal?.aborted).toBeTrue();
+      expect(harness.elements.statusBanner.textContent).toBe("Gateway unavailable. Check your tailnet connection and try again.");
+      expect(harness.embedCalls).toHaveLength(0);
+      expect(harness.elements.sessionList.querySelector(".working-row")?.disabled).toBeFalse();
+      expect(harness.pendingDelays()).not.toContain(10_000);
+      harness.setVisibility("hidden");
+    }
+  });
+
+  test("a forbidden remote Next ask preserves the local shell and offers an explicit return to Sessions", async () => {
+    const home = session("withdrawn-home-0001", { inputRequired: true });
+    const remote = session("withdrawn-remote-0001", { inputRequired: true });
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [home], remoteSessions: [remote],
+      clientConfig: config, suffix: "withdrawn-next-host",
+      async launchResponse(path, init): Promise<Response> {
+        if (path.startsWith("https://remote.example")) return new Response(null, { status: 403 });
+        const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+        return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+      },
+    });
+    await settleUntil(() => harness.elements.directoryCount.textContent === "2 waiting", 100);
+    const hero = harness.elements.sessionList.querySelector(".queue-hero");
+    const openHome = hero?.dataset.sourceKey === "local\0https://sessions.example"
+      ? hero.querySelector(".action-request")
+      : harness.elements.sessionList.querySelectorAll(".queue-row").find(row => row.dataset.sourceKey === "local\0https://sessions.example");
+    expect(openHome).toBeDefined();
+    openHome?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.embedCalls.length === 1, 100);
+    const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
+    harness.embedCalls[0]?.onStateChange?.({
+      phase: "live", endedReason: null, requestPending: true, responsePending: false,
+      gatewayHealth: health, relayHealth: health,
+    });
+    const answered = session(home.instanceId);
+    harness.setList(2, [answered]);
+    harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: answered });
+    expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Next ask →");
+    harness.body.querySelector(".triage-action")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.body.querySelector(".triage-copy")?.textContent === "Access withdrawn on Remote. Choose another session.", 100);
+    expect(harness.disposals.count).toBe(0);
+    expect(harness.embedCalls).toHaveLength(1);
+    expect(harness.body.querySelector(".shell-host")?.textContent).toBe("Home");
+    expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Sessions");
+    harness.body.querySelector(".triage-action")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.elements.fleetStatus.children.some(row => row.dataset.state === "forbidden"), 100);
+    expect(harness.body.querySelector(".gateway-shell")).toBeNull();
+    expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
+    harness.setVisibility("hidden");
+  });
+
+  test("a same-source forbidden Control upgrade still disposes the remote shell", async () => {
+    let launches = 0;
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], remoteSessions: [session("withdrawn-upgrade-0001")],
+      clientConfig: config, suffix: "withdrawn-same-host",
+      async launchResponse(_path, init): Promise<Response> {
+        if (++launches === 2) return new Response(null, { status: 403 });
+        const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+        return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+      },
+    });
+    await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 1, 100);
+    harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.embedCalls.length === 1, 100);
+    harness.body.querySelector(".shell-control")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.disposals.count === 1, 100);
+    expect(harness.embedCalls).toHaveLength(1);
+    expect(harness.body.querySelector(".gateway-shell")).toBeNull();
+    expect(harness.elements.fleetStatus.children.some(row => row.dataset.state === "forbidden")).toBeTrue();
+    expect(harness.pendingDelays()).not.toContain(10_000);
+    harness.setVisibility("hidden");
   });
 
   test("colliding ids have independent held records and remote Hold never closes home notifications", async () => {

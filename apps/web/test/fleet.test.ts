@@ -170,18 +170,50 @@ describe("fleet record identity and migration", () => {
     const v1 = HELD_KEY.replace("v2", "v1");
     storage.setItem(v1, JSON.stringify([{ instanceId: "same-id-0001", requestId: "request-0000000001", heldAt: "2026-07-21T10:00:00.000Z" }]));
     storage.fail = true;
-    expect(readSourceRecords(storage, HELD_KEY, [local]).size).toBe(1);
+    expect(readSourceRecords(storage, HELD_KEY, [local], true).size).toBe(1);
     expect(storage.getItem(v1)).not.toBeNull();
     storage.fail = false;
-    const records = readSourceRecords(storage, HELD_KEY, [local]);
+    const records = readSourceRecords(storage, HELD_KEY, [local], true);
     expect(storage.getItem(v1)).toBeNull();
     expect([...records.values()][0]).toMatchObject({ sourceId: "local", sourceOrigin: local.origin });
     storage.setItem(v1, "[]");
-    readSourceRecords(storage, HELD_KEY, [local]);
+    readSourceRecords(storage, HELD_KEY, [local], true);
     expect(storage.getItem(v1)).toBeNull();
     storage.setItem(DISMISSED_KEY, JSON.stringify([
       { sourceId: "remote", sourceOrigin: remote.origin, instanceId: "same-id-0001", generation: 1, dismissedAt: "2026-07-21T10:00:00.000Z" },
     ]));
-    expect(readSourceRecords(storage, DISMISSED_KEY, [local, { ...remote, origin: "https://replacement.example" }]).size).toBe(0);
+    expect(readSourceRecords(storage, DISMISSED_KEY, [local, { ...remote, origin: "https://replacement.example" }], true).size).toBe(0);
+  });
+
+  test("non-authoritative reads preserve valid unknown bindings and storage bytes without committing migration", () => {
+    const storage = new Storage();
+    const held = {
+      sourceId: remote.id, sourceOrigin: remote.origin, instanceId: "remote-held-0001",
+      requestId: "remote-request-0001", heldAt: "2026-07-21T10:00:00.000Z",
+    };
+    const dismissed = {
+      sourceId: remote.id, sourceOrigin: remote.origin, instanceId: "remote-hidden-0001",
+      generation: 1, dismissedAt: "2026-07-21T10:00:00.000Z",
+    };
+    const heldBytes = JSON.stringify([held, { ...held, sourceId: "INVALID" }, { ...held, sourceOrigin: "https://remote.example/path" }], null, 2);
+    const dismissedBytes = JSON.stringify([dismissed], null, 2);
+    storage.setItem(HELD_KEY, heldBytes);
+    storage.setItem(DISMISSED_KEY, dismissedBytes);
+    const before = [...storage.items];
+    expect([...readSourceRecords(storage, HELD_KEY, [local], false).values()]).toEqual([held]);
+    expect([...readSourceRecords(storage, DISMISSED_KEY, [local], false).values()]).toEqual([dismissed]);
+    expect([...storage.items]).toEqual(before);
+    expect(readSourceRecords(storage, HELD_KEY, [local], true).size).toBe(0);
+    expect(readSourceRecords(storage, DISMISSED_KEY, [local], true).size).toBe(0);
+    expect(storage.getItem(HELD_KEY)).toBe("[]");
+    expect(storage.getItem(DISMISSED_KEY)).toBe("[]");
+
+    const legacy = new Storage();
+    const v1 = HELD_KEY.replace("v2", "v1");
+    const bytes = JSON.stringify([{ instanceId: held.instanceId, requestId: held.requestId, heldAt: held.heldAt }], null, 2);
+    legacy.setItem(v1, bytes);
+    expect(readSourceRecords(legacy, HELD_KEY, [local], false).size).toBe(1);
+    expect(legacy.getItem(v1)).toBe(bytes);
+    expect(legacy.getItem(HELD_KEY)).toBeNull();
   });
 });

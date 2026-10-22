@@ -1,5 +1,6 @@
 import {
   INSTANCE_ID_PATTERN,
+  MAX_FRAME_BYTES,
   MAX_SESSIONS,
   PUSH_API_VERSION,
   parseLaunchResponse,
@@ -133,6 +134,7 @@ interface LaunchAttempt {
   readonly scope: SourceKey | "all";
   readonly sourceEpoch: number | undefined;
   readonly controller: AbortController;
+  deadline?: number;
   settled: boolean;
 }
 let launchSequence = 0;
@@ -883,6 +885,7 @@ async function probeSource(key: SourceKey, signal: AbortSignal): Promise<Snapsho
 function cancelLaunch(source?: SourceKey): void {
   if (pendingLaunch === undefined || (source !== undefined && pendingLaunch.ref.sourceKey !== source)) return;
   pendingLaunch.settled = true;
+  if (pendingLaunch.deadline !== undefined) window.clearTimeout(pendingLaunch.deadline);
   pendingLaunch.controller.abort();
   pendingLaunch = undefined;
 }
@@ -953,8 +956,8 @@ async function initializeFleet(): Promise<void> {
   } catch { fleetBootstrapFailed = true; }
   if (typeof localStorage !== "undefined") {
     const configured = [...sources.values()];
-    heldAsks = readSourceRecords(localStorage, HELD_KEY, configured) as Map<string, HeldAsk>;
-    dismissedSessions = readSourceRecords(localStorage, DISMISSED_KEY, configured) as Map<string, DismissedSession>;
+    heldAsks = readSourceRecords(localStorage, HELD_KEY, configured, !fleetBootstrapFailed) as Map<string, HeldAsk>;
+    dismissedSessions = readSourceRecords(localStorage, DISMISSED_KEY, configured, !fleetBootstrapFailed) as Map<string, DismissedSession>;
   }
   hostPicker.replaceChildren();
   for (const [key, label] of [["all", "All hosts"], ...[...sources].map(([key, source]) => [key, source.label])] as [string, string][]) {
@@ -2115,6 +2118,10 @@ async function launch(
   }
   const settle = (): void => {
     attempt.settled = true;
+    if (attempt.deadline !== undefined) {
+      window.clearTimeout(attempt.deadline);
+      delete attempt.deadline;
+    }
     if (pendingLaunch === attempt) pendingLaunch = undefined;
   };
 
@@ -2179,6 +2186,7 @@ async function launch(
   let response: Response;
   try {
     const remote = session.sourceKey !== localKey;
+    if (remote) attempt.deadline = window.setTimeout(() => attempt.controller.abort(), 10_000);
     response = await fetch(`${remote ? source.origin : ""}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2197,6 +2205,10 @@ async function launch(
     return false;
   }
 
+  if (attempt.controller.signal.aborted) {
+    fail("offline", "Gateway unavailable. Check your tailnet connection and try again.");
+    return false;
+  }
   if (!currentAttempt()) return discard();
   if (!response.ok) {
     if (response.status === 403) {
@@ -2207,6 +2219,11 @@ async function launch(
         settle();
         resetButton();
         remotes.get(session.sourceKey)?.forbid();
+        if (sourceShell !== undefined && activeCollabShell === sourceShell) {
+          showTriageBar(sourceShell, "reconnecting", `Access withdrawn on ${source.label}. Choose another session.`, "Sessions", () => {
+            void restoreDirectory();
+          });
+        }
         applyActivatedWorkerUpdate();
       }
     } else if (response.status === 404 || response.status === 409) {
@@ -2222,9 +2239,17 @@ async function launch(
 
   let capability: string | undefined;
   try {
-    const payload = parseLaunchResponse(await response.json());
+    const payload = parseLaunchResponse(await boundedJson(response, MAX_FRAME_BYTES));
+    if (attempt.deadline !== undefined) {
+      window.clearTimeout(attempt.deadline);
+      delete attempt.deadline;
+    }
     if (payload.mode !== mode || payload.generation !== session.generation) {
       throw new Error("invalid launch response");
+    }
+    if (attempt.controller.signal.aborted) {
+      fail("offline", "Gateway unavailable. Check your tailnet connection and try again.");
+      return false;
     }
     if (!currentAttempt()) return discard();
     capability = payload.capability;
@@ -2234,7 +2259,9 @@ async function launch(
     return true;
   } catch {
     capability = undefined;
-    fail("offline", "The gateway returned an invalid launch response.");
+    fail("offline", attempt.controller.signal.aborted
+      ? "Gateway unavailable. Check your tailnet connection and try again."
+      : "The gateway returned an invalid launch response.");
     return false;
   }
 }
