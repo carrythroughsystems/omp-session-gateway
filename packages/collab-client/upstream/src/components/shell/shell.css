@@ -697,6 +697,65 @@
 	flex: none;
 }
 
+.sh-speech {
+	display: grid;
+	gap: 8px;
+	margin-top: 8px;
+	color: var(--fg-muted);
+	font-size: 12px;
+}
+
+.sh-speech p {
+	margin: 0;
+	line-height: 1.5;
+}
+
+.sh-speech-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.sh-speech-disclosure,
+.sh-speech-capture,
+.sh-speech-review {
+	display: grid;
+	gap: 8px;
+	padding: 12px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--bg-overlay);
+}
+
+.sh-speech-review label {
+	display: grid;
+	gap: 6px;
+}
+
+.sh-speech-review-input {
+	box-sizing: border-box;
+	width: 100%;
+	min-width: 0;
+	padding: 8px;
+	font: inherit;
+	font-size: 16px;
+	line-height: 1.5;
+	color: var(--fg);
+	background: transparent;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	resize: vertical;
+}
+
+.sh-speech-transcript {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.sh-speech-error {
+	color: var(--err);
+}
+
 .sh-composer-ask {
 	display: grid;
 	gap: 10px;

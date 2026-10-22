@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { GatewayProbeResult } from "../upstream/src/embed-contract";
 import type { PathHealth } from "../upstream/src/lib/client";
 import {
   installBrowserConnectionRecovery,
@@ -89,6 +90,20 @@ function recoveryHarness(results: readonly (boolean | "hang" | "deferred-abort")
     },
   };
   return { connection, deferredAborts, document, environment, fetches, health, refreshed, relayMeasurements, window };
+}
+
+function installInjectedRecovery(
+  harness: RecoveryHarness,
+  probeGateway: (signal: AbortSignal) => Promise<GatewayProbeResult>,
+): () => void {
+  return installBrowserConnectionRecovery(
+    () => { harness.refreshed.count += 1; },
+    harness.environment,
+    state => harness.health.push(state),
+    () => { harness.relayMeasurements.count += 1; },
+    undefined,
+    probeGateway,
+  );
 }
 
 describe("collaboration browser network recovery", () => {
@@ -322,6 +337,266 @@ describe("collaboration browser network recovery", () => {
     await settle();
     expect(harness.health.at(-1)?.state).toBe("healthy");
     expect(harness.fetches).toHaveLength(4);
+
+    dispose();
+  });
+
+  test("uses the injected selected-gateway probe without fetching same-origin health", async () => {
+    const harness = recoveryHarness([]);
+    const signals: AbortSignal[] = [];
+    const dispose = installInjectedRecovery(harness, async signal => {
+      signals.push(signal);
+      return "healthy";
+    });
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(false);
+    expect(harness.health.at(-1)?.state).toBe("healthy");
+    expect(harness.window.pendingDelays()).toEqual([15_000]);
+
+    harness.connection.dispatchEvent(new Event("change"));
+    await settle();
+    expect(signals).toHaveLength(2);
+    expect(harness.fetches).toHaveLength(0);
+    expect(harness.refreshed.count).toBe(0);
+    expect(harness.relayMeasurements.count).toBe(1);
+    expect(harness.window.pendingDelays()).toEqual([15_000]);
+
+    dispose();
+  });
+
+  test("stops forbidden recovery until a visible, pageshow, or online transition probes once", async () => {
+    const harness = recoveryHarness([]);
+    let probes = 0;
+    const dispose = installInjectedRecovery(harness, async () => {
+      probes += 1;
+      return "forbidden";
+    });
+
+    harness.window.runNextTimer();
+    harness.connection.dispatchEvent(new Event("change"));
+    await settle();
+    expect(harness.health.map(state => state.state)).toEqual(["checking", "forbidden"]);
+    expect(harness.health.at(-1)?.failureSince).toBe(1_000);
+    expect(harness.health.at(-1)?.retryAt).toBeNull();
+    expect(harness.window.pendingDelays()).toEqual([]);
+    expect(probes).toBe(1);
+
+    harness.connection.dispatchEvent(new Event("change"));
+    harness.window.dispatchEvent(new Event("offline"));
+    await settle();
+    expect(probes).toBe(1);
+    expect(harness.window.pendingDelays()).toEqual([]);
+
+    harness.document.visibilityState = "hidden";
+    harness.document.dispatchEvent(new Event("visibilitychange"));
+    expect(probes).toBe(1);
+    harness.document.visibilityState = "visible";
+    harness.document.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+    expect(probes).toBe(2);
+    expect(harness.health.at(-1)?.state).toBe("forbidden");
+    expect(harness.window.pendingDelays()).toEqual([]);
+
+    harness.window.dispatchEvent(new Event("pageshow"));
+    await settle();
+    expect(probes).toBe(3);
+    expect(harness.window.pendingDelays()).toEqual([]);
+
+    harness.window.dispatchEvent(new Event("online"));
+    await settle();
+    expect(probes).toBe(4);
+    expect(harness.window.pendingDelays()).toEqual([]);
+    expect(harness.refreshed.count).toBe(0);
+    expect(harness.relayMeasurements.count).toBe(0);
+    expect(harness.fetches).toHaveLength(0);
+
+    dispose();
+  });
+
+  test("recovers a restored authorization through the existing success hysteresis", async () => {
+    const harness = recoveryHarness([]);
+    let probes = 0;
+    const dispose = installInjectedRecovery(harness, async () => {
+      probes += 1;
+      return probes === 1 ? "forbidden" : "healthy";
+    });
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("forbidden");
+
+    harness.document.visibilityState = "hidden";
+    harness.document.dispatchEvent(new Event("visibilitychange"));
+    harness.document.visibilityState = "visible";
+    harness.document.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("checking");
+    expect(harness.refreshed.count).toBe(1);
+    expect(harness.relayMeasurements.count).toBe(0);
+    expect(harness.window.pendingDelays()).toEqual([2_000]);
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(probes).toBe(3);
+    expect(harness.health.at(-1)?.state).toBe("healthy");
+    expect(harness.health.at(-1)?.failureSince).toBeNull();
+    expect(harness.refreshed.count).toBe(1);
+    expect(harness.relayMeasurements.count).toBe(1);
+    expect(harness.window.pendingDelays()).toEqual([15_000]);
+
+    dispose();
+  });
+
+  test("ignores injected probe completions after disposal aborts their signal", async () => {
+    for (const result of ["healthy", "forbidden"] as const) {
+      const harness = recoveryHarness([]);
+      const signals: AbortSignal[] = [];
+      const completions: Array<(result: GatewayProbeResult) => void> = [];
+      const dispose = installInjectedRecovery(harness, signal => {
+        signals.push(signal);
+        return new Promise(resolve => { completions.push(resolve); });
+      });
+
+      harness.window.runNextTimer();
+      await settle();
+      expect(completions).toHaveLength(1);
+      expect(harness.window.pendingDelays()).toEqual([3_000]);
+      dispose();
+      expect(signals[0]?.aborted).toBe(true);
+      completions[0]?.(result);
+      await settle();
+      expect(harness.health.map(state => state.state)).toEqual(["checking"]);
+      expect(harness.window.pendingDelays()).toEqual([]);
+      expect(harness.refreshed.count).toBe(0);
+      expect(harness.relayMeasurements.count).toBe(0);
+      expect(harness.fetches).toHaveLength(0);
+    }
+  });
+
+  test("ignores a hide-aborted injected result before probing the foreground gateway", async () => {
+    const harness = recoveryHarness([]);
+    const signals: AbortSignal[] = [];
+    const completions: Array<(result: GatewayProbeResult) => void> = [];
+    const dispose = installInjectedRecovery(harness, signal => {
+      signals.push(signal);
+      if (signals.length === 1) {
+        return new Promise(resolve => { completions.push(resolve); });
+      }
+      return Promise.resolve("healthy");
+    });
+
+    harness.window.runNextTimer();
+    await settle();
+    harness.document.visibilityState = "hidden";
+    harness.document.dispatchEvent(new Event("visibilitychange"));
+    expect(signals[0]?.aborted).toBe(true);
+    harness.document.visibilityState = "visible";
+    harness.document.dispatchEvent(new Event("visibilitychange"));
+    expect(signals).toHaveLength(1);
+
+    completions[0]?.("forbidden");
+    await settle();
+    expect(harness.health.map(state => state.state)).toEqual(["checking"]);
+    expect(harness.window.pendingDelays()).toEqual([0]);
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(signals).toHaveLength(2);
+    expect(harness.health.at(-1)?.state).toBe("healthy");
+    expect(harness.refreshed.count).toBe(0);
+    expect(harness.relayMeasurements.count).toBe(1);
+    expect(harness.fetches).toHaveLength(0);
+
+    dispose();
+  });
+
+  test("uses the same degraded and jittered outage delays for injected unavailable results", async () => {
+    const harness = recoveryHarness([]);
+    let probes = 0;
+    const dispose = installInjectedRecovery(harness, async () => {
+      probes += 1;
+      return probes <= 2 ? "unavailable" : "healthy";
+    });
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("degraded");
+    expect(harness.health.at(-1)?.failureSince).toBe(1_000);
+    expect(harness.window.pendingDelays()).toEqual([2_000]);
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("unreachable");
+    expect((harness.health.at(-1)?.retryAt ?? 0) - harness.window.now).toBe(1_000);
+    expect(harness.window.pendingDelays()).toEqual([1_000]);
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("checking");
+    expect(harness.refreshed.count).toBe(1);
+    expect(harness.window.pendingDelays()).toEqual([2_000]);
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(probes).toBe(4);
+    expect(harness.health.at(-1)?.state).toBe("healthy");
+    expect(harness.refreshed.count).toBe(1);
+    expect(harness.window.pendingDelays()).toEqual([15_000]);
+    expect(harness.fetches).toHaveLength(0);
+
+    dispose();
+  });
+
+  test("counts synchronous throws and rejected injected probes as unavailable", async () => {
+    const harness = recoveryHarness([]);
+    let probes = 0;
+    const dispose = installInjectedRecovery(harness, () => {
+      probes += 1;
+      if (probes === 1) throw new Error("selected gateway probe failed");
+      return Promise.reject(new Error("selected gateway probe rejected"));
+    });
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("degraded");
+    expect(harness.window.pendingDelays()).toEqual([2_000]);
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("unreachable");
+    expect(harness.window.pendingDelays()).toEqual([1_000]);
+    expect(harness.refreshed.count).toBe(0);
+    expect(harness.fetches).toHaveLength(0);
+
+    dispose();
+  });
+
+  test("bounds an injected probe with the existing initial abort timeout", async () => {
+    const harness = recoveryHarness([]);
+    const signals: AbortSignal[] = [];
+    const dispose = installInjectedRecovery(harness, signal => {
+      signals.push(signal);
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          reject(new DOMException("probe timed out", "AbortError"));
+        }, { once: true });
+      });
+    });
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.window.pendingDelays()).toEqual([3_000]);
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(signals[0]?.aborted).toBe(true);
+    expect(harness.health.at(-1)?.state).toBe("degraded");
+    expect(harness.window.pendingDelays()).toEqual([2_000]);
+    expect(harness.refreshed.count).toBe(0);
+    expect(harness.fetches).toHaveLength(0);
 
     dispose();
   });

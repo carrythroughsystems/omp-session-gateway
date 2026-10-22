@@ -6,6 +6,7 @@ import type { TranscriptProps } from "../upstream/src/components/transcript/Tran
 import {
   type MiniElement,
   click,
+  installDomGlobals,
   mount,
   query,
   queryAll,
@@ -17,6 +18,7 @@ import {
 // The transcript pulls in the `<omp-tool-view>` custom element and the theme
 // store, which both need browser globals while their modules initialize, so the
 // harness above has to be in place before either module is loaded.
+installDomGlobals();
 const { TRANSCRIPT_WINDOW, TRANSCRIPT_WINDOW_STEP, Transcript } = await import(
   "../upstream/src/components/transcript/Transcript",
 );

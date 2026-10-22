@@ -25,6 +25,11 @@ Foreground, BFCache restore, online, and Network Information transitions replace
 stale relay transport. A metadata-free same-origin health probe forces one replacement after an
 observed gateway outage recovers; established guests retain bounded relay room recovery.
 
+Embedded recovery probes the launching gateway through an injected selected-source callback and
+treats a readable authorization loss as terminal for automatic recovery, allowing a fresh probe
+only on foreground, pageshow, or online transitions. Non-embedded callers retain the same-origin
+health probe.
+
 The 18.4.x refresh brings the redesigned inset transcript/composer panel, updated tool and agent
 surfaces, and upstream's coarse-pointer text sizing. The earlier local 16px text-field patch is
 now upstream code. Snapshot chunks now buffer inside upstream's guest replica and publish once
@@ -59,6 +64,16 @@ draft for bounded retry. The gateway HTTP service and service worker never recei
 Removing, acknowledged sending, or leaving drops preview references; the normalized image then
 follows ordinary OMP transcript and model-provider handling on the host. View links remain
 read-only at every mutating client method, and pointer capture protects mobile composer actions.
+
+Control text composers offer dismissible keyboard-dictation guidance independently of the optional
+browser recognizer. When explicitly enabled by the gateway, live Control prompt and free-text Ask
+drafts offer gesture-only browser speech after a document-scoped disclosure: the browser or OS may
+send audio to its speech provider. Capture is bounded to two minutes, 128 result segments, 8,000
+code points, and 32 KiB of UTF-8 text. Start/stop watchdogs finalize only a review buffer; **Use text**
+edits the bound draft at its current selection, and **Send** remains a separate explicit action.
+Generation, Ask identity, destination, liveness, pending-response, and page lifecycle changes discard
+the recording. No audio is persisted or sent to the gateway; browser support is feature-detected,
+not a claim of physical-device qualification or on-device recognition.
 
 `upstream/UPSTREAM.json` records the exact source paths, package versions, Bun `1.4.0`, and local patch list.
 `upstream/LICENSE` preserves the upstream license. The build remains a narrow integration; it does not fork the
