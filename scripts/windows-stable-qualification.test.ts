@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { cleanupWindows, runWindows, verifyWindowsDoctor, windowsCampaignLabel, windowsNeedsCleanup, assertWindowsPins } from "./windows-stable-qualification.ts";
 import pins from "./windows-qualification-pins.json";
-import type { WindowsContext, WindowsFirewall, WindowsGuestAction, WindowsIdentity, WindowsInstance, WindowsPrincipal, WindowsRuntime } from "./windows-stable-qualification.ts";
-import { verifyWindowsStaleLaunch, windowsPixelForeground, windowsPixelLauncher, waitForStableWindowsTransport } from "./windows-qualification-runtime.ts";
+import type { WindowsContext, WindowsFirewall, WindowsGuestAction, WindowsIdentity, WindowsInstance, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
+import { command as windowsCommand, verifyWindowsStaleLaunch, windowsPixelForeground, windowsPixelLauncher, waitForStableWindowsTransport } from "./windows-qualification-runtime.ts";
 import { firewallEligibility } from "./vultr-target.ts";
 import { parseQualificationPins } from "./stable-qualification.ts";
 
@@ -51,6 +51,68 @@ test("guest rejection is not treated as transient transport instability", async 
     { now: () => elapsed, sleep: async ms => { elapsed += ms; } }, 75_000)).rejects.toBe(failure);
   expect(probes).toBe(1);
   expect(elapsed).toBe(0);
+});
+test("slow first authenticated probes get 180 seconds without weakening the stability window", async () => {
+  let now = 0;
+  const limits: number[] = [];
+  const result = await waitForStableWindowsTransport(async timeoutMs => {
+    limits.push(timeoutMs); now += 100_000;
+    return { windowsBuild: 26100 };
+  }, { now: () => now, sleep: async ms => { now += ms; } }, 12 * 60_000);
+  expect(limits).toEqual([180_000, 180_000, 180_000]);
+  expect(result).toMatchObject({ transportStabilitySamples: 3, transportStabilityDurationMs: 260_000 });
+  expect(now).toBeLessThan(12 * 60_000);
+});
+test("a probe is capped by remaining admission time and a late success cannot pass", async () => {
+  let now = 0;
+  const limits: number[] = [];
+  await expect(waitForStableWindowsTransport(async timeoutMs => {
+    limits.push(timeoutMs); now += timeoutMs;
+    return { windowsBuild: 26100 };
+  }, { now: () => now, sleep: async ms => { now += ms; } }, 90_000)).rejects.toThrow("stability window timed out");
+  expect(limits).toEqual([90_000]);
+  expect(now).toBe(90_000);
+});
+test("transport command checkpoints first response before exit without copying stream contents", async () => {
+  const probes: WindowsTransportProbe[] = [];
+  const script = `process.stderr.write("synthetic-private-output-never-real\\n" + "x".repeat(200) + "\\n");
+    process.stderr.write("WINRM_FIRST_");
+    setTimeout(() => { process.stderr.write("RESPONSE " + Date.now() + "\\n"); process.stdout.write("bounded-result"); }, 10);`;
+  expect(await windowsCommand([process.execPath, "-e", script], { timeoutMs: 3_000,
+    transportProbe: async probe => { await Bun.sleep(1); probes.push({ ...probe }); },
+  })).toBe("bounded-result");
+  expect(probes).toHaveLength(3);
+  expect(probes[0]).toMatchObject({ firstResponseLatencyMs: null, signalAt: null, exitedAt: null, exitCode: null });
+  expect(probes[1]!.firstResponseLatencyMs).toBeGreaterThanOrEqual(0);
+  expect(probes[1]!.exitedAt).toBeNull();
+  expect(probes[2]!.exitCode).toBe(0);
+  expect(probes[2]!.signalAt).toBeNull();
+  expect(probes[2]!.exitedAt!).toBeGreaterThanOrEqual(probes[0]!.startedAt + probes[2]!.firstResponseLatencyMs!);
+  expect(JSON.stringify(probes)).not.toContain("synthetic-private");
+  expect(Object.keys(probes[2]!).sort()).toEqual(["exitCode", "exitedAt", "firstResponseLatencyMs", "signalAt", "startedAt", "timeoutMs"]);
+});
+test("a timed-out transport command persists signal and exit before its failure escapes", async () => {
+  const probes: WindowsTransportProbe[] = [];
+  await expect(windowsCommand([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+    timeoutMs: 50, transportProbe: async probe => { probes.push({ ...probe }); },
+  })).rejects.toThrow("output withheld");
+  expect(probes).toHaveLength(3);
+  const last = probes.at(-1)!;
+  expect(last.signalAt).toBeGreaterThanOrEqual(last.startedAt);
+  expect(last.exitedAt).toBeGreaterThanOrEqual(last.signalAt!);
+  expect(last.exitCode).not.toBe(0);
+  expect(last.firstResponseLatencyMs).toBeNull();
+});
+test("transport checkpoint failures refuse spawn or success instead of losing diagnostics silently", async () => {
+  const failure = new Error("synthetic checkpoint failure");
+  await expect(windowsCommand(["synthetic-missing-command"], {
+    transportProbe: async () => { throw failure; },
+  })).rejects.toBe(failure);
+  let checkpoints = 0;
+  await expect(windowsCommand([process.execPath, "-e", ""], {
+    transportProbe: async () => { if (++checkpoints === 2) throw failure; },
+  })).rejects.toBe(failure);
+  expect(checkpoints).toBe(2);
 });
 test("Pixel restoration selects the installed app behind a non-exported Chrome activity", () => {
   const component = "com.android.chrome/org.chromium.chrome.browser.webapps.SameTaskWebApkActivity";
@@ -161,6 +223,63 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; li
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test("completed evidence retains separate transport probe observations", async () => {
+    const f = fixture(); const original = f.runtime.guest;
+    const probes: WindowsTransportProbe[] = [];
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "transport") {
+        for (let i = 0; i < 3; i++) {
+          const startedAt = f.runtime.now() + i * 30_000;
+          const probe = { startedAt, timeoutMs: 180_000, firstResponseLatencyMs: 100, signalAt: null, exitedAt: startedAt + 200, exitCode: 0 };
+          probes.push(probe); await context.transportProbe!(probe);
+        }
+      }
+      return original(context, action, principal);
+    };
+    const result = await f.run();
+    expect(result.transportProbes).toEqual(probes);
+    expect((f.progress as Record<string, unknown>).transportProbes).toEqual(probes);
+    await f.clean();
+    expect((f.progress as Record<string, unknown>).transportProbes).toEqual(probes);
+  });
+  test("transport timeline is checkpointed during the probe and retained through failed owner cleanup", async () => {
+    const f = fixture(); const original = f.runtime.guest;
+    const probe: WindowsTransportProbe = { startedAt: f.runtime.now(), timeoutMs: 180_000,
+      firstResponseLatencyMs: null, signalAt: null, exitedAt: null, exitCode: null };
+    f.runtime.guest = async (context, action, principal) => {
+      if (action !== "transport") return original(context, action, principal);
+      await context.transportProbe!(probe);
+      expect((f.progress as Record<string, unknown>).transportProbes).toEqual([probe]);
+      await context.transportProbe!({ ...probe, firstResponseLatencyMs: 120_000 });
+      await context.transportProbe!({ ...probe, firstResponseLatencyMs: 120_000, signalAt: probe.startedAt + 180_000 });
+      await context.transportProbe!({ ...probe, firstResponseLatencyMs: 120_000, signalAt: probe.startedAt + 180_000, exitedAt: probe.startedAt + 180_010, exitCode: 143 });
+      throw new Error("synthetic transport deadline");
+    };
+    await expect(f.run()).rejects.toThrow("synthetic transport deadline");
+    expect((f.progress as Record<string, unknown>).transportProbes).toEqual([
+      { ...probe, firstResponseLatencyMs: 120_000, signalAt: probe.startedAt + 180_000, exitedAt: probe.startedAt + 180_010, exitCode: 143 },
+    ]);
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+  });
+  test("historical progress without diagnostic probes remains cleanable without fabricating observations", async () => {
+    const f = fixture(); await f.run();
+    const prior = { ...f.progress as Record<string, unknown> };
+    delete prior.transportProbes;
+    await cleanupWindows({ identity, progress: prior, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime });
+    expect((f.progress as Record<string, unknown>).transportProbes).toBeUndefined();
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
+  });
+  test("transport diagnostics reject unknown fields and incoherent timestamps before effects", async () => {
+    const f = fixture(); await f.run();
+    const probe: WindowsTransportProbe = { startedAt: f.runtime.now(), timeoutMs: 180_000,
+      firstResponseLatencyMs: null, signalAt: null, exitedAt: null, exitCode: null };
+    for (const bad of [{ ...probe, stderr: "synthetic-private-never-real" }, { ...probe, timeoutMs: 180_001 },
+      { ...probe, exitCode: 0 }, { ...probe, signalAt: probe.startedAt - 1 },
+      { ...probe, firstResponseLatencyMs: 20, exitedAt: probe.startedAt + 10, exitCode: 0 }]) {
+      expect(() => windowsNeedsCleanup({ ...f.progress as Record<string, unknown>, transportProbes: [bad] })).toThrow();
+    }
+  });
   test("tagged doctor records denial while rejecting an unsafe host", () => {
     const observed = verifyWindowsDoctor({ checks: taggedDoctorChecks, ...doctorState });
     expect(observed).toMatchObject({ doctorTrue: 15, doctorChecks: 18, doctorIdentityAllowed: false, doctorPwa: false, doctorSessionHealth: false });

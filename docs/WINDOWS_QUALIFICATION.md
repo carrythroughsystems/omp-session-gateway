@@ -117,6 +117,22 @@ both the count and window, while a guest assertion failure aborts immediately. T
 `transportStabilitySamples` and `transportStabilityDurationMs` are receipt facts. Mutations are
 not retried by this readiness boundary.
 
+Each authenticated probe has at most **180 seconds**, capped by the remaining combined deadline,
+to accommodate a fresh instance's first WinRM exchange. The controller sends SIGTERM at that bound;
+the helper still attempts owned WinRM shell teardown before exiting. A subprocess deadline remains
+a failed probe, not a successful observation or an automatic mutation retry.
+
+The Windows progress and completed result retain `transportProbes`: one metadata-only row per
+authenticated probe, checkpointed at invocation start, first authenticated response, controller
+SIGTERM (if sent), and process exit. `startedAt`, `signalAt`, and `exitedAt` are UTC epoch
+milliseconds; `timeoutMs` records the applied bound and `exitCode` the subprocess outcome.
+`firstResponseLatencyMs` measures from invocation start to the helper's first authenticated
+`open_shell` reply, not completion of the guest command or shell teardown. Unobserved events are
+`null`, so a timeout during teardown differs from no observed authenticated reply. Only the helper's
+fixed timestamp marker is consumed; no host, credential, argv, script, stdout or stderr is copied
+into these rows. Failed checkpoints refuse qualification. Historical immutable progress without
+this additive diagnostic field remains cleanable and is not rewritten to invent probe observations.
+
 An initial pinned RDP logon establishes the interactive session required by installation; the
 client then disconnects. The sequence is predecessor install → candidate upgrade with private-state digests unchanged →
 doctor → reboot → at least three pre-login samples over at least 30 seconds → pinned RDP login
