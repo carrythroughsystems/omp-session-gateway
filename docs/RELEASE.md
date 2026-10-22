@@ -214,7 +214,7 @@ with committed release history; the fixture notes describe the retained public e
 `prepare X.Y.Z --release-class minor --date YYYY-MM-DD` uses the same next-minor predicate
 as selection and promotion. It may supersede an unqualified, unpublished next-patch preparation:
 the package/workspace/constants move to the next minor; that prepared CHANGELOG section and
-`[Unreleased]` are folded into one new cut; the generator recounts all bullets and regenerates
+the pending entries are folded into one new cut; the generator recounts all bullets and regenerates
 `release-text.json` together. The old summary must still match its companion metadata; never
 hand-recount either header. Qualified/published preparations, unrelated versions, duplicate cuts
 and edited summaries refuse. The published stable lock and OMP baseline stay unchanged.
