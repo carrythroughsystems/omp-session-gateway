@@ -83,13 +83,13 @@ Gateway log fields are numeric or boolean only; never log strings from host quer
 
 ### HTTP and browser
 
-- Validate exact `Origin` on state-changing requests and evaluate `Sec-Fetch-Site` defensively.
-- Do not use wildcard CORS.
+- Validate exact `Origin` on state-changing requests and evaluate `Sec-Fetch-Site` defensively (`requestHasValidMutationContext` for same-origin routes; `requestHasTrustedDashboardContext` for cross-origin launches from `http.trustedDashboardOrigins`).
+- Do not use wildcard CORS or `Access-Control-Allow-Credentials`. Cross-origin admission is bounded to at most 8 `http.trustedDashboardOrigins` and exposed only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and their `OPTIONS` preflights (`fleet.targets` is bounded to 7 remote targets, 8 sources total with `local`). `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin.
+- Keep `SourceKey` (`id + "\0" + origin`) strictly as a dashboard-side in-memory discriminator; never concatenate it into an OMP `instanceId` or send it on the wire. Device-local triage storage (`omp.sessions.held-asks.v2`, `omp.sessions.dismissed.v2`) records `sourceId` and `sourceOrigin` without labels or capabilities, and Web Push / app badges remain scoped to the home gateway only.
 - API and launch responses are `no-store`.
-- Set strict CSP, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, frame
-  protections, and a narrow Permissions Policy.
-- The service worker caches only immutable application-shell assets and bypasses navigation,
-  non-GET requests, `/api/`, and collaboration-client bootstrap traffic.
+- Set strict CSP (`connect-src` extended on document HTML only with `fleet.targets[].origin`), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, frame protections, and a narrow Permissions Policy (`microphone=()` by default and on all non-document responses; `microphone=(self)` on document HTML only when `speech.browserRecognition` is `true`).
+- `speech.browserRecognition` defaults to `false`. When enabled, the in-page Web Speech control mounts only in writable **Control**, and **Use text** only populates the composer draft — it never submits (**Send** remains a separate action).
+- The service worker caches only immutable application-shell assets and bypasses cross-origin, navigation, non-GET, `/api/`, and collaboration-client bootstrap traffic.
 - Keep runtime assets first-party; do not add analytics, remote fonts, third-party scripts, or CDNs.
 
 ## OMP integration invariants
@@ -116,6 +116,7 @@ The supported settings contract is:
 - OMP publication is independent of gateway availability; OMP does not connect to the gateway.
 - Preserve `/collab`, `/collab view`, `/collab status`, `/collab stop`, `/join`, and
   `/leave` behavior.
+- Tern is an execution environment for stock OMP, not a gateway integration target (ADR-038): session identity stays OMP's `instanceId` and `generation` from `~/.omp/run/collab-hosts`, with no Tern adapter, Tern API, `tsp.ts` reader, or pane scraping.
 
 ## Reliability and bounds
 

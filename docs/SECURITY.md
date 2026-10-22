@@ -242,6 +242,11 @@ browser `capture="environment"` hint; **Choose existing** omits `capture`. Nativ
 capture launches the operating-system camera UI and does not grant script-level camera access, so
 the gateway keeps `Permissions-Policy: camera=()` and never invokes `getUserMedia`.
 
+
+Speech input follows two distinct paths ([ADR-037](DECISIONS.md#adr-037--speech-input-keyboard-dictation-baseline-and-opt-in-browser-speech-recognition)):
+
+- **OS keyboard dictation (default baseline):** handled by the operating-system keyboard outside page JavaScript and inserts text into the standard composer `<textarea>` (with composer help copy `"Use your keyboard's microphone key to dictate into this box. iPhone: Settings → General → Keyboard → Enable Dictation. Dictation never sends — tap Send when the text is right."`). Like the file-input camera path above, it needs no browser microphone grant, so the gateway keeps `Permissions-Policy: microphone=()` when `speech.browserRecognition` is `false`.
+- **Opt-in in-page browser speech recognition (`speech.browserRecognition: true`):** unlike `<input type="file" capture="environment">`, browser Web Speech implementations (`SpeechRecognition` / `webkitSpeechRecognition`) require document-level `Permissions-Policy: microphone=(self)`. When `speech.browserRecognition` is `true`, only document HTML responses switch to `microphone=(self)` (keeping `camera=()` and all other directives unchanged), while API, SSE, problem, and static asset responses retain `microphone=()`. Because HTTP headers apply to the hosting document and cannot distinguish read-only **View** from writable **Control**, Control-only enforcement lives in the collaboration client (`browserRecognitionEnabled`, writable **Control** mode, and a healthy connection). Audio captured by in-page speech recognition is sent by the browser or OS to its speech provider **outside the encrypted OMP relay and before any prompt is sent**; no on-device processing claim is made, and the client displays the explicit disclosure `"Your browser or OS may send audio to its speech provider before any OMP prompt is sent."` before starting recognition. Recognizer configuration is bounded (`lang = navigator.language || "en-US"`, `continuous = true`, `interimResults = true`, one alternative, no auto-restart; watchdogs `10 s` start, `120 s` capture, `5 s` stop; review buffer capped at `128` segments, `8,000` code points, and `32 KiB`). No speech-to-text server, API key, or audio persistence exists in the gateway, and **Use text** inserts the reviewed draft into the composer without submitting (**Send** remains a separate explicit action). In a federated session, the home document's `speech.browserRecognition` setting is authoritative.
 ## 6. Capability handling
 
 Mandatory rules:
@@ -267,16 +272,19 @@ generation replacement. They are metadata, not authorization. Prompt text, optio
 transcript content remain prohibited unless a later OMP snapshot contract explicitly introduces a
 bounded plain-text preview contract; the current implementation always uses the boolean fallback.
 
-The PWA may persist two bounded, non-secret local routing record types: an exact held ask
-`(instanceId, requestId, heldAt)`, and a generation-scoped dismissed session
-`(instanceId, generation, dismissedAt)`. It must reject malformed, oversized, non-canonical, or
-excess records and must never add session labels, paths, models, prompt content, transcript content,
-or capabilities. Holding does not change authoritative attention or badge counts. Dismissal is only
-a reversible local hide of a non-attention row: it makes no network request and does not stop OMP.
-Authoritative ask changes clear holds; removal, generation replacement, or attention clears
-dismissals. Transport failures clear neither. A held ask may close only a notification with the
-matching instance tag and request ID.
-
+The PWA may persist two bounded, non-secret local routing record types under `localStorage` keys
+`omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`: an exact source-qualified held ask
+`(sourceId, sourceOrigin, instanceId, requestId, heldAt)`, and a generation-scoped dismissed session
+`(sourceId, sourceOrigin, instanceId, generation, dismissedAt)` (migrating legacy v1 keys to the local
+source and dropping unconfigured or re-pointed sources at bootstrap). It must reject malformed,
+oversized, non-canonical, or excess records (100 items / 512,000 bytes max) and must never persist
+the composite in-memory `SourceKey`, session labels, paths, models, prompt content, transcript
+content, or capabilities. Holding does not change authoritative attention or badge counts. Dismissal
+is only a reversible local hide of a non-attention row: it makes no network request and does not stop
+OMP. Authoritative ask changes clear holds; removal, generation replacement, or attention clears
+dismissals. Transport failures clear neither. A held ask on the local source may close only a home
+notification with the matching instance tag and request ID; holding an ask on a remote fleet source
+never enumerates or closes home notifications even when `instanceId` collides.
 After an explicit permission/subscription action, the gateway may persist a user-only VAPID key
 pair, bounded browser subscription set, authenticated identity, and per-device `private`,
 `session`, or `preview` choice. It assembles encrypted push presentation at send time. `private`
@@ -294,6 +302,7 @@ request ID and cannot be used as an ask/Control intent. Stop detail obeys the sa
 privacy choice, with no preview content. No activity state is persisted.
 Never put a collaboration capability in a payload, notification data, route, history,
 service-worker message, persisted push state, badge, or request identifier.
+Web Push subscriptions, VAPID keys, notification tags, app badges, and service-worker tap routes remain strictly home-scoped to the originating gateway ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)). Remote fleet targets never share push state or routes, and foreground remote counts never feed the home app badge.
 
 JavaScript strings cannot be reliably zeroized. Minimize lifetime, copies, closures, global state, and persistence instead of claiming memory erasure.
 
@@ -309,16 +318,18 @@ Referrer-Policy: no-referrer
 X-Content-Type-Options: nosniff
 Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()
 ```
+Document HTML responses extend `connect-src` with each configured `fleet.targets[].origin` (`http.trustedDashboardOrigins` is never added to `connect-src`) and switch `Permissions-Policy` to `microphone=(self)` only when `speech.browserRecognition` is `true`. API, SSE, problem, and static asset responses always keep `connect-src 'self' wss://my.omp.sh` and `microphone=()`.
 
 Additional requirements:
 
-- exact Origin validation on POST and WebAuthn enrollment/assertion endpoints;
-- validate `Sec-Fetch-Site` when supplied;
-- no wildcard CORS and no credentialed cross-origin API;
+- exact `Origin` validation on `POST` and any future WebAuthn enrollment/assertion endpoints;
+- validate `Sec-Fetch-Site` when supplied (`same-origin` on same-origin mutations; `same-site` or `cross-site` accepted on `POST /api/v1/sessions/:instanceId/launch` **only** when the request `Origin` header is an exact match in `http.trustedDashboardOrigins` and `Content-Type` is `application/json` — missing Fetch Metadata is never permission to skip exact `Origin` validation);
+- no wildcard CORS and no `Access-Control-Allow-Credentials`;
+- **federated dashboard origin exception ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):** when `http.trustedDashboardOrigins` is empty (default), no cross-origin API access is permitted. Any foreign non-admitted `Origin` on any `/api/` route except loopback `GET /api/v1/health` is refused with `403` before identity checks. A remote gateway that configures an origin in `http.trustedDashboardOrigins` makes an explicit browser trust decision: it trusts JavaScript served by that dashboard origin to read its session metadata (`GET /api/v1/sessions`) and request View or Control capabilities (`POST /api/v1/sessions/:instanceId/launch`) using the viewer's own authorized Tailscale identity. Only those two routes and their authenticated `OPTIONS` preflights (which never consume launch rate-limit tokens) may emit `Access-Control-Allow-Origin: <exact origin>` and `Vary: Origin`; `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin. Removing an origin from `http.trustedDashboardOrigins` blocks new cross-origin API reads and launches immediately (and a readable `403` disposes an active remote shell in the dashboard and sets the shell chip to `Access withdrawn`), but does not revoke an already issued OMP capability on the relay until the OMP host stops collaboration or rotates the generation;
 - all metadata rendered as text, never unsanitized HTML;
 - strip control/bidi characters or display them safely in titles/paths;
 - cap label length and session count;
-- service worker caches only queryless, content-hashed static shell files (the app shell plus the pinned collaboration-client module and stylesheet — never a capability-bearing response) and explicitly bypasses `/api/`, `/internal/`, `/client/`, `/collab/`, `/update/`, navigation, query-bearing URLs, and all non-GET requests;
+- service worker caches only queryless, content-hashed static shell files (the app shell plus the pinned collaboration-client module and stylesheet — never a capability-bearing response) and explicitly bypasses cross-origin requests, `/api/`, `/internal/`, `/client/`, `/collab/`, `/update/`, navigation, query-bearing URLs, and all non-GET requests;
 - service worker Push handling accepts exact `attention`/`clear`/`activity_stop` envelopes, uses one per-instance tag, updates only the bounded app badge count, and never fetches or receives a collaboration capability;
 - transient directory transport failure retains the last authenticated metadata only in volatile page memory, marks it stale with the last-fresh timestamp, and disables no actions solely because SSE disconnected; authorization failure clears it;
 - no capability in Redux/React Query persistence, devtools globals, error boundaries, replay tools, performance marks, history state, or directory snapshots;
@@ -422,6 +433,7 @@ Forbidden:
 - unredacted tailnet names and identities in public bundles.
 
 Test infrastructure must fail when a known canary appears in logs, files, Playwright traces, HARs, screenshots, video, browser history, DOM snapshots, caches, storage, service-worker state, or diagnostics archives.
+Tern, multi-host fleet, and speech test fixtures or qualification notes follow the same leak rules: never record a literal 43-character base64url token, a 64-hex discovery token, a collaboration capability, a real `*.ts.net` tailnet hostname (use `<name>.example.ts.net`), a public IPv4 address, or a `/Users/<name>` path.
 
 ### Percy visual upload boundary and Live
 
@@ -678,7 +690,7 @@ Before release, prove:
 - attention and notification surfaces expose only ADR-019's approved bounded metadata: opaque request identity, count, and detail-selected labels; Private has no body, and Preview falls back to Session because current OMP snapshots supply no preview. Prompt/option/answer/transcript content, full paths, and any field outside that contract remain forbidden;
 - stopped, expired, and replaced generations cannot launch;
 - view-only mutation attempts are rejected by the OMP host;
-- cross-origin launches fail; any future WebAuthn endpoints must enforce the same exact-origin boundary;
+- unconfigured cross-origin requests and launches fail with `403` before identity checks and without CORS headers; configured `http.trustedDashboardOrigins` admit only exact-origin `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and their authenticated `OPTIONS` preflights (without consuming launch rate-limit tokens) under full Tailscale identity authorization; any future WebAuthn endpoints must enforce the same exact-origin boundary;
 - malformed and oversized IPC/API input stays bounded;
 - gateway restart starts empty and discovery polling repopulates only live hosts;
 - every test record either vendor kept from the stable campaign's cloud devices contains neither
