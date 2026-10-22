@@ -195,9 +195,12 @@ for (const order of ["the failure settles first", "a collaboration mounts first"
       expect(await loadCount(page)).toBe(1);
 
       if (order === "the failure settles first") {
-        // One settled launch must not release the update while the other is still pending.
+        // The superseded failure is discarded; the latest intent still owns the deferred update.
         failingLaunch.release();
-        await expect(page.locator("#status-banner")).toHaveText("The session could not be opened. Try again.");
+        await failingLaunch.finished;
+        await expect(page.locator("#status-banner")).not.toContainText("The session could not be opened.");
+        await expect(page.locator(".gateway-shell")).toHaveCount(0);
+        expect(fixture.launchRequests).toHaveLength(0);
         await page.waitForTimeout(250);
         expect(await loadCount(page)).toBe(1);
         viewLaunch.release();
@@ -213,6 +216,7 @@ for (const order of ["the failure settles first", "a collaboration mounts first"
         await expect(page.locator("link[data-omp-collab-styles]")).toHaveCount(1);
       }
       await expect(page).toHaveURL(`${fixture.origin}/client/`);
+      await expect(page.locator(".shell-title")).toHaveText("Automatic PWA upgrade");
       expect(await loadCount(page)).toBe(1);
       expect(fixture.launchRequests.map(request => request.instanceId)).toEqual(["pwa-upgrade-0001"]);
 

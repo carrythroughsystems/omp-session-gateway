@@ -39,6 +39,30 @@ interface Mutation {
 
 const MUTATIONS: readonly Mutation[] = [
   {
+    name: "untrusted dashboard origins admitted to browser-direct metadata",
+    file: "apps/gateway/src/http-policy.ts",
+    find: 'if (origin === null || !config.http.trustedDashboardOrigins.includes(origin)) return undefined;',
+    replace: 'if (origin === null) return undefined;',
+    target: "apps/gateway/test/http.test.ts",
+    mustFail: "refuses untrusted, null, malformed and multiple dashboard origins",
+  },
+  {
+    name: "preflight bypasses the normal identity path",
+    file: "apps/gateway/src/http.ts",
+    find: "const authorization = authorizeHttpRequest(request, peer, config, serveOwnsIdentityHeaders);",
+    replace: 'const authorization = request.method === "OPTIONS" ? { allowed: true as const, identityKey: "preflight-bypass" } : authorizeHttpRequest(request, peer, config, serveOwnsIdentityHeaders);',
+    target: "apps/gateway/test/http.test.ts",
+    mustFail: "preflight cannot bypass identity trust, loopback, allowlist or second-hop checks",
+  },
+  {
+    name: "a trusted dashboard is accepted as the local push mutation context",
+    file: "apps/gateway/src/auth.ts",
+    find: 'if (request.headers.get("Origin") !== expectedOrigin) return false;',
+    replace: 'if (false && request.headers.get("Origin") !== expectedOrigin) return false;',
+    target: "apps/gateway/test/http.test.ts",
+    mustFail: "trusted-dashboard origins never authorize local push mutations",
+  },
+  {
     name: "identity headers believed on a host with no Tailscale tunnel device (#98)",
     file: "apps/gateway/src/auth.ts",
     find: 'if (!serveOwnsIdentityHeaders) return { allowed: false, reason: "identity_untrustworthy" };',

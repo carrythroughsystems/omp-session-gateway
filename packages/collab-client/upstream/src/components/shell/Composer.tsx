@@ -10,11 +10,13 @@ import {
 	type PreparedPhoto,
 } from "../../lib/photo-attachment";
 import { recommendedOptionIndex } from "./ask-recommendation";
+import { SpeechInput, useSpeechInput } from "./SpeechInput";
 
 export interface ComposerProps {
 	client: GuestClient;
 	snapshot: GuestSnapshot;
 	embedded?: boolean;
+	browserRecognitionEnabled?: boolean;
 }
 
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with shell.css). */
@@ -126,6 +128,8 @@ interface AskEditorProps {
 	sending: boolean;
 	onSubmit(value: string): void;
 	submitLabel?: string;
+	snapshot: GuestSnapshot;
+	browserRecognitionEnabled: boolean;
 }
 
 /**
@@ -133,16 +137,23 @@ interface AskEditorProps {
  * draft seeded from `prefill`, while re-sends of the same request never clobber a half-typed
  * draft. Submits verbatim — whitespace-only responses are intentional.
  */
-function AskEditor({ disabled, prefill, sending, onSubmit, submitLabel = "Submit" }: AskEditorProps): ReactNode {
+function AskEditor({ disabled, prefill, sending, onSubmit, submitLabel = "Submit", snapshot, browserRecognitionEnabled }: AskEditorProps): ReactNode {
 	const [draft, setDraft] = useState(prefill ?? "");
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
+	const speech = useSpeechInput({
+		enabled: browserRecognitionEnabled && !disabled && !snapshot.readOnly,
+		binding: { destination: "ask", requestId: snapshot.uiRequest?.reqId, requestKind: snapshot.uiRequest?.kind },
+		destination: taRef,
+		setDraft,
+	});
 
 	useLayoutEffect(() => {
 		autosize(taRef.current);
 	}, [draft]);
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+		if (speech.isBusy()) return;
 		if (shouldSubmitOnEnter(e, composingRef.current)) {
 			e.preventDefault();
 			if (!disabled) onSubmit(draft);
@@ -150,6 +161,7 @@ function AskEditor({ disabled, prefill, sending, onSubmit, submitLabel = "Submit
 	};
 
 	return (
+		<>
 		<div className="sh-composer-inner">
 			<textarea
 				ref={taRef}
@@ -168,14 +180,16 @@ function AskEditor({ disabled, prefill, sending, onSubmit, submitLabel = "Submit
 				<button
 					type="button"
 					className="sh-btn sh-btn-primary"
-					disabled={disabled}
-					onClick={() => onSubmit(draft)}
+					disabled={disabled || speech.busy}
+					onClick={() => { if (!disabled && !speech.isBusy()) onSubmit(draft); }}
 					title="submit response"
 				>
 					<SendHorizontal size={12} /> <span className="sh-btn-label">{sending ? "Sending…" : submitLabel}</span>
 				</button>
 			</div>
 		</div>
+		<SpeechInput speech={speech} />
+		</>
 	);
 }
 type SelectRequest = Extract<NonNullable<GuestSnapshot["uiRequest"]>, { kind: "select" }>;
@@ -265,7 +279,7 @@ function SelectAsk({ client, disabled, embedded, recommendedIndex, request, send
 	);
 }
 
-export function Composer({ client, snapshot, embedded = false }: ComposerProps): ReactNode {
+export function Composer({ client, snapshot, embedded = false, browserRecognitionEnabled = false }: ComposerProps): ReactNode {
 	const [text, setText] = useState("");
 	const [photos, setPhotos] = useState<readonly PreparedPhoto[]>([]);
 	const [preparingPhoto, setPreparingPhoto] = useState(false);
@@ -291,13 +305,21 @@ export function Composer({ client, snapshot, embedded = false }: ComposerProps):
 	const relayReady = snapshot.relayHealth.state === "healthy";
 	const retryReady = pendingPhotoPrompt !== null && photoConfirmationExpired && relayReady;
 	const hasDraft = text.trim().length > 0 || photos.length > 0;
+	const speech = useSpeechInput({
+		enabled: browserRecognitionEnabled && canPrompt && uiRequest === null && !sendingResponse && !preparingPhoto && pendingPhotoPrompt === null,
+		binding: { destination: "prompt", requestId: uiRequest?.reqId, requestKind: uiRequest?.kind },
+		destination: taRef,
+		setDraft: setText,
+	});
 	const canSend =
 		canPrompt &&
+		!speech.busy &&
 		!preparingPhoto &&
 		hasDraft &&
 		(pendingPhotoPrompt === null ? photos.length === 0 || relayReady : retryReady);
 	const canAddPhoto =
 		canPrompt &&
+		!speech.busy &&
 		!preparingPhoto &&
 		pendingPhotoPrompt === null &&
 		photos.length < MAX_PHOTO_ATTACHMENTS;
@@ -402,6 +424,7 @@ export function Composer({ client, snapshot, embedded = false }: ComposerProps):
 			(!trimmed && selectedPhotos.length === 0) ||
 			!live ||
 			readOnly ||
+			speech.isBusy() ||
 			preparingPhoto ||
 			(pendingPhotoPrompt !== null && !retryReady)
 		) {
@@ -420,9 +443,10 @@ export function Composer({ client, snapshot, embedded = false }: ComposerProps):
 		setPendingPhotoPrompt({ text: prompt, images, afterEntryId: snapshot.entries.at(-1)?.id ?? null });
 		setPhotoConfirmationExpired(false);
 		client.sendPrompt(prompt, images);
-	}, [client, live, pendingPhotoPrompt, preparingPhoto, readOnly, relayReady, retryReady, snapshot.entries, text]);
+	}, [client, live, pendingPhotoPrompt, preparingPhoto, readOnly, relayReady, retryReady, snapshot.entries, text, speech.isBusy]);
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+		if (speech.isBusy()) return;
 		if (shouldSubmitOnEnter(e, composingRef.current)) {
 			e.preventDefault();
 			send();
@@ -461,6 +485,8 @@ export function Composer({ client, snapshot, embedded = false }: ComposerProps):
 						onSubmit={value => client.sendUiResponse(uiRequest.reqId, value)}
 						submitLabel={embedded ? "Send" : "Submit"}
 						sending={sendingResponse}
+						snapshot={snapshot}
+						browserRecognitionEnabled={browserRecognitionEnabled && !preparingPhoto && pendingPhotoPrompt === null}
 					/>
 				)}
 				{!embedded && (
@@ -677,6 +703,7 @@ export function Composer({ client, snapshot, embedded = false }: ComposerProps):
 					</button>
 				</div>
 			</div>
+			{!readOnly && <SpeechInput speech={speech} />}
 		</div>
 	);
 }

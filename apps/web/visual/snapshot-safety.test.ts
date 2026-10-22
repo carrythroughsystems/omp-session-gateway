@@ -14,7 +14,11 @@ let key = "";
 
 beforeAll(async () => {
   fixture = await startDashboardFixture(INITIAL_SESSIONS);
-  const response = await fetch(`${fixture.origin}/api/v1/sessions/${INITIAL_SESSIONS[0].instanceId}/launch`, { method: "POST", body: JSON.stringify({ generation: 1, mode: "control" }) });
+  const response = await fetch(`${fixture.origin}/api/v1/sessions/${INITIAL_SESSIONS[0].instanceId}/launch`, {
+    method: "POST",
+    headers: { Origin: fixture.origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ generation: 1, mode: "control" }),
+  });
   const body: unknown = await response.json();
   if (body === null || typeof body !== "object" || !("capability" in body) || typeof body.capability !== "string") throw new Error("test fixture launch failed");
   canary = body.capability;

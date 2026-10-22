@@ -1,10 +1,13 @@
 import { createHmac } from "node:crypto";
 import {
+  CLIENT_CONFIG_VERSION,
   INSTANCE_ID_PATTERN,
+  LOCAL_FLEET_SOURCE_ID,
   MAX_FRAME_BYTES,
   MAX_PUSH_SUBSCRIPTION_BYTES,
   PUSH_API_VERSION,
   ProtocolValidationError,
+  type ClientConfigResponse,
   type LaunchMode,
   type SessionEvent,
   parseJsonFrame,
@@ -13,7 +16,13 @@ import {
   parsePushSubscriptionRequest,
   parsePushUnsubscribeRequest,
 } from "@omp-session-gateway/protocol";
-import { authorizeHttpRequest, isLoopbackAddress, requestHasValidMutationContext, type RequestPeer } from "./auth.ts";
+import {
+  authorizeHttpRequest,
+  isLoopbackAddress,
+  requestHasTrustedDashboardContext,
+  requestHasValidMutationContext,
+  type RequestPeer,
+} from "./auth.ts";
 import { createTailnetPresenceProbe } from "./tailnet.ts";
 import type { GatewayConfig } from "./config.ts";
 import { SafeLogger } from "./logger.ts";
@@ -22,6 +31,7 @@ import type { PushService } from "./push.ts";
 
 import { StaticAssetStore } from "./static.ts";
 import type { LaunchResolution } from "./omp-registry.ts";
+import { corsAdmission, finalizeHttpResponse, preflightDecision, type PreflightDecision } from "./http-policy.ts";
 
 /**
  * The launch side of the OMP reader, narrowed to what HTTP needs. Keeping it an interface means the
@@ -35,25 +45,6 @@ export interface LaunchBroker {
     readonly requestId?: string;
   }): Promise<LaunchResolution>;
 }
-
-const API_HEADERS: Record<string, string> = {
-  "Cache-Control": "no-store, max-age=0",
-  Pragma: "no-cache",
-  "Referrer-Policy": "no-referrer",
-  "X-Content-Type-Options": "nosniff",
-  "Cross-Origin-Resource-Policy": "same-origin",
-};
-
-const SECURITY_HEADERS: Record<string, string> = {
-  "Content-Security-Policy":
-    "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' wss://my.omp.sh; manifest-src 'self'; worker-src 'self'",
-  "Cross-Origin-Opener-Policy": "same-origin",
-  "Cross-Origin-Resource-Policy": "same-origin",
-  "Referrer-Policy": "no-referrer",
-  "X-Content-Type-Options": "nosniff",
-  "X-Frame-Options": "DENY",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()",
-};
 
 interface RateBucket {
   count: number;
@@ -90,17 +81,8 @@ class LaunchRateLimiter {
   }
 }
 
-function withSecurityHeaders(response: Response, api: boolean): Response {
-  const headers = api ? { ...SECURITY_HEADERS, ...API_HEADERS } : SECURITY_HEADERS;
-  for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
-  return response;
-}
-
 function problem(status: number, code: string, message: string): Response {
-  return withSecurityHeaders(
-    Response.json({ code, message }, { status, headers: { "Content-Type": "application/problem+json" } }),
-    true,
-  );
+  return Response.json({ code, message }, { status, headers: { "Content-Type": "application/problem+json" } });
 }
 
 async function readBoundedBody(request: Request, maximumBytes: number): Promise<Uint8Array> {
@@ -215,16 +197,13 @@ function eventStream(
     },
     { highWaterMark: 32 },
   );
-  return withSecurityHeaders(
-    new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        Connection: "keep-alive",
-        "X-Accel-Buffering": "no",
-      },
-    }),
-    true,
-  );
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 export function createHttpHandler(options: {
   readonly config: GatewayConfig;
@@ -274,16 +253,26 @@ export function createHttpHandler(options: {
   // Seeded sound so a healthy daemon says nothing at startup and only a change is reported. This
   // governs logging only; authorization always uses the measured value.
   let identityTrustLogged = true;
-  return async (request, peer): Promise<Response> => {
-    let url: URL;
-    try {
-      url = new URL(request.url);
-    } catch {
-      return problem(400, "bad_request", "Invalid request");
-    }
+  const route = async (
+    request: Request,
+    peer: RequestPeer | undefined,
+    url: URL,
+    admittedOrigin: string | undefined,
+    preflight: PreflightDecision | undefined,
+  ): Promise<Response> => {
     const clientRoute = request.method === "GET" && url.pathname === "/client/";
     const requestBootstrap = request.method === "GET" && parseNotificationRoute(url) !== undefined;
     const updateBootstrap = request.method === "GET" && url.pathname === "/update/";
+    const origin = request.headers.get("Origin");
+    if (
+      url.pathname.startsWith("/api/") &&
+      !(url.pathname === "/api/v1/health" && request.method === "GET") &&
+      origin !== null &&
+      origin !== config.http.publicOrigin &&
+      admittedOrigin === undefined
+    ) {
+      return problem(403, "forbidden", "Forbidden");
+    }
     if (url.search !== "" && !requestBootstrap) {
       return problem(400, "bad_request", "Query parameters are not accepted");
     }
@@ -295,7 +284,7 @@ export function createHttpHandler(options: {
       }
       const status = options.endpointHealthy?.() === false ? "degraded" : "ready";
       const challenge = request.headers.get("X-OMP-Readiness-Challenge");
-      if (challenge === null) return withSecurityHeaders(Response.json({ status }), true);
+      if (challenge === null) return Response.json({ status });
       if (options.readinessToken === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(challenge)) {
         return problem(400, "bad_request", "Invalid readiness challenge");
       }
@@ -305,10 +294,7 @@ export function createHttpHandler(options: {
         .update("\0")
         .update(instance)
         .digest("base64url");
-      return withSecurityHeaders(
-        Response.json({ status, proof, ...(instance === "" ? {} : { instance }) }),
-        true,
-      );
+      return Response.json({ status, proof, ...(instance === "" ? {} : { instance }) });
     }
 
     // Only `tailscale-serve` mode believes an identity header, so only it pays for the measurement.
@@ -332,8 +318,22 @@ export function createHttpHandler(options: {
       });
       return problem(403, "forbidden", "Forbidden");
     }
+    if (request.method === "OPTIONS" && url.pathname.startsWith("/api/")) {
+      return preflight?.allowed === true
+        ? new Response(null, { status: 204 })
+        : problem(403, "forbidden", "Forbidden");
+    }
+    if (url.pathname === "/api/v1/client-config" && request.method === "GET") {
+      const response: ClientConfigResponse = {
+        version: CLIENT_CONFIG_VERSION,
+        local: { id: LOCAL_FLEET_SOURCE_ID, label: config.fleet.label, origin: config.http.publicOrigin },
+        targets: config.fleet.targets.map(target => ({ id: target.id, label: target.label, origin: target.origin })),
+        speech: { browserRecognition: config.speech.browserRecognition },
+      };
+      return Response.json(response);
+    }
     if (url.pathname === "/api/v1/sessions" && request.method === "GET") {
-      return withSecurityHeaders(Response.json(registry.snapshot()), true);
+      return Response.json(registry.snapshot());
     }
     if (url.pathname === "/api/v1/events" && request.method === "GET") {
       // Re-read per keepalive: an admitted stream must not outlive the topology that justified it.
@@ -342,7 +342,7 @@ export function createHttpHandler(options: {
       );
     }
     if (url.pathname === "/api/v1/push/config" && request.method === "GET" && options.pushService !== undefined) {
-      return withSecurityHeaders(Response.json(options.pushService.configResponse()), true);
+      return Response.json(options.pushService.configResponse());
     }
     if (
       url.pathname === "/api/v1/push/subscription" &&
@@ -373,10 +373,7 @@ export function createHttpHandler(options: {
         }
         try {
           const detailLevel = await options.pushService.subscribe(authorization.identityKey, subscriptionRequest);
-          return withSecurityHeaders(
-            Response.json({ version: PUSH_API_VERSION, detailLevel }),
-            true,
-          );
+          return Response.json({ version: PUSH_API_VERSION, detailLevel });
         } catch {
           return problem(409, "subscription_rejected", "Push subscription could not be saved");
         }
@@ -389,7 +386,7 @@ export function createHttpHandler(options: {
         }
         await options.pushService.unsubscribe(authorization.identityKey, unsubscribeRequest);
       }
-      return withSecurityHeaders(new Response(null, { status: 204 }), true);
+      return new Response(null, { status: 204 });
     }
 
 
@@ -406,7 +403,10 @@ export function createHttpHandler(options: {
       if (!INSTANCE_ID_PATTERN.test(instanceId)) {
         return problem(400, "bad_request", "Invalid request");
       }
-      if (!requestHasValidMutationContext(request, config.http.publicOrigin)) {
+      const validContext = origin === config.http.publicOrigin
+        ? requestHasValidMutationContext(request, config.http.publicOrigin)
+        : requestHasTrustedDashboardContext(request, config.http.trustedDashboardOrigins) !== undefined;
+      if (!validContext) {
         return problem(403, "forbidden", "Forbidden");
       }
       if (request.headers.get("Content-Type")?.toLowerCase() !== "application/json") {
@@ -443,17 +443,45 @@ export function createHttpHandler(options: {
         generation: launchRequest.generation,
         capability: resolution.capability.reveal(),
       });
-      return withSecurityHeaders(response, true);
+      return response;
     }
 
     if (url.pathname.startsWith("/api/")) return problem(404, "not_found", "Not found");
     const staticResponse = staticAssets.response(
       clientRoute || requestBootstrap || updateBootstrap ? "/" : url.pathname,
     );
-    return withSecurityHeaders(
-      staticResponse ?? new Response("Not found", { status: 404 }),
-      clientRoute || requestBootstrap || updateBootstrap,
-    );
+    return staticResponse ?? new Response("Not found", { status: 404 });
+  };
+  return async (request, peer): Promise<Response> => {
+    let url: URL | undefined;
+    let admittedOrigin: string | undefined;
+    let preflight: PreflightDecision | undefined;
+    let response: Response;
+    try {
+      url = new URL(request.url);
+    } catch {
+      return finalizeHttpResponse(problem(400, "bad_request", "Invalid request"), config, {
+        document: false,
+        noStore: true,
+      });
+    }
+    try {
+      admittedOrigin = corsAdmission(request, config);
+      preflight = request.method === "OPTIONS" ? preflightDecision(request, config) : undefined;
+      response = await route(request, peer, url, admittedOrigin, preflight);
+    } catch {
+      logger.event("error", "http.request_failed");
+      response = problem(500, "internal_error", "Internal server error");
+    }
+    const bootstrap = request.method === "GET" &&
+      (url.pathname === "/client/" || url.pathname === "/update/" || parseNotificationRoute(url) !== undefined);
+    return finalizeHttpResponse(response, config, {
+      document: response.status < 400 && response.headers.get("Content-Type")?.startsWith("text/html") === true,
+      noStore: url.pathname.startsWith("/api/") || bootstrap ||
+        response.headers.get("Content-Type") === "application/problem+json",
+      ...(request.method === "OPTIONS" || admittedOrigin === undefined ? {} : { corsOrigin: admittedOrigin }),
+      ...(preflight?.allowed === true && response.status === 204 ? { preflight } : {}),
+    });
   };
 }
 

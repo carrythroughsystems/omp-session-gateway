@@ -1,21 +1,24 @@
 #!/usr/bin/env bun
 import { randomBytes } from "node:crypto";
-import { basename, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   type AuthMode,
   captureGatewayConfigFile,
   defaultGatewayPaths,
+  FLEET_CONFIG_SINCE_VERSION,
   type GatewayConfig,
   loadGatewayConfig,
   loadOrCreateReadinessToken,
   loadReadinessToken,
   loopbackHttpOrigin,
+  projectPreFleetConfig,
   publicOriginHttpsPort,
   restoreGatewayConfigFile,
   removeLegacyPublisherToken,
   rotateReadinessToken,
   writeGatewayConfigFile,
+  writePrivateTextFile,
 } from "./config.ts";
 import { createDiagnosticsBundle } from "./diagnostics.ts";
 import { gatewayReady, loopbackHttpResponds, runDoctorChecks } from "./doctor.ts";
@@ -433,7 +436,34 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
   if (!service.installed) throw new Error("refusing rollback without an installed gateway service");
   const target = await resolveRollbackTarget(config, requested);
   const readinessToken = await loadReadinessToken(config);
+  const targetVersion = basename(target.runtime.directory).slice(0, -13);
+  const configSnapshot = await captureGatewayConfigFile(config.paths.configPath);
+  const projection = configSnapshot.content === undefined || Bun.semver.order(targetVersion, FLEET_CONFIG_SINCE_VERSION) >= 0
+    ? undefined
+    : projectPreFleetConfig(JSON.parse(configSnapshot.content) as unknown);
+  const backupPath = join(config.paths.configDir, "config.pre-rollback.json");
+  if (projection !== undefined && projection.removedKeys.length > 0) {
+    try {
+      await writePrivateTextFile(backupPath, configSnapshot.content!, { exclusive: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new Error(`refusing rollback because ${backupPath} already exists; restore or move that backup first`);
+      }
+      throw error;
+    }
+  }
+  let configProjected = false;
   try {
+    if (projection !== undefined && projection.removedKeys.length > 0) {
+      configProjected = true;
+      await writePrivateTextFile(config.paths.configPath, `${JSON.stringify(projection.document, null, 2)}\n`);
+      console.log(
+        `Saved the full authored configuration to ${backupPath}; removed ${projection.removedKeys.join(", ")} from ${config.paths.configPath} for runtime ${targetVersion} (older than ${FLEET_CONFIG_SINCE_VERSION}).`,
+      );
+      console.log(
+        `To restore: first install ${FLEET_CONFIG_SINCE_VERSION} or newer, replace ${config.paths.configPath} with ${backupPath}, restart the gateway, and reload the PWA.`,
+      );
+    }
     // Same commit order as install: the service definition is rewritten first and `current.json`
     // only advances once the predecessor has proven readiness. See `activationState`.
     const readinessInstance =
@@ -446,11 +476,19 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
     console.log(
       `Rolled back ${definition.identifier} from ${target.from} to ${basename(target.runtime.directory)} (${target.selection}); loopback health ${service.active ? "ready" : "not started"}.`,
     );
-    console.log("Configuration and readiness token were preserved.");
+    console.log(configProjected ? "Readiness token was preserved." : "Configuration and readiness token were preserved.");
   } catch (error) {
     // The pointer never moved, so it still names the runtime that was last proven ready. Rebuilding
-    // the service definition from it is the repair half of the pointer-is-authority invariant.
+    // service definition from it is the repair half of the pointer-is-authority invariant.
     const repairErrors: unknown[] = [];
+    if (configProjected) {
+      try {
+        await restoreGatewayConfigFile(configSnapshot);
+        console.log(`Rollback failed; restored the authored configuration. The backup remains at ${backupPath}.`);
+      } catch (repairError) {
+        repairErrors.push(repairError);
+      }
+    }
     try {
       const authoritative = await currentInstalledRuntime(config);
       if (authoritative === undefined) throw new Error("current.json no longer names a verified installed runtime");
@@ -566,6 +604,9 @@ async function runServeGuidance(): Promise<void> {
   );
   console.log(`Allowlisted logins: ${config.auth.allowedLogins.length}. Keep tailnet grants restricted to the intended user/device.`);
   console.log("Tailscale Funnel is unsupported and must remain disabled.");
+  console.log(
+    "Fleet setup: the dashboard lists each target in fleet.targets; each target separately trusts the dashboard's exact origin in http.trustedDashboardOrigins and allows the Tailscale login in auth.allowedLogins. Reload the PWA after configuration changes.",
+  );
 }
 
 function printHelp(): void {
@@ -581,6 +622,11 @@ Usage:
   omp-gateway rotate-readiness-token
   omp-gateway serve [--dev-localhost] [--port 4317] [--origin http://127.0.0.1:4317]
   omp-gatewayd
+
+Fleet is opt-in in config.json: the dashboard lists fleet.targets, and each target trusts the
+dashboard's exact origin in http.trustedDashboardOrigins. The Tailscale login must separately be
+allowed at the target. Reload the PWA after configuration changes. Browser speech recognition is
+off unless speech.browserRecognition is true.
 `);
 }
 

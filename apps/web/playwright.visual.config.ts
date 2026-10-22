@@ -23,6 +23,10 @@ export default defineConfig({
     contextOptions: { reducedMotion: "reduce" },
     deviceScaleFactor: 1,
     serviceWorkers: "allow",
+    // The e2e fixture mirrors the production CSP (`style-src 'self'`) so the fleet specs prove the
+    // document's connect-src; this lane injects inline motion-disabling and guard styles, and it
+    // reviews geometry, not policy, so it bypasses CSP as it did before the fixture carried one.
+    bypassCSP: true,
     screenshot: "off",
     video: "off",
     trace: "off",

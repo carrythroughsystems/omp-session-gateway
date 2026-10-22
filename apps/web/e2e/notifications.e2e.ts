@@ -327,13 +327,15 @@ test("attention cards and explicit background alert settings stay metadata-only"
     await expect(page.locator(".queue-hero h2")).toHaveText("attention-viewonly-002");
     await expect(page.locator(".held-row .row-title")).toHaveText("attention-control-0001");
     const heldStorage = await page.evaluate(() =>
-      JSON.parse(localStorage.getItem("omp.sessions.held-asks.v1") ?? "null") as unknown,
+      JSON.parse(localStorage.getItem("omp.sessions.held-asks.v2") ?? "null") as unknown,
     );
     expect(heldStorage).toEqual([
       {
         instanceId: "attention-control-0001",
         requestId: "request-attention-control-0001",
         heldAt: expect.any(String),
+        sourceId: "local",
+        sourceOrigin: fixture.origin,
       },
     ]);
     await page.locator(".held-requeue").click();
@@ -421,13 +423,15 @@ test("attention cards and explicit background alert settings stay metadata-only"
     await expect(page.locator("#local-action-toast")).toBeVisible();
     await expect(page.locator("#local-action-toast-copy")).toContainText("on this device");
     const dismissedStorage = await page.evaluate(() =>
-      JSON.parse(localStorage.getItem("omp.sessions.dismissed.v1") ?? "null") as unknown,
+      JSON.parse(localStorage.getItem("omp.sessions.dismissed.v2") ?? "null") as unknown,
     );
     expect(dismissedStorage).toEqual([
       {
         instanceId: "ordinary-newest-0003",
         generation: 1,
         dismissedAt: expect.any(String),
+        sourceId: "local",
+        sourceOrigin: fixture.origin,
       },
     ]);
     await page.locator("#local-action-toast-undo").click();
@@ -447,7 +451,7 @@ test("attention cards and explicit background alert settings stay metadata-only"
     expect(fixture.requests).toHaveLength(requestsBeforeDismiss);
     await page.locator(".dismissed-control").getByRole("button", { name: "Show all" }).click();
     await expect(page.locator(".working-row")).toHaveCount(1);
-    expect(await page.evaluate(() => localStorage.getItem("omp.sessions.dismissed.v1"))).toBe("[]");
+    expect(await page.evaluate(() => localStorage.getItem("omp.sessions.dismissed.v2"))).toBe("[]");
 
     expect(await notificationState(page)).toMatchObject({ permissionRequests: 0, subscriptionActive: false });
     await page.locator("#settings").click();

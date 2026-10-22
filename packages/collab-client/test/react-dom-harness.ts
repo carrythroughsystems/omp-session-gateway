@@ -128,6 +128,14 @@ export class MiniElement extends MiniNode {
   scrollTop = 0;
   type = "";
   value = "";
+  oninput = null;
+  selectionStart = 0;
+  selectionEnd = 0;
+
+  setSelectionRange(start: number, end: number): void {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }
 
   get children(): MiniElement[] {
     return this.childNodes.filter((node): node is MiniElement => node instanceof MiniElement);
@@ -218,6 +226,21 @@ export class MiniDocument extends MiniNode {
   readonly body: MiniElement;
   activeElement: MiniElement | null;
   defaultView: unknown = null;
+  visibilityState = "visible";
+  oninput = null;
+  readonly events = new EventTarget();
+
+  override addEventListener(type: string, listener: Listener): void {
+    this.events.addEventListener(type, listener);
+  }
+
+  override removeEventListener(type: string, listener: Listener): void {
+    this.events.removeEventListener(type, listener);
+  }
+
+  dispatchEvent(event: Event): boolean {
+    return this.events.dispatchEvent(event);
+  }
 
   constructor() {
     super(undefined as unknown as MiniDocument);
@@ -305,8 +328,15 @@ const INSTALLED: Record<string, unknown> = {
 const nativeGlobals = new Map<string, PropertyDescriptor | undefined>();
 for (const name of Object.keys(INSTALLED)) {
   nativeGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
-  Object.defineProperty(globalThis, name, { configurable: true, value: INSTALLED[name] });
 }
+
+/** Reinstall after another test file restores its globals; the same document owns every tree. */
+export function installDomGlobals(): void {
+  for (const name of Object.keys(INSTALLED)) {
+    Object.defineProperty(globalThis, name, { configurable: true, value: INSTALLED[name] });
+  }
+}
+installDomGlobals();
 
 /** Hands the process back its own globals; call from `afterAll`. */
 export function restoreDomGlobals(): void {
@@ -340,6 +370,7 @@ export interface MountedTree {
 const mounted: Root[] = [];
 
 export async function mount(node: ReactNode): Promise<MountedTree> {
+  installDomGlobals();
   const container = document.createElement("div");
   document.body.appendChild(container);
   const createRoot = await loadCreateRoot();
@@ -373,9 +404,9 @@ export async function unmountAll(): Promise<void> {
 }
 
 /** Dispatches a click the way the browser would: capture then bubble listeners. */
-export async function click(node: MiniElement): Promise<void> {
+export async function dispatch(node: MiniElement, type: string, properties: Record<string, unknown> = {}): Promise<{ defaultPrevented: boolean }> {
   const event = {
-    type: "click",
+    type,
     target: node,
     bubbles: true,
     cancelable: true,
@@ -385,14 +416,20 @@ export async function click(node: MiniElement): Promise<void> {
     detail: 1,
     button: 0,
     buttons: 0,
-    preventDefault(): void {},
+    preventDefault(): void { this.defaultPrevented = true; },
     stopPropagation(): void {},
+    ...properties,
   };
   await act(async () => {
     for (let current: MiniNode | null = node; current !== null; current = current.parentNode) {
-      const listeners = current instanceof MiniElement ? current.listeners.get("click") : undefined;
+      const listeners = current instanceof MiniElement ? current.listeners.get(type) : undefined;
       if (listeners === undefined) continue;
       for (const listener of [...listeners]) listener(event);
     }
   });
+  return event;
+}
+
+export async function click(node: MiniElement): Promise<void> {
+  await dispatch(node, "click");
 }

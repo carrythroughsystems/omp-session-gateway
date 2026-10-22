@@ -152,6 +152,7 @@ export function App({ capability, onDispose, embedOptions }: AppProps): ReactNod
 			health => client.setGatewayHealth(health),
 			() => client.remeasureRelay(),
 			paused => client.setRelayProbesPaused(paused),
+			embedOptions?.probeGateway,
 		);
 		let unsubscribe = (): void => {};
 		const stop = (): void => {
@@ -162,7 +163,7 @@ export function App({ capability, onDispose, embedOptions }: AppProps): ReactNod
 			if (client.getSnapshot().phase === "ended") stop();
 		});
 		return stop;
-	}, [client]);
+	}, [client, embedOptions?.probeGateway]);
 
 	useEffect(() => {
 		if (!client) document.title = "OMP collaboration";
@@ -304,7 +305,7 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 										suppressAskTool
 									/>
 							</div>
-							<Composer client={client} snapshot={snap} embedded />
+							<Composer client={client} snapshot={snap} embedded browserRecognitionEnabled={embedOptions?.browserRecognitionEnabled === true} />
 						</div>
 					) : (
 						<div className="sh-transcript">
@@ -320,7 +321,7 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 						</div>
 					)}
 					{(!embedded || snap.uiRequest === null) && (
-						<Composer client={client} snapshot={snap} embedded={embedded} />
+						<Composer client={client} snapshot={snap} embedded={embedded} browserRecognitionEnabled={embedOptions?.browserRecognitionEnabled === true} />
 					)}
 				</section>
 				{!embedded && railOpen && (

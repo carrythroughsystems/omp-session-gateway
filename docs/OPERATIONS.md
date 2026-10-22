@@ -27,7 +27,7 @@ From the directory containing the verified archive on Linux or macOS, replace th
 tar -xf omp-session-gateway-*-bun.tar
 cd omp-session-gateway-*-bun
 bun apps/gateway/src/cli.js install \
-  --origin https://host.tailnet.ts.net \
+  --origin https://host.example.ts.net \
   --allow you@example.com
 bun apps/gateway/src/cli.js serve-guidance
 ```
@@ -37,7 +37,7 @@ On Windows, run the same steps in PowerShell, one command per line:
 ```powershell
 tar -xf (Get-Item omp-session-gateway-*-bun.tar).Name
 cd omp-session-gateway-*-bun
-bun apps/gateway/src/cli.js install --origin https://host.tailnet.ts.net --allow you@example.com
+bun apps/gateway/src/cli.js install --origin https://host.example.ts.net --allow you@example.com
 bun apps/gateway/src/cli.js serve-guidance
 ```
 
@@ -79,13 +79,14 @@ The gateway reads each discovery file's `endpoint` field verbatim because OMP ca
 
 ## 4. Gateway configuration
 
-`install --origin https://host.tailnet.ts.net --allow you@example.com` creates or updates `config.json`:
+`install --origin https://host.example.ts.net --allow you@example.com` creates or updates `config.json`:
 
 | Field | Default | Bounds | Meaning |
 |---|---|---|---|
 | `http.hostname` | `"127.0.0.1"` | `"127.0.0.1"` or `"::1"` | Loopback bind address; non-loopback addresses are rejected. |
 | `http.port` | `4317` | `1`–`65535` | Loopback HTTP port proxied by Tailscale Serve. |
 | `http.publicOrigin` | Set by `--origin` | Exact `https://` origin in production | External Tailscale Serve origin (exact `http://` loopback origin in `dev-localhost` mode). |
+| `http.trustedDashboardOrigins` | `[]` | `0`–`8` canonical origins (`https://` in `tailscale-serve` mode; loopback `http://127.0.0.1:<port>` or `http://[::1]:<port>` also allowed in `dev-localhost` mode; unique; `!= http.publicOrigin`) | Remote dashboard origins allowed to call `GET /api/v1/sessions` and `POST /api/v1/sessions/:instanceId/launch` via browser-direct CORS. |
 | `auth.mode` | `"tailscale-serve"` | `"tailscale-serve"` or `"dev-localhost"` | Production Tailscale Serve identity check or local development mode. |
 | `auth.allowedLogins` | Set by `--allow` | 1+ entries (`1`–`320` chars, no `*`) | Lowercased `Tailscale-User-Login` values allowed to access the gateway. |
 | `omp.discoveryDir` | `~/.omp/run/collab-hosts` | Absolute path, no NUL bytes | Explicit discovery path override when the service does not inherit a custom `PI_CONFIG_DIR`. |
@@ -93,10 +94,52 @@ The gateway reads each discovery file's `endpoint` field verbatim because OMP ca
 | `registry.heartbeatSeconds` | `10` | `2`–`60` | Seconds between discovery polls of OMP's host directory. |
 | `registry.ttlSeconds` | `35` | `5`–`300`, and `> 2 × heartbeatSeconds` | Seconds an existing session card is kept during transient query failures. |
 | `registry.maxSessions` | `100` | `1`–`1000` | Maximum concurrent hosts tracked in the in-memory registry. |
+| `fleet.label` | First DNS label of `http.publicOrigin` host (loopback dev origins keep the literal host) | `1`–`64` NFC code points (control/bidi stripped) | Display label for this host in `GET /api/v1/client-config` and the **Host** picker. |
+| `fleet.targets` | `[]` | `0`–`7` `{ id, label, origin }` entries (`id` matches `^[a-z][a-z0-9-]{0,31}$` and `!= "local"`; `label` `1`–`64` code points; canonical `origin != http.publicOrigin`; unique `id` and `origin`) | Remote gateways polled directly by this host's PWA (at most 8 sources total including `local`). |
+| `speech.browserRecognition` | `false` | `true` or `false` | When `true`, sets `Permissions-Policy: microphone=(self)` on document HTML responses and enables the opt-in Web Speech microphone control in writable **Control** sessions. |
 
 Only `ENOENT` or `ECONNREFUSED` proves a queried OMP host has exited; timeouts, permission or resource errors, and wire errors retain the card until `registry.ttlSeconds` expires. A host absent from OMP's discovery directory is removed on the next poll, and an absent discovery directory is valid when no sessions are sharing.
 
 Configuration parsing fails closed on unknown keys, wildcard addresses or logins, non-private file permissions, or invalid poll/TTL combinations.
+
+### Multi-host setup
+
+To list and launch sessions across multiple workstations from one installed **OMP Sessions** PWA, configure reciprocal trust between your home (dashboard) gateway and each remote target gateway ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):
+
+1. **On the home (dashboard) gateway**, add `fleet.label` (optional) and `fleet.targets` (up to 7 targets) to `config.json`:
+
+   ```json
+   {
+     "fleet": {
+       "label": "Studio",
+       "targets": [
+         {
+           "id": "workstation",
+           "label": "Workstation",
+           "origin": "https://workstation.example.ts.net"
+         }
+       ]
+     }
+   }
+   ```
+
+2. **On each remote target gateway**, add the home gateway's exact `http.publicOrigin` to `http.trustedDashboardOrigins` in `config.json`:
+
+   ```json
+   {
+     "http": {
+       "hostname": "127.0.0.1",
+       "port": 4317,
+       "publicOrigin": "https://workstation.example.ts.net",
+       "trustedDashboardOrigins": [
+         "https://studio.example.ts.net"
+       ]
+     }
+   }
+   ```
+
+3. **Verify Tailscale identity and policy on every host:** confirm your user login is in `auth.allowedLogins` on both gateways and that your tailnet policy grants your user-owned browser/phone device HTTPS access to both hosts.
+4. **Apply and reload:** re-run `omp-gateway install --origin <origin> --allow <login>` on each edited host (which preserves `http.trustedDashboardOrigins`, `fleet`, and `speech` verbatim and restarts the service), then **reload the installed PWA** so it fetches the updated `GET /api/v1/client-config`.
 
 ## 5. Tailscale Serve
 
@@ -199,10 +242,10 @@ To update the gateway to a newer release:
 
 1. Download and verify the new release archive ([Verify a published build](RELEASE.md#verify-a-published-build)).
 2. Extract the archive and run the same `install` command with your production `--origin` and `--allow` flags.
-3. The installer preserves your existing port (when `--port` is omitted), `registry` settings, authored `omp` overrides, `readiness-token`, and Web Push subscriptions, and switches the active runtime only after authenticated readiness passes.
+3. The installer preserves your existing port (when `--port` is omitted), `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `readiness-token`, and Web Push subscriptions, and switches the active runtime only after authenticated readiness passes.
 4. Run `bun apps/gateway/src/cli.js status` and `bun apps/gateway/src/cli.js doctor` from the new extraction directory.
 
-Running `omp` sessions do not need to be restarted across a gateway update; the next discovery poll repopulates the directory within `registry.heartbeatSeconds` (default 10 s). If you need to revert, `omp-gateway rollback` (or `rollback --to <version-dir>`) restores a retained gateway runtime and preserves `config.json` and `readiness-token`, but never downgrades or restarts `omp`. See [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md).
+Running `omp` sessions do not need to be restarted across a gateway update; the next discovery poll repopulates the directory within `registry.heartbeatSeconds` (default 10 s). If you need to revert, `omp-gateway rollback` (or `rollback --to <version-dir>`) restores a retained gateway runtime and preserves `readiness-token`, without downgrading or restarting `omp`. When rolling back to a retained runtime older than `FLEET_CONFIG_SINCE_VERSION` (`0.8.0`) while `http.trustedDashboardOrigins`, `fleet`, or `speech` is authored, `rollback` writes the full authored document to `<configDir>/config.pre-rollback.json` (`0600`, refusing the rollback if that file already exists), removes `http.trustedDashboardOrigins`, `fleet`, and `speech` from `config.json` before starting the older runtime, and prints restore steps (install `0.8.0` or newer, replace `config.json` with the backup, restart the gateway, and reload the PWA); see [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md#roll-back-to-a-retained-predecessor).
 
 ## 10. Lost phone and revocation
 
@@ -246,6 +289,8 @@ Pass `--output <path>` to choose a custom filename. The archive (`omp-gateway-di
 | Android stays unreachable after sleep or a Wi-Fi / cellular change | Android Chrome can wedge its network stack after a radio transition even after connectivity returns; after 45 seconds of visible failure, **OMP Sessions** shows recovery help. | Tap **Try again**; if it remains unreachable after 45 seconds, force-stop or swipe closed Chrome / **OMP Sessions** and reopen **OMP Sessions**. |
 | Background alerts are blocked or unavailable | Browser notification permission is denied, **OMP Sessions** is open in a regular Safari tab on iPhone/iPad instead of installed to the Home Screen, or push registration failed. | On iPhone or iPad, use Safari **Share → Add to Home Screen** and open the Home Screen app; open **Settings** in **OMP Sessions**, enable **Background alerts**, and allow notifications in browser/OS settings. |
 | Page returned to the directory after an update or reload | Capabilities live only in page memory and are never persisted; a service-worker update reloads an idle directory (or applies after you leave an active session). | Tap **View** or **Open request** in the directory to request a fresh capability. |
+| Remote host row shows `403` / `Access withdrawn.` (`forbidden`) vs `Cannot reach this host from this app.` | Remote hosts are polled every 10 seconds while visible (5-second request timeout, 35-second stale grace). A readable `403` means CORS admission succeeded (`http.trustedDashboardOrigins` on the target includes the dashboard origin) but the target gateway denied authorization (your login is missing from the target's `auth.allowedLogins`, the device is tagged, or the target has `loopbackTrustSound: false`); its rows are cleared, any open shell from that host shows `Access withdrawn` / closes, and polling pauses until **Retry** or returning to the foreground. `Cannot reach this host from this app.` means the browser blocked or failed the cross-origin fetch before a response could be read: the target host is offline, tailnet/MagicDNS/local-network access is blocked, or the target's `http.trustedDashboardOrigins` does not include the dashboard's exact `http.publicOrigin` (browsers make CORS blocks, DNS failures, and network timeouts indistinguishable to JavaScript). | For `403`, check `auth.allowedLogins` and `omp-gateway doctor` on the target host, then tap **Retry**. For `Cannot reach this host from this app.`, open the target's `https://` Serve origin directly in a browser tab to separate a host/tailnet outage from a missing `http.trustedDashboardOrigins` entry, update `config.json` on the target if needed, and tap **Retry**. |
+| Banner shows `Fleet configuration unavailable — reload this app` | `GET /api/v1/client-config` returned `200` with a malformed body, an unsupported `version`, or `local.origin` different from the browser's `location.origin` (for example, opening the gateway through a hostname that does not match `http.publicOrigin`). | Open the exact `http.publicOrigin` URL configured on the home gateway and tap **Reload**. |
 
 ## 12. Self-hosted relay mode
 

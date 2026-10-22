@@ -42,7 +42,9 @@ type SettleSend = (error?: unknown) => void;
 
 function config(root: string): GatewayConfig {
   return {
-    http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "http://127.0.0.1:4317" },
+    http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "http://127.0.0.1:4317", trustedDashboardOrigins: [] },
+    fleet: { label: "127.0.0.1", targets: [] },
+    speech: { browserRecognition: false },
     auth: { mode: "dev-localhost", allowedLogins: [] },
     omp: { discoveryDir: join(root, "omp", "run", "collab-hosts"), queryTimeoutMs: 1_500 },
     registry: { heartbeatSeconds: 10, ttlSeconds: 35, maxSessions: 100 },

@@ -150,7 +150,7 @@ hosts. OMP does not reconnect to or authenticate with the gateway.
 
 ## 4. Browser HTTP API
 
-Production requests are accepted only through the loopback Tailscale Serve proxy path and require an allowed identity. No CORS is enabled.
+Production requests are accepted only through the loopback Tailscale Serve proxy path and require an allowed identity. By default, no CORS is enabled; opt-in cross-origin access is permitted only for exact dashboard origins configured in `http.trustedDashboardOrigins` on the two routes specified under [Cross-origin access](#cross-origin-access).
 
 Every `/api/` response includes at least:
 
@@ -163,6 +163,40 @@ Cross-Origin-Resource-Policy: same-origin
 ```
 
 The server's access log must suppress query strings, request/response bodies, authorization headers, identity headers, and launch endpoint response sizes.
+
+### `GET /api/v1/client-config`
+
+Returns the public client bootstrap configuration (validated by [`schemas/client-config.schema.json`](../schemas/client-config.schema.json) and `parseClientConfigResponse`):
+
+```json
+{
+  "version": 1,
+  "local": {
+    "id": "local",
+    "label": "studio",
+    "origin": "https://studio.example.ts.net"
+  },
+  "targets": [
+    {
+      "id": "workstation",
+      "label": "Workstation",
+      "origin": "https://workstation.example.ts.net"
+    }
+  ],
+  "speech": {
+    "browserRecognition": false
+  }
+}
+```
+
+Requirements and behavior:
+
+- authenticated identically to `GET /api/v1/sessions`;
+- same-origin only: if an `Origin` request header is present and does not equal `http.publicOrigin`, the gateway returns `403 Forbidden`;
+- no query string allowed; `Cache-Control: no-store, max-age=0`; never receives CORS headers;
+- built from named fields only (`local = { id: "local", label: fleet.label, origin: http.publicOrigin }` where `fleet.label` defaults to the first DNS label of the `http.publicOrigin` host and loopback dev origins keep the literal host, `targets = fleet.targets`, `speech = { browserRecognition: speech.browserRecognition }`), bounded to `MAX_CLIENT_CONFIG_BYTES` (32 KiB), with at most 7 `targets` (8 sources total);
+- never spreads `GatewayConfig` and never includes `auth.allowedLogins`, `http.trustedDashboardOrigins`, filesystem paths, readiness or discovery tokens, or registry state;
+- older gateways without this endpoint return `404`, which the web app treats as local-only with `speech.browserRecognition = false` and no error banner; a `200` response with an invalid body, unsupported version, or `local.origin !== location.origin` is treated as a fleet bootstrap error (`Fleet configuration unavailable — reload this app`) while the local directory keeps working.
 
 ### `GET /api/v1/sessions`
 
@@ -324,8 +358,7 @@ metadata, not an authorization credential.
 
 Requirements:
 
-- exact same-origin `Origin`;
-- `Sec-Fetch-Site` of `same-origin` when present;
+- exact same-origin `Origin` (with `Sec-Fetch-Site: same-origin` when present), or an exact configured origin in `http.trustedDashboardOrigins` under [Cross-origin access](#cross-origin-access) (with `Sec-Fetch-Site` absent or in `{same-site, cross-site}`);
 - `Content-Type: application/json` with no ambiguous encodings;
 - verified and allowed Tailscale identity;
 - current generation match and fresh successful host observation;
@@ -363,6 +396,24 @@ but an unsafe or unreadable directory degrades discovery. No directory path, tok
 detail appears in this response. The optional HMAC challenge/response uses the gateway’s private
 readiness token and keeps its existing shape; that token is never given to OMP.
 
+
+### Cross-origin access
+
+When `http.trustedDashboardOrigins` is non-empty (up to 8 canonical origins), the gateway admits browser-direct CORS requests from those exact origins on a strictly bounded surface ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):
+
+- **Allowed routes and methods:** only `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and `OPTIONS` preflight on those two exact paths. `/api/v1/events`, `/api/v1/push/config`, `/api/v1/push/subscription`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin.
+- **Origin admission:** the request `Origin` header must be a single canonical origin present in `http.trustedDashboardOrigins`. Missing, `null`, `*`, malformed, or multi-valued `Origin` headers are not admitted. Any foreign non-admitted `Origin` on any `/api/` route except loopback `GET /api/v1/health` is refused with `403` (`forbidden`) and no CORS headers before identity checks.
+- **Normal authorization applies:** admitted cross-origin requests still run the full target-gateway authorization path (loopback peer check, TUN-mode Tailscale Serve verification, second-hop proxy header refusal, `auth.allowedLogins` check, rate limiting, and body-size bounds).
+- **Cross-origin launch mutation context (`requestHasTrustedDashboardContext`):** cross-origin `POST /api/v1/sessions/:instanceId/launch` requires `Origin` in `http.trustedDashboardOrigins`, `Sec-Fetch-Site` absent or in `{same-site, cross-site}` (`none` and `same-origin` are rejected on the cross-origin path), and `Content-Type` exactly `application/json`. `requestHasValidMutationContext` is unchanged for local launches and push subscription mutations.
+- **Response headers on admitted requests:** responses add `Access-Control-Allow-Origin: <exact matched origin>` and `Vary: Origin`, keep `Cache-Control: no-store, max-age=0`, and never emit `Access-Control-Allow-Credentials` or a wildcard. Problem responses (`400`, `403`, `404`, `409`, `413`, `415`, `429`, `500`) for an admitted origin on those two routes carry the same `Access-Control-Allow-Origin` and `Vary: Origin` headers so the dashboard can distinguish a readable `403` from a network or CORS failure.
+- **Preflight (`OPTIONS`):** handled only on `/api/v1/sessions` and `/api/v1/sessions/:instanceId/launch`, authenticated through the normal identity path, without querying OMP or consuming launch rate-limit tokens. A valid preflight requires `Origin` in `http.trustedDashboardOrigins`, `Access-Control-Request-Method` matching the route (`GET` for `/api/v1/sessions`, `POST` for `/api/v1/sessions/:instanceId/launch`), and `Access-Control-Request-Headers` absent for `GET` or containing only `content-type` (case-insensitive) for `POST`. It returns `204 No Content` with:
+  - `Access-Control-Allow-Origin: <exact matched origin>`
+  - `Access-Control-Allow-Methods: GET` (or `POST`)
+  - `Access-Control-Allow-Headers: Content-Type` (`POST` only)
+  - `Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers`
+  - `Cache-Control: no-store, max-age=0` (and no `Access-Control-Max-Age`)
+
+  Any other `OPTIONS` request returns `403 Forbidden` with no CORS headers.
 ## 5. In-memory collab client bootstrap
 
 Shipped same-page API, defined in `packages/collab-client/upstream/src/embed.ts`:
@@ -390,7 +441,9 @@ Requirements:
 - clear references on disconnect/leave and call `onDispose`;
 - reload returns to the directory rather than reconnecting.
 - treat browser network APIs only as remeasurement triggers; derive gateway and relay state from
-  same-origin HTTP results, passive host traffic, and optional encrypted health ping/pong frames;
+  `CollabEmbedOptions.probeGateway` (or the default same-origin `GET /api/v1/health` probe when `probeGateway` is omitted), passive host traffic, and optional encrypted health ping/pong frames;
+- when `probeGateway(signal)` is supplied, it returns `Promise<GatewayProbeResult>` (`"healthy" | "unavailable" | "forbidden"`), where `"healthy"` requires a parsed session list from the selected source's `GET <origin>/api/v1/sessions`, `"forbidden"` reflects a readable `403` and sets `gatewayHealth.state = "forbidden"` (`PathHealthState` includes `"forbidden"`, and the embedded client's shell chip shows `Access withdrawn`) without refreshing the relay or scheduling automatic probe retries (a later visibility or online transition may probe once more), and `"unavailable"` follows the existing degraded/unreachable recovery path;
+- when `CollabEmbedOptions.browserRecognitionEnabled` is `true` (from `speech.browserRecognition`), enable the opt-in Web Speech (`SpeechRecognition` / `webkitSpeechRecognition`) microphone control in writable **Control** sessions only: configure the recognizer with `lang = navigator.language || "en-US"`, `continuous = true`, `interimResults = true`, one alternative (`maxAlternatives = 1`), and no automatic restart; enforce a `10 s` start watchdog (`SPEECH_START_TIMEOUT_MS`), a `120 s` capture limit (`SPEECH_CAPTURE_LIMIT_MS`), and a `5 s` stop watchdog (`SPEECH_STOP_TIMEOUT_MS`); bound the review buffer to `128` segments (`MAX_SPEECH_SEGMENTS`), `8,000` Unicode code points (`MAX_SPEECH_CODEPOINTS`), and `32 KiB` UTF-8 (`MAX_SPEECH_BYTES`); use the fixed keyboard-dictation help `"Use your keyboard's microphone key to dictate into this box. iPhone: Settings → General → Keyboard → Enable Dictation. Dictation never sends — tap Send when the text is right."` and pre-start disclosure `"Your browser or OS may send audio to its speech provider before any OMP prompt is sent."`; keep recognized text in the editable review buffer until the user explicitly taps **Use text**; and keep **Use text** separate from **Send**;
 - keep a submitted host UI response visible and disabled until `ui-request-end`; resend it after a
   fresh welcome, and accept a targeted end frame as the idempotent acknowledgement when the host
   already settled that request;
@@ -445,3 +498,5 @@ cache; reload returns to the directory.
 - A mismatch never returns a capability.
 - Expired and removed records are indistinguishable to remote callers.
 - A session removed while a client page is opening closes or resets that page with a generic message.
+- In the web app, every session is addressed in memory by `SourceKey = id + "\0" + origin`, `SessionRef = { sourceKey, instanceId, generation, requestId? }`, and session map key `sourceKey + "\0" + instanceId`. The source key is a browser-only discriminator and is never concatenated into an OMP `instanceId` or sent in any HTTP request, route, or relay frame. Device-local triage records in `localStorage` use `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2` carrying `sourceId` and `sourceOrigin`.
+- Remote fleet sources (`fleet.targets`) do not open `EventSource` streams. Each remote source maintains its own epoch, request sequence, revision, freshness timestamp, and error state, polling `GET <origin>/api/v1/sessions` with `{ mode: "cors", credentials: "omit", cache: "no-store", redirect: "error", signal }` on visible start and every 10 seconds while visible (at most 1 request in flight per source, 5-second request timeout, 35-second stale grace window before last-seen rows expire, 8 MiB body limit, and 1 s → 30 s jittered failure backoff). A readable `403` transitions the remote source to `forbidden` (`Access withdrawn.`), clears its rows, disposes any active shell from that source, and pauses automatic polling until **Retry** or a foreground (`visibilitychange`, `pageshow`, or `online`) transition. Hidden or frozen pages abort in-flight remote polls without recording a failure and refresh immediately on `visibilitychange`, `pageshow`, or `online` before re-enabling stale actions. Within a remote source's current epoch, the latest completed request is authoritative (accepting a lower revision after a remote daemon restart) and older or prior-epoch responses are discarded; revisions are never compared across sources.

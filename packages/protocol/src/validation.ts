@@ -1,5 +1,10 @@
 import { ProtocolValidationError, SecretCapability } from "./secret.ts";
 import {
+  CLIENT_CONFIG_VERSION,
+  FLEET_SOURCE_ID_PATTERN,
+  LOCAL_FLEET_SOURCE_ID,
+  MAX_FLEET_LABEL_CODEPOINTS,
+  MAX_FLEET_TARGETS,
   MAX_FRAME_BYTES,
   INSTANCE_ID_PATTERN,
   MAX_LABEL_CODEPOINTS,
@@ -11,6 +16,8 @@ import {
   PUSH_API_VERSION,
   type AttentionPushMessage,
   type BrowserPushSubscription,
+  type ClientConfigResponse,
+  type FleetSource,
   type LaunchMode,
   type LaunchRequest,
   type LaunchResponse,
@@ -691,6 +698,81 @@ export function parseLaunchResponse(value: unknown): LaunchResponse {
     generation: requireInteger(record.generation, 1),
     capability: SecretCapability.from(record.capability).reveal(),
   };
+}
+
+const LOOPBACK_HOSTNAMES: Readonly<Record<string, true>> = { "127.0.0.1": true, "[::1]": true };
+
+/**
+ * A gateway origin the browser may contact directly. Only the canonical `URL.origin` spelling is
+ * accepted, so credentials, paths, queries, fragments, default ports, and case variants are all
+ * rejected rather than silently aliased. HTTPS is required except for loopback development
+ * origins, which only a `dev-localhost` gateway ever publishes.
+ */
+export function parseFleetOrigin(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 256) throw new ProtocolValidationError();
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ProtocolValidationError();
+  }
+  if (url.origin !== value) throw new ProtocolValidationError();
+  if (url.protocol === "https:") return value;
+  if (url.protocol === "http:" && LOOPBACK_HOSTNAMES[url.hostname] === true) return value;
+  throw new ProtocolValidationError();
+}
+
+export function parseFleetSourceId(value: unknown): string {
+  if (typeof value !== "string" || !FLEET_SOURCE_ID_PATTERN.test(value)) throw new ProtocolValidationError();
+  return value;
+}
+
+/** Operator-authored display text: NFC, control and bidi characters stripped, 1..64 code points. */
+export function parseFleetLabel(value: unknown): string {
+  if (typeof value !== "string") throw new ProtocolValidationError();
+  const normalized = value.normalize("NFC").replace(DISALLOWED_LABEL_PATTERN, "").trim();
+  const length = [...normalized].length;
+  if (length === 0 || length > MAX_FLEET_LABEL_CODEPOINTS) throw new ProtocolValidationError();
+  return normalized;
+}
+
+function parseFleetSource(value: unknown): FleetSource {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["id", "label", "origin"]);
+  return {
+    id: parseFleetSourceId(record.id),
+    label: parseFleetLabel(record.label),
+    origin: parseFleetOrigin(record.origin),
+  };
+}
+
+/**
+ * `GET /api/v1/client-config`. Strict like every gateway-owned wire: the browser must not guess a
+ * fleet from a response it does not fully understand. Targets are unique by id and by origin and
+ * never reuse the local identity, so a session reference can bind to exactly one source.
+ */
+export function parseClientConfigResponse(value: unknown): ClientConfigResponse {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["version", "local", "targets", "speech"]);
+  if (record.version !== CLIENT_CONFIG_VERSION) throw new ProtocolValidationError();
+  const local = parseFleetSource(record.local);
+  if (local.id !== LOCAL_FLEET_SOURCE_ID) throw new ProtocolValidationError();
+  if (!Array.isArray(record.targets) || record.targets.length > MAX_FLEET_TARGETS) {
+    throw new ProtocolValidationError();
+  }
+  const ids = new Set([local.id]);
+  const origins = new Set([local.origin]);
+  const targets = record.targets.map((entry) => {
+    const target = parseFleetSource(entry);
+    if (ids.has(target.id) || origins.has(target.origin)) throw new ProtocolValidationError();
+    ids.add(target.id);
+    origins.add(target.origin);
+    return target;
+  });
+  const speech = requireRecord(record.speech);
+  requireExactKeys(speech, ["browserRecognition"]);
+  if (typeof speech.browserRecognition !== "boolean") throw new ProtocolValidationError();
+  return { version: CLIENT_CONFIG_VERSION, local, targets, speech: { browserRecognition: speech.browserRecognition } };
 }
 
 /**

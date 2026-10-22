@@ -28,6 +28,7 @@ const required = [
   "docs/UPGRADE_ROLLBACK.md",
   "schemas/omp-host-registry.schema.json",
   "schemas/session-list.schema.json",
+  "schemas/client-config.schema.json",
   "schemas/launch-request.schema.json",
   "schemas/launch-response.schema.json",
   "schemas/sse-event.schema.json",
@@ -233,6 +234,34 @@ export function checkUnsafeFinally(relativePath: string, source: string): string
   return violations;
 }
 
+/**
+ * Document-context web sources schedule every timer through `window` or an injected clock. A bare
+ * global timer cannot be cancelled by the page's owner, and in the unit harness it outlives the
+ * fake document it would render into: a fleet grace timer once fired during another test file.
+ * The service worker is a different global and is excluded.
+ */
+export function checkDocumentTimers(relativePath: string, source: string): string[] {
+  if (!/^apps\/web\/src\/(?!service-worker\.ts$).+\.ts$/u.test(relativePath)) return [];
+  const tokens = [...sourceTokens(source)];
+  const violations: string[] = [];
+  for (const [index, token] of tokens.entries()) {
+    if (!/^(?:set|clear)(?:Timeout|Interval)$/u.test(token.value) || tokens[index + 1]?.value !== "(") continue;
+    const previous = tokens[index - 1]?.value ?? "";
+    // Member access and `function setTimeout` definitions are not global calls.
+    if (previous === "." || previous === "?." || previous === "function") continue;
+    // A method signature in an interface or type literal: `setTimeout(...): number;`.
+    let depth = 0;
+    let close = index + 1;
+    for (; close < tokens.length; close++) {
+      if (tokens[close]?.value === "(") depth++;
+      else if (tokens[close]?.value === ")" && --depth === 0) break;
+    }
+    if (tokens[close + 1]?.value === ":" && /^(?:\{|\}|;|,)$/u.test(previous)) continue;
+    violations.push(relativePath + ":" + token.line + ": bare " + token.value + "; schedule through window or an injected clock");
+  }
+  return violations;
+}
+
 async function main(): Promise<void> {
   const errors: string[] = [];
   for (const rel of required) {
@@ -252,6 +281,7 @@ async function main(): Promise<void> {
     const text = await readFile(file, "utf8");
     errors.push(...checkProviderReads(rel, text));
     errors.push(...checkUnsafeFinally(rel, text));
+    errors.push(...checkDocumentTimers(rel, text));
     if (rel === "scripts/check-repository.ts") continue;
     // adb argv must be constructed only by its redacting, exit-checking owner, including calls
     // routed through generic subprocess wrappers. The one executable-prerequisite list is not argv.
@@ -307,6 +337,7 @@ async function main(): Promise<void> {
     "UPSTREAM.lock.json",
     "schemas/omp-host-registry.schema.json",
     "schemas/session-list.schema.json",
+    "schemas/client-config.schema.json",
     "schemas/launch-request.schema.json",
     "schemas/launch-response.schema.json",
     "schemas/sse-event.schema.json",
