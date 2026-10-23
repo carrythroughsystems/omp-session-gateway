@@ -79,6 +79,8 @@ export interface DriverState {
   publicationRun?: string | undefined;
   recordPr?: number | undefined;
   failedMain?: string | undefined;
+  /** Retired selections remain auditable; tags, jobs and qualification receipts never move. */
+  retired?: { candidate: string; reason: string; at: string; issue: number; preparePr?: number; failedMain?: string }[];
   /** Attempt zero preserves the original job paths. Each authorized retry gets a new ordinal. */
   campaignAttempt?: number | undefined;
   resumeDeviceCloud?: boolean | undefined;
@@ -151,7 +153,7 @@ export interface RepositorySnapshot {
   authorityFailure?: RoutineHoldReason;
   evidence?: RoutineEvidence;
   smoke?: JobObservation;
-  /** A failed host lease must first be recovered manually; a new request cannot steal it. */
+  /** True unless the failed lease is absent or its completed cleanup permits owner-only recovery. */
   hostRecoveryRequired?: boolean;
 }
 export interface DriverConfig { bot: string; founder: string }
@@ -161,8 +163,17 @@ export interface Decision {
   detail: string;
   links?: string[];
   pr?: PullRequest;
-  patch?: Partial<DriverState>;
+  patch?: { [Key in keyof DriverState]?: Exclude<DriverState[Key], undefined> };
+  /** JSON preserves deletion intent; assigning undefined in a persisted patch does not. */
+  clear?: (keyof Pick<DriverState, "preparePr" | "orderPr" | "updatedHead" | "candidateCommit" | "candidateDigest" |
+    "approvePr" | "approvedHead" | "approvedTree" | "stableCommit" | "stableDigest" | "publicationRun" |
+    "recordPr" | "failedMain" | "holdReason" | "holdCommit" | "infrastructureHold" | "resumeDeviceCloud" | "macHost">)[];
   holdReason?: RoutineHoldReason;
+}
+export function applyDecisionPatch(state: DriverState, step: Pick<Decision, "patch" | "clear">): DriverState {
+  const next = { ...state, ...step.patch };
+  for (const key of step.clear ?? []) delete next[key];
+  return next;
 }
 export interface Idle { operation: "idle"; detail: string; holdReason?: RoutineHoldReason }
 export function compareVersions(a: string, b: string): number {
@@ -207,7 +218,8 @@ function refuse(pr: PullRequest | undefined, config: DriverConfig, role: string)
 export function routineHold(reason: RoutineHoldReason, sourceCommit?: string): Decision {
   const holdCommit = reason === "out-of-class" ? sourceCommit : undefined;
   return decision("hold", "held", "routine release held: " + reason + (holdCommit === undefined ? "" : " at source commit " + holdCommit),
-    { holdReason: reason, patch: { holdReason: reason, holdCommit } });
+    { holdReason: reason, patch: { holdReason: reason, ...(holdCommit === undefined ? {} : { holdCommit }) },
+      ...(holdCommit === undefined ? { clear: ["holdCommit"] } : {}) });
 }
 export function promotionHold(state: DriverState, repo: RepositorySnapshot, config: DriverConfig, merged = false): RoutineHoldReason | undefined {
   const reason = routineReleaseHold({
@@ -221,33 +233,46 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
   if (state?.intent !== undefined) return state.intent;
   if (state?.phase === "infrastructure-held") return idle("device-cloud infrastructure held; explicit retry-device-cloud authorization required; no automatic retry");
   if (repo.authorityFailure !== undefined) return routineHold(repo.authorityFailure);
-  if (state?.holdReason !== undefined) return idle("held: " + state.holdReason + (state.holdCommit === undefined ? "" : " at source commit " + state.holdCommit) + "; inspect exact subject before operator recovery");
+  const stalePrepare = state?.phase === "held" && state.holdReason === "stale-source"
+    && state.candidateCommit === undefined && (repo.prepare === undefined ? state.preparePr === undefined : !repo.prepare.merged);
+  if (state?.holdReason !== undefined && !stalePrepare) return idle("held: " + state.holdReason + (state.holdCommit === undefined ? "" : " at source commit " + state.holdCommit) + "; inspect exact subject before operator recovery");
   if (state === undefined || state.phase === "closed") {
-    const issue = selectRequest(repo.issues);
+    const issue = selectRequest(repo.issues.filter(issue => state?.phase !== "closed" || issue.number !== state.issue.number));
     if (issue === undefined) return idle("no open tracking issue; idle");
     const version = nextReleaseVersion(repo.latestStable, parseReleaseClass(issue.releaseClass));
     return decision("select", "selected", `request ${requestVersion(issue)} for gateway v${version}`, { patch: {
       schemaVersion: 1, sequence: 0, issue, version, candidate: nextCandidate(version, repo.tags), selectedMain: repo.main, previousStable: repo.latestStable, date,
     }, links: [issue.url] });
   }
-  const failure = (detail: string) => decision("stop", "diagnostic-required", detail + (["qualifying", "smoking"].includes(state.phase) ? "; inspect and recover the exact owning release-host lease before further device work" : ""), { patch: { failedMain: repo.main } });
+  const failure = (detail: string) => decision("stop", "diagnostic-required", detail + (["qualifying", "smoking"].includes(state.phase) ? "; inspect and recover the exact owning release-host lease before further device work" : ""), {
+    // The kill switch may defer observation until after the fix landed. Bind failure to what ran.
+    patch: { failedMain: state.phase === "qualifying" ? state.candidateCommit ?? state.selectedMain : repo.main },
+  });
   if (state.phase === "stopped") return idle("stopped; founder/operator intervention required");
-  if (state.phase === "diagnostic-required") {
-    if (state.stableCommit !== undefined) return idle("diagnostic-required after approval/publication; preserve the immutable release and reconcile manually");
+  if (state.phase === "diagnostic-required" || stalePrepare) {
+    if (state.stableCommit !== undefined || repo.tags.includes(`v${state.version}`) || compareVersions(repo.latestStable, state.version) >= 0) {
+      return idle("diagnostic-required after approval/publication; preserve the immutable release and reconcile manually");
+    }
     // An order PR's "Closes #N" closes the tracking issue when it merges, so a retry request for the
     // same version opens a new one (v0.7.5: #369 closed #368; the retry opened #374).
     const matching = repo.issues.filter(issue => requestVersion(issue) === requestVersion(state.issue)
       && parseReleaseClass(issue.releaseClass) === parseReleaseClass(state.issue.releaseClass));
     const request = matching.find(issue => issue.number === state.issue.number) ?? selectRequest(matching);
-    if (request === undefined || request.request === state.issue.request || repo.main === state.failedMain) return idle("diagnostic-required; no retry without a new request and a main fix");
+    const failedMain = state.failedMain ?? (stalePrepare ? state.selectedMain : undefined);
+    if (request === undefined || !/^[1-9][0-9]*:[1-9][0-9]*$/u.test(request.request)
+      || (request.number !== state.issue.number && request.request === state.issue.request)
+      || failedMain === undefined || repo.main === failedMain) return idle("diagnostic-required; no retry without an open successful request and a main fix");
     if (repo.hostRecoveryRequired) return idle("diagnostic-required; recover the failed release-host lease before a new candidate");
-    return decision("rerequest", "selected", "new request after a main fix; preserve failed receipt and use next prealpha", { patch: {
-      issue: request, selectedMain: repo.main, candidate: nextCandidate(state.version, repo.tags),
-      preparePr: undefined, orderPr: undefined, updatedHead: undefined, candidateCommit: undefined, candidateDigest: undefined, approvePr: undefined,
-      approvedHead: undefined, approvedTree: undefined, stableCommit: undefined, stableDigest: undefined,
-      publicationRun: undefined, recordPr: undefined, failedMain: undefined,
-      campaignAttempt: 0, infrastructureHold: undefined, resumeDeviceCloud: undefined, macHost: undefined,
-    } });
+    return decision("rerequest", "selected", "re-select open request after a main fix; preserve failed receipt and use next prealpha", {
+      ...(repo.prepare === undefined || repo.prepare.merged ? {} : { pr: repo.prepare }), patch: {
+      issue: request, selectedMain: repo.main, candidate: nextCandidate(state.version, [...repo.tags, state.candidate, ...(state.retired ?? []).map(item => item.candidate)]),
+      retired: [...state.retired ?? [], { candidate: state.candidate, reason: stalePrepare ? "stale-source" : "diagnostic-required",
+        at: new Date().toISOString(), issue: state.issue.number,
+        ...((state.preparePr ?? repo.prepare?.number) === undefined ? {} : { preparePr: state.preparePr ?? repo.prepare!.number }), failedMain }],
+      campaignAttempt: 0,
+    }, clear: ["preparePr", "orderPr", "updatedHead", "candidateCommit", "candidateDigest", "approvePr",
+      "approvedHead", "approvedTree", "stableCommit", "stableDigest", "publicationRun", "recordPr",
+      "failedMain", "holdReason", "holdCommit", "infrastructureHold", "resumeDeviceCloud", "macHost"] });
   }
   if (["selected", "order-updated", "order-ready", "order-landed", "held"].includes(state.phase)) {
     const comparison = compareVersions(repo.upstreamTag, requestVersion(state.issue)!);
@@ -328,7 +353,7 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
     const pr = repo.approve!;
     if (state.phase === "approved") return decision("tag-stable", "stable-tagged", "sign and push the exact routine-authorized stable merge");
     if (!pr.merged) return decision("merge-approve", "approved", "standing routine authority: merge the exact checked promotion", { pr });
-    return decision("accept-approval", "approved", "observed exact-subject release-bot merge", { patch: { stableCommit: pr.mergeCommit }, links: [pr.url] });
+    return decision("accept-approval", "approved", "observed exact-subject release-bot merge", { patch: { stableCommit: pr.mergeCommit! }, links: [pr.url] });
   }
   if (state.phase === "stable-published") return decision("verify-stable", "stable-verified", `verify v${state.version}, GitHub Latest and rebuilt archive digest`);
   if (state.phase === "stable-verified") return decision("start-smoke", "smoking", `detached published-byte smoke for v${state.version} with --force-reinstall and --rebuild-omp`);
@@ -341,13 +366,14 @@ export interface DriverPort {
   save(state: DriverState): Promise<void>;
   snapshot(state: DriverState | undefined): Promise<RepositorySnapshot>;
   /** Must be replay-safe: inspect deterministic PR branch/tag/job identity before creating.
-   *  Throws StaleIntentError only when it refused before any effect because a pinned input moved. */
+   *  StaleIntentError refuses release advancement when pinned inputs move. Retry-only lease/PR
+   *  retirement may already be durably reconciled; it never advances the failed selection. */
   perform(step: Decision, state: DriverState): Promise<Partial<DriverState>>;
   /** Reconcile marker on the issue, accepting only comments authored by the configured bot. */
   announce(issue: number, body: string, marker: string): Promise<void>;
 }
-/** A saved intent's pinned input (a PR head, its checks) moved before the intent had any effect.
- *  Replaying it can never succeed, so the tick drops it and the next tick plans afresh. */
+/** A saved intent's pinned input moved before release advancement. Retry-only cleanup may have
+ *  settled durably, but the failed selection stays intact and the next tick plans afresh. */
 export class StaleIntentError extends Error {}
 /** At most one state transition. The caller holds the tick mutex; plan never calls save/perform. */
 export async function tick(port: DriverPort, config: DriverConfig, plan = false): Promise<Decision | Idle> {
@@ -366,7 +392,7 @@ export async function tick(port: DriverPort, config: DriverConfig, plan = false)
   await port.save(state);
   let result: Partial<DriverState>;
   try {
-    result = await port.perform(step, { ...state, ...step.patch });
+    result = await port.perform(step, step.operation === "rerequest" ? state : applyDecisionPatch(state, step));
   } catch (error) {
     if (error instanceof RoutineHoldError) {
       step = routineHold(error.reason, error.sourceCommit);
@@ -378,7 +404,7 @@ export async function tick(port: DriverPort, config: DriverConfig, plan = false)
       return idle("re-planning: " + step.operation + " refused before any effect (" + error.message + ")");
     }
   }
-  state = { ...state, ...step.patch, ...result, phase: step.phase, sequence: state.sequence + 1 };
+  state = { ...applyDecisionPatch(state, step), ...result, phase: step.phase, sequence: state.sequence + 1 };
   delete state.intent;
   const marker = `<!-- release-driver:${createHash("sha256").update(`${state.issue.number}:${state.issue.request}:${state.candidate}:${state.sequence}:${state.phase}`).digest("hex")} -->`;
   state.announcement = { marker, body: [`release-driver: ${state.phase} — ${step.detail.replace(/[\r\n]/gu, " ")}`, ...(step.links ?? []), marker].join("\n") };

@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import { nextReleaseVersion, parseReleaseClass, REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_HOLD_REASONS, ROUTINE_EVIDENCE_STEPS, GENERATED_RELEASE_PATHS, generatedReleaseKind, generatedReleaseFilesMatch, routineProtectedPath, routineReleaseHold, assertStableReleaseQualification, releasePolicy, releaseVersion } from "./release-policy.ts";
+import { repositoryFiles } from "./repository-files.ts";
+import { nextReleaseVersion, parseReleaseClass, REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_HOLD_REASONS, ROUTINE_EVIDENCE_STEPS, GENERATED_RELEASE_PATHS, generatedReleaseKind, generatedReleaseFilesMatch, routinePathClassification, routineProtectedPath, routineReleaseHold, assertStableReleaseQualification, releasePolicy, releaseVersion } from "./release-policy.ts";
 
 
 describe("standing routine release authority", () => {
@@ -48,8 +49,24 @@ describe("standing routine release authority", () => {
     for (const invalid of ["major", "", null, "MINOR"]) expect(() => parseReleaseClass(invalid)).toThrow("release class");
     for (const invalid of ["0.7.7", "v00.7.7", "v0.7.8-prealpha.1"]) expect(() => nextReleaseVersion(invalid)).toThrow("published stable");
   });
-  test.each([".github/workflows/release-request.yml", ".github/workflows/signed-release.yml", ".github/CODEOWNERS", "scripts/release-policy.ts", "scripts/release-driver-runtime.ts", "scripts/release-host-lease.ts", "scripts/post-release-smoke.ts", "scripts/stable-qualification.ts", "scripts/check-repository.ts", "schemas/stable-release.schema.json", "docs/RELEASE.md"])("protects authority, signer, permissions and quality path %s", path => {
+  test.each([".github/workflows/release-request.yml", ".github/workflows/signed-release.yml", ".github/CODEOWNERS", "scripts/release-policy.ts", "scripts/release-driver-runtime.ts", "scripts/release-host-lease.ts", "scripts/post-release-smoke.ts", "scripts/stable-qualification.ts", "scripts/release-generate.ts", "schemas/stable-release.schema.json", "STABLE_RELEASE.lock.json"])("protects authority, signer, publication and lease path %s", path => {
     expect(routineProtectedPath(path)).toBe(true);
+  });
+  test.each(["docs/RELEASE.md", "docs/TEST_PLAN.md", ".github/workflows/ci.yml", ".github/workflows/droplet-qualification.yml", "scripts/provision-linux-qual.sh", "scripts/device-cloud-runtime.ts", "scripts/release-driver.test.ts", "scripts/fixtures/digitalocean-delete-tag-removal.json", "scripts/check-repository.ts"])("admits reviewed routine path %s", path => {
+    expect(routineProtectedPath(path)).toBe(false);
+  });
+  test("every script has a deliberate classification; new executable scripts fail closed", async () => {
+    const root = join(import.meta.dir, "..");
+    for (const file of await repositoryFiles(root)) {
+      const path = file.slice(root.length + 1).replaceAll("\\", "/");
+      if (!path.startsWith("scripts/")) continue;
+      expect(routinePathClassification(path), path).not.toBeUndefined();
+    }
+    expect(routinePathClassification("scripts/unclassified-new-lane.ts")).toBeUndefined();
+    expect(routineProtectedPath("scripts/unclassified-new-lane.ts")).toBe(true);
+  });
+  test("DB-R4 cleanup predicate binding belongs to the protected authority surface", () => {
+    expect(routineProtectedPath("scripts/stable-lanes.ts")).toBe(true);
   });
   test("checks writer-readable protection facts against the installed administrator attestation", () => {
     const branch = { protected: true, protection: { enabled: true, required_status_checks: { contexts: [...REQUIRED_CHECKS], enforcement_level: "everyone" } } };

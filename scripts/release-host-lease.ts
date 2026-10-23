@@ -4,6 +4,39 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
+ * Retire only this failed campaign after its driver proves settled cleanup and
+ * durably records that proof. BEGIN EXCLUSIVE refuses any live holder; neither
+ * the database inode nor a foreign owner is ever replaced. An absent row is a
+ * replay of a completed clear, not permission to run the proof against a new owner.
+ */
+export async function clearReleaseHostLease(
+  owner: string,
+  proveAndRecordCleanup: () => Promise<void>,
+  directory = join(homedir(), ".local", "state", "omp-session-gateway", "release-host"),
+): Promise<"cleared" | "absent"> {
+  if (!owner) throw new Error("release host lease requires a campaign identity");
+  const parent = lstatSync(directory), path = join(directory, "lease.sqlite"), file = lstatSync(path);
+  if (!parent.isDirectory() || !file.isFile() || [parent, file].some(info =>
+    info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0)) throw new Error("release host lease must be private and owned by the release account");
+  const database = new Database(path);
+  try {
+    database.exec("PRAGMA busy_timeout = 1000");
+    database.exec("BEGIN EXCLUSIVE");
+    const previous = database.query<{ owner: string }, []>("SELECT owner FROM campaign WHERE id = 1").get();
+    if (previous === null) { database.exec("COMMIT"); return "absent"; }
+    if (previous.owner !== owner) throw new Error("release host lease owner changed; maintainer recovery required");
+    await proveAndRecordCleanup();
+    if (database.query("DELETE FROM campaign WHERE id = 1 AND owner = ?").run(owner).changes !== 1) throw new Error("release host lease owner was not cleared");
+    database.exec("COMMIT");
+    return "cleared";
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch {}
+    if (error !== null && typeof error === "object" && "code" in error && error.code === "SQLITE_BUSY") throw new Error("release host is busy; another campaign holds its lease");
+    throw error;
+  } finally { database.close(); }
+}
+
+/**
  * One release account owns the retained host and Pixel, across tags and checkouts.
  * SQLite's EXCLUSIVE locking mode retains the OS lock across commits. Committing
  * the owner before effects makes crash recovery belong to that same campaign;

@@ -4,14 +4,17 @@ import { lstat, mkdir, open, readFile, readdir, rename, writeFile } from "node:f
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ORDER_AUTHOR, ORDER_HEAD_PREFIX, REPOSITORY, StaleIntentError, campaignAttempt, compareVersions, isOrder, outsideOrderScope, parseCampaignInfrastructureHold, requestVersion, promotionHold, tick } from "./release-driver.ts";
+import { ORDER_AUTHOR, ORDER_HEAD_PREFIX, REPOSITORY, StaleIntentError, applyDecisionPatch, campaignAttempt, compareVersions, isOrder, nextStep, outsideOrderScope, parseCampaignInfrastructureHold, requestVersion, promotionHold, tick } from "./release-driver.ts";
 import type { CampaignInfrastructureHold, Decision, DriverConfig, DriverPort, DriverState, JobObservation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
 import { assertReleaseTagState } from "./release-tag-state.ts";
 import { releaseAssetNames, verifyReleaseSignatures } from "./post-release-smoke.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
 import { compareReleaseArchives } from "./release-runtime-compare.ts";
-import { assertDeviceCloudResumeEligible, validateStableQualificationReceipt, type StableQualificationLaneModules, type StableQualificationReceipt } from "./stable-qualification.ts";
+import { assertDeviceCloudResumeEligible, externalCleanupCurrent, validateStableQualificationReceipt, type StableQualificationLaneModules, type StableQualificationReceipt } from "./stable-qualification.ts";
+import { defaultLaneModules } from "./stable-lanes.ts";
+import { clearReleaseHostLease } from "./release-host-lease.ts";
 import { parseDeviceCloudMachineOutcome, readDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
+import { parseDeviceCloudProgress } from "./device-cloud-qualification.ts";
 import { nextReleaseVersion, parseReleaseClass, REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineProtectedPath, routineSourceHold, generatedReleaseKind, generatedReleaseFilesMatch } from "./release-policy.ts";
 import type { RoutineAuthority, RoutineEvidence } from "./release-policy.ts";
 import { runAdb } from "./android-device.ts";
@@ -34,6 +37,7 @@ export function driverConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfi
     dryRun: env.OMP_RELEASE_DRY_RUN === "1" || env.OMP_RELEASE_DRY_RUN === "true",
   };
   for (const login of [config.bot, config.founder]) if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/u.test(login)) throw new Error("invalid release identity login");
+  if (config.bot.toLowerCase() === config.founder.toLowerCase()) throw new Error("release bot and maintainer logins must be distinct");
   for (const path of [config.ghConfig, config.signingKey, config.stateDir]) if (!isAbsolute(path)) throw new Error("driver paths must be absolute");
   return config;
 }
@@ -60,8 +64,11 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   try { await file.writeFile(JSON.stringify(value, null, 2) + "\n"); await file.sync(); }
   finally { await file.close(); }
   await rename(temporary, path);
-  const parent = await open(dirname(path), "r");
-  try { await parent.sync(); } finally { await parent.close(); }
+  // Directory fsync is a POSIX durability step; NTFS has no equivalent and rename is already atomic there.
+  if (process.platform !== "win32") {
+    const parent = await open(dirname(path), "r");
+    try { await parent.sync(); } finally { await parent.close(); }
+  }
 }
 async function immutableJobJson(path: string, value: unknown): Promise<boolean> {
   let file;
@@ -93,6 +100,41 @@ interface ApiPr {
 }
 interface WorkflowRun { id: number; run_attempt: number; head_sha: string; head_branch: string; conclusion: string | null; status: string; html_url: string; created_at: string }
 interface JobSpec { kind: "campaign" | "approve" | "smoke"; state: DriverState; root: string }
+
+/** Failed qualification is retryable, never qualified, once every effect owner proves cleanup. */
+export function assertFailedCampaignCleanup(
+  state: DriverState, value: unknown, modules: StableQualificationLaneModules = defaultLaneModules,
+): void {
+  if (!state.candidateCommit || !state.candidateDigest || !state.previousStable || !state.macHost) throw new Error("failed campaign binding is incomplete");
+  const receipt = validateStableQualificationReceipt(value, state.candidate, state.candidateCommit, state.previousStable);
+  // Worker exit/absence and the OS lock prove settlement in failedCampaignCleanup/lease clear.
+  // A failed consumer can leave publication marked running and omit campaign completedAt.
+  if (receipt.status !== "failed" || receipt.macHost !== state.macHost ||
+    receipt.candidate?.tag !== state.candidate || receipt.candidate.sourceCommit !== state.candidateCommit ||
+    receipt.candidate.archiveSha256 !== state.candidateDigest) {
+    throw new Error("failed campaign does not match its exact binding");
+  }
+  // Debian owns its workflow teardown; a failed/unknown workflow is not proof of cloud absence.
+  for (const name of ["debian", "cleanup", "windowsCleanup", "androidPushCleanup", "deviceCloudCleanup"] as const) {
+    if (receipt.lanes[name].status !== "passed" || receipt.lanes[name].attempts < 1) throw new Error("failed campaign cleanup did not pass: " + name);
+  }
+  for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
+    if (!externalCleanupCurrent(receipt, name)) throw new Error("failed campaign cleanup is stale or incomplete: " + name);
+  }
+  for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
+    if (modules[name].needsCleanup(receipt.lanes[name].evidence?.progress)) throw new Error("failed campaign cleanup is stale or incomplete: " + name);
+  }
+  const cloud = parseDeviceCloudProgress(receipt.lanes.deviceCloud.evidence?.progress);
+  const resources = cloud.resources, audit = cloud.results.audit;
+  if (resources === undefined || resources.some(resource =>
+    resource.sessionId === undefined || !resource.ended || !resource.audited || resource.incident === true ||
+    resource.unauditedDeletion === true || (resource.vendor === "browserstack" && !resource.recordRemoved)) ||
+    (resources.length > 0 && audit?.records !== resources.length) ||
+    (audit !== undefined && (audit.records !== resources.length || audit.recordsExposingLinks !== 0 ||
+      audit.recordsWithMedia !== 0 || (audit.lingeringSignedArtifacts !== undefined && audit.lingeringSignedArtifacts !== 0)))) {
+    throw new Error("failed campaign device-cloud retained-record audit is unresolved");
+  }
+}
 
 class CampaignAvailabilityResult extends Error {
   constructor(readonly hold: CampaignInfrastructureHold) { super("candidate device-cloud infrastructure held"); }
@@ -242,7 +284,7 @@ export class StudioDriver implements DriverPort {
       mergeTree: merge?.tree.sha, mergeVerified: merge?.verification.verified, behind: pr.mergeable_state === "behind" || pr.mergeable_state === "unknown",
       checksPassed: REQUIRED_CHECKS.every(name => runs.some(run => run.name === name && run.status === "completed" && run.conclusion === "success" && run.app.slug === "github-actions")), files, url: pr.html_url };
   }
-  async issues(): Promise<TrackingIssue[]> {
+  async issues(previous?: TrackingIssue): Promise<TrackingIssue[]> {
     const raw = await this.pages<{ number: number; title: string; user: { login: string }; html_url: string; created_at: string; labels?: { name: string }[]; pull_request?: unknown }>("issues?state=open&creator=github-actions%5Bbot%5D&per_page=100");
     const issues: TrackingIssue[] = raw.filter(issue => issue.pull_request === undefined).map(issue => ({
       number: issue.number, title: issue.title, author: issue.user.login, request: issue.created_at, url: issue.html_url,
@@ -251,18 +293,43 @@ export class StudioDriver implements DriverPort {
     if (issues.length === 0) return issues;
     const requests = await this.api<{ workflow_runs: WorkflowRun[] }>("actions/workflows/release-request.yml/runs?status=success&per_page=100", true);
     const jobName = (issue: TrackingIssue) => `Request OMP ${requestVersion(issue)}${issue.releaseClass === "minor" ? " (minor)" : ""}`;
-    const unmatched = new Set(issues.map(jobName));
+    type FilingJob = { name: string; conclusion: string; steps?: { name: string; status: string; conclusion: string }[] };
+    // The successful filing step's output is resolved into an immutable Actions
+    // step name. Current labels/timestamps cannot identify which issue a run filed.
+    const filedIssue = (job: FilingJob): TrackingIssue | undefined => {
+      if (job.conclusion !== "success") return undefined;
+      const records = job.steps?.filter(step => step.name.startsWith("Record tracking issue #")) ?? [];
+      if (records.length !== 1 || records[0]!.status !== "completed" || records[0]!.conclusion !== "success") return undefined;
+      const number = /^Record tracking issue #([1-9][0-9]*)$/u.exec(records[0]!.name)?.[1];
+      return issues.find(issue => String(issue.number) === number && jobName(issue) === job.name);
+    };
+    const unmatched = new Set(issues.map(issue => issue.number));
     for (const run of requests?.workflow_runs ?? []) {
       if (unmatched.size === 0) break;
-      const jobs = await this.api<{ jobs: { name: string; conclusion: string }[] }>(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
-      for (const name of unmatched) {
-        if (!jobs!.jobs.some(job => job.name === name && job.conclusion === "success")) continue;
-        for (const issue of issues) if (jobName(issue) === name) issue.request = `${run.id}:${run.run_attempt}`;
-        unmatched.delete(name);
+      const jobs = await this.api<{ jobs: FilingJob[] }>(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
+      for (const job of jobs!.jobs) {
+        const issue = filedIssue(job);
+        if (issue === undefined || !unmatched.has(issue.number)) continue;
+        issue.request = `${run.id}:${run.run_attempt}`;
+        unmatched.delete(issue.number);
+      }
+    }
+    // A long-lived open request can outlive the newest 100 runs. Revalidate its recorded
+    // successful run directly rather than requiring another workflow dispatch.
+    const retained = issues.find(issue => issue.number === previous?.number && jobName(issue) === jobName(previous!));
+    if (retained && unmatched.has(retained.number) && /^[1-9][0-9]*:[1-9][0-9]*$/u.test(previous!.request)) {
+      const [id, attempt] = previous!.request.split(":");
+      const run = await this.api<{ path: string; conclusion: string; status: string }>(`actions/runs/${id}/attempts/${attempt}`, true);
+      if (run?.path === ".github/workflows/release-request.yml" && run.status === "completed" && run.conclusion === "success") {
+        const jobs = await this.api<{ jobs: FilingJob[] }>(`actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`);
+        if (jobs?.jobs.some(job => filedIssue(job)?.number === retained.number)) {
+          retained.request = previous!.request;
+          unmatched.delete(retained.number);
+        }
       }
     }
     // A mutable label alone cannot opt a legacy patch request into minor-release authority.
-    return issues.filter(issue => issue.releaseClass !== "minor" || !unmatched.has(jobName(issue)));
+    return issues.filter(issue => issue.releaseClass !== "minor" || /^[1-9][0-9]*:[1-9][0-9]*$/u.test(issue.request));
   }
   async workflow(tag: string, source: string): Promise<"passed" | "failed" | "pending"> {
     const result = await this.api<{ workflow_runs: WorkflowRun[] }>(`actions/workflows/signed-release.yml/runs?event=push&head_sha=${source}&per_page=100`);
@@ -301,6 +368,32 @@ export class StudioDriver implements DriverPort {
       this.jobDirectory("campaign", specification.state) !== this.jobDirectory("campaign", state) ||
       specification.state.previousStable !== state.previousStable) throw new Error("held campaign worker binding is missing or changed");
     return specification.state;
+  }
+  async failedCampaignCleanup(state: DriverState): Promise<string> {
+    const bound = await this.campaignBinding(state);
+    if (bound.candidateCommit !== state.candidateCommit || bound.candidateDigest !== state.candidateDigest ||
+      bound.macHost !== state.macHost || bound.authorityPolicy !== state.authorityPolicy) throw new Error("failed worker binding changed");
+    const directory = this.jobDirectory("campaign", state);
+    if ((await this.job("campaign", state)).status !== "failed" || !await Bun.file(join(directory, "exit")).exists()) throw new Error("failed campaign worker has not exited");
+    for (let attempt = 0; attempt <= campaignAttempt(state); attempt++) {
+      if (await this.campaignWorkerRunning({ ...state, campaignAttempt: attempt })) throw new Error("a candidate campaign worker is still active");
+    }
+    const bytes = await readFile(this.receipt(state), "utf8");
+    assertFailedCampaignCleanup(bound, JSON.parse(bytes));
+    return createHash("sha256").update(bytes).digest("hex");
+  }
+  async recoverFailedCampaign(state: DriverState): Promise<void> {
+    const owner = await this.releaseHostOwner();
+    if (owner === undefined) return;
+    const expected = `qualification:${state.candidate}:${this.receipt(state)}`;
+    if (owner !== expected) throw new Error("release host lease belongs to another campaign");
+    const path = join(this.jobDirectory("campaign", state), "lease-recovery.json");
+    const result = await clearReleaseHostLease(expected, async () => {
+      const receiptSha256 = await this.failedCampaignCleanup(state);
+      await atomicJson(path, { owner: expected, candidate: state.candidate, at: new Date().toISOString(), receiptSha256, status: "clear-authorized" });
+    });
+    const proof = await jsonFile<Record<string, unknown>>(path);
+    if (proof !== undefined) await atomicJson(path, { ...proof, status: result });
   }
   campaignHoldObservation(state: DriverState, output: unknown, receipt: StableQualificationReceipt | undefined): CampaignInfrastructureHold {
     return campaignAvailabilityObservation(state, output, receipt);
@@ -362,6 +455,9 @@ export class StudioDriver implements DriverPort {
     const controls = new Map<string, string>();
     for (const entry of tree) {
       if (entry.type === "tree") continue;
+      // Generated approval records change every release. Their only admitted source
+      // transition is the exact generated approve class below, plus the policy gate.
+      if (entry.path === "STABLE_RELEASE.lock.json") continue;
       const manifest = entry.path === "package.json" || entry.path.endsWith("/package.json");
       if (!routineProtectedPath(entry.path) && !manifest && entry.path !== "bun.lock") continue;
       let hash = entry.sha;
@@ -408,8 +504,21 @@ export class StudioDriver implements DriverPort {
         const detail = await this.readPr(item.number);
         const subject = (await this.api<{ message: string }>("git/commits/" + candidate.merge_commit_sha))!.message.split("\n", 1)[0]!;
         const baseline = isOrder(detail) && outsideOrderScope(detail).length === 0 && candidate.merged_by?.login === this.config.bot;
-        // The source fix was reviewed by its maintainer merge, not by the release bot evaluating itself.
-        const fix = /^(fix|perf|revert)(\([^)]+\))?: /u.test(subject) && candidate.merged_by?.login === this.config.founder;
+        // A bot merge needs a maintainer review of this exact head, never a mutable title.
+        const changesReleaseLock = detail.files.some(file => [file.filename, file.previous_filename].includes("STABLE_RELEASE.lock.json"));
+        let fix = false;
+        if (!changesReleaseLock && /^(fix|perf|revert)(\([^)]+\))?: /u.test(subject)) {
+          if (candidate.merged_by?.login === this.config.bot) {
+            if (this.config.bot.toLowerCase() !== this.config.founder.toLowerCase() &&
+              detail.files.every(file => [file.filename, file.previous_filename].every(path => path === undefined || !routineProtectedPath(path)))) {
+              const reviews = await this.pages<{ id: number; user: { login: string }; state: string; commit_id: string }>(`pulls/${item.number}/reviews?per_page=100`);
+              const review = reviews.filter(review => review.user.login === this.config.founder && review.state !== "COMMENTED" && review.state !== "PENDING").sort((a, b) => b.id - a.id)[0];
+              // readPr resolves tree from this immutable head SHA, not the movable branch name.
+              fix = review?.state === "APPROVED" && review.commit_id === detail.head &&
+                detail.mergeTree !== undefined && detail.tree === detail.mergeTree;
+            }
+          } else fix = candidate.merged_by?.login === this.config.founder;
+        }
         const kind = generatedReleaseKind(detail.headRef);
         const releaseRecord = detail.author === this.config.bot && generatedReleaseFilesMatch(kind, detail.files)
           && /^(chore|docs)\(release\): (prepare|approve|record) /u.test(subject) && candidate.merged_by?.login === this.config.bot;
@@ -436,10 +545,19 @@ export class StudioDriver implements DriverPort {
     const [authority, evidence] = await Promise.all([this.authority(state, main, pr), this.evidence(state)]);
     return { main, approve: pr, authority, ...(evidence === undefined ? {} : { evidence }), upstreamTag: "", latestStable: "", tags: [], issues: [] };
   }
+  async prepareObservation(state: DriverState): Promise<PullRequest | undefined> {
+    if (state.preparePr !== undefined) return this.readPr(state.preparePr);
+    if (state.phase !== "held" || state.holdReason !== "stale-source" || state.candidateCommit !== undefined) return undefined;
+    // The PR may predate its state checkpoint or only now be visible. Never create here.
+    const branch = `release-driver/${state.issue.number}/${state.candidate}-prepare`;
+    const existing = await this.pages<ApiPr>(`pulls?state=all&base=main&head=carrythroughsystems:${encodeURIComponent(branch)}&per_page=100`);
+    if (existing.length > 1) throw new Error("multiple PRs use the deterministic release branch");
+    return existing.length === 1 ? this.readPr(existing[0]!.number) : undefined;
+  }
   async snapshot(state: DriverState | undefined): Promise<RepositorySnapshot> {
     const [main, upstream, latest, tags, issues] = await Promise.all([
       this.api<{ sha: string }>("commits/main"), this.api<{ content: string }>("contents/UPSTREAM.lock.json?ref=main"),
-      this.api<{ tag_name: string }>("releases/latest"), this.pages<{ name: string }>("tags?per_page=100"), this.issues(),
+      this.api<{ tag_name: string }>("releases/latest"), this.pages<{ name: string }>("tags?per_page=100"), this.issues(state?.phase === "closed" ? undefined : state?.issue),
     ]);
     const lock: { tag: string } = JSON.parse(Buffer.from(upstream!.content, "base64").toString());
     compareVersions(lock.tag, lock.tag);
@@ -452,7 +570,8 @@ export class StudioDriver implements DriverPort {
       // Multiple matching orders are ambiguous. Never select by attacker-controlled title/body.
       if (matching.length === 1) repo.order = await this.readPr(matching[0]!.number);
     }
-    if (state.preparePr !== undefined) repo.prepare = await this.readPr(state.preparePr);
+    const prepare = await this.prepareObservation(state);
+    if (prepare !== undefined) repo.prepare = prepare;
     if (state.approvePr !== undefined) repo.approve = await this.readPr(state.approvePr);
     if (state.recordPr !== undefined) repo.record = await this.readPr(state.recordPr);
     if (["approve-open", "approve-checking", "approval-required", "approved"].includes(state.phase)) {
@@ -466,15 +585,17 @@ export class StudioDriver implements DriverPort {
     if (state.phase === "qualifying") repo.campaign = await this.job("campaign", state);
     if (state.phase === "approve-checking") repo.approveChecks = await this.job("approve", state);
     if (state.phase === "smoking") repo.smoke = await this.job("smoke", state);
-    if (state.phase === "diagnostic-required") {
-      const path = join(homedir(), ".local/state/omp-session-gateway/release-host/lease.sqlite");
-      if (await Bun.file(path).exists()) {
-        try {
-          const db = new Database(path, { readonly: true });
-          try { repo.hostRecoveryRequired = db.query("SELECT owner FROM campaign WHERE id = 1").get() !== null; }
-          finally { db.close(); }
-        } catch { repo.hostRecoveryRequired = true; }
-      }
+    if (state.phase === "diagnostic-required" || (state.phase === "held" && state.holdReason === "stale-source")) {
+      try {
+        const owner = await this.releaseHostOwner();
+        if (owner !== undefined) {
+          repo.hostRecoveryRequired = true;
+          if (owner === `qualification:${state.candidate}:${this.receipt(state)}`) {
+            await this.failedCampaignCleanup(state);
+            repo.hostRecoveryRequired = false;
+          }
+        }
+      } catch { repo.hostRecoveryRequired = true; }
     }
     return repo;
   }
@@ -653,6 +774,59 @@ export class StudioDriver implements DriverPort {
   async perform(step: Decision, state: DriverState): Promise<Partial<DriverState>> {
     if (this.plan) throw new Error("plan attempted a release effect");
     switch (step.operation) {
+      case "rerequest": {
+        const current = { ...state };
+        delete current.intent;
+        const repo = await this.snapshot(current);
+        const assertRetry = (observation: RepositorySnapshot) => {
+          const retry = nextStep(current, observation, this.config);
+          if (retry.operation !== "rerequest" || retry.patch?.selectedMain !== step.patch?.selectedMain ||
+            retry.patch?.candidate !== step.patch?.candidate || retry.patch?.issue?.number !== step.patch?.issue?.number ||
+            retry.patch?.issue?.request !== step.patch?.issue?.request) throw new StaleIntentError("retry subject changed");
+          const orphan = observation.prepare?.merged ? undefined : observation.prepare;
+          if (orphan?.number !== step.pr?.number) throw new StaleIntentError("new orphan prepare requires a pinned retirement plan");
+        };
+        const assertOrphan = (orphan: PullRequest | undefined) => {
+          if (step.pr === undefined) return undefined;
+          if (!orphan || orphan.merged || (state.preparePr !== undefined && orphan.number !== state.preparePr) || orphan.number !== step.pr.number || orphan.head !== step.pr.head ||
+            orphan.author !== this.config.bot || orphan.base !== "main" || orphan.headRepository !== REPOSITORY ||
+            orphan.headRef !== `release-driver/${state.issue.number}/${state.candidate}-prepare`) throw new StaleIntentError("orphan prepare identity changed");
+          return orphan;
+        };
+        const prepareNumber = state.preparePr ?? step.pr?.number;
+        const assertUnpublished = async () => {
+          if (await this.api(`git/ref/tags/v${state.version}`, true) !== undefined ||
+            await this.api(`releases/tags/v${state.version}`, true) !== undefined) throw new StaleIntentError("stable publication already exists; preserve the immutable release");
+        };
+        const revalidate = async () => {
+          const [issues, prepare, tags] = await Promise.all([
+            this.issues(current.issue), this.prepareObservation({ ...current, ...(prepareNumber === undefined ? {} : { preparePr: prepareNumber }) }),
+            this.pages<{ name: string }>("tags?per_page=100"),
+          ]);
+          // Recompute nextCandidate through nextStep; a newly published prealpha reserves its ordinal.
+          assertRetry({ ...repo, issues, tags: tags.map(tag => tag.name), ...(prepare === undefined ? {} : { prepare }) });
+          const orphan = assertOrphan(prepare);
+          await assertUnpublished();
+          return orphan;
+        };
+        assertRetry(repo);
+        assertOrphan(repo.prepare);
+        const next = applyDecisionPatch(state, step);
+        this.requireSourceAuthority(await this.authority(next, repo.main), state.authorityPolicy);
+        await assertUnpublished();
+        await this.recoverFailedCampaign(state);
+        let orphan = await revalidate();
+        if (orphan) {
+          const marker = `<!-- release-driver-retire:${state.issue.number}:${state.candidate} -->`;
+          await this.announce(orphan.number, `release-driver: retire unmerged prepare after a landed fix; request #${next.issue.number} continues with ${next.candidate}\n${marker}`, marker);
+          orphan = await revalidate();
+          if (orphan?.state === "open") await this.gh(["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/${orphan.number}`, "-f", "state=closed"]);
+        }
+        // Preserve the failed selection if the issue closed or prepare merged while
+        // cleanup/comment/close settled. Those idempotent retirements stay reconciled.
+        await revalidate();
+        return {};
+      }
       case "update-order":
       case "update-release-pr": {
         const pr = await this.readPr(step.pr!.number);
@@ -695,7 +869,7 @@ export class StudioDriver implements DriverPort {
         return { macHost: bound.macHost };
       }
       case "open-approve": return { approvePr: (await this.openPr("approve", state)).number };
-      case "start-approve-checks": await this.launch("approve", { ...state, ...step.patch }); return {};
+      case "start-approve-checks": await this.launch("approve", applyDecisionPatch(state, step)); return {};
       case "merge-approve": {
         const repo = await this.promotionSnapshot(state);
         const reason = promotionHold(state, repo, this.config);
@@ -717,7 +891,7 @@ export class StudioDriver implements DriverPort {
       case "open-record": return { recordPr: (await this.openPr("record", state)).number };
       case "merge-record": await this.merge(step.pr!, false); return {};
       case "close":
-        for (const issue of await this.issues()) if (compareVersions(requestVersion(issue)!, requestVersion(state.issue)!) <= 0
+        for (const issue of await this.issues(state.issue)) if (compareVersions(requestVersion(issue)!, requestVersion(state.issue)!) <= 0
           && (issue.releaseClass !== "minor" || state.issue.releaseClass === "minor")) {
           const body = `release-driver: closed — fulfilled by v${state.version}\nhttps://github.com/${REPOSITORY}/releases/tag/v${state.version}\n<!-- release-driver-close:${state.issue.number}:${issue.number}:${state.version} -->`;
           // The selected issue receives its single transition comment through the state outbox.

@@ -101,7 +101,11 @@ the `release-minor` label and reuse only an issue of that class. Thus a minor re
 rebind an existing patch request. The issue body is for humans; the driver never parses it.
 A successful request job's `Request OMP vX.Y.Z` (patch) or `Request OMP vX.Y.Z (minor)` name and
 Actions run/attempt bind the version and class and identify explicit re-requests without issue
-edits. A minor label without a matching successful filing job grants no authority. The selected
+edits. The filing step validates the created/reused issue URL, emits its numeric `tracking_issue`
+output, and a following successful step records `Record tracking issue #N` in the Actions jobs API.
+That exact number binds the run to the issue; current labels, timestamps and the human issue body
+are not attribution evidence. A missing, duplicate, failed or mismatched record grants no authority.
+A minor label without a matching successful filing job grants no authority. The selected
 class is persisted with the request; diagnostic re-requests cannot switch it, and completing a
 patch release does not close an outstanding minor request.
 
@@ -146,7 +150,15 @@ force; GitHub supplies the signed squash merge. Auto-merge stays disabled.
 
 The promotion PR remains the reviewable exact-subject artifact. Standing authority permits only
 the requested next patch or explicit next minor version, eligible upstream baseline orders, and fixes/performance fixes/reverts
-already reviewed and merged by the configured maintainer. The installed checkout is the separately
+already reviewed by the configured maintainer. A maintainer merge remains sufficient. A bot-merged
+`fix`/`perf`/`revert` must change no authority path (including rename-from paths) and carry the
+configured maintainer's latest non-comment review as `APPROVED` at the exact PR head.
+The immutable tree of that approved head must also equal the landed squash's merge tree;
+approval of a different post-merge branch head cannot authorize the bytes already on main.
+Dismissed, superseded and stale-head reviews never count. The lead uses that maintainer identity;
+there is no separate lead identity or bot self-approval. Bot and maintainer logins must be distinct
+(case-insensitively); the runtime checks the bot-review branch before any maintainer-merge shortcut.
+The installed checkout is the separately
 reviewed setup baseline. Later source commits require an associated merged main PR in those
 classes or a bot-owned generated release record; unclassified/direct source commits refuse.
 Founder fixes must be squash-merged with an immutable `fix`, `perf` or `revert` merge-commit
@@ -163,10 +175,16 @@ this predicate; it no longer asks the founder. Only the configured release bot m
 Stable signing independently rereads merger, merge source/tree, evidence, current main and policy.
 Main movement after prepare is a stale-source hold, never silent incorporation of newer work.
 
-A routine release cannot change its own controls: all .github/ paths (signers, credential permissions,
-checks and CODEOWNERS), all schemas/, all scripts/ except generated release-text.json and the
-order-scoped windows-qualification-pins.json, AGENTS.md/CLAUDE.md, tsconfig/bunfig/other lock controls,
-and docs/RELEASE.md, docs/TEST_PLAN.md, docs/SECURITY.md are protected. Package manifests
+A routine release cannot change its own authority. `ROUTINE_AUTHORITY_PATHS` in
+`scripts/release-policy.ts` is the explicit, reasoned authority list: request/selection and merge
+policy, driver installation/signing-key inputs, host/Pixel leases, signed-release and Pages
+publication workflows, release builders/generators/state/provenance/runtime comparison,
+campaign admission/receipt settlement, the `stable-lanes.ts` cleanup-predicate binding and evidence
+schemas, CODEOWNERS, release lock and all schemas.
+`AGENTS.md`/`CLAUDE.md` and tsconfig/bunfig/mise/other lock controls remain protected.
+`STABLE_RELEASE.lock.json` is admitted only as generated approval output, checked by the release
+policy gate; a fix touching it requires a separately installed baseline, not routine source admission.
+Package manifests
 at every depth are fingerprinted with only their top-level version omitted; root bun.lock omits only
 generated workspace versions. The manifest sweep found the root and four workspace package.json
 files, bunfig.toml, mise.toml and mise.lock; no npm/Yarn configuration, Deno, Python or Cargo
@@ -175,7 +193,12 @@ controls, even in a newly added nested package. bunfig.toml and lifecycle-capabl
 any depth are protected; mise.lock is covered by the lockfile rule. build-release.ts omits only its
 generated product-version literal. Both tracked modifications and untracked non-ignored files
 (including Bun-autoloaded .env/config inputs) make the installed checkout dirty and hold admission.
-Ordinary source/test fixes do not change quality requirements.
+Tests, synthetic fixtures, individual provisioning/qualification/device-cloud lanes, docs (including
+this runbook), and explicitly listed CI workflows without signing/publication are routine after
+the same source review. Their fixes need no founder merge or driver reinstall. The implementation
+table records each script's purpose; test and fixture rules are explicit. A classification test
+fails when any new script has no classification, and runtime treats unknown script/workflow paths
+as protected until classified. Narrowing paths does not remove any required check.
 Added/deleted control paths and rename-from paths cannot evade the comparison. The live main
 branch-protection attestation, configured bot/source-reviewer identities and required-check list also
 enter the fingerprint. The setup reviewer observed classic main protection: strict seven required
@@ -380,10 +403,15 @@ smoke still forces reinstall and checks every doctor result; public gateway expo
 ### Durable jobs, failures and kill switch
 
 State lives under `~/.local/state/omp-session-gateway/release-driver/`: atomic/fsynced
-`state.json` contains the write intent, pinned PR/tag identities and comment outbox. A SQLite
+`state.json` contains the write intent, pinned PR/tag identities and comment outbox. Atomic JSON
+writes sync the file before rename on every platform and sync the parent directory on POSIX.
+Windows retains file sync and atomic rename without the unsupported directory fsync. A SQLite
 mutex excludes overlapping ticks. Deterministic release branches, tags, comment markers and tmux
 job ids reconcile a provider write accepted just before a process crash. Plan does not create any
 of these. Bot-owned worktrees under `work/` leave the operator checkout's working tree alone.
+Intent patches carry explicit `clear` field names for deletion, never `undefined` values that JSON
+would discard. One patch applicator handles first execution and persisted replay; a meta-test covers
+every patch-emitting operation and proves JSON round-trip equality and identical application.
 The candidate campaign uses a dedicated published `release-driver/*-campaign` branch pinned to
 the prepare merge, so unrelated movement of main cannot silently change the orchestrator source.
 
@@ -391,14 +419,52 @@ Campaign, approve checks and smoke run detached in named tmux sessions with a st
 result and exit file under `jobs/`. Campaign receipts remain at
 `~/.local/share/omp-session-gateway/qualification/<candidate>/stable-qualification.json`.
 Qualification and smoke use their existing shared release-host lease (including its durable failed
-owner); the driver never deletes, replaces or steals it. An ordinary failed/missing device/cloud job enters
-diagnostic-required, reports non-passed lanes, and is not retried. A missing local approve-check
+owner); the driver never deletes or replaces the database or steals a foreign/live owner.
+An ordinary failed/missing device/cloud job enters diagnostic-required and reports non-passed lanes.
+A missing local approve-check
 worker can resume only at the same head/tree and policy; no device, cloud or publication action
 is replayed. Passed/failed results are never overwritten to invent a retry. The saved intent and
-outbox reconcile accepted bot merges and announcements after a crash; immutable tags never move. An explicit new green request
-after a fix on main selects the next prealpha only after the previous lease is recovered. Follow
-[Release gates](#release-gates) for cleanup/recovery of that exact old campaign first; a new request
-is not permission to abandon cloud/device resources. Ordinary failed receipts stay unchanged. Public
+outbox reconcile accepted bot merges and announcements after a crash; immutable tags never move.
+After a fix moves main beyond `failedMain`, the same still-open tracking issue with the same OMP
+version/class and recorded successful request run is automatically re-selected. The successful
+filing job must record that exact issue number; another older, relabeled or solely remaining open
+issue cannot inherit a run whose actual issue closed. The driver revalidates a recorded numeric
+`run:attempt` even if it has fallen out of the newest 100 runs.
+**Installation boundary:** older runs without the API-visible issue-number record, including
+already-stored numeric tokens, require one explicit successful dispatch of the updated request
+workflow for the same open issue/version/class. Legacy creation-time tokens are also insufficient.
+No historical run is backfilled or inferred from mutable metadata. Once bound to a recorded run,
+no new workflow dispatch, request closure, or manual selection retirement is required.
+If the kill switch delays consuming a failed campaign until after its fix landed, `failedMain`
+records the candidate commit that actually ran (or the selected source before candidate binding),
+not main at observation time. The next tick can therefore re-select; merely observing the candidate's
+own prepare merge does not count as a fix.
+An explicit new successful same-version/class request
+still works, including a replacement issue when the old issue closed. A closed issue alone cannot retry.
+An unmerged prepare held on `stale-source` also re-selects after main differs from its failed
+selection's source, including a hold before a prepare PR was created. Merged prepares and other
+authority holds do not take that shortcut. Observing the stable tag or a latest stable at or beyond
+the failed version vetoes re-selection in planning, without saving a new write intent.
+
+Re-selection appends `{candidate, reason, at, issue, preparePr, failedMain}` to `state.retired`,
+closes only the old bot-owned unmerged prepare PR with a reconciled bot comment, and prepares the
+next unused prealpha (retired untagged candidates also reserve their ordinal). It never closes
+the tracking request, rewrites old jobs/receipts, or silently incorporates a fix into an existing
+candidate. Source review, policy fingerprint and immutable-stable guards are rechecked before effects.
+After the authority walk and lease recovery, the open issue, unmerged orphan identity and stable
+tag/release absence are reread before closure and immediately before committing selection. The driver
+also refreshes the tag listing and recomputes the next candidate ordinal at each revalidation.
+If a newly visible prealpha reserves the planned ordinal, the old intent is dropped and replanned
+without changing the failed selection; an immutable tag is never reused for different bytes. Discovery
+also checks the deterministic old prepare branch when its number was not checkpointed. A newly
+visible orphan drops the obsolete intent before retirement, so the next tick durably pins its identity
+and audit entry before closing it. A moved subject drops its obsolete intent and
+preserves the failed selection; any already-recorded lease/PR retirement remains replay-safe.
+Closing a fulfilled request retains its recorded filing identity, and the closed state never
+re-selects that fulfilled issue even if a later GitHub listing still shows it open.
+The previous host lease must be absent or eligible for owner-verified cleanup retirement below.
+Follow [Release gates](#release-gates) for incomplete cleanup; a request is not permission to
+abandon cloud/device resources. Ordinary failed receipts stay unchanged. Public
 verification failures also leave the write intent for diagnosis; immutable tags are never moved.
 
 A 1Password identity-probe deadline is a host-fault diagnostic, not a wrong-account verdict.
@@ -408,19 +474,65 @@ confirm `op --account my.1password.com --version` under the release account, the
 exact candidate's credential-bearing preflight. A passing manual preflight has no durable
 candidate-bound retry receipt and does not clear `diagnostic-required`. The retry gate compares
 main's SHA for inequality with `failedMain`, not changed paths or ancestry; separate source and
-policy authority still apply. Retain the failed job and receipts, land the reviewed fix, and
-request the same exact OMP version again. If release controls change, the job-free setup review
+policy authority still apply. Retain the failed job and receipts and land the reviewed fix;
+the existing open successful request suffices. If release controls change, the job-free setup review
 must also explicitly retire the failed selection's old policy binding: archive its state only
 after confirming no pending intent/outbox, stable publication, active job or owned host lease,
 then select the new request under the reviewed installed policy. Updating the checkout alone
 leaves the old binding and holds preparation. The next selection uses the next prealpha; never
 overwrite a completed campaign job or its evidence.
 
+**One-time #452 installation after `v0.8.0-prealpha.3`:** this is an authority change, not an
+automatic retry across policy fingerprints. Keep the driver disabled while the founder merges
+#452 and the maintainer performs the job-free, quiesced installation. Then:
+
+1. Checksum and retain .3's state, immutable job specification/results/logs and qualification
+   receipts. Confirm no worker/process owns the host and all four cleanup lanes and Debian
+   passed at the recorded epochs. Use the maintainer EXCLUSIVE owner-verified lease-clear
+   procedure below, not database deletion; move the old `state.json` into the driver's `retired/`
+   archive. Preserve all referenced job/receipt evidence. Do not edit its policy fingerprint or
+   the immutable failed-worker specification to force a match.
+2. In the gateway checkout, dispatch the updated request workflow once:
+   ```sh
+   gh workflow run release-request.yml --ref main -f omp_version=18.12.5 -f release_class=minor
+   ```
+   Wait for its successful filing job to record `Record tracking issue #448`. It must reuse the
+   still-open minor request #448, not close it or create a replacement.
+3. Run read-only `bun scripts/release-driver.ts plan`. Require `select` for issue #448 and
+   `v0.8.0-prealpha.4`, under the newly installed policy, before changing the kill switch.
+4. Rearm through the reviewed setup procedure. Later failures under that policy can use automatic
+   same-request re-selection; .3's old authority binding is intentionally not carried across.
+
+### Bounded device-cloud journey retries
+
+Within one `deviceCloud` invocation, each iPhone, iPad or Samsung journey may retry once after
+an ordinary post-attestation collaboration or Home Screen journey failure. Only that journey
+gets a fresh device session: the candidate, retained-Mac fixture, live OMP generation, tunnels,
+Pixel lease and lane epoch stay unchanged. Passed journeys and every other lane's receipts stay
+intact. A second failure is terminal; this is not a campaign restart or a resumable browser command.
+
+Before the retry, the first session must have ended, its finalized record must pass the live-link
+and media audit, and BrowserStack's record and signed artifacts must be verified removed. Unknown
+allocation outcomes, allocation identity failures, unsafe evidence, sink/audit failures and failed
+containment never retry. Generation changes also refuse rather than create new fixture evidence.
+Final release still ends every session and stops the tunnels/fixture before releasing the Pixel;
+`deviceCloudCleanup` remains bound to that same lane epoch, not a per-journey ordinal.
+
+Additive schema-3 `progress.journeys[target]` preserves both numbered attempts and closed outcomes
+(including the first failure's collaboration/Home Screen stage); raw errors never enter receipts.
+Resources carry the matching attempt ordinal, all session identities remain recorded, and aggregate
+audit counts include both attempts. Successful evidence includes this journey history. A crash does
+not resume an interrupted journey or reset its retry budget: existing dirty-attempt cleanup applies.
+
+Availability holds are never automatically retried by this mechanism. An initial hold keeps the
+operator-authorized semantics below; availability encountered after an ordinary failed first
+journey remains a mixed diagnostic failure, not fresh availability-only authorization.
+
 ### Device-cloud availability holds
 
 Only validated no-free pinned-device observations are availability. Authentication, malformed
-catalogs, transport/queue ambiguity, allocation mismatch, journey defects, audit errors and failed
-cleanup remain diagnostic. The stable CLI exits 75 for an availability-only failure. The driver
+catalogs, transport/queue ambiguity, allocation mismatch, exhausted journey retries, audit errors
+and failed cleanup remain diagnostic. The stable CLI exits 75 for an availability-only failure. The driver
 sets `OMP_STABLE_OUTCOME_FILE` to a distinct `preflight-outcome.json` or `campaign-outcome.json`
 inside the private job directory; the CLI atomically writes a closed JSON outcome there. Earlier
 human lane stdout/stderr is never parsed as machine evidence. Missing or invalid outcome files
@@ -671,6 +783,30 @@ caught failure also retains ownership, including admission failures; correct the
 that command. This does not clean up orphaned child processes or remote resources by itself:
 inspect the existing receipt and recover its recorded resources before resuming after a crash,
 following the lane-specific recovery procedures.
+
+The driver's landed-fix re-selection has one bounded exception: it may clear its own failed
+campaign row after the immutable campaign job is failed and exited, every candidate worker is
+absent, and the exact candidate/source/digest/predecessor/host-bound receipt is failed and settled.
+Settlement is proved by that exited worker and absent processes under the host lock, not by the
+receipt's optional `completedAt` or stale primary-lane status. For example, prealpha.3 left
+`ompPublication` marked running after a consumer failed, despite passing every cleanup lane.
+Those bookkeeping fields are neither rewritten nor treated as permission to skip cleanup proof.
+Every recorded device-cloud allocation, including both sessions of a retried journey, must have
+ended and passed its retained-record audit. Missing ownership/audit proof, exposing links or media,
+lingering signed artifacts, incidents and unaudited deletions keep the maintainer stop even when
+`cleanupRequired` is false. BrowserStack records must also be verified removed. Aggregate audit
+counts must cover every recorded allocation; a local cleanup pass alone cannot settle vendor custody.
+All four cleanup lanes (`cleanup`, `windowsCleanup`, `androidPushCleanup`, `deviceCloudCleanup`)
+must have passed; external cleanup epochs must match their lane's last attempt and the lane
+implementations must report no remaining effects. Debian must also have passed, since a failed
+workflow is not proof that its cloud teardown succeeded. Pending/unstarted cleanup is not a pass.
+Inside an EXCLUSIVE SQLite transaction the driver rechecks the exact owner, revalidates cleanup,
+and fsyncs `jobs/<failed-job>/lease-recovery.json` with the old receipt digest before deleting
+only that owner row. The receipt records `clear-authorized` before the transaction commits and
+`cleared` after it; a crash between them leaves the durable authorization evidence. A live OS lock
+refuses even the same owner. No device or provider cleanup is guessed or performed by this clear.
+The old receipt and database inode remain intact. Missing, failed or stale cleanup, a foreign
+owner, or an active worker retains the maintainer recovery stop below.
 
 Never delete, rename, or replace the lease database to unlock a campaign: that can create two
 live lock inodes. If the original command cannot recover, a maintainer must stop every launcher

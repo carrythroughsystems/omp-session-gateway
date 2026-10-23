@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 
 interface WorkflowStep {
+  readonly id?: string;
   readonly name?: string;
   readonly run?: string;
   readonly uses?: string;
@@ -134,6 +135,16 @@ ${runStep(job).run}
 }
 
 const shellTest = test.skipIf(process.platform === "win32");
+
+shellTest("recorded filing identity is a validated output consumed by a successful API-visible step", async () => {
+  const created = await exerciseStep("file");
+  expect(created.code, created.stderr).toBe(0);
+  expect(created.output).toBe("tracking_issue=999\n");
+  const reused = await exerciseStep("file", { version: "18.9.3", pages: [[tracking(405)]] });
+  expect(reused.output).toBe("tracking_issue=405\n");
+  expect(runStep("file").id).toBe("file");
+  expect(workflow.jobs.file.steps?.[1]?.name).toBe("Record tracking issue #${{ steps.file.outputs.tracking_issue }}");
+});
 
 test("weekly scheduling and downstream gates preserve the request identity and privilege boundary", async () => {
   expect(workflow.on.schedule).toEqual([{ cron: "17 15 * * 1" }]);
