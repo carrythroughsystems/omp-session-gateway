@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { assertStableReleaseQualification, nextReleaseVersion, parseReleaseClass, releaseVersion, type ReleaseClass } from "./release-policy.ts";
 import { externalCleanupCurrent, validateStableQualificationReceipt } from "./stable-qualification.ts";
 import { historicalPredecessor } from "./post-release-smoke.ts";
-import { SAMSUNG_MODEL_CODES } from "./device-cloud-qualification.ts";
+import { parseDeviceCloudProgress, SAMSUNG_MODEL_CODES } from "./device-cloud-qualification.ts";
 
 const REPO = "https://github.com/carrythroughsystems/omp-session-gateway";
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
@@ -121,8 +121,8 @@ function measurements(value: unknown): unknown {
   return out;
 }
 
-/** Legacy homogeneous receipts retain their bytes; new receipts attribute every target explicitly. */
-export function cloudReleaseEvidence(value: unknown): { summary: string; devices: Record<"iphone" | "ipad" | "android", string> } {
+/** Preserve historical projections; retry audits count owned allocations, not final targets. */
+export function cloudReleaseEvidence(value: unknown, progressValue?: unknown): { summary: string; devices: Record<"iphone" | "ipad" | "android", string> } {
   const cloud = object(value, "cloud result");
   requireTrue(cloud.passed, "cloud result");
   const targets = object(cloud.targets, "cloud targets");
@@ -154,14 +154,43 @@ export function cloudReleaseEvidence(value: unknown): { summary: string; devices
     devices[name] = attributed ? `${vendor}, tunnel ${tunnelVersion}: ${description}` : description;
   }
   const audit = object(cloud.audit, "cloud audit");
-  equal(audit.records, 3, "cloud audited records");
+  let records: number = names.length, browserStackRecords = browserStackTargets;
+  if (cloud.journeys !== undefined || (progressValue !== undefined && object(progressValue, "cloud progress").journeys !== undefined)) {
+    const progress = parseDeviceCloudProgress(progressValue);
+    equal(progress.phase, "restored", "cloud progress phase");
+    equal(progress.cleanupRequired, false, "cloud cleanup");
+    equal(JSON.stringify(progress.journeys), JSON.stringify(cloud.journeys), "cloud journey history");
+    if (!attributed || progress.resources === undefined) throw new Error("cloud retries require attributed allocation records");
+    for (const name of names) {
+      const attempts = progress.journeys?.[name];
+      if (!attempts || attempts.at(-1)?.outcome !== "passed") throw new Error(`cloud ${name} has no final passing journey`);
+      const allocations = progress.resources.filter(resource => resource.target === name);
+      equal(allocations.length, attempts.length, `cloud ${name} allocation count`);
+      const final = allocations.find(resource => resource.attempt === attempts.length);
+      if (!final) throw new Error(`cloud ${name} has no final allocation`);
+      equal(object(targets[name], `cloud ${name}`).vendor, final.vendor === "testingbot" ? "TestingBot" : "BrowserStack", `cloud ${name} allocation vendor`);
+    }
+    for (const resource of progress.resources) {
+      requireTrue(resource.ended, "cloud allocation ended");
+      requireTrue(resource.audited, "cloud allocation audited");
+      if (resource.incident === true || resource.unauditedDeletion === true) throw new Error("cloud allocation has unresolved audit evidence");
+    }
+    records = progress.resources.length;
+    browserStackRecords = progress.resources.filter(resource => resource.vendor === "browserstack").length;
+    const recordedAudit = object(progress.results.audit, "cloud progress audit");
+    for (const key of ["records", "testingbotRecords", "browserstackRecords", "recordsExposingLinks", "recordsWithMedia", "lingeringSignedArtifacts"]) {
+      equal(audit[key], recordedAudit[key], `cloud ${key} audit binding`);
+    }
+  }
+  equal(audit.records, records, "cloud audited records");
   equal(audit.recordsExposingLinks, 0, "cloud retained link exposure");
   equal(audit.recordsWithMedia, 0, "cloud retained media");
   if (attributed) {
-    equal(cloud.vendor, browserStackTargets === 0 ? "TestingBot" : "mixed", "aggregate cloud vendor");
-    equal(cloud.tunnelVersion, browserStackTargets === 0 ? object(targets.iphone, "cloud iphone").tunnelVersion : "per-target", "aggregate cloud tunnel");
-    equal(audit.browserstackRecords, browserStackTargets, "BrowserStack audited records");
-    equal(audit.testingbotRecords, 3 - browserStackTargets, "TestingBot audited records");
+    equal(audit.lingeringSignedArtifacts, 0, "cloud lingering signed artifacts");
+    equal(cloud.vendor, browserStackRecords === 0 ? "TestingBot" : "mixed", "aggregate cloud vendor");
+    equal(cloud.tunnelVersion, browserStackRecords === 0 ? object(targets.iphone, "cloud iphone").tunnelVersion : "per-target", "aggregate cloud tunnel");
+    equal(audit.browserstackRecords, browserStackRecords, "BrowserStack audited records");
+    equal(audit.testingbotRecords, records - browserStackRecords, "TestingBot audited records");
   } else equal(cloud.vendor, "TestingBot", "legacy cloud vendor");
   return {
     devices,
@@ -237,7 +266,7 @@ function qualification(receiptValue: unknown, candidateTag: string, tag: string,
   equal(push.ompVersion, releaseVersion(baseline), "Push OMP");
   const platform = object(push.platform, "Push platform");
   const cloud = object(e("deviceCloud").result, "cloud result");
-  const cloudEvidence = cloudReleaseEvidence(cloud);
+  const cloudEvidence = cloudReleaseEvidence(cloud, e("deviceCloud").progress);
   const device = (name: "iphone" | "ipad" | "android") => cloudEvidence.devices[name];
   const observations = object(windows.observations, "Windows observations");
   const relay = e("relay");

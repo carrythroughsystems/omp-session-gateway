@@ -521,7 +521,10 @@ Final release still ends every session and stops the tunnels/fixture before rele
 Additive schema-3 `progress.journeys[target]` preserves both numbered attempts and closed outcomes
 (including the first failure's collaboration/Home Screen stage); raw errors never enter receipts.
 Resources carry the matching attempt ordinal, all session identities remain recorded, and aggregate
-audit counts include both attempts. Successful evidence includes this journey history. A crash does
+audit counts include both attempts. Approval binds each final passing target to its allocation and
+derives total/per-vendor audit counts from every ended, clean-audited allocation, including retries;
+it does not assume three records or attribute a failed attempt to its successor's vendor.
+Successful evidence includes this journey history. A crash does
 not resume an interrupted journey or reset its retry budget: existing dirty-attempt cleanup applies.
 
 Availability holds are never automatically retried by this mechanism. An initial hold keeps the

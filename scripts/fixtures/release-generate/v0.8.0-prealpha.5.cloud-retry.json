@@ -1,0 +1,270 @@
+{
+  "progress": {
+    "lane": "deviceCloud",
+    "epoch": "6dd3f43d-e530-4685-aaf7-b21cbbed2a7d",
+    "binding": "39cec3fde5bd2b9c308716e2cc62f06ba4ccc06a52899da38fb376720e2630b2",
+    "phase": "restored",
+    "cleanupRequired": false,
+    "sessions": [
+      "fixture-session-1",
+      "fixture-session-2",
+      "fixture-session-4"
+    ],
+    "resources": [
+      {
+        "vendor": "testingbot",
+        "target": "iphone",
+        "attempt": 1,
+        "ended": true,
+        "audited": true,
+        "recordRemoved": false,
+        "sessionId": "fixture-session-1"
+      },
+      {
+        "vendor": "testingbot",
+        "target": "iphone",
+        "attempt": 2,
+        "ended": true,
+        "audited": true,
+        "recordRemoved": false,
+        "sessionId": "fixture-session-2"
+      },
+      {
+        "vendor": "browserstack",
+        "target": "ipad",
+        "attempt": 1,
+        "ended": true,
+        "audited": true,
+        "recordRemoved": true,
+        "sessionId": "3333333333333333333333333333333333333333",
+        "artifacts": [],
+        "recordDeleted": true
+      },
+      {
+        "vendor": "testingbot",
+        "target": "android",
+        "attempt": 1,
+        "ended": true,
+        "audited": true,
+        "recordRemoved": false,
+        "sessionId": "fixture-session-4"
+      }
+    ],
+    "tunnels": [
+      "testingbot",
+      "browserstack"
+    ],
+    "results": {
+      "audit": {
+        "records": 4,
+        "recordsExposingLinks": 0,
+        "recordsWithMedia": 0,
+        "lingeringSignedArtifacts": 0,
+        "testingbotRecords": 3,
+        "browserstackRecords": 1,
+        "dashboardReferences": 4
+      },
+      "iphone": {
+        "device": "iPhone 17 Pro",
+        "os": "26.5",
+        "browser": "safari",
+        "browserVersion": "26.5",
+        "vendor": "TestingBot",
+        "tunnelVersion": "4.9",
+        "appAssetMatched": true,
+        "viewReadOnly": true,
+        "controlWritable": true,
+        "promptAccepted": true,
+        "returnedToDirectory": true,
+        "sinksDetectable": 7,
+        "sinkFindings": 0,
+        "homeScreenApp": true,
+        "alertsEnabled": true,
+        "subscriptionOmitsExpirationTime": true,
+        "pushServiceHost": "web.push.apple.com",
+        "deliveredMs": 10444,
+        "tapOpenedControl": true,
+        "tapUrlScrubbed": true,
+        "alertsDisabled": true,
+        "tunnelRefusals": 18,
+        "elapsedMs": 82171
+      },
+      "ipad": {
+        "device": "iPad (10th generation)",
+        "os": "27.0",
+        "browser": "safari",
+        "browserVersion": "27.0",
+        "vendor": "BrowserStack",
+        "tunnelVersion": "8.9",
+        "appAssetMatched": true,
+        "viewReadOnly": true,
+        "controlWritable": true,
+        "promptAccepted": true,
+        "returnedToDirectory": true,
+        "sinksDetectable": 7,
+        "sinkFindings": 0,
+        "tunnelRefusals": 7,
+        "elapsedMs": 24528
+      },
+      "android": {
+        "device": "Galaxy S26",
+        "model": "SM-S942B",
+        "os": "16.0.0",
+        "browser": "chrome",
+        "browserVersion": "145.0.7632.159",
+        "vendor": "TestingBot",
+        "tunnelVersion": "4.9",
+        "appAssetMatched": true,
+        "viewReadOnly": true,
+        "controlWritable": true,
+        "promptAccepted": true,
+        "returnedToDirectory": true,
+        "sinksDetectable": 7,
+        "sinkFindings": 0,
+        "tunnelRefusals": 32,
+        "elapsedMs": 27977
+      }
+    },
+    "journeys": {
+      "iphone": [
+        {
+          "attempt": 1,
+          "outcome": "journey-failed",
+          "stage": "home-screen"
+        },
+        {
+          "attempt": 2,
+          "outcome": "passed"
+        }
+      ],
+      "ipad": [
+        {
+          "attempt": 1,
+          "outcome": "passed"
+        }
+      ],
+      "android": [
+        {
+          "attempt": 1,
+          "outcome": "passed"
+        }
+      ]
+    },
+    "auditSessions": {
+      "live": {
+        "instanceId": "fixture-live",
+        "generation": 1
+      },
+      "fixture": {
+        "instanceId": "fixture-audit",
+        "generation": 1
+      }
+    }
+  },
+  "result": {
+    "passed": true,
+    "vendor": "mixed",
+    "tunnelVersion": "per-target",
+    "targets": {
+      "iphone": {
+        "device": "iPhone 17 Pro",
+        "os": "26.5",
+        "browser": "safari",
+        "browserVersion": "26.5",
+        "vendor": "TestingBot",
+        "tunnelVersion": "4.9",
+        "appAssetMatched": true,
+        "viewReadOnly": true,
+        "controlWritable": true,
+        "promptAccepted": true,
+        "returnedToDirectory": true,
+        "sinksDetectable": 7,
+        "sinkFindings": 0,
+        "homeScreenApp": true,
+        "alertsEnabled": true,
+        "subscriptionOmitsExpirationTime": true,
+        "pushServiceHost": "web.push.apple.com",
+        "deliveredMs": 10444,
+        "tapOpenedControl": true,
+        "tapUrlScrubbed": true,
+        "alertsDisabled": true,
+        "tunnelRefusals": 18,
+        "elapsedMs": 82171
+      },
+      "ipad": {
+        "device": "iPad (10th generation)",
+        "os": "27.0",
+        "browser": "safari",
+        "browserVersion": "27.0",
+        "vendor": "BrowserStack",
+        "tunnelVersion": "8.9",
+        "appAssetMatched": true,
+        "viewReadOnly": true,
+        "controlWritable": true,
+        "promptAccepted": true,
+        "returnedToDirectory": true,
+        "sinksDetectable": 7,
+        "sinkFindings": 0,
+        "tunnelRefusals": 7,
+        "elapsedMs": 24528
+      },
+      "android": {
+        "device": "Galaxy S26",
+        "model": "SM-S942B",
+        "os": "16.0.0",
+        "browser": "chrome",
+        "browserVersion": "145.0.7632.159",
+        "vendor": "TestingBot",
+        "tunnelVersion": "4.9",
+        "appAssetMatched": true,
+        "viewReadOnly": true,
+        "controlWritable": true,
+        "promptAccepted": true,
+        "returnedToDirectory": true,
+        "sinksDetectable": 7,
+        "sinkFindings": 0,
+        "tunnelRefusals": 32,
+        "elapsedMs": 27977
+      }
+    },
+    "journeys": {
+      "iphone": [
+        {
+          "attempt": 1,
+          "outcome": "journey-failed",
+          "stage": "home-screen"
+        },
+        {
+          "attempt": 2,
+          "outcome": "passed"
+        }
+      ],
+      "ipad": [
+        {
+          "attempt": 1,
+          "outcome": "passed"
+        }
+      ],
+      "android": [
+        {
+          "attempt": 1,
+          "outcome": "passed"
+        }
+      ]
+    },
+    "audit": {
+      "records": 4,
+      "recordsExposingLinks": 0,
+      "recordsWithMedia": 0,
+      "lingeringSignedArtifacts": 0,
+      "testingbotRecords": 3,
+      "browserstackRecords": 1,
+      "dashboardReferences": 4
+    }
+  },
+  "source": {
+    "candidate": "v0.8.0-prealpha.5",
+    "receiptSha256": "126aa12a7a3f8c2dd7f8ef2036a838620a03b79177f8424b8f5a1579fd7396ef",
+    "privateSessionIds": "replaced with synthetic identifiers"
+  }
+}
