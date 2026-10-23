@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cloudReleaseEvidence, generateRelease, RELEASE_TEXT, runReleaseGenerate, type ReleaseGenerateOptions } from "./release-generate.ts";
+import type { DeviceCloudProgress } from "./device-cloud-qualification.ts";
 import { historicalTrees, normalizeHistoricalTree } from "./fixtures/release-generate/historical.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -14,6 +15,7 @@ async function fixture(name: string): Promise<unknown> {
 }
 const originals = historicalTrees();
 const receipt = await fixture("v0.7.4.receipt.json");
+const recordedCloudRetry = await fixture("v0.8.0-prealpha.5.cloud-retry.json");
 const smoke = await fixture("v0.7.4.smoke.json");
 const status = await fixture("v0.7.4.status.json");
 // Preserve the recorded fixture; simulate its publication at the transferred repository.
@@ -68,6 +70,78 @@ describe("cloud vendor release attribution", () => {
     if (kind === "aggregate vendor") invalid.vendor = "TestingBot";
     if (kind === "audit counts") invalid.audit.browserstackRecords = 0;
     expect(() => cloudReleaseEvidence(invalid)).toThrow();
+  });
+
+  function retry() {
+    return structuredClone(recordedCloudRetry) as {
+      result: CloudEvidence & { journeys: NonNullable<DeviceCloudProgress["journeys"]> };
+      progress: DeviceCloudProgress;
+    };
+  }
+  test("recorded .5 iPhone retry projects three final targets from four audited allocations", () => {
+    const evidence = retry();
+    expect(evidence.result.audit).toMatchObject({ records: 4, testingbotRecords: 3, browserstackRecords: 1 });
+    expect(evidence.result.journeys.iphone).toEqual([
+      { attempt: 1, outcome: "journey-failed", stage: "home-screen" }, { attempt: 2, outcome: "passed" },
+    ]);
+    const projected = cloudReleaseEvidence(evidence.result, evidence.progress);
+    expect(Object.keys(projected.devices)).toEqual(["iphone", "ipad", "android"]);
+    expect(projected.devices.iphone).toContain("TestingBot, tunnel 4.9: iPhone 17 Pro");
+    expect(projected.devices.ipad).toContain("BrowserStack, tunnel 8.9: iPad (10th generation)");
+  });
+  test("approval passes recorded retry progress to the cloud projection", () => {
+    const evidence = retry();
+    const candidate = structuredClone(receipt) as { lanes: {
+      deviceCloud: { evidence: unknown }; deviceCloudCleanup: { evidence: { epoch: string } };
+    } };
+    candidate.lanes.deviceCloud.evidence = evidence;
+    candidate.lanes.deviceCloudCleanup.evidence.epoch = evidence.progress.epoch;
+    expect(generateRelease(approveBefore, { ...approveOptions, receipt: candidate })["docs/COMPATIBILITY.md"])
+      .toContain("TestingBot, tunnel 4.9: iPhone 17 Pro");
+  });
+  test("audit vendor totals follow allocations when a retry changes vendor", () => {
+    const evidence = retry(), resources = evidence.progress.resources!;
+    const failed = resources.shift()!;
+    resources[0]!.attempt = 1;
+    failed.target = "ipad";
+    resources[1]!.attempt = 2;
+    resources.splice(1, 0, failed);
+    evidence.progress.sessions = resources.filter(r => r.vendor === "testingbot").map(r => r.sessionId!);
+    evidence.progress.journeys = {
+      iphone: [{ attempt: 1, outcome: "passed" }],
+      ipad: [{ attempt: 1, outcome: "journey-failed", stage: "collaboration" }, { attempt: 2, outcome: "passed" }],
+      android: [{ attempt: 1, outcome: "passed" }],
+    };
+    evidence.result.journeys = structuredClone(evidence.progress.journeys);
+    expect(cloudReleaseEvidence(evidence.result, evidence.progress).devices.ipad).toContain("BrowserStack");
+  });
+  test.each([
+    "missing progress", "unaudited retry", "unaudited final", "unended", "missing allocation",
+    "duplicate allocation", "nonpassing final", "missing journey", "third attempt", "journey mismatch",
+    "wrong final vendor", "audit total", "audit vendor", "retained links", "retained media", "lingering",
+  ])("retry projection refuses %s", kind => {
+    const evidence = retry();
+    if (kind === "missing progress") {
+      expect(() => cloudReleaseEvidence(evidence.result)).toThrow();
+      return;
+    }
+    const resources = evidence.progress.resources!;
+    if (kind === "unaudited retry") resources[0]!.audited = false;
+    if (kind === "unaudited final") resources[1]!.audited = false;
+    if (kind === "unended") resources[1]!.ended = false;
+    if (kind === "missing allocation") resources.splice(1, 1);
+    if (kind === "duplicate allocation") resources.push(structuredClone(resources[1]!));
+    if (kind === "nonpassing final") evidence.progress.journeys!.iphone![1]!.outcome = "failed";
+    if (kind === "missing journey") delete evidence.progress.journeys!.android;
+    if (kind === "third attempt") evidence.progress.journeys!.iphone!.push({ attempt: 2, outcome: "passed" });
+    if (kind === "journey mismatch") evidence.result.journeys.iphone![0]!.stage = "collaboration";
+    if (kind === "wrong final vendor") evidence.result.targets.ipad.vendor = "TestingBot";
+    if (kind === "audit total") evidence.result.audit.records = 3;
+    if (kind === "audit vendor") evidence.result.audit.testingbotRecords = 2;
+    if (kind === "retained links") evidence.result.audit.recordsExposingLinks = 1;
+    if (kind === "retained media") evidence.result.audit.recordsWithMedia = 1;
+    if (kind === "lingering") evidence.result.audit.lingeringSignedArtifacts = 1;
+    expect(() => cloudReleaseEvidence(evidence.result, evidence.progress)).toThrow();
   });
 });
 
