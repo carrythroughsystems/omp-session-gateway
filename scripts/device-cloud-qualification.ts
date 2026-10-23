@@ -26,6 +26,7 @@ import {
   mergeBrowserStackArtifacts,
 } from "./browserstack.ts";
 import { RetainedVendorJsonError } from "./device-cloud-record-json.ts";
+import { deviceCloudHolds } from "./device-cloud-availability.ts";
 
 export interface DeviceCloudIdentity {
   readonly tag: string;
@@ -37,6 +38,14 @@ export interface DeviceCloudIdentity {
 
 export const DEVICE_CLOUD_TARGETS = ["iphone", "ipad", "android"] as const;
 export type DeviceCloudTarget = (typeof DEVICE_CLOUD_TARGETS)[number];
+
+/** Only post-allocation UI journeys qualify for the bounded in-lane retry. */
+export class DeviceCloudJourneyFailure extends Error {
+  constructor(readonly stage: "collaboration" | "home-screen", cause: unknown) {
+    super(`device-cloud ${stage} journey failed`, { cause });
+    this.name = "DeviceCloudJourneyFailure";
+  }
+}
 
 export const DEVICE_CLOUD_VENDOR_POLICY = {
   iphone: ["testingbot"], ipad: ["testingbot", "browserstack"], android: ["testingbot", "browserstack"],
@@ -51,6 +60,8 @@ export interface DeviceCloudSessionRef {
 export interface DeviceCloudResource {
   vendor: DeviceCloudVendor;
   target: DeviceCloudTarget;
+  /** Additive ownership ordinal within the unchanged lane epoch. Absent on historical receipts. */
+  attempt?: 1 | 2;
   /** Absent means creation was intended but its outcome is not known. Never infer absence. */
   sessionId?: string;
   ended: boolean;
@@ -101,6 +112,13 @@ export type DeviceCloudPhase = (typeof DEVICE_CLOUD_PHASES)[number];
 export type DeviceCloudObservation = boolean | number | string;
 export type DeviceCloudResults = Partial<Record<DeviceCloudTarget | "audit", Record<string, DeviceCloudObservation>>>;
 
+export interface DeviceCloudJourneyAttempt {
+  attempt: 1 | 2;
+  outcome: "running" | "passed" | "journey-failed" | "availability-held" | "failed";
+  /** Closed diagnostic category; raw errors and vendor text never enter the receipt. */
+  stage?: "collaboration" | "home-screen";
+}
+
 export interface DeviceCloudProgress extends Record<string, unknown> {
   lane: "deviceCloud";
   epoch: string;
@@ -114,6 +132,7 @@ export interface DeviceCloudProgress extends Record<string, unknown> {
   tunnels?: DeviceCloudVendor[];
   auditSessions?: Record<"live" | "fixture", Pick<SessionMetadata, "instanceId" | "generation">>;
   results: DeviceCloudResults;
+  journeys?: Partial<Record<DeviceCloudTarget, DeviceCloudJourneyAttempt[]>>;
 }
 
 export interface DeviceCloudTargetAttempt {
@@ -136,7 +155,7 @@ export interface DeviceCloudRuntime {
   fixtureSession(epoch: string): Promise<SessionMetadata | undefined>;
   liveSession(label: string): Promise<SessionMetadata | undefined>;
   tunnel(operation: "start" | "stop", epoch: string, vendor: DeviceCloudVendor): Promise<void>;
-  /** Allocates a device, runs the target's journeys, and ends its session. */
+  /** Allocates and drives one target; the lane owns session end, record audit and bounded retry. */
   verify(target: DeviceCloudTarget, attempt: DeviceCloudTargetAttempt): Promise<Record<string, DeviceCloudObservation>>;
   endSession(reference: DeviceCloudSessionRef): Promise<void>;
   record(reference: DeviceCloudSessionRef, remember?: (artifacts: readonly CloudArtifact[]) => Promise<void>, inspect?: CloudRecordRemoval["inspect"]): Promise<TestRecord | undefined>;
@@ -304,12 +323,26 @@ function binding(identity: DeviceCloudIdentity): string {
 /** Refuses anything but the exact progress shape, and any evidence that could carry a secret. */
 export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
   if (
-    !isRecord(value) || Object.keys(value).some(key => !["binding", "cleanupRequired", "epoch", "lane", "phase", "results", "sessions", "resources", "tunnels", "auditSessions"].includes(key)) ||
+    !isRecord(value) || Object.keys(value).some(key => !["binding", "cleanupRequired", "epoch", "lane", "phase", "results", "sessions", "resources", "tunnels", "auditSessions", "journeys"].includes(key)) ||
     value.lane !== "deviceCloud" || typeof value.epoch !== "string" || !EPOCH.test(value.epoch) ||
     typeof value.binding !== "string" || !/^[a-f0-9]{64}$/u.test(value.binding) || typeof value.cleanupRequired !== "boolean" ||
     !DEVICE_CLOUD_PHASES.some(phase => phase === value.phase)
   ) {
     throw new Error("invalid device-cloud progress");
+  }
+  if (value.journeys !== undefined) {
+    if (!isRecord(value.journeys)) throw new Error("invalid device-cloud journey history");
+    for (const [target, attempts] of Object.entries(value.journeys)) {
+      if (!DEVICE_CLOUD_TARGETS.some(known => known === target) || !Array.isArray(attempts) || attempts.length < 1 || attempts.length > 2) {
+        throw new Error("invalid device-cloud journey attempts");
+      }
+      for (const [index, attempt] of attempts.entries()) {
+        if (!isRecord(attempt) || Object.keys(attempt).some(key => !["attempt", "outcome", "stage"].includes(key)) ||
+          attempt.attempt !== index + 1 || !["running", "passed", "journey-failed", "availability-held", "failed"].includes(String(attempt.outcome)) ||
+          (attempt.outcome === "journey-failed" ? !["collaboration", "home-screen"].includes(String(attempt.stage)) : attempt.stage !== undefined) ||
+          (index === 1 && attempts[0].outcome !== "journey-failed")) throw new Error("invalid device-cloud journey outcome");
+      }
+    }
   }
   if (value.auditSessions !== undefined) {
     if (!isRecord(value.auditSessions) || Object.keys(value.auditSessions).sort().join(",") !== "fixture,live" ||
@@ -318,19 +351,22 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
         !Number.isSafeInteger(session.generation) || (session.generation as number) < 1)) throw new Error("invalid device-cloud audit generation identities");
   }
   if (value.resources !== undefined || value.tunnels !== undefined) {
-    if (!Array.isArray(value.resources) || value.resources.length > 3 || !Array.isArray(value.tunnels) ||
+    if (!Array.isArray(value.resources) || value.resources.length > (value.journeys === undefined ? 3 : 6) || !Array.isArray(value.tunnels) ||
       value.tunnels.length > 2 || new Set(value.tunnels).size !== value.tunnels.length ||
       value.tunnels.some(vendor => vendor !== "testingbot" && vendor !== "browserstack")) throw new Error("invalid device-cloud vendor ownership");
     const targets = new Set<string>();
     const references = new Set<string>();
     for (const resource of value.resources) {
-      if (!isRecord(resource) || Object.keys(resource).some(key => !["audited", "ended", "recordRemoved", "recordDeleted", "target", "vendor", "sessionId", "artifacts", "unauditedDeletion", "incident"].includes(key)) ||
+      if (!isRecord(resource) || Object.keys(resource).some(key => !["audited", "ended", "recordRemoved", "recordDeleted", "target", "vendor", "sessionId", "artifacts", "unauditedDeletion", "incident", "attempt"].includes(key)) ||
         (resource.vendor !== "testingbot" && resource.vendor !== "browserstack") ||
         !DEVICE_CLOUD_TARGETS.some(target => target === resource.target) || typeof resource.target !== "string" ||
         (resource.vendor === "browserstack" && resource.target === "iphone") ||
         typeof resource.ended !== "boolean" || typeof resource.audited !== "boolean" || typeof resource.recordRemoved !== "boolean" ||
-        targets.has(resource.target)) throw new Error("invalid device-cloud allocation resource");
-      targets.add(resource.target);
+        targets.has(`${resource.target}:${resource.attempt ?? 1}`)) throw new Error("invalid device-cloud allocation resource");
+      if (value.journeys === undefined ? resource.attempt !== undefined :
+        (resource.attempt !== 1 && resource.attempt !== 2) || !Array.isArray((value.journeys as Record<string, unknown>)[resource.target]) ||
+          ((value.journeys as Record<string, unknown[]>)[resource.target]?.length ?? 0) < (resource.attempt as number)) throw new Error("unbound device-cloud journey resource");
+      targets.add(`${resource.target}:${resource.attempt ?? 1}`);
       if (resource.sessionId === undefined) {
         if (resource.ended || resource.audited || resource.recordRemoved || value.cleanupRequired !== true) throw new Error("inconsistent pending cloud allocation");
       } else {
@@ -357,9 +393,17 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
     const projected = value.resources.filter(resource => resource.vendor === "testingbot" && resource.sessionId !== undefined).map(resource => resource.sessionId);
     if (JSON.stringify(projected) !== JSON.stringify(value.sessions)) throw new Error("invalid legacy cloud session projection");
   }
+  if (isRecord(value.journeys)) {
+    for (const [target, attempts] of Object.entries(value.journeys)) {
+      if ((attempts as unknown[]).length === 2) {
+        const previous = (value.resources as DeviceCloudResource[] | undefined)?.find(resource => resource.target === target && resource.attempt === 1);
+        if (previous === undefined || !journeyReleased(previous)) throw new Error("device-cloud retry lacks prior containment proof");
+      }
+    }
+  }
   const sessions = value.sessions;
   if (
-    !Array.isArray(sessions) || sessions.length > DEVICE_CLOUD_TARGETS.length ||
+    !Array.isArray(sessions) || sessions.length > DEVICE_CLOUD_TARGETS.length * (value.journeys === undefined ? 1 : 2) ||
     sessions.some(id => typeof id !== "string" || !TESTINGBOT_SESSION_ID.test(id))
   ) {
     throw new Error("invalid device-cloud session record");
@@ -371,7 +415,7 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
     }
     if (!safeObservations(result)) throw new Error("unsafe device-cloud evidence");
     if (key !== "audit" && Array.isArray(value.resources)) {
-      const resource = value.resources.find(resource => resource.target === key);
+      const resource = value.resources.findLast(resource => resource.target === key);
       if (resource === undefined || result.vendor !== (resource.vendor === "testingbot" ? "TestingBot" : "BrowserStack")) throw new Error("device-cloud evidence vendor does not match its owned session");
     }
   }
@@ -392,6 +436,11 @@ function ownedResources(progress: DeviceCloudProgress): DeviceCloudResource[] {
 function sessionReference(resource: DeviceCloudResource): DeviceCloudSessionRef {
   if (resource.sessionId === undefined) throw new Error("an ambiguous cloud allocation requires operator reconciliation");
   return { vendor: resource.vendor, target: resource.target, sessionId: resource.sessionId };
+}
+
+function journeyReleased(resource: DeviceCloudResource): boolean {
+  return resource.sessionId !== undefined && resource.ended && resource.audited && resource.incident !== true &&
+    resource.unauditedDeletion !== true && (resource.vendor !== "browserstack" || resource.recordRemoved);
 }
 
 function recordExposure(links: readonly string[]): (record: TestRecord) => { leaks: boolean; media: boolean } {
@@ -470,6 +519,7 @@ async function auditRecords(
   progress: DeviceCloudProgress,
   driven: readonly (readonly [SessionMetadata, () => Promise<SessionMetadata | undefined>])[],
   save: () => Promise<void>,
+  resources = ownedResources(progress),
 ): Promise<Record<string, DeviceCloudObservation>> {
   const records: { resource: DeviceCloudResource; record: TestRecord }[] = [];
   const failures: Error[] = [];
@@ -487,7 +537,7 @@ async function auditRecords(
     }
   }
   const exposure = recordExposure(needles);
-  for (const resource of ownedResources(progress)) {
+  for (const resource of resources) {
     try {
       const record = await waitFor(runtime, "test record finalization", async () => {
         const inspect = resource.vendor === "browserstack" ? async (record: TestRecord) => {
@@ -549,6 +599,10 @@ async function auditRecords(
     browserstackRecords: records.filter(({ resource }) => resource.vendor === "browserstack").length,
     dashboardReferences: records.reduce((sum, { record }) => sum + (record.dashboardReferences ?? 0), 0),
   };
+  for (const key of Object.keys(audit) as (keyof typeof audit)[]) {
+    const previous = progress.results.audit?.[key];
+    audit[key] += typeof previous === "number" ? previous : 0;
+  }
   progress.results.audit = audit;
   await save();
   if (exposing > 0) failures.push(new Error(`${exposing} of ${records.length} cloud test records contain a live View or Control link`));
@@ -567,6 +621,11 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
   const { runtime } = input;
   const driven: (readonly [SessionMetadata, () => Promise<SessionMetadata | undefined>])[] = [];
   const failures: unknown[] = [];
+  const inspected = new Set<DeviceCloudResource>();
+  const inspect = async (resources: DeviceCloudResource[]) => {
+    for (const resource of resources) inspected.add(resource);
+    return auditRecords(runtime, progress, driven, save, resources);
+  };
   const advance = async (phase: DeviceCloudPhase) => {
     progress.phase = phase;
     await save();
@@ -591,42 +650,73 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
     await runtime.tunnel("start", progress.epoch, "testingbot");
     await advance("tunnel_ready");
     for (const target of DEVICE_CLOUD_TARGETS) {
-      const targetFailures: unknown[] = [];
-      let observations: Record<string, DeviceCloudObservation> | undefined;
-      try {
-        observations = await runtime.verify(target, {
-          epoch: progress.epoch,
-          session: live,
-          allocating: async vendor => {
-            if (progress.resources!.some(resource => resource.target === target) || (target === "iphone" && vendor !== "testingbot")) throw new Error("invalid cloud allocation intent");
-            progress.resources!.push({ vendor, target, ended: false, audited: false, recordRemoved: false });
-            await save();
-          },
-          startingTunnel: async vendor => {
-            if (!progress.tunnels!.includes(vendor)) { progress.tunnels!.push(vendor); await save(); }
-          },
-          created: async reference => {
-            const resource = progress.resources!.find(resource => resource.target === target);
-            if (resource === undefined || resource.vendor !== reference.vendor || reference.target !== target || resource.sessionId !== undefined ||
-              !(reference.vendor === "testingbot" ? TESTINGBOT_SESSION_ID : BROWSERSTACK_SESSION_ID).test(reference.sessionId) ||
-              progress.resources!.some(owned => owned.vendor === reference.vendor && owned.sessionId === reference.sessionId)) throw new Error("cloud session does not match its allocation intent");
-            resource.sessionId = reference.sessionId;
-            if (reference.vendor === "testingbot") progress.sessions.push(reference.sessionId);
-            await save();
-          },
-        });
-      } catch (error) { targetFailures.push(error); }
-      // Targets are sequential: never retain active devices behind the next allocation.
-      for (const resource of ownedResources(progress).filter(resource => resource.target === target && !resource.ended)) {
-        try { await runtime.endSession(sessionReference(resource)); resource.ended = true; await save(); }
-        catch { targetFailures.push(new Error("a device-cloud target session did not end before the next allocation")); }
+      const attempts = progress.journeys![target] = [];
+      let firstFailure: DeviceCloudJourneyFailure | undefined;
+      for (const ordinal of [1, 2] as const) {
+        const recorded: DeviceCloudJourneyAttempt = { attempt: ordinal, outcome: "running" };
+        attempts.push(recorded);
+        await save();
+        const targetFailures: unknown[] = [];
+        let observations: Record<string, DeviceCloudObservation> | undefined, failure: unknown;
+        try {
+          observations = await runtime.verify(target, {
+            epoch: progress.epoch,
+            session: live,
+            allocating: async vendor => {
+              if (progress.resources!.some(resource => resource.target === target && resource.attempt === ordinal) || (target === "iphone" && vendor !== "testingbot")) throw new Error("invalid cloud allocation intent");
+              progress.resources!.push({ vendor, target, attempt: ordinal, ended: false, audited: false, recordRemoved: false });
+              await save();
+            },
+            startingTunnel: async vendor => {
+              if (!progress.tunnels!.includes(vendor)) { progress.tunnels!.push(vendor); await save(); }
+            },
+            created: async reference => {
+              const resource = progress.resources!.find(resource => resource.target === target && resource.attempt === ordinal);
+              if (resource === undefined || resource.vendor !== reference.vendor || reference.target !== target || resource.sessionId !== undefined ||
+                !(reference.vendor === "testingbot" ? TESTINGBOT_SESSION_ID : BROWSERSTACK_SESSION_ID).test(reference.sessionId) ||
+                progress.resources!.some(owned => owned.vendor === reference.vendor && owned.sessionId === reference.sessionId)) throw new Error("cloud session does not match its allocation intent");
+              resource.sessionId = reference.sessionId;
+              if (reference.vendor === "testingbot") progress.sessions.push(reference.sessionId);
+              await save();
+            },
+          });
+        } catch (error) {
+          failure = error;
+          recorded.outcome = error instanceof DeviceCloudJourneyFailure ? "journey-failed" :
+            deviceCloudHolds(error) === undefined ? "failed" : "availability-held";
+          if (error instanceof DeviceCloudJourneyFailure) recorded.stage = error.stage;
+          await save();
+        }
+        // A fresh allocation, never a replayed WebDriver command or an active old session.
+        const resources = ownedResources(progress).filter(resource => resource.target === target && resource.attempt === ordinal);
+        for (const resource of resources.filter(resource => !resource.ended)) {
+          try { await runtime.endSession(sessionReference(resource)); resource.ended = true; await save(); }
+          catch { targetFailures.push(new Error("a device-cloud target session did not end before the next allocation")); }
+        }
+        if (targetFailures.length > 0) {
+          if (failure !== undefined) targetFailures.unshift(failure);
+          throw new AggregateError(targetFailures, "device-cloud target and session release failed");
+        }
+        if (failure instanceof DeviceCloudJourneyFailure && ordinal === 1) {
+          await inspect(resources);
+          if (resources.length !== 1 || !resources.every(journeyReleased)) throw new Error("device-cloud retry lacks prior containment proof");
+          firstFailure = failure;
+          continue;
+        }
+        if (failure !== undefined) {
+          if (firstFailure !== undefined) throw new AggregateError([firstFailure, failure], "device-cloud journey failed twice");
+          throw failure;
+        }
+        if (observations === undefined || !safeObservations(observations)) {
+          recorded.outcome = "failed";
+          await save();
+          throw new Error(observations === undefined ? "device-cloud target returned no observations" : `unsafe device-cloud evidence from the ${target}`);
+        }
+        recorded.outcome = "passed";
+        progress.results[target] = observations;
+        await advance(`${target}_verified`);
+        break;
       }
-      if (targetFailures.length === 1) throw targetFailures[0];
-      if (targetFailures.length > 1) throw new AggregateError(targetFailures, "device-cloud target and session release failed");
-      if (observations === undefined) throw new Error("device-cloud target returned no observations");
-      if (!safeObservations(observations)) throw new Error(`unsafe device-cloud evidence from the ${target}`);
-      progress.results[target] = observations;
-      await advance(`${target}_verified`);
     }
   } catch (error) {
     failures.push(error);
@@ -639,8 +729,8 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
   }
   let audit: Record<string, DeviceCloudObservation> | undefined;
   try {
-    audit = ownedResources(progress).length === 0 ? { records: 0, recordsExposingLinks: 0, recordsWithMedia: 0 } :
-      await auditRecords(runtime, progress, driven, save);
+    const remaining = ownedResources(progress).filter(resource => !inspected.has(resource));
+    audit = remaining.length === 0 ? progress.results.audit ?? { records: 0, recordsExposingLinks: 0, recordsWithMedia: 0 } : await inspect(remaining);
     await advance("records_audited");
   } catch (error) {
     failures.push(error);
@@ -653,6 +743,7 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
     vendor: progress.resources!.every(resource => resource.vendor === "testingbot") ? "TestingBot" : "mixed",
     tunnelVersion: progress.resources!.every(resource => resource.vendor === "testingbot") ? TESTINGBOT_TUNNEL.version : "per-target",
     targets: Object.fromEntries(DEVICE_CLOUD_TARGETS.map(target => [target, progress.results[target]])),
+    journeys: progress.journeys,
     audit,
   };
 }
@@ -767,7 +858,7 @@ export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Recor
   // tunnel, or fixture remain.
   return input.pixel("deviceCloud", async () => {
     const progress: DeviceCloudProgress = {
-      lane: "deviceCloud", epoch: randomUUID(), binding: bind, phase: "attempt_started", cleanupRequired: true, sessions: [], resources: [], tunnels: [], results: {},
+      lane: "deviceCloud", epoch: randomUUID(), binding: bind, phase: "attempt_started", cleanupRequired: true, sessions: [], resources: [], tunnels: [], results: {}, journeys: {},
     };
     // Only progress the parser accepts is saved, so the cleanup lane can always read it back.
     const save = async () => { await input.checkpoint(structuredClone(parseDeviceCloudProgress(progress))); };

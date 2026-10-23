@@ -3,6 +3,7 @@ import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import {
   DEVICE_CLOUD_PROFILES,
   DEVICE_CLOUD_TARGETS,
+  DeviceCloudJourneyFailure,
   ALLOCATION_REPORT_EXPRESSION,
   attestAllocation,
   cleanupDeviceCloud,
@@ -18,7 +19,7 @@ import {
 } from "./device-cloud-qualification.ts";
 import type { DeviceCloudVendor } from "./device-cloud-common.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudHolds } from "./device-cloud-availability.ts";
-import { createPixelLease, type PixelLease } from "./stable-qualification.ts";
+import { createPixelLease, createStableQualificationReceipt, externalCleanupCurrent, runExternalLane, type ExternalLaneModule, type PixelLease } from "./stable-qualification.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import { TestingBotApi } from "./testingbot.ts";
 import { BrowserStackApi, BrowserStackAuditFailure, prepareBrowserStackLocal } from "./browserstack.ts";
@@ -62,6 +63,8 @@ function harness(options: {
   readonly generationChangesAt?: string;
   readonly generationChanges?: "fixture" | "live";
   readonly failing?: string;
+  readonly journeyFailures?: Partial<Record<DeviceCloudTarget, number>>;
+  readonly failureStage?: "collaboration" | "home-screen";
   readonly hold?: DeviceCloudTarget;
   readonly auditFails?: boolean;
   readonly vendors?: Partial<Record<DeviceCloudTarget, DeviceCloudVendor>>;
@@ -74,6 +77,7 @@ function harness(options: {
   let leased = false;
   let clock = 0;
   let published = false;
+  const attempts: Partial<Record<DeviceCloudTarget, number>> = {};
   const generations: Record<"fixture" | "live", number> = { fixture: 1, live: 1 };
   const effect = (name: string) => {
     effects.push(`${name}${leased ? "" : " (unleased)"}`);
@@ -102,6 +106,7 @@ function harness(options: {
       effect(`tunnel ${operation}`);
     },
     verify: async (target, attempt) => {
+      const ordinal = attempts[target] = (attempts[target] ?? 0) + 1;
       if (attempt.session.cwdLabel !== LIVE_LABEL) throw new Error("journeys must drive the live session");
       if (target === options.hold) throw new DeviceCloudAvailabilityHold({
         kind: "device-cloud-availability", stage: "allocation", target, vendors: ["testingbot"],
@@ -110,8 +115,16 @@ function harness(options: {
       const vendor = options.vendors?.[target] ?? "testingbot";
       if (vendor === "browserstack") await attempt.startingTunnel(vendor);
       await attempt.allocating(vendor);
-      await attempt.created({ vendor, target, sessionId: options.sessionIds?.[target] ?? `session-${target}-0001` });
-      effect(`verify ${target}`);
+      const fixedId = options.sessionIds?.[target];
+      const sessionId = fixedId === undefined ? (vendor === "browserstack"
+        ? String(DEVICE_CLOUD_TARGETS.indexOf(target) + 1).repeat(39) + ordinal
+        : `session-${target}-${String(ordinal).padStart(4, "0")}`) : ordinal === 1 ? fixedId :
+          vendor === "browserstack" ? fixedId.slice(0, -1) + ((parseInt(fixedId.slice(-1), 16) + 1) % 16).toString(16) : `${fixedId}-retry`;
+      await attempt.created({ vendor, target, sessionId });
+      try {
+        effect(`verify ${target}`);
+        if (ordinal <= (options.journeyFailures?.[target] ?? 0)) throw new Error("synthetic journey failure with vendor-secret-detail");
+      } catch (error) { throw new DeviceCloudJourneyFailure(options.failureStage ?? "collaboration", error); }
       if (options.generationChangesAt === target) generations[options.generationChanges ?? "fixture"] += 1;
       return {
         vendor: vendor === "testingbot" ? "TestingBot" : "BrowserStack", tunnelVersion: vendor === "testingbot" ? "4.9" : "8.9",
@@ -293,10 +306,10 @@ describe("device-cloud lane", () => {
 
   test("a failed attempt is still released under its own lease", async () => {
     const lane = harness({ failing: "verify ipad" });
-    expect(await failure(runDeviceCloud(input(lane)))).toContain("verify ipad failed");
+    expect(await failure(runDeviceCloud(input(lane)))).toContain("journey failed twice");
     expect(lane.effects.filter(effect => effect.endsWith("(unleased)"))).toEqual([]);
     expect(lane.effects.slice(-5)).toEqual([
-      "audit session-iphone-0001", "audit session-ipad-0001", "tunnel stop", "fixture stop", "workspace remove",
+      "audit session-iphone-0001", "audit session-ipad-0002", "tunnel stop", "fixture stop", "workspace remove",
     ]);
     expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(false);
   });
@@ -418,6 +431,187 @@ describe("device-cloud lane", () => {
   });
 });
 
+describe("bounded device journey retry", () => {
+  test.each(DEVICE_CLOUD_TARGETS)("retries only a failed %s journey once on the same fixture and epoch", async target => {
+    const lane = harness({ journeyFailures: { [target]: 1 } });
+    const result = await runDeviceCloud(input(lane));
+    expect(result.passed).toBe(true);
+    for (const other of DEVICE_CLOUD_TARGETS) {
+      expect(lane.effects.filter(effect => effect === `verify ${other}`)).toHaveLength(other === target ? 2 : 1);
+    }
+    expect(lane.effects.filter(effect => effect === "fixture start")).toHaveLength(1);
+    expect(new Set(lane.checkpoints.map(progress => progress.epoch)).size).toBe(1);
+    expect(result.journeys).toMatchObject({ [target]: [
+      { attempt: 1, outcome: "journey-failed", stage: "collaboration" }, { attempt: 2, outcome: "passed" },
+    ] });
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.results.audit).toMatchObject({ records: 4, recordsExposingLinks: 0 });
+    expect(progress.sessions).toHaveLength(4);
+    expect(JSON.stringify(lane.checkpoints)).not.toContain("vendor-secret-detail");
+    const first = `session-${target}-0001`;
+    expect(lane.effects.indexOf(`end ${first}`)).toBeLessThan(lane.effects.indexOf(`audit ${first}`));
+    expect(lane.effects.indexOf(`audit ${first}`)).toBeLessThan(lane.effects.lastIndexOf(`verify ${target}`));
+  });
+
+  test("a second journey failure is terminal and both failures remain in the receipt", async () => {
+    const lane = harness({ journeyFailures: { ipad: 2 } });
+    await expect(runDeviceCloud(input(lane))).rejects.toThrow("journey failed");
+    expect(lane.effects.filter(effect => effect === "verify ipad")).toHaveLength(2);
+    expect(lane.effects).not.toContain("verify android");
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1))).toMatchObject({
+      cleanupRequired: false, journeys: { ipad: [
+        { attempt: 1, outcome: "journey-failed" }, { attempt: 2, outcome: "journey-failed" },
+      ] },
+    });
+  });
+
+  test("availability is never retried and retains its typed hold", async () => {
+    const lane = harness({ hold: "ipad" });
+    let calls = 0;
+    const error = await runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime,
+      verify: async (target, attempt) => { if (target === "ipad") calls++; return lane.runtime.verify(target, attempt); },
+    } }).catch(error => error);
+    expect(deviceCloudHolds(error)).toHaveLength(1);
+    expect(calls).toBe(1);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1))).toMatchObject({
+      journeys: { ipad: [{ attempt: 1, outcome: "availability-held" }] },
+    });
+  });
+
+  test("records Home Screen failure separately before its single retry", async () => {
+    const lane = harness({ journeyFailures: { iphone: 1 }, failureStage: "home-screen" });
+    expect((await runDeviceCloud(input(lane))).journeys).toMatchObject({
+      iphone: [{ attempt: 1, outcome: "journey-failed", stage: "home-screen" }, { attempt: 2, outcome: "passed" }],
+    });
+  });
+
+  test("availability on the second attempt cannot erase the first ordinary failure", async () => {
+    const lane = harness({ journeyFailures: { iphone: 1 } });
+    let calls = 0;
+    const error = await runDeviceCloud({ ...input(lane), runtime: { ...lane.runtime,
+      verify: async (target, attempt) => {
+        calls++;
+        if (calls === 2) throw new DeviceCloudAvailabilityHold({
+          kind: "device-cloud-availability", stage: "allocation", target, vendors: ["testingbot"],
+          reason: "pinned-pool-busy", waitedMs: 600_000, epoch: attempt.epoch,
+        });
+        return lane.runtime.verify(target, attempt);
+      },
+    } }).catch(error => error);
+    expect(calls).toBe(2);
+    expect(deviceCloudHolds(error)).toBeUndefined();
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1))).toMatchObject({
+      cleanupRequired: false, journeys: { iphone: [{ outcome: "journey-failed" }, { outcome: "availability-held" }] },
+    });
+  });
+
+  test("history refuses a third attempt or a retry without prior containment", async () => {
+    const lane = harness({ journeyFailures: { ipad: 1 } });
+    await runDeviceCloud(input(lane));
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    const third = structuredClone(progress);
+    (third.journeys!.ipad as unknown[]).push({ attempt: 3, outcome: "passed" });
+    expect(() => parseDeviceCloudProgress(third)).toThrow("attempts");
+    for (const change of [{ ended: false }, { audited: false }, { incident: true }, { unauditedDeletion: true }]) {
+      const dirty = structuredClone(progress);
+      Object.assign(dirty.resources!.find(resource => resource.target === "ipad" && resource.attempt === 1)!, change);
+      expect(() => parseDeviceCloudProgress(dirty)).toThrow();
+    }
+    const reflected = structuredClone(progress);
+    Object.assign(reflected.journeys!.ipad![0]!, { stage: "SYNTHETICKEYREFLECTION" });
+    expect(() => parseDeviceCloudProgress(reflected)).toThrow("outcome");
+  });
+
+  test("all three per-journey budgets remain bounded and their six records stay attributable", async () => {
+    const lane = harness({ journeyFailures: { iphone: 1, ipad: 1, android: 1 } });
+    const result = await runDeviceCloud(input(lane));
+    expect(result.audit).toMatchObject({ records: 6, recordsExposingLinks: 0 });
+    const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
+    expect(progress.resources).toHaveLength(6);
+    for (const target of DEVICE_CLOUD_TARGETS) {
+      expect(progress.journeys?.[target]).toMatchObject([{ attempt: 1, outcome: "journey-failed" }, { attempt: 2, outcome: "passed" }]);
+      expect(progress.resources?.filter(resource => resource.target === target).map(resource => resource.attempt)).toEqual([1, 2]);
+    }
+  });
+
+  test("an interrupted retry cannot resume or allocate again before old-attempt cleanup", async () => {
+    const lane = harness({ journeyFailures: { ipad: 1 } });
+    await runDeviceCloud(input(lane));
+    const interrupted = lane.checkpoints.find(saved => {
+      const progress = parseDeviceCloudProgress(saved);
+      return progress.journeys?.ipad?.[1]?.outcome === "running";
+    });
+    expect(interrupted).toBeDefined();
+    const resumed = harness();
+    await expect(runDeviceCloud(input(resumed, interrupted))).rejects.toThrow("requires cleanup");
+    expect(resumed.effects).toEqual([]);
+    const epoch = parseDeviceCloudProgress(interrupted).epoch;
+    expect(await cleanupDeviceCloud(input(resumed, interrupted))).toMatchObject({ epoch, restored: true });
+    expect(resumed.effects.filter(effect => effect.startsWith("verify "))).toEqual([]);
+  });
+
+  test.each(["end", "audit", "remove", "allocation"] as const)("does not retry after %s containment failure", async step => {
+    const lane = harness({ journeyFailures: { ipad: 1 }, vendors: { ipad: "browserstack" } });
+    let calls = 0;
+    const runtime: DeviceCloudRuntime = { ...lane.runtime,
+      verify: async (target, attempt) => {
+        if (target === "ipad") {
+          calls++;
+          if (step === "allocation") { await attempt.allocating("testingbot"); throw new Error("ambiguous allocation"); }
+        }
+        return lane.runtime.verify(target, attempt);
+      },
+      endSession: async reference => { if (step === "end" && reference.target === "ipad") throw new Error("end failed"); await lane.runtime.endSession(reference); },
+      record: async (...args) => { if (step === "audit" && args[0].target === "ipad") throw new Error("audit failed"); return lane.runtime.record(...args); },
+      removeRecord: async (...args) => { if (step === "remove" && args[0].target === "ipad") throw new Error("removal failed"); return lane.runtime.removeRecord(...args); },
+    };
+    await expect(runDeviceCloud({ ...input(lane), runtime })).rejects.toThrow();
+    expect(calls).toBe(1);
+    expect(lane.effects).not.toContain("verify android");
+  });
+
+  test("a BrowserStack retry audits and removes the failed allocation before replacing it", async () => {
+    const lane = harness({ journeyFailures: { ipad: 1 }, vendors: { ipad: "browserstack" } });
+    const result = await runDeviceCloud(input(lane));
+    const first = "2".repeat(39) + "1";
+    expect(lane.effects.indexOf(`remove ${first}`)).toBeGreaterThan(lane.effects.indexOf(`audit ${first}`));
+    expect(lane.effects.indexOf(`remove ${first}`)).toBeLessThan(lane.effects.lastIndexOf("verify ipad"));
+    expect(result.audit).toMatchObject({ records: 4, browserstackRecords: 2 });
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.filter(resource => resource.target === "ipad"))
+      .toMatchObject([{ ended: true, audited: true, recordRemoved: true }, { ended: true, audited: true, recordRemoved: true }]);
+  });
+
+  test("keeps other lane receipts and binds final cleanup to the single cloud epoch", async () => {
+    const lane = harness({ journeyFailures: { ipad: 1 } });
+    const receipt = createStableQualificationReceipt(identity.tag, identity.candidate.sourceCommit, "v0.6.9");
+    for (const [name, entry] of Object.entries(receipt.lanes)) {
+      if (name !== "deviceCloud" && name !== "deviceCloudCleanup") Object.assign(entry, { status: "passed", attempts: 1, evidence: { retained: true } });
+    }
+    const before = structuredClone(receipt.lanes);
+    const module: ExternalLaneModule = {
+      preflight: async () => {}, needsCleanup: deviceCloudNeedsCleanup,
+      run: context => runDeviceCloud({ ...input(lane), progress: context.progress, checkpoint: context.checkpoint, pixel: context.pixel }),
+      cleanup: context => cleanupDeviceCloud({ ...input(lane), progress: context.progress, checkpoint: context.checkpoint, pixel: context.pixel }),
+    };
+    await runExternalLane(receipt, "deviceCloud", async () => {}, module, {
+      identity: { ...identity, previousTag: "v0.6.9", orchestratorCommit: identity.candidate.sourceCommit,
+        receiptRoot: "/synthetic/receipt", predecessor: { ...identity.candidate, tag: "v0.6.9" } },
+      pixel: lane.pixel,
+    });
+    for (const [name, entry] of Object.entries(receipt.lanes)) {
+      if (name !== "deviceCloud" && name !== "deviceCloudCleanup") expect(entry).toEqual(before[name as keyof typeof before]);
+    }
+    expect(receipt.lanes.deviceCloud).toMatchObject({ status: "passed", attempts: 1 });
+    expect(receipt.lanes.deviceCloudCleanup).toMatchObject({ status: "passed", attempts: 1 });
+    const progress = parseDeviceCloudProgress(receipt.lanes.deviceCloud.evidence?.progress);
+    expect(progress).toMatchObject({ cleanupRequired: false, journeys: { ipad: [{ attempt: 1 }, { attempt: 2 }] } });
+    expect(receipt.lanes.deviceCloudCleanup.evidence?.epoch).toBe(progress.epoch);
+    expect(externalCleanupCurrent(receipt, "deviceCloud")).toBe(true);
+    receipt.lanes.deviceCloudCleanup.evidence!.epoch = "stale";
+    expect(externalCleanupCurrent(receipt, "deviceCloud")).toBe(false);
+  });
+});
+
 describe("mixed-vendor ownership and partial failure", () => {
   const vendors = { ipad: "browserstack", android: "browserstack" } as const;
   const sessionIds = { ipad: "a".repeat(40), android: "b".repeat(40) };
@@ -448,11 +642,11 @@ describe("mixed-vendor ownership and partial failure", () => {
     ]);
   });
 
-  test("audits every vendor after a later target fails and never replays a primary write", async () => {
+  test("audits every vendor after a later target exhausts its fresh-session retry", async () => {
     const lane = harness({ vendors, sessionIds, failing: "verify android" });
-    await expect(runDeviceCloud(input(lane))).rejects.toThrow("verify android");
+    await expect(runDeviceCloud(input(lane))).rejects.toThrow("journey failed twice");
     for (const sessionId of ["session-iphone-0001", ...Object.values(sessionIds)]) expect(lane.effects).toContain(`audit ${sessionId}`);
-    expect(lane.effects.filter(effect => effect.startsWith("verify "))).toEqual(["verify iphone", "verify ipad", "verify android"]);
+    expect(lane.effects.filter(effect => effect.startsWith("verify "))).toEqual(["verify iphone", "verify ipad", "verify android", "verify android"]);
     for (const sessionId of Object.values(sessionIds)) expect(lane.effects).toContain(`remove ${sessionId}`);
   });
 
@@ -550,7 +744,7 @@ describe("mixed-vendor ownership and partial failure", () => {
     expect(pixelUnrestored(error)).toBe(true);
     const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
     expect(progress.cleanupRequired).toBe(true);
-    expect(progress.resources).toEqual([{ vendor: "testingbot", target: "iphone", ended: false, audited: false, recordRemoved: false }]);
+    expect(progress.resources).toEqual([{ vendor: "testingbot", target: "iphone", attempt: 1, ended: false, audited: false, recordRemoved: false }]);
     expect(lane.effects).not.toContain("workspace remove");
     expect(lane.effects.filter(effect => effect.startsWith("verify "))).toEqual([]);
   });

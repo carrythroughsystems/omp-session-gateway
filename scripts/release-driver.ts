@@ -244,7 +244,10 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       schemaVersion: 1, sequence: 0, issue, version, candidate: nextCandidate(version, repo.tags), selectedMain: repo.main, previousStable: repo.latestStable, date,
     }, links: [issue.url] });
   }
-  const failure = (detail: string) => decision("stop", "diagnostic-required", detail + (["qualifying", "smoking"].includes(state.phase) ? "; inspect and recover the exact owning release-host lease before further device work" : ""), { patch: { failedMain: repo.main } });
+  const failure = (detail: string) => decision("stop", "diagnostic-required", detail + (["qualifying", "smoking"].includes(state.phase) ? "; inspect and recover the exact owning release-host lease before further device work" : ""), {
+    // The kill switch may defer observation until after the fix landed. Bind failure to what ran.
+    patch: { failedMain: state.phase === "qualifying" ? state.candidateCommit ?? state.selectedMain : repo.main },
+  });
   if (state.phase === "stopped") return idle("stopped; founder/operator intervention required");
   if (state.phase === "diagnostic-required" || stalePrepare) {
     if (state.stableCommit !== undefined || repo.tags.includes(`v${state.version}`) || compareVersions(repo.latestStable, state.version) >= 0) {

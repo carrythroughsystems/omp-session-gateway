@@ -26,6 +26,7 @@ import {
   DEVICE_CLOUD_PROFILES,
   DEVICE_CLOUD_TARGETS,
   DEVICE_CLOUD_VENDOR_POLICY,
+  DeviceCloudJourneyFailure,
   eligibleDevice,
   type BrowserAllocationReport,
   type DeviceCloudIdentity,
@@ -535,7 +536,9 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
         browser: reported,
         ...(vendorRecord === undefined ? {} : { vendorRecord }),
       });
-      const journey = await runCollaborationJourney(session, { origin, label, promptMarker: PROMPT_MARKER, expectedAppAsset: appAsset });
+      let journey: Awaited<ReturnType<typeof runCollaborationJourney>>;
+      try { journey = await runCollaborationJourney(session, { origin, label, promptMarker: PROMPT_MARKER, expectedAppAsset: appAsset }); }
+      catch (error) { throw new DeviceCloudJourneyFailure("collaboration", error); }
       await assertCleanSinks(session, label);
       const observations: Observations = {
         ...allocation,
@@ -550,7 +553,9 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
         sinkFindings: 0,
       };
       if (profile.homeScreenAlerts) {
-        Object.assign(observations, await homeScreenAlerts(new TestingBotNativeSession(session), origin, () => commandPushFixture(location(attempt.epoch), "ask", fixture!.execute)));
+        try {
+          Object.assign(observations, await homeScreenAlerts(new TestingBotNativeSession(session), origin, () => commandPushFixture(location(attempt.epoch), "ask", fixture!.execute)));
+        } catch (error) { throw new DeviceCloudJourneyFailure("home-screen", error); }
       }
       observations.tunnelRefusals = (proxy?.refusals() ?? 0) - refusalsBefore;
       observations.elapsedMs = Date.now() - started;

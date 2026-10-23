@@ -469,6 +469,26 @@ test("diagnostic re-selection keeps the successful open request after a main fix
   if (step.operation !== "idle") { expect(step.patch?.candidate).toBe("v0.7.5-prealpha.2"); expect(step.patch?.candidateCommit).toBeUndefined(); }
 });
 
+test.each([true, false])("late campaign failure observes its own source, not already-fixed main (candidate bound: %s)", async bound => {
+  const fake = new FakeDriver();
+  fake.state = { ...state("qualifying"), sequence: 7, ...(bound ? { candidateCommit: "b".repeat(40) } : {}) };
+  fake.repo.main = "d".repeat(40);
+  fake.repo.campaign = { status: "failed" };
+  expect(fake.state.failedMain).toBeUndefined();
+  expect((await tick(fake, config)).operation).toBe("stop");
+  expect(fake.state.failedMain).toBe(bound ? "b".repeat(40) : fake.state.selectedMain);
+  expect((await tick(fake, config)).operation).toBe("rerequest");
+});
+
+test("consuming a campaign failure on unchanged candidate main cannot trigger a retry", async () => {
+  const fake = new FakeDriver();
+  fake.state = { ...state("qualifying"), candidateCommit: "b".repeat(40) };
+  fake.repo.main = fake.state.candidateCommit!;
+  fake.repo.campaign = { status: "failed" };
+  expect((await tick(fake, config)).operation).toBe("stop");
+  expect((await tick(fake, config)).operation).toBe("idle");
+});
+
 test("stale unmerged prepare retires its selection without reusing its branch or clearing other holds", () => {
   const failed = { ...state("held"), holdReason: "stale-source" as const, preparePr: 401 };
   const repo = snapshot({ main: "d".repeat(40), prepare: pr({ headRef: "release-driver/400/v0.7.5-prealpha.1-prepare" }) });
@@ -626,9 +646,33 @@ test("lease self-clear accepts only settled candidate-bound cleanup with matchin
     const dirty = structuredClone(receipt); dirty.lanes[name].evidence!.progress = { epoch: receipt.lanes[`${name}Cleanup`].evidence!.epoch, cleanupRequired: true };
     expect(() => assertFailedCampaignCleanup(selected, dirty, retryReceiptModules)).toThrow("stale or incomplete");
   }
-  for (const changed of [{ ...receipt, completedAt: undefined }, { ...receipt, macHost: "other@fixture.invalid" },
+  for (const changed of [{ ...receipt, status: "running" }, { ...receipt, macHost: "other@fixture.invalid" },
     { ...receipt, orchestratorCommit: "b".repeat(40) }]) {
     expect(() => assertFailedCampaignCleanup(selected, changed, retryReceiptModules)).toThrow();
+  }
+});
+
+test("prealpha.3 exited-job receipt permits cleanup despite unfinished publication bookkeeping", () => {
+  const selected = { ...heldCampaign().selected, candidate: "v0.8.0-prealpha.3", version: "0.8.0",
+    candidateCommit: "272f2328cb5d05babbe8ec1931d7ba916053b09d",
+    candidateDigest: "4257d21c3fcc8de59272619b3e88e668ddaee52fdc46c66ef4923fe00541426f", previousStable: "v0.7.7" };
+  const { receipt } = receiptScopedCampaign(selected);
+  delete receipt.lanes.deviceCloud.evidence!.availabilityHold;
+  receipt.lanes.ompPublication.status = "running";
+  expect(receipt.completedAt).toBeUndefined();
+  const epochs = {
+    windows: "d03dcdcc-b3e8-45ea-a1e3-d11d099c9ddd",
+    androidPush: "3957660b-d8ea-4caf-930c-68b03b34a454",
+    deviceCloud: "c8224e01-0505-4d4a-9a38-22d8a34eb7fe",
+  };
+  for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
+    receipt.lanes[name].evidence!.progress = { epoch: epochs[name], cleanupRequired: false };
+    receipt.lanes[`${name}Cleanup`].evidence = { epoch: epochs[name] };
+  }
+  expect(() => assertFailedCampaignCleanup(selected, receipt, retryReceiptModules)).not.toThrow();
+  for (const name of ["cleanup", "windowsCleanup", "androidPushCleanup", "deviceCloudCleanup"] as const) {
+    const failed = structuredClone(receipt); failed.lanes[name].status = "failed";
+    expect(() => assertFailedCampaignCleanup(selected, failed, retryReceiptModules)).toThrow("did not pass");
   }
 });
 

@@ -103,10 +103,12 @@ export function assertFailedCampaignCleanup(
 ): void {
   if (!state.candidateCommit || !state.candidateDigest || !state.previousStable || !state.macHost) throw new Error("failed campaign binding is incomplete");
   const receipt = validateStableQualificationReceipt(value, state.candidate, state.candidateCommit, state.previousStable);
-  if (receipt.status !== "failed" || !receipt.completedAt || receipt.macHost !== state.macHost ||
+  // Worker exit/absence and the OS lock prove settlement in failedCampaignCleanup/lease clear.
+  // A failed consumer can leave publication marked running and omit campaign completedAt.
+  if (receipt.status !== "failed" || receipt.macHost !== state.macHost ||
     receipt.candidate?.tag !== state.candidate || receipt.candidate.sourceCommit !== state.candidateCommit ||
-    receipt.candidate.archiveSha256 !== state.candidateDigest || Object.values(receipt.lanes).some(lane => lane.status === "running")) {
-    throw new Error("failed campaign is not settled at its exact binding");
+    receipt.candidate.archiveSha256 !== state.candidateDigest) {
+    throw new Error("failed campaign does not match its exact binding");
   }
   // Debian owns its workflow teardown; a failed/unknown workflow is not proof of cloud absence.
   for (const name of ["debian", "cleanup", "windowsCleanup", "androidPushCleanup", "deviceCloudCleanup"] as const) {

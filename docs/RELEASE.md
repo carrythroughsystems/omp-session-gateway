@@ -431,6 +431,10 @@ already-stored numeric tokens, require one explicit successful dispatch of the u
 workflow for the same open issue/version/class. Legacy creation-time tokens are also insufficient.
 No historical run is backfilled or inferred from mutable metadata. Once bound to a recorded run,
 no new workflow dispatch, request closure, or manual selection retirement is required.
+If the kill switch delays consuming a failed campaign until after its fix landed, `failedMain`
+records the candidate commit that actually ran (or the selected source before candidate binding),
+not main at observation time. The next tick can therefore re-select; merely observing the candidate's
+own prepare merge does not count as a fix.
 An explicit new successful same-version/class request
 still works, including a replacement issue when the old issue closed. A closed issue alone cannot retry.
 An unmerged prepare held on `stale-source` also re-selects after main differs from its failed
@@ -471,11 +475,57 @@ then select the new request under the reviewed installed policy. Updating the ch
 leaves the old binding and holds preparation. The next selection uses the next prealpha; never
 overwrite a completed campaign job or its evidence.
 
+**One-time #452 installation after `v0.8.0-prealpha.3`:** this is an authority change, not an
+automatic retry across policy fingerprints. Keep the driver disabled while the founder merges
+#452 and the maintainer performs the job-free, quiesced installation. Then:
+
+1. Checksum and retain .3's state, immutable job specification/results/logs and qualification
+   receipts. Confirm no worker/process owns the host and all four cleanup lanes and Debian
+   passed at the recorded epochs. Use the maintainer EXCLUSIVE owner-verified lease-clear
+   procedure below, not database deletion; move the old `state.json` into the driver's `retired/`
+   archive. Preserve all referenced job/receipt evidence. Do not edit its policy fingerprint or
+   the immutable failed-worker specification to force a match.
+2. In the gateway checkout, dispatch the updated request workflow once:
+   ```sh
+   gh workflow run release-request.yml --ref main -f omp_version=18.12.5 -f release_class=minor
+   ```
+   Wait for its successful filing job to record `Record tracking issue #448`. It must reuse the
+   still-open minor request #448, not close it or create a replacement.
+3. Run read-only `bun scripts/release-driver.ts plan`. Require `select` for issue #448 and
+   `v0.8.0-prealpha.4`, under the newly installed policy, before changing the kill switch.
+4. Rearm through the reviewed setup procedure. Later failures under that policy can use automatic
+   same-request re-selection; .3's old authority binding is intentionally not carried across.
+
+### Bounded device-cloud journey retries
+
+Within one `deviceCloud` invocation, each iPhone, iPad or Samsung journey may retry once after
+an ordinary post-attestation collaboration or Home Screen journey failure. Only that journey
+gets a fresh device session: the candidate, retained-Mac fixture, live OMP generation, tunnels,
+Pixel lease and lane epoch stay unchanged. Passed journeys and every other lane's receipts stay
+intact. A second failure is terminal; this is not a campaign restart or a resumable browser command.
+
+Before the retry, the first session must have ended, its finalized record must pass the live-link
+and media audit, and BrowserStack's record and signed artifacts must be verified removed. Unknown
+allocation outcomes, allocation identity failures, unsafe evidence, sink/audit failures and failed
+containment never retry. Generation changes also refuse rather than create new fixture evidence.
+Final release still ends every session and stops the tunnels/fixture before releasing the Pixel;
+`deviceCloudCleanup` remains bound to that same lane epoch, not a per-journey ordinal.
+
+Additive schema-3 `progress.journeys[target]` preserves both numbered attempts and closed outcomes
+(including the first failure's collaboration/Home Screen stage); raw errors never enter receipts.
+Resources carry the matching attempt ordinal, all session identities remain recorded, and aggregate
+audit counts include both attempts. Successful evidence includes this journey history. A crash does
+not resume an interrupted journey or reset its retry budget: existing dirty-attempt cleanup applies.
+
+Availability holds are never automatically retried by this mechanism. An initial hold keeps the
+operator-authorized semantics below; availability encountered after an ordinary failed first
+journey remains a mixed diagnostic failure, not fresh availability-only authorization.
+
 ### Device-cloud availability holds
 
 Only validated no-free pinned-device observations are availability. Authentication, malformed
-catalogs, transport/queue ambiguity, allocation mismatch, journey defects, audit errors and failed
-cleanup remain diagnostic. The stable CLI exits 75 for an availability-only failure. The driver
+catalogs, transport/queue ambiguity, allocation mismatch, exhausted journey retries, audit errors
+and failed cleanup remain diagnostic. The stable CLI exits 75 for an availability-only failure. The driver
 sets `OMP_STABLE_OUTCOME_FILE` to a distinct `preflight-outcome.json` or `campaign-outcome.json`
 inside the private job directory; the CLI atomically writes a closed JSON outcome there. Earlier
 human lane stdout/stderr is never parsed as machine evidence. Missing or invalid outcome files
@@ -730,6 +780,10 @@ following the lane-specific recovery procedures.
 The driver's landed-fix re-selection has one bounded exception: it may clear its own failed
 campaign row after the immutable campaign job is failed and exited, every candidate worker is
 absent, and the exact candidate/source/digest/predecessor/host-bound receipt is failed and settled.
+Settlement is proved by that exited worker and absent processes under the host lock, not by the
+receipt's optional `completedAt` or stale primary-lane status. For example, prealpha.3 left
+`ompPublication` marked running after a consumer failed, despite passing every cleanup lane.
+Those bookkeeping fields are neither rewritten nor treated as permission to skip cleanup proof.
 All four cleanup lanes (`cleanup`, `windowsCleanup`, `androidPushCleanup`, `deviceCloudCleanup`)
 must have passed; external cleanup epochs must match their lane's last attempt and the lane
 implementations must report no remaining effects. Debian must also have passed, since a failed
