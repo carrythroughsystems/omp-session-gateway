@@ -36,6 +36,7 @@ export function driverConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfi
     dryRun: env.OMP_RELEASE_DRY_RUN === "1" || env.OMP_RELEASE_DRY_RUN === "true",
   };
   for (const login of [config.bot, config.founder]) if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/u.test(login)) throw new Error("invalid release identity login");
+  if (config.bot.toLowerCase() === config.founder.toLowerCase()) throw new Error("release bot and maintainer logins must be distinct");
   for (const path of [config.ghConfig, config.signingKey, config.stateDir]) if (!isAbsolute(path)) throw new Error("driver paths must be absolute");
   return config;
 }
@@ -112,7 +113,10 @@ export function assertFailedCampaignCleanup(
     if (receipt.lanes[name].status !== "passed" || receipt.lanes[name].attempts < 1) throw new Error("failed campaign cleanup did not pass: " + name);
   }
   for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
-    if (!externalCleanupCurrent(receipt, name) || modules[name].needsCleanup(receipt.lanes[name].evidence?.progress)) throw new Error("failed campaign cleanup is stale or incomplete: " + name);
+    if (!externalCleanupCurrent(receipt, name)) throw new Error("failed campaign cleanup is stale or incomplete: " + name);
+  }
+  for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
+    if (modules[name].needsCleanup(receipt.lanes[name].evidence?.progress)) throw new Error("failed campaign cleanup is stale or incomplete: " + name);
   }
 }
 
@@ -273,13 +277,25 @@ export class StudioDriver implements DriverPort {
     if (issues.length === 0) return issues;
     const requests = await this.api<{ workflow_runs: WorkflowRun[] }>("actions/workflows/release-request.yml/runs?status=success&per_page=100", true);
     const jobName = (issue: TrackingIssue) => `Request OMP ${requestVersion(issue)}${issue.releaseClass === "minor" ? " (minor)" : ""}`;
+    type FilingJob = { name: string; conclusion: string; completed_at: string };
+    // The filing workflow creates or reuses one issue. Its completion timestamp
+    // cannot authorize an issue created later; multiple eligible issues are ambiguous.
+    const filedIssue = (job: FilingJob): TrackingIssue | undefined => {
+      const completed = Date.parse(job.completed_at);
+      if (job.conclusion !== "success" || !Number.isFinite(completed)) return undefined;
+      const eligible = issues.filter(issue => jobName(issue) === job.name
+        && Date.parse(raw.find(item => item.number === issue.number)!.created_at) <= completed);
+      return eligible.length === 1 ? eligible[0] : undefined;
+    };
     const unmatched = new Set(issues.map(jobName));
     for (const run of requests?.workflow_runs ?? []) {
       if (unmatched.size === 0) break;
-      const jobs = await this.api<{ jobs: { name: string; conclusion: string }[] }>(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
+      const jobs = await this.api<{ jobs: FilingJob[] }>(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
       for (const name of unmatched) {
-        if (!jobs!.jobs.some(job => job.name === name && job.conclusion === "success")) continue;
-        for (const issue of issues) if (jobName(issue) === name) issue.request = `${run.id}:${run.run_attempt}`;
+        const job = jobs!.jobs.find(job => job.name === name && job.conclusion === "success");
+        const issue = job === undefined ? undefined : filedIssue(job);
+        if (issue === undefined) continue;
+        issue.request = `${run.id}:${run.run_attempt}`;
         unmatched.delete(name);
       }
     }
@@ -290,15 +306,15 @@ export class StudioDriver implements DriverPort {
       const [id, attempt] = previous!.request.split(":");
       const run = await this.api<{ path: string; conclusion: string; status: string }>(`actions/runs/${id}/attempts/${attempt}`, true);
       if (run?.path === ".github/workflows/release-request.yml" && run.status === "completed" && run.conclusion === "success") {
-        const jobs = await this.api<{ jobs: { name: string; conclusion: string }[] }>(`actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`);
-        if (jobs?.jobs.some(job => job.name === jobName(retained) && job.conclusion === "success")) {
+        const jobs = await this.api<{ jobs: FilingJob[] }>(`actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`);
+        if (jobs?.jobs.some(job => filedIssue(job)?.number === retained.number)) {
           retained.request = previous!.request;
           unmatched.delete(jobName(retained));
         }
       }
     }
     // A mutable label alone cannot opt a legacy patch request into minor-release authority.
-    return issues.filter(issue => issue.releaseClass !== "minor" || !unmatched.has(jobName(issue)));
+    return issues.filter(issue => issue.releaseClass !== "minor" || /^[1-9][0-9]*:[1-9][0-9]*$/u.test(issue.request));
   }
   async workflow(tag: string, source: string): Promise<"passed" | "failed" | "pending"> {
     const result = await this.api<{ workflow_runs: WorkflowRun[] }>(`actions/workflows/signed-release.yml/runs?event=push&head_sha=${source}&per_page=100`);
@@ -475,12 +491,16 @@ export class StudioDriver implements DriverPort {
         const baseline = isOrder(detail) && outsideOrderScope(detail).length === 0 && candidate.merged_by?.login === this.config.bot;
         // A bot merge needs a maintainer review of this exact head, never a mutable title.
         const changesReleaseLock = detail.files.some(file => [file.filename, file.previous_filename].includes("STABLE_RELEASE.lock.json"));
-        let fix = !changesReleaseLock && /^(fix|perf|revert)(\([^)]+\))?: /u.test(subject) && candidate.merged_by?.login === this.config.founder;
-        if (!fix && /^(fix|perf|revert)(\([^)]+\))?: /u.test(subject) && candidate.merged_by?.login === this.config.bot &&
-          detail.files.every(file => [file.filename, file.previous_filename].every(path => path === undefined || !routineProtectedPath(path)))) {
-          const reviews = await this.pages<{ id: number; user: { login: string }; state: string; commit_id: string }>(`pulls/${item.number}/reviews?per_page=100`);
-          const review = reviews.filter(review => review.user.login === this.config.founder && review.state !== "COMMENTED" && review.state !== "PENDING").sort((a, b) => b.id - a.id)[0];
-          fix = review?.state === "APPROVED" && review.commit_id === detail.head;
+        let fix = false;
+        if (!changesReleaseLock && /^(fix|perf|revert)(\([^)]+\))?: /u.test(subject)) {
+          if (candidate.merged_by?.login === this.config.bot) {
+            if (this.config.bot.toLowerCase() !== this.config.founder.toLowerCase() &&
+              detail.files.every(file => [file.filename, file.previous_filename].every(path => path === undefined || !routineProtectedPath(path)))) {
+              const reviews = await this.pages<{ id: number; user: { login: string }; state: string; commit_id: string }>(`pulls/${item.number}/reviews?per_page=100`);
+              const review = reviews.filter(review => review.user.login === this.config.founder && review.state !== "COMMENTED" && review.state !== "PENDING").sort((a, b) => b.id - a.id)[0];
+              fix = review?.state === "APPROVED" && review.commit_id === detail.head;
+            }
+          } else fix = candidate.merged_by?.login === this.config.founder;
         }
         const kind = generatedReleaseKind(detail.headRef);
         const releaseRecord = detail.author === this.config.bot && generatedReleaseFilesMatch(kind, detail.files)
@@ -511,7 +531,7 @@ export class StudioDriver implements DriverPort {
   async snapshot(state: DriverState | undefined): Promise<RepositorySnapshot> {
     const [main, upstream, latest, tags, issues] = await Promise.all([
       this.api<{ sha: string }>("commits/main"), this.api<{ content: string }>("contents/UPSTREAM.lock.json?ref=main"),
-      this.api<{ tag_name: string }>("releases/latest"), this.pages<{ name: string }>("tags?per_page=100"), this.issues(state?.issue),
+      this.api<{ tag_name: string }>("releases/latest"), this.pages<{ name: string }>("tags?per_page=100"), this.issues(state?.phase === "closed" ? undefined : state?.issue),
     ]);
     const lock: { tag: string } = JSON.parse(Buffer.from(upstream!.content, "base64").toString());
     compareVersions(lock.tag, lock.tag);
@@ -525,6 +545,14 @@ export class StudioDriver implements DriverPort {
       if (matching.length === 1) repo.order = await this.readPr(matching[0]!.number);
     }
     if (state.preparePr !== undefined) repo.prepare = await this.readPr(state.preparePr);
+    else if (state.phase === "held" && state.holdReason === "stale-source" && state.candidateCommit === undefined) {
+      // The PR may have been created before an open-prepare crash, before its number
+      // reached state. Recover only the deterministic old branch; never create here.
+      const branch = `release-driver/${state.issue.number}/${state.candidate}-prepare`;
+      const existing = await this.pages<ApiPr>(`pulls?state=all&base=main&head=carrythroughsystems:${encodeURIComponent(branch)}&per_page=100`);
+      if (existing.length > 1) throw new Error("multiple PRs use the deterministic release branch");
+      if (existing.length === 1) repo.prepare = await this.readPr(existing[0]!.number);
+    }
     if (state.approvePr !== undefined) repo.approve = await this.readPr(state.approvePr);
     if (state.recordPr !== undefined) repo.record = await this.readPr(state.recordPr);
     if (["approve-open", "approve-checking", "approval-required", "approved"].includes(state.phase)) {
@@ -731,26 +759,44 @@ export class StudioDriver implements DriverPort {
         const current = { ...state };
         delete current.intent;
         const repo = await this.snapshot(current);
-        const retry = nextStep(current, repo, this.config);
-        if (retry.operation !== "rerequest" || retry.patch?.selectedMain !== step.patch?.selectedMain ||
-          retry.patch?.candidate !== step.patch?.candidate || retry.patch?.issue?.number !== step.patch?.issue?.number ||
-          retry.patch?.issue?.request !== step.patch?.issue?.request) throw new StaleIntentError("retry subject changed");
+        const assertRetry = (observation: RepositorySnapshot) => {
+          const retry = nextStep(current, observation, this.config);
+          if (retry.operation !== "rerequest" || retry.patch?.selectedMain !== step.patch?.selectedMain ||
+            retry.patch?.candidate !== step.patch?.candidate || retry.patch?.issue?.number !== step.patch?.issue?.number ||
+            retry.patch?.issue?.request !== step.patch?.issue?.request) throw new StaleIntentError("retry subject changed");
+        };
+        const assertOrphan = (orphan: PullRequest | undefined) => {
+          if (step.pr === undefined) return undefined;
+          if (!orphan || orphan.merged || (state.preparePr !== undefined && orphan.number !== state.preparePr) || orphan.number !== step.pr.number || orphan.head !== step.pr.head ||
+            orphan.author !== this.config.bot || orphan.base !== "main" || orphan.headRepository !== REPOSITORY ||
+            orphan.headRef !== `release-driver/${state.issue.number}/${state.candidate}-prepare`) throw new StaleIntentError("orphan prepare identity changed");
+          return orphan;
+        };
+        const prepareNumber = state.preparePr ?? step.pr?.number;
+        const revalidate = async () => {
+          const [issues, prepare] = await Promise.all([
+            this.issues(current.issue), prepareNumber === undefined ? undefined : this.readPr(prepareNumber),
+          ]);
+          assertRetry({ ...repo, issues, ...(prepare === undefined ? {} : { prepare }) });
+          return assertOrphan(prepare);
+        };
+        assertRetry(repo);
+        assertOrphan(repo.prepare);
         const next = { ...state, ...step.patch };
         this.requireSourceAuthority(await this.authority(next, repo.main), state.authorityPolicy);
         if (await this.api(`git/ref/tags/v${state.version}`, true) !== undefined ||
-          await this.api(`releases/tags/v${state.version}`, true) !== undefined) throw new Error("stable publication already exists; re-selection refused");
-        const orphan = repo.prepare;
-        if (orphan && !orphan.merged) {
-          if (orphan.number !== state.preparePr || orphan.number !== step.pr?.number || orphan.head !== step.pr.head ||
-            orphan.author !== this.config.bot || orphan.base !== "main" || orphan.headRepository !== REPOSITORY ||
-            orphan.headRef !== `release-driver/${state.issue.number}/${state.candidate}-prepare`) throw new Error("orphan prepare identity changed");
-        }
+          await this.api(`releases/tags/v${state.version}`, true) !== undefined) throw new StaleIntentError("stable publication already exists; preserve the immutable release");
         await this.recoverFailedCampaign(state);
-        if (orphan && !orphan.merged) {
+        let orphan = await revalidate();
+        if (orphan) {
           const marker = `<!-- release-driver-retire:${state.issue.number}:${state.candidate} -->`;
           await this.announce(orphan.number, `release-driver: retire unmerged prepare after a landed fix; request #${next.issue.number} continues with ${next.candidate}\n${marker}`, marker);
-          if (orphan.state === "open") await this.gh(["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/${orphan.number}`, "-f", "state=closed"]);
+          orphan = await revalidate();
+          if (orphan?.state === "open") await this.gh(["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/${orphan.number}`, "-f", "state=closed"]);
         }
+        // Preserve the failed selection if the issue closed or prepare merged while
+        // cleanup/comment/close settled. Those idempotent retirements stay reconciled.
+        await revalidate();
         return {};
       }
       case "update-order":
@@ -817,7 +863,7 @@ export class StudioDriver implements DriverPort {
       case "open-record": return { recordPr: (await this.openPr("record", state)).number };
       case "merge-record": await this.merge(step.pr!, false); return {};
       case "close":
-        for (const issue of await this.issues()) if (compareVersions(requestVersion(issue)!, requestVersion(state.issue)!) <= 0
+        for (const issue of await this.issues(state.issue)) if (compareVersions(requestVersion(issue)!, requestVersion(state.issue)!) <= 0
           && (issue.releaseClass !== "minor" || state.issue.releaseClass === "minor")) {
           const body = `release-driver: closed — fulfilled by v${state.version}\nhttps://github.com/${REPOSITORY}/releases/tag/v${state.version}\n<!-- release-driver-close:${state.issue.number}:${issue.number}:${state.version} -->`;
           // The selected issue receives its single transition comment through the state outbox.

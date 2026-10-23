@@ -224,10 +224,10 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
   if (state?.phase === "infrastructure-held") return idle("device-cloud infrastructure held; explicit retry-device-cloud authorization required; no automatic retry");
   if (repo.authorityFailure !== undefined) return routineHold(repo.authorityFailure);
   const stalePrepare = state?.phase === "held" && state.holdReason === "stale-source"
-    && state.candidateCommit === undefined && repo.prepare !== undefined && !repo.prepare.merged;
+    && state.candidateCommit === undefined && (repo.prepare === undefined ? state.preparePr === undefined : !repo.prepare.merged);
   if (state?.holdReason !== undefined && !stalePrepare) return idle("held: " + state.holdReason + (state.holdCommit === undefined ? "" : " at source commit " + state.holdCommit) + "; inspect exact subject before operator recovery");
   if (state === undefined || state.phase === "closed") {
-    const issue = selectRequest(repo.issues);
+    const issue = selectRequest(repo.issues.filter(issue => state?.phase !== "closed" || issue.number !== state.issue.number));
     if (issue === undefined) return idle("no open tracking issue; idle");
     const version = nextReleaseVersion(repo.latestStable, parseReleaseClass(issue.releaseClass));
     return decision("select", "selected", `request ${requestVersion(issue)} for gateway v${version}`, { patch: {
@@ -237,7 +237,9 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
   const failure = (detail: string) => decision("stop", "diagnostic-required", detail + (["qualifying", "smoking"].includes(state.phase) ? "; inspect and recover the exact owning release-host lease before further device work" : ""), { patch: { failedMain: repo.main } });
   if (state.phase === "stopped") return idle("stopped; founder/operator intervention required");
   if (state.phase === "diagnostic-required" || stalePrepare) {
-    if (state.stableCommit !== undefined) return idle("diagnostic-required after approval/publication; preserve the immutable release and reconcile manually");
+    if (state.stableCommit !== undefined || repo.tags.includes(`v${state.version}`) || compareVersions(repo.latestStable, state.version) >= 0) {
+      return idle("diagnostic-required after approval/publication; preserve the immutable release and reconcile manually");
+    }
     // An order PR's "Closes #N" closes the tracking issue when it merges, so a retry request for the
     // same version opens a new one (v0.7.5: #369 closed #368; the retry opened #374).
     const matching = repo.issues.filter(issue => requestVersion(issue) === requestVersion(state.issue)
@@ -252,7 +254,8 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       ...(repo.prepare === undefined || repo.prepare.merged ? {} : { pr: repo.prepare }), patch: {
       issue: request, selectedMain: repo.main, candidate: nextCandidate(state.version, [...repo.tags, state.candidate, ...(state.retired ?? []).map(item => item.candidate)]),
       retired: [...state.retired ?? [], { candidate: state.candidate, reason: stalePrepare ? "stale-source" : "diagnostic-required",
-        at: new Date().toISOString(), issue: state.issue.number, ...(state.preparePr === undefined ? {} : { preparePr: state.preparePr }), failedMain }],
+        at: new Date().toISOString(), issue: state.issue.number,
+        ...((state.preparePr ?? repo.prepare?.number) === undefined ? {} : { preparePr: state.preparePr ?? repo.prepare!.number }), failedMain }],
       preparePr: undefined, orderPr: undefined, updatedHead: undefined, candidateCommit: undefined, candidateDigest: undefined, approvePr: undefined,
       approvedHead: undefined, approvedTree: undefined, stableCommit: undefined, stableDigest: undefined,
       publicationRun: undefined, recordPr: undefined, failedMain: undefined, holdReason: undefined, holdCommit: undefined,
@@ -351,13 +354,14 @@ export interface DriverPort {
   save(state: DriverState): Promise<void>;
   snapshot(state: DriverState | undefined): Promise<RepositorySnapshot>;
   /** Must be replay-safe: inspect deterministic PR branch/tag/job identity before creating.
-   *  Throws StaleIntentError only when it refused before any effect because a pinned input moved. */
+   *  StaleIntentError refuses release advancement when pinned inputs move. Retry-only lease/PR
+   *  retirement may already be durably reconciled; it never advances the failed selection. */
   perform(step: Decision, state: DriverState): Promise<Partial<DriverState>>;
   /** Reconcile marker on the issue, accepting only comments authored by the configured bot. */
   announce(issue: number, body: string, marker: string): Promise<void>;
 }
-/** A saved intent's pinned input (a PR head, its checks) moved before the intent had any effect.
- *  Replaying it can never succeed, so the tick drops it and the next tick plans afresh. */
+/** A saved intent's pinned input moved before release advancement. Retry-only cleanup may have
+ *  settled durably, but the failed selection stays intact and the next tick plans afresh. */
 export class StaleIntentError extends Error {}
 /** At most one state transition. The caller holds the tick mutex; plan never calls save/perform. */
 export async function tick(port: DriverPort, config: DriverConfig, plan = false): Promise<Decision | Idle> {

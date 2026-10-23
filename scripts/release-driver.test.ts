@@ -100,11 +100,11 @@ test("explicit minor request selects 0.8.0 instead of the unpublished 0.7.8 chai
 });
 test("request identities bind OMP version and class to successful filing jobs", async () => {
   class Requests extends StudioDriver {
-    jobs = [{ name: "Request OMP v18.8.3", conclusion: "success" }];
+    jobs = [{ name: "Request OMP v18.8.3", conclusion: "success", completed_at: "2026-10-22T21:21:27Z" }];
     override async pages<T>(): Promise<T[]> {
       return [
-        { number: 439, title: issue.title, user: { login: issue.author }, created_at: "legacy", html_url: issue.url, labels: [] },
-        { number: 441, title: issue.title, user: { login: issue.author }, created_at: "minor", html_url: issue.url, labels: [{ name: "release-minor" }] },
+        { number: 439, title: issue.title, user: { login: issue.author }, created_at: "2026-10-22T21:21:24Z", html_url: issue.url, labels: [] },
+        { number: 441, title: issue.title, user: { login: issue.author }, created_at: "2026-10-22T21:21:25Z", html_url: issue.url, labels: [{ name: "release-minor" }] },
       ] as T[];
     }
     override async api<T>(path: string): Promise<T | undefined> {
@@ -113,11 +113,11 @@ test("request identities bind OMP version and class to successful filing jobs", 
   }
   const runtime = new Requests(driverConfig(), true);
   expect((await runtime.issues()).map(value => [value.number, value.releaseClass, value.request])).toEqual([[439, "patch", "42:1"]]);
-  runtime.jobs = [{ name: "Request OMP v18.8.3 (minor)", conclusion: "skipped" }];
+  runtime.jobs = [{ name: "Request OMP v18.8.3 (minor)", conclusion: "skipped", completed_at: "2026-10-22T21:21:27Z" }];
   expect((await runtime.issues()).map(value => value.number)).toEqual([439]);
-  runtime.jobs = [{ name: "Request OMP v18.8.3 (minor)", conclusion: "success" }];
+  runtime.jobs = [{ name: "Request OMP v18.8.3 (minor)", conclusion: "success", completed_at: "2026-10-22T21:21:27Z" }];
   expect((await runtime.issues()).map(value => [value.number, value.releaseClass, value.request])).toEqual([
-    [439, "patch", "legacy"], [441, "minor", "42:1"],
+    [439, "patch", "2026-10-22T21:21:24Z"], [441, "minor", "42:1"],
   ]);
   expect(selectRequest(await runtime.issues())?.number).toBe(441);
 });
@@ -126,12 +126,12 @@ test("an open request retains its validated successful run outside the latest wo
   class RetainedRequest extends StudioDriver {
     valid = true;
     override async pages<T>(): Promise<T[]> {
-      return [{ number: issue.number, title: issue.title, user: { login: issue.author }, created_at: "legacy",
+      return [{ number: issue.number, title: issue.title, user: { login: issue.author }, created_at: "2026-10-22T21:21:25Z",
         html_url: issue.url, labels: [{ name: "release-minor" }] }] as T[];
     }
     override async api<T>(path: string): Promise<T | undefined> {
       return (path.startsWith("actions/workflows/") ? { workflow_runs: [] }
-        : path.endsWith("/jobs?per_page=100") ? { jobs: [{ name: "Request OMP v18.8.3 (minor)", conclusion: "success" }] }
+        : path.endsWith("/jobs?per_page=100") ? { jobs: [{ name: "Request OMP v18.8.3 (minor)", conclusion: "success", completed_at: "2026-10-22T21:21:27Z" }] }
         : { path: ".github/workflows/release-request.yml", status: "completed", conclusion: this.valid ? "success" : "failure" }) as T;
     }
   }
@@ -301,6 +301,11 @@ describe("review remediations", () => {
       runtime.sourcePr.files = [{ filename: "docs/RELEASE.md", previous_filename: filename }];
       expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
     }
+  });
+  test("DB-R2 injected equal identities cannot bypass the bot review branch", async () => {
+    const runtime = new SourceRuntime({ ...driverConfig(), bot: config.founder }, true);
+    runtime.subject = "fix(qualification): routine repair";
+    expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
   });
   test("runtime and policy admit the exact requested minor class, not an arbitrary minor jump", async () => {
     const runtime = new SourceRuntime(driverConfig(), true);
@@ -631,6 +636,8 @@ test("re-selection closes only its bot-owned orphan prepare and preserves reques
     comments = new Set<string>();
     writes: string[][] = [];
     override async snapshot() { return repo; }
+    override async issues() { return repo.issues; }
+    override async readPr() { return repo.prepare!; }
     override async authority() { return authority; }
     override async api<T>(): Promise<T | undefined> { return undefined; }
     override async recoverFailedCampaign() {}
@@ -1041,4 +1048,201 @@ test("a diagnostic after publication never restarts an immutable stable version"
   const stopped = { ...state("diagnostic-required"), stableCommit: "e".repeat(40), failedMain: "a".repeat(40) };
   const repo = snapshot({ main: "d".repeat(40), issues: [{ ...issue, request: "99:1" }] });
   expect(nextStep(stopped, repo, config).detail).toContain("preserve the immutable release");
+});
+
+describe("round-one retry boundary regressions", () => {
+  test("DB-R1 a later label-only minor issue cannot inherit a completed filing run", async () => {
+    class Filing extends StudioDriver {
+      laterCreated = "2026-10-22T21:22:00Z";
+      override async pages<T>(): Promise<T[]> {
+        return [400, 401].map(number => ({ number, title: issue.title, user: { login: issue.author }, html_url: issue.url,
+          created_at: number === 400 ? "2026-10-22T21:21:24Z" : this.laterCreated,
+          labels: [{ name: "release-minor" }] })) as T[];
+      }
+      override async api<T>(path: string): Promise<T | undefined> {
+        return (path.startsWith("actions/workflows/") ? { workflow_runs: [{ id: 42, run_attempt: 1 }] }
+          : { jobs: [{ name: "Request OMP v18.8.3 (minor)", conclusion: "success", completed_at: "2026-10-22T21:21:27Z" }] }) as T;
+      }
+    }
+    const runtime = new Filing(driverConfig(), true);
+    expect((await runtime.issues()).map(item => item.number)).toEqual([400]);
+    runtime.laterCreated = "2026-10-22T21:21:25Z";
+    expect(await runtime.issues()).toEqual([]); // Two possible filing targets are not an identity proof.
+  });
+
+  test("DB-R2 bot and maintainer cannot share a login, even with different case", () => {
+    for (const founder of ["alphastorm-release", "ALPHASTORM-RELEASE"]) {
+      expect(() => driverConfig({ OMP_RELEASE_BOT_LOGIN: "alphastorm-release", OMP_RELEASE_FOUNDER_LOGIN: founder })).toThrow("distinct");
+    }
+  });
+
+  test.each(["tag", "latest"] as const)("DB-R3/GR-R1 observed stable %s vetoes retry before saving an intent", async observation => {
+    const fake = new FakeDriver();
+    fake.state = { ...state("diagnostic-required"), failedMain: state().selectedMain };
+    fake.repo.main = "d".repeat(40);
+    if (observation === "tag") fake.repo.tags.push("v0.7.5");
+    else fake.repo.latestStable = "v0.7.5";
+    const step = await tick(fake, config);
+    expect(step.operation).toBe("idle");
+    expect(step.detail).toContain("immutable release");
+    expect(fake.saves).toBe(0);
+    expect(fake.performed).toEqual([]);
+  });
+
+  test("AR-R1 closing an aged minor request passes its identity and never reselects fulfilled issue", async () => {
+    const selected = { ...state("recorded"), issue: { ...issue, releaseClass: "minor" as const } };
+    class Closing extends StudioDriver {
+      seen: TrackingIssue | undefined;
+      closed: string[] = [];
+      override async issues(previous?: TrackingIssue) { this.seen = previous; return previous ? [previous] : []; }
+      override async gh<T>(args: string[]): Promise<T | undefined> { this.closed.push(args[3]!); return undefined; }
+    }
+    const runtime = new Closing(driverConfig(), false);
+    await runtime.perform({ operation: "close", phase: "closed", detail: "fulfilled" }, selected);
+    expect(runtime.seen).toEqual(selected.issue);
+    expect(runtime.closed).toEqual([`repos/${REPOSITORY}/issues/400`]);
+    expect(nextStep({ ...selected, phase: "closed" }, snapshot({ issues: [selected.issue] }), config).operation).toBe("idle");
+  });
+
+  test("AR-R2 a stale selection with no prepare PR can reselect without inventing an orphan", () => {
+    const step = nextStep({ ...state("held"), holdReason: "stale-source" }, snapshot({ main: "d".repeat(40) }), config);
+    expect(step.operation).toBe("rerequest");
+    if (step.operation !== "idle") expect(step.pr).toBeUndefined();
+  });
+
+  test("AR-R2 discovers and retires a deterministic prepare created before its state checkpoint", async () => {
+    const selected = { ...state("held"), holdReason: "stale-source" as const };
+    class Uncheckpointed extends StudioDriver {
+      merged = false;
+      closes = 0;
+      override async issues() { return [issue]; }
+      override async releaseHostOwner() { return undefined; }
+      override async authority() { return authority; }
+      override async readPr() { return pr({ headRef: "release-driver/400/v0.7.5-prealpha.1-prepare", merged: this.merged }); }
+      override async announce() {}
+      override async gh<T>(): Promise<T | undefined> { this.closes++; return undefined; }
+      override async pages<T>(path: string): Promise<T[]> {
+        if (path.startsWith("tags?")) return [{ name: "v0.7.4" }] as T[];
+        if (path.includes("head=carrythroughsystems:release-driver%2F400%2Fv0.7.5-prealpha.1-prepare")) return [{ number: 401 }] as T[];
+        throw new Error("unexpected discovery " + path);
+      }
+      override async api<T>(path: string): Promise<T | undefined> {
+        if (path === "commits/main") return { sha: "d".repeat(40) } as T;
+        if (path.startsWith("contents/")) return { content: Buffer.from('{"tag":"v18.8.3"}').toString("base64") } as T;
+        if (path === "releases/latest") return { tag_name: "v0.7.4" } as T;
+        return undefined;
+      }
+    }
+    const runtime = new Uncheckpointed(driverConfig(), false);
+    const step = nextStep(selected, await runtime.snapshot(selected), config);
+    expect(step.operation).toBe("rerequest");
+    if (step.operation === "idle") throw new Error("missing retry");
+    expect(step.patch?.retired?.[0]?.preparePr).toBe(401);
+    await runtime.perform(step, selected);
+    expect(runtime.closes).toBe(1);
+    runtime.merged = true;
+    expect(nextStep(selected, await runtime.snapshot(selected), config).operation).toBe("idle");
+  });
+
+  test("DB-R4 cleanup binding changes are included in installed/source control fingerprints", async () => {
+    class Binding extends StudioDriver {
+      override async git(args: string[]) {
+        if (args[0] === "ls-tree") return `100644 blob ${args[2]}\tscripts/stable-lanes.ts`;
+        throw new Error("unexpected control read");
+      }
+    }
+    const runtime = new Binding(driverConfig(), true);
+    const installed = await runtime.controls("installed", true), changed = await runtime.controls("changed", true);
+    expect(installed.has("scripts/stable-lanes.ts")).toBe(true);
+    expect(installed.get("scripts/stable-lanes.ts")).not.toBe(changed.get("scripts/stable-lanes.ts"));
+  });
+
+  test("DB-U2 predecessor numeric request retries; an unproven legacy timestamp stays refused", () => {
+    const predecessor: DriverState = { ...state("diagnostic-required"), version: "0.8.0", previousStable: "v0.7.7",
+      candidate: "v0.8.0-prealpha.1", failedMain: "38715dac23f9c16905759c39c4e09123eb5b5dc4",
+      issue: { ...issue, number: 448, title: "Upstream tracking: v18.12.5", request: "39869779940:1", releaseClass: "minor" } };
+    const repo = snapshot({ main: "13f45261900c7fac56c812bdc7ea167901665b11", latestStable: "v0.7.7",
+      upstreamTag: "v18.12.5", issues: [predecessor.issue], tags: [predecessor.candidate] });
+    expect(nextStep(predecessor, repo, config).operation).toBe("rerequest");
+    const legacy = { ...predecessor, issue: { ...predecessor.issue, request: "2026-10-22T21:21:25Z" } };
+    expect(nextStep(legacy, { ...repo, issues: [legacy.issue] }, config).operation).toBe("idle");
+  });
+
+  class RacingRetry extends StudioDriver {
+    selected = { ...state("held"), holdReason: "stale-source" as const, preparePr: 401 };
+    repo = snapshot({ main: "d".repeat(40), prepare: pr({ headRef: "release-driver/400/v0.7.5-prealpha.1-prepare" }) });
+    afterRecovery: () => void = () => {};
+    afterComment: () => void = () => {};
+    afterClose: () => void = () => {};
+    writes = 0;
+    override async snapshot() { return structuredClone(this.repo); }
+    override async issues() { return structuredClone(this.repo.issues); }
+    override async readPr() { return structuredClone(this.repo.prepare!); }
+    override async authority() { return authority; }
+    override async api<T>(): Promise<T | undefined> { return undefined; }
+    override async recoverFailedCampaign() { this.afterRecovery(); }
+    override async announce() { this.writes++; this.afterComment(); }
+    override async gh<T>(): Promise<T | undefined> { this.writes++; this.repo.prepare!.state = "closed"; this.afterClose(); return undefined; }
+    step() {
+      const step = nextStep(this.selected, this.repo, config);
+      if (step.operation === "idle") throw new Error("no retry planned");
+      return structuredClone(step);
+    }
+  }
+
+  test.each(["head", "author"] as const)("GR-R2 moved orphan %s replans rather than wedging its saved intent", async field => {
+    const runtime = new RacingRetry(driverConfig(), false), step = runtime.step();
+    runtime.repo.prepare![field] = field === "head" ? "d".repeat(40) : "foreign";
+    await expect(runtime.perform(step, runtime.selected)).rejects.toBeInstanceOf(StaleIntentError);
+    expect(runtime.writes).toBe(0);
+  });
+
+  test.each(["issue closed", "prepare merged"] as const)("DB-R5/GR-R3 rereads %s after lease recovery", async change => {
+    const runtime = new RacingRetry(driverConfig(), false), step = runtime.step();
+    runtime.afterRecovery = () => {
+      if (change === "issue closed") runtime.repo.issues = [];
+      else runtime.repo.prepare!.merged = true;
+    };
+    await expect(runtime.perform(step, runtime.selected)).rejects.toBeInstanceOf(StaleIntentError);
+    expect(runtime.writes).toBe(0);
+  });
+
+  test("DB-R5/GR-R3 late races preserve the failed selection and clear the obsolete intent", async () => {
+    for (const point of ["afterRecovery", "afterComment", "afterClose"] as const) {
+      const runtime = new RacingRetry(driverConfig(), false);
+      runtime[point] = () => { runtime.repo.issues = []; };
+      const fake = new FakeDriver();
+      fake.state = structuredClone(runtime.selected);
+      fake.repo = runtime.repo;
+      fake.perform = (step, selected) => runtime.perform(step, selected);
+      expect((await tick(fake, config)).operation).toBe("idle");
+      expect(fake.state.candidate).toBe(runtime.selected.candidate);
+      expect(fake.state.retired).toBeUndefined();
+      expect(fake.state.intent).toBeUndefined();
+    }
+  });
+
+  test("DB-R3/GR-R1 a newly observed stable publication drops an obsolete retry intent", async () => {
+    class Published extends RacingRetry {
+      override async api<T>(): Promise<T | undefined> { return { exists: true } as T; }
+    }
+    const runtime = new Published(driverConfig(), false), fake = new FakeDriver();
+    fake.state = structuredClone(runtime.selected); fake.repo = runtime.repo;
+    fake.perform = (step, selected) => runtime.perform(step, selected);
+    expect((await tick(fake, config)).operation).toBe("idle");
+    expect(fake.state.intent).toBeUndefined();
+    expect(runtime.writes).toBe(0);
+    fake.repo.tags.push(`v${fake.state.version}`);
+    expect((await tick(fake, config)).detail).toContain("immutable release");
+  });
+
+  test("GR-U1 production cleanup gate rejects missing source progress despite passed cleanup", () => {
+    const selected = heldCampaign().selected, { receipt } = receiptScopedCampaign(selected);
+    receipt.completedAt = "2026-10-23T02:00:00.000Z";
+    for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
+      const changed = structuredClone(receipt);
+      delete changed.lanes[name].evidence!.progress;
+      expect(() => assertFailedCampaignCleanup(selected, changed)).toThrow("stale or incomplete");
+    }
+  });
 });

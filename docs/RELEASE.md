@@ -150,7 +150,9 @@ already reviewed by the configured maintainer. A maintainer merge remains suffic
 `fix`/`perf`/`revert` must change no authority path (including rename-from paths) and carry the
 configured maintainer's latest non-comment review as `APPROVED` at the exact PR head.
 Dismissed, superseded and stale-head reviews never count. The lead uses that maintainer identity;
-there is no separate lead identity or bot self-approval. The installed checkout is the separately
+there is no separate lead identity or bot self-approval. Bot and maintainer logins must be distinct
+(case-insensitively); the runtime checks the bot-review branch before any maintainer-merge shortcut.
+The installed checkout is the separately
 reviewed setup baseline. Later source commits require an associated merged main PR in those
 classes or a bot-owned generated release record; unclassified/direct source commits refuse.
 Founder fixes must be squash-merged with an immutable `fix`, `perf` or `revert` merge-commit
@@ -171,7 +173,8 @@ A routine release cannot change its own authority. `ROUTINE_AUTHORITY_PATHS` in
 `scripts/release-policy.ts` is the explicit, reasoned authority list: request/selection and merge
 policy, driver installation/signing-key inputs, host/Pixel leases, signed-release and Pages
 publication workflows, release builders/generators/state/provenance/runtime comparison,
-campaign admission/receipt settlement and evidence schemas, CODEOWNERS, release lock and all schemas.
+campaign admission/receipt settlement, the `stable-lanes.ts` cleanup-predicate binding and evidence
+schemas, CODEOWNERS, release lock and all schemas.
 `AGENTS.md`/`CLAUDE.md` and tsconfig/bunfig/mise/other lock controls remain protected.
 `STABLE_RELEASE.lock.json` is admitted only as generated approval output, checked by the release
 policy gate; a fix touching it requires a separately installed baseline, not routine source admission.
@@ -412,18 +415,30 @@ worker can resume only at the same head/tree and policy; no device, cloud or pub
 is replayed. Passed/failed results are never overwritten to invent a retry. The saved intent and
 outbox reconcile accepted bot merges and announcements after a crash; immutable tags never move.
 After a fix moves main beyond `failedMain`, the same still-open tracking issue with the same OMP
-version/class and recorded successful request run is automatically re-selected. The driver revalidates
-that run even if it has fallen out of the newest 100 runs. No new workflow dispatch, request closure,
-or manual selection retirement is required. An explicit new successful same-version/class request
+version/class and recorded successful request run is automatically re-selected. A successful filing
+job can bind only one matching open issue created no later than that job's completion; a later
+label-only issue cannot inherit it and multiple eligible issues are ambiguous. The driver revalidates
+a recorded numeric `run:attempt` even if it has fallen out of the newest 100 runs. Legacy creation-time
+tokens do not prove a successful run: if no current filing run binds that issue, automatic retry
+stays refused until an explicit successful same-version/class request. For a validated retained run,
+no new workflow dispatch, request closure, or manual selection retirement is required.
+An explicit new successful same-version/class request
 still works, including a replacement issue when the old issue closed. A closed issue alone cannot retry.
 An unmerged prepare held on `stale-source` also re-selects after main differs from its failed
-selection's source; merged prepares and other authority holds do not take that shortcut.
+selection's source, including a hold before a prepare PR was created. Merged prepares and other
+authority holds do not take that shortcut. Observing the stable tag or a latest stable at or beyond
+the failed version vetoes re-selection in planning, without saving a new write intent.
 
 Re-selection appends `{candidate, reason, at, issue, preparePr, failedMain}` to `state.retired`,
 closes only the old bot-owned unmerged prepare PR with a reconciled bot comment, and prepares the
 next unused prealpha (retired untagged candidates also reserve their ordinal). It never closes
 the tracking request, rewrites old jobs/receipts, or silently incorporates a fix into an existing
 candidate. Source review, policy fingerprint and immutable-stable guards are rechecked before effects.
+After the authority walk and lease recovery, the open issue and unmerged orphan identity are reread
+before closure and before committing selection. A moved subject drops its obsolete intent and
+preserves the failed selection; any already-recorded lease/PR retirement remains replay-safe.
+Closing a fulfilled request retains its recorded filing identity, and the closed state never
+re-selects that fulfilled issue even if a later GitHub listing still shows it open.
 The previous host lease must be absent or eligible for owner-verified cleanup retirement below.
 Follow [Release gates](#release-gates) for incomplete cleanup; a request is not permission to
 abandon cloud/device resources. Ordinary failed receipts stay unchanged. Public
