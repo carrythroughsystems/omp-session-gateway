@@ -1,0 +1,320 @@
+{
+  "before": {
+    "droplet": {
+      "id": 611742709,
+      "name": "omp-gateway-qual",
+      "memory": 8192,
+      "vcpus": 2,
+      "disk": 100,
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 100,
+            "unit": "gib"
+          }
+        }
+      ],
+      "locked": false,
+      "status": "active",
+      "kernel": null,
+      "created_at": "2026-10-22T23:49:06Z",
+      "features": [
+        "droplet_agent",
+        "private_networking"
+      ],
+      "backup_ids": [],
+      "next_backup_window": null,
+      "snapshot_ids": [],
+      "image": {
+        "id": 248394734,
+        "name": "13 x64",
+        "distribution": "Debian",
+        "slug": "debian-13-x64",
+        "public": true,
+        "regions": [
+          "nyc3",
+          "ams2",
+          "ams3",
+          "atl1",
+          "blr1",
+          "fra1",
+          "lon1",
+          "mem1",
+          "mkc1",
+          "nyc1",
+          "nyc2",
+          "ric1",
+          "sfo1",
+          "sfo2",
+          "sfo3",
+          "sgp1",
+          "syd1",
+          "tor1"
+        ],
+        "created_at": "2026-10-05T03:49:47Z",
+        "min_disk_size": 7,
+        "type": "base",
+        "size_gigabytes": 3.22,
+        "description": "Debian 13 Image",
+        "tags": [],
+        "status": "available"
+      },
+      "volume_ids": [],
+      "size": {
+        "slug": "s-2vcpu-8gb-amd",
+        "memory": 8192,
+        "vcpus": 2,
+        "disk": 100,
+        "transfer": 5.0,
+        "price_monthly": 42,
+        "price_hourly": 0.0625,
+        "regions": [
+          "ams3",
+          "blr1",
+          "fra1",
+          "lon1",
+          "nyc1",
+          "nyc2",
+          "nyc3",
+          "sfo3",
+          "sgp1",
+          "syd1",
+          "tor1"
+        ],
+        "available": true,
+        "description": "Basic AMD",
+        "networking_throughput": 2000,
+        "disk_info": [
+          {
+            "type": "local",
+            "size": {
+              "amount": 100,
+              "unit": "gib"
+            }
+          }
+        ]
+      },
+      "size_slug": "s-2vcpu-8gb-amd",
+      "networks": {
+        "v4": [
+          {
+            "ip_address": "164.92.114.234",
+            "netmask": "255.255.224.0",
+            "gateway": "164.92.96.1",
+            "type": "public"
+          },
+          {
+            "ip_address": "10.124.0.2",
+            "netmask": "255.255.240.0",
+            "gateway": "10.124.0.1",
+            "type": "private"
+          }
+        ],
+        "v6": []
+      },
+      "region": {
+        "name": "San Francisco 3",
+        "slug": "sfo3",
+        "features": [
+          "backups",
+          "ipv6",
+          "metadata",
+          "install_agent",
+          "storage",
+          "image_transfer"
+        ],
+        "available": true,
+        "sizes": [
+          "s-1vcpu-1gb-amd",
+          "s-1vcpu-1gb-intel",
+          "s-1vcpu-1gb-35gb-intel",
+          "s-1vcpu-2gb-amd",
+          "s-1vcpu-2gb-intel",
+          "s-1vcpu-2gb-70gb-intel",
+          "s-2vcpu-2gb-amd",
+          "s-2vcpu-2gb-intel",
+          "s-2vcpu-2gb-90gb-intel",
+          "s-2vcpu-4gb-amd",
+          "s-2vcpu-4gb-intel",
+          "s-2vcpu-4gb-120gb-intel",
+          "s-2vcpu-8gb-amd",
+          "s-2vcpu-8gb-160gb-intel",
+          "s-4vcpu-8gb-amd",
+          "s-4vcpu-8gb-intel",
+          "s-4vcpu-8gb-240gb-intel",
+          "s-4vcpu-16gb-amd",
+          "s-4vcpu-16gb-320gb-intel",
+          "s-8vcpu-16gb-amd",
+          "s-8vcpu-16gb-intel",
+          "s-8vcpu-16gb-480gb-intel",
+          "s-8vcpu-32gb-amd",
+          "s-8vcpu-32gb-640gb-intel"
+        ]
+      },
+      "tags": [
+        "omp-gateway-qual"
+      ],
+      "vpc_uuid": "5d83b82e-256b-4b51-89eb-752cf26f1ab2",
+      "subnet_uuid": "717229b0-8254-463a-9b1b-eed9179a8d02"
+    }
+  },
+  "after": {
+    "droplet": {
+      "id": 611742709,
+      "name": "omp-gateway-qual",
+      "memory": 8192,
+      "vcpus": 2,
+      "disk": 100,
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 100,
+            "unit": "gib"
+          }
+        }
+      ],
+      "locked": false,
+      "status": "active",
+      "kernel": null,
+      "created_at": "2026-10-22T23:49:06Z",
+      "features": [
+        "droplet_agent",
+        "private_networking"
+      ],
+      "backup_ids": [],
+      "next_backup_window": null,
+      "snapshot_ids": [],
+      "image": {
+        "id": 248394734,
+        "name": "13 x64",
+        "distribution": "Debian",
+        "slug": "debian-13-x64",
+        "public": true,
+        "regions": [
+          "nyc3",
+          "ams2",
+          "ams3",
+          "atl1",
+          "blr1",
+          "fra1",
+          "lon1",
+          "mem1",
+          "mkc1",
+          "nyc1",
+          "nyc2",
+          "ric1",
+          "sfo1",
+          "sfo2",
+          "sfo3",
+          "sgp1",
+          "syd1",
+          "tor1"
+        ],
+        "created_at": "2026-10-05T03:49:47Z",
+        "min_disk_size": 7,
+        "type": "base",
+        "size_gigabytes": 3.22,
+        "description": "Debian 13 Image",
+        "tags": [],
+        "status": "available"
+      },
+      "volume_ids": [],
+      "size": {
+        "slug": "s-2vcpu-8gb-amd",
+        "memory": 8192,
+        "vcpus": 2,
+        "disk": 100,
+        "transfer": 5.0,
+        "price_monthly": 42,
+        "price_hourly": 0.0625,
+        "regions": [
+          "ams3",
+          "blr1",
+          "fra1",
+          "lon1",
+          "nyc1",
+          "nyc2",
+          "nyc3",
+          "sfo3",
+          "sgp1",
+          "syd1",
+          "tor1"
+        ],
+        "available": true,
+        "description": "Basic AMD",
+        "networking_throughput": 2000,
+        "disk_info": [
+          {
+            "type": "local",
+            "size": {
+              "amount": 100,
+              "unit": "gib"
+            }
+          }
+        ]
+      },
+      "size_slug": "s-2vcpu-8gb-amd",
+      "networks": {
+        "v4": [
+          {
+            "ip_address": "164.92.114.234",
+            "netmask": "255.255.224.0",
+            "gateway": "164.92.96.1",
+            "type": "public"
+          },
+          {
+            "ip_address": "10.124.0.2",
+            "netmask": "255.255.240.0",
+            "gateway": "10.124.0.1",
+            "type": "private"
+          }
+        ],
+        "v6": []
+      },
+      "region": {
+        "name": "San Francisco 3",
+        "slug": "sfo3",
+        "features": [
+          "backups",
+          "ipv6",
+          "metadata",
+          "install_agent",
+          "storage",
+          "image_transfer"
+        ],
+        "available": true,
+        "sizes": [
+          "s-1vcpu-1gb-amd",
+          "s-1vcpu-1gb-intel",
+          "s-1vcpu-1gb-35gb-intel",
+          "s-1vcpu-2gb-amd",
+          "s-1vcpu-2gb-intel",
+          "s-1vcpu-2gb-70gb-intel",
+          "s-2vcpu-2gb-amd",
+          "s-2vcpu-2gb-intel",
+          "s-2vcpu-2gb-90gb-intel",
+          "s-2vcpu-4gb-amd",
+          "s-2vcpu-4gb-intel",
+          "s-2vcpu-4gb-120gb-intel",
+          "s-2vcpu-8gb-amd",
+          "s-2vcpu-8gb-160gb-intel",
+          "s-4vcpu-8gb-amd",
+          "s-4vcpu-8gb-intel",
+          "s-4vcpu-8gb-240gb-intel",
+          "s-4vcpu-16gb-amd",
+          "s-4vcpu-16gb-320gb-intel",
+          "s-8vcpu-16gb-amd",
+          "s-8vcpu-16gb-intel",
+          "s-8vcpu-16gb-480gb-intel",
+          "s-8vcpu-32gb-amd",
+          "s-8vcpu-32gb-640gb-intel"
+        ]
+      },
+      "tags": [],
+      "vpc_uuid": "5d83b82e-256b-4b51-89eb-752cf26f1ab2",
+      "subnet_uuid": "717229b0-8254-463a-9b1b-eed9179a8d02"
+    }
+  }
+}

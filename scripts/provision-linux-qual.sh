@@ -276,11 +276,12 @@ provider_request() {
 }
 
 validate_droplet_identity() {
-  printf '%s' "$DROPLET_JSON" | jq -e --arg name "$DROPLET_NAME" --arg id "$DROPLET_ID" '
+  local require_tag="${1:-true}"
+  printf '%s' "$DROPLET_JSON" | jq -e --arg name "$DROPLET_NAME" --arg id "$DROPLET_ID" --argjson require_tag "$require_tag" '
     type == "object" and .name == $name and
     (.id | type == "number" and . > 0 and . == floor) and
     ($id == "" or (.id | tostring) == $id) and
-    (.tags | type == "array" and index($name) != null)' >/dev/null ||
+    (.tags | type == "array" and ($require_tag == false or index($name) != null))' >/dev/null ||
     die "DigitalOcean droplet identity does not match the retained id/name/tag; evidence: $PROVIDER_EVIDENCE_RUN"
 }
 
@@ -301,7 +302,7 @@ accrued_cost() {
 # Presence is independent of network readiness. Only a 404 for the retained id or a valid empty
 # list without a retained id means absence. Never call inside a substitution: assignments matter.
 load_droplet() {
-  local timeout="${1:-30}" encoded_name
+  local timeout="${1:-30}" require_tag="${2:-true}" encoded_name
   DROPLET_ID="$(state_read droplet_id)" || die "cannot read retained droplet id"
   DROPLET_JSON=""
   DROPLET_IP=""
@@ -323,7 +324,7 @@ load_droplet() {
   [ "$PROVIDER_STATUS" = 200 ] || die "DigitalOcean droplet $DROPLET_ID returned HTTP $PROVIDER_STATUS, not absence"
   DROPLET_JSON="$(printf '%s' "$PROVIDER_BODY" | jq -ce '.droplet')" ||
     die "DigitalOcean droplet response is malformed, not absence"
-  validate_droplet_identity
+  validate_droplet_identity "$require_tag"
 }
 
 read_droplet_ip() {
@@ -950,7 +951,9 @@ REMOTE
     while [ "$DESTROY_CONFIRMED" -eq 0 ] && [ "$SECONDS" -lt "$deadline" ]; do
       remaining=$((deadline - SECONDS))
       if [ "$remaining" -gt 30 ]; then remaining=30; fi
-      if ! load_droplet "$remaining"; then
+      # Accepted deletion can remove tags before the exact id returns 404.
+      # Keep checking id/name, but do not require the already-validated ownership tag.
+      if ! load_droplet "$remaining" false; then
         DESTROY_CONFIRMED=1
         break
       fi
