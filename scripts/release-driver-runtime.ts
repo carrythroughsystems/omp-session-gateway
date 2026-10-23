@@ -14,6 +14,7 @@ import { assertDeviceCloudResumeEligible, externalCleanupCurrent, validateStable
 import { defaultLaneModules } from "./stable-lanes.ts";
 import { clearReleaseHostLease } from "./release-host-lease.ts";
 import { parseDeviceCloudMachineOutcome, readDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
+import { parseDeviceCloudProgress } from "./device-cloud-qualification.ts";
 import { nextReleaseVersion, parseReleaseClass, REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineProtectedPath, routineSourceHold, generatedReleaseKind, generatedReleaseFilesMatch } from "./release-policy.ts";
 import type { RoutineAuthority, RoutineEvidence } from "./release-policy.ts";
 import { runAdb } from "./android-device.ts";
@@ -119,6 +120,16 @@ export function assertFailedCampaignCleanup(
   }
   for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
     if (modules[name].needsCleanup(receipt.lanes[name].evidence?.progress)) throw new Error("failed campaign cleanup is stale or incomplete: " + name);
+  }
+  const cloud = parseDeviceCloudProgress(receipt.lanes.deviceCloud.evidence?.progress);
+  const resources = cloud.resources, audit = cloud.results.audit;
+  if (resources === undefined || resources.some(resource =>
+    resource.sessionId === undefined || !resource.ended || !resource.audited || resource.incident === true ||
+    resource.unauditedDeletion === true || (resource.vendor === "browserstack" && !resource.recordRemoved)) ||
+    (resources.length > 0 && audit?.records !== resources.length) ||
+    (audit !== undefined && (audit.records !== resources.length || audit.recordsExposingLinks !== 0 ||
+      audit.recordsWithMedia !== 0 || (audit.lingeringSignedArtifacts !== undefined && audit.lingeringSignedArtifacts !== 0)))) {
+    throw new Error("failed campaign device-cloud retained-record audit is unresolved");
   }
 }
 
@@ -499,7 +510,9 @@ export class StudioDriver implements DriverPort {
               detail.files.every(file => [file.filename, file.previous_filename].every(path => path === undefined || !routineProtectedPath(path)))) {
               const reviews = await this.pages<{ id: number; user: { login: string }; state: string; commit_id: string }>(`pulls/${item.number}/reviews?per_page=100`);
               const review = reviews.filter(review => review.user.login === this.config.founder && review.state !== "COMMENTED" && review.state !== "PENDING").sort((a, b) => b.id - a.id)[0];
-              fix = review?.state === "APPROVED" && review.commit_id === detail.head;
+              // readPr resolves tree from this immutable head SHA, not the movable branch name.
+              fix = review?.state === "APPROVED" && review.commit_id === detail.head &&
+                detail.mergeTree !== undefined && detail.tree === detail.mergeTree;
             }
           } else fix = candidate.merged_by?.login === this.config.founder;
         }
@@ -783,10 +796,12 @@ export class StudioDriver implements DriverPort {
             await this.api(`releases/tags/v${state.version}`, true) !== undefined) throw new StaleIntentError("stable publication already exists; preserve the immutable release");
         };
         const revalidate = async () => {
-          const [issues, prepare] = await Promise.all([
+          const [issues, prepare, tags] = await Promise.all([
             this.issues(current.issue), this.prepareObservation({ ...current, ...(prepareNumber === undefined ? {} : { preparePr: prepareNumber }) }),
+            this.pages<{ name: string }>("tags?per_page=100"),
           ]);
-          assertRetry({ ...repo, issues, ...(prepare === undefined ? {} : { prepare }) });
+          // Recompute nextCandidate through nextStep; a newly published prealpha reserves its ordinal.
+          assertRetry({ ...repo, issues, tags: tags.map(tag => tag.name), ...(prepare === undefined ? {} : { prepare }) });
           const orphan = assertOrphan(prepare);
           await assertUnpublished();
           return orphan;

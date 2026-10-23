@@ -153,6 +153,8 @@ the requested next patch or explicit next minor version, eligible upstream basel
 already reviewed by the configured maintainer. A maintainer merge remains sufficient. A bot-merged
 `fix`/`perf`/`revert` must change no authority path (including rename-from paths) and carry the
 configured maintainer's latest non-comment review as `APPROVED` at the exact PR head.
+The immutable tree of that approved head must also equal the landed squash's merge tree;
+approval of a different post-merge branch head cannot authorize the bytes already on main.
 Dismissed, superseded and stale-head reviews never count. The lead uses that maintainer identity;
 there is no separate lead identity or bot self-approval. Bot and maintainer logins must be distinct
 (case-insensitively); the runtime checks the bot-review branch before any maintainer-merge shortcut.
@@ -448,7 +450,10 @@ next unused prealpha (retired untagged candidates also reserve their ordinal). I
 the tracking request, rewrites old jobs/receipts, or silently incorporates a fix into an existing
 candidate. Source review, policy fingerprint and immutable-stable guards are rechecked before effects.
 After the authority walk and lease recovery, the open issue, unmerged orphan identity and stable
-tag/release absence are reread before closure and immediately before committing selection. Discovery
+tag/release absence are reread before closure and immediately before committing selection. The driver
+also refreshes the tag listing and recomputes the next candidate ordinal at each revalidation.
+If a newly visible prealpha reserves the planned ordinal, the old intent is dropped and replanned
+without changing the failed selection; an immutable tag is never reused for different bytes. Discovery
 also checks the deterministic old prepare branch when its number was not checkpointed. A newly
 visible orphan drops the obsolete intent before retirement, so the next tick durably pins its identity
 and audit entry before closing it. A moved subject drops its obsolete intent and
@@ -784,6 +789,11 @@ Settlement is proved by that exited worker and absent processes under the host l
 receipt's optional `completedAt` or stale primary-lane status. For example, prealpha.3 left
 `ompPublication` marked running after a consumer failed, despite passing every cleanup lane.
 Those bookkeeping fields are neither rewritten nor treated as permission to skip cleanup proof.
+Every recorded device-cloud allocation, including both sessions of a retried journey, must have
+ended and passed its retained-record audit. Missing ownership/audit proof, exposing links or media,
+lingering signed artifacts, incidents and unaudited deletions keep the maintainer stop even when
+`cleanupRequired` is false. BrowserStack records must also be verified removed. Aggregate audit
+counts must cover every recorded allocation; a local cleanup pass alone cannot settle vendor custody.
 All four cleanup lanes (`cleanup`, `windowsCleanup`, `androidPushCleanup`, `deviceCloudCleanup`)
 must have passed; external cleanup epochs must match their lane's last attempt and the lane
 implementations must report no remaining effects. Debian must also have passed, since a failed

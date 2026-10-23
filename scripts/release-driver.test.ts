@@ -285,7 +285,7 @@ describe("review remediations", () => {
   test("bot-merged fixes need the latest maintainer approval at the exact head and no authority paths", async () => {
     const runtime = new SourceRuntime(driverConfig(), true);
     runtime.subject = "fix(qualification): repair apt step";
-    runtime.sourcePr = pr({ merged: true, mergedBy: config.bot, files: [{ filename: "scripts/provision-linux-qual.sh" }] });
+    runtime.sourcePr = pr({ merged: true, mergedBy: config.bot, mergeTree: "c".repeat(40), files: [{ filename: "scripts/provision-linux-qual.sh" }] });
     expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
     const approval = { id: 1, user: { login: config.founder }, state: "APPROVED", commit_id: runtime.sourcePr.head };
     runtime.reviews = [approval];
@@ -308,6 +308,24 @@ describe("review remediations", () => {
   test("DB-R2 injected equal identities cannot bypass the bot review branch", async () => {
     const runtime = new SourceRuntime({ ...driverConfig(), bot: config.founder }, true);
     runtime.subject = "fix(qualification): routine repair";
+    expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
+  });
+  test("round-three GR-R1 approval must cover the landed squash tree, not a later PR head", async () => {
+    const runtime = new SourceRuntime(driverConfig(), true);
+    runtime.subject = "fix(qualification): reviewed routine repair";
+    runtime.sourcePr = pr({ merged: true, mergedBy: config.bot, mergeTree: "d".repeat(40),
+      files: [{ filename: "scripts/provision-linux-qual.sh" }] });
+    runtime.reviews = [
+      { id: 1, user: { login: config.founder }, state: "DISMISSED", commit_id: "old-landed-head" },
+      { id: 2, user: { login: config.founder }, state: "APPROVED", commit_id: runtime.sourcePr.head },
+    ];
+    expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
+    runtime.sourcePr.mergeTree = runtime.sourcePr.tree;
+    expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(true);
+    runtime.reviews.push({ id: 3, user: { login: config.founder }, state: "DISMISSED", commit_id: runtime.sourcePr.head });
+    expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
+    runtime.reviews.pop();
+    delete runtime.sourcePr.mergeTree;
     expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
   });
   test("runtime and policy admit the exact requested minor class, not an arbitrary minor jump", async () => {
@@ -604,6 +622,15 @@ const retryReceiptModules: StableQualificationLaneModules = (() => {
   return { windows: lane, androidPush: lane, deviceCloud: lane, createPixelLease: () => async (_owner, action) => action() };
 })();
 
+function cleanCloudProgress(epoch: string) {
+  return {
+    lane: "deviceCloud", epoch, binding: "9".repeat(64), phase: "restored", cleanupRequired: false,
+    sessions: ["session-iphone-0001"], tunnels: ["testingbot"],
+    resources: [{ vendor: "testingbot", target: "iphone", sessionId: "session-iphone-0001", ended: true, audited: true, recordRemoved: false }],
+    results: { audit: { records: 1, recordsExposingLinks: 0, recordsWithMedia: 0, lingeringSignedArtifacts: 0 } },
+  };
+}
+
 function receiptScopedCampaign(selected: DriverState) {
   const receipt = createStableQualificationReceipt(selected.candidate, selected.candidateCommit!, selected.previousStable!);
   receipt.status = "failed"; receipt.macHost = selected.macHost!;
@@ -615,6 +642,7 @@ function receiptScopedCampaign(selected: DriverState) {
     receipt.lanes[name].evidence = { progress: { epoch, cleanupRequired: false }, result: { passed: true } };
     receipt.lanes[`${name}Cleanup`].evidence = { epoch };
   }
+  receipt.lanes.deviceCloud.evidence!.progress = cleanCloudProgress(epoch);
   receipt.lanes.deviceCloud.status = "failed";
   const availabilityHolds = [{
     kind: "device-cloud-availability", stage: "allocation", target: "ipad", vendors: ["testingbot"],
@@ -666,7 +694,7 @@ test("prealpha.3 exited-job receipt permits cleanup despite unfinished publicati
     deviceCloud: "c8224e01-0505-4d4a-9a38-22d8a34eb7fe",
   };
   for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
-    receipt.lanes[name].evidence!.progress = { epoch: epochs[name], cleanupRequired: false };
+    receipt.lanes[name].evidence!.progress = name === "deviceCloud" ? cleanCloudProgress(epochs[name]) : { epoch: epochs[name], cleanupRequired: false };
     receipt.lanes[`${name}Cleanup`].evidence = { epoch: epochs[name] };
   }
   expect(() => assertFailedCampaignCleanup(selected, receipt, retryReceiptModules)).not.toThrow();
@@ -676,6 +704,40 @@ test("prealpha.3 exited-job receipt permits cleanup despite unfinished publicati
   }
 });
 
+test("round-three DB-R2 passed cleanup cannot settle unaudited or exposing vendor records", () => {
+  const selected = heldCampaign().selected, { receipt } = receiptScopedCampaign(selected);
+  const epoch = receipt.lanes.deviceCloudCleanup.evidence!.epoch as string;
+  const progress = cleanCloudProgress(epoch);
+  progress.sessions.push("session-ipad-0001");
+  progress.resources.push({ ...progress.resources[0]!, target: "ipad", sessionId: "session-ipad-0001" });
+  progress.results.audit.records = 2;
+  receipt.lanes.deviceCloud.evidence!.progress = progress;
+  expect(() => assertFailedCampaignCleanup(selected, receipt, retryReceiptModules)).not.toThrow();
+  for (const index of [0, 1]) {
+    const unsafe = structuredClone(receipt);
+    const cloud = unsafe.lanes.deviceCloud.evidence!.progress as typeof progress;
+    cloud.resources[index]!.audited = false;
+    expect(() => assertFailedCampaignCleanup(selected, unsafe, retryReceiptModules)).toThrow();
+  }
+  for (const change of [{ recordsExposingLinks: 1 }, { recordsWithMedia: 1 }, { lingeringSignedArtifacts: 1 }, { records: 1 }]) {
+    const unsafe = structuredClone(receipt);
+    Object.assign((unsafe.lanes.deviceCloud.evidence!.progress as typeof progress).results.audit, change);
+    expect(() => assertFailedCampaignCleanup(selected, unsafe, retryReceiptModules)).toThrow();
+  }
+  for (const field of ["resources", "results"]) {
+    const unsafe = structuredClone(receipt);
+    delete (unsafe.lanes.deviceCloud.evidence!.progress as Record<string, unknown>)[field];
+    expect(() => assertFailedCampaignCleanup(selected, unsafe, retryReceiptModules)).toThrow();
+  }
+  const legacy = structuredClone(receipt);
+  const legacyCloud = legacy.lanes.deviceCloud.evidence!.progress as Record<string, unknown>;
+  delete legacyCloud.resources; delete legacyCloud.tunnels;
+  expect(() => assertFailedCampaignCleanup(selected, legacy, retryReceiptModules)).toThrow("retained-record audit");
+  const unallocated = structuredClone(receipt);
+  unallocated.lanes.deviceCloud.evidence!.progress = { ...cleanCloudProgress(epoch), resources: [], sessions: [], tunnels: [], results: {} };
+  expect(() => assertFailedCampaignCleanup(selected, unallocated, retryReceiptModules)).not.toThrow();
+});
+
 test("re-selection closes only its bot-owned orphan prepare and preserves request/job history across replay", async () => {
   const failed = { ...state("held"), holdReason: "stale-source" as const, preparePr: 401 };
   const repo = snapshot({ main: "d".repeat(40), prepare: pr({ headRef: "release-driver/400/v0.7.5-prealpha.1-prepare" }) });
@@ -683,6 +745,7 @@ test("re-selection closes only its bot-owned orphan prepare and preserves reques
     comments = new Set<string>();
     writes: string[][] = [];
     override async snapshot() { return repo; }
+    override async pages<T>() { return repo.tags.map(name => ({ name })) as T[]; }
     override async issues() { return repo.issues; }
     override async readPr() { return repo.prepare!; }
     override async authority() { return authority; }
@@ -1223,6 +1286,7 @@ describe("round-one retry boundary regressions", () => {
     afterClose: () => void = () => {};
     writes = 0;
     override async snapshot() { return structuredClone(this.repo); }
+    override async pages<T>() { return this.repo.tags.map(name => ({ name })) as T[]; }
     override async issues() { return structuredClone(this.repo.issues); }
     override async readPr() { return structuredClone(this.repo.prepare!); }
     override async authority() { return authority; }
@@ -1236,6 +1300,25 @@ describe("round-one retry boundary regressions", () => {
       return structuredClone(step);
     }
   }
+
+  test.each(["afterRecovery", "afterComment", "afterClose"] as const)("round-three DB-R1 refreshes candidate ordinals %s", async point => {
+    class TagsRace extends RacingRetry {
+      freshTags = [...this.repo.tags];
+      override async pages<T>() { return this.freshTags.map(name => ({ name })) as T[]; }
+    }
+    const runtime = new TagsRace(driverConfig(), false), fake = new FakeDriver();
+    runtime[point] = () => { runtime.freshTags.push("v0.7.5-prealpha.2"); };
+    fake.state = structuredClone(runtime.selected); fake.repo = runtime.repo;
+    fake.perform = (step, selected) => runtime.perform(step, selected);
+    expect((await tick(fake, config)).operation).toBe("idle");
+    expect(fake.state.candidate).toBe("v0.7.5-prealpha.1");
+    expect(fake.state.intent).toBeUndefined();
+    expect(fake.state.retired).toBeUndefined();
+    runtime[point] = () => {};
+    runtime.repo.tags = [...runtime.freshTags];
+    expect((await tick(fake, config)).operation).toBe("rerequest");
+    expect(fake.state.candidate).toBe("v0.7.5-prealpha.3");
+  });
 
   test.each(["head", "author"] as const)("GR-R2 moved orphan %s replans rather than wedging its saved intent", async field => {
     const runtime = new RacingRetry(driverConfig(), false), step = runtime.step();
@@ -1419,6 +1502,7 @@ describe("round-two class closure", () => {
       published = false;
       effects = 0;
       override async snapshot() { return structuredClone(repo); }
+      override async pages<T>() { return repo.tags.map(name => ({ name })) as T[]; }
       override async issues() { return repo.issues; }
       override async readPr() { return repo.prepare!; }
       override async authority() { return authority; }
@@ -1443,6 +1527,7 @@ describe("round-two class closure", () => {
     class NewlyVisible extends StudioDriver {
       closes = 0;
       override async snapshot() { return observed; }
+      override async pages<T>() { return observed.tags.map(name => ({ name })) as T[]; }
       override async issues() { return observed.issues; }
       override async readPr() { return observed.prepare; }
       override async authority() { return authority; }
