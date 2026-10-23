@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep local 18-state visual validation required while making only Percy upload failures
+  advisory, with visible local/upload outcomes and capability-free diagnostic artifacts.
+  Snapshot queueing no longer claims confirmed submission before build finalization.
+
 ## [v0.8.0] — 2026-10-23
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 39 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.

@@ -243,7 +243,7 @@ for (const state of VISUAL_STATES) {
       if (process.env.OMP_VISUAL_MODE === "upload") {
         phase = "submit";
         await submitSnapshot(page, `${state} / ${info.project.name}`, fixture, options);
-        info.annotations.push({ type: "visual-submitted", description: "accepted" });
+        info.annotations.push({ type: "visual-queued", description: "accepted" });
       } else if (process.env.OMP_VISUAL_MODE !== "local") throw new Error("visual mode: closed mode required");
     } catch (error) {
       // Playwright must never get a browser error, locator excerpt, unsafe message or cause.
