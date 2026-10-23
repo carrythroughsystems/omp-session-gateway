@@ -750,15 +750,19 @@ blocking a merge.
 | `windows-service-lifecycle` | Windows contracts and ACLs, install, readiness-token isolation and rotation, uninstall, and a standard (non-elevated) user's install, reinstall, daemon readiness, and uninstall | gating |
 | `linux-arm64-source-checkout` | Native aarch64 typecheck, build, `bun test`, and the pinned mainline OMP registry fixtures | advisory |
 | `coverage` | `bun run test:coverage` and the Codecov upload | advisory |
-| `visual-review` | Fixed GitHub-hosted Ubuntu: `bun run test:visual` validates all 18 deterministic synthetic states and source/serialized geometry; eligible same-repository PRs, main pushes and GitHub-hosted dispatches then require guarded Percy uploads and finalization | advisory |
+| `visual-review` | Fixed GitHub-hosted Ubuntu: required `bun run test:visual` validates all 18 deterministic synthetic states and source/serialized geometry; eligible same-repository PRs, main pushes and GitHub-hosted dispatches then attempt guarded advisory Percy uploads and finalization | advisory |
 
 `coverage` is advisory by design: its upload sets `fail_ci_if_error: false`, so a merge never
 depends on a third-party service being reachable.
 
 `visual-review` always validates locally without a token. Forks and all gateway-ci dispatches
 are explicitly **not uploaded** and receive no Percy secret. Eligible uploads fail visibly on
-missing credentials, SDK warnings, an unavailable vendor, incomplete submission or finalization;
-no retries or `continue-on-error` mask the result. The six states are empty/all-clear/needs-you
+missing credentials, SDK warnings, an unavailable vendor, incomplete submission or finalization.
+Only the upload step has `continue-on-error`; local validation still fails the job. The step
+summary names the closed diagnostic codes and local PASSED/FAILED outcome. Seven-day workflow
+artifacts retain only reconstructed, closed-set stdout/stderr and numeric summary JSON under
+`test-results/visual-diagnostics/`, never raw vendor output, credentials or URLs. Queued snapshots
+are not described as submitted until the owning CLI confirms build finalization. The six states are empty/all-clear/needs-you
 directory, Settings with Session alerts enabled, connected View and connected Control Ask, each at
 390×844, 810×1080 and 1280×800 with a fixed clock/randomness, en-US/UTC, dark theme, reduced
 motion and DPR 1. Directory asks are metadata-only, collaboration prose/code are authored synthetic,

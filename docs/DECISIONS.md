@@ -1635,7 +1635,8 @@ This decision does not implement or change device-cloud routing, tunnels, receip
 no automatic approval is allowed. First-service acceptance requires an observed 18-snapshot build
 and a deliberate CSS perturbation producing a reviewable diff. Local proofs alone do not establish
 an upload. No traces, recordings, raw SDK diagnostics or Percy output are committed or uploaded as
-CI artifacts. Review capture-tool pins with baselines. Review sponsorship renewal on 2027-09-20,
+CI artifacts. Closed-set reconstructed diagnostic codes and numeric validation summaries may be
+retained for seven days; raw CLI streams remain prohibited. Review capture-tool pins with baselines. Review sponsorship renewal on 2027-09-20,
 before expiry on 2027-10-20; if uploads end, update credentials, CI expectations and attribution
 together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.md).
 
