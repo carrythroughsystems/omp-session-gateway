@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
+import deletionResponses from "./fixtures/digitalocean-delete-tag-removal.json";
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -16,7 +17,7 @@ const PROVIDER_DROPLET = {
   networks: { v4: [{ type: "public", ip_address: "192.0.2.42" }] },
 };
 
-async function dropletHarness(scenario: Record<string, unknown>, bound = false) {
+async function dropletHarness(scenario: Record<string, unknown>, bound = false, droplet = PROVIDER_DROPLET) {
   const home = await mkdtemp(join(tmpdir(), "omp-droplet-presence-"));
   const bin = join(home, "bin");
   const state = join(home, "state", "omp-session-gateway-qual");
@@ -25,7 +26,7 @@ async function dropletHarness(scenario: Record<string, unknown>, bound = false) 
   await Promise.all([mkdir(bin), mkdir(state, { recursive: true })]);
   await writeFile(join(home, "scenario.json"), JSON.stringify(scenario));
   if (bound) {
-    await writeFile(stateFile, '{"droplet_id":"4242"}');
+    await writeFile(stateFile, JSON.stringify({ droplet_id: String(droplet.id) }));
     await writeFile(join(home, "created"), "");
   }
   await writeFile(
@@ -69,16 +70,19 @@ if (method === "GET" && url.includes("/droplets?")) {
   const bodyPath = args[args.indexOf("--data-binary") + 1].slice(1);
   const request = JSON.parse(readFileSync(bodyPath, "utf8"));
   if (request.name !== droplet.name || request.tags[0] !== droplet.name || request.ssh_keys[0] !== 4242) process.exit(93);
-} else if (url.endsWith("/droplets/4242") && method === "GET") {
+} else if (url.endsWith("/droplets/" + droplet.id) && method === "GET") {
   if (existsSync(root + "/deleted")) {
-    status = 404;
-    body = {id: "not_found"};
+    const deletion = calls.findLastIndex(call => call.method === "DELETE");
+    const reads = calls.slice(deletion + 1).filter(call => call.method === "GET").length;
+    body = scenario.afterDeleteBodies?.[reads - 1];
+    status = body === undefined ? 404 : 200;
+    body ??= {id: "not_found"};
   } else {
     status = scenario.getStatus ?? 200;
-    const reads = calls.filter(call => call.method === "GET" && call.url.endsWith("/droplets/4242")).length;
+    const reads = calls.filter(call => call.method === "GET" && call.url.endsWith("/droplets/" + droplet.id)).length;
     body = scenario.getBodies?.[Math.min(reads - 1, scenario.getBodies.length - 1)] ?? {droplet};
   }
-} else if (url.endsWith("/droplets/4242") && method === "DELETE") {
+} else if (url.endsWith("/droplets/" + droplet.id) && method === "DELETE") {
   status = scenario.deleteStatus ?? 204;
   body = status === 204 ? "" : {message: "synthetic delete response"};
   if (status === 204 || status === 404) writeFileSync(root + "/deleted", "");
@@ -123,7 +127,7 @@ main "$2"
           DIGITALOCEAN_ACCESS_TOKEN: storedCredential ? "" : PROVIDER_TEST_TOKEN,
           PROVIDER_TEST_TOKEN,
           PROVIDER_FIXTURE: home,
-          PROVIDER_DROPLET: JSON.stringify(PROVIDER_DROPLET),
+          PROVIDER_DROPLET: JSON.stringify(droplet),
           TS_AUTHKEY: "",
           TS_API_KEY: "",
         },
@@ -234,6 +238,7 @@ for (const [name, scenario, bound, reason] of [
   ["malformed get", { getBodies: ["not json"] }, true, "response is malformed"],
   ["HTTP read error", { getStatus: 503 }, true, "HTTP 503, not absence"],
   ["identity mismatch", { getBodies: [{ droplet: { ...PROVIDER_DROPLET, id: 9999 } }] }, true, "identity does not match"],
+  ["missing ownership tag", { getBodies: [{ droplet: { ...PROVIDER_DROPLET, tags: [] } }] }, true, "identity does not match"],
   ["transport error", { transportExit: 28 }, true, "transport failed"],
 ] as const) {
   test.skipIf(process.platform === "win32")(`droplet ${name} cannot turn into absence or a delete`, async () => {
@@ -251,6 +256,65 @@ for (const [name, scenario, bound, reason] of [
     }
   });
 }
+
+// Run 39874213716 retained these credential-free GET bodies around an accepted DELETE.
+// Network addresses use non-identifying examples; identity fields and the tag-removal delta are unchanged.
+test.skipIf(process.platform === "win32")("accepted droplet deletion tolerates tag removal until exact-id 404", async () => {
+  const fixture = await dropletHarness({
+    getBodies: [deletionResponses.before],
+    afterDeleteBodies: [deletionResponses.after],
+  }, true, deletionResponses.before.droplet);
+  try {
+    const result = await fixture.run("destroy");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("id 611742709 confirmed absent (HTTP 404)");
+    expect(await Bun.file(fixture.stateFile).exists()).toBe(false);
+    expect((await fixture.calls()).map(({ method, url }) => ({ method, url }))).toEqual(
+      ["GET", "DELETE", "GET", "GET"].map(method => ({
+        method, url: "https://api.digitalocean.com/v2/droplets/611742709",
+      })),
+    );
+    expect(await fixture.evidence()).toContain('"tags":[]');
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+for (const [name, body] of [
+  ["id", { droplet: { ...deletionResponses.after.droplet, id: 9999 } }],
+  ["name", { droplet: { ...deletionResponses.after.droplet, name: "foreign-droplet" } }],
+] as const) {
+  test.skipIf(process.platform === "win32")(`accepted droplet deletion still refuses a changed ${name}`, async () => {
+    const fixture = await dropletHarness({
+      getBodies: [deletionResponses.before], afterDeleteBodies: [body],
+    }, true, deletionResponses.before.droplet);
+    try {
+      const result = await fixture.run("destroy");
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("identity does not match");
+      expect(await Bun.file(fixture.stateFile).exists()).toBe(true);
+      expect((await fixture.calls()).map(call => call.method)).toEqual(["GET", "DELETE", "GET"]);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+}
+
+test.skipIf(process.platform === "win32")("accepted droplet deletion still requires final HTTP 404", async () => {
+  const fixture = await dropletHarness({
+    getBodies: [deletionResponses.before],
+    afterDeleteBodies: Array(40).fill(deletionResponses.after),
+  }, true, deletionResponses.before.droplet);
+  try {
+    const result = await fixture.run("destroy");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("has not returned HTTP 404 after 150s");
+    expect(await Bun.file(fixture.stateFile).exists()).toBe(true);
+    expect((await fixture.calls()).filter(call => call.method === "DELETE")).toHaveLength(1);
+  } finally {
+    await fixture.dispose();
+  }
+}, 15_000);
 
 for (const status of [204, 404, 500]) {
   test.skipIf(process.platform === "win32")(`droplet DELETE HTTP ${status} determines teardown disposition`, async () => {
