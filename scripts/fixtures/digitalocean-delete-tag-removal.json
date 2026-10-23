@@ -99,15 +99,15 @@
       "networks": {
         "v4": [
           {
-            "ip_address": "164.92.114.234",
+            "ip_address": "192.0.2.42",
             "netmask": "255.255.224.0",
-            "gateway": "164.92.96.1",
+            "gateway": "192.0.2.1",
             "type": "public"
           },
           {
-            "ip_address": "10.124.0.2",
+            "ip_address": "10.0.0.42",
             "netmask": "255.255.240.0",
-            "gateway": "10.124.0.1",
+            "gateway": "10.0.0.1",
             "type": "private"
           }
         ],
@@ -259,15 +259,15 @@
       "networks": {
         "v4": [
           {
-            "ip_address": "164.92.114.234",
+            "ip_address": "192.0.2.42",
             "netmask": "255.255.224.0",
-            "gateway": "164.92.96.1",
+            "gateway": "192.0.2.1",
             "type": "public"
           },
           {
-            "ip_address": "10.124.0.2",
+            "ip_address": "10.0.0.42",
             "netmask": "255.255.240.0",
-            "gateway": "10.124.0.1",
+            "gateway": "10.0.0.1",
             "type": "private"
           }
         ],

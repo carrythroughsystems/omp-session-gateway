@@ -258,6 +258,7 @@ for (const [name, scenario, bound, reason] of [
 }
 
 // Run 39874213716 retained these credential-free GET bodies around an accepted DELETE.
+// Network addresses use non-identifying examples; identity fields and the tag-removal delta are unchanged.
 test.skipIf(process.platform === "win32")("accepted droplet deletion tolerates tag removal until exact-id 404", async () => {
   const fixture = await dropletHarness({
     getBodies: [deletionResponses.before],
