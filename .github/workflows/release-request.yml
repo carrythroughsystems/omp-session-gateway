@@ -156,6 +156,7 @@ jobs:
       issues: write
     steps:
       - name: Open or reuse the tracking request
+        id: file
         env:
           GH_TOKEN: ${{ github.token }}
           OMP_VERSION: ${{ needs.resolve.outputs.omp_version }}
@@ -200,6 +201,13 @@ jobs:
             issue_url=$(gh issue create --repo "$GITHUB_REPOSITORY" "${labels[@]}" --title "$title" --body "$body")
             result=created
           fi
+          # Persist exact filing identity in the Actions job, not mutable issue metadata.
+          issue="${issue_url##*/}"
+          if [[ ! "$issue" =~ ^[1-9][0-9]*$ || "$issue_url" != "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/issues/$issue" ]]; then
+            printf 'invalid tracking issue identity\n' >&2
+            exit 1
+          fi
+          printf 'tracking_issue=%s\n' "$issue" >>"$GITHUB_OUTPUT"
           # Reusing a request never posts a comment or rewrites its human note.
           {
             printf '## Release request\n'
@@ -210,3 +218,11 @@ jobs:
             printf -- '- Tracking issue (%s): %s\n' "$result" "$issue_url"
             printf -- '- Requested by: @%s\n' "$REQUEST_ACTOR"
           } >>"$GITHUB_STEP_SUMMARY"
+      # Jobs API preserves this resolved name for the exact run/attempt. The driver
+      # requires this step and the version/class filing job both to have succeeded.
+      - name: "Record tracking issue #${{ steps.file.outputs.tracking_issue }}"
+        env:
+          TRACKING_ISSUE: ${{ steps.file.outputs.tracking_issue }}
+        run: |
+          set -euo pipefail
+          [[ "$TRACKING_ISSUE" =~ ^[1-9][0-9]*$ ]]

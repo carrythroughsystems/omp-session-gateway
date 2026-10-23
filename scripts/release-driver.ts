@@ -163,8 +163,17 @@ export interface Decision {
   detail: string;
   links?: string[];
   pr?: PullRequest;
-  patch?: Partial<DriverState>;
+  patch?: { [Key in keyof DriverState]?: Exclude<DriverState[Key], undefined> };
+  /** JSON preserves deletion intent; assigning undefined in a persisted patch does not. */
+  clear?: (keyof Pick<DriverState, "preparePr" | "orderPr" | "updatedHead" | "candidateCommit" | "candidateDigest" |
+    "approvePr" | "approvedHead" | "approvedTree" | "stableCommit" | "stableDigest" | "publicationRun" |
+    "recordPr" | "failedMain" | "holdReason" | "holdCommit" | "infrastructureHold" | "resumeDeviceCloud" | "macHost">)[];
   holdReason?: RoutineHoldReason;
+}
+export function applyDecisionPatch(state: DriverState, step: Pick<Decision, "patch" | "clear">): DriverState {
+  const next = { ...state, ...step.patch };
+  for (const key of step.clear ?? []) delete next[key];
+  return next;
 }
 export interface Idle { operation: "idle"; detail: string; holdReason?: RoutineHoldReason }
 export function compareVersions(a: string, b: string): number {
@@ -209,7 +218,8 @@ function refuse(pr: PullRequest | undefined, config: DriverConfig, role: string)
 export function routineHold(reason: RoutineHoldReason, sourceCommit?: string): Decision {
   const holdCommit = reason === "out-of-class" ? sourceCommit : undefined;
   return decision("hold", "held", "routine release held: " + reason + (holdCommit === undefined ? "" : " at source commit " + holdCommit),
-    { holdReason: reason, patch: { holdReason: reason, holdCommit } });
+    { holdReason: reason, patch: { holdReason: reason, ...(holdCommit === undefined ? {} : { holdCommit }) },
+      ...(holdCommit === undefined ? { clear: ["holdCommit"] } : {}) });
 }
 export function promotionHold(state: DriverState, repo: RepositorySnapshot, config: DriverConfig, merged = false): RoutineHoldReason | undefined {
   const reason = routineReleaseHold({
@@ -256,11 +266,10 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       retired: [...state.retired ?? [], { candidate: state.candidate, reason: stalePrepare ? "stale-source" : "diagnostic-required",
         at: new Date().toISOString(), issue: state.issue.number,
         ...((state.preparePr ?? repo.prepare?.number) === undefined ? {} : { preparePr: state.preparePr ?? repo.prepare!.number }), failedMain }],
-      preparePr: undefined, orderPr: undefined, updatedHead: undefined, candidateCommit: undefined, candidateDigest: undefined, approvePr: undefined,
-      approvedHead: undefined, approvedTree: undefined, stableCommit: undefined, stableDigest: undefined,
-      publicationRun: undefined, recordPr: undefined, failedMain: undefined, holdReason: undefined, holdCommit: undefined,
-      campaignAttempt: 0, infrastructureHold: undefined, resumeDeviceCloud: undefined, macHost: undefined,
-    } });
+      campaignAttempt: 0,
+    }, clear: ["preparePr", "orderPr", "updatedHead", "candidateCommit", "candidateDigest", "approvePr",
+      "approvedHead", "approvedTree", "stableCommit", "stableDigest", "publicationRun", "recordPr",
+      "failedMain", "holdReason", "holdCommit", "infrastructureHold", "resumeDeviceCloud", "macHost"] });
   }
   if (["selected", "order-updated", "order-ready", "order-landed", "held"].includes(state.phase)) {
     const comparison = compareVersions(repo.upstreamTag, requestVersion(state.issue)!);
@@ -341,7 +350,7 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
     const pr = repo.approve!;
     if (state.phase === "approved") return decision("tag-stable", "stable-tagged", "sign and push the exact routine-authorized stable merge");
     if (!pr.merged) return decision("merge-approve", "approved", "standing routine authority: merge the exact checked promotion", { pr });
-    return decision("accept-approval", "approved", "observed exact-subject release-bot merge", { patch: { stableCommit: pr.mergeCommit }, links: [pr.url] });
+    return decision("accept-approval", "approved", "observed exact-subject release-bot merge", { patch: { stableCommit: pr.mergeCommit! }, links: [pr.url] });
   }
   if (state.phase === "stable-published") return decision("verify-stable", "stable-verified", `verify v${state.version}, GitHub Latest and rebuilt archive digest`);
   if (state.phase === "stable-verified") return decision("start-smoke", "smoking", `detached published-byte smoke for v${state.version} with --force-reinstall and --rebuild-omp`);
@@ -380,7 +389,7 @@ export async function tick(port: DriverPort, config: DriverConfig, plan = false)
   await port.save(state);
   let result: Partial<DriverState>;
   try {
-    result = await port.perform(step, step.operation === "rerequest" ? state : { ...state, ...step.patch });
+    result = await port.perform(step, step.operation === "rerequest" ? state : applyDecisionPatch(state, step));
   } catch (error) {
     if (error instanceof RoutineHoldError) {
       step = routineHold(error.reason, error.sourceCommit);
@@ -392,7 +401,7 @@ export async function tick(port: DriverPort, config: DriverConfig, plan = false)
       return idle("re-planning: " + step.operation + " refused before any effect (" + error.message + ")");
     }
   }
-  state = { ...state, ...step.patch, ...result, phase: step.phase, sequence: state.sequence + 1 };
+  state = { ...applyDecisionPatch(state, step), ...result, phase: step.phase, sequence: state.sequence + 1 };
   delete state.intent;
   const marker = `<!-- release-driver:${createHash("sha256").update(`${state.issue.number}:${state.issue.request}:${state.candidate}:${state.sequence}:${state.phase}`).digest("hex")} -->`;
   state.announcement = { marker, body: [`release-driver: ${state.phase} — ${step.detail.replace(/[\r\n]/gu, " ")}`, ...(step.links ?? []), marker].join("\n") };

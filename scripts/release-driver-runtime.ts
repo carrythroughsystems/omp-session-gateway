@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, readdir, rename, writeFile } from "node:f
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ORDER_AUTHOR, ORDER_HEAD_PREFIX, REPOSITORY, StaleIntentError, campaignAttempt, compareVersions, isOrder, nextStep, outsideOrderScope, parseCampaignInfrastructureHold, requestVersion, promotionHold, tick } from "./release-driver.ts";
+import { ORDER_AUTHOR, ORDER_HEAD_PREFIX, REPOSITORY, StaleIntentError, applyDecisionPatch, campaignAttempt, compareVersions, isOrder, nextStep, outsideOrderScope, parseCampaignInfrastructureHold, requestVersion, promotionHold, tick } from "./release-driver.ts";
 import type { CampaignInfrastructureHold, Decision, DriverConfig, DriverPort, DriverState, JobObservation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
 import { assertReleaseTagState } from "./release-tag-state.ts";
 import { releaseAssetNames, verifyReleaseSignatures } from "./post-release-smoke.ts";
@@ -277,39 +277,38 @@ export class StudioDriver implements DriverPort {
     if (issues.length === 0) return issues;
     const requests = await this.api<{ workflow_runs: WorkflowRun[] }>("actions/workflows/release-request.yml/runs?status=success&per_page=100", true);
     const jobName = (issue: TrackingIssue) => `Request OMP ${requestVersion(issue)}${issue.releaseClass === "minor" ? " (minor)" : ""}`;
-    type FilingJob = { name: string; conclusion: string; completed_at: string };
-    // The filing workflow creates or reuses one issue. Its completion timestamp
-    // cannot authorize an issue created later; multiple eligible issues are ambiguous.
+    type FilingJob = { name: string; conclusion: string; steps?: { name: string; status: string; conclusion: string }[] };
+    // The successful filing step's output is resolved into an immutable Actions
+    // step name. Current labels/timestamps cannot identify which issue a run filed.
     const filedIssue = (job: FilingJob): TrackingIssue | undefined => {
-      const completed = Date.parse(job.completed_at);
-      if (job.conclusion !== "success" || !Number.isFinite(completed)) return undefined;
-      const eligible = issues.filter(issue => jobName(issue) === job.name
-        && Date.parse(raw.find(item => item.number === issue.number)!.created_at) <= completed);
-      return eligible.length === 1 ? eligible[0] : undefined;
+      if (job.conclusion !== "success") return undefined;
+      const records = job.steps?.filter(step => step.name.startsWith("Record tracking issue #")) ?? [];
+      if (records.length !== 1 || records[0]!.status !== "completed" || records[0]!.conclusion !== "success") return undefined;
+      const number = /^Record tracking issue #([1-9][0-9]*)$/u.exec(records[0]!.name)?.[1];
+      return issues.find(issue => String(issue.number) === number && jobName(issue) === job.name);
     };
-    const unmatched = new Set(issues.map(jobName));
+    const unmatched = new Set(issues.map(issue => issue.number));
     for (const run of requests?.workflow_runs ?? []) {
       if (unmatched.size === 0) break;
       const jobs = await this.api<{ jobs: FilingJob[] }>(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
-      for (const name of unmatched) {
-        const job = jobs!.jobs.find(job => job.name === name && job.conclusion === "success");
-        const issue = job === undefined ? undefined : filedIssue(job);
-        if (issue === undefined) continue;
+      for (const job of jobs!.jobs) {
+        const issue = filedIssue(job);
+        if (issue === undefined || !unmatched.has(issue.number)) continue;
         issue.request = `${run.id}:${run.run_attempt}`;
-        unmatched.delete(name);
+        unmatched.delete(issue.number);
       }
     }
     // A long-lived open request can outlive the newest 100 runs. Revalidate its recorded
     // successful run directly rather than requiring another workflow dispatch.
     const retained = issues.find(issue => issue.number === previous?.number && jobName(issue) === jobName(previous!));
-    if (retained && unmatched.has(jobName(retained)) && /^[1-9][0-9]*:[1-9][0-9]*$/u.test(previous!.request)) {
+    if (retained && unmatched.has(retained.number) && /^[1-9][0-9]*:[1-9][0-9]*$/u.test(previous!.request)) {
       const [id, attempt] = previous!.request.split(":");
       const run = await this.api<{ path: string; conclusion: string; status: string }>(`actions/runs/${id}/attempts/${attempt}`, true);
       if (run?.path === ".github/workflows/release-request.yml" && run.status === "completed" && run.conclusion === "success") {
         const jobs = await this.api<{ jobs: FilingJob[] }>(`actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`);
         if (jobs?.jobs.some(job => filedIssue(job)?.number === retained.number)) {
           retained.request = previous!.request;
-          unmatched.delete(jobName(retained));
+          unmatched.delete(retained.number);
         }
       }
     }
@@ -528,6 +527,15 @@ export class StudioDriver implements DriverPort {
     const [authority, evidence] = await Promise.all([this.authority(state, main, pr), this.evidence(state)]);
     return { main, approve: pr, authority, ...(evidence === undefined ? {} : { evidence }), upstreamTag: "", latestStable: "", tags: [], issues: [] };
   }
+  async prepareObservation(state: DriverState): Promise<PullRequest | undefined> {
+    if (state.preparePr !== undefined) return this.readPr(state.preparePr);
+    if (state.phase !== "held" || state.holdReason !== "stale-source" || state.candidateCommit !== undefined) return undefined;
+    // The PR may predate its state checkpoint or only now be visible. Never create here.
+    const branch = `release-driver/${state.issue.number}/${state.candidate}-prepare`;
+    const existing = await this.pages<ApiPr>(`pulls?state=all&base=main&head=carrythroughsystems:${encodeURIComponent(branch)}&per_page=100`);
+    if (existing.length > 1) throw new Error("multiple PRs use the deterministic release branch");
+    return existing.length === 1 ? this.readPr(existing[0]!.number) : undefined;
+  }
   async snapshot(state: DriverState | undefined): Promise<RepositorySnapshot> {
     const [main, upstream, latest, tags, issues] = await Promise.all([
       this.api<{ sha: string }>("commits/main"), this.api<{ content: string }>("contents/UPSTREAM.lock.json?ref=main"),
@@ -544,15 +552,8 @@ export class StudioDriver implements DriverPort {
       // Multiple matching orders are ambiguous. Never select by attacker-controlled title/body.
       if (matching.length === 1) repo.order = await this.readPr(matching[0]!.number);
     }
-    if (state.preparePr !== undefined) repo.prepare = await this.readPr(state.preparePr);
-    else if (state.phase === "held" && state.holdReason === "stale-source" && state.candidateCommit === undefined) {
-      // The PR may have been created before an open-prepare crash, before its number
-      // reached state. Recover only the deterministic old branch; never create here.
-      const branch = `release-driver/${state.issue.number}/${state.candidate}-prepare`;
-      const existing = await this.pages<ApiPr>(`pulls?state=all&base=main&head=carrythroughsystems:${encodeURIComponent(branch)}&per_page=100`);
-      if (existing.length > 1) throw new Error("multiple PRs use the deterministic release branch");
-      if (existing.length === 1) repo.prepare = await this.readPr(existing[0]!.number);
-    }
+    const prepare = await this.prepareObservation(state);
+    if (prepare !== undefined) repo.prepare = prepare;
     if (state.approvePr !== undefined) repo.approve = await this.readPr(state.approvePr);
     if (state.recordPr !== undefined) repo.record = await this.readPr(state.recordPr);
     if (["approve-open", "approve-checking", "approval-required", "approved"].includes(state.phase)) {
@@ -764,6 +765,8 @@ export class StudioDriver implements DriverPort {
           if (retry.operation !== "rerequest" || retry.patch?.selectedMain !== step.patch?.selectedMain ||
             retry.patch?.candidate !== step.patch?.candidate || retry.patch?.issue?.number !== step.patch?.issue?.number ||
             retry.patch?.issue?.request !== step.patch?.issue?.request) throw new StaleIntentError("retry subject changed");
+          const orphan = observation.prepare?.merged ? undefined : observation.prepare;
+          if (orphan?.number !== step.pr?.number) throw new StaleIntentError("new orphan prepare requires a pinned retirement plan");
         };
         const assertOrphan = (orphan: PullRequest | undefined) => {
           if (step.pr === undefined) return undefined;
@@ -773,19 +776,24 @@ export class StudioDriver implements DriverPort {
           return orphan;
         };
         const prepareNumber = state.preparePr ?? step.pr?.number;
+        const assertUnpublished = async () => {
+          if (await this.api(`git/ref/tags/v${state.version}`, true) !== undefined ||
+            await this.api(`releases/tags/v${state.version}`, true) !== undefined) throw new StaleIntentError("stable publication already exists; preserve the immutable release");
+        };
         const revalidate = async () => {
           const [issues, prepare] = await Promise.all([
-            this.issues(current.issue), prepareNumber === undefined ? undefined : this.readPr(prepareNumber),
+            this.issues(current.issue), this.prepareObservation({ ...current, ...(prepareNumber === undefined ? {} : { preparePr: prepareNumber }) }),
           ]);
           assertRetry({ ...repo, issues, ...(prepare === undefined ? {} : { prepare }) });
-          return assertOrphan(prepare);
+          const orphan = assertOrphan(prepare);
+          await assertUnpublished();
+          return orphan;
         };
         assertRetry(repo);
         assertOrphan(repo.prepare);
-        const next = { ...state, ...step.patch };
+        const next = applyDecisionPatch(state, step);
         this.requireSourceAuthority(await this.authority(next, repo.main), state.authorityPolicy);
-        if (await this.api(`git/ref/tags/v${state.version}`, true) !== undefined ||
-          await this.api(`releases/tags/v${state.version}`, true) !== undefined) throw new StaleIntentError("stable publication already exists; preserve the immutable release");
+        await assertUnpublished();
         await this.recoverFailedCampaign(state);
         let orphan = await revalidate();
         if (orphan) {
@@ -841,7 +849,7 @@ export class StudioDriver implements DriverPort {
         return { macHost: bound.macHost };
       }
       case "open-approve": return { approvePr: (await this.openPr("approve", state)).number };
-      case "start-approve-checks": await this.launch("approve", { ...state, ...step.patch }); return {};
+      case "start-approve-checks": await this.launch("approve", applyDecisionPatch(state, step)); return {};
       case "merge-approve": {
         const repo = await this.promotionSnapshot(state);
         const reason = promotionHold(state, repo, this.config);

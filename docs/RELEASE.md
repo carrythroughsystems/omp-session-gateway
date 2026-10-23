@@ -101,7 +101,11 @@ the `release-minor` label and reuse only an issue of that class. Thus a minor re
 rebind an existing patch request. The issue body is for humans; the driver never parses it.
 A successful request job's `Request OMP vX.Y.Z` (patch) or `Request OMP vX.Y.Z (minor)` name and
 Actions run/attempt bind the version and class and identify explicit re-requests without issue
-edits. A minor label without a matching successful filing job grants no authority. The selected
+edits. The filing step validates the created/reused issue URL, emits its numeric `tracking_issue`
+output, and a following successful step records `Record tracking issue #N` in the Actions jobs API.
+That exact number binds the run to the issue; current labels, timestamps and the human issue body
+are not attribution evidence. A missing, duplicate, failed or mismatched record grants no authority.
+A minor label without a matching successful filing job grants no authority. The selected
 class is persisted with the request; diagnostic re-requests cannot switch it, and completing a
 patch release does not close an outstanding minor request.
 
@@ -401,6 +405,9 @@ State lives under `~/.local/state/omp-session-gateway/release-driver/`: atomic/f
 mutex excludes overlapping ticks. Deterministic release branches, tags, comment markers and tmux
 job ids reconcile a provider write accepted just before a process crash. Plan does not create any
 of these. Bot-owned worktrees under `work/` leave the operator checkout's working tree alone.
+Intent patches carry explicit `clear` field names for deletion, never `undefined` values that JSON
+would discard. One patch applicator handles first execution and persisted replay; a meta-test covers
+every patch-emitting operation and proves JSON round-trip equality and identical application.
 The candidate campaign uses a dedicated published `release-driver/*-campaign` branch pinned to
 the prepare merge, so unrelated movement of main cannot silently change the orchestrator source.
 
@@ -415,12 +422,14 @@ worker can resume only at the same head/tree and policy; no device, cloud or pub
 is replayed. Passed/failed results are never overwritten to invent a retry. The saved intent and
 outbox reconcile accepted bot merges and announcements after a crash; immutable tags never move.
 After a fix moves main beyond `failedMain`, the same still-open tracking issue with the same OMP
-version/class and recorded successful request run is automatically re-selected. A successful filing
-job can bind only one matching open issue created no later than that job's completion; a later
-label-only issue cannot inherit it and multiple eligible issues are ambiguous. The driver revalidates
-a recorded numeric `run:attempt` even if it has fallen out of the newest 100 runs. Legacy creation-time
-tokens do not prove a successful run: if no current filing run binds that issue, automatic retry
-stays refused until an explicit successful same-version/class request. For a validated retained run,
+version/class and recorded successful request run is automatically re-selected. The successful
+filing job must record that exact issue number; another older, relabeled or solely remaining open
+issue cannot inherit a run whose actual issue closed. The driver revalidates a recorded numeric
+`run:attempt` even if it has fallen out of the newest 100 runs.
+**Installation boundary:** older runs without the API-visible issue-number record, including
+already-stored numeric tokens, require one explicit successful dispatch of the updated request
+workflow for the same open issue/version/class. Legacy creation-time tokens are also insufficient.
+No historical run is backfilled or inferred from mutable metadata. Once bound to a recorded run,
 no new workflow dispatch, request closure, or manual selection retirement is required.
 An explicit new successful same-version/class request
 still works, including a replacement issue when the old issue closed. A closed issue alone cannot retry.
@@ -434,8 +443,11 @@ closes only the old bot-owned unmerged prepare PR with a reconciled bot comment,
 next unused prealpha (retired untagged candidates also reserve their ordinal). It never closes
 the tracking request, rewrites old jobs/receipts, or silently incorporates a fix into an existing
 candidate. Source review, policy fingerprint and immutable-stable guards are rechecked before effects.
-After the authority walk and lease recovery, the open issue and unmerged orphan identity are reread
-before closure and before committing selection. A moved subject drops its obsolete intent and
+After the authority walk and lease recovery, the open issue, unmerged orphan identity and stable
+tag/release absence are reread before closure and immediately before committing selection. Discovery
+also checks the deterministic old prepare branch when its number was not checkpointed. A newly
+visible orphan drops the obsolete intent before retirement, so the next tick durably pins its identity
+and audit entry before closing it. A moved subject drops its obsolete intent and
 preserves the failed selection; any already-recorded lease/PR retirement remains replay-safe.
 Closing a fulfilled request retains its recorded filing identity, and the closed state never
 re-selects that fulfilled issue even if a later GitHub listing still shows it open.
