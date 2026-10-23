@@ -141,6 +141,9 @@ test("a prolonged visible outage opens recovery help from the loaded shell", asy
     await page.clock.install();
     await page.goto(fixture.origin);
     await expect(page.locator(".working-row")).toHaveCount(1);
+    await expect.poll(
+      () => fixture.requests.filter(request => request === "GET /api/v1/events").length,
+    ).toBeGreaterThanOrEqual(1);
     await page.route("**/api/v1/sessions", route => route.abort("connectionrefused"));
     expect(fixture.disconnectEvents()).toBeGreaterThan(0);
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "tailnet", { timeout: 6_000 });

@@ -139,6 +139,7 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 38 changel
 - Confirm disposable Debian droplet deletion when DigitalOcean removes ownership tags
   before its final HTTP 404. Keep strict id/name/tag checks before DELETE and exact
   id/name checks during bounded absence polling; a missing tag never counts as absence.
+  Wait for stream establishment before disconnecting it in the browser outage check.
 - Read the release's tag endpoint before declaring it absent from GitHub's release list
   (#437). Keep the same release-policy and signed-asset checks when a newly published
   candidate is missing from the list; a missing tag or failed lookup still fails closed.
