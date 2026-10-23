@@ -64,8 +64,11 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   try { await file.writeFile(JSON.stringify(value, null, 2) + "\n"); await file.sync(); }
   finally { await file.close(); }
   await rename(temporary, path);
-  const parent = await open(dirname(path), "r");
-  try { await parent.sync(); } finally { await parent.close(); }
+  // Directory fsync is a POSIX durability step; NTFS has no equivalent and rename is already atomic there.
+  if (process.platform !== "win32") {
+    const parent = await open(dirname(path), "r");
+    try { await parent.sync(); } finally { await parent.close(); }
+  }
 }
 async function immutableJobJson(path: string, value: unknown): Promise<boolean> {
   let file;

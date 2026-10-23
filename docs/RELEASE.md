@@ -403,7 +403,9 @@ smoke still forces reinstall and checks every doctor result; public gateway expo
 ### Durable jobs, failures and kill switch
 
 State lives under `~/.local/state/omp-session-gateway/release-driver/`: atomic/fsynced
-`state.json` contains the write intent, pinned PR/tag identities and comment outbox. A SQLite
+`state.json` contains the write intent, pinned PR/tag identities and comment outbox. Atomic JSON
+writes sync the file before rename on every platform and sync the parent directory on POSIX.
+Windows retains file sync and atomic rename without the unsupported directory fsync. A SQLite
 mutex excludes overlapping ticks. Deterministic release branches, tags, comment markers and tmux
 job ids reconcile a provider write accepted just before a process crash. Plan does not create any
 of these. Bot-owned worktrees under `work/` leave the operator checkout's working tree alone.
