@@ -1,7 +1,7 @@
 <!-- release-generate:summary:start -->
 # OMP Session Gateway
 
-> Native integration with stock Oh My Pi (OMP) >=18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. v0.8.0 is qualified for stable promotion; publication is pending. The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun 1.4.0, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by OMP.
+> Native integration with stock Oh My Pi (OMP) >=18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. Stable v0.8.0 is published as immutable GitHub Latest. The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun 1.4.0, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by OMP.
 <!-- release-generate:summary:end -->
 
 ## Supported platforms
@@ -11,7 +11,7 @@
 ## Current qualification boundary
 
 <!-- release-generate:boundary:start -->
-v0.8.0 is qualified for stable promotion; publication is pending. [Release v0.8.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.8.0). Signed candidate v0.8.0-prealpha.6; source f35b02c1a97456c778a359366f73df4beb436fb9; archive SHA-256 3ed73a967dc552da70d678ec5135430b6dc140992f3dcaf7d473bce7e2e7b47d. Published v0.7.7 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
+Stable v0.8.0 is published as immutable GitHub Latest. [Release v0.8.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.8.0). Signed candidate v0.8.0-prealpha.6; source f35b02c1a97456c778a359366f73df4beb436fb9; archive SHA-256 3ed73a967dc552da70d678ec5135430b6dc140992f3dcaf7d473bce7e2e7b47d. Published v0.7.7 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
 
 - artifacts (1 attempt): Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; v0.7.7 verified the same way.
 - debian (1 attempt): Run 39937344468 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/39937344468); OS/kernel versions and migration counts are not exported.
