@@ -79,6 +79,8 @@ export interface DriverState {
   publicationRun?: string | undefined;
   recordPr?: number | undefined;
   failedMain?: string | undefined;
+  /** Retired selections remain auditable; tags, jobs and qualification receipts never move. */
+  retired?: { candidate: string; reason: string; at: string; issue: number; preparePr?: number; failedMain?: string }[];
   /** Attempt zero preserves the original job paths. Each authorized retry gets a new ordinal. */
   campaignAttempt?: number | undefined;
   resumeDeviceCloud?: boolean | undefined;
@@ -151,7 +153,7 @@ export interface RepositorySnapshot {
   authorityFailure?: RoutineHoldReason;
   evidence?: RoutineEvidence;
   smoke?: JobObservation;
-  /** A failed host lease must first be recovered manually; a new request cannot steal it. */
+  /** True unless the failed lease is absent or its completed cleanup permits owner-only recovery. */
   hostRecoveryRequired?: boolean;
 }
 export interface DriverConfig { bot: string; founder: string }
@@ -221,7 +223,9 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
   if (state?.intent !== undefined) return state.intent;
   if (state?.phase === "infrastructure-held") return idle("device-cloud infrastructure held; explicit retry-device-cloud authorization required; no automatic retry");
   if (repo.authorityFailure !== undefined) return routineHold(repo.authorityFailure);
-  if (state?.holdReason !== undefined) return idle("held: " + state.holdReason + (state.holdCommit === undefined ? "" : " at source commit " + state.holdCommit) + "; inspect exact subject before operator recovery");
+  const stalePrepare = state?.phase === "held" && state.holdReason === "stale-source"
+    && state.candidateCommit === undefined && repo.prepare !== undefined && !repo.prepare.merged;
+  if (state?.holdReason !== undefined && !stalePrepare) return idle("held: " + state.holdReason + (state.holdCommit === undefined ? "" : " at source commit " + state.holdCommit) + "; inspect exact subject before operator recovery");
   if (state === undefined || state.phase === "closed") {
     const issue = selectRequest(repo.issues);
     if (issue === undefined) return idle("no open tracking issue; idle");
@@ -232,20 +236,26 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
   }
   const failure = (detail: string) => decision("stop", "diagnostic-required", detail + (["qualifying", "smoking"].includes(state.phase) ? "; inspect and recover the exact owning release-host lease before further device work" : ""), { patch: { failedMain: repo.main } });
   if (state.phase === "stopped") return idle("stopped; founder/operator intervention required");
-  if (state.phase === "diagnostic-required") {
+  if (state.phase === "diagnostic-required" || stalePrepare) {
     if (state.stableCommit !== undefined) return idle("diagnostic-required after approval/publication; preserve the immutable release and reconcile manually");
     // An order PR's "Closes #N" closes the tracking issue when it merges, so a retry request for the
     // same version opens a new one (v0.7.5: #369 closed #368; the retry opened #374).
     const matching = repo.issues.filter(issue => requestVersion(issue) === requestVersion(state.issue)
       && parseReleaseClass(issue.releaseClass) === parseReleaseClass(state.issue.releaseClass));
     const request = matching.find(issue => issue.number === state.issue.number) ?? selectRequest(matching);
-    if (request === undefined || request.request === state.issue.request || repo.main === state.failedMain) return idle("diagnostic-required; no retry without a new request and a main fix");
+    const failedMain = state.failedMain ?? (stalePrepare ? state.selectedMain : undefined);
+    if (request === undefined || !/^[1-9][0-9]*:[1-9][0-9]*$/u.test(request.request)
+      || (request.number !== state.issue.number && request.request === state.issue.request)
+      || failedMain === undefined || repo.main === failedMain) return idle("diagnostic-required; no retry without an open successful request and a main fix");
     if (repo.hostRecoveryRequired) return idle("diagnostic-required; recover the failed release-host lease before a new candidate");
-    return decision("rerequest", "selected", "new request after a main fix; preserve failed receipt and use next prealpha", { patch: {
-      issue: request, selectedMain: repo.main, candidate: nextCandidate(state.version, repo.tags),
+    return decision("rerequest", "selected", "re-select open request after a main fix; preserve failed receipt and use next prealpha", {
+      ...(repo.prepare === undefined || repo.prepare.merged ? {} : { pr: repo.prepare }), patch: {
+      issue: request, selectedMain: repo.main, candidate: nextCandidate(state.version, [...repo.tags, state.candidate, ...(state.retired ?? []).map(item => item.candidate)]),
+      retired: [...state.retired ?? [], { candidate: state.candidate, reason: stalePrepare ? "stale-source" : "diagnostic-required",
+        at: new Date().toISOString(), issue: state.issue.number, ...(state.preparePr === undefined ? {} : { preparePr: state.preparePr }), failedMain }],
       preparePr: undefined, orderPr: undefined, updatedHead: undefined, candidateCommit: undefined, candidateDigest: undefined, approvePr: undefined,
       approvedHead: undefined, approvedTree: undefined, stableCommit: undefined, stableDigest: undefined,
-      publicationRun: undefined, recordPr: undefined, failedMain: undefined,
+      publicationRun: undefined, recordPr: undefined, failedMain: undefined, holdReason: undefined, holdCommit: undefined,
       campaignAttempt: 0, infrastructureHold: undefined, resumeDeviceCloud: undefined, macHost: undefined,
     } });
   }
@@ -366,7 +376,7 @@ export async function tick(port: DriverPort, config: DriverConfig, plan = false)
   await port.save(state);
   let result: Partial<DriverState>;
   try {
-    result = await port.perform(step, { ...state, ...step.patch });
+    result = await port.perform(step, step.operation === "rerequest" ? state : { ...state, ...step.patch });
   } catch (error) {
     if (error instanceof RoutineHoldError) {
       step = routineHold(error.reason, error.sourceCommit);

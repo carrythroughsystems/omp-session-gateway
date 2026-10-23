@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withReleaseHostLease } from "./release-host-lease.ts";
+import { clearReleaseHostLease, withReleaseHostLease } from "./release-host-lease.ts";
 
 function campaign(directory: string, owner: string) {
   const source = `
@@ -25,6 +25,33 @@ function campaign(directory: string, owner: string) {
 }
 
 describe.skipIf(process.platform === "win32")("cross-process release-host ownership", () => {
+  test("self-clear requires verified cleanup and the exact inactive owner", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gateway-host-self-clear-"));
+    try {
+      await expect(withReleaseHostLease("candidate-a", async () => { throw new Error("failed"); }, root)).rejects.toThrow("failed");
+      await expect(clearReleaseHostLease("candidate-a", async () => { throw new Error("cleanup incomplete"); }, root)).rejects.toThrow("cleanup incomplete");
+      await expect(clearReleaseHostLease("candidate-b", async () => {}, root)).rejects.toThrow("owner");
+      let receipts = 0;
+      expect(await clearReleaseHostLease("candidate-a", async () => { receipts++; }, root)).toBe("cleared");
+      expect(receipts).toBe(1);
+      expect(await clearReleaseHostLease("candidate-a", async () => { throw new Error("already cleared"); }, root)).toBe("absent");
+      await withReleaseHostLease("candidate-b", async () => {}, root);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("self-clear cannot steal a live OS lock even from the same owner", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gateway-host-self-clear-live-"));
+    const holder = campaign(root, "candidate-a");
+    try {
+      expect(await holder.firstOutput).toBe("held");
+      await expect(clearReleaseHostLease("candidate-a", async () => { throw new Error("must not reach cleanup"); }, root)).rejects.toThrow("busy");
+    } finally {
+      holder.child.stdin.end();
+      await holder.child.exited;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     ["qualification:v1:receipt-a", "qualification:v1:receipt-a"],
     ["qualification:v1:receipt-a", "qualification:v2:receipt-b"],

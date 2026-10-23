@@ -146,7 +146,11 @@ force; GitHub supplies the signed squash merge. Auto-merge stays disabled.
 
 The promotion PR remains the reviewable exact-subject artifact. Standing authority permits only
 the requested next patch or explicit next minor version, eligible upstream baseline orders, and fixes/performance fixes/reverts
-already reviewed and merged by the configured maintainer. The installed checkout is the separately
+already reviewed by the configured maintainer. A maintainer merge remains sufficient. A bot-merged
+`fix`/`perf`/`revert` must change no authority path (including rename-from paths) and carry the
+configured maintainer's latest non-comment review as `APPROVED` at the exact PR head.
+Dismissed, superseded and stale-head reviews never count. The lead uses that maintainer identity;
+there is no separate lead identity or bot self-approval. The installed checkout is the separately
 reviewed setup baseline. Later source commits require an associated merged main PR in those
 classes or a bot-owned generated release record; unclassified/direct source commits refuse.
 Founder fixes must be squash-merged with an immutable `fix`, `perf` or `revert` merge-commit
@@ -163,10 +167,15 @@ this predicate; it no longer asks the founder. Only the configured release bot m
 Stable signing independently rereads merger, merge source/tree, evidence, current main and policy.
 Main movement after prepare is a stale-source hold, never silent incorporation of newer work.
 
-A routine release cannot change its own controls: all .github/ paths (signers, credential permissions,
-checks and CODEOWNERS), all schemas/, all scripts/ except generated release-text.json and the
-order-scoped windows-qualification-pins.json, AGENTS.md/CLAUDE.md, tsconfig/bunfig/other lock controls,
-and docs/RELEASE.md, docs/TEST_PLAN.md, docs/SECURITY.md are protected. Package manifests
+A routine release cannot change its own authority. `ROUTINE_AUTHORITY_PATHS` in
+`scripts/release-policy.ts` is the explicit, reasoned authority list: request/selection and merge
+policy, driver installation/signing-key inputs, host/Pixel leases, signed-release and Pages
+publication workflows, release builders/generators/state/provenance/runtime comparison,
+campaign admission/receipt settlement and evidence schemas, CODEOWNERS, release lock and all schemas.
+`AGENTS.md`/`CLAUDE.md` and tsconfig/bunfig/mise/other lock controls remain protected.
+`STABLE_RELEASE.lock.json` is admitted only as generated approval output, checked by the release
+policy gate; a fix touching it requires a separately installed baseline, not routine source admission.
+Package manifests
 at every depth are fingerprinted with only their top-level version omitted; root bun.lock omits only
 generated workspace versions. The manifest sweep found the root and four workspace package.json
 files, bunfig.toml, mise.toml and mise.lock; no npm/Yarn configuration, Deno, Python or Cargo
@@ -175,7 +184,12 @@ controls, even in a newly added nested package. bunfig.toml and lifecycle-capabl
 any depth are protected; mise.lock is covered by the lockfile rule. build-release.ts omits only its
 generated product-version literal. Both tracked modifications and untracked non-ignored files
 (including Bun-autoloaded .env/config inputs) make the installed checkout dirty and hold admission.
-Ordinary source/test fixes do not change quality requirements.
+Tests, synthetic fixtures, individual provisioning/qualification/device-cloud lanes, docs (including
+this runbook), and explicitly listed CI workflows without signing/publication are routine after
+the same source review. Their fixes need no founder merge or driver reinstall. The implementation
+table records each script's purpose; test and fixture rules are explicit. A classification test
+fails when any new script has no classification, and runtime treats unknown script/workflow paths
+as protected until classified. Narrowing paths does not remove any required check.
 Added/deleted control paths and rename-from paths cannot evade the comparison. The live main
 branch-protection attestation, configured bot/source-reviewer identities and required-check list also
 enter the fingerprint. The setup reviewer observed classic main protection: strict seven required
@@ -391,14 +405,28 @@ Campaign, approve checks and smoke run detached in named tmux sessions with a st
 result and exit file under `jobs/`. Campaign receipts remain at
 `~/.local/share/omp-session-gateway/qualification/<candidate>/stable-qualification.json`.
 Qualification and smoke use their existing shared release-host lease (including its durable failed
-owner); the driver never deletes, replaces or steals it. An ordinary failed/missing device/cloud job enters
-diagnostic-required, reports non-passed lanes, and is not retried. A missing local approve-check
+owner); the driver never deletes or replaces the database or steals a foreign/live owner.
+An ordinary failed/missing device/cloud job enters diagnostic-required and reports non-passed lanes.
+A missing local approve-check
 worker can resume only at the same head/tree and policy; no device, cloud or publication action
 is replayed. Passed/failed results are never overwritten to invent a retry. The saved intent and
-outbox reconcile accepted bot merges and announcements after a crash; immutable tags never move. An explicit new green request
-after a fix on main selects the next prealpha only after the previous lease is recovered. Follow
-[Release gates](#release-gates) for cleanup/recovery of that exact old campaign first; a new request
-is not permission to abandon cloud/device resources. Ordinary failed receipts stay unchanged. Public
+outbox reconcile accepted bot merges and announcements after a crash; immutable tags never move.
+After a fix moves main beyond `failedMain`, the same still-open tracking issue with the same OMP
+version/class and recorded successful request run is automatically re-selected. The driver revalidates
+that run even if it has fallen out of the newest 100 runs. No new workflow dispatch, request closure,
+or manual selection retirement is required. An explicit new successful same-version/class request
+still works, including a replacement issue when the old issue closed. A closed issue alone cannot retry.
+An unmerged prepare held on `stale-source` also re-selects after main differs from its failed
+selection's source; merged prepares and other authority holds do not take that shortcut.
+
+Re-selection appends `{candidate, reason, at, issue, preparePr, failedMain}` to `state.retired`,
+closes only the old bot-owned unmerged prepare PR with a reconciled bot comment, and prepares the
+next unused prealpha (retired untagged candidates also reserve their ordinal). It never closes
+the tracking request, rewrites old jobs/receipts, or silently incorporates a fix into an existing
+candidate. Source review, policy fingerprint and immutable-stable guards are rechecked before effects.
+The previous host lease must be absent or eligible for owner-verified cleanup retirement below.
+Follow [Release gates](#release-gates) for incomplete cleanup; a request is not permission to
+abandon cloud/device resources. Ordinary failed receipts stay unchanged. Public
 verification failures also leave the write intent for diagnosis; immutable tags are never moved.
 
 A 1Password identity-probe deadline is a host-fault diagnostic, not a wrong-account verdict.
@@ -408,8 +436,8 @@ confirm `op --account my.1password.com --version` under the release account, the
 exact candidate's credential-bearing preflight. A passing manual preflight has no durable
 candidate-bound retry receipt and does not clear `diagnostic-required`. The retry gate compares
 main's SHA for inequality with `failedMain`, not changed paths or ancestry; separate source and
-policy authority still apply. Retain the failed job and receipts, land the reviewed fix, and
-request the same exact OMP version again. If release controls change, the job-free setup review
+policy authority still apply. Retain the failed job and receipts and land the reviewed fix;
+the existing open successful request suffices. If release controls change, the job-free setup review
 must also explicitly retire the failed selection's old policy binding: archive its state only
 after confirming no pending intent/outbox, stable publication, active job or owned host lease,
 then select the new request under the reviewed installed policy. Updating the checkout alone
@@ -671,6 +699,21 @@ caught failure also retains ownership, including admission failures; correct the
 that command. This does not clean up orphaned child processes or remote resources by itself:
 inspect the existing receipt and recover its recorded resources before resuming after a crash,
 following the lane-specific recovery procedures.
+
+The driver's landed-fix re-selection has one bounded exception: it may clear its own failed
+campaign row after the immutable campaign job is failed and exited, every candidate worker is
+absent, and the exact candidate/source/digest/predecessor/host-bound receipt is failed and settled.
+All four cleanup lanes (`cleanup`, `windowsCleanup`, `androidPushCleanup`, `deviceCloudCleanup`)
+must have passed; external cleanup epochs must match their lane's last attempt and the lane
+implementations must report no remaining effects. Debian must also have passed, since a failed
+workflow is not proof that its cloud teardown succeeded. Pending/unstarted cleanup is not a pass.
+Inside an EXCLUSIVE SQLite transaction the driver rechecks the exact owner, revalidates cleanup,
+and fsyncs `jobs/<failed-job>/lease-recovery.json` with the old receipt digest before deleting
+only that owner row. The receipt records `clear-authorized` before the transaction commits and
+`cleared` after it; a crash between them leaves the durable authorization evidence. A live OS lock
+refuses even the same owner. No device or provider cleanup is guessed or performed by this clear.
+The old receipt and database inode remain intact. Missing, failed or stale cleanup, a foreign
+owner, or an active worker retains the maintainer recovery stop below.
 
 Never delete, rename, or replace the lease database to unlock a campaign: that can create two
 live lock inodes. If the original command cannot recover, a maintainer must stop every launcher

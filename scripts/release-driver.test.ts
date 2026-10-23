@@ -64,7 +64,7 @@ test("routine controls normalize generated versions but retain policy and depend
   expect(await runtime.controls("old", true)).toEqual(await runtime.controls("new", true));
 });
 
-import { botEnvironment, campaignAvailabilityObservation, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
+import { assertFailedCampaignCleanup, botEnvironment, campaignAvailabilityObservation, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
 import { campaignAttempt, compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, parseCampaignInfrastructureHold, REPOSITORY, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
 import type { CampaignInfrastructureHold, Decision, DriverPort, DriverState, JobObservation, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
 import { createStableQualificationReceipt } from "./stable-qualification.ts";
@@ -120,6 +120,25 @@ test("request identities bind OMP version and class to successful filing jobs", 
     [439, "patch", "legacy"], [441, "minor", "42:1"],
   ]);
   expect(selectRequest(await runtime.issues())?.number).toBe(441);
+});
+test("an open request retains its validated successful run outside the latest workflow page", async () => {
+  const previous = { ...issue, releaseClass: "minor" as const };
+  class RetainedRequest extends StudioDriver {
+    valid = true;
+    override async pages<T>(): Promise<T[]> {
+      return [{ number: issue.number, title: issue.title, user: { login: issue.author }, created_at: "legacy",
+        html_url: issue.url, labels: [{ name: "release-minor" }] }] as T[];
+    }
+    override async api<T>(path: string): Promise<T | undefined> {
+      return (path.startsWith("actions/workflows/") ? { workflow_runs: [] }
+        : path.endsWith("/jobs?per_page=100") ? { jobs: [{ name: "Request OMP v18.8.3 (minor)", conclusion: "success" }] }
+        : { path: ".github/workflows/release-request.yml", status: "completed", conclusion: this.valid ? "success" : "failure" }) as T;
+    }
+  }
+  const runtime = new RetainedRequest(driverConfig(), true);
+  expect((await runtime.issues(previous))[0]?.request).toBe("42:1");
+  runtime.valid = false;
+  expect(await runtime.issues(previous)).toEqual([]);
 });
 test("a completed patch does not close an outstanding minor request", async () => {
   const minor = { ...issue, number: 441, releaseClass: "minor" as const };
@@ -237,13 +256,14 @@ describe("review remediations", () => {
     subject = "feat(gateway): immutable feature";
     sourcePr = pr({ merged: true, mergedBy: config.founder, mergeCommit: "a".repeat(40) });
     dirty = false;
+    reviews: { id: number; user: { login: string }; state: string; commit_id: string }[] = [];
     override async controls() { return new Map<string, string>(); }
     override async git(args: string[]) {
       if (args[0] === "rev-parse") return "installed";
       if (args[0] === "status") return this.dirty && !args.includes("--untracked-files=no") ? "?? .env" : "";
       throw new Error("unexpected git read");
     }
-    override async pages<T>(): Promise<T[]> { return [{ number: 401 }] as T[]; }
+    override async pages<T>(path: string): Promise<T[]> { return (path.includes("/reviews") ? this.reviews : [{ number: 401 }]) as T[]; }
     override async readPr() { return this.sourcePr; }
     override async api<T>(path: string): Promise<T | undefined> {
       if (path === "branches/main") return { protected: true, protection: { enabled: true, required_status_checks: { contexts: [...REQUIRED_CHECKS], enforcement_level: "everyone" } } } as T;
@@ -258,6 +278,29 @@ describe("review remediations", () => {
     expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
     runtime.title = "feat(gateway): title edited after merge"; runtime.subject = "fix(gateway): immutable reviewed fix";
     expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(true);
+  });
+  test("bot-merged fixes need the latest maintainer approval at the exact head and no authority paths", async () => {
+    const runtime = new SourceRuntime(driverConfig(), true);
+    runtime.subject = "fix(qualification): repair apt step";
+    runtime.sourcePr = pr({ merged: true, mergedBy: config.bot, files: [{ filename: "scripts/provision-linux-qual.sh" }] });
+    expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
+    const approval = { id: 1, user: { login: config.founder }, state: "APPROVED", commit_id: runtime.sourcePr.head };
+    runtime.reviews = [approval];
+    expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(true);
+    for (const review of [
+      { ...approval, commit_id: "old-head" }, { ...approval, user: { login: config.bot } },
+      { ...approval, state: "DISMISSED" }, { ...approval, state: "CHANGES_REQUESTED" },
+    ]) {
+      runtime.reviews = [review];
+      expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
+    }
+    runtime.reviews = [approval, { ...approval, id: 2, state: "DISMISSED" }];
+    expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
+    runtime.reviews = [approval];
+    for (const filename of ["scripts/release-policy.ts", "STABLE_RELEASE.lock.json"]) {
+      runtime.sourcePr.files = [{ filename: "docs/RELEASE.md", previous_filename: filename }];
+      expect((await runtime.authority(state(), state().selectedMain)).sourceReviewed).toBe(false);
+    }
   });
   test("runtime and policy admit the exact requested minor class, not an arbitrary minor jump", async () => {
     const runtime = new SourceRuntime(driverConfig(), true);
@@ -405,15 +448,32 @@ test.each(["qualifying", "approve-checking", "smoking"] as const)("%s failure st
   expect((await tick(fake, config)).operation).toBe("idle");
 });
 
-test("diagnostic rerequest requires a new green dispatch, main fix, and recovered host lease", () => {
+test("diagnostic re-selection keeps the successful open request after a main fix", () => {
   const failed = { ...state("diagnostic-required"), failedMain: "a".repeat(40), candidateCommit: "b".repeat(40) };
   const repo = snapshot({ main: "d".repeat(40), tags: ["v0.7.5-prealpha.1"], issues: [{ ...issue, request: "43:1" }] });
   expect(nextStep(failed, { ...repo, hostRecoveryRequired: true }, config).operation).toBe("idle");
   expect(nextStep(failed, { ...repo, main: failed.failedMain }, config).operation).toBe("idle");
-  expect(nextStep(failed, { ...repo, issues: [issue] }, config).operation).toBe("idle");
+  expect(nextStep(failed, { ...repo, issues: [issue] }, config).operation).toBe("rerequest");
+  expect(nextStep(failed, { ...repo, issues: [] }, config).operation).toBe("idle");
+  expect(nextStep(failed, { ...repo, issues: [{ ...issue, request: "legacy-created-at" }] }, config).operation).toBe("idle");
   const step = nextStep(failed, repo, config);
   expect(step.operation).toBe("rerequest");
   if (step.operation !== "idle") { expect(step.patch?.candidate).toBe("v0.7.5-prealpha.2"); expect(step.patch?.candidateCommit).toBeUndefined(); }
+});
+
+test("stale unmerged prepare retires its selection without reusing its branch or clearing other holds", () => {
+  const failed = { ...state("held"), holdReason: "stale-source" as const, preparePr: 401 };
+  const repo = snapshot({ main: "d".repeat(40), prepare: pr({ headRef: "release-driver/400/v0.7.5-prealpha.1-prepare" }) });
+  const step = nextStep(failed, repo, config);
+  expect(step.operation).toBe("rerequest");
+  if (step.operation !== "idle") {
+    expect(step.patch?.candidate).toBe("v0.7.5-prealpha.2");
+    expect(step.patch?.retired?.[0]).toMatchObject({ candidate: failed.candidate, reason: "stale-source", issue: 400, preparePr: 401 });
+    expect(step.patch?.holdReason).toBeUndefined();
+  }
+  expect(nextStep(failed, { ...repo, main: failed.selectedMain }, config).operation).toBe("idle");
+  expect(nextStep(failed, { ...repo, prepare: pr({ merged: true }) }, config).operation).toBe("idle");
+  expect(nextStep({ ...failed, holdReason: "authority-path-changed" }, repo, config).operation).toBe("idle");
 });
 
 test("diagnostic rerequests cannot change the pinned release class", () => {
@@ -540,6 +600,60 @@ function receiptScopedCampaign(selected: DriverState) {
   } };
   return { receipt, hold: campaignAvailabilityObservation(selected, { outcome: "infrastructure-hold", availabilityHolds }, receipt, retryReceiptModules) };
 }
+
+test("lease self-clear accepts only settled candidate-bound cleanup with matching external epochs", () => {
+  const selected = heldCampaign().selected;
+  const { receipt } = receiptScopedCampaign(selected);
+  receipt.completedAt = "2026-10-23T02:00:00.000Z";
+  expect(() => assertFailedCampaignCleanup(selected, receipt, retryReceiptModules)).not.toThrow();
+  for (const name of ["cleanup", "windowsCleanup", "androidPushCleanup", "deviceCloudCleanup", "debian"] as const) {
+    for (const status of ["failed", "pending", "running"] as const) {
+      const changed = structuredClone(receipt); changed.lanes[name].status = status;
+      expect(() => assertFailedCampaignCleanup(selected, changed, retryReceiptModules)).toThrow();
+    }
+  }
+  for (const name of ["windows", "androidPush", "deviceCloud"] as const) {
+    const stale = structuredClone(receipt); stale.lanes[`${name}Cleanup`].evidence!.epoch = "stale";
+    expect(() => assertFailedCampaignCleanup(selected, stale, retryReceiptModules)).toThrow("stale or incomplete");
+    const dirty = structuredClone(receipt); dirty.lanes[name].evidence!.progress = { epoch: receipt.lanes[`${name}Cleanup`].evidence!.epoch, cleanupRequired: true };
+    expect(() => assertFailedCampaignCleanup(selected, dirty, retryReceiptModules)).toThrow("stale or incomplete");
+  }
+  for (const changed of [{ ...receipt, completedAt: undefined }, { ...receipt, macHost: "other@fixture.invalid" },
+    { ...receipt, orchestratorCommit: "b".repeat(40) }]) {
+    expect(() => assertFailedCampaignCleanup(selected, changed, retryReceiptModules)).toThrow();
+  }
+});
+
+test("re-selection closes only its bot-owned orphan prepare and preserves request/job history across replay", async () => {
+  const failed = { ...state("held"), holdReason: "stale-source" as const, preparePr: 401 };
+  const repo = snapshot({ main: "d".repeat(40), prepare: pr({ headRef: "release-driver/400/v0.7.5-prealpha.1-prepare" }) });
+  class Retirement extends StudioDriver {
+    comments = new Set<string>();
+    writes: string[][] = [];
+    override async snapshot() { return repo; }
+    override async authority() { return authority; }
+    override async api<T>(): Promise<T | undefined> { return undefined; }
+    override async recoverFailedCampaign() {}
+    override async announce(_issue: number, _body: string, marker: string) { this.comments.add(marker); }
+    override async gh<T>(args: string[]): Promise<T | undefined> { this.writes.push(args); repo.prepare!.state = "closed"; return undefined; }
+  }
+  const runtime = new Retirement(driverConfig(), false), step = nextStep(failed, repo, config);
+  if (step.operation === "idle") throw new Error("no retry planned");
+  await runtime.perform(step, failed);
+  await runtime.perform(step, failed);
+  expect(runtime.comments.size).toBe(1);
+  expect(runtime.writes).toHaveLength(1);
+  expect(runtime.writes[0]).toContain(`repos/${REPOSITORY}/pulls/401`);
+  const changed = { ...repo.prepare! }; repo.prepare!.author = "foreign";
+  await expect(runtime.perform(step, failed)).rejects.toThrow("identity changed");
+  repo.prepare = changed;
+  const fake = new FakeDriver(); fake.state = failed; fake.repo = repo;
+  expect((await tick(fake, config)).operation).toBe("rerequest");
+  expect(fake.state.retired).toHaveLength(1);
+  expect(fake.state.issue.number).toBe(issue.number);
+  expect(fake.state.candidate).toBe("v0.7.5-prealpha.2");
+  expect((await tick(fake, config)).operation).toBe("open-prepare");
+});
 
 class RetryDriver extends StudioDriver {
   current = heldCampaign().selected;
