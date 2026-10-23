@@ -1304,14 +1304,16 @@ describe("round-two class closure", () => {
     for (const phase of Object.keys(phases) as DriverState["phase"][]) for (const repo of repos) calls.push([{ ...subject, phase }, repo]);
     const held = heldCampaign();
     calls.push([{ ...held.selected, phase: "qualifying" }, { ...base, campaign: { status: "infrastructure-hold", availabilityHold: held.hold } }]);
-    calls.push([{ ...state("held"), holdReason: "stale-source" }, { ...base, main: "d".repeat(40), prepare: undefined }]);
+    const unprepared = { ...base, main: "d".repeat(40) };
+    delete unprepared.prepare;
+    calls.push([{ ...state("held"), holdReason: "stale-source" }, unprepared]);
     const patchOperations = new Set<string>();
     for (const [selected, repo] of calls) {
       const step = nextStep(selected, repo, config);
       if (step.operation === "idle" || step.patch === undefined) continue;
       patchOperations.add(step.operation);
       const persisted = JSON.parse(JSON.stringify(step)) as Decision;
-      expect(step.patch, step.operation).toStrictEqual(persisted.patch);
+      expect(step.patch, step.operation).toStrictEqual(persisted.patch!);
       expect(step.clear, step.operation).toStrictEqual(persisted.clear);
       const previous = { ...subject, ...Object.fromEntries((step.clear ?? []).map(key => [key, "previous"])) } as DriverState;
       const applied = applyDecisionPatch(previous, step);
@@ -1342,14 +1344,14 @@ describe("round-two class closure", () => {
   test("DB-R1 retained attempts require one successful exact-issue record; historical metadata is insufficient", async () => {
     const previous = { ...issue, releaseClass: "minor" as const };
     class RetainedEvidence extends StudioDriver {
-      job = filingJob("Request OMP v18.8.3 (minor)", issue.number);
+      filing = filingJob("Request OMP v18.8.3 (minor)", issue.number);
       override async pages<T>(): Promise<T[]> {
         return [{ number: issue.number, title: issue.title, user: { login: issue.author }, created_at: "2026-10-01T00:00:00Z",
           html_url: issue.url, labels: [{ name: "release-minor" }] }] as T[];
       }
       override async api<T>(path: string): Promise<T | undefined> {
         return (path.startsWith("actions/workflows/") ? { workflow_runs: [] }
-          : path.endsWith("/jobs?per_page=100") ? { jobs: [this.job] }
+          : path.endsWith("/jobs?per_page=100") ? { jobs: [this.filing] }
           : { path: ".github/workflows/release-request.yml", status: "completed", conclusion: "success" }) as T;
       }
     }
@@ -1361,7 +1363,7 @@ describe("round-two class closure", () => {
       [{ ...valid.steps[0]!, conclusion: "skipped" }], [{ ...valid.steps[0]!, status: "in_progress" }],
       [{ ...valid.steps[0]!, name: "Record tracking issue #0400" }], [...valid.steps, ...valid.steps],
     ]) {
-      runtime.job = { ...valid, steps };
+      runtime.filing = { ...valid, steps };
       expect(await runtime.issues(previous)).toEqual([]);
     }
   });
