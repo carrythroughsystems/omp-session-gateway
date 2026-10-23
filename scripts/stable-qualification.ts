@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PRODUCT_VERSION as VERSION } from "./build-release.ts";
-import { runAdb, parseAndroidPackageVersion, readAndroidQualificationPin, requireAndroidDevicePreconditions, requireSingleDevice, resolveAndroidBrowserTarget } from "./android-device.ts";
+import { runAdb, parseAndroidPackageVersion, readAndroidQualificationPin, requireAndroidDevicePreconditions, requireAndroidGatewayReachability, requireSingleDevice, resolveAndroidBrowserTarget } from "./android-device.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
 import { releaseVersion } from "./release-policy.ts";
 import { historicalPredecessor, verifyReleaseSignatures } from "./post-release-smoke.ts";
@@ -1420,6 +1420,7 @@ else:
     throw new Error(`Stable preflight: Mac requires stock OMP >=18.1.20 on PATH for doctor compatibility; install it with: bun add --global --exact @oh-my-pi/pi-coding-agent@${ompPins.version}`);
   }
   const macOrigin = `https://${macProbe.dnsName}`;
+  await requireAndroidGatewayReachability(macOrigin, (...args) => runtime.adb(serial, args));
   const laneContext: ExternalLanePreflightContext = { environment: runtime.environment, serial, omp: ompPins, macOrigin };
   for (const [name, lane] of [
     ["Windows", lanes.windows],
@@ -1784,10 +1785,14 @@ async function startTunnel(target: MacTarget, port: number): Promise<ManagedProc
   throw new Error("SSH loopback tunnel did not become ready");
 }
 
-async function runAndroidAcceptance(
+export async function runAndroidAcceptance(
   options: StableQualificationOptions,
   context: MacContext,
+  runtime: Pick<StablePreflightRuntime, "adb"> = defaultPreflightRuntime,
 ): Promise<Record<string, unknown>> {
+  // A read-only refusal is not an unrestored child: no potentially mutating process ran.
+  const admittedSerial = await requireSingleDevice((...args) => runtime.adb(undefined, args));
+  await requireAndroidGatewayReachability(context.publicOrigin, (...args) => runtime.adb(admittedSerial, args));
   const browser = resolveAndroidBrowserTarget();
   const androidEnvironment = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
