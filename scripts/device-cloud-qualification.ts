@@ -415,7 +415,8 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
     }
     if (!safeObservations(result)) throw new Error("unsafe device-cloud evidence");
     if (key !== "audit" && Array.isArray(value.resources)) {
-      const resource = value.resources.findLast(resource => resource.target === key);
+      const attempt = isRecord(value.journeys) ? (value.journeys[key] as DeviceCloudJourneyAttempt[] | undefined)?.length : undefined;
+      const resource = value.resources.find(resource => resource.target === key && resource.attempt === attempt);
       if (resource === undefined || result.vendor !== (resource.vendor === "testingbot" ? "TestingBot" : "BrowserStack")) throw new Error("device-cloud evidence vendor does not match its owned session");
     }
   }
@@ -650,7 +651,8 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
     await runtime.tunnel("start", progress.epoch, "testingbot");
     await advance("tunnel_ready");
     for (const target of DEVICE_CLOUD_TARGETS) {
-      const attempts = progress.journeys![target] = [];
+      const attempts: DeviceCloudJourneyAttempt[] = [];
+      progress.journeys![target] = attempts;
       let firstFailure: DeviceCloudJourneyFailure | undefined;
       for (const ordinal of [1, 2] as const) {
         const recorded: DeviceCloudJourneyAttempt = { attempt: ordinal, outcome: "running" };

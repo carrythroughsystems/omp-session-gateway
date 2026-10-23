@@ -432,7 +432,7 @@ describe("device-cloud lane", () => {
 });
 
 describe("bounded device journey retry", () => {
-  test.each(DEVICE_CLOUD_TARGETS)("retries only a failed %s journey once on the same fixture and epoch", async target => {
+  test.each([...DEVICE_CLOUD_TARGETS])("retries only a failed %s journey once on the same fixture and epoch", async target => {
     const lane = harness({ journeyFailures: { [target]: 1 } });
     const result = await runDeviceCloud(input(lane));
     expect(result.passed).toBe(true);
