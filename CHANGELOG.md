@@ -6,6 +6,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Recount prepared changelog entry-count drift against `release-text.json` before qualification,
+  preserving every bullet, the exact requested candidate and immutable release records (#436).
+
 ## [v0.8.0] — 2026-10-23
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 39 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.
