@@ -6,6 +6,13 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Document same-uid/private-ACL discovery for isolated OMP HOMEs and the unchanged
+  18.12.5→18.12.6 collaboration contract; extend the local lifecycle proof with native-executable
+  publication, real View/Control attach, restart and OMP-owned revocation checks, without changing
+  the engineering baseline lock.
+
 ## [v0.8.0] — 2026-10-23
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 39 changelog entries below record the changes since v0.7.7. Historical receipts do not qualify these bytes.
