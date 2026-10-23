@@ -216,6 +216,25 @@ export async function waitForStableWindowsTransport(
   throw new Error("authenticated WinRM stability window timed out");
 }
 
+type WindowsUploadStep = "existence/hash" | "remove" | "stream";
+
+/** Add only the Python helper's redacted message and source-free traceback to its legacy diagnostic. */
+export function windowsWinrmDiagnostic(result: {
+  diagnostic: string;
+  exception?: {
+    type: string; message: string; uploadStep: WindowsUploadStep | null;
+    frames: { file: string; line: number; function: string }[];
+  };
+}): string {
+  return result.diagnostic + (result.exception === undefined ? "" : `; ${JSON.stringify(result.exception)}`);
+}
+
+/** Label an upload failure without replaying a possibly accepted remote write. */
+export async function windowsUploadStep<T>(step: WindowsUploadStep, action: (step: WindowsUploadStep) => Promise<T>): Promise<T> {
+  try { return await action(step); }
+  catch (error) { throw new Error(`Windows upload ${step}: ${error instanceof Error ? error.message : "guest operation failed"}`); }
+}
+
 export async function createWindowsRuntime(options: { development?: boolean } = {}): Promise<WindowsRuntime> {
   const environment: Record<string, string | undefined> = { ...process.env };
   const vultrKey = (await privateFile(join(homedir(), ".vultr-apikey"))).trim();
@@ -292,7 +311,7 @@ export async function createWindowsRuntime(options: { development?: boolean } = 
     },
   };
   const guestScript = await readFile(join(import.meta.dir, "windows-qualification-guest.ps1"), "utf8");
-  const winrm = async (context: WindowsContext, script: string, input?: unknown, timeoutMs = 300_000, upload?: { sourcePath: string; destinationPath: string }, mutation = true, principal: WindowsPrincipal = "administrator", transportProbe?: WindowsContext["transportProbe"]): Promise<Record<string, unknown>> => {
+  const winrm = async (context: WindowsContext, script: string, input?: unknown, timeoutMs = 300_000, upload?: { sourcePath: string; destinationPath: string }, mutation = true, principal: WindowsPrincipal = "administrator", transportProbe?: WindowsContext["transportProbe"], uploadStep?: WindowsUploadStep): Promise<Record<string, unknown>> => {
     const access = await loadAccess(context.epoch);
     if (mutation || !access.host) {
       const current = await provider.instance(access.instance);
@@ -306,11 +325,11 @@ export async function createWindowsRuntime(options: { development?: boolean } = 
     }
     const credential = account(access, principal);
     const result = JSON.parse(await command([python, join(import.meta.dir, "windows-winrm.py")], {
-      input: JSON.stringify({ host: access.host, username: credential.account, password: credential.password, script, input, upload, observeTransport: transportProbe !== undefined }),
+      input: JSON.stringify({ host: access.host, username: credential.account, password: credential.password, script, input, upload, uploadStep, observeTransport: transportProbe !== undefined }),
       timeoutMs, allowedExitCodes: [0, 1], ...(transportProbe === undefined ? {} : { transportProbe }),
-    })) as { exitCode: number; stdout: string; diagnostic: string };
-    if (result.exitCode === -1) throw new Error(`WinRM transport not yet ready: ${result.diagnostic}`);
-    if (result.exitCode !== 0) throw new Error(`WinRM guest failed (${result.exitCode}): ${result.diagnostic}`);
+    })) as { exitCode: number; stdout: string } & Parameters<typeof windowsWinrmDiagnostic>[0];
+    if (result.exitCode === -1) throw new Error(`WinRM transport not yet ready: ${windowsWinrmDiagnostic(result)}`);
+    if (result.exitCode !== 0) throw new Error(`WinRM guest failed (${result.exitCode}): ${windowsWinrmDiagnostic(result)}`);
     try { return JSON.parse(result.stdout.trim()) as Record<string, unknown>; }
     catch { throw new Error("WinRM response is not a bounded observation"); }
   };
@@ -330,14 +349,14 @@ export async function createWindowsRuntime(options: { development?: boolean } = 
   const upload = async (context: WindowsContext, local: string, name: string) => {
     const expected = digest(await readFile(local));
     const destinationPath = `C:\\omp-winqual-${context.epoch}\\${name}`;
-    const found = await winrm(context, "param($p)\n$exists = Test-Path -LiteralPath $p.path\n@{ exists=$exists; matches=$exists -and (Get-FileHash -Algorithm SHA256 -LiteralPath $p.path).Hash.ToLowerInvariant() -eq $p.digest } | ConvertTo-Json -Compress", { path: destinationPath, digest: expected });
+    const found = await windowsUploadStep("existence/hash", step => winrm(context, "param($p)\n$exists = Test-Path -LiteralPath $p.path\n@{ exists=$exists; matches=$exists -and (Get-FileHash -Algorithm SHA256 -LiteralPath $p.path).Hash.ToLowerInvariant() -eq $p.digest } | ConvertTo-Json -Compress", { path: destinationPath, digest: expected }, undefined, undefined, true, "administrator", undefined, step));
     if (found.matches === true) return;
     if (found.exists === true) {
       await context.beforeEffect();
-      await winrm(context, "param($p)\nRemove-Item -LiteralPath $p.path -Force\n'{\"removed\":true}'", { path: destinationPath });
+      await windowsUploadStep("remove", step => winrm(context, "param($p)\nRemove-Item -LiteralPath $p.path -Force\n'{\"removed\":true}'", { path: destinationPath }, undefined, undefined, true, "administrator", undefined, step));
     }
     await context.beforeEffect();
-    await winrm(context, "", undefined, 900_000, { sourcePath: local, destinationPath });
+    await windowsUploadStep("stream", step => winrm(context, "", undefined, 900_000, { sourcePath: local, destinationPath }, true, "administrator", undefined, step));
   };
   const poll = async (action: () => Promise<boolean>, ms: number, name: string) => {
     const deadline = Date.now() + ms;

@@ -63,6 +63,75 @@ class WinrmFramingTests(unittest.TestCase):
             self.adapter['main']()
         return json.loads(output.getvalue())
 
+    def run_entrypoint(self, request):
+        module = types.ModuleType('winrm.protocol')
+        module.Protocol = Transport
+        output = io.StringIO()
+        with patch.dict(sys.modules, {'winrm.protocol': module}), \
+                patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))), \
+                contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exited:
+                runpy.run_path(str(Path(__file__).with_name('windows-winrm.py')), run_name='__main__')
+        self.assertEqual(exited.exception.code, 1)
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        return json.loads(output.getvalue())
+
+    def test_lookup_error_keeps_safe_message_frames_and_exact_upload_step(self):
+        password = 'synthetic-password-42'
+        token = 'synthetic-tailnet-token-43'
+        account_secret = 'synthetic-account-secret-44'
+        request = {'host': '192.0.2.10', 'username': 'Administrator', 'password': password,
+                   'script': 'synthetic-private-script', 'input': {'joinValue': token, 'accountSecret': account_secret}}
+        def lookup_failure(*_args):
+            secret_local = 'synthetic-local-must-not-appear'
+            raise LookupError(f'unknown encoding: synthetic-codec; {password}; {token}; {account_secret}')
+        for step in ('existence/hash', 'remove', 'stream'):
+            with self.subTest(step=step), patch.object(Transport, 'open_shell', lookup_failure):
+                result = self.run_entrypoint({**request, 'uploadStep': step})
+            self.assertEqual(result['diagnostic'], 'LookupError')
+            detail = result['exception']
+            self.assertEqual(detail['type'], 'LookupError')
+            self.assertEqual(detail['uploadStep'], step)
+            self.assertIn('unknown encoding: synthetic-codec', detail['message'])
+            self.assertEqual(detail['message'].count('[REDACTED]'), 3)
+            self.assertTrue(any(frame['function'] == 'lookup_failure' for frame in detail['frames']))
+            self.assertTrue(any(frame['file'] == 'windows-winrm.py' for frame in detail['frames']))
+            for frame in detail['frames']:
+                self.assertEqual(set(frame), {'file', 'line', 'function'})
+                self.assertIsInstance(frame['line'], int)
+                self.assertNotIn('/', frame['file'])
+                self.assertNotIn('\\', frame['file'])
+            encoded = json.dumps(result)
+            for secret in (password, token, account_secret, 'synthetic-local-must-not-appear', 'synthetic-private-script'):
+                self.assertNotIn(secret, encoded)
+
+    def test_exception_message_redacts_encoded_secrets_credentials_and_headers_before_bounding(self):
+        from urllib.parse import quote
+        password = 'synthetic!private"\\value'
+        request = {'host': '192.0.2.10', 'username': 'Administrator', 'password': password, 'script': 'synthetic-private-script'}
+        message = ('unknown encoding: synthetic-codec ' + password + ' ' + quote(password, safe='') + ' ' +
+                   json.dumps(password)[1:-1] + '\nAuthorization: NTLM synthetic-derived-header\n' +
+                   'https://synthetic-user:synthetic-url-secret@example.invalid/path?token=synthetic-url-token\n' +
+                   'Cookie: synthetic-cookie-value\n' + 'x' * 10000)
+        with patch.object(Transport, 'open_shell', side_effect=LookupError(message)):
+            result = self.run_entrypoint(request)
+        detail = result['exception']
+        self.assertIsNone(detail['uploadStep'])
+        self.assertLessEqual(len(detail['message']), 2048)
+        self.assertIn('unknown encoding: synthetic-codec', detail['message'])
+        encoded = json.dumps(result)
+        for secret in (password, quote(password, safe=''), json.dumps(password)[1:-1],
+                       'synthetic-derived-header', 'synthetic-url-secret', 'synthetic-url-token', 'synthetic-cookie-value'):
+            self.assertNotIn(secret, encoded)
+
+    def test_exception_context_cannot_inject_unknown_upload_steps_or_traceback_paths(self):
+        request = {'host': '192.0.2.10', 'username': 'Administrator', 'password': 'synthetic-transport-only',
+                   'script': 'synthetic', 'uploadStep': 'https://private:secret@example.invalid/upload'}
+        with patch.object(Transport, 'open_shell', side_effect=LookupError('synthetic failure')):
+            result = self.run_entrypoint(request)
+        self.assertIsNone(result['exception']['uploadStep'])
+        self.assertNotIn('private:secret', json.dumps(result))
+
     def test_first_response_marker_precedes_guest_execution_and_has_no_payload(self):
         original = Transport.run_command
         def after_first_response(instance, *args, **options):
