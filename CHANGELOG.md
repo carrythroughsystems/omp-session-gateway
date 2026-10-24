@@ -6,6 +6,13 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Document same-uid/private-ACL discovery for isolated OMP HOMEs and the unchanged
+  18.12.5→18.12.6 collaboration contract; extend the local lifecycle proof with native-executable
+  publication, real View/Control attach, restart and OMP-owned revocation checks, without changing
+  the engineering baseline lock.
+
 ### Fixed
 
 - Refuse a missing Pixel Tailscale/DNS path to the configured gateway before Android acceptance

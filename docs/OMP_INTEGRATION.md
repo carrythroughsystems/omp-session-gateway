@@ -100,6 +100,135 @@ OMP also provides `omp collab list [--json]` and
 capability: do not capture it in logs, files, fixtures, diagnostics, or issue reports. The gateway
 queries the endpoint directly and never shells out to a link-printing command.
 
+### Isolated-HOME execution hosts
+
+An isolated OMP HOME is supported without a new adapter. Run OMP and its local gateway as the
+**same OS uid on the execution host**. Configure `collab.autoStart` inside that HOME, then set the
+gateway's absolute `omp.discoveryDir` to `<isolated-HOME>/.omp/run/collab-hosts`. The gateway may
+have its own HOME/XDG configuration root; only the explicit discovery path needs to agree.
+`PI_CONFIG_DIR`, if used, must be accounted for on the OMP side too.
+
+For example, with an operator-owned private `/private/tmp/omp-example-home`:
+
+```sh
+HOME=/private/tmp/omp-example-home omp config set collab.autoStart control
+HOME=/private/tmp/omp-example-home omp
+```
+
+Set the gateway's existing configuration field before starting it:
+
+```json
+{ "omp": { "discoveryDir": "/private/tmp/omp-example-home/.omp/run/collab-hosts" } }
+```
+
+Keep the HOME and discovery directory private (`0700`); OMP owns and removes its discovery
+files and query endpoints. The reader refuses symlinks, a different uid, or group/other access
+on the directory, file or POSIX socket (`apps/gateway/src/omp-registry.ts`). Do not broaden ACLs
+to let another service account in, copy discovery files/tokens, or derive socket paths from
+filenames. Run the local gateway under the OMP uid instead. A gateway selects one discovery root;
+independent roots can use independent local gateways and the existing browser-direct federation.
+There is no filesystem transport across machines, Tern scraper, capability-copy service or proxy.
+
+The runnable developer proof uses the installed stock native executable or a stock `dist/cli.js`,
+not a replacement OMP build:
+
+```sh
+bun install --frozen-lockfile
+bun run build
+bun scripts/omp-lifecycle-development.ts \
+  --omp /opt/homebrew/bin/omp \
+  --isolated-home --expect-version 18.12.6
+```
+
+The script creates a fresh private HOME, sets and reads back `collab.autoStart=control`, starts a
+real loopback development gateway with the explicit path, and observes publication and owner/mode
+metadata. An ephemeral headless Chromium context attaches the real embedded client through the
+stock relay as read-only View, then upgrades to writable Control, both before and after an owned
+OMP process restart. No model prompt is sent in this mode. The owned fixture exits through
+OMP's ordinary `/quit` command, awaiting controller shutdown before the PTY bridge closes.
+It requires both card revocation and OMP-owned discovery-file removal on each stop **before**
+any stale-publication pruning. It stops
+only its owned children and removes its private root after OMP has removed all publications.
+Terminal output, discovery contents, launch capabilities, browser logs, screenshots, traces,
+recordings and HAR are never captured. Output is bounded facts and a fixed failure phase.
+Without the opt-in mode/version override, the existing lifecycle command still requires the
+engineering baseline from `UPSTREAM.lock.json`.
+
+#### Observed isolated-HOME proof — 2026-10-23
+
+The exact command above passed on the macOS Apple-silicon developer workstation with the
+installed stock native OMP `18.12.6` and Bun `1.4.0` (71.65 seconds). The real gateway consumed
+only the fresh HOME's explicit discovery root; both initial and restarted OMP processes attached
+through the real embedded client/stock relay in View and Control. This is **Smoke-tested**
+developer evidence, not a signed-release, retained-host, Tailscale Serve or physical-phone
+qualification. No Tern or proxy was involved; the harness submitted no model prompt.
+
+Observed output (all fields retained; decimal `448` is octal `0700`):
+
+```json
+{
+  "passed": true,
+  "ompVersion": "18.12.6",
+  "isolatedHome": true,
+  "discovery": {
+    "sameUid": true,
+    "directoryMode": 448,
+    "privatePublication": true
+  },
+  "initial": {
+    "published": true,
+    "viewAttached": true,
+    "viewReadOnly": true,
+    "controlAttached": true,
+    "controlWritable": true
+  },
+  "restart": {
+    "newInstance": true,
+    "generation": 1,
+    "republished": true,
+    "viewAttached": true,
+    "controlAttached": true
+  },
+  "revocation": { "cardsRemoved": 2, "filesRemoved": 2 },
+  "cleanup": { "stopped": true, "privateRootRemoved": true }
+}
+```
+
+An earlier forced-termination attempt revoked the card but failed the pre-cleanup discovery-file
+removal check; OMP's own later listing pruned the stale file. The passing proof waits for ordinary
+`/quit` shutdown instead. It does not turn forced process death into a claim of immediate file
+removal, and the gateway never deletes or repairs a publication.
+
+### 18.12.5 → 18.12.6 discovery/collaboration contract delta (2026-10-23)
+
+Compared the canonical stock tags, not the retired downstream fork:
+`v18.12.5` = `d5cd750e41fede277f9eb933455da92a0738915e`;
+`v18.12.6` = `45c35e40c46166dc726ccc52f5d27f40f2449f99`. With
+`OMP_SOURCE_CHECKOUT` pointing to the local checkout containing those stock tags, used:
+
+```sh
+git -C "$OMP_SOURCE_CHECKOUT" log v18.12.5..v18.12.6 -- \
+  packages/coding-agent/src/collab \
+  packages/coding-agent/src/cli/collab-cli.ts \
+  packages/coding-agent/src/slash-commands/builtin-collaboration.ts \
+  packages/collab-web packages/wire/src docs/collab.md
+```
+
+The scoped log and scoped diff were empty: controller, private registry, host/query protocol,
+relay/client and collaboration CLI sources are unchanged. `packages/wire/package.json` changes
+only its version from `18.12.5` to `18.12.6`; its protocol source is unchanged. The
+[18.12.6 coding-agent changelog](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/CHANGELOG.md#18126---2026-10-21)
+records ACP steering/cancellation, MCP reauthentication, print builtins, deferred interactive
+extension loading, subagent fallback/usage fixes and browser-tab close confirmation, not a
+discovery/collaboration schema change. Deferred extension startup may change startup timing, so
+the proof waits for real publication rather than assuming a fixed delay.
+
+For this focused seam, a host-baseline bump is **contract-benign**, subject to the observed
+consumer proof and unchanged registry/client sources; it is not a claim that every 18.12.6 runtime
+change is benign or release-qualified. `UPSTREAM.lock.json` remains at `v18.12.5`; a baseline
+bump is a separate control change with its normal review and qualification. The independent
+embedded client pin remains unchanged too.
+
 ## 3. Polling and lifecycle
 
 `startHostPoller` coalesces concurrent rounds and reconciles observed metadata with retained
