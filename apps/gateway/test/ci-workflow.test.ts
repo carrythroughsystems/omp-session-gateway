@@ -87,6 +87,7 @@ interface VisualWorkflowStep {
   env?: Record<string, string>;
   with?: Record<string, unknown>;
   "timeout-minutes"?: number;
+  "continue-on-error"?: boolean;
 }
 interface VisualWorkflow {
   jobs: Record<string, {
@@ -94,6 +95,7 @@ interface VisualWorkflow {
     "timeout-minutes": number;
     env?: unknown;
     needs?: unknown;
+    "continue-on-error"?: boolean;
     steps: VisualWorkflowStep[];
   }>;
 }
@@ -106,7 +108,8 @@ test("visual review stays GitHub-hosted and scopes its secret only to eligible u
   expect(visual["timeout-minutes"]).toBe(20);
   expect(visual.env).toBeUndefined();
   expect(visual.needs).toBeUndefined();
-  expect(JSON.stringify(visual)).not.toMatch(/continue-on-error|upload-artifact|retries/u);
+  expect(visual["continue-on-error"]).toBeUndefined();
+  expect(JSON.stringify(visual)).not.toMatch(/retries/u);
   const steps = visual.steps;
   const setup = steps.find(step => step.uses?.startsWith("oven-sh/setup-bun@"))!;
   expect(setup.if).toBeUndefined();
@@ -124,10 +127,13 @@ test("visual review stays GitHub-hosted and scopes its secret only to eligible u
   expect(steps.find(step => step.run === "bunx playwright install chromium")?.["timeout-minutes"]).toBe(10);
   const local = steps.find(step => step.run === "bun run test:visual")!;
   expect(local.if).toBeUndefined();
-  expect(local.env).toBeUndefined();
+  expect(local["continue-on-error"]).toBeUndefined();
+  expect(local.env?.OMP_VISUAL_EVIDENCE_DIR).toBe("test-results/visual-diagnostics");
   const secretSteps = steps.filter((step: unknown) => JSON.stringify(step).includes("secrets.PERCY_TOKEN"));
   expect(secretSteps).toHaveLength(1);
   const upload = secretSteps[0]!;
+  expect(upload["continue-on-error"]).toBe(true);
+  expect(steps.filter(step => step["continue-on-error"])).toEqual([upload]);
   expect(upload.run).toBe("bun run test:visual:percy");
   expect(upload.env?.OMP_VISUAL_NODE_EXECUTABLE).toBe("${{ steps.percy-node.outputs.executable }}");
   for (const condition of [upload.if, upload.env?.PERCY_TOKEN]) {
@@ -141,4 +147,20 @@ test("visual review stays GitHub-hosted and scopes its secret only to eligible u
   expect(summary.if).toContain("head.repo.full_name != github.repository");
   expect(summary.run).toContain("Percy not uploaded");
   expect(summary.env).toBeUndefined();
+});
+
+test("local visual failure fails the job while upload failure is advisory with retained diagnostics", async () => {
+  const workflow = Bun.YAML.parse(await readFile(workflowPath, "utf8")) as VisualWorkflow;
+  const visual = workflow.jobs["visual-review"]!;
+  const local = visual.steps.find(step => step.run === "bun run test:visual")!;
+  const upload = visual.steps.find(step => step.run === "bun run test:visual:percy")!;
+  const failsJob = (step: VisualWorkflowStep): boolean =>
+    spawnSync("bash", ["-e", "-c", step.run!.replace(/bun run test:visual(?::percy)?/u, "exit 23")]).status !== 0 &&
+    step["continue-on-error"] !== true;
+  expect(failsJob(local)).toBe(true);
+  expect(failsJob(upload)).toBe(false);
+  expect(upload.env?.GITHUB_STEP_SUMMARY).toBeUndefined(); // GitHub supplies the real summary path.
+  const artifact = visual.steps.find(step => step.uses?.startsWith("actions/upload-artifact@"))!;
+  expect(artifact.if).toBe("${{ always() }}");
+  expect(artifact.with?.path).toBe("test-results/visual-diagnostics/");
 });

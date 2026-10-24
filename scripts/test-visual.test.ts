@@ -2,10 +2,13 @@ import { expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { basename, dirname } from "node:path";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { LOG_AUDIT_SUCCESS, PERCY_RUNTIME_NOTICE, assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
 
-const localSuccess = { code: 0, stdout: "visual: validated=18 submitted=0 outcome=passed\n", stderr: "" };
-const uploadSuccess = { code: 0, stdout: "visual: validated=18 submitted=18 outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n", stderr: "" };
+const localSuccess = { code: 0, stdout: "visual: validated=18 queued=0 outcome=passed\n", stderr: "" };
+const uploadSuccess = { code: 0, stdout: "visual: validated=18 queued=18 outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n", stderr: "" };
 const auditSuccess = { code: 0, stdout: LOG_AUDIT_SUCCESS + "\n", stderr: "" };
 
 test("local mode starts only the build and Playwright without Percy credentials or controls", async () => {
@@ -99,8 +102,8 @@ test("upload rejects disabled Percy, swallowed warnings, incomplete counts and f
     { ...uploadSuccess, stdout: localSuccess.stdout },
     { ...uploadSuccess, stdout: uploadSuccess.stdout + "Percy is not running\n" },
     { ...uploadSuccess, stderr: "SDK warning contains untrusted detail" },
-    { ...uploadSuccess, stdout: "visual: validated=18 submitted=18 outcome=passed\n" },
-    { ...uploadSuccess, stdout: uploadSuccess.stdout.replace("submitted=18", "submitted=17") },
+    { ...uploadSuccess, stdout: "visual: validated=18 queued=18 outcome=passed\n" },
+    { ...uploadSuccess, stdout: uploadSuccess.stdout.replace("queued=18", "queued=17") },
     { ...uploadSuccess, code: 1 },
   ];
   for (const result of failures) expect(() => assertVisualResult(result, true)).toThrow("visual upload: incomplete or failed Percy build");
@@ -127,11 +130,51 @@ test("failed diagnostics never repeat untrusted child output", () => {
   expect(visualEnvironment({ PERCY_TOKEN: planted, __PERCY_BROWSERIFIED__: "1", OMP_VISUAL_MODE: "upload", CI: "true" })).toEqual({ CI: "true" });
 });
 
+test("unfinalized upload retains only sanitized diagnostics and reports advisory failure after local validation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "visual-evidence-"));
+  const environment = {
+    PERCY_TOKEN: "synthetic-test-token",
+    OMP_VISUAL_EVIDENCE_DIR: directory,
+    GITHUB_STEP_SUMMARY: join(directory, "step-summary"),
+  };
+  try {
+    await runVisual(["local"], environment, async command =>
+      command.includes("build") ? { code: 0, stdout: "", stderr: "" } : localSuccess);
+    const output: string[] = [];
+    const original = process.stdout.write;
+    process.stdout.write = ((value: string) => { output.push(value); return true; }) as typeof original;
+    try {
+      let calls = 0;
+      await expect(runVisual(["upload"], environment, async () => {
+        calls++;
+        return calls === 1 ? { code: 0, stdout: "", stderr: "" } : calls === 2 ? auditSuccess : {
+          code: 1,
+          stdout: "visual-runner: phase=server reason=health-unreachable\nvisual: validated=18 queued=18 outcome=passed\n",
+          stderr: "HTTP 403 synthetic-sensitive-diagnostic",
+        };
+      }, () => "synthetic-node")).rejects.toThrow("visual upload: incomplete or failed Percy build");
+    } finally { process.stdout.write = original; }
+    expect(output.join("")).not.toMatch(/submitted|uploaded/u);
+    const summary = await readFile(environment.GITHUB_STEP_SUMMARY, "utf8");
+    expect(summary).toContain("visual upload FAILED (advisory):");
+    expect(summary).toContain("health-unreachable");
+    expect(summary).toContain("cli-http-403");
+    expect(summary).toContain("; local visual validation PASSED");
+    const local = JSON.parse(await readFile(join(directory, "local-summary.json"), "utf8"));
+    expect(local).toEqual({ validated: 18, queued: 0, outcome: "passed" });
+    for (const path of ["upload-stdout.log", "upload-stderr.log"]) {
+      const text = await readFile(join(directory, path), "utf8");
+      expect(text).not.toContain("synthetic-sensitive-diagnostic");
+      expect(text).not.toContain(environment.PERCY_TOKEN);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("nested upload diagnostics preserve only closed-set phases, reasons and bounded counts", () => {
   const planted = "synthetic-sensitive-diagnostic";
   const diagnostic = [
     "visual: directory-empty / visual-phone-390x844: failed phase=submit reason=guard-rejected",
-    "visual: validated=0 submitted=0 outcome=failed",
+    "visual: validated=0 queued=0 outcome=failed",
     "visual-runner: phase=server reason=healthy",
     "visual-runner: phase=playwright reason=child-exit",
     `[percy] ${planted}`,
@@ -141,8 +184,8 @@ test("nested upload diagnostics preserve only closed-set phases, reasons and bou
     "visual: directory-empty / visual-phone-390x844: failed phase=submit reason=constructor",
     "visual-runner: phase=constructor reason=healthy",
     "visual: unknown-state / visual-phone-390x844: passed",
-    "visual: validated=99 submitted=0 outcome=passed",
-    "visual: validated=0 submitted=18 outcome=passed",
+    "visual: validated=99 queued=0 outcome=passed",
+    "visual: validated=0 queued=18 outcome=passed",
   ].join("\n");
   const lines = safeVisualLines(diagnostic);
   expect(lines.some(line => line.includes(planted))).toBe(false);

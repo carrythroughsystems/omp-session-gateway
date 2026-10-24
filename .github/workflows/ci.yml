@@ -242,14 +242,26 @@ jobs:
         run: bunx playwright install chromium
         timeout-minutes: 10
       - name: Validate synthetic visual states locally
+        env:
+          OMP_VISUAL_EVIDENCE_DIR: test-results/visual-diagnostics
         run: bun run test:visual
       - name: Upload guarded Percy snapshots
+        continue-on-error: true
         if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.runner == 'github-hosted') }}
         env:
           PERCY_TOKEN: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.runner == 'github-hosted')) && secrets.PERCY_TOKEN || '' }}
           OMP_VISUAL_NODE_EXECUTABLE: ${{ steps.percy-node.outputs.executable }}
+          OMP_VISUAL_EVIDENCE_DIR: test-results/visual-diagnostics
         run: bun run test:visual:percy
       - name: Record local-only visual review
         if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || (github.event_name == 'workflow_dispatch' && inputs.runner != 'github-hosted') }}
         run: |
           printf '%s\n' 'Percy not uploaded: fork or gateway-ci dispatch; all 18 synthetic states validated locally without a repository secret.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain closed visual diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: visual-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/visual-diagnostics/
+          retention-days: 7
+          if-no-files-found: ignore

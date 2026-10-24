@@ -23,7 +23,7 @@ export const VISUAL_UPLOAD_REASONS: Readonly<Record<string, true>> = {
 /** No raw errors, attachments, browser console, child stdout/stderr, or DOM excerpts. */
 export default class SafeVisualReporter implements Reporter {
   private passed = new Set<string>();
-  private submitted = new Set<string>();
+  private queued = new Set<string>();
   private failed = false;
 
   onTestEnd(test: TestCase, result: TestResult): void {
@@ -38,7 +38,7 @@ export default class SafeVisualReporter implements Reporter {
     const reason = test.annotations.find(value => value.type === "visual-upload-reason" && Object.hasOwn(VISUAL_UPLOAD_REASONS, value.description ?? ""))?.description;
     if (result.status === "passed" && !this.passed.has(identity)) {
       this.passed.add(identity);
-      if (test.annotations.some(value => value.type === "visual-submitted" && value.description === "accepted")) this.submitted.add(identity);
+      if (test.annotations.some(value => value.type === "visual-queued" && value.description === "accepted")) this.queued.add(identity);
       process.stdout.write(`visual: ${identity}: passed\n`);
     } else {
       this.failed = true;
@@ -52,8 +52,8 @@ export default class SafeVisualReporter implements Reporter {
 
   async onEnd(result: FullResult): Promise<{ status: "passed" | "failed" }> {
     const upload = process.env.OMP_VISUAL_MODE === "upload";
-    const success = result.status === "passed" && !this.failed && this.passed.size === 18 && this.submitted.size === (upload ? 18 : 0);
-    process.stdout.write(`visual: validated=${this.passed.size} submitted=${this.submitted.size} outcome=${success ? "passed" : "failed"}\n`);
+    const success = result.status === "passed" && !this.failed && this.passed.size === 18 && this.queued.size === (upload ? 18 : 0);
+    process.stdout.write(`visual: validated=${this.passed.size} queued=${this.queued.size} outcome=${success ? "passed" : "failed"}\n`);
     return { status: success ? "passed" : "failed" };
   }
 }
