@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,8 @@ const RUNNER_REASONS: Readonly<Record<string, true>> = {
   "cli-lockfile-warning": true, "cli-proxy-warning": true, "cli-node-warning": true,
   "cli-serialization-warning": true, "cli-unknown-diagnostic": true,
   "cli-runtime-notice": true,
+  "cli-http-401": true, "cli-http-403": true, "cli-http-429": true, "cli-http-5xx": true,
+  "cli-dns-failed": true, "cli-connection-refused": true, "cli-timeout": true,
 };
 // Stable messages from the pinned CLI; classify only, never echo text or relax failure policy.
 const CLI_DIAGNOSTICS: ReadonlyArray<readonly [string, RegExp]> = [
@@ -51,6 +53,13 @@ const CLI_DIAGNOSTICS: ReadonlyArray<readonly [string, RegExp]> = [
   ["cli-proxy-warning", /system level proxy/iu],
   ["cli-node-warning", /ExperimentalWarning|DeprecationWarning|MaxListenersExceededWarning/u],
   ["cli-serialization-warning", /Encountered snapshot serialization warnings|Readiness timed out|DOM elements found outside/iu],
+  ["cli-http-401", /\b(?:HTTP|status(?:Code)?)[: =]+401\b/iu],
+  ["cli-http-403", /\b(?:HTTP|status(?:Code)?)[: =]+403\b/iu],
+  ["cli-http-429", /\b(?:HTTP|status(?:Code)?)[: =]+429\b/iu],
+  ["cli-http-5xx", /\b(?:HTTP|status(?:Code)?)[: =]+5\d\d\b/iu],
+  ["cli-dns-failed", /\b(?:ENOTFOUND|EAI_AGAIN)\b/u],
+  ["cli-connection-refused", /\bECONNREFUSED\b/u],
+  ["cli-timeout", /\b(?:ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT)\b/u],
 ];
 
 export function visualEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -68,12 +77,12 @@ export function safeVisualLines(text: string): string[] {
       lines.push(`visual: ${state[1]} / ${state[2]}: ${state[3]}${state[4] ? ` phase=${state[4]}` : ""}${state[5] ? ` reason=${state[5]}` : ""}`);
       continue;
     }
-    const summary = /^visual: validated=(\d{1,2}) submitted=(\d{1,2}) outcome=(passed|failed)$/u.exec(line);
+    const summary = /^visual: validated=(\d{1,2}) queued=(\d{1,2}) outcome=(passed|failed)$/u.exec(line);
     if (summary && Number(summary[1]) <= 18 && Number(summary[2]) <= Number(summary[1])) {
-      lines.push(`visual: validated=${Number(summary[1])} submitted=${Number(summary[2])} outcome=${summary[3]}`);
+      lines.push(`visual: validated=${Number(summary[1])} queued=${Number(summary[2])} outcome=${summary[3]}`);
       continue;
     }
-    const runner = /^visual-runner: phase=([a-z-]+) reason=([a-z-]+)$/u.exec(line);
+    const runner = /^visual-runner: phase=([a-z-]+) reason=([a-z0-9-]+)$/u.exec(line);
     if (runner && Object.hasOwn(RUNNER_PHASES, runner[1] ?? "") && Object.hasOwn(RUNNER_REASONS, runner[2] ?? "")) {
       lines.push(`visual-runner: phase=${runner[1]} reason=${runner[2]}`);
     }
@@ -82,7 +91,7 @@ export function safeVisualLines(text: string): string[] {
 }
 
 export function visualProcessReasons(result: VisualProcessResult, upload: boolean, requireFinalization = upload): string[] {
-  const expected = `visual: validated=18 submitted=${upload ? 18 : 0} outcome=passed`;
+  const expected = `visual: validated=18 queued=${upload ? 18 : 0} outcome=passed`;
   const reasons: string[] = [];
   if (result.code !== 0) reasons.push("child-exit");
   // The sole nonfatal diagnostic is the exact pinned entry-point announcement, not SDK output.
@@ -245,7 +254,7 @@ export async function requirePercyServer(environment: NodeJS.ProcessEnv): Promis
   } catch { throw new Error(`visual upload: healthy Percy server required (${reason})`); }
 }
 
-export async function runVisual(
+async function runVisualProcess(
   args: readonly string[],
   environment: NodeJS.ProcessEnv,
   run: VisualProcess = execute,
@@ -326,7 +335,74 @@ export async function runVisual(
   }
   for (const reason of visualProcessReasons(result, true)) process.stdout.write(`visual-runner: phase=percy reason=${reason}\n`);
   assertVisualResult(result, true);
-  process.stdout.write("visual upload: build finalized\n");
+  process.stdout.write("visual upload: submitted=18 build finalized\n");
+}
+
+/** Persist only reconstructed, closed-set diagnostics, never vendor text, URLs or credentials. */
+export async function runVisual(
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv,
+  run: VisualProcess = execute,
+  resolveRuntime: VisualRuntimeResolver = Bun.which,
+): Promise<void> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const reasons = new Set<string>();
+  let summary = { validated: 0, queued: 0, outcome: "failed" };
+  let passed = false;
+  try {
+    await runVisualProcess(args, environment, async (command, childEnvironment, timeoutMs) => {
+      const result = await run(command, childEnvironment, timeoutMs);
+      const lines = safeVisualLines(`${result.stdout}\n${result.stderr}`);
+      stdout.push(...safeVisualLines(result.stdout));
+      stderr.push(...safeVisualLines(result.stderr));
+      for (const line of lines) {
+        const code = /^visual-runner: phase=[a-z-]+ reason=([a-z0-9-]+)$/u.exec(line)?.[1];
+        if (code && code !== "healthy") reasons.add(code);
+        const counts = /^visual: validated=(\d+) queued=(\d+) outcome=(passed|failed)$/u.exec(line);
+        if (counts) summary = { validated: Number(counts[1]), queued: Number(counts[2]), outcome: counts[3]! };
+      }
+      if (command[1] === CLI_EXECUTABLE) {
+        for (const code of visualProcessReasons(result, true)) {
+          reasons.add(code);
+          stderr.push(`visual-runner: phase=percy reason=${code}`);
+        }
+      }
+      return result;
+    }, resolveRuntime);
+    passed = true;
+  } catch (error) {
+    const fixedReason = error instanceof Error ? ({
+      [MISSING_TOKEN]: "token-missing",
+      [MISSING_NODE]: "node-missing",
+      "visual upload: log audit failed": "log-audit-failed",
+      "visual: build failed": "build-failed",
+    } as Record<string, string>)[error.message] : undefined;
+    if (fixedReason) reasons.add(fixedReason);
+    if (reasons.size === 0) reasons.add("execution-failed");
+    throw error;
+  } finally {
+    const directory = environment.OMP_VISUAL_EVIDENCE_DIR;
+    if (directory && (args[0] === "local" || args[0] === "upload")) {
+      const mode = args[0];
+      if (!passed) summary.outcome = "failed";
+      await mkdir(directory, { recursive: true });
+      await Promise.all([
+        writeFile(join(directory, `${mode}-stdout.log`), stdout.join("\n") + "\n"),
+        writeFile(join(directory, `${mode}-stderr.log`), stderr.join("\n") + "\n"),
+        writeFile(join(directory, `${mode}-summary.json`), JSON.stringify(summary) + "\n"),
+      ]);
+      if (mode === "upload" && environment.GITHUB_STEP_SUMMARY) {
+        let localPassed = false;
+        try {
+          const local = JSON.parse(await readFile(join(directory, "local-summary.json"), "utf8"));
+          localPassed = local.validated === 18 && local.queued === 0 && local.outcome === "passed";
+        } catch { /* Absent or invalid local evidence cannot claim a passed validation. */ }
+        await appendFile(environment.GITHUB_STEP_SUMMARY,
+          `visual upload ${passed ? "PASSED: finalized" : `FAILED (advisory): ${[...reasons].join(", ")}`}; local visual validation ${localPassed ? "PASSED" : "FAILED"}\n`);
+      }
+    }
+  }
 }
 
 if (import.meta.main) {
