@@ -277,6 +277,27 @@ export async function androidDeviceReachesHost(host: string, command: AndroidAdb
   return output.includes("1 received");
 }
 
+export class AndroidReachabilityPreconditionError extends Error {
+  readonly name = "AndroidReachabilityPreconditionError";
+  constructor(readonly reason: "unreachable" | "adb-transport") {
+    super(reason === "unreachable"
+      ? "Android gateway reachability prerequisite: connect Tailscale on the Pixel and verify DNS/routing to the configured gateway origin before navigation; no device settings were changed"
+      : "Android gateway reachability prerequisite: adb transport failed; restore the authorized USB connection before navigation; no device settings were changed");
+  }
+}
+
+/** Read-only device-origin DNS/ICMP admission, not proof of HTTPS, Chrome or CDP health. */
+export async function requireAndroidGatewayReachability(origin: string, command: AndroidAdbCommand): Promise<void> {
+  const host = new URL(origin).hostname;
+  let reachable: boolean;
+  try { reachable = await androidDeviceReachesHost(host, command); }
+  catch (error) {
+    if (error instanceof AndroidAdbError) throw new AndroidReachabilityPreconditionError("adb-transport");
+    throw error;
+  }
+  if (!reachable) throw new AndroidReachabilityPreconditionError("unreachable");
+}
+
 export const ANDROID_QUALIFICATION_PIN_KEYCHAIN_SERVICE =
   "omp-session-gateway.android-qualification-pin";
 const ANDROID_PIN_MIN_LENGTH = 4;
