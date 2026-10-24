@@ -11,6 +11,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Refuse a missing Pixel Tailscale/DNS path to the configured gateway before Android acceptance
   navigation, with named reachability/adb diagnostics and a read-only parent admission gate that
   does not poison the shared Pixel lease before a mutating child has run (#430).
+- Recount prepared changelog entry-count drift against `release-text.json` before qualification,
+  preserving every bullet, the exact requested candidate and immutable release records (#436).
 - Keep local 18-state visual validation required while making only Percy upload failures
   advisory, with visible local/upload outcomes and capability-free diagnostic artifacts.
   Snapshot queueing no longer claims confirmed submission before build finalization.
