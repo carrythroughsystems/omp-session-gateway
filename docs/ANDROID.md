@@ -204,6 +204,17 @@ repeat the shared, lane-selected preconditions at their own admission. Post-rele
 before release download or host mutation. An unavailable or unrecognized probe refuses safely too.
 This is an admission snapshot: keep tethering off for the entire run.
 
+Before initial acceptance navigation, the Pixel must resolve and reach the **configured gateway
+origin's hostname** over its own network path. A read-only `ping -c 1 -W 2` probe runs during
+campaign admission once the retained Mac origin is known, repeats in the lease holder before
+starting the acceptance child, and runs in standalone acceptance before Chrome or radio effects.
+An unknown host or packet loss raises `AndroidReachabilityPreconditionError` (`unreachable`)
+with a Tailscale/DNS/routing prerequisite diagnostic; adb transport failure is separately named
+`adb-transport`. No automatic VPN login/connect or network-setting mutation is performed.
+A parent-side read-only refusal does not poison the Pixel lease; failures of a child that actually
+ran retain the existing conservative restoration guard. DNS/ICMP reachability does **not** prove
+HTTPS, browser or CDP health, and it is only an admission snapshot, not a later recovery guarantee.
+
 The origin must already have granted notification permission before the run. The lane never accepts
 a permission prompt as part of admission. For its negative window, it retains a browser-only CDP
 connection holding an origin-scoped denial while the WebAPK task is closed. Chrome removes this

@@ -28,6 +28,7 @@ import {
   parseStableQualificationArgs,
   qualifyDebian,
   runExternalLane,
+  runAndroidAcceptance,
   runPixelRestoringChild,
   runStableQualification,
   receiptNeedsMacCleanup,
@@ -552,6 +553,8 @@ async function preflightFixture(root: string, failure?: PreflightFailure): Promi
       if (invocation === "adb -s private-device shell getprop ro.product.model") return "Pixel 10";
       if (invocation === "adb -s private-device shell dumpsys tethering") return "    Upstream wanted: false\n";
       if (invocation === "adb -s private-device shell settings get global zen_mode") return "0\n";
+      if (["qualification-mac.example.ts.net", "fixture.invalid"].some(host =>
+        invocation === `adb -s private-device shell ping -c 1 -W 2 '${host}' || true`)) return "1 transmitted, 1 received";
       if (invocation === "adb -s private-device shell getprop ro.build.version.release") return "16";
       if (invocation === "adb -s private-device shell getprop ro.build.id") return "fixture-build";
       if (invocation === "adb -s private-device shell dumpsys package com.android.chrome") return "versionName=150.0.1";
@@ -579,6 +582,24 @@ async function preflightFixture(root: string, failure?: PreflightFailure): Promi
 }
 
 describe("stable qualification read-only admission", () => {
+  test("Pixel DNS prerequisite refusal happens before campaign admission, effects or receipts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stable-preflight-pixel-path-"));
+    try {
+      const fixture = await preflightFixture(root);
+      let laneAdmissions = 0;
+      const lanes = admissionLanes();
+      const runtime: StablePreflightRuntime = {
+        ...fixture,
+        adb: (serial, args) => args[1]?.startsWith("ping ") ? Promise.resolve("ping: unknown host") : fixture.adb(serial, args),
+      };
+      const lane = { ...lanes.windows, preflight: async () => { laneAdmissions++; } };
+      await expect(runStableQualification(["--preflight", "--tag", TAG], runtime, { ...lanes, windows: lane }))
+        .rejects.toMatchObject({ name: "AndroidReachabilityPreconditionError", reason: "unreachable" });
+      expect(laneAdmissions).toBe(0);
+      expect(await readdir(root)).toEqual([]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   test.each(["guard=unknown", "guard=refused:f", "guard=refused:" + "61".repeat(401), "guard=invalid:", "guard=passed\nextra"])("Mac admission rejects malformed reboot guard framing without receipts: %s", async guardLine => {
     const root = await mkdtemp(join(tmpdir(), "stable-preflight-guard-protocol-"));
     try {
@@ -1675,6 +1696,26 @@ test("a Pixel left unrestored refuses every later device lane", async () => {
   if (waiter?.status !== "rejected") throw new Error("the waiting lane must be refused");
   expect(String(waiter.reason)).toContain("left unrestored by windows");
   expect(later).toBe(0);
+});
+
+test("a read-only Android origin refusal leaves the Pixel lease clean for the next admission", async () => {
+  const lease = createPixelLease(() => {});
+  let calls = 0;
+  const options = parseStableQualificationArgs(["--tag", TAG], MAC_ENV);
+  await expect(lease("android", () => runAndroidAcceptance(options, {
+    publicOrigin: "https://gateway-fixture.invalid",
+    target: { sshDestination: "fixture.invalid", sudoPassword: "" },
+    environment: {},
+  }, {
+    adb: async (_serial, args) => {
+      calls++;
+      if (args[0] === "devices") return "List of devices attached\nfixture-device device\n";
+      if (args[1] === "ping -c 1 -W 2 'gateway-fixture.invalid' || true") return "ping: unknown host";
+      throw new Error("unexpected mutating device command");
+    },
+  }))).rejects.toMatchObject({ name: "AndroidReachabilityPreconditionError", reason: "unreachable" });
+  expect(calls).toBe(2);
+  expect(await lease("androidPush", async () => "admitted")).toBe("admitted");
 });
 
 test("a failed or timed-out Pixel-restoring child refuses every later device lane", async () => {

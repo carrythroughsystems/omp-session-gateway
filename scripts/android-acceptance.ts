@@ -20,6 +20,7 @@
 import {
   ANDROID_DIRECTORY_SURFACE_EXPRESSION,
   requireAndroidDevicePreconditions,
+  requireAndroidGatewayReachability,
   requireSingleDevice,
   androidDeviceReachesHost,
   runAdb,
@@ -222,8 +223,9 @@ async function authorizationMatrix(driver: AndroidChromeDriver, label: string): 
   return value;
 }
 
-/** Captures admission's radio baseline before the first mutation and verifies its restoration. */
-export async function withAndroidAcceptanceRestoration<T>(command: AndroidAdbCommand, body: () => Promise<T>): Promise<T> {
+/** Refuses a missing device path before browser/radio effects, then verifies radio restoration. */
+export async function withAndroidAcceptanceRestoration<T>(command: AndroidAdbCommand, body: () => Promise<T>, origin: string): Promise<T> {
+  await requireAndroidGatewayReachability(origin, command);
   const baseline = await readAndroidRadioBaseline(command);
   return runWithRestoration("Android acceptance", body, [
     () => restoreAndroidRadios(baseline, command),
@@ -364,7 +366,7 @@ if (import.meta.main) {
       airplaneDeviceReachableMs: airplane.deviceReachableFirstMs,
       dozeRecoveredMs: doze.recoveredMs,
     };
-  }));
+  }), origin);
 
   console.log(JSON.stringify(summary, null, 1));
 
