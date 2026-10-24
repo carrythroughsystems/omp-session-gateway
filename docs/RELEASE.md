@@ -238,9 +238,14 @@ with committed release history; the fixture notes describe the retained public e
 as selection and promotion. It may supersede an unqualified, unpublished next-patch preparation:
 the package/workspace/constants move to the next minor; that prepared CHANGELOG section and
 the pending entries are folded into one new cut; the generator recounts all bullets and regenerates
-`release-text.json` together. The old summary must still match its companion metadata; never
-hand-recount either header. Qualified/published preparations, unrelated versions, duplicate cuts
-and edited summaries refuse. The published stable lock and OMP baseline stay unchanged.
+`release-text.json` together. When an unqualified/unpublished prepared section gains a bullet,
+count-only drift between its generated summary and companion metadata is safely recounted on
+the next prepare (including the 2026-10-22 27→28 case). Prefer adding the bullet without
+hand-recounting either header. Every other summary byte, including baseline, predecessor and
+qualification disclaimer, must still match. Count drift on qualified/published preparations,
+unrelated versions, duplicate cuts and other edited summaries refuse. The requested candidate
+identity remains exact; the published stable lock, earlier changelog sections and OMP baseline
+stay unchanged.
 Installing this class-aware control change is the separately reviewed job-free Studio setup path,
 not a release-bot self-upgrade. No main changes may land between prepare and approve.
 
