@@ -202,6 +202,43 @@ test("fresh attempts preserve the existing cut and incorporate new Unreleased fi
   expect(repeated).toEqual(result);
 });
 
+test("2026-10-22 prepare recounts 27 to 28 entries when only the prepared count drifted from release-text", () => {
+  const before = Object.fromEntries(Object.entries(prepareBefore).map(([path, bytes]) =>
+    [path, bytes.replaceAll("0.7.4", "0.7.8").replaceAll("0.7.3", "0.7.7")]));
+  const bullets = Array.from({ length: 27 }, (_, index) => `- Prepared change ${index + 1}.`);
+  before["CHANGELOG.md"] = `# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n${bullets.join("\n")}\n\n## [v0.7.7] — 2026-10-21\n\n- Previous immutable release.\n`;
+  const options: ReleaseGenerateOptions = {
+    command: "prepare", version: "0.7.8", date: "2026-10-22", candidateTag: "v0.7.8-prealpha.4",
+  };
+  const initial = generateRelease(before, options);
+  const tree = { ...before, ...initial };
+  const metadata = JSON.parse(tree[RELEASE_TEXT]!);
+  expect(metadata.summary).toContain("27 changelog entries");
+  tree["CHANGELOG.md"] = tree["CHANGELOG.md"]!
+    .replace("27 changelog entries", "28 changelog entries")
+    .replace("- Prepared change 27.", "- Prepared change 27.\n- Subsequent repair.");
+  const nextOptions = { ...options, candidateTag: "v0.7.8-prealpha.5" };
+  const result = generateRelease(tree, nextOptions);
+  const next = JSON.parse(result[RELEASE_TEXT]!);
+  expect(next.summary).toContain("28 changelog entries");
+  expect(next.candidateTag).toBe("v0.7.8-prealpha.5");
+  expect(result["CHANGELOG.md"]).toContain(next.summary);
+  for (const bullet of [...bullets, "- Subsequent repair."]) expect(result["CHANGELOG.md"]).toContain(bullet);
+  expect(result["CHANGELOG.md"]).toContain("- Previous immutable release.");
+  expect(result["CHANGELOG.md"]!.match(/## \[v0.7.8\]/gu)).toHaveLength(1);
+  expect(result["STABLE_RELEASE.lock.json"]).toBeUndefined();
+  expect(result["UPSTREAM.lock.json"]).toBeUndefined();
+  expect(generateRelease({ ...tree, ...result }, nextOptions)).toEqual(result);
+  for (const field of ["qualification", "publication"]) {
+    expect(() => generateRelease({
+      ...tree, [RELEASE_TEXT]: JSON.stringify({ ...metadata, [field]: {} }),
+    }, nextOptions)).toThrow("prepared changelog");
+  }
+  expect(() => generateRelease({
+    ...tree, "CHANGELOG.md": tree["CHANGELOG.md"]!.replace("Historical receipts do not qualify", "Historical receipts qualify"),
+  }, nextOptions)).toThrow("prepared changelog");
+});
+
 test("minor preparation folds the unpublished patch cut and recounts all entries together", () => {
   const tree = Object.fromEntries(Object.entries({ ...prepareBefore, ...prepared }).map(([path, bytes]) =>
     [path, bytes.replaceAll("0.7.4", "0.7.8").replaceAll("0.7.3", "0.7.7")]));

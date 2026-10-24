@@ -80,6 +80,11 @@ function html(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 function markdown(value: string): string { return value.replaceAll("|", "\\|").replaceAll("\n", " "); }
+/** Only the generated count/grammar may drift; baseline, predecessor and claims stay exact. */
+function countIndependentSummary(value: string): string | undefined {
+  const generated = /^(This release uses stock OMP v\d+\.\d+\.\d+ as its engineering baseline\. )The [1-9][0-9]* changelog (?:entry below records|entries below record)( the changes since v\d+\.\d+\.\d+\. Historical receipts do not qualify these bytes\.)$/u.exec(value);
+  return generated ? `${generated[1]}<entry count>${generated[2]}` : undefined;
+}
 export function releaseMarker(name: string, content: string): string {
   return `<!-- release-generate:${name}:start -->\n${content.trim()}\n<!-- release-generate:${name}:end -->`;
 }
@@ -386,8 +391,14 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
       if (!data.summary) throw new Error("prepared release has no summary");
       const section = new RegExp(`\\n## \\[v${escapePattern(String(packageVersion))}\\] — [^\\n]+\\n\\n([\\s\\S]*?)(?=\\n## \\[|$)`, "u");
       const old = changelog.match(section);
-      if (!old || !old[1]!.startsWith(data.summary)) throw new Error("prepared changelog section is missing or edited");
-      pending = [pending.trim(), old[1]!.slice(data.summary.length).trim()].filter(Boolean).join("\n\n");
+      const oldSummary = old?.[1]?.split("\n\n", 1)[0];
+      const countOnly = oldSummary !== undefined && countIndependentSummary(data.summary) !== undefined
+        && countIndependentSummary(oldSummary) === countIndependentSummary(data.summary);
+      if (!old || oldSummary === undefined || oldSummary !== data.summary &&
+        !(countOnly && data.qualification === undefined && data.publication === undefined)) {
+        throw new Error("prepared changelog section is missing or edited; only generated count drift before qualification can be recounted");
+      }
+      pending = [pending.trim(), old[1]!.slice(oldSummary.length).trim()].filter(Boolean).join("\n\n");
       changelogBase = changelog.replace(section, "");
     }
     if (changelogBase.includes(`## [${tag}]`)) throw new Error("duplicate release cut");
