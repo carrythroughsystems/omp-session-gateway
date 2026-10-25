@@ -1792,8 +1792,9 @@ Close/Back control, context-aware theme, and visibly different heights between s
   dot and icon-only Expand. Hide the inner shell bar and flatten its frame only while in the tray;
   promotion restores the shell bar and moves the same connection indicator back into it.
   Expand or tapping its title grows to full viewport with the long token,
-  then reparents the same shell into the body and replaces history with `/client/`. No second
-  React root, capability or relay socket; no draft loss. Full-screen working View retains ADR-040.
+  then reparents the same shell into the body and pushes `/client/` with the directory entry's
+  restore state beneath it, exactly like a full launch, so system back returns to the directory.
+  No second React root, capability or relay socket; no draft loss. Full-screen working View retains ADR-040.
 - Close restores the cached directory and disposes synchronously. Presentation is carried with
   the validated attempt, live shell and memory-only bfcache intent. Pagehide/cancellation invalidate
   late mounts and promotions. Resume revalidates and reacquires rather than retaining a capability.

@@ -2212,7 +2212,7 @@ function enterCollabClient(
   back.className = "shell-back";
   back.textContent = "← Sessions";
   back.addEventListener("click", () => {
-    if (shellState.presentation === "request-tray" || history.state?.ompTrayPromoted === true) returnToDirectory();
+    if (shellState.presentation === "request-tray") returnToDirectory();
     else history.back();
   });
   const title = createTitleElement("span", "shell-title", session);
@@ -2311,7 +2311,9 @@ function enterCollabClient(
         tray.close(true, true);
         document.body.className = "collab-shell-active";
         document.body.replaceChildren(shell);
-        history.replaceState({ ompCollab: true, ompTrayPromoted: true }, "", "/client/");
+        // The same history shape as a full launch, so system back returns to the directory.
+        history.replaceState({ ompDirectory: snapshot.historyState }, "", "/");
+        history.pushState({ ompCollab: true }, "", "/client/");
       });
       expand.addEventListener("click", promote);
       tray.replace({

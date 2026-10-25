@@ -180,9 +180,12 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       expect(fixture.launchRequests).toHaveLength(launches);
       await expect(page.locator(".sh-composer-input")).toHaveValue("Draft retained through expansion");
       await capture("request-promoted");
-      await page.locator(".shell-back").click();
+      // Promotion leaves the same history shape as a full launch: system back returns to the directory.
+      await page.goBack();
+      await expect(page).toHaveURL(`${fixture.origin}/`);
       await expect(page.locator("#session-list")).toBeVisible();
       await expect(page.locator("#root")).toHaveCount(0);
+      await expect(page.locator("body > .gateway-shell")).toHaveCount(0);
 
       await page.clock.install();
       await expect(page.locator("#status-banner")).toBeHidden();
