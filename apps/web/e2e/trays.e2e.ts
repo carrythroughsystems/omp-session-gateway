@@ -228,7 +228,7 @@ test("transient expiry pauses for pointer and focus, and cannot close a replacem
   } finally { await fixture.stop(); }
 });
 
-test("request close cancels late launch; failed launch retries; bfcache preserves tray presentation", async ({ page, context }, info) => {
+test("request close cancels late launch; failed preview returns to the directory; bfcache preserves tray presentation", async ({ page, context }, info) => {
   test.skip(!info.project.name.startsWith("pixel"));
   const key = randomBytes(32);
   const fixture = await startDashboardFixture([GATEWAY_WAITING], { roomKey: key });
@@ -245,9 +245,10 @@ test("request close cancels late launch; failed launch retries; bfcache preserve
     await expect(page.locator("#root")).toHaveCount(0);
     await page.route("**/launch", route => route.fulfill({ status: 503, body: "{}" }));
     await page.locator(".action-request").click();
-    await expect(page.locator(".request-status")).toHaveText("The session could not be opened. Try again.");
+    await expect(page.locator("#tray")).toBeHidden();
+    await expect(page.locator("#status-banner")).toHaveText("The session could not be opened. Try again.");
     await page.unroute("**/launch");
-    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    await page.locator(".action-request").click();
     await expect(page.locator("#tray #root .sh-app")).toHaveCount(1);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
     await expect(page.locator("#root .sh-app")).toHaveCount(0);
@@ -314,7 +315,7 @@ test("growth cancellation and pagehide never promote a disposed shell", async ({
   } finally { await fixture.stop(); }
 });
 
-test("withdrawn request access stays in the tray and an open keyboard leaves its client usable", async ({ page, context }, info) => {
+test("withdrawn request access returns to the directory and a recovered client remains keyboard-usable", async ({ page, context }, info) => {
   test.skip(!info.project.name.startsWith("pixel"));
   const key = randomBytes(32);
   const fixture = await startDashboardFixture([GATEWAY_WAITING], { roomKey: key });
@@ -323,11 +324,14 @@ test("withdrawn request access stays in the tray and an open keyboard leaves its
     await page.goto(fixture.origin);
     await page.route("**/launch", route => route.fulfill({ status: 403, body: "{}" }));
     await page.locator(".action-request").click();
-    await expect(page.locator(".request-status")).toHaveText("This tailnet identity is not authorized.");
-    await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeHidden();
+    await expect(page.locator("#status-banner")).toHaveText("This tailnet identity is not authorized.");
+    await expect(page.locator("#tray")).toBeHidden();
+    await expect(page.locator(".action-request")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Try again", exact: true })).toHaveCount(0);
     await expect(page.locator("#root")).toHaveCount(0);
-    await page.getByRole("button", { name: "Close Gateway auth hardening", exact: true }).click();
     await page.unroute("**/launch");
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(page.locator("#status-banner")).toBeHidden();
     await page.locator(".action-request").click();
     await page.locator(".sh-ask-send").click();
     await expect(page.locator(".sh-composer-input")).toBeVisible();

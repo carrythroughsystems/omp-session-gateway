@@ -1,17 +1,18 @@
 import type { FullResult, Reporter, TestCase, TestResult } from "@playwright/test/reporter";
 
 export const VISUAL_STATES = [
-  "directory-empty", "directory-all-clear", "directory-needs-you", "settings-enabled-session", "collab-view", "collab-control-ask",
+  "directory-empty", "directory-all-clear", "directory-needs-you", "directory-partial-coverage", "settings-enabled-session", "collab-view", "collab-control-ask",
 ] as const;
 export type VisualState = typeof VISUAL_STATES[number];
 export const VISUAL_PROJECTS = ["visual-phone-390x844", "visual-tablet-810x1080", "visual-desktop-1280x800"] as const;
+export const VISUAL_CASE_COUNT = VISUAL_STATES.length * VISUAL_PROJECTS.length;
 export const VISUAL_PHASES: Readonly<Record<string, true>> = {
   fixture: true, directory: true, alerts: true, state: true, motion: true, geometry: true, guard: true, submit: true, cleanup: true,
   "negative-hidden-attribute": true, "negative-form-value": true, "negative-inline-style": true,
   "negative-text": true, "negative-textual-resource": true, "negative-surface": true,
   "source-overflow": true, "source-network": true, "source-transcript": true, "source-header": true,
   "parity-directory": true, "parity-column": true, "parity-transcript": true, "parity-header": true,
-  "parity-ask": true, "parity-triage": true, "parity-settings": true, "parity-overflow": true,
+  "parity-ask": true, "parity-triage": true, "parity-tray": true, "parity-overflow": true,
   "parity-directory-x": true, "parity-directory-y": true, "parity-directory-width": true, "parity-directory-height": true,
 };
 export const VISUAL_UPLOAD_REASONS: Readonly<Record<string, true>> = {
@@ -52,7 +53,7 @@ export default class SafeVisualReporter implements Reporter {
 
   async onEnd(result: FullResult): Promise<{ status: "passed" | "failed" }> {
     const upload = process.env.OMP_VISUAL_MODE === "upload";
-    const success = result.status === "passed" && !this.failed && this.passed.size === 18 && this.queued.size === (upload ? 18 : 0);
+    const success = result.status === "passed" && !this.failed && this.passed.size === VISUAL_CASE_COUNT && this.queued.size === (upload ? VISUAL_CASE_COUNT : 0);
     process.stdout.write(`visual: validated=${this.passed.size} queued=${this.queued.size} outcome=${success ? "passed" : "failed"}\n`);
     return { status: success ? "passed" : "failed" };
   }

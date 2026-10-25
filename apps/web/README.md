@@ -112,18 +112,21 @@ arrival gates, privacy, and optional synthetic screenshots via `OMP_FIRST_RUN_SC
 
 ## Multiple configured hosts
 
-`GET /api/v1/client-config` is loaded once per document, bounded to 32 KiB with a four-second
+`GET /api/v1/client-config` is loaded at bootstrap, bounded to 32 KiB with a four-second
 deadline. A 404 retains the local-only experience; malformed, unsupported or origin-mismatched
-configuration leaves the local directory usable and offers Reload. Configuration changes need
-a reload. The native Host picker scopes counts and actions, not transport work.
+configuration leaves the local directory usable and offers Try again in the single banner.
+Reconnect retries failed bootstrap after the local snapshot recovers. Changes to an already
+loaded configuration need a reload. The native Host picker scopes counts and actions, not transport work.
 
 `fleet.ts` owns DOM-free remote transport and persistence helpers. Each configured remote origin
 is fetched directly with CORS, omitted credentials, no-store and redirects refused. There is no
 gateway proxy, remote SSE, remote configuration discovery, remote health endpoint or fleet push.
 Visible pages poll every ten seconds with one coalesced request per host, a five-second deadline
 and an 8 MiB body cap. Transient failures retain disabled stale rows for 35 seconds, then remove
-them; a readable 403 clears rows immediately and stops automatic polling until Retry or foreground
-transition. Hiding/freezing aborts work without recording a failure. Each source owns its epoch,
+them; a readable 403 clears rows immediately and stops automatic polling until a foreground/online
+recheck, with no Retry action. Offline retains the observation clock and stale-grace deadline;
+scheduled recovery resumes polling without depending on an online event. Hiding/freezing aborts
+work without recording a failure. Each source owns its epoch,
 request sequence and revision domain; a completed full snapshot can have a lower revision after
 a remote daemon restarts.
 
@@ -207,14 +210,14 @@ This browser evidence is not real-host Tern or physical-device qualification.
 
 ## Synthetic visual review
 
-From the repository root, `bun run test:visual` builds the real dashboard/client and validates six
-states at 390×844, 810×1080 and 1280×800 (18 unique state/project names). It never starts Percy
+From the repository root, `bun run test:visual` builds the real dashboard/client and validates seven
+states at 390×844, 810×1080 and 1280×800 (21 unique state/project names), including partial host coverage. It never starts Percy
 or passes a token. Fixed clock/randomness, en-US/UTC, dark theme, reduced motion and DPR 1 keep
 captures deterministic. Directory asks are metadata-only; collaboration prose/code are authored
 synthetic content from `e2e/synthetic-product-fixture.ts`, whose defaults also serve README capture.
 
 `bun run test:visual:percy` requires `PERCY_TOKEN`, a healthy local Percy server started by the
-pinned CLI, all 18 guarded submissions and a finalized build. Native Node.js (24.22.0 LTS in CI)
+pinned CLI, all 21 guarded submissions and a finalized build. Native Node.js (24.22.0 LTS in CI)
 must be on `PATH` for the Percy CLI only; builds and the visual worker stay on Bun 1.4.0. CI
 passes the executable from its SHA-pinned setup-node step; missing local Node fails closed with
 `reason=node-missing`. Percy must not run under Bun's HTTP compatibility layer.
@@ -227,7 +230,7 @@ and header-alignment checks rather than the normal View width.
 This advisory signal does not replace functional e2e or qualification. Project setup, eligible
 CI events and review policy are in [BrowserStack](../../docs/BROWSERSTACK.md).
 Failures report only closed-set phases/reasons and bounded counts, never raw Percy/browser text.
-Upload mode additionally runs an 18-state testing-host preflight and scans the redacted CLI logs
+Upload mode additionally runs a 21-case testing-host preflight and scans the redacted CLI logs
 Percy would receive; the vendor uploads CLI logs with builds even while CI-log upload is disabled.
 The retained fixture guard must also reject a planted SDK-log canary. This preflight never runs
 in local mode or uses a real token.

@@ -12,7 +12,7 @@ signed-release device qualification. See [ADR-035](DECISIONS.md#adr-035--advisor
 
 ## Percy scope
 
-`bun run test:visual` builds the real dashboard and pinned collaboration client, then validates six
+`bun run test:visual` builds the real dashboard and pinned collaboration client, then validates seven
 states at each of three Chromium source viewports. These are CSS viewport sizes, not emulated or
 qualified devices; 810×1080 matches the qualified ninth-generation iPad's CSS viewport without
 claiming this lane runs on that iPad.
@@ -24,8 +24,8 @@ claiming this lane runs on that iPad.
 | `visual-desktop-1280x800` | 1280×800 |
 
 The states are `directory-empty`, `directory-all-clear`, `directory-needs-you`,
-`settings-enabled-session`, `collab-view`, and `collab-control-ask`. Each snapshot is named
-`state / project`: **18 distinct snapshots**, each serialized at its own width. The clock and
+`directory-partial-coverage`, `settings-enabled-session`, `collab-view`, and `collab-control-ask`. Each snapshot is named
+`state / project`: **21 distinct snapshots**, each serialized at its own width. The clock and
 randomness are fixed; locale is en-US, timezone UTC, theme dark, reduced motion on, DPR 1.
 Test-only styles also disable CSS animation/transition replay; an active animation fails the lane.
 Directory asks contain metadata only. Collaboration prose and code are explicitly authored
@@ -61,21 +61,21 @@ health request, creating a build with zero snapshots.
 The SDK's automatic drop-in baseline provider is disabled explicitly; this lane never seeds or
 auto-approves committed screenshots.
 
-Upload mode first runs this same 18-state suite against the installed native-Node Percy testing
+Upload mode first runs this same 21-case suite against the installed native-Node Percy testing
 host, with real asset discovery but no vendor effects and no real token. A private pipe supplies
 one ephemeral synthetic authority shared by those fixtures; it is never exposed by the returned
-`DashboardFixture`, or placed in argv, the environment, output or a file. After all 18 submissions,
+`DashboardFixture`, or placed in argv, the environment, output or a file. After all 21 submissions,
 the retained fixture guard and both leak scanners check the exact redacted `clilogs` candidate
 (non-`ci` logger records, including metadata). A planted SDK-log canary must also be rejected.
 This five-minute-bounded preflight must
 pass before the real Percy CLI starts; it emits only
-`visual-audit: states=18 logs=passed planted=rejected`. Local mode still never starts Percy.
+`visual-audit: states=21 logs=passed planted=rejected`. Local mode still never starts Percy.
 
 1. Create a dedicated **web** Percy project for these synthetic fixtures, connected to this
    repository. Do not share a project/token with production captures or real sessions.
 2. The maintainer chooses renderers in Percy project settings, not this suite. Recommended:
    **Chrome, Firefox, Safari, and Edge**; add **Safari on iPhone** and **Chrome on Android** if quota
-   allows. Confirm the rendering/billing multiplier for 18 snapshots before enabling all browsers.
+   allows. Confirm the rendering/billing multiplier for 21 snapshots before enabling all browsers.
    Renderer availability and the account's quota remain account configuration, not repository facts.
 3. Keep JavaScript rendering disabled. Review access and retention, and record the chosen project,
    renderers, quota, project owner, baseline approver and sponsorship-renewal owner in the
@@ -85,8 +85,8 @@ pass before the real Percy CLI starts; it emits only
 5. Run `bun run test:visual` without a token. For a real upload, supply the token through the
    process environment and run `bun run test:visual:percy`. Missing credentials fail with
    `visual upload: PERCY_TOKEN is required`; an unhealthy server, SDK warning, skipped submission,
-   fewer than 18 submissions or failed finalization also fails. Upload never falls back to local.
-6. Establish the baseline from `main`; confirm all 18 names, widths, commit association, intended
+   fewer than 21 submissions or failed finalization also fails. Upload never falls back to local.
+6. Establish the baseline from `main`; confirm all 21 names, widths, commit association, intended
    renderers and resource graph. Then make a temporary CSS perturbation on a disposable branch,
    confirm a reviewable Percy diff, and discard that perturbation. These two real-service proofs
    require the maintainer's token and are not implied by local validation.

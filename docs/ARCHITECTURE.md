@@ -101,13 +101,55 @@ and build identity — live in the Background alerts tray and its Alert detail c
 clear` summary claims "You'll get pinged" only while alerts are enabled and otherwise offers the
 Settings path.
 
-The PWA never prefetches capabilities. On bootstrap it fetches same-origin `GET /api/v1/client-config` (`cache: "no-store"`, `credentials: "same-origin"`, `redirect: "error"`, 4-second timeout, bounded to `MAX_CLIENT_CONFIG_BYTES`). A `404` response from an older gateway falls back to local-only operation with browser speech recognition disabled and no error banner. A `200` response whose body fails schema validation, reports an unsupported version, or has `local.origin !== location.origin` keeps the local directory running, creates no remote sources, and shows `Fleet configuration unavailable — reload this app` with a **Reload** action.
+The PWA never prefetches capabilities. On bootstrap it fetches same-origin `GET /api/v1/client-config` (`cache: "no-store"`, `credentials: "same-origin"`, `redirect: "error"`, 4-second timeout, bounded to `MAX_CLIENT_CONFIG_BYTES`). A `404` response from an older gateway falls back to local-only operation with browser speech recognition disabled and no error banner. A failed or invalid configuration keeps the local directory usable and creates no remote sources. The banner owns `Fleet configuration unavailable` with **Try again** only while the local list is available; a local transport outage replaces that story, never adds a fleet row. Reconnect retries failed bootstrap after a successful local snapshot, coalescing concurrent recovery attempts; successful configuration clears the banner.
 
 For the local source (`id: "local"`), the PWA receives metadata from `GET /api/v1/sessions` and `GET /api/v1/events`. When `fleet.targets` (up to 7 remote sources, 8 total with `local`) is configured, the PWA polls each remote target's `GET <origin>/api/v1/sessions` directly from the browser (`mode: "cors"`, `credentials: "omit"`, `cache: "no-store"`, `redirect: "error"`, 5-second timeout, 8 MiB response bound) immediately on visible start and every 10 seconds while visible, with at most one request in flight per source and jittered exponential failure backoff (1 s to 30 s). It never opens a remote `EventSource` or fetches remote `client-config`, `health`, or `push` routes. Each session is keyed in page memory by `SourceKey = id + "\0" + origin` and `SessionRef = { sourceKey, instanceId, generation, requestId? }`; the composite source key is never concatenated into an OMP `instanceId` or sent over the network.
 
-A native `<select>` labeled **Host** filters the directory across **All hosts**, the local host label, and configured `fleet.targets` in configuration order; filter state lives in volatile page/history state only and never changes background polling. Every session row, hero card, held row, and active collaboration shell bar displays its host label. **All clear** and **No live sessions** render only when every source in the selected scope has a fresh snapshot; otherwise the directory names the unavailable hosts without claiming fleet-wide all-clear or background-alert coverage for them. Under **All hosts**, waiting sessions are ordered by first observation of each exact ask in this browser (`observed waiting order`, tie-broken by `sourceKey` then `instanceId`); a single selected host keeps `ask.since` FIFO. A readable `403` from a remote source clears its rows, marks it forbidden, cancels its pending launches, stops automatic polling until explicit **Retry** or a foreground transition, and disposes an active shell from that source. Timeouts, network errors, CORS-opaque responses, malformed payloads, and other HTTP failures keep the source's last rows visibly stale and non-launchable for a 35-second grace window before removing them while retaining the host's error row (`Cannot reach this host from this app.`).
+A native `<select>` labeled **Host** filters the directory across **All hosts**, the local host label, and configured `fleet.targets` in configuration order; filter state lives in volatile page/history state only and never changes background polling. Every session row, hero card, held row, and active collaboration shell bar displays its host label. **All clear** and **No live sessions** require fresh snapshots for every source in scope. Otherwise, coverage aggregates counts, accessible names say **Listed**, and quiet checks are not host failures. Only independent failed remote sources get named rows; the banner owns device/local-gateway connectivity. Under **All hosts**, waiting sessions follow first observation of each exact ask (`observed waiting order`, tie-broken by `sourceKey` then `instanceId`); a selected host keeps `ask.since` FIFO. A readable remote `403` clears rows, marks the source forbidden, cancels its launches, stops automatic polling until a foreground/online recheck, and disposes its active shell; it offers no **Retry**. Other failures retain disabled stale rows for 35 seconds, then expire them while retaining the successful **List as of** clock and `Host unavailable` row. A retained empty observation says **No sessions as of** that clock, not that the host was never checked.
 
-Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and offers retry without unmounting its collaboration shell.
+`availability.ts` is the pure eight-state presentation model: loading, fresh, refreshing, stale,
+expired, unavailable, forbidden and withdrawn. An authorization-withdrawn observation cannot
+certify an empty list or reuse its old clock, including during a later offline retry; only a
+fresh authorized snapshot restores that observation. `fleet.ts` owns transport/retention; `app.ts` adapts its local
+and remote observations to the model and writes every banner through one single-child writer.
+Offline marks remotes stale without hiding them or stopping their retry chain; the grace deadline
+still runs. Every reconnect restores visibility idempotently, so recovery never requires an
+`online` event. Hiding/freezing still aborts without inventing a failure.
+A pending retry preserves the named local fault, even before the first successful snapshot.
+Remote launch denial uses its forbidden host row without replacing an independent local banner.
+Bootstrap recovery updates the existing local source's label in place; its origin-bound object
+identity remains stable for accepted creation intents and their exact Ready handoff.
+Visible guidance timing is separate from the named local fault: hiding, expiry messages, and
+remote mounts cannot clear that fault or cancel its retry chain. Only a successful local
+observation or a replacement named local fault changes its ownership.
+Local list, launch, creation and embedded-probe denials share one withdrawal transition: clear
+metadata and clock, invalidate the event epoch, close the stream, cancel local work, and require
+a fresh authorized snapshot. Late pre-denial upserts, keepalives and errors cannot resurrect it.
+Remote launch errors remain source-scoped, including 404/409 and transport failures. Their host
+notice lasts until that source is checked successfully or a launch succeeds; Refresh host never
+replays a capability request. Observation-aware empty copy also covers All hosts and single-host views.
+Denying, failing, discarding or programmatically cancelling an unmounted request preview restores
+and consumes its directory snapshot without starting another fetch or reverting a newer host selection.
+Pagehide is the exception: cancellation keeps the snapshot and metadata-only resume intent together
+until persisted pageshow revalidates and relaunches. Local authorization withdrawal does not skip
+remote refresh during restoration, and remote triage gates on its own source freshness, not local
+directory readiness. Cross-host Next-ask failures retain the target's notice across predecessor
+health updates; expired targets still refresh, and Sessions returns to list-only recovery.
+Target-owned triage arbitrates all predecessor writers, including Hold reconciliation and short
+connection interruptions. Explicit dismissal also invalidates a pending expired-target feedback update.
+Mounted action failures use this owner whether the target is local or remote. Local success paths release
+the owner just like remote observations; a successful expiry refresh never recreates a failed host row.
+Pending launches, not `answerShown`, suppress Hold reconciliation, so dismissal can restore Hold immediately.
+Launch acceptance revalidates current View/Control eligibility as well as source, generation and request.
+The accepted shell receives that revalidated metadata, including its current title and Control affordance.
+Every new launch intent advances the selection epoch, so a failed newer intent still supersedes an older
+resume. Creation establishes that epoch when its wizard opens; its launch handoff continues the same intent.
+Selected-source empty rendering also uses its own observation, with retained empty clocks ahead
+of neutral checking progress.
+Availability descriptors retain the exact successful observation instant separately from formatted time;
+All-hosts empty rendering compares those instants before claiming a shared clock.
+
+Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and keeps its collaboration shell mounted while offering source-appropriate recovery.
 
 Authoritative snapshots and upserts remove a held record when its exact ask changes or clears, and remove a dismissal when the session disappears, its generation changes, or it needs attention. Transport failures do not erase either record. Optional `busy` distinguishes sampled activity from idle/unknown, not successful completion. The PWA must not invent a Completed state or label local dismissal as Close or Exit. These bounded records contain no title, path, model, prompt, answer, transcript, or collaboration capability.
 An explicit Background alerts tray action enables background Web Push. Permission is never requested on load.
@@ -302,12 +344,12 @@ each source viewport → installed @percy/dom serialization → exact-material/c
 guards → Percy SDK → host-restricted, JavaScript-disabled discovery → advisory visual build`.
 
 The shared deterministic fixture also supplies README capture without changing its default
-content or ordering. Local visual validation checks all 18 states and source/serialized geometry
+content or ordering. Local visual validation checks all 21 state/project pairs and source/serialized geometry
 without starting Percy or passing credentials. Upload mode rechecks the exact SDK POST, requires
 a healthy session, all submissions and finalization, and never falls back. No live OMP, real
 transcript, production gateway, capability canary or third-party runtime asset belongs in this
 flow. Synthetic authority stays in source-context memory; serialized HTML/resources fail if it
-appears. Before uploading, a native-Node testing host runs the same 18 states without a real token
+appears. Before uploading, a native-Node testing host runs the same 21 cases without a real token
 or vendor effects. A private pipe supplies a shared ephemeral synthetic authority; the retained
 fixture guard and both scanners check the exact redacted non-`ci` log candidate and reject a
 planted SDK-log canary. Percy uploads those redacted CLI logs with builds; the separate CI-log

@@ -61,7 +61,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await page.goto(fixture.origin);
       await expect(page.locator("#directory-title")).toHaveText("Needs you");
       const connected = await settledTray(page, "connected");
-      await expect(page.locator(".first-run-copy")).toContainText("is publishing 5 live sessions.");
+      await expect(page.locator(".first-run-copy")).toContainText("5 live sessions are listed across the checked hosts.");
       await expect(page.locator(".first-run-note")).toHaveText("Capabilities are requested only when you tap an action.");
       await expect(page.locator(".first-run-connected svg")).toHaveAttribute("width", "32");
       expect(await record(page)).toBeNull();
@@ -167,7 +167,7 @@ for (const close of ["skip", "escape", "native"] as const) {
       await installSilentWebSocket(page);
       await page.goto(fixture.origin);
       await settledTray(page, "connected");
-      await expect(page.locator(".first-run-copy")).toContainText("no live sessions yet.");
+      await expect(page.locator(".first-run-copy")).toContainText("No live sessions are listed yet.");
       if (close === "skip") await page.getByRole("button", { name: "Skip introduction" }).click();
       else if (close === "escape") await page.keyboard.press("Escape");
       else await page.locator("#tray").evaluate(element => (element as HTMLDialogElement).requestClose());

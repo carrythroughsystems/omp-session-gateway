@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "@playwright/test";
 import { startDashboardFixture, type SyntheticFixtureAuthority } from "../apps/web/e2e/fixture-server.ts";
 import { assertPercyLogsSafe } from "../apps/web/visual/snapshot-safety.ts";
-import { VISUAL_PHASES, VISUAL_PROJECTS, VISUAL_STATES, VISUAL_UPLOAD_REASONS } from "../apps/web/visual/safe-reporter.ts";
+import { VISUAL_CASE_COUNT, VISUAL_PHASES, VISUAL_PROJECTS, VISUAL_STATES, VISUAL_UPLOAD_REASONS } from "../apps/web/visual/safe-reporter.ts";
 
 export type VisualMode = "local" | "upload";
 export interface VisualProcessResult { code: number; stdout: string; stderr: string }
@@ -22,7 +22,7 @@ const CLI_EXECUTABLE = fileURLToPath(new URL("../bin/run.cjs", pathToFileURL(CLI
 const CONFIG = "apps/web/playwright.visual.config.ts";
 const MISSING_TOKEN = "visual upload: PERCY_TOKEN is required";
 const MISSING_NODE = "visual upload: Node.js is required for Percy";
-export const LOG_AUDIT_SUCCESS = "visual-audit: states=18 logs=passed planted=rejected";
+export const LOG_AUDIT_SUCCESS = `visual-audit: states=${VISUAL_CASE_COUNT} logs=passed planted=rejected`;
 // @percy/cli 1.32.11 bin/run.cjs:13-16 prints this unconditionally, even on Node 24.
 // Our exact major pin and native Node >=20 already satisfy this future-major announcement.
 export const PERCY_RUNTIME_NOTICE = "Heads up! The next major version of @percy/cli will require Node 20+. Either pin @percy/cli to its current major version, or make sure your setup runs on Node 20+, before the next major release.";
@@ -78,7 +78,7 @@ export function safeVisualLines(text: string): string[] {
       continue;
     }
     const summary = /^visual: validated=(\d{1,2}) queued=(\d{1,2}) outcome=(passed|failed)$/u.exec(line);
-    if (summary && Number(summary[1]) <= 18 && Number(summary[2]) <= Number(summary[1])) {
+    if (summary && Number(summary[1]) <= VISUAL_CASE_COUNT && Number(summary[2]) <= Number(summary[1])) {
       lines.push(`visual: validated=${Number(summary[1])} queued=${Number(summary[2])} outcome=${summary[3]}`);
       continue;
     }
@@ -91,7 +91,7 @@ export function safeVisualLines(text: string): string[] {
 }
 
 export function visualProcessReasons(result: VisualProcessResult, upload: boolean, requireFinalization = upload): string[] {
-  const expected = `visual: validated=18 queued=${upload ? 18 : 0} outcome=passed`;
+  const expected = `visual: validated=${VISUAL_CASE_COUNT} queued=${upload ? VISUAL_CASE_COUNT : 0} outcome=passed`;
   const reasons: string[] = [];
   if (result.code !== 0) reasons.push("child-exit");
   // The sole nonfatal diagnostic is the exact pinned entry-point announcement, not SDK output.
@@ -141,7 +141,7 @@ async function execute(command: string[], environment: NodeJS.ProcessEnv, timeou
 }
 
 /**
- * Native-Node testing host: real discovery/SDK/18-state suite, no vendor effects. A private pipe
+ * Native-Node testing host: the full discovery/SDK/state suite, no vendor effects. A private pipe
  * supplies one ephemeral authority so the retained fixture guard covers every worker's logs.
  */
 export async function runPercyLogAuditHost(bunExecutable: string): Promise<void> {
@@ -202,7 +202,7 @@ export async function runPercyLogAuditHost(bunExecutable: string): Promise<void>
     }
     const requests = percy.testing.requests ?? [];
     if (!percy.browser.isConnected() ||
-      requests.filter((request: { method: string; url: string }) => request.method === "POST" && request.url === "/percy/snapshot").length !== 18) throw new Error();
+      requests.filter((request: { method: string; url: string }) => request.method === "POST" && request.url === "/percy/snapshot").length !== VISUAL_CASE_COUNT) throw new Error();
     const readCliLogs = async (): Promise<unknown[]> => {
       const response = await fetch(new URL("/test/logs", percy.address()), { signal: AbortSignal.timeout(5_000) });
       const body: unknown = await response.json();
@@ -280,7 +280,7 @@ async function runVisualProcess(
       ...(environment.OMP_VISUAL_AUDIT_PIPE === undefined ? {} : { OMP_VISUAL_AUDIT_PIPE: environment.OMP_VISUAL_AUDIT_PIPE }),
     });
     for (const line of safeVisualLines(`${result.stdout}\n${result.stderr}`)) process.stdout.write(`${line}\n`);
-    // The worker requires 18 submissions; only its owning CLI can finalize the build.
+    // The worker requires every state/project submission; only its owning CLI can finalize the build.
     const reasons = visualProcessReasons(result, true, false);
     for (const reason of reasons) process.stdout.write(`visual-runner: phase=playwright reason=${reason}\n`);
     if (reasons.length !== 0) throw new Error("visual upload: submissions failed");
@@ -335,7 +335,7 @@ async function runVisualProcess(
   }
   for (const reason of visualProcessReasons(result, true)) process.stdout.write(`visual-runner: phase=percy reason=${reason}\n`);
   assertVisualResult(result, true);
-  process.stdout.write("visual upload: submitted=18 build finalized\n");
+  process.stdout.write(`visual upload: submitted=${VISUAL_CASE_COUNT} build finalized\n`);
 }
 
 /** Persist only reconstructed, closed-set diagnostics, never vendor text, URLs or credentials. */
@@ -396,7 +396,7 @@ export async function runVisual(
         let localPassed = false;
         try {
           const local = JSON.parse(await readFile(join(directory, "local-summary.json"), "utf8"));
-          localPassed = local.validated === 18 && local.queued === 0 && local.outcome === "passed";
+          localPassed = local.validated === VISUAL_CASE_COUNT && local.queued === 0 && local.outcome === "passed";
         } catch { /* Absent or invalid local evidence cannot claim a passed validation. */ }
         await appendFile(environment.GITHUB_STEP_SUMMARY,
           `visual upload ${passed ? "PASSED: finalized" : `FAILED (advisory): ${[...reasons].join(", ")}`}; local visual validation ${localPassed ? "PASSED" : "FAILED"}\n`);

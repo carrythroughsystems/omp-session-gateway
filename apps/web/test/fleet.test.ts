@@ -175,6 +175,28 @@ describe("creation preferences", () => {
 });
 
 describe("fleet transport", () => {
+  test("visibility revalidation is refreshing, not a failed snapshot", async () => {
+    const time = new Clock();
+    // This fixture uses only the callable fetch interface, not Bun's extra fetch properties.
+    const fetchSnapshot = (async () => snapshot(1)) as unknown as typeof fetch;
+    const transport = new FleetTransport(remote, () => {}, fetchSnapshot, time);
+    transport.setVisible(true);
+    await transport.refresh();
+    const epoch = transport.epoch;
+    transport.setVisible(true);
+    expect(transport.epoch).toBe(epoch);
+    expect(transport.status).toBe("fresh");
+    transport.setVisible(false);
+    expect(transport.status).toBe("refreshing");
+    expect(transport.staleSince).toBeUndefined();
+    expect(transport.snapshot?.revision).toBe(1);
+    transport.setVisible(true);
+    expect(transport.status).toBe("refreshing");
+    await transport.refresh();
+    expect(transport.status).toBe("fresh");
+    transport.setVisible(false);
+  });
+
   test("coalesces requests, binds CORS options, and accepts lower revisions after a restart", async () => {
     const time = new Clock();
     const requests: RequestInit[] = [];
@@ -251,7 +273,47 @@ describe("fleet transport", () => {
     time.advance(35_000);
     await flush();
     expect(transport.snapshot).toBeUndefined();
-    expect(transport.status).toBe("unavailable");
+    expect(transport.status).toBe("expired");
+    transport.setVisible(false);
+  });
+
+  test("offline interruption retains its observation, expires at 35 seconds and recovers without a visibility event", async () => {
+    const time = new Clock();
+    let broken = false;
+    let requests = 0;
+    const fetchSnapshot = (async () => {
+      requests++;
+      if (broken) throw new TypeError("synthetic outage");
+      return snapshot(requests);
+    }) as unknown as typeof fetch;
+    const transport = new FleetTransport(remote, () => {}, fetchSnapshot, time);
+    transport.setVisible(true);
+    await transport.refresh();
+    const observedAt = transport.freshAt;
+    broken = true;
+    transport.interrupt();
+    expect(transport.status).toBe("stale");
+    expect(transport.freshAt).toBe(observedAt);
+    expect(transport.snapshot).toBeDefined();
+    await flush();
+    time.advance(34_999);
+    await flush();
+    expect(transport.snapshot).toBeDefined();
+    time.advance(1);
+    await flush();
+    expect(transport.status).toBe("expired");
+    expect(transport.snapshot).toBeUndefined();
+    expect(transport.freshAt).toBe(observedAt);
+    broken = false;
+    const requestsBeforeRecovery = requests;
+    time.advance(30_000);
+    await flush();
+    expect(transport.status).toBe("fresh");
+    expect(requests).toBeGreaterThan(requestsBeforeRecovery);
+    const requestsBeforePoll = requests;
+    time.advance(10_000);
+    await flush();
+    expect(requests).toBe(requestsBeforePoll + 1);
     transport.setVisible(false);
   });
 

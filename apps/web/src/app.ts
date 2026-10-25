@@ -27,6 +27,7 @@ import {
   readSourceRecords, boundedJson, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
   type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
 } from "./fleet";
+import { sourceAvailability as describeSource, scopeCoverage as coverageForSources } from "./availability";
 import { createTray, type TrayPanel } from "./tray";
 import { SessionCreationController } from "./session-creation";
 
@@ -104,10 +105,11 @@ type TransportFailureKind = "offline" | "tailnet" | "desktop" | "gateway";
 
 type LaunchPresentation = "full" | "request-tray";
 
-let localSource: FleetSource = { id: "local", label: "This host", origin: location.origin };
+const localSource = { id: "local", label: "This host", origin: location.origin } satisfies FleetSource;
 const localKey = sourceKey(localSource);
 const sources = new Map<SourceKey, FleetSource>([[localKey, localSource]]);
 const remotes = new Map<SourceKey, FleetTransport>();
+const remoteLaunchFailures = new Map<SourceKey, string>();
 let selectedScope: SourceKey | "all" = "all";
 let browserRecognitionEnabled = false;
 let fleetBootstrapFailed = false;
@@ -119,6 +121,7 @@ let dismissedSessions = new Map<string, DismissedSession>();
 let events: EventSource | undefined;
 let directoryLoaded = false;
 let authorizationDenied = false;
+let localObservationWithdrawn = false;
 let notificationState: NotificationControlState = "checking";
 let directoryEpoch = 0;
 let directoryRevision = -1;
@@ -189,6 +192,7 @@ interface ActiveCollabShell extends SessionRef {
   readonly shell: HTMLElement;
   answerShown: boolean;
   answerTriageVisible: boolean;
+  launchFailureSource?: SourceKey;
   triageTimeout?: number;
   hasBeenLive: boolean;
   latestEmbedState?: CollabEmbedState;
@@ -247,14 +251,7 @@ const creation = new SessionCreationController({
     const key = sourceKey(source);
     clearCreationDraft(key);
     if (key !== localKey) { remotes.get(key)?.forbid(); return; }
-    authorizationDenied = true;
-    localFresh = false;
-    directoryLoaded = false;
-    replaceSessionSnapshot([], localKey, false);
-    cancelLaunch(localKey);
-    if (activeCollabShell?.sourceKey === localKey) returnToDirectory();
-    render();
-    setStatus("unauthorized", "This tailnet identity is not authorized.");
+    withdrawLocalAuthorization();
   },
   refresh: source => sourceKey(source) === localKey ? refreshAndConnect() : remotes.get(sourceKey(source))!.refresh(true),
   openReady: async (source, binding, draft, current) => {
@@ -354,9 +351,9 @@ function firstRunPanel(step: Exclude<FirstRunStep, "done">): TrayPanel {
     mark.removeAttribute("id");
     mark.setAttribute("width", "32");
     mark.setAttribute("height", "32");
-    const count = scopedSessions().length;
+    const count = scopedSessions().filter(session => sourceFresh(session.sourceKey)).length;
     body.append(mark, createTextElement("p", "first-run-copy",
-      `This phone is on your tailnet. ${localSource.label} is publishing ${count === 0 ? "no live sessions yet" : `${count} live session${count === 1 ? "" : "s"}`}.`),
+      `This phone is on your tailnet. ${count === 0 ? "No live sessions are listed yet" : `${count} live session${count === 1 ? " is" : "s are"} listed across the checked hosts`}.`),
     createTextElement("p", "first-run-note", "Capabilities are requested only when you tap an action."));
   } else if (step === "alerts") {
     const notNow = document.createElement("button");
@@ -675,14 +672,29 @@ if (location.pathname === "/update/" || location.pathname === "/client/") {
   history.replaceState(null, "", "/");
 }
 
-type StatusKind = "ready" | "offline" | "tailnet" | "desktop" | "gateway" | "unauthorized" | "expired" | "loading";
+type StatusKind = "ready" | "offline" | "tailnet" | "desktop" | "gateway" | "configuration" | "unauthorized" | "expired" | "loading";
+
+function writeBanner(kind: StatusKind, content: HTMLElement): void {
+  statusBanner.dataset.kind = kind;
+  statusBanner.replaceChildren(content);
+  statusBanner.hidden = kind === "ready";
+}
 
 function setStatus(kind: StatusKind, message: string): void {
-  if (kind === "ready" || kind === "unauthorized" || kind === "expired") clearTransportFailureTracking();
-  statusBanner.dataset.kind = kind;
-  statusBanner.replaceChildren();
-  statusBanner.textContent = message;
-  statusBanner.hidden = kind === "ready";
+  // Presentation changes are not evidence that the local connection recovered.
+  if (kind !== "unauthorized" && (authorizationDenied || transportFailureKind !== undefined)) return;
+  const content = createTextElement("span", "status-copy", message);
+  if (kind === "ready" && fleetBootstrapFailed) {
+    kind = "configuration";
+    content.append(
+      createTextElement("strong", "status-title", "Fleet configuration unavailable"),
+      createTextElement("span", "status-detail", "The local list is available. Try again to check the configured hosts."),
+    );
+    const retry = createTextElement("button", "status-action", "Try again");
+    retry.addEventListener("click", () => void refreshAndConnect());
+    content.append(retry);
+  }
+  writeBanner(kind, content);
 }
 
 function parseDirectoryHistoryState(value: unknown): DirectoryHistoryState | undefined {
@@ -714,13 +726,17 @@ function parseDirectoryHistoryState(value: unknown): DirectoryHistoryState | und
   return { version: 2, scope: typeof record.scope === "string" && sources.has(record.scope) ? record.scope : "all", order, scrollY: record.scrollY };
 }
 
-function clearTransportFailureTracking(): void {
+function resetTransportGuidance(): void {
   if (transportGuidanceTimeout !== undefined) {
     window.clearTimeout(transportGuidanceTimeout);
     transportGuidanceTimeout = undefined;
   }
   transportFailureSince = undefined;
   if (tray.id === "recovery") tray.close();
+}
+
+function clearLocalTransportFailure(): void {
+  resetTransportGuidance();
   transportFailureKind = undefined;
 }
 
@@ -749,30 +765,34 @@ function showTransportFailure(kind: TransportFailureKind): void {
     if (transportFailureSince === undefined) transportFailureSince = Date.now();
     transportFailureKind = kind;
   } else {
-    clearTransportFailureTracking();
+    resetTransportGuidance();
   }
+  transportFailureKind = kind;
   directoryRevision = -1;
   render();
-  const asOf =
-    lastFreshAt === undefined
-      ? "before the last successful connection"
-      : new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" }).format(lastFreshAt);
+  const freshness = sourceAvailability(localKey);
+  const asOf = freshness.time;
+  const listCopy = asOf === undefined ? freshness.copy
+    : sources.size > 1 ? `${localSource.label}: ${freshness.copy}`
+      : `Showing the list as of ${asOf}.`;
   const copy: Record<TransportFailureKind, readonly [string, string]> = {
     offline: [
       "You're offline",
-      "This device has no connection. Showing the list as of " + asOf + " — retries automatically.",
+      `This device has no connection. ${listCopy} Retries automatically.`,
     ],
     tailnet: [
       "Tailnet unreachable",
-      "This device is online, but your tailnet isn't answering — Tailscale is off or logged out here.",
+      "This device is online, but your tailnet isn't answering. Check that Tailscale is connected.",
     ],
     desktop: [
       "Desktop unreachable",
-      "Tailnet looks fine, but the desktop isn't answering — asleep, or the gateway stopped. Last seen " + asOf + ".",
+      `The desktop isn't answering. Check that it is awake and the gateway is running. ${listCopy}`,
     ],
     gateway: [
       "Gateway unavailable",
-      "Live updates paused; showing the list as of " + asOf + ". Reconnects automatically.",
+      sources.size === 1 && asOf !== undefined
+        ? `Live updates paused; showing the list as of ${asOf}. Reconnects automatically.`
+        : `Live updates paused. ${listCopy} Reconnects automatically.`,
     ],
   };
   const [title, body] = copy[kind];
@@ -783,7 +803,7 @@ function showTransportFailure(kind: TransportFailureKind): void {
     createTextElement("span", "status-detail", body),
   );
   if (kind === "tailnet") {
-    text.append(createTextElement("span", "status-freshness", "Last seen " + asOf + "."));
+    text.append(createTextElement("span", "status-freshness", listCopy));
   }
 
   const extended = transportGuidanceVisible(kind);
@@ -797,8 +817,6 @@ function showTransportFailure(kind: TransportFailureKind): void {
     );
   }
 
-  statusBanner.dataset.kind = kind;
-  statusBanner.replaceChildren(text);
   if (kind === "desktop" || extended) {
     const actions = document.createElement("span");
     actions.className = "status-actions";
@@ -820,9 +838,9 @@ function showTransportFailure(kind: TransportFailureKind): void {
       });
       actions.append(troubleshooting);
     }
-    statusBanner.append(actions);
+    text.append(actions);
   }
-  statusBanner.hidden = false;
+  writeBanner(kind, text);
   if (tracksVisibleFailure) scheduleTransportGuidance();
 }
 
@@ -918,7 +936,7 @@ function createSessionTile(session: SessionMetadata, state?: SessionTileState): 
   tile.append(icon === undefined
     ? createTextElement("span", "tile-monogram", [...titleText(session)][0]?.toLocaleUpperCase() ?? "")
     : createTextElement("span", "glyph", icon));
-  if (state !== undefined) tile.dataset.state = state;
+  if (state !== undefined) tile.dataset.state = sourceFresh(session.sourceKey) ? state : "unknown";
   return tile;
 }
 
@@ -1062,11 +1080,31 @@ function scopedSessions(scope = selectedScope): SessionMetadata[] {
 }
 
 function sourceFresh(key: SourceKey): boolean {
-  return key === localKey ? localFresh : remotes.get(key)?.status === "fresh";
+  return key === localKey ? localFresh && !authorizationDenied && !localObservationWithdrawn : remotes.get(key)?.status === "fresh";
+}
+
+function sourceAvailability(key: SourceKey) {
+  if (key !== localKey) {
+    const remote = remotes.get(key);
+    return describeSource(remote?.status ?? "unavailable", remote?.freshAt);
+  }
+  return describeSource(
+    authorizationDenied ? "forbidden" : localObservationWithdrawn ? "withdrawn" : localFresh ? "fresh"
+      : transportFailureKind !== undefined ? directoryLoaded ? "stale" : "unavailable"
+        : directoryLoaded ? "refreshing" : "loading",
+    lastFreshAt,
+  );
+}
+
+function scopeCoverage(scope = selectedScope) {
+  return coverageForSources(
+    [...sources.keys()].filter(key => scope === "all" || key === scope).map(sourceAvailability),
+    fleetBootstrapFailed,
+  );
 }
 
 function scopeComplete(scope = selectedScope): boolean {
-  return [...sources.keys()].filter(key => scope === "all" || key === scope).every(sourceFresh);
+  return scopeCoverage(scope).complete;
 }
 
 function hostLabel(ref: Pick<SessionRef, "sourceKey">): string {
@@ -1078,13 +1116,17 @@ async function probeSource(key: SourceKey, signal: AbortSignal): Promise<Snapsho
   if (signal.aborted) return "unavailable";
   if (key !== localKey) return await remotes.get(key)?.probe(signal) ?? "unavailable";
   localProbe ??= (async (): Promise<SnapshotResult> => {
+    const epoch = directoryEpoch;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 5_000);
     try {
       const response = await fetch("/api/v1/sessions", {
         cache: "no-store", credentials: "same-origin", redirect: "error", signal: controller.signal,
       });
-      if (response.status === 403) return "forbidden";
+      if (response.status === 403) {
+        if (epoch === directoryEpoch) withdrawLocalAuthorization();
+        return "forbidden";
+      }
       if (!response.ok) return "unavailable";
       parseSessionListResponse(await boundedJson(response, SNAPSHOT_BYTES));
       return "healthy";
@@ -1101,7 +1143,32 @@ async function probeSource(key: SourceKey, signal: AbortSignal): Promise<Snapsho
   return await promise;
 }
 
-function cancelLaunch(source?: SourceKey): void {
+function withdrawLocalAuthorization(): void {
+  authorizationDenied = true;
+  localFresh = false;
+  directoryLoaded = false;
+  localObservationWithdrawn = true;
+  lastFreshAt = undefined;
+  directoryEpoch += 1;
+  directoryRevision = -1;
+  snapshotController?.abort();
+  snapshotController = undefined;
+  events?.close();
+  events = undefined;
+  clearEventLiveness();
+  clearReconnectTimeout();
+  eventStreamStale = false;
+  clearLocalTransportFailure();
+  replaceSessionSnapshot([], localKey, false);
+  creation.cancel("forbidden", localKey);
+  clearCreationDraft(localKey);
+  cancelLaunch(localKey);
+  if (activeCollabShell?.sourceKey === localKey) void restoreDirectory(undefined, undefined, false);
+  render();
+  setStatus("unauthorized", "This tailnet identity is not authorized.");
+}
+
+function cancelLaunch(source?: SourceKey, restore = true): void {
   if (pendingLaunch === undefined || (source !== undefined && pendingLaunch.ref.sourceKey !== source)) return;
   const cancelled = pendingLaunch;
   cancelled.settled = true;
@@ -1109,17 +1176,28 @@ function cancelLaunch(source?: SourceKey): void {
   cancelled.controller.abort();
   pendingLaunch = undefined;
   if (cancelled.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
-    // Compact requests have not displaced the directory. Dismiss without re-entering restore
-    // (or starting another snapshot), so the cancelling caller retains its status/route intent.
-    tray.close(true, true);
+    if (restore && dashboardSnapshot !== undefined) {
+      // Consume the preview's snapshot without reverting a newer host selection or retrying.
+      void restoreDirectory({ ompDirectory: { ...dashboardSnapshot.historyState, scope: selectedScope } }, cancelled.ref, false);
+    } else tray.close(true, true);
     if (statusBanner.dataset.kind === "loading" && directoryLoaded && localFresh) setStatus("ready", "");
   }
   if (cancelled.creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
 }
 
+function releaseLaunchFailure(sourceKey: SourceKey): void {
+  remoteLaunchFailures.delete(sourceKey);
+  if (activeCollabShell?.launchFailureSource === sourceKey) {
+    hideTriageBar(activeCollabShell, false);
+    reconcileActiveCollabShell();
+  }
+}
+
 function remoteChanged(remote: FleetTransport): void {
   replaceSessionSnapshot(remote.snapshot?.sessions ?? [], remote.key, remote.status === "fresh");
+  if (remote.status === "fresh") releaseLaunchFailure(remote.key);
   if (remote.status === "forbidden") {
+    remoteLaunchFailures.delete(remote.key);
     creation.cancel("forbidden", remote.key);
     clearCreationDraft(remote.key);
     cancelLaunch(remote.key);
@@ -1132,35 +1210,21 @@ function remoteChanged(remote: FleetTransport): void {
 
 function renderFleetStatus(): void {
   fleetStatus.replaceChildren();
-  if (fleetBootstrapFailed) {
-    const row = createTextElement("div", "status-guidance fleet-status-row", "Fleet configuration unavailable — reload this app");
-    const reload = createTextElement("button", "status-action", "Reload");
-    reload.addEventListener("click", () => location.reload());
-    row.append(reload);
-    fleetStatus.append(row);
-  }
-  if (sources.size > 1 && (selectedScope === "all" || selectedScope === localKey) && !localFresh) {
-    const detail = authorizationDenied ? "Access withdrawn."
-      : directoryLoaded ? `Live updates unavailable.${lastFreshAt === undefined ? "" : ` Stale since ${new Date(lastFreshAt).toLocaleTimeString()}.`}`
-        : "Loading sessions…";
-    const row = createTextElement("div", "status-guidance fleet-status-row", `${localSource.label}: ${detail}`);
-    row.dataset.sourceKey = localKey;
-    row.dataset.state = authorizationDenied ? "forbidden" : directoryLoaded ? "stale" : "loading";
-    const retry = createTextElement("button", "status-action", "Retry");
-    retry.addEventListener("click", () => void refreshAndConnect());
-    row.append(retry);
-    fleetStatus.append(row);
-  }
+  // The banner owns this gateway; only independent remote failures belong here.
   for (const [key, remote] of remotes) {
-    if ((selectedScope !== "all" && selectedScope !== key) || remote.status === "fresh") continue;
-    const detail = remote.status === "loading" || (remote.status === "stale" && remote.staleSince === undefined) ? "Refreshing sessions…"
-      : remote.status === "forbidden" ? "Access withdrawn."
-        : `Cannot reach this host from this app.${remote.snapshot !== undefined && remote.staleSince !== undefined ? ` Stale since ${new Date(remote.staleSince).toLocaleTimeString()}.` : ""}`;
-    const row = createTextElement("div", "status-guidance fleet-status-row", `${remote.source.label}: ${detail}`);
+    const availability = sourceAvailability(key);
+    const launchFailure = remoteLaunchFailures.get(key);
+    if ((selectedScope !== "all" && selectedScope !== key) || (!availability.failed && launchFailure === undefined) ||
+      (navigator.onLine === false && remote.status !== "forbidden")) continue;
+    const detail = remote.status === "forbidden" ? "Access withdrawn."
+      : availability.failed ? `Host unavailable. ${availability.copy}` : launchFailure!;
+    const row = document.createElement("div");
+    row.className = "fleet-status-row";
+    row.append(createTextElement("span", "fleet-status-copy", `${remote.source.label}: ${detail}`));
     row.dataset.sourceKey = key;
-    row.dataset.state = remote.status;
-    if (remote.status !== "loading") {
-      const retry = createTextElement("button", "status-action", "Retry");
+    row.dataset.state = availability.failed ? remote.status : "launch-failed";
+    if (availability.retry || launchFailure !== undefined) {
+      const retry = createTextElement("button", "status-action", availability.failed ? "Retry" : "Refresh host");
       retry.addEventListener("click", () => void remote.refresh(true));
       row.append(retry);
     }
@@ -1173,8 +1237,8 @@ async function initializeFleet(): Promise<void> {
   try {
     const config = await loadClientConfig(location.origin);
     if (config !== undefined) {
-      localSource = config.local;
-      sources.set(localKey, localSource);
+      // Identity is already origin-bound. Keep in-flight creation intents on this same source.
+      localSource.label = config.local.label;
       browserRecognitionEnabled = config.speech.browserRecognition;
       for (const target of config.targets) {
         const key = sourceKey(target);
@@ -1182,6 +1246,7 @@ async function initializeFleet(): Promise<void> {
         remotes.set(key, new FleetTransport(target, remoteChanged));
       }
     }
+    fleetBootstrapFailed = false;
   } catch { fleetBootstrapFailed = true; }
   if (typeof localStorage !== "undefined") {
     const configured = [...sources.values()];
@@ -1306,10 +1371,15 @@ function contextFacts(session: SessionMetadata): Fact[] {
   ];
 }
 
+function freshnessFacts(session: SessionMetadata): Fact[] {
+  const availability = sourceAvailability(session.sourceKey);
+  return availability.current ? [] : [["session-freshness", availability.failed ? availability.copy : "Updating…"]];
+}
+
 function createSessionSummary(session: SessionMetadata): HTMLElement {
   return createRowMeta([
     contextFacts(session),
-    [["working-model", session.model === undefined ? undefined : modelSlug(session.model)]],
+    sourceFresh(session.sourceKey) ? [["working-model", session.model === undefined ? undefined : modelSlug(session.model)]] : freshnessFacts(session),
   ]) ?? createTextElement("span", "row-meta", "Live OMP session");
 }
 
@@ -1470,6 +1540,7 @@ function restoreDismissedSessions(): void {
 function createWorkingRow(session: SessionMetadata): HTMLElement {
   const frame = document.createElement("div");
   frame.className = "working-row-frame";
+  frame.dataset.fresh = String(sourceFresh(session.sourceKey));
   const button = document.createElement("button");
   button.type = "button";
   button.className = "working-row";
@@ -1482,11 +1553,11 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   copy.append(createTitleElement("span", "row-title", session));
   const details = createRowMeta([
     contextFacts(session),
-    [
+    sourceFresh(session.sourceKey) ? [
       ["session-activity", session.busy === true ? "Working" : session.busy === false ? "Idle" : "Activity unknown"],
       ["row-time", uptimeLabel(session)],
       ["working-model", session.model === undefined ? undefined : modelSlug(session.model)],
-    ],
+    ] : freshnessFacts(session),
   ]);
   if (details !== undefined) copy.append(details);
   button.append(createSessionTile(session, activityState(session)), copy);
@@ -1508,6 +1579,7 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "queue-row";
+  button.dataset.fresh = String(sourceFresh(session.sourceKey));
   button.dataset.instanceId = session.instanceId;
   button.dataset.sourceKey = session.sourceKey;
   button.disabled = !sourceFresh(session.sourceKey) || (mode === "control" ? !session.canControl : !session.canView);
@@ -1518,7 +1590,7 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
   const copy = document.createElement("span");
   copy.className = "row-copy";
   copy.append(createTitleElement("span", "row-title", session));
-  const meta = createRowMeta([contextFacts(session)]);
+  const meta = createRowMeta([contextFacts(session), freshnessFacts(session)]);
   if (meta !== undefined) copy.append(meta);
   button.append(
     createSessionTile(session, "waiting"),
@@ -1536,6 +1608,7 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   const mode: LaunchMode = session.canControl ? "control" : "view";
   const row = document.createElement("div");
   row.className = "held-row";
+  row.dataset.fresh = String(sourceFresh(session.sourceKey));
   row.dataset.instanceId = session.instanceId;
   row.dataset.sourceKey = session.sourceKey;
 
@@ -1547,7 +1620,7 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   const copy = document.createElement("span");
   copy.className = "row-copy";
   copy.append(createTitleElement("span", "row-title", session));
-  const meta = createRowMeta([contextFacts(session)]);
+  const meta = createRowMeta([contextFacts(session), freshnessFacts(session)]);
   if (meta !== undefined) copy.append(meta);
   open.append(
     createSessionTile(session, "held"),
@@ -1586,26 +1659,27 @@ function renderAllClear(
   dismissed: readonly SessionMetadata[],
   arrived: boolean,
 ): void {
+  const coverage = scopeCoverage();
   const summary = document.createElement("div");
   summary.className = "all-clear-summary";
-  summary.dataset.complete = String(scopeComplete());
+  summary.dataset.complete = String(coverage.complete);
   if (arrived) summary.dataset.arrived = "true";
   const alertsLive = notificationState === "enabled" && (sources.size === 1 || selectedScope === localKey);
   const message = document.createElement("div");
   message.className = "all-clear-message";
   message.append(
-    createTextElement("h2", "all-clear-title", scopeComplete() ? "All clear" : "Host coverage incomplete"),
+    createTextElement("h2", "all-clear-title", coverage.complete ? "All clear" : coverage.title),
     createTextElement(
       "p",
       "all-clear-copy",
-      scopeComplete()
+      coverage.complete
         ? `Nothing needs you.${alertsLive ? " Alerts are on for input requests and activity stops." : ""}`
-        : `Unavailable: ${[...sources].filter(([key]) => (selectedScope === "all" || key === selectedScope) && !sourceFresh(key)).map(([, source]) => source.label).join(", ")}.`,
+        : coverage.copy,
     ),
   );
   summary.append(createTextElement("span", "all-clear-dot", ""), message);
   // Keep the ping promise honest: without an active subscription, surface the path to one.
-  if ((sources.size === 1 || selectedScope === localKey) && (notificationState === "idle" || notificationState === "blocked")) {
+  if (coverage.complete && (sources.size === 1 || selectedScope === localKey) && (notificationState === "idle" || notificationState === "blocked")) {
     const hint = document.createElement("button");
     hint.type = "button";
     hint.className = "alerts-hint";
@@ -1615,7 +1689,7 @@ function renderAllClear(
   }
   sessionList.append(summary);
   if (working.length > 0) {
-    sessionList.append(createQueueKicker("Live sessions"));
+    sessionList.append(createQueueKicker(coverage.complete ? "Live sessions" : "Sessions"));
     for (const session of working) sessionList.append(createWorkingRow(session));
   }
   appendDismissedControl(dismissed);
@@ -1627,19 +1701,22 @@ function renderWaitingQueue(
   working: readonly SessionMetadata[],
   dismissed: readonly SessionMetadata[],
 ): void {
+  if (!scopeComplete()) renderAllClear([], [], false);
   const [hero, ...remaining] = waiting;
   if (hero === undefined) {
     const summary = document.createElement("div");
     summary.className = "all-held-summary";
     summary.append(
       createTextElement("span", "row-dot row-dot-held", ""),
-      createTextElement("strong", "", scopeComplete() ? `Queue clear · ${held.length} on hold — handle at desk` : `${held.length} on hold · some hosts unavailable`),
+      createTextElement("strong", "", scopeComplete() ? `Queue clear · ${held.length} on hold — handle at desk`
+        : scopeCoverage().failed ? `${held.length} on hold · some hosts unavailable` : `${held.length} on hold · checking other hosts`),
     );
     sessionList.append(summary);
   } else {
     sessionList.append(createQueueKicker("Up next", selectedScope === "all" && sources.size > 1 ? "observed waiting order" : waitingLabel(hero)));
     const article = document.createElement("article");
     article.className = "queue-hero";
+    article.dataset.fresh = String(sourceFresh(hero.sourceKey));
     article.dataset.instanceId = hero.instanceId;
     article.dataset.sourceKey = hero.sourceKey;
     const askPreview = createTextElement(
@@ -1724,7 +1801,7 @@ function renderWaitingQueue(
     for (const session of held) sessionList.append(createHeldRow(session));
   }
   if (working.length > 0) {
-    sessionList.append(createQueueKicker(`Live sessions · ${working.length}`));
+    sessionList.append(createQueueKicker(`${scopeComplete() ? "Live sessions" : "Sessions"} · ${working.length}`));
     for (const session of working) sessionList.append(createWorkingRow(session));
   }
   appendDismissedControl(dismissed);
@@ -1860,22 +1937,70 @@ function renderDirectory(arrived = false): void {
   if (focusRef !== undefined) focusDirectoryRequest(focusRef);
 }
 
+function renderEmptyState(): void {
+  emptyState.querySelector(".empty-state-detail")?.remove();
+  const coverage = scopeCoverage();
+  const filtered = selectedScope !== "all";
+  const observations = [...sources.keys()].filter(key => !filtered || key === selectedScope).map(sourceAvailability);
+  const observation = observations.length === 1 ? observations[0] : undefined;
+  const withdrawn = observations.some(source => source.status === "withdrawn");
+  const expired = observations.some(source => source.status === "expired");
+  const denied = observations.every(source => source.status === "forbidden");
+  const retainedEmpty = observations.every(source => source.time !== undefined &&
+    (source.status === "fresh" || source.status === "refreshing" || source.status === "stale"));
+  const sharedTime = observations[0]?.time;
+  const sharedInstant = observations[0]?.observedAt;
+  emptyState.dataset.state = coverage.complete && !filtered ? "empty" : "limited";
+  if (emptyState.dataset.state === "empty") return;
+  const body = document.createElement("div");
+  body.className = "empty-state-detail";
+  const title = denied ? "Sessions are hidden"
+    : withdrawn ? "Session list withdrawn"
+    : coverage.complete ? "No sessions on this host"
+      : expired ? observation === undefined ? "Session lists expired" : "Session list expired"
+        : retainedEmpty ? observations.every(source => source.observedAt === sharedInstant)
+          ? `No sessions as of ${sharedTime}` : "No sessions in the last received lists"
+          : !coverage.failed ? "Checking for sessions"
+            : observation !== undefined ? "This host has not been checked" : "No sessions to show yet";
+  const detail = denied ? "Ask the gateway operator to restore access."
+    : withdrawn ? "A fresh authorized list is needed before showing sessions."
+    : coverage.complete ? "Choose another host or start a session here."
+    : !coverage.failed ? retainedEmpty ? "Checking for updates before confirming this list is still empty."
+      : "Waiting for the remaining hosts before confirming this list is empty."
+      : observation !== undefined ? "Its sessions may appear when the connection returns."
+        : "Some hosts could not be checked. Sessions may appear when they reconnect.";
+  body.append(createTextElement("h2", "", title), createTextElement("p", "", detail));
+  if (!denied) body.append(createTextElement("p", "empty-coverage", coverage.complete ? "No live sessions are listed here." : coverage.copy));
+  if (filtered) {
+    const all = createTextElement("button", "status-action", "All hosts");
+    all.addEventListener("click", () => {
+      hostPicker.value = "all";
+      hostPicker.dispatchEvent(new Event("change"));
+    });
+    body.append(all);
+  }
+  emptyState.append(body);
+}
+
 function renderDirectoryContents(arrived = false): void {
   renderFleetStatus();
   sessionList.replaceChildren();
-  if (!directoryLoaded && sessions.size === 0) {
+  sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
+  if (sessions.size === 0 && !scopeCoverage().failed &&
+    ![...sources.keys()].some(key => (selectedScope === "all" || key === selectedScope) && sourceAvailability(key).time !== undefined)) {
     emptyState.hidden = true;
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
     return;
   }
   const visibleSessions = scopedSessions();
-  emptyState.hidden = visibleSessions.length > 0 || !scopeComplete();
+  emptyState.hidden = visibleSessions.length > 0;
   if (visibleSessions.length === 0) {
+    renderEmptyState();
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
     sessionList.className = "session-list";
-    sessionList.setAttribute("aria-label", "Live OMP sessions");
+    sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
     if (arrived) renderAllClear([], [], true);
     return;
   }
@@ -1900,20 +2025,20 @@ function renderDirectoryContents(arrived = false): void {
   }
 
   directoryTitle.textContent = "Sessions";
-  directoryCount.className = "count-pill count-pill-live";
+  directoryCount.className = `count-pill ${scopeComplete() ? "count-pill-live" : "count-pill-listed"}`;
   const liveWorkingCount = working.length + dismissed.length;
-  directoryCount.textContent = `Live · ${liveWorkingCount}`;
+  directoryCount.textContent = `${scopeComplete() ? "Live" : "Listed"} · ${liveWorkingCount}`;
   sessionList.className = "session-list all-clear";
-  sessionList.setAttribute("aria-label", "Live OMP sessions");
+  sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
   renderAllClear(working, dismissed, arrived);
 }
 
 function setConnectionState(
   chip: HTMLElement,
-  state: "connected" | "reconnecting" | "offline",
+  state: "connected" | "connecting" | "reconnecting" | "offline" | "forbidden",
   copy?: string,
 ): void {
-  const label = copy ?? (state === "connected" ? "Connected" : state === "reconnecting" ? "Reconnecting…" : "Offline");
+  const label = copy ?? (state === "connected" ? "Connected" : state === "connecting" ? "Connecting…" : state === "reconnecting" ? "Reconnecting…" : "Offline");
   const compact = state === "connected" && copy === undefined ? "true" : "false";
   if (chip.dataset.state !== state) chip.dataset.state = state;
   if (chip.dataset.compact !== compact) chip.dataset.compact = compact;
@@ -1926,7 +2051,7 @@ function setConnectionState(
 
 function sessionEndedCopy(reason: string | null): string {
   const exitCode = reason?.match(/\bexit(?:ed)?(?:\s+with)?(?:\s+code)?\s+(-?\d+)\b/iu)?.[1];
-  return exitCode === undefined ? "Mac/session ended" : `Mac/session ended · exit ${exitCode}`;
+  return exitCode === undefined ? "Session ended" : `Session ended · exit ${exitCode}`;
 }
 
 function hideTriageBar(shell: ActiveCollabShell, rerenderConnection = true): void {
@@ -1937,18 +2062,28 @@ function hideTriageBar(shell: ActiveCollabShell, rerenderConnection = true): voi
   }
   shell.answerTriageVisible = false;
   shell.triageBar.hidden = true;
+  delete shell.launchFailureSource;
+  delete shell.triageBar.dataset.failureKind;
   delete shell.triageBar.dataset.dismissible;
   delete shell.shell.dataset.triageVisible;
   if (hidAnswerTriage && rerenderConnection) renderConnectionState(shell);
 }
 
+function dismissTriageBar(shell: ActiveCollabShell): void {
+  // A dismissed target action must not reappear when its pending list refresh completes.
+  if (shell.launchFailureSource !== undefined) selectionEpoch += 1;
+  hideTriageBar(shell);
+  reconcileActiveCollabShell();
+}
+
 function showTriageBar(
   shell: ActiveCollabShell,
-  kind: "next" | "clear" | "hold" | "sending" | "reconnecting" | "ended",
+  kind: "next" | "clear" | "hold" | "sending" | "reconnecting" | "launch-failed" | "ended",
   copy: string,
   actionLabel?: string,
   action?: () => void,
 ): void {
+  if (shell.launchFailureSource !== undefined && kind !== "launch-failed") return;
   const drawCheck = kind === "clear" && copy.startsWith("✓ Answered — all clear") &&
     shell.triageBar.dataset.kind !== "clear";
   hideTriageBar(shell, false);
@@ -1982,10 +2117,18 @@ function showTriageBar(
   }
   shell.triageBar.hidden = false;
   shell.shell.dataset.triageVisible = "true";
-  if (kind === "next" || kind === "clear") {
+  if (kind === "next" || kind === "clear" || kind === "launch-failed") {
     shell.triageBar.dataset.dismissible = "true";
+  }
+  if (kind === "next" || kind === "clear") {
     shell.triageTimeout = window.setTimeout(() => hideTriageBar(shell), 8_000);
   }
+}
+
+function showLaunchFailure(shell: ActiveCollabShell, sourceKey: SourceKey, kind: "offline" | "unauthorized" | "expired", copy: string): void {
+  showTriageBar(shell, "launch-failed", copy, "Sessions", () => { void restoreDirectory(undefined, undefined, false); });
+  shell.launchFailureSource = sourceKey;
+  shell.triageBar.dataset.failureKind = kind;
 }
 
 function clearConnectionTimers(shell: ActiveCollabShell): void {
@@ -2012,11 +2155,10 @@ function pathInterrupted(health: PathHealth): boolean {
 }
 
 function retryingCopy(path: "gateway" | "relay", state: CollabEmbedState): string {
-  const label = path === "gateway" ? "Gateway unavailable" : "Relay unavailable";
   const retryAt = path === "gateway" ? state.gatewayHealth.retryAt : state.relayHealth.retryAt;
-  if (retryAt === null) return `${label} — retrying…`;
+  if (retryAt === null) return "Reconnecting automatically…";
   const seconds = Math.max(0, Math.ceil((retryAt - Date.now()) / 1_000));
-  return seconds > 0 ? `${label} — retrying in ${seconds}s` : `${label} — retrying…`;
+  return seconds > 0 ? `Retrying in ${seconds}s` : "Reconnecting automatically…";
 }
 
 function scheduleConnectionRender(shell: ActiveCollabShell, delay: number, kind: "delay" | "tick"): void {
@@ -2036,7 +2178,8 @@ function renderConnectionState(shell: ActiveCollabShell): void {
   if (state === undefined || activeCollabShell !== shell) return;
   if (state.gatewayHealth.state === "forbidden") {
     clearConnectionTimers(shell);
-    setConnectionState(shell.connectionChip, "offline", "Access withdrawn — return to sessions");
+    setConnectionState(shell.connectionChip, "forbidden", "Access withdrawn");
+    showTriageBar(shell, "ended", "This identity can no longer access the session.", "Back to Sessions", returnToDirectory);
     return;
   }
 
@@ -2065,14 +2208,6 @@ function renderConnectionState(shell: ActiveCollabShell): void {
       progressCopy = `${prefix} ${percent}%`;
     }
   }
-  if (!shell.hasBeenLive) {
-    if (!live || loading !== null) {
-      setConnectionState(shell.connectionChip, "reconnecting", progressCopy ?? "Connecting…");
-      return;
-    }
-    shell.hasBeenLive = true;
-  }
-
   const gatewayInterrupted = pathInterrupted(state.gatewayHealth);
   const relayInterrupted = pathInterrupted(state.relayHealth);
   if (gatewayInterrupted || relayInterrupted) {
@@ -2087,7 +2222,7 @@ function renderConnectionState(shell: ActiveCollabShell): void {
       setConnectionState(shell.connectionChip, "reconnecting", "Reconnecting…");
       if (state.responsePending && !shell.answerTriageVisible) {
         showTriageBar(shell, "sending", "Sending…");
-      } else if (!shell.answerTriageVisible && !shell.triageBar.hidden) {
+      } else if (!shell.answerTriageVisible && !shell.triageBar.hidden && shell.launchFailureSource === undefined) {
         hideTriageBar(shell);
       }
       scheduleConnectionRender(shell, CONNECTION_EXTENDED_MS - elapsed, "delay");
@@ -2113,6 +2248,14 @@ function renderConnectionState(shell: ActiveCollabShell): void {
   }
   delete shell.interruptionStartedAt;
   delete shell.outagePath;
+  if (!shell.hasBeenLive) {
+    if (!live || loading !== null) {
+      setConnectionState(shell.connectionChip, "connecting", progressCopy ?? "Connecting…");
+      if (shell.triageBar.dataset.kind === "reconnecting") hideTriageBar(shell);
+      return;
+    }
+    shell.hasBeenLive = true;
+  }
   if (progressCopy !== null) {
     if (shell.recoveredTimeout !== undefined) {
       window.clearTimeout(shell.recoveredTimeout);
@@ -2194,10 +2337,10 @@ function returnToDirectory(historyValue?: unknown): void {
  * cannot be left waiting behind an inert shell — and resolves once the refreshed snapshot has
  * landed, so a resume can decide against current metadata rather than the pre-background copy.
  */
-function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, "sourceKey" | "instanceId">): Promise<boolean> {
+function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, "sourceKey" | "instanceId">, refresh = true): Promise<boolean> {
   const focusRef = activeCollabShell?.presentation === "request-tray" ? activeCollabShell
     : requestRef ?? (pendingLaunch?.presentation === "request-tray" ? pendingLaunch.ref : undefined);
-  cancelLaunch();
+  cancelLaunch(undefined, false);
   tray.close(true, true);
   selectionEpoch += 1;
   collabShellDisposedOnPageHide = false;
@@ -2221,9 +2364,15 @@ function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, 
   renderedSignature = snapshot.signature;
   history.replaceState({ ompDirectory: historyState }, "", "/");
   window.scrollTo(0, historyState.scrollY);
+  render();
   const focused = focusRef === undefined ? undefined : focusDirectoryRequest(focusRef);
+  if (!refresh) {
+    applyActivatedWorkerUpdate();
+    return Promise.resolve(false);
+  }
   const epoch = selectionEpoch;
-  const refreshed = Promise.all([refreshAndConnect(), ...[...remotes.values()].map(remote => remote.refresh())])
+  const refreshed = Promise.all([authorizationDenied ? Promise.resolve(false) : refreshAndConnect(),
+    ...[...remotes.values()].map(remote => remote.refresh())])
     .then(([local]) => {
       if (focusRef !== undefined && selectionEpoch === epoch && activeCollabShell === undefined &&
         pendingLaunch === undefined && !trayHost.open &&
@@ -2279,7 +2428,6 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
     session => sourceFresh(session.sourceKey) && (sessionKey(session) !== sessionKey(current) || session.ask?.requestId !== currentRequestId),
   );
   if (next !== undefined) {
-    shell.answerShown = true;
     showTriageBar(shell, "sending", "Opening next request…");
     const mode: LaunchMode = next.canControl ? "control" : "view";
     const opened = await launch(next, mode, undefined, next.ask?.requestId, shell.scope);
@@ -2287,23 +2435,7 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
       holdSession(current, false);
       return;
     }
-    if (activeCollabShell !== shell) return;
-    shell.answerShown = false;
-    const latestCurrent = sessions.get(sessionKey(current));
-    if (
-      latestCurrent?.generation !== current.generation ||
-      latestCurrent.ask?.requestId !== currentRequestId
-    ) {
-      reconcileActiveCollabShell();
-      return;
-    }
-    showTriageBar(
-      shell,
-      "hold",
-      "Couldn't open the next request. This one is still queued.",
-      "Try again",
-      () => void holdCurrentAskAndAdvance(shell, current),
-    );
+    if (activeCollabShell === shell) reconcileActiveCollabShell();
     return;
   }
   if (!holdSession(current, false)) return;
@@ -2312,7 +2444,8 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
   showTriageBar(
     shell,
     "clear",
-    scopeComplete(shell.scope) ? `Queue clear · ${held} on hold — handle at desk` : `${held} on hold · some hosts unavailable`,
+    scopeComplete(shell.scope) ? `Queue clear · ${held} on hold — handle at desk`
+      : scopeCoverage(shell.scope).failed ? `${held} on hold · some hosts unavailable` : `${held} on hold · checking other hosts`,
     "Sessions",
     returnToDirectory,
   );
@@ -2327,7 +2460,8 @@ function reconcileActiveCollabShell(): void {
   if (
     shell === undefined ||
     shell.answerShown ||
-    !directoryLoaded ||
+    pendingLaunch !== undefined ||
+    shell.launchFailureSource !== undefined ||
     shell.latestEmbedState?.responsePending === true
   ) {
     return;
@@ -2338,7 +2472,7 @@ function reconcileActiveCollabShell(): void {
     shell.answerShown = true;
     clearConnectionTimers(shell);
     setConnectionState(shell.connectionChip, "offline", "Ended");
-    showTriageBar(shell, "ended", "Mac/session ended", "Back to Sessions", returnToDirectory);
+    showTriageBar(shell, "ended", "Session ended", "Back to Sessions", returnToDirectory);
     return;
   }
   if (shell.openedRequestId !== undefined && current.ask?.requestId === shell.openedRequestId) {
@@ -2373,7 +2507,8 @@ function reconcileActiveCollabShell(): void {
   showTriageBar(
     shell,
     "clear",
-    scopeComplete(shell.scope) ? `✓ Answered — all clear · ${working} live` : "Answered — some hosts are unavailable",
+    scopeComplete(shell.scope) ? `✓ Answered — all clear · ${working} live`
+      : scopeCoverage(shell.scope).failed ? "Answered — some hosts are unavailable" : "Answered — checking other hosts",
     "Sessions",
     returnToDirectory,
   );
@@ -2494,7 +2629,7 @@ function enterCollabClient(
     void launch(current, "control", control, current.ask?.requestId, shellState.scope);
   });
   const connection = createTextElement("span", "conn-chip", "Connecting…");
-  setConnectionState(connection, "reconnecting", "Connecting…");
+  setConnectionState(connection, "connecting", "Connecting…");
   connection.setAttribute("role", "status");
   connection.setAttribute("aria-live", "polite");
   connection.setAttribute("aria-atomic", "true");
@@ -2525,7 +2660,7 @@ function enterCollabClient(
       event.target !== null &&
       !triageBar.contains(event.target as Node)
     ) {
-      hideTriageBar(activeCollabShell ?? shellState);
+      dismissTriageBar(activeCollabShell ?? shellState);
     }
   });
   shell.addEventListener("keydown", event => {
@@ -2537,7 +2672,7 @@ function enterCollabClient(
     }
     if (event.key === "Escape" && triageBar.dataset.dismissible === "true") {
       event.preventDefault();
-      hideTriageBar(activeCollabShell ?? shellState);
+      dismissTriageBar(activeCollabShell ?? shellState);
     }
   });
   triageBar.addEventListener("pointerdown", event => {
@@ -2545,7 +2680,7 @@ function enterCollabClient(
   });
   triageBar.addEventListener("pointerup", event => {
     if (triageSwipeStart !== undefined && Math.abs(event.clientY - triageSwipeStart) >= 32) {
-      hideTriageBar(activeCollabShell ?? shellState);
+      dismissTriageBar(activeCollabShell ?? shellState);
     }
     triageSwipeStart = undefined;
   });
@@ -2553,10 +2688,12 @@ function enterCollabClient(
     triageSwipeStart = undefined;
   });
 
-  snapshotController?.abort();
-  snapshotController = undefined;
-  clearReconnectTimeout();
-  reconnectAttempt = 0;
+  if (session.sourceKey === localKey) {
+    snapshotController?.abort();
+    snapshotController = undefined;
+    clearReconnectTimeout();
+    reconnectAttempt = 0;
+  }
   const commitHistory = location.pathname !== "/client/";
   const commit = (): void => {
     originTile?.style.setProperty("view-transition-name", "");
@@ -2721,27 +2858,23 @@ async function launch(
   if (!sourceFresh(session.sourceKey)) return false;
   const source = sources.get(session.sourceKey);
   if (source === undefined) return false;
+  // New intent supersedes a waiting restoration even when this launch subsequently fails.
+  // Creation's handoff continues the intent established when its wizard opened.
+  if (!creationHandoff) selectionEpoch += 1;
+  if (activeCollabShell?.launchFailureSource !== undefined) hideTriageBar(activeCollabShell, false);
   selectedScope = scope;
   hostPicker.value = scope;
   pendingNotificationLaunch = undefined;
   pendingNotificationRoute = false;
   cancelLaunch();
-  let requestStatus: HTMLElement | undefined;
-  let requestRetry: HTMLButtonElement | undefined;
   if (presentation === "request-tray" && activeCollabShell === undefined) {
     captureDirectorySnapshot();
     if (tray.id === "request") tray.close(true, true);
     const preview = document.createElement("div");
     preview.className = "request-preview";
-    requestStatus = createTextElement("p", "request-status", "Connecting…");
+    const requestStatus = createTextElement("p", "request-status", "Connecting…");
     requestStatus.setAttribute("role", "status");
-    requestRetry = document.createElement("button");
-    requestRetry.type = "button";
-    requestRetry.className = "tray-choice";
-    requestRetry.textContent = "Try again";
-    requestRetry.hidden = true;
-    requestRetry.addEventListener("click", () => void launch(session, mode, button, requestId, scope, presentation));
-    preview.append(createSessionSummary(session), createTextElement("p", "ask-preview", session.ask?.preview ?? "Waiting for your input"), requestStatus, requestRetry);
+    preview.append(createSessionSummary(session), createTextElement("p", "ask-preview", session.ask?.preview ?? "Waiting for your input"), requestStatus);
     tray.open({ id: "request", title: spokenTitle(session), tone: "attention", body: preview, icon: createSessionTile(session) }, {
       onClose: () => { void restoreDirectory(undefined, session); },
     });
@@ -2754,14 +2887,18 @@ async function launch(
     controller: new AbortController(), settled: false,
   };
   pendingLaunch = attempt;
-  const currentAttempt = (): boolean => {
+  const currentBinding = (): SessionMetadata | undefined => {
     const current = sessions.get(sessionKey(attempt.ref));
     return pendingLaunch === attempt && !attempt.settled && !attempt.controller.signal.aborted &&
       selectionEpoch === attempt.epoch && selectedScope === attempt.scope &&
       remotes.get(attempt.ref.sourceKey)?.epoch === attempt.sourceEpoch &&
       sources.get(attempt.ref.sourceKey) === source && sourceFresh(attempt.ref.sourceKey) &&
       current?.generation === attempt.ref.generation &&
-      (requestId === undefined || current.ask?.requestId === requestId);
+      (requestId === undefined || current.ask?.requestId === requestId) ? current : undefined;
+  };
+  const currentAttempt = (): boolean => {
+    const current = currentBinding();
+    return current !== undefined && (mode === "view" ? current.canView : current.canControl);
   };
   const sourceShell = activeCollabShell;
   // A row keeps its tile, title and facts while it opens (they travel into the shell); only a
@@ -2774,7 +2911,7 @@ async function launch(
     button.dataset.busy = "true";
     button.setAttribute("aria-busy", "true");
     if (labelOnly) button.textContent = mode === "view" ? "Opening view…" : "Opening control…";
-  } else if (sourceShell === undefined) {
+  } else if (sourceShell === undefined && session.sourceKey === localKey) {
     setStatus("loading", mode === "view" ? "Opening view…" : "Opening control…");
   }
   const settle = (): void => {
@@ -2788,7 +2925,9 @@ async function launch(
 
   const resetButton = (): void => {
     if (button === undefined) return;
-    button.disabled = !sourceFresh(session.sourceKey) || (mode === "view" ? !session.canView : !session.canControl);
+    const current = sessions.get(sessionKey(attempt.ref));
+    button.disabled = !sourceFresh(session.sourceKey) || current?.generation !== attempt.ref.generation ||
+      (mode === "view" ? !current.canView : !current.canControl);
     delete button.dataset.busy;
     button.removeAttribute("aria-busy");
     if (labelOnly) button.textContent = idleLabel;
@@ -2796,13 +2935,17 @@ async function launch(
   let stylesheet: HTMLLinkElement | undefined;
   let startCollabWithCapability: StartCollabWithCapability;
   const discard = (): false => {
+    const current = currentBinding();
+    if (current !== undefined && !(mode === "view" ? current.canView : current.canControl)) {
+      fail("expired", `${mode === "control" ? "Control" : "View"} is no longer available for this session. Choose another session.`);
+      return false;
+    }
     const owned = pendingLaunch === attempt;
     settle();
     resetButton();
     if (owned && creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
-    if (owned && requestStatus !== undefined && tray.id === "request") {
-      requestStatus.textContent = "That session changed or expired. Try again from the directory.";
-      tray.refresh();
+    if (owned && attempt.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
+      void restoreDirectory(undefined, session, false);
     }
     if (pendingLaunch === undefined && activeCollabShell === undefined && stylesheet !== undefined) {
       stylesheet.remove();
@@ -2815,15 +2958,11 @@ async function launch(
     if (pendingLaunch !== attempt) return discard();
     settle();
     resetButton();
+    const remoteFailure = session.sourceKey !== localKey;
+    if (remoteFailure && kind !== "unauthorized") remoteLaunchFailures.set(session.sourceKey, message);
     if (sourceShell !== undefined && activeCollabShell === sourceShell) {
-      showTriageBar(sourceShell, "reconnecting", message, "Try again", () => {
-        showTriageBar(
-          sourceShell,
-          "sending",
-          mode === "view" ? "Opening view…" : "Opening control…",
-        );
-        void launch(session, mode, button, requestId, scope, presentation);
-      });
+      if (!remoteFailure) setStatus(kind, message);
+      showLaunchFailure(sourceShell, session.sourceKey, kind, kind === "unauthorized" ? message : `${source.label}: ${message}`);
       return true;
     }
     // A concurrent launch may already have mounted a collaboration; its route and styles stay put.
@@ -2832,12 +2971,12 @@ async function launch(
       stylesheet?.remove();
       collabStylesheetLoad = undefined;
     }
-    setStatus(kind, message);
-    if (requestStatus !== undefined && tray.id === "request") {
-      requestStatus.textContent = message;
-      if (requestRetry !== undefined) requestRetry.hidden = kind === "unauthorized";
-      tray.refresh();
+    if (attempt.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
+      void restoreDirectory(undefined, session, false);
     }
+    if (remoteFailure) {
+      renderFleetStatus();
+    } else setStatus(kind, message);
     applyActivatedWorkerUpdate();
     return false;
   };
@@ -2885,23 +3024,23 @@ async function launch(
   if (!response.ok) {
     if (response.status === 403) {
       if (session.sourceKey === localKey) {
-        authorizationDenied = true;
-        creation.cancel("forbidden", localKey);
-        clearCreationDraft(localKey);
-        fail("unauthorized", "This tailnet identity is not authorized.");
+        if (sourceShell !== undefined && sourceShell.sourceKey !== localKey) {
+          fail("unauthorized", `Access withdrawn on ${source.label}. Choose another session.`);
+        }
+        withdrawLocalAuthorization();
+        return discard();
       } else {
         fail("unauthorized", `Access withdrawn on ${source.label}. Choose another session.`);
         remotes.get(session.sourceKey)?.forbid();
-        if (sourceShell !== undefined && activeCollabShell === sourceShell) {
-          showTriageBar(sourceShell, "reconnecting", `Access withdrawn on ${source.label}. Choose another session.`, "Sessions", () => {
-            void restoreDirectory();
-          });
-        }
         applyActivatedWorkerUpdate();
       }
     } else if (response.status === 404 || response.status === 409) {
       const preservedShell = fail("expired", "That session changed or expired. Try again.");
-      if (!preservedShell && (session.sourceKey === localKey ? await refreshAndConnect() : await remotes.get(session.sourceKey)?.refresh() === "healthy")) {
+      const refreshEpoch = selectionEpoch;
+      const refreshed = session.sourceKey === localKey ? await refreshAndConnect()
+        : await remotes.get(session.sourceKey)?.refresh() === "healthy";
+      // A successful observation releases source-owned failure feedback; never recreate it.
+      if (refreshed && !preservedShell && session.sourceKey === localKey && selectionEpoch === refreshEpoch) {
         setStatus("expired", "That session changed or expired. The list has been refreshed.");
       }
     } else {
@@ -2924,9 +3063,11 @@ async function launch(
       fail("offline", "Gateway unavailable. Check your tailnet connection and try again.");
       return false;
     }
-    if (!currentAttempt()) return discard();
+    const current = currentBinding();
+    if (current === undefined || !(mode === "view" ? current.canView : current.canControl)) return discard();
+    if (remoteLaunchFailures.delete(session.sourceKey)) renderFleetStatus();
     capability = payload.capability;
-    enterCollabClient(capability, startCollabWithCapability, session, mode, requestId, originTile, attempt.presentation);
+    enterCollabClient(capability, startCollabWithCapability, current, mode, requestId, originTile, attempt.presentation);
     settle();
     capability = undefined;
     return true;
@@ -2941,12 +3082,15 @@ async function launch(
 
 function applyEvent(event: SessionEvent, epoch: number): boolean {
   if (epoch !== directoryEpoch || event.revision < directoryRevision) return false;
+  if (localObservationWithdrawn && event.type !== "snapshot") return false;
   directoryRevision = event.revision;
   authorizationDenied = false;
   directoryLoaded = true;
   localFresh = true;
   lastFreshAt = Date.now();
+  clearLocalTransportFailure();
   if (event.type === "snapshot") {
+    localObservationWithdrawn = false;
     replaceSessionSnapshot(event.sessions);
   } else if (event.type === "session_upsert") {
     const session = { ...event.session, sourceKey: localKey };
@@ -2965,6 +3109,7 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
     }
   }
   if (event.type !== "snapshot") reconcileLocalRecords();
+  releaseLaunchFailure(localKey);
   render();
   reconcileActiveCollabShell();
   return true;
@@ -2983,7 +3128,9 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
-  if (!directoryLoaded) setStatus("loading", "Loading sessions…");
+  if (!directoryLoaded && transportFailureKind === undefined && !authorizationDenied && !localObservationWithdrawn) {
+    setStatus("loading", "Loading sessions…");
+  }
   try {
     const response = await fetch("/api/v1/sessions", {
       cache: "no-store",
@@ -2993,16 +3140,7 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     responseReceived = true;
     if (epoch !== directoryEpoch) return false;
     if (response.status === 403) {
-      authorizationDenied = true;
-      creation.cancel("forbidden", localKey);
-      clearCreationDraft(localKey);
-      directoryLoaded = false;
-      localFresh = false;
-      replaceSessionSnapshot([], localKey, false);
-      cancelLaunch(localKey);
-      if (activeCollabShell?.sourceKey === localKey) returnToDirectory();
-      render();
-      setStatus("unauthorized", "This tailnet identity is not authorized.");
+      withdrawLocalAuthorization();
       return false;
     }
     if (!response.ok) throw new Error("snapshot failed");
@@ -3010,10 +3148,13 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     if (epoch !== directoryEpoch || payload.revision < directoryRevision) return false;
     directoryRevision = payload.revision;
     authorizationDenied = false;
+    localObservationWithdrawn = false;
     directoryLoaded = true;
     localFresh = true;
     lastFreshAt = Date.now();
+    clearLocalTransportFailure();
     replaceSessionSnapshot(payload.sessions);
+    releaseLaunchFailure(localKey);
     render();
     setStatus("ready", "");
     return true;
@@ -3065,12 +3206,15 @@ function connectEvents(epoch: number): void {
   }
   source.addEventListener("keepalive", () => {
     if (events !== source || epoch !== directoryEpoch) return;
+    if (localObservationWithdrawn) return;
     if (eventStreamStale) {
       failEventStream(source, epoch);
       return;
     }
     lastFreshAt = Date.now();
     localFresh = true;
+    clearLocalTransportFailure();
+    releaseLaunchFailure(localKey);
     armEventLiveness(source, epoch);
     if (!notificationRouteStatusLocked) setStatus("ready", "");
   });
@@ -3122,7 +3266,9 @@ async function resolvePendingNotificationRoute(): Promise<void> {
   }
 }
 
+let fleetRecovery: Promise<void> | undefined;
 async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
+  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
   if (resetBackoff) reconnectAttempt = 0;
   clearReconnectTimeout();
   const epoch = directoryEpoch + 1;
@@ -3136,6 +3282,13 @@ async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
   eventStreamStale = false;
   const loaded = await loadSnapshot(epoch);
   if (loaded && epoch === directoryEpoch) {
+    if (fleetBootstrapFailed) {
+      fleetRecovery ??= initializeFleet().finally(() => { fleetRecovery = undefined; });
+      await fleetRecovery;
+      if (epoch !== directoryEpoch) return false;
+      render();
+      setStatus("ready", "");
+    }
     reconnectAttempt = 0;
     connectEvents(epoch);
     warmCollabClient();
@@ -3161,6 +3314,7 @@ for (const id of ["#new-session", "#empty-new-session"]) {
   requiredElement<HTMLButtonElement>(id).addEventListener("click", () => {
     cancelLaunch();
     clearCreationDraft();
+    selectionEpoch += 1;
     creation.open();
   });
 }
@@ -3197,7 +3351,10 @@ window.addEventListener("pageshow", event => {
   void refreshAndConnect();
 });
 window.addEventListener("online", () => {
-  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  for (const remote of remotes.values()) {
+    remote.setVisible(document.visibilityState === "visible");
+    void remote.refresh(true);
+  }
   void refreshAndConnect();
 });
 window.addEventListener("pagehide", () => {
@@ -3211,7 +3368,8 @@ window.addEventListener("pagehide", () => {
     collabShellDisposedOnPageHide = true;
   }
   selectionEpoch += 1;
-  cancelLaunch();
+  // Keep the directory snapshot beside the metadata-only intent until persisted pageshow revalidates it.
+  cancelLaunch(undefined, false);
   for (const remote of remotes.values()) remote.setVisible(false);
 });
 window.addEventListener("popstate", () => {
@@ -3223,7 +3381,7 @@ window.addEventListener("popstate", () => {
 window.addEventListener("offline", () => {
   localFresh = false;
   render();
-  for (const remote of remotes.values()) remote.setVisible(false);
+  for (const remote of remotes.values()) remote.interrupt();
   directoryEpoch += 1;
   directoryRevision = -1;
   snapshotController?.abort();
@@ -3275,15 +3433,19 @@ document.addEventListener("freeze", () => {
  * a timer that was frozen with it.
  */
 document.addEventListener("visibilitychange", () => {
-  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  for (const remote of remotes.values()) {
+    remote.setVisible(document.visibilityState === "visible");
+    if (document.visibilityState === "visible") void remote.refresh(true);
+  }
   if (document.visibilityState !== "visible") {
     if (creation.isActive) cancelLaunch();
     creation.cancel("background");
-    clearTransportFailureTracking();
+    resetTransportGuidance();
     return;
   }
   maybeStartFirstRun();
   if (authorizationDenied || directoryStreamIsLive()) return;
+  if (transportFailureKind !== undefined) showTransportFailure(transportFailureKind);
   localFresh = false;
   render();
   void refreshAndConnect();

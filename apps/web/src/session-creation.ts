@@ -210,6 +210,7 @@ export class SessionCreationController {
         const valid = validInitialPromptDraft(draft.value);
         create.disabled = !valid;
         draft.setAttribute("aria-invalid", String(!valid));
+        note.className = valid ? "" : "creation-error";
         note.textContent = valid
           ? "Up to 8,000 characters. Kept only in this page; added to the Control composer, never sent automatically."
           : "First task is too long. Keep it within 8,000 characters and 32 KiB before creating.";
@@ -262,7 +263,8 @@ export class SessionCreationController {
       this.showStep("project");
       if (revisionMismatch) {
         const message = text("p", "Choices refreshed. Review them and choose Create again.");
-        this.deps.tray.heading?.parentElement?.after(message);
+        message.className = "creation-notice";
+        this.deps.tray.heading?.closest(".tray-panel")?.querySelector(".creation-body")?.prepend(message);
         this.deps.tray.refresh();
       }
     } catch {
@@ -276,10 +278,8 @@ export class SessionCreationController {
       : reason === "ledger_unavailable" ? "Creation tracking is unavailable on this host. Ask the operator to check its private ledger."
         : reason === "configuration_unavailable" ? "The approved startup configuration is unavailable on this host."
           : reason === "tern_unavailable" ? "Tern is unavailable on this host. Open Tern there before trying again."
-            : "Session creation is unavailable on this host. It may need a newer gateway or its connection restored.";
-    const create = button("Create and open Control", () => {}, true);
-    create.disabled = true;
-    body.append(text("p", copy), create, button("Retry options", () => void this.loadOptions()));
+            : "Cannot load this host's approved choices. Check its connection or choose another host.";
+    body.append(text("p", copy), button("Retry options", () => void this.loadOptions()));
     this.panel("terminal", "Creation unavailable", body, this.deps.sources().length > 1 ? () => this.showStep("host") : undefined);
   }
 
@@ -343,7 +343,7 @@ export class SessionCreationController {
     this.progressState = active;
   }
 
-  private paused(copy = "Stopped watching. The command may still be starting on the host."): void {
+  private paused(copy = "The command may still be starting. Check creation before starting another session."): void {
     const body = document.createElement("div");
     body.append(text("p", `Creation on ${this.intent?.source.label ?? this.source!.label}. ${copy}`), button("Check creation", () => void this.watch(false), true),
       button("Start another session", () => this.startChoices()));
@@ -423,7 +423,7 @@ export class SessionCreationController {
           this.admissionFailure(error.code);
         } else this.paused(error instanceof CreationTransportError && error.code === "not_found"
           ? "This creation is no longer available to this identity. Check Tern and the directory before creating another."
-          : "The host response was lost. Check creation looks up an acknowledged operation or replays the same request only during its first hour. After that, a lost acknowledgement can only be checked in the directory.");
+          : "The host response was lost. Check creation to look up this request. Check Tern and the directory before starting another session.");
       }
     };
     await poll();

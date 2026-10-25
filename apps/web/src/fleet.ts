@@ -7,6 +7,7 @@ import {
   type SessionCreationOptions, type SessionCreationRequest, type SessionCreationReceipt, type SessionCreationStatus,
   type ClientConfigResponse, type FleetSource, type SessionListResponse,
 } from "@omp-session-gateway/protocol";
+import type { SourceStatus } from "./availability";
 
 export type SourceKey = string;
 export interface SessionRef {
@@ -19,7 +20,6 @@ export const sourceKey = (source: FleetSource): SourceKey => `${source.id}\0${so
 export const sessionKey = (ref: Pick<SessionRef, "sourceKey" | "instanceId">): string =>
   `${ref.sourceKey}\0${ref.instanceId}`;
 export type SnapshotResult = "healthy" | "unavailable" | "forbidden";
-export type SourceStatus = "loading" | "fresh" | "stale" | "unavailable" | "forbidden";
 export const SNAPSHOT_BYTES = 8 * 1024 * 1024;
 export const STALE_GRACE_MS = 35_000;
 
@@ -104,12 +104,13 @@ export class FleetTransport {
   ) { this.key = sourceKey(source); }
 
   setVisible(visible: boolean): void {
+    if (this.visible === visible) return;
     this.visible = visible;
     this.epoch += 1;
     this.request?.controller.abort();
     this.request = undefined;
     this.clearTimer();
-    if (this.status === "fresh") this.status = "stale";
+    if (this.status === "fresh") this.status = "refreshing";
     this.changed(this);
     if (visible) {
       this.failures = 0;
@@ -126,8 +127,33 @@ export class FleetTransport {
   private expire(): void {
     if (this.staleSince === undefined || this.time.now() - this.staleSince < STALE_GRACE_MS) return;
     this.snapshot = undefined;
-    if (this.status !== "forbidden") this.status = "unavailable";
+    if (this.status !== "forbidden") this.status = this.freshAt === undefined ? "unavailable" : "expired";
     this.changed(this);
+  }
+
+  private markUnavailable(): void {
+    this.failures += 1;
+    this.staleSince ??= this.time.now();
+    this.status = this.snapshot !== undefined ? "stale" : this.freshAt === undefined ? "unavailable" : "expired";
+    if (this.graceTimer === undefined) {
+      this.graceTimer = this.time.setTimeout(() => {
+        this.graceTimer = undefined;
+        this.expire();
+      }, Math.max(0, STALE_GRACE_MS - (this.time.now() - this.staleSince)));
+    }
+    this.expire();
+    this.changed(this);
+  }
+
+  /** Connectivity failed, not visibility: retain the observation and keep recovery polling alive. */
+  interrupt(): void {
+    if (this.status === "forbidden") return;
+    this.epoch += 1;
+    this.request?.controller.abort();
+    this.request = undefined;
+    this.clearTimer();
+    this.markUnavailable();
+    if (this.visible) void this.refresh();
   }
 
   forbid(): void {
@@ -146,6 +172,10 @@ export class FleetTransport {
     if (this.request !== undefined) return this.request.promise;
     if (!this.visible || (this.status === "forbidden" && !explicit)) {
       return Promise.resolve(this.status === "forbidden" ? "forbidden" : "unavailable");
+    }
+    if (explicit && this.status === "fresh") {
+      this.status = "refreshing";
+      this.changed(this);
     }
     this.clearTimer();
     const epoch = this.epoch;
@@ -197,17 +227,7 @@ export class FleetTransport {
       return "healthy";
     } catch {
       if (!current() || (controller.signal.aborted && !timedOut)) return "unavailable";
-      this.failures += 1;
-      this.staleSince ??= this.time.now();
-      this.status = this.snapshot === undefined ? "unavailable" : "stale";
-      if (this.graceTimer === undefined) {
-        this.graceTimer = this.time.setTimeout(() => {
-          this.graceTimer = undefined;
-          this.expire();
-        }, Math.max(0, STALE_GRACE_MS - (this.time.now() - this.staleSince)));
-      }
-      this.expire();
-      this.changed(this);
+      this.markUnavailable();
       return "unavailable";
     } finally {
       this.time.clearTimeout(timeout);

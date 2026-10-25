@@ -174,8 +174,8 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   share one centered column, `min(100% − 2rem, 60rem)`: wide enough for the
   client's 900px transcript, with no empty frame around it.
 - All clear: compact left-aligned status (ringed live dot, `All clear`, one muted
-  line), without repeating live counts already present in the masthead; `Host
-  coverage incomplete` turns the dot amber. Alert state appears only while
+  line), without repeating live counts already present in the masthead; incomplete
+  coverage uses a neutral dot and numeric host coverage. Alert state appears only while
   background alerts are enabled; otherwise a pill chip routes to Settings.
   Its sole delight moment is a same-scope queue → all-clear arrival: the emerald
   ring expands to 2.5× and fades over the long token, the title rises 4px over
@@ -191,6 +191,7 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   not permission prompts. Resume the last step; completing or skipping stays done.
   Noninteractive tray headings receive focus without an outline; interactive controls retain
   their focus rings. The affiliation/build footer appears in Settings, not the introduction.
+
 - Settings trays: `Background alerts` contains the seven-state toggle and mono build line;
   enabled alerts expose `Alert detail · <level>`, opening a child with the three radios.
 - Creation trays: visible `New session` actions in the heading area and empty state lead through
@@ -232,6 +233,45 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
 Security-UX invariants (do not regress): capabilities fetched only on tap
 (no-store), never rendered into DOM attributes/history/storage; Background alerts
 keeps the standing community/affiliation line.
+
+### Availability ownership
+
+The banner owns device/local-gateway interruptions; host rows name only independently failed
+remote sources. Loading and foreground refresh are neutral, never warnings or Retry actions.
+Failed fleet bootstrap uses that same banner, not a second row; local transport failure takes
+precedence. Offline preserves remote observation clocks and expiry while recovery continues.
+An established fault stays named during a pending retry, even before the first snapshot.
+Remote launch denial belongs to its host row, never the device/local authorization banner.
+Hiding or opening a remote session is not local recovery. Remote expired-session and failed-launch
+feedback stays on that source; Refresh host checks its list without retrying a capability launch.
+Cross-host Next-ask failures name the target in the existing triage bar, not the healthy
+predecessor's connection chip, and offer Sessions to reach that host's list-only recovery.
+The target owns that notice through predecessor health and Hold updates. It has no expiry timer:
+Sessions, explicit dismissal, a new launch, or a successful target observation releases it.
+Its denial accent is red; non-auth target failures retain amber.
+Local targets follow the same ownership as remote targets, including in-session mode withdrawal.
+Successful expiry refresh ends the failure notice; dismissing it restores Hold without waiting for refresh.
+Withdrawing View or Control during a launch names the unavailable mode instead of opening it.
+Coverage aggregates `N of M hosts up to date` without repeating labels. Only complete coverage
+earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Listed · N` pill and
+`Sessions`. Cached rows retain legible text, with dashed borders, muted state badges, and
+`List as of {time}` metadata. Every availability clock formats the last successful observation
+with the same locale-aware hour/minute formatter, never the failed-check time.
+Multiple empty lists share an `as of` clock only when their underlying observation instants match,
+not merely because their formatted hour and minute happen to match.
+
+An empty incomplete list explains that sessions may be missing; it never claims all clear.
+Access denial is red and has no Retry promise. A retained empty observation says `No sessions
+as of {time}`; an expired or authorization-withdrawn list does not claim it was empty.
+Withdrawal invalidates the old observation clock until a fresh authorized snapshot arrives.
+These observation distinctions apply to All hosts and single-host directories too.
+An independently observed remote empty list remains visible when local access is withdrawn.
+Quiet rechecks keep a retained empty observation's clock primary and checking progress secondary.
+In a session, reported health faults
+override neutral initial joining; the chip's name remains visible in request trays, and the
+triage bar supplies retry timing rather than repeating the fault. Creation keeps its
+single-topic steps; the explicit Create-and-Control action is amber, and unavailable creation
+offers recovery choices instead of a disabled primary action.
 
 ## Relationship to upstream
 

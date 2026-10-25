@@ -52,6 +52,19 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Show one connection-interruption story in the directory banner, reserve host rows for
+  independently failed sources, and keep routine refreshes quiet with no Retry action.
+- Report host coverage as counts without repeating host names; mark cached sessions and their
+  counts as listed rather than live, using one consistent “list as of” clock.
+- Keep empty and host-filtered directories informative when coverage is incomplete, without
+  claiming there are no sessions on an unreachable or unauthorized host.
+- Remove Retry from access-denied hosts; restoring access requires an operator or identity change.
+- Keep session outage names in the connection chip and recovery timing in the triage bar,
+  without repeating the same warning.
+- Show initial session joins as neutral progress until gateway/relay health reports a fault;
+  keep the fault name visible in compact request trays as well as full sessions.
+- Replace unavailable Create actions with recovery choices, distinguish uncertain creation from
+  failure, and identify Create-and-Control as a privileged action.
 - Refresh the embedded OMP client and wire pin to v18.12.6: coalesce streaming renders and parse
   only Markdown tails (#14728), take linear-time Markdown/math lexing (#13961, #14667), stop idle
   agent-drawer polling, and adopt the eval renderer rework. Vendor the pure-JavaScript marked fork
@@ -61,6 +74,35 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Keep failed local targets distinct from an open remote session, including Next, Hold, and withdrawn Control actions.
+- Clear expired-target notices after successful list recovery instead of recreating a resolved failure.
+- Restore Hold immediately when a target failure is dismissed while its list refresh is still pending.
+- Build a newly opened session's title and Control action from the latest authoritative metadata.
+- Show a shared empty-list clock only when the hosts' observation instants actually match.
+- Preserve cross-host Next and Hold failure notices through updates from the session still on screen, until dismissal or target recovery.
+- Mark target-host access denial in red, distinct from amber connection or launch failures.
+- Reject an in-flight session launch when View or Control is withdrawn, including launches resumed after browser restoration.
+- Keep a newer session choice authoritative even when its launch fails while an older browser restoration is waiting.
+- Resume pending request previews after a browser back/forward-cache restore without reusing an old launch.
+- Restore remote sessions and update their request triage even when local authorization or the local list is unavailable.
+- Attribute failed cross-host Next-ask actions to the target host and refresh expired target lists without replaying a launch.
+- Return failed or changed request previews to the directory without retaining an obsolete host-selection snapshot.
+- Show independently confirmed remote empty lists and retain empty-observation clocks during quiet rechecks.
+- Preserve local connection faults and recovery across phone backgrounding and remote-session opens.
+- Withdraw local sessions and invalidate old live events after authorization denial from launch,
+  creation, or embedded probes, not only directory-list requests.
+- Keep remote expired-session and failed-launch feedback on that host instead of replacing a local fault.
+- Explain withdrawn, expired, and retained-empty observations in All hosts and single-host directories.
+- Restore the current directory scope after a request preview is denied or cancelled.
+- Keep the named connection fault visible while retrying a failed first session list.
+- Report a remote launch access denial on that host alone, preserving the local connection story.
+- Keep accepted session creation attached to the same host when fleet configuration recovers.
+- Distinguish an authorization-withdrawn list from an observed empty list, even after going offline.
+- Keep remote observations stale and bounded while offline, and resume polling after scheduled
+  recovery even when the browser never emits an online event.
+- Give failed fleet bootstrap one banner owner and retry it when the local connection recovers.
+- Preserve the last successful empty-list clock, accessible Listed vocabulary, and neutral
+  checking copy in held queues and answer feedback.
 - Render Nerd Font Private Use Area symbols in session titles with a self-hosted Symbols Nerd
   Font Mono subset, split into immutable, content-hashed WOFF2 chunks loaded and cached only on
   first use; keep ordinary text on system fonts and make no remote font requests.
@@ -69,7 +111,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
   does not poison the shared Pixel lease before a mutating child has run (#430).
 - Recount prepared changelog entry-count drift against `release-text.json` before qualification,
   preserving every bullet, the exact requested candidate and immutable release records (#436).
-- Keep local 18-state visual validation required while making only Percy upload failures
+- Keep local 21-case visual validation required while making only Percy upload failures
   advisory, with visible local/upload outcomes and capability-free diagnostic artifacts.
   Snapshot queueing no longer claims confirmed submission before build finalization.
 

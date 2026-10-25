@@ -6,10 +6,16 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LOG_AUDIT_SUCCESS, PERCY_RUNTIME_NOTICE, assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
+import { VISUAL_CASE_COUNT, VISUAL_PHASES } from "../apps/web/visual/safe-reporter.ts";
 
-const localSuccess = { code: 0, stdout: "visual: validated=18 queued=0 outcome=passed\n", stderr: "" };
-const uploadSuccess = { code: 0, stdout: "visual: validated=18 queued=18 outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n", stderr: "" };
+const localSuccess = { code: 0, stdout: `visual: validated=${VISUAL_CASE_COUNT} queued=0 outcome=passed\n`, stderr: "" };
+const uploadSuccess = { code: 0, stdout: `visual: validated=${VISUAL_CASE_COUNT} queued=${VISUAL_CASE_COUNT} outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n`, stderr: "" };
 const auditSuccess = { code: 0, stdout: LOG_AUDIT_SUCCESS + "\n", stderr: "" };
+
+test("tray parity diagnostics retain their closed-set phase", () => {
+  expect(VISUAL_PHASES["parity-tray"]).toBe(true);
+  expect(VISUAL_PHASES["parity-settings"]).toBeUndefined();
+});
 
 test("local mode starts only the build and Playwright without Percy credentials or controls", async () => {
   const calls: Array<{ command: string[]; environment: NodeJS.ProcessEnv }> = [];
@@ -102,8 +108,8 @@ test("upload rejects disabled Percy, swallowed warnings, incomplete counts and f
     { ...uploadSuccess, stdout: localSuccess.stdout },
     { ...uploadSuccess, stdout: uploadSuccess.stdout + "Percy is not running\n" },
     { ...uploadSuccess, stderr: "SDK warning contains untrusted detail" },
-    { ...uploadSuccess, stdout: "visual: validated=18 queued=18 outcome=passed\n" },
-    { ...uploadSuccess, stdout: uploadSuccess.stdout.replace("queued=18", "queued=17") },
+    { ...uploadSuccess, stdout: `visual: validated=${VISUAL_CASE_COUNT} queued=${VISUAL_CASE_COUNT} outcome=passed\n` },
+    { ...uploadSuccess, stdout: uploadSuccess.stdout.replace(`queued=${VISUAL_CASE_COUNT}`, `queued=${VISUAL_CASE_COUNT - 1}`) },
     { ...uploadSuccess, code: 1 },
   ];
   for (const result of failures) expect(() => assertVisualResult(result, true)).toThrow("visual upload: incomplete or failed Percy build");
@@ -149,7 +155,7 @@ test("unfinalized upload retains only sanitized diagnostics and reports advisory
         calls++;
         return calls === 1 ? { code: 0, stdout: "", stderr: "" } : calls === 2 ? auditSuccess : {
           code: 1,
-          stdout: "visual-runner: phase=server reason=health-unreachable\nvisual: validated=18 queued=18 outcome=passed\n",
+          stdout: `visual-runner: phase=server reason=health-unreachable\nvisual: validated=${VISUAL_CASE_COUNT} queued=${VISUAL_CASE_COUNT} outcome=passed\n`,
           stderr: "HTTP 403 synthetic-sensitive-diagnostic",
         };
       }, () => "synthetic-node")).rejects.toThrow("visual upload: incomplete or failed Percy build");
@@ -161,7 +167,7 @@ test("unfinalized upload retains only sanitized diagnostics and reports advisory
     expect(summary).toContain("cli-http-403");
     expect(summary).toContain("; local visual validation PASSED");
     const local = JSON.parse(await readFile(join(directory, "local-summary.json"), "utf8"));
-    expect(local).toEqual({ validated: 18, queued: 0, outcome: "passed" });
+    expect(local).toEqual({ validated: VISUAL_CASE_COUNT, queued: 0, outcome: "passed" });
     for (const path of ["upload-stdout.log", "upload-stderr.log"]) {
       const text = await readFile(join(directory, path), "utf8");
       expect(text).not.toContain("synthetic-sensitive-diagnostic");
@@ -185,7 +191,7 @@ test("nested upload diagnostics preserve only closed-set phases, reasons and bou
     "visual-runner: phase=constructor reason=healthy",
     "visual: unknown-state / visual-phone-390x844: passed",
     "visual: validated=99 queued=0 outcome=passed",
-    "visual: validated=0 queued=18 outcome=passed",
+    `visual: validated=0 queued=${VISUAL_CASE_COUNT} outcome=passed`,
   ].join("\n");
   const lines = safeVisualLines(diagnostic);
   expect(lines.some(line => line.includes(planted))).toBe(false);
@@ -195,7 +201,7 @@ test("nested upload diagnostics preserve only closed-set phases, reasons and bou
   ]);
 });
 
-test("classified and unknown CLI diagnostics still fail a finalized 18-snapshot build", () => {
+test("classified and unknown CLI diagnostics still fail a finalized full-snapshot build", () => {
   for (const [text, category] of [
     ["[percy] Skipping baseline setup", "cli-baseline-warning"],
     ["[percy] [SDK Update Available] package: version", "cli-sdk-update"],
