@@ -342,7 +342,7 @@ export async function startDashboardFixture(
         response.writeHead(404).end("Not found");
         return;
       }
-      if (url.pathname === "/fixture-returning-device.js") {
+      if (url.pathname === "/assets/fixture-returning-device.js") {
         response.writeHead(200, { "Content-Type": "text/javascript", "Cache-Control": "no-store" });
         response.end('localStorage.setItem("omp.sessions.first-run.v1", JSON.stringify({version:1,step:"done",updatedAt:"2026-10-24T00:00:00.000Z"}));');
         return;
@@ -371,7 +371,7 @@ export async function startDashboardFixture(
         const servedBody = relative === "service-worker.js" && serviceWorkerVersion > 0
           ? Buffer.concat([body, Buffer.from(`\n// fixture update ${serviceWorkerVersion}\n`)])
           : relative === "index.html" && options.firstRun !== true
-            ? Buffer.from(body.toString().replace("<head>", '<head><script src="/fixture-returning-device.js"></script>'))
+            ? Buffer.from(body.toString().replace("<head>", '<head><script src="/assets/fixture-returning-device.js"></script>'))
             : body;
         if (relative === "index.html") response.setHeader("Content-Security-Policy", fixtureCsp(targets.map(target => target.origin)));
         response.writeHead(200, {
