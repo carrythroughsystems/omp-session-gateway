@@ -74,6 +74,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Resume pending request previews after a browser back/forward-cache restore without reusing an old launch.
+- Restore remote sessions and update their request triage even when local authorization or the local list is unavailable.
+- Attribute failed cross-host Next-ask actions to the target host and refresh expired target lists without replaying a launch.
+- Return failed or changed request previews to the directory without retaining an obsolete host-selection snapshot.
+- Show independently confirmed remote empty lists and retain empty-observation clocks during quiet rechecks.
 - Preserve local connection faults and recovery across phone backgrounding and remote-session opens.
 - Withdraw local sessions and invalidate old live events after authorization denial from launch,
   creation, or embedded probes, not only directory-list requests.

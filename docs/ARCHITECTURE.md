@@ -128,10 +128,17 @@ a fresh authorized snapshot. Late pre-denial upserts, keepalives and errors cann
 Remote launch errors remain source-scoped, including 404/409 and transport failures. Their host
 notice lasts until that source is checked successfully or a launch succeeds; Refresh host never
 replays a capability request. Observation-aware empty copy also covers All hosts and single-host views.
-Denying or programmatically cancelling an unmounted request preview restores and consumes its directory snapshot
-without starting another fetch or reverting a newer host selection.
+Denying, failing, discarding or programmatically cancelling an unmounted request preview restores
+and consumes its directory snapshot without starting another fetch or reverting a newer host selection.
+Pagehide is the exception: cancellation keeps the snapshot and metadata-only resume intent together
+until persisted pageshow revalidates and relaunches. Local authorization withdrawal does not skip
+remote refresh during restoration, and remote triage gates on its own source freshness, not local
+directory readiness. Cross-host Next-ask failures retain the target's notice across predecessor
+health updates; expired targets still refresh, and Sessions returns to list-only recovery.
+Selected-source empty rendering also uses its own observation, with retained empty clocks ahead
+of neutral checking progress.
 
-Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and offers retry without unmounting its collaboration shell.
+Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and keeps its collaboration shell mounted while offering source-appropriate recovery.
 
 Authoritative snapshots and upserts remove a held record when its exact ask changes or clears, and remove a dismissal when the session disappears, its generation changes, or it needs attention. Transport failures do not erase either record. Optional `busy` distinguishes sampled activity from idle/unknown, not successful completion. The PWA must not invent a Completed state or label local dismissal as Close or Exit. These bounded records contain no title, path, model, prompt, answer, transcript, or collaboration capability.
 An explicit Background alerts tray action enables background Web Push. Permission is never requested on load.

@@ -1368,6 +1368,7 @@ body.collab-shell-active {
 
 .triage-bar[data-kind="sending"]::before,
 .triage-bar[data-kind="reconnecting"]::before,
+.triage-bar[data-kind="launch-failed"]::before,
 .triage-bar[data-kind="ended"]::before {
   content: "";
   flex: none;
@@ -1378,7 +1379,8 @@ body.collab-shell-active {
 }
 
 .triage-bar[data-kind="sending"]::before,
-.triage-bar[data-kind="reconnecting"]::before {
+.triage-bar[data-kind="reconnecting"]::before,
+.triage-bar[data-kind="launch-failed"]::before {
   background: var(--control);
 }
 

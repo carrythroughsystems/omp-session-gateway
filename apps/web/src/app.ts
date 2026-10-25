@@ -1946,15 +1946,16 @@ function renderEmptyState(): void {
   const title = denied ? "Sessions are hidden"
     : withdrawn ? "Session list withdrawn"
     : coverage.complete ? "No sessions on this host"
-      : !coverage.failed ? "Checking for sessions"
-        : expired ? observation === undefined ? "Session lists expired" : "Session list expired"
-          : retainedEmpty ? observations.every(source => source.time === sharedTime)
-            ? `No sessions as of ${sharedTime}` : "No sessions in the last received lists"
+      : expired ? observation === undefined ? "Session lists expired" : "Session list expired"
+        : retainedEmpty ? observations.every(source => source.time === sharedTime)
+          ? `No sessions as of ${sharedTime}` : "No sessions in the last received lists"
+          : !coverage.failed ? "Checking for sessions"
             : observation !== undefined ? "This host has not been checked" : "No sessions to show yet";
   const detail = denied ? "Ask the gateway operator to restore access."
     : withdrawn ? "A fresh authorized list is needed before showing sessions."
     : coverage.complete ? "Choose another host or start a session here."
-    : !coverage.failed ? "Waiting for the remaining hosts before confirming this list is empty."
+    : !coverage.failed ? retainedEmpty ? "Checking for updates before confirming this list is still empty."
+      : "Waiting for the remaining hosts before confirming this list is empty."
       : observation !== undefined ? "Its sessions may appear when the connection returns."
         : "Some hosts could not be checked. Sessions may appear when they reconnect.";
   body.append(createTextElement("h2", "", title), createTextElement("p", "", detail));
@@ -1974,7 +1975,8 @@ function renderDirectoryContents(arrived = false): void {
   renderFleetStatus();
   sessionList.replaceChildren();
   sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
-  if (!directoryLoaded && sessions.size === 0 && !scopeCoverage().failed) {
+  if (sessions.size === 0 && !scopeCoverage().failed &&
+    ![...sources.keys()].some(key => (selectedScope === "all" || key === selectedScope) && sourceAvailability(key).time !== undefined)) {
     emptyState.hidden = true;
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
@@ -2056,7 +2058,7 @@ function hideTriageBar(shell: ActiveCollabShell, rerenderConnection = true): voi
 
 function showTriageBar(
   shell: ActiveCollabShell,
-  kind: "next" | "clear" | "hold" | "sending" | "reconnecting" | "ended",
+  kind: "next" | "clear" | "hold" | "sending" | "reconnecting" | "launch-failed" | "ended",
   copy: string,
   actionLabel?: string,
   action?: () => void,
@@ -2335,12 +2337,13 @@ function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, 
   window.scrollTo(0, historyState.scrollY);
   render();
   const focused = focusRef === undefined ? undefined : focusDirectoryRequest(focusRef);
-  if (!refresh || authorizationDenied) {
+  if (!refresh) {
     applyActivatedWorkerUpdate();
     return Promise.resolve(false);
   }
   const epoch = selectionEpoch;
-  const refreshed = Promise.all([refreshAndConnect(), ...[...remotes.values()].map(remote => remote.refresh())])
+  const refreshed = Promise.all([authorizationDenied ? Promise.resolve(false) : refreshAndConnect(),
+    ...[...remotes.values()].map(remote => remote.refresh())])
     .then(([local]) => {
       if (focusRef !== undefined && selectionEpoch === epoch && activeCollabShell === undefined &&
         pendingLaunch === undefined && !trayHost.open &&
@@ -2414,6 +2417,8 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
       reconcileActiveCollabShell();
       return;
     }
+    if (next.sourceKey !== localKey &&
+      (remoteLaunchFailures.has(next.sourceKey) || remotes.get(next.sourceKey)?.status === "forbidden")) return;
     showTriageBar(
       shell,
       "hold",
@@ -2445,7 +2450,6 @@ function reconcileActiveCollabShell(): void {
   if (
     shell === undefined ||
     shell.answerShown ||
-    !directoryLoaded ||
     shell.latestEmbedState?.responsePending === true
   ) {
     return;
@@ -2847,22 +2851,14 @@ async function launch(
   pendingNotificationLaunch = undefined;
   pendingNotificationRoute = false;
   cancelLaunch();
-  let requestStatus: HTMLElement | undefined;
-  let requestRetry: HTMLButtonElement | undefined;
   if (presentation === "request-tray" && activeCollabShell === undefined) {
     captureDirectorySnapshot();
     if (tray.id === "request") tray.close(true, true);
     const preview = document.createElement("div");
     preview.className = "request-preview";
-    requestStatus = createTextElement("p", "request-status", "Connecting…");
+    const requestStatus = createTextElement("p", "request-status", "Connecting…");
     requestStatus.setAttribute("role", "status");
-    requestRetry = document.createElement("button");
-    requestRetry.type = "button";
-    requestRetry.className = "tray-choice";
-    requestRetry.textContent = "Try again";
-    requestRetry.hidden = true;
-    requestRetry.addEventListener("click", () => void launch(session, mode, button, requestId, scope, presentation));
-    preview.append(createSessionSummary(session), createTextElement("p", "ask-preview", session.ask?.preview ?? "Waiting for your input"), requestStatus, requestRetry);
+    preview.append(createSessionSummary(session), createTextElement("p", "ask-preview", session.ask?.preview ?? "Waiting for your input"), requestStatus);
     tray.open({ id: "request", title: spokenTitle(session), tone: "attention", body: preview, icon: createSessionTile(session) }, {
       onClose: () => { void restoreDirectory(undefined, session); },
     });
@@ -2921,9 +2917,8 @@ async function launch(
     settle();
     resetButton();
     if (owned && creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
-    if (owned && requestStatus !== undefined && tray.id === "request") {
-      requestStatus.textContent = "That session changed or expired. Try again from the directory.";
-      tray.refresh();
+    if (owned && attempt.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
+      void restoreDirectory(undefined, session, false);
     }
     if (pendingLaunch === undefined && activeCollabShell === undefined && stylesheet !== undefined) {
       stylesheet.remove();
@@ -2936,7 +2931,14 @@ async function launch(
     if (pendingLaunch !== attempt) return discard();
     settle();
     resetButton();
+    const remoteFailure = session.sourceKey !== localKey;
+    if (remoteFailure && kind !== "unauthorized") remoteLaunchFailures.set(session.sourceKey, message);
     if (sourceShell !== undefined && activeCollabShell === sourceShell) {
+      if (remoteFailure) {
+        showTriageBar(sourceShell, "launch-failed", kind === "unauthorized" ? message : `${source.label}: ${message}`, "Sessions",
+          () => { void restoreDirectory(undefined, undefined, false); });
+        return true;
+      }
       showTriageBar(sourceShell, "reconnecting", message, "Try again", () => {
         showTriageBar(
           sourceShell,
@@ -2953,17 +2955,12 @@ async function launch(
       stylesheet?.remove();
       collabStylesheetLoad = undefined;
     }
-    const remoteFailure = session.sourceKey !== localKey;
+    if (attempt.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
+      void restoreDirectory(undefined, session, false);
+    }
     if (remoteFailure) {
-      if (kind !== "unauthorized") remoteLaunchFailures.set(session.sourceKey, message);
-      if (tray.id === "request") void restoreDirectory(undefined, session, false);
       renderFleetStatus();
     } else setStatus(kind, message);
-    if (!remoteFailure && requestStatus !== undefined && tray.id === "request") {
-      requestStatus.textContent = message;
-      if (requestRetry !== undefined) requestRetry.hidden = kind === "unauthorized";
-      tray.refresh();
-    }
     applyActivatedWorkerUpdate();
     return false;
   };
@@ -3025,12 +3022,17 @@ async function launch(
       }
     } else if (response.status === 404 || response.status === 409) {
       const preservedShell = fail("expired", "That session changed or expired. Try again.");
-      if (!preservedShell && (session.sourceKey === localKey ? await refreshAndConnect() : await remotes.get(session.sourceKey)?.refresh() === "healthy")) {
+      if ((!preservedShell || session.sourceKey !== localKey) &&
+        (session.sourceKey === localKey ? await refreshAndConnect() : await remotes.get(session.sourceKey)?.refresh() === "healthy")) {
         const message = "That session changed or expired. The list has been refreshed.";
         if (session.sourceKey === localKey) setStatus("expired", message);
         else {
           remoteLaunchFailures.set(session.sourceKey, message);
           renderFleetStatus();
+          if (sourceShell !== undefined && activeCollabShell === sourceShell) {
+            showTriageBar(sourceShell, "launch-failed", `${source.label}: ${message}`, "Sessions",
+              () => { void restoreDirectory(undefined, undefined, false); });
+          }
         }
       }
     } else {
@@ -3353,7 +3355,8 @@ window.addEventListener("pagehide", () => {
     collabShellDisposedOnPageHide = true;
   }
   selectionEpoch += 1;
-  cancelLaunch();
+  // Keep the directory snapshot beside the metadata-only intent until persisted pageshow revalidates it.
+  cancelLaunch(undefined, false);
   for (const remote of remotes.values()) remote.setVisible(false);
 });
 window.addEventListener("popstate", () => {

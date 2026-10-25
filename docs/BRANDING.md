@@ -244,6 +244,8 @@ An established fault stays named during a pending retry, even before the first s
 Remote launch denial belongs to its host row, never the device/local authorization banner.
 Hiding or opening a remote session is not local recovery. Remote expired-session and failed-launch
 feedback stays on that source; Refresh host checks its list without retrying a capability launch.
+Cross-host Next-ask failures name the target in the existing triage bar, not the healthy
+predecessor's connection chip, and offer Sessions to reach that host's list-only recovery.
 Coverage aggregates `N of M hosts up to date` without repeating labels. Only complete coverage
 earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Listed · N` pill and
 `Sessions`. Cached rows retain legible text, with dashed borders, muted state badges, and
@@ -255,6 +257,8 @@ Access denial is red and has no Retry promise. A retained empty observation says
 as of {time}`; an expired or authorization-withdrawn list does not claim it was empty.
 Withdrawal invalidates the old observation clock until a fresh authorized snapshot arrives.
 These observation distinctions apply to All hosts and single-host directories too.
+An independently observed remote empty list remains visible when local access is withdrawn.
+Quiet rechecks keep a retained empty observation's clock primary and checking progress secondary.
 In a session, reported health faults
 override neutral initial joining; the chip's name remains visible in request trays, and the
 triage bar supplies retry timing rather than repeating the fault. Creation keeps its
