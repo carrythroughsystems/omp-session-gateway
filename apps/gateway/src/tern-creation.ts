@@ -217,7 +217,7 @@ export class SessionCreationService {
       const operation: Operation = { owner, request, createdAt, expiresAt: new Date(Date.parse(createdAt) + RETENTION_MS).toISOString(),
         status: { operationId, state: "accepted", updatedAt: createdAt } };
       await this.#commit([...retained, operation]);
-      this.#execution = this.#execute(operationId, copy, profile, acceptedAt)
+      const execution = this.#execute(operationId, copy, profile, acceptedAt)
         .catch(async () => {
           if (!this.#healthy || this.#stopped) return;
           const state = this.#operations.find(operation => operation.status.operationId === operationId)!.status.state;
@@ -225,7 +225,8 @@ export class SessionCreationService {
           else if (state === "launching") await this.#transition(operationId, { state: "outcome_unknown", error: "launch_outcome_unknown" });
           else if (state === "awaiting_omp") await this.#transition(operationId, { state: "started_unavailable", error: "adoption_timeout" });
         }).catch(() => { /* Failed durable finalization disables creation; never expose uncommitted state. */ })
-        .finally(() => { this.#execution = undefined; });
+        .finally(() => { if (this.#execution === execution) this.#execution = undefined; });
+      this.#execution = execution;
       return { status: 202, receipt: { operationId, state: "accepted" } };
     });
   }
@@ -300,9 +301,9 @@ export class SessionCreationService {
       }
       await this.#transition(operationId, { state: "awaiting_omp" }, result.blockId);
       let viewOnly = false;
+      const refresh = await this.#dependencies.poller.refreshForAdoption({ signal, timeoutMs: Math.min(5000, deadline - this.#clock.monotonic()) });
+      if (refresh.status === "ok" && refresh.observation.startedAt > spawnedAt && refresh.observation.round > baseline.observation.round) latest = refresh.observation;
       while (!signal.aborted && this.#clock.monotonic() < deadline) {
-        const refresh = await this.#dependencies.poller.refreshForAdoption({ signal, timeoutMs: Math.min(5000, deadline - this.#clock.monotonic()) });
-        if (refresh.status === "ok" && refresh.observation.startedAt > spawnedAt && refresh.observation.round > baseline.observation.round) latest = refresh.observation;
         const current = await this.#cli.inspect(profile, signal);
         if (signal.aborted) return;
         const file = current && matchingTernBasename(current, result.blockId);
