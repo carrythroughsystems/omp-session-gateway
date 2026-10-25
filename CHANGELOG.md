@@ -8,6 +8,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Resumable, skippable first-run trays for connection facts, optional background alerts, and
+  View versus Control, reusing the existing tray and notification control. The bounded
+  `omp.sessions.first-run.v1` record stores only step and timestamp. A same-scope queue clearance
+  gets one emerald all-clear arrival, mirrored by the shell's answered check draw-in; fresh
+  loads, routine refreshes, scope changes and reduced motion remain still (ADR-042).
 - Unify Settings, Troubleshooting, Hide/Undo and request Options in one native tray system.
   Open request connects inside an amber tray and expands into the same live session without
   replacing its client, socket or composer draft. Nested focus/back, grip dismissal, safe areas,

@@ -311,7 +311,10 @@ test("installed-PWA View and Control mount in the current window without losing 
     expect(JSON.parse(residue.historyState)).toMatchObject({
       ompDirectory: { scrollY: controlDirectoryScroll },
     });
-    expect(JSON.parse(residue.localStorage)).toEqual({ "omp.collab.name": "guest" });
+    expect(JSON.parse(residue.localStorage)).toEqual({
+      "omp.collab.name": "guest",
+      "omp.sessions.first-run.v1": JSON.stringify({ version: 1, step: "done", updatedAt: "2026-10-24T00:00:00.000Z" }),
+    });
     expect(residue.sessionStorage).toBe("{}");
     expect(residue.cacheUrls.every(url => !url.includes("/api/") && !url.includes("/client/"))).toBe(true);
   } finally {
@@ -1318,7 +1321,10 @@ test("a bfcache restore reopens the backgrounded session and stores no capabilit
     }));
     expect(residue.url).toBe(`${fixture.origin}/`);
     expect(residue.historyState).not.toContain("standalone-launch-0001");
-    expect(JSON.parse(residue.localStorage)).toEqual({ "omp.collab.name": "guest" });
+    expect(JSON.parse(residue.localStorage)).toEqual({
+      "omp.collab.name": "guest",
+      "omp.sessions.first-run.v1": JSON.stringify({ version: 1, step: "done", updatedAt: "2026-10-24T00:00:00.000Z" }),
+    });
     expect(residue.sessionStorage).toBe("{}");
     expect(residue.cacheUrls.every(url => !url.includes("/api/") && !url.includes("/client/"))).toBe(true);
   } finally {

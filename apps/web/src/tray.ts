@@ -6,6 +6,9 @@ export interface TrayPanel {
   readonly icon?: HTMLElement;
   readonly actions?: readonly HTMLElement[];
   readonly layout?: "expanded";
+  readonly leadingLabel?: string;
+  /** Runs only when this panel becomes current, including native Back/pop. */
+  readonly onShow?: () => void;
 }
 
 interface PanelEntry {
@@ -34,6 +37,7 @@ export function createTray(host: HTMLDialogElement) {
   let hovered = false;
   let focused = false;
   let closing = false;
+  let restoreAfterNativeClose = false;
   let expanding = false;
   let promotionCleanup: (() => void) | undefined;
   let pointer: { id: number; y: number; distance: number } | undefined;
@@ -64,6 +68,7 @@ export function createTray(host: HTMLDialogElement) {
     host.style.transform = "";
     delete host.dataset.layout;
     closing = false;
+    restoreAfterNativeClose = false;
     pointer = undefined;
   };
   const close = (immediate = false, silent = false): void => {
@@ -133,7 +138,7 @@ export function createTray(host: HTMLDialogElement) {
       leading.type = "button";
       leading.className = "tray-leading";
       const parent = current();
-      leading.setAttribute("aria-label", parent === undefined ? `Close ${panel.title}` : `Back to ${parent.panel.title}`);
+      leading.setAttribute("aria-label", panel.leadingLabel ?? (parent === undefined ? `Close ${panel.title}` : `Back to ${parent.panel.title}`));
       leading.textContent = parent === undefined ? "⌄" : "‹";
       leading.addEventListener("click", () => stack.length > 1 ? pop() : close());
       heading = document.createElement("h2");
@@ -176,8 +181,9 @@ export function createTray(host: HTMLDialogElement) {
       }, 200);
     }
     entry.heading?.focus({ preventScroll: true });
+    entry.panel.onShow?.();
   };
-  const open = (panel: TrayPanel, options: { transientMs?: number; onClose?: () => void } = {}): void => {
+  const open = (panel: TrayPanel, options: { transientMs?: number; onClose?: () => void; parents?: readonly TrayPanel[] } = {}): void => {
     if (host.open) close(true);
     if (closing) finishClose();
     stack = [];
@@ -198,6 +204,8 @@ export function createTray(host: HTMLDialogElement) {
       overflow = document.body.style.overflow;
       document.body.style.overflow = "hidden";
     }
+    // Resumed flows retain Back destinations without displaying or focusing skipped panels.
+    for (const parent of options.parents?.slice(0, 2) ?? []) stack.push(build(parent));
     const entry = build(panel);
     stack.push(entry);
     content.append(entry.element);
@@ -231,10 +239,21 @@ export function createTray(host: HTMLDialogElement) {
   };
   host.addEventListener("cancel", event => {
     event.preventDefault();
-    if (stack.length > 1) pop();
+    if (stack.length > 1) {
+      // Chromium makes consecutive platform close requests non-cancelable without a new
+      // activation. Preserve the popped stack and restore modality after its forced close.
+      restoreAfterNativeClose = !event.cancelable;
+      pop();
+    }
     else close();
   });
   host.addEventListener("close", () => {
+    if (restoreAfterNativeClose && !host.open && !closing) {
+      restoreAfterNativeClose = false;
+      host.showModal();
+      display(current()!);
+      return;
+    }
     // Native/programmatic closure outside this module still releases lock and owned resources.
     if (host.open || closing) return;
     const callback = onClose;

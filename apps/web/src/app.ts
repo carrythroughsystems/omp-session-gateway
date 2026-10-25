@@ -27,7 +27,7 @@ import {
   readSourceRecords, boundedJson, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
   type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
 } from "./fleet";
-import { createTray } from "./tray";
+import { createTray, type TrayPanel } from "./tray";
 
 type SessionMetadata = Metadata & { readonly sourceKey: SourceKey };
 
@@ -95,6 +95,10 @@ const LOCAL_ACTION_UNDO_MS = 5_000;
 const HELD_ASKS_STORAGE_KEY = HELD_KEY;
 const DISMISSED_SESSIONS_STORAGE_KEY = DISMISSED_KEY;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+const FIRST_RUN_KEY = "omp.sessions.first-run.v1";
+const firstRunEntry = location.pathname === "/";
+type FirstRunStep = "connected" | "alerts" | "modes" | "done";
+let firstRunStarted = false;
 type TransportFailureKind = "offline" | "tailnet" | "desktop" | "gateway";
 
 type LaunchPresentation = "full" | "request-tray";
@@ -255,11 +259,100 @@ function setNotificationControl(state: NotificationControlState): void {
   notificationDisclosure.hidden = state === "enabled";
   // The all-clear surface repeats the alert promise, so it re-renders with the control state.
   if (changed) render();
-  if (tray.id === "alerts") tray.refresh();
+  if (tray.id === "alerts" || tray.id === "first-run-alerts") tray.refresh();
 }
 
 function openAlerts(): void {
   tray.open({ id: "alerts", title: "Background alerts", tone: "neutral", body: alertsPanel });
+}
+
+/** A missing record is fresh; malformed or inaccessible storage never forces an introduction. */
+function readFirstRunStep(): FirstRunStep {
+  try {
+    const text = localStorage.getItem(FIRST_RUN_KEY);
+    if (text === null) return "connected";
+    if (text.length > 128) return "done";
+    const record: unknown = JSON.parse(text);
+    if (record === null || typeof record !== "object" || Array.isArray(record)) return "done";
+    const value = record as Record<string, unknown>;
+    if (Object.keys(value).length !== 3 || value.version !== 1 || typeof value.step !== "string" ||
+      !["alerts", "modes", "done"].includes(value.step) ||
+      typeof value.updatedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value.updatedAt) ||
+      new Date(value.updatedAt).toISOString() !== value.updatedAt) return "done";
+    return value.step as FirstRunStep;
+  } catch { return "done"; }
+}
+
+function writeFirstRunStep(step: FirstRunStep): void {
+  try {
+    // Connected has no persisted record: returning to it is a fresh, skippable introduction.
+    if (step === "connected") localStorage.removeItem(FIRST_RUN_KEY);
+    else localStorage.setItem(FIRST_RUN_KEY, JSON.stringify({ version: 1, step, updatedAt: new Date().toISOString() }));
+  } catch { /* This document still remembers completion when storage is unavailable. */ }
+}
+
+function firstRunPanel(step: Exclude<FirstRunStep, "done">): TrayPanel {
+  const body = document.createElement("div");
+  body.className = `first-run-body first-run-${step}`;
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "first-run-next";
+  next.textContent = step === "modes" ? "Done" : "Next";
+  const advance = (): void => {
+    if (step === "modes") tray.close();
+    else tray.push(firstRunPanel(step === "connected" ? "alerts" : "modes"));
+  };
+  next.addEventListener("click", advance);
+  if (step === "connected") {
+    const mark = requiredElement<SVGElement>("#gateway-mark").cloneNode(true) as SVGElement;
+    mark.removeAttribute("id");
+    mark.setAttribute("width", "32");
+    mark.setAttribute("height", "32");
+    const count = scopedSessions().length;
+    body.append(mark, createTextElement("p", "first-run-copy",
+      `This phone is on your tailnet. ${localSource.label} is publishing ${count === 0 ? "no live sessions yet" : `${count} live session${count === 1 ? "" : "s"}`}.`),
+    createTextElement("p", "first-run-note", "Capabilities are requested only when you tap an action."));
+  } else if (step === "alerts") {
+    const notNow = document.createElement("button");
+    notNow.type = "button";
+    notNow.className = "first-run-not-now";
+    notNow.textContent = "Not now";
+    notNow.addEventListener("click", advance);
+    body.append(alertsPanel, notNow);
+  } else {
+    for (const [label, glyph, copy] of [
+      ["View", "◉", "Watch a session live. Nothing you do reaches it."],
+      ["Control", "›", "Answer requests and send prompts. Opens only when you tap it."],
+    ]) {
+      const row = document.createElement("div");
+      row.className = "first-run-mode";
+      const icon = createTextElement("span", "first-run-glyph", glyph!);
+      icon.setAttribute("aria-hidden", "true");
+      const text = document.createElement("div");
+      text.append(createTextElement("h3", "", label!), createTextElement("p", "", copy!));
+      row.append(icon, text);
+      body.append(row);
+    }
+  }
+  return {
+    id: `first-run-${step}`,
+    title: step === "connected" ? "Connected" : step === "alerts" ? "Background alerts" : "View or Control",
+    tone: "neutral", body, actions: [next],
+    ...(step === "connected" ? { leadingLabel: "Skip introduction" } : {}),
+    onShow: () => writeFirstRunStep(step),
+  };
+}
+
+function maybeStartFirstRun(): void {
+  if (!firstRunEntry || firstRunStarted || !directoryLoaded || !localFresh || location.pathname !== "/" ||
+    document.visibilityState !== "visible" || trayHost.open || activeCollabShell !== undefined ||
+    pendingLaunch !== undefined || pendingNotificationRoute || navigationTransition !== undefined) return;
+  const step = readFirstRunStep();
+  if (step === "done") return;
+  firstRunStarted = true;
+  const parents = step === "connected" ? [] : [firstRunPanel("connected")];
+  if (step === "modes") parents.push(firstRunPanel("alerts"));
+  tray.open(firstRunPanel(step), { parents, onClose: () => writeFirstRunStep("done") });
 }
 
 function isNotificationSupportResponse(value: unknown): boolean {
@@ -1426,10 +1519,12 @@ function appendDismissedControl(dismissed: readonly SessionMetadata[]): void {
 function renderAllClear(
   working: readonly SessionMetadata[],
   dismissed: readonly SessionMetadata[],
+  arrived: boolean,
 ): void {
   const summary = document.createElement("div");
   summary.className = "all-clear-summary";
   summary.dataset.complete = String(scopeComplete());
+  if (arrived) summary.dataset.arrived = "true";
   const alertsLive = notificationState === "enabled" && (sources.size === 1 || selectedScope === localKey);
   const message = document.createElement("div");
   message.className = "all-clear-message";
@@ -1622,7 +1717,6 @@ function nameDirectoryRows(named: boolean): void {
 function directorySignature(): string {
   if (!directoryLoaded && sessions.size === 0) return "loading";
   const visible = scopedSessions();
-  if (visible.length === 0) return `empty:${scopeComplete()}`;
   const identity = (session: SessionMetadata, state: SessionTileState): unknown[] =>
     [session.sourceKey, session.instanceId, session.generation, state, session.ask?.requestId ?? null];
   return JSON.stringify([
@@ -1631,7 +1725,16 @@ function directorySignature(): string {
     orderedHeldSessions().map(session => identity(session, "held")),
     orderedWorkingSessions().map(session => identity(session, activityState(session))),
     orderedDismissedSessions().map(session => [session.sourceKey, session.instanceId, session.generation]),
+    visible.length === 0 ? ["empty", scopeComplete()] : "populated",
   ]);
+}
+
+/** Signatures are generated here, never supplied by storage or a server. Include held requests. */
+function allClearArrival(previous: string | undefined, next: string): boolean {
+  if (previous === undefined || previous === "loading" || next === "loading") return false;
+  const [oldScope, oldWaiting, oldHeld] = JSON.parse(previous) as [string, unknown[], unknown[]];
+  const [scope, waiting, held] = JSON.parse(next) as [string, unknown[], unknown[]];
+  return oldScope === scope && oldWaiting.length + oldHeld.length > 0 && waiting.length + held.length === 0;
 }
 
 let renderedSignature: string | undefined;
@@ -1662,20 +1765,22 @@ function render(): void {
   const signature = directorySignature();
   // The first populated render settles in place; afterwards only structural changes animate.
   const animate = renderedSignature !== undefined && renderedSignature !== "loading" && renderedSignature !== signature && motionAllowed();
+  const arrived = animate && scopeComplete() && allClearArrival(renderedSignature, signature);
   renderedSignature = signature;
   if (!animate) {
     renderDirectory();
+    maybeStartFirstRun();
     return;
   }
   nameDirectoryRows(true);
   const transition = transitionDocument("list", () => {
-    renderDirectory();
+    renderDirectory(arrived);
     nameDirectoryRows(true);
   });
-  transition?.finished.finally(() => nameDirectoryRows(false));
+  transition?.finished.finally(() => { nameDirectoryRows(false); maybeStartFirstRun(); });
 }
 
-function renderDirectory(): void {
+function renderDirectory(arrived = false): void {
   const focused = document.activeElement;
   const keyed = focused?.matches(".action-request, .queue-row, .held-open")
     ? focused.closest<HTMLElement>("[data-instance-id]") : null;
@@ -1683,12 +1788,12 @@ function renderDirectory(): void {
     sourceKey: keyed.dataset.sourceKey ?? localKey,
     instanceId: keyed.dataset.instanceId,
   };
-  renderDirectoryContents();
+  renderDirectoryContents(arrived);
   // Snapshot/SSE refreshes replace row nodes even when there is no structural animation.
   if (focusRef !== undefined) focusDirectoryRequest(focusRef);
 }
 
-function renderDirectoryContents(): void {
+function renderDirectoryContents(arrived = false): void {
   renderFleetStatus();
   sessionList.replaceChildren();
   if (!directoryLoaded && sessions.size === 0) {
@@ -1704,6 +1809,7 @@ function renderDirectoryContents(): void {
     directoryCount.hidden = true;
     sessionList.className = "session-list";
     sessionList.setAttribute("aria-label", "Live OMP sessions");
+    if (arrived) renderAllClear([], [], true);
     return;
   }
 
@@ -1732,7 +1838,7 @@ function renderDirectoryContents(): void {
   directoryCount.textContent = `Live · ${liveWorkingCount}`;
   sessionList.className = "session-list all-clear";
   sessionList.setAttribute("aria-label", "Live OMP sessions");
-  renderAllClear(working, dismissed);
+  renderAllClear(working, dismissed, arrived);
 }
 
 function setConnectionState(
@@ -1773,10 +1879,24 @@ function showTriageBar(
   actionLabel?: string,
   action?: () => void,
 ): void {
+  const drawCheck = kind === "clear" && copy.startsWith("✓ Answered — all clear") &&
+    shell.triageBar.dataset.kind !== "clear";
   hideTriageBar(shell, false);
   shell.triageBar.dataset.kind = kind;
   shell.answerTriageVisible = kind === "next" || kind === "clear";
-  const message = createTextElement("span", "triage-copy", copy);
+  const message = createTextElement("span", "triage-copy", drawCheck ? copy.slice(2) : copy);
+  if (drawCheck) {
+    const check = document.createElementNS(SVG_NAMESPACE, "svg");
+    check.setAttribute("class", "triage-check");
+    check.setAttribute("viewBox", "0 0 20 20");
+    check.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS(SVG_NAMESPACE, "path");
+    path.setAttribute("d", "M4 10l4 4 8-8");
+    path.setAttribute("pathLength", "1");
+    check.append(path);
+    message.prepend(check);
+    if (!reducedMotion.matches && document.visibilityState === "visible") check.dataset.arrived = "true";
+  }
   if (actionLabel !== undefined && action !== undefined) {
     const button = document.createElement("button");
     button.type = "button";
@@ -2212,6 +2332,9 @@ function warmCollabClient(): void {
 
 function captureDirectorySnapshot(): DashboardSnapshot {
   if (dashboardSnapshot === undefined) {
+    // Reattaching cached rows must not replay a completed or interrupted arrival.
+    const arrived = sessionList.querySelector<HTMLElement>(".all-clear-summary");
+    if (arrived !== null) delete arrived.dataset.arrived;
     const historyState: DirectoryHistoryState = {
       version: 2,
       scope: selectedScope,
@@ -2920,6 +3043,7 @@ hostPicker.addEventListener("change", () => {
   applyActivatedWorkerUpdate();
 });
 settingsButton.addEventListener("click", openAlerts);
+trayHost.addEventListener("close", maybeStartFirstRun);
 notificationButton.addEventListener("click", () => void toggleBackgroundNotifications());
 alertDetailButton.addEventListener("click", () => tray.push({
   id: "detail", title: "Alert detail", tone: "neutral", body: detailPanel,
@@ -3028,6 +3152,7 @@ document.addEventListener("visibilitychange", () => {
     clearTransportFailureTracking();
     return;
   }
+  maybeStartFirstRun();
   if (authorizationDenied || directoryStreamIsLive()) return;
   localFresh = false;
   render();

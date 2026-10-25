@@ -296,6 +296,12 @@ OMP. Authoritative ask changes clear holds; removal, generation replacement, or 
 dismissals. Transport failures clear neither. A held ask on the local source may close only a home
 notification with the matching instance tag and request ID; holding an ask on a remote fleet source
 never enumerates or closes home notifications even when `instanceId` collides.
+The separate first-run key `omp.sessions.first-run.v1` stores only
+`{ version: 1, step: "alerts" | "modes" | "done", updatedAt: ISO }` (128 characters maximum).
+It contains no host/session identifiers, labels, permissions or capabilities. Missing means fresh;
+malformed, unsupported, oversized or inaccessible records suppress the introduction. The flow
+reuses the existing notification opt-in control and never requests a capability or notification
+permission merely by opening or advancing a step.
 After an explicit permission/subscription action, the gateway may persist a user-only VAPID key
 pair, bounded browser subscription set, authenticated identity, and per-device `private`,
 `session`, or `preview` choice. It assembles encrypted push presentation at send time. `private`

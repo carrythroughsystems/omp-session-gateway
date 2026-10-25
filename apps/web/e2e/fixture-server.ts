@@ -23,6 +23,8 @@ const fixtureCsp = (origins: readonly string[]): string =>
 
 export interface DashboardFixtureOptions {
   readonly roomKey?: Uint8Array;
+  /** Existing scenarios model a returning device; first-run specs opt into genuinely empty storage. */
+  readonly firstRun?: boolean;
   /** In-memory audit input only; ordinary and README fixtures keep random authority. */
   readonly syntheticAuthority?: SyntheticFixtureAuthority;
 }
@@ -340,6 +342,11 @@ export async function startDashboardFixture(
         response.writeHead(404).end("Not found");
         return;
       }
+      if (url.pathname === "/assets/fixture-returning-device.js") {
+        response.writeHead(200, { "Content-Type": "text/javascript", "Cache-Control": "no-store" });
+        response.end('localStorage.setItem("omp.sessions.first-run.v1", JSON.stringify({version:1,step:"done",updatedAt:"2026-10-24T00:00:00.000Z"}));');
+        return;
+      }
 
       let pathname: string;
       try {
@@ -363,7 +370,9 @@ export async function startDashboardFixture(
         const body = await readFile(candidate);
         const servedBody = relative === "service-worker.js" && serviceWorkerVersion > 0
           ? Buffer.concat([body, Buffer.from(`\n// fixture update ${serviceWorkerVersion}\n`)])
-          : body;
+          : relative === "index.html" && options.firstRun !== true
+            ? Buffer.from(body.toString().replace("<head>", '<head><script src="/assets/fixture-returning-device.js"></script>'))
+            : body;
         if (relative === "index.html") response.setHeader("Content-Security-Policy", fixtureCsp(targets.map(target => target.origin)));
         response.writeHead(200, {
           "Cache-Control": relative === "index.html"
