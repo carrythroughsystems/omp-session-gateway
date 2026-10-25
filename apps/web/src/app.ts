@@ -1281,18 +1281,25 @@ function createQueueKicker(label: string, detail?: string): HTMLElement {
   return kicker;
 }
 
-/** One metadata line of discrete facts; each fact stays whole and the line wraps between facts. */
-function createRowMeta(facts: readonly (readonly [className: string, value: string | undefined])[]): HTMLElement | undefined {
+type Fact = readonly [className: string, value: string | undefined];
+
+/** Metadata under a title as groups of discrete facts, one group per line; a group never wraps. */
+function createRowMeta(groups: readonly (readonly Fact[])[]): HTMLElement | undefined {
   const meta = document.createElement("span");
   meta.className = "row-meta";
-  for (const [className, value] of facts) {
-    if (value !== undefined && value.length > 0) meta.append(createTextElement("span", `fact ${className}`, value));
+  for (const facts of groups) {
+    const group = document.createElement("span");
+    group.className = "fact-group";
+    for (const [className, value] of facts) {
+      if (value !== undefined && value.length > 0) group.append(createTextElement("span", `fact ${className}`, value));
+    }
+    if (group.childElementCount > 0) meta.append(group);
   }
   return meta.childElementCount > 0 ? meta : undefined;
 }
 
 /** Where a session runs: its host (only while several are in view) and its project, unless the title already is the project. */
-function contextFacts(session: SessionMetadata): (readonly [className: string, value: string | undefined])[] {
+function contextFacts(session: SessionMetadata): Fact[] {
   return [
     ["host-label", hostVisible() ? hostLabel(session) : undefined],
     ["working-context", session.cwdLabel === sessionTitle(session) ? undefined : session.cwdLabel],
@@ -1301,8 +1308,8 @@ function contextFacts(session: SessionMetadata): (readonly [className: string, v
 
 function createSessionSummary(session: SessionMetadata): HTMLElement {
   return createRowMeta([
-    ...contextFacts(session),
-    ["working-model", session.model === undefined ? undefined : modelSlug(session.model)],
+    contextFacts(session),
+    [["working-model", session.model === undefined ? undefined : modelSlug(session.model)]],
   ]) ?? createTextElement("span", "row-meta", "Live OMP session");
 }
 
@@ -1474,10 +1481,12 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   copy.className = "working-copy";
   copy.append(createTitleElement("span", "row-title", session));
   const details = createRowMeta([
-    ...contextFacts(session),
-    ["session-activity", session.busy === true ? "Working" : session.busy === false ? "Idle" : "Activity unknown"],
-    ["row-time", uptimeLabel(session)],
-    ["working-model", session.model === undefined ? undefined : modelSlug(session.model)],
+    contextFacts(session),
+    [
+      ["session-activity", session.busy === true ? "Working" : session.busy === false ? "Idle" : "Activity unknown"],
+      ["row-time", uptimeLabel(session)],
+      ["working-model", session.model === undefined ? undefined : modelSlug(session.model)],
+    ],
   ]);
   if (details !== undefined) copy.append(details);
   button.append(createSessionTile(session, activityState(session)), copy);
@@ -1509,7 +1518,7 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
   const copy = document.createElement("span");
   copy.className = "row-copy";
   copy.append(createTitleElement("span", "row-title", session));
-  const meta = createRowMeta(contextFacts(session));
+  const meta = createRowMeta([contextFacts(session)]);
   if (meta !== undefined) copy.append(meta);
   button.append(
     createSessionTile(session, "waiting"),
@@ -1538,7 +1547,7 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   const copy = document.createElement("span");
   copy.className = "row-copy";
   copy.append(createTitleElement("span", "row-title", session));
-  const meta = createRowMeta(contextFacts(session));
+  const meta = createRowMeta([contextFacts(session)]);
   if (meta !== undefined) copy.append(meta);
   open.append(
     createSessionTile(session, "held"),

@@ -274,43 +274,54 @@ h1 {
   gap: 0.15rem;
 }
 
-/* Scope control: the select's own options name the hosts, so its label is `aria-label` only and
-   it reads as one compact chip under the heading. */
-.host-picker {
+/* ——— Directory toolbar ———————————————————————————————————————
+   One 48px row under the heading: the scope filter leads, the creation action trails. Both are
+   pills of the same height so the row reads as one control strip, not two unrelated boxes. */
+.directory-tools {
   display: flex;
   align-items: center;
-  margin-top: 0.85rem;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+}
+
+/* Scope control: the select's own options name the hosts, so its label is `aria-label` only. */
+.host-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
 }
 
 .host-picker select {
   min-width: 0;
   max-width: 100%;
-  min-height: 2.75rem;
-  padding: 0.5rem 2rem 0.5rem 0.8rem;
+  height: 3rem;
+  padding: 0 2.4rem 0 1.1rem;
   border: 1px solid var(--border-strong);
-  border-radius: 0.6rem;
+  border-radius: 999px;
   color: var(--ink);
   background: var(--surface);
-  font: 500 0.88rem/1.2 var(--font-sans);
+  font: 500 0.88rem/1 var(--font-sans);
+  appearance: none;
   cursor: pointer;
 }
 
-.host-label {
+/* The chevron is an inline SVG over the select, so no stylesheet URL is needed. */
+.host-picker svg {
+  position: absolute;
+  right: 0.9rem;
   color: var(--muted);
-  font-size: 0.72rem;
-  overflow-wrap: anywhere;
+  pointer-events: none;
 }
 
 /* ——— Metadata facts ———————————————————————————————————————————
-   One line of discrete facts under a title. Facts never break internally; the line wraps
-   between them, each fact carries its own trailing separator, and only a fact wider than the
-   whole row truncates. Hosts appear only when more than one host is in view. */
+   Facts under a title come in groups — where the session runs (host · project) and what it is
+   doing (state · uptime · model) — each group on its own line. A group never wraps, so a
+   separator can never dangle at a line end; when a group is wider than the row its facts shrink
+   and truncate individually. Hosts appear only when more than one host is in view. */
 
 .row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: 0.45rem;
+  display: grid;
   row-gap: 0.1rem;
   min-width: 0;
   color: var(--muted);
@@ -320,11 +331,31 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
+.fact-group {
+  display: flex;
+  align-items: baseline;
+  column-gap: 0.45rem;
+  min-width: 0;
+}
+
 .fact {
-  max-width: 100%;
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Identifiers give way first; the state word and uptime stay whole, and the host keeps whole
+   up to half the line so the project truncates before the host does. */
+.fact.session-activity,
+.fact.row-time {
+  flex-shrink: 0;
+}
+
+.fact.host-label {
+  flex-shrink: 0;
+  max-width: 55%;
 }
 
 .fact:not(:last-child)::after {
@@ -1491,17 +1522,23 @@ body.collab-shell-active {
 }
 .tray [hidden] { display: none; }
 .new-session {
-  min-height: 3rem;
-  margin-top: 0.75rem;
-  padding: 0.65rem 1rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  height: 3rem;
+  margin: 0 0 0 auto;
+  padding: 0 1.15rem 0 0.95rem;
   border: 1px solid var(--border-strong);
-  border-radius: 0.75rem;
+  border-radius: 999px;
   color: var(--ink);
   background: var(--surface);
-  font: 600 0.9rem/1.3 var(--font-sans);
+  font: 600 0.88rem/1 var(--font-sans);
+  white-space: nowrap;
   cursor: pointer;
 }
+.new-session svg { flex: none; color: var(--live); }
 .new-session:hover { background: var(--surface-press); }
+.empty-state .new-session { margin: 0.75rem auto 0; }
 .creation-body { display: grid; align-content: start; gap: 0.75rem; padding-block: 0.75rem 1rem; }
 .creation-body p { margin: 0; color: var(--muted); font-size: 0.9rem; line-height: 1.5; }
 .creation-body .tray-choice { margin: 0; overflow-wrap: anywhere; }
