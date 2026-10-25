@@ -77,7 +77,7 @@ Each card may show only non-secret metadata:
 
 A directory with zero live sessions shows the `collab.autoStart` empty-state guidance instead of a
 zero-count summary. Device-scoped preferences — the background-alert toggle, notification detail,
-and build identity — live in one Settings sheet behind a persistent masthead control; the `All
+and build identity — live in the Background alerts tray and its Alert detail child behind a persistent masthead control; the `All
 clear` summary claims "You'll get pinged" only while alerts are enabled and otherwise offers the
 Settings path.
 
@@ -90,7 +90,7 @@ A native `<select>` labeled **Host** filters the directory across **All hosts**,
 Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and offers retry without unmounting its collaboration shell.
 
 Authoritative snapshots and upserts remove a held record when its exact ask changes or clears, and remove a dismissal when the session disappears, its generation changes, or it needs attention. Transport failures do not erase either record. Optional `busy` distinguishes sampled activity from idle/unknown, not successful completion. The PWA must not invent a Completed state or label local dismissal as Close or Exit. These bounded records contain no title, path, model, prompt, answer, transcript, or collaboration capability.
-An explicit Settings-sheet action enables background Web Push. Permission is never requested on load.
+An explicit Background alerts tray action enables background Web Push. Permission is never requested on load.
 The gateway sends strict Push v2 attention/clear and activity-stop envelopes with bounded identity and a
 bounded pending count. Private detail uses a fixed title with no body; Session (the default) adds
 bounded session/project labels. Preview falls back to Session because stock OMP supplies no ask
@@ -215,7 +215,7 @@ OMP remains unaware of this browser-routing metadata.
 ### 2.4 View or Control launch
 
 1. The user taps **View** or **Control**.
-2. The shipped same-document client increments `pendingLaunches` in page memory before loading its assets and requesting a capability, and changes the URL to `/client/` at mount. Because service-worker activation claims clients without navigating them and the page defers its `controllerchange` reload while a launch, routed notification, or collaboration is active, a worker upgrade never interrupts an in-flight launch.
+2. The shipped same-document client tracks the pending launch in page memory before loading its assets and requesting a capability. Full-screen View changes the URL to `/client/` at mount; Open request mounts inside the native tray and only Expand replaces the route with `/client/`, reparenting the same shell without remounting the client. Because service-worker activation claims clients without navigating them and the page defers its `controllerchange` reload while a launch, routed notification, or collaboration is active, a worker upgrade never interrupts an in-flight launch.
 3. The PWA performs a same-origin `POST /api/v1/sessions/:instanceId/launch` with the observed generation and desired mode.
 4. The gateway verifies Tailscale identity, application allowlist, Origin, fetch metadata, content type, rate limits, generation, freshness, and mode availability.
 5. The launch broker queries OMP for the exact generation and role, revalidates current state, and

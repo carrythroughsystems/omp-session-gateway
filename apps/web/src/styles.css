@@ -679,15 +679,9 @@ h1 {
   background: #b98d3e;
 }
 
-.hero-alternatives {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.45rem;
-  margin-top: 0.45rem;
-}
-
-.hero-alt {
-  min-height: 2.75rem;
+.hero-options {
+  width: 100%;
+  min-height: 3rem;
   padding: 0.5rem;
   border: 1px solid transparent;
   border-radius: 0.5rem;
@@ -698,11 +692,11 @@ h1 {
   cursor: pointer;
 }
 
-.hero-alt:hover:not(:disabled) {
+.hero-options:hover:not(:disabled) {
   color: var(--ink);
 }
 
-.hero-alt:active:not(:disabled) {
+.hero-options:active:not(:disabled) {
   background: var(--surface-press);
 }
 
@@ -1056,46 +1050,6 @@ h1 {
   color: var(--ink);
 }
 
-/* ——— Local action toast ——————————————————————————————————————— */
-
-.local-action-toast {
-  position: fixed;
-  z-index: 50;
-  right: max(0.75rem, env(safe-area-inset-right));
-  bottom: max(0.75rem, env(safe-area-inset-bottom));
-  left: max(0.75rem, env(safe-area-inset-left));
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  width: min(32rem, calc(100% - 1.5rem));
-  min-height: 3.5rem;
-  margin-inline: auto;
-  padding: 0.65rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 0.75rem;
-  color: var(--body);
-  background: #111619;
-  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.55);
-  font-size: 0.78rem;
-  line-height: 1.35;
-}
-
-.local-action-toast[hidden] {
-  display: none;
-}
-
-.local-action-toast button {
-  min-height: 2.75rem;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--control-border);
-  border-radius: 0.45rem;
-  color: var(--control);
-  background: var(--control-wash);
-  font-weight: 700;
-  cursor: pointer;
-}
-
 /* ——— Empty state —————————————————————————————————————————————— */
 
 .empty-state {
@@ -1364,76 +1318,151 @@ body.collab-shell-active {
   background: var(--control);
 }
 
-/* ——— Sheets (settings, troubleshooting) ——————————————————————— */
+/* ——— One tray system (ADR-041) ——————————————————————————————— */
 
-.notification-sheet {
+.tray {
+  position: fixed;
+  inset: auto 0 0;
   width: min(100% - 1rem, 35rem);
-  max-height: min(88dvh, 46rem);
-  margin: auto auto max(0.5rem, env(safe-area-inset-bottom));
-  padding: 0.9rem 1rem max(1rem, env(safe-area-inset-bottom));
-  overflow-y: auto;
+  max-width: none;
+  max-height: calc(100dvh - 1rem);
+  margin: 0 auto;
+  padding: 0;
+  overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 0.9rem;
+  border-bottom: 0;
+  border-radius: 1.25rem 1.25rem 0 0;
   color: var(--ink);
   background: var(--surface);
   box-shadow: 0 -1rem 3rem rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transform: translateY(100%);
+  transition: height var(--motion-medium) var(--ease-emphasized),
+    transform var(--motion-medium) var(--ease-emphasized),
+    opacity var(--motion-short) var(--ease-emphasized),
+    overlay var(--motion-medium) allow-discrete,
+    display var(--motion-medium) allow-discrete;
 }
 
-.notification-sheet::backdrop {
+.tray[open] { opacity: 1; transform: translateY(0); }
+.tray.tray-closing { opacity: 0; transform: translateY(100%); }
+.tray.tray-dragging { transition: none; }
+.tray[data-tone="attention"] { border-top-color: var(--control); }
+.tray[data-tone="attention"] .tray-leading { color: var(--control); }
+.tray[data-mode="transient"] { z-index: 50; }
+.tray::backdrop {
   background: rgba(0, 0, 0, 0.68);
   backdrop-filter: blur(3px);
+  transition: opacity var(--motion-medium), overlay var(--motion-medium) allow-discrete,
+    display var(--motion-medium) allow-discrete;
 }
-
-.notification-sheet-handle {
+.tray.tray-closing::backdrop { opacity: 0; }
+@starting-style {
+  .tray[open] { opacity: 0; transform: translateY(100%); }
+  .tray[open]::backdrop { opacity: 0; }
+}
+.tray-grip {
+  display: grid;
+  place-items: center;
+  height: 24px;
+  touch-action: none;
+  cursor: grab;
+}
+.tray-grip::after {
+  content: "";
   width: 2.5rem;
   height: 0.25rem;
-  margin: 0 auto 1rem;
   border-radius: 999px;
   background: var(--faint);
 }
-
-.notification-sheet header {
+.tray-content { position: relative; height: calc(100% - 24px); }
+.tray-panel {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
+  flex-direction: column;
+  max-height: 100%;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity var(--motion-medium) var(--ease-emphasized),
+    transform var(--motion-medium) var(--ease-emphasized);
 }
-
-.sheet-kicker,
-.notification-sheet legend {
-  margin: 0 0 0.35rem;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+@starting-style {
+  .tray-panel { opacity: 0; transform: scale(0.96); }
 }
-
-.notification-sheet h2 {
-  margin: 0 0 1rem;
-  font-size: 1.35rem;
+.tray-panel-out {
+  position: absolute;
+  inset: 0 0 auto;
+  opacity: 0;
+  transform: scale(0.96);
+  transition-duration: var(--motion-short);
+}
+.tray-header {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 0.35rem;
+  padding: 0 1rem 0.5rem;
+}
+.tray-header h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.15rem;
   letter-spacing: -0.015em;
 }
-
-.sheet-close {
-  min-height: 2.75rem;
-  padding: 0.5rem 0.65rem;
+.tray-leading, .tray-expand {
+  min-width: 3rem;
+  min-height: 3rem;
   border: 0;
+  border-radius: 0.5rem;
   color: var(--body);
   background: none;
   cursor: pointer;
 }
-
-.sheet-section {
-  padding-top: 0.35rem;
+.tray-leading { font-size: 1.7rem; }
+.tray-body {
+  min-height: 0;
+  padding: 0 1rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
 }
-
-.sheet-section-title {
-  margin: 0 0 0.6rem;
+.tray-choice {
+  display: block;
+  width: 100%;
+  min-height: 3rem;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  color: var(--body);
+  background: var(--raised);
+  text-align: left;
+  cursor: pointer;
+}
+.tray [hidden] { display: none; }
+.tray[data-layout="expanded"] .tray-panel,
+.tray[data-layout="full"] .tray-panel { height: 100%; }
+.tray[data-layout] .tray-body { flex: 1; padding: 0; overflow: hidden; }
+.tray[data-layout] .gateway-shell { position: relative; inset: auto; height: 100%; min-height: 0; }
+.tray[data-layout] .gateway-shell #root { min-height: 0; }
+.tray[data-layout] .shell-bar { padding-top: 0; }
+.tray[data-layout] .shell-back { display: none; }
+.tray[data-layout] .tray-header h2 { cursor: pointer; }
+.tray[data-layout="full"] {
+  width: 100%;
+  max-height: none;
+  border-radius: 0;
+  transition-duration: var(--motion-long);
+}
+.tray[data-layout="full"] .tray-header { padding-top: env(safe-area-inset-top); }
+.request-preview .hero-identity { margin-bottom: 1rem; }
+.request-status { color: var(--muted); font-size: 0.85rem; }
+.tray legend {
+  margin: 0 0 0.35rem;
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.68rem;
-  font-weight: 500;
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -1480,7 +1509,7 @@ body.collab-shell-active {
   line-height: 1.5;
 }
 
-.notification-sheet fieldset {
+.tray fieldset {
   display: grid;
   gap: 0.55rem;
   margin: 0.9rem 0 0;
@@ -1690,10 +1719,6 @@ body.collab-shell-active {
   to { transform: translateY(-8px); }
 }
 
-@keyframes motion-toast-in {
-  from { transform: translateY(100%); }
-}
-
 /* Navigation: the whole root never snapshots; the directory column and the session shell are the
    two travelling surfaces (shared axis X) and the tapped tile is the shared element between them. */
 html:active-view-transition-type(forward, back) {
@@ -1762,10 +1787,6 @@ html:active-view-transition-type(list) .directory-heading {
   view-transition-name: directory-heading;
 }
 
-html:active-view-transition-type(list) .local-action-toast:not([hidden]) {
-  view-transition-name: local-action-toast;
-}
-
 ::view-transition-group(.omp-row) {
   animation-duration: var(--motion-medium);
   animation-timing-function: var(--ease-emphasized);
@@ -1786,11 +1807,6 @@ html:active-view-transition-type(list) .local-action-toast:not([hidden]) {
     var(--motion-medium) var(--ease-emphasized-decelerate) both motion-row-in;
 }
 
-::view-transition-new(local-action-toast):only-child {
-  animation: var(--motion-short) var(--ease-emphasized-decelerate) both motion-fade-in,
-    var(--motion-medium) var(--ease-emphasized-decelerate) both motion-toast-in;
-}
-
 /* Tactile press: the tile settles under the thumb; the row surface still darkens as before. */
 .session-tile {
   transition: transform 120ms var(--ease-emphasized);
@@ -1808,6 +1824,7 @@ dialog:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .tray, .tray::backdrop, .tray-panel { transition: none; }
   .status[data-kind="loading"]::before {
     animation: none;
   }

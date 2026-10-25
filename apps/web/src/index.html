@@ -58,15 +58,9 @@
       </section>
       <section id="session-list" class="session-list" aria-label="Live OMP sessions"></section>
     </main>
-    <dialog id="network-recovery-help" class="notification-sheet recovery-help" autofocus aria-labelledby="network-recovery-help-title">
-      <div class="notification-sheet-handle" aria-hidden="true"></div>
-      <header>
-        <div>
-          <p class="sheet-kicker">OMP Sessions troubleshooting</p>
-          <h2 id="network-recovery-help-title">Still unreachable?</h2>
-        </div>
-        <button id="network-recovery-help-close" class="sheet-close" type="button" aria-label="Close network troubleshooting">Close</button>
-      </header>
+    <dialog id="tray" class="tray" closedby="closerequest"></dialog>
+    <div hidden>
+    <section id="recovery-panel" class="recovery-help">
       <p>A browser can occasionally stop networking after the device sleeps or changes networks; Chrome on Android is the known case. OMP Sessions cannot restart the browser itself.</p>
       <ol>
         <li>Fully close the browser that hosts OMP Sessions. On Android, open <strong>Settings</strong>, then <strong>Apps</strong>, select the browser, and tap <strong>Force stop</strong>. On iPhone or iPad, swipe it away in the app switcher. On a computer, quit the browser.</li>
@@ -74,21 +68,15 @@
         <li>If it remains unavailable, confirm Tailscale is connected and the desktop is awake.</li>
       </ol>
       <p class="recovery-help-note">These steps are guidance, not a diagnosis: the same banner can mean the tailnet, desktop, or gateway is genuinely unavailable.</p>
-    </dialog>
-    <dialog id="notification-settings" class="notification-sheet" autofocus aria-labelledby="notification-settings-title">
-      <div class="notification-sheet-handle" aria-hidden="true"></div>
-      <header>
-        <div>
-          <p class="sheet-kicker">OMP Sessions</p>
-          <h2 id="notification-settings-title">Settings</h2>
-        </div>
-        <button id="notification-settings-close" class="sheet-close" type="button" aria-label="Close settings">Close</button>
-      </header>
-      <section class="sheet-section" aria-labelledby="sheet-alerts-title">
-        <h3 id="sheet-alerts-title" class="sheet-section-title">Background alerts</h3>
+    </section>
+    <section id="alerts-panel">
         <p id="alert-scope" class="notify-note"></p>
         <button id="notify" class="notify" type="button" data-state="checking" disabled>Checking background alerts…</button>
         <p id="notify-note" class="notify-note">Alerts work with the app closed for input requests or activity stops. After revalidation, requests open Control; activity stops open View.</p>
+        <button id="alert-detail" class="tray-choice" type="button" hidden>Alert detail · Session ›</button>
+      <p class="sheet-build">Community project · not affiliated with OMP · build <code><!--ASSET_BUILD--></code></p>
+    </section>
+    <section id="detail-panel">
         <fieldset id="notification-detail-options" hidden>
           <legend>Choose what this device can show</legend>
           <label class="detail-option">
@@ -105,13 +93,12 @@
           </label>
           <p class="sheet-footnote">Per-device, stored with the push subscription on the gateway. Payloads are built at the chosen level — the phone never redacts.</p>
         </fieldset>
-      </section>
-      <p class="sheet-build">Community project · not affiliated with OMP · build <code><!--ASSET_BUILD--></code></p>
-    </dialog>
-    <aside id="local-action-toast" class="local-action-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
-      <span id="local-action-toast-copy"></span>
-      <button id="local-action-toast-undo" type="button">Undo</button>
-    </aside>
+    </section>
+    <section id="undo-panel">
+      <p id="undo-copy"></p>
+      <button id="undo-dismissal" class="tray-choice" type="button">Undo</button>
+    </section>
+    </div>
     <!--ASSET_SCRIPT-->
   </body>
 </html>

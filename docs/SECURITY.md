@@ -265,6 +265,12 @@ Mandatory rules:
 - use generated canary capabilities for tests, never real user links.
 
 The embedded `v18.12.6` client keeps the same capability boundary across coalesced renders.
+Request trays use that same in-memory bootstrap and mount exactly one client. Expanding reparents
+the existing shell; it neither fetches another capability nor creates another React root. Tray
+descriptors, DOM attributes and history state never contain capability material. Native modal
+close requests consume Back without tray history entries; only promotion replaces the route with
+`/client/`. Closing disposes the client synchronously. The bfcache resume intent retains only the
+metadata binding and full/tray presentation, then reacquires a fresh capability after revalidation.
 Both one-shot and streaming-tail Markdown route links through the same browser-URL scheme
 sanitizer; raw HTML stays escaped and KaTeX emits MathML with `trust: false`. Only pure
 TypeScript parser sources are vendored, with no pi-utils/pi-natives runtime dependency.

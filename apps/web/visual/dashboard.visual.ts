@@ -26,7 +26,7 @@ function metadataOnly(session: SessionMetadata): SessionMetadata {
 
 async function geometry(page: Page) {
   return page.evaluate(() => {
-    const selectors = ["body > main", ".gateway-shell main", ".sh-transcript", ".shell-back", ".sh-composer-ask-embedded", ".triage-bar", "#notification-settings"];
+    const selectors = ["body > main", ".gateway-shell main", ".sh-transcript", ".tray[data-layout] .tray-panel:not([inert]) .tray-leading, .shell-back", ".sh-composer-ask-embedded", ".triage-bar", "#tray"];
     return {
       overflow: document.documentElement.scrollWidth > window.innerWidth,
       boxes: selectors.map(selector => {
@@ -132,10 +132,13 @@ for (const state of VISUAL_STATES) {
         await page.locator("#notify").click();
         await page.locator('#notify[data-state="enabled"]').waitFor();
         if (state === "directory-all-clear") {
-          await page.locator("#notification-settings-close").click();
+          await page.locator("#tray .tray-leading").click();
           await page.locator(".alerts-hint").waitFor({ state: "hidden" });
-        } else if (!await page.locator('input[name="notification-detail"][value="session"]').isChecked()) {
-          throw new Error("visual state: session detail not selected");
+        } else {
+          await page.locator("#alert-detail").click();
+          if (!await page.locator('input[name="notification-detail"][value="session"]').isChecked()) {
+            throw new Error("visual state: session detail not selected");
+          }
         }
       }
       phase = "state";
@@ -227,7 +230,7 @@ for (const state of VISUAL_STATES) {
         await parityPage.evaluate(async () => document.fonts.ready);
         const copy = await geometry(parityPage);
         if (copy.overflow) { phase = "parity-overflow"; throw new Error("visual geometry: serialized overflow"); }
-        const labels = ["directory", "column", "transcript", "header", "ask", "triage", "settings"];
+        const labels = ["directory", "column", "transcript", "header", "ask", "triage", "tray"];
         const equal = source.boxes.every((box, index) => {
           const other = copy.boxes[index];
           const matches = box === null || other == null ? box === other

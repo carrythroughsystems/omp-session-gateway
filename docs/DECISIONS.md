@@ -1751,3 +1751,52 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 - Shell-to-shell launches (Control upgrade, Next), bfcache resumes, disposal, and authorization withdrawal restore or replace the shell without motion.
 
 **Consequences:** The directory and the session read as one continuous space; a request that arrives moves its row into the queue instead of teleporting. Routine refreshes stay as cheap as before (one signature string per render). The visual lane keeps reduced motion and its zero-running-animations guard; the browser lane runs with motion live and `apps/web/e2e/motion.e2e.ts` proves which changes animate and which do not. Later layers (the tray system, first-run guidance, the all-clear moment) build on the same gate and tokens.
+
+---
+
+## ADR-041 — One native tray system
+
+**Status:** Accepted; supersedes ADR-027's Settings-sheet presentation and the Hide/Undo toast
+presentation in ADR-026/ADR-040. Notification, local-routing and capability semantics are unchanged.
+
+**Date:** 2026-10-24
+
+**Context:** Settings, Troubleshooting, local Undo and hero alternates used unrelated secondary
+surfaces. Opening a request displaced the directory before the operator could answer a small Ask.
+Family's gradual-revelation rules call for one focused topic/action, a concise title and leading
+Close/Back control, context-aware theme, and visibly different heights between successive panels.
+
+**Decision:**
+
+- One `#tray` native dialog and plain DOM module own a stack of at most three panels. Modal flows
+  use `showModal()`, body scroll lock, native focus containment/return, and heading focus on swaps.
+  `cancel` pops a child or closes the root; no tray `pushState` competes with Android close requests.
+  Root backdrop coordinates cover browsers without `closedby`. Grip-only captured-pointer dragging
+  starts after 4px and dismisses past the smaller of 96px or 25% of tray height.
+- Measure panel heights in pixels and transition with ADR-040's emphasized medium token; if adjacent
+  panels are within 24px, enlarge the incoming panel. Outgoing content is inert and aria-hidden
+  during its short fade/0.96 scale. Safe areas, 48px controls, contained scrolling and visual-viewport
+  sizing apply on phone and desktop. Reduced motion opens, closes, swaps and promotes instantly.
+  Class-driven exit retains modality until transition end or a timeout calls native `close()`.
+- Background alerts owns the existing seven-state toggle, enabled-only Alert detail row and build
+  footer; the child radios apply immediately and return. Reuse the same notification elements.
+  Troubleshooting is one content panel. Hero Options opens This request with immediate Hold and
+  View transcript choices, not another confirmation.
+- Hide opens the same host through non-modal `show()`, `role=status` and polite live announcement.
+  Its five-second timer pauses for hover/focus. Generation-bound Undo and persistent Show all keep
+  the existing bounded device-local records; a superseding tray cancels the old timer.
+- Open request on the hero, Then and held rows opens compact metadata/Connecting immediately and
+  runs the ordinary validated launch. Mount the existing pinned client and shell inside a roughly
+  72%-visual-viewport tray. Expand or tapping its title grows to full viewport with the long token,
+  then reparents the same shell into the body and replaces history with `/client/`. No second
+  React root, capability or relay socket; no draft loss. Full-screen working View retains ADR-040.
+- Close restores the cached directory and disposes synchronously. Presentation is carried with
+  the validated attempt, live shell and memory-only bfcache intent. Pagehide/cancellation invalidate
+  late mounts and promotions. Resume revalidates and reacquires rather than retaining a capability.
+  No document view transition runs while a tray is open.
+
+**Consequences:** Secondary surfaces share anatomy, motion and accessibility. Request handling can
+stay in context, with deliberate expansion for longer work. The module never owns bearer secrets;
+CSP, protocol, client embed contract, local record formats and dependencies remain unchanged.
+Browser tests exercise root/socket/draft identity, native cancel, nested focus/inertness, transient
+timing, recovery and capability sinks; the 18-state visual harness serializes the same native host.

@@ -319,9 +319,9 @@ test("attention cards and explicit background alert settings stay metadata-only"
     await expect(page.locator(".queue-hero .ask-preview")).toHaveText("Waiting for your input");
     await expect(page.locator(".queue-hero").getByRole("button")).toHaveText([
       "Open request",
-      "Hold for desk",
-      "Transcript",
+      "Options",
     ]);
+    await page.getByRole("button", { name: "Options", exact: true }).click();
     await page.getByRole("button", { name: "Hold for desk" }).click();
     await expect(page.locator("#directory-count")).toHaveText("2 waiting · 1 held");
     await expect(page.locator(".queue-hero h2")).toHaveText("attention-viewonly-002");
@@ -362,7 +362,7 @@ test("attention cards and explicit background alert settings stay metadata-only"
       .evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
     expect(directoryTargets.every(height => height >= 44)).toBe(true);
     const heroAltTargets = await page
-      .locator(".hero-alt")
+      .locator(".hero-options")
       .evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
     expect(heroAltTargets.every(height => height >= 44)).toBe(true);
 
@@ -379,7 +379,7 @@ test("attention cards and explicit background alert settings stay metadata-only"
       await expect(page.locator(".queue-row")).toHaveCount(count - 1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       const targets = await page
-        .locator(".action-request, .hero-alt, .queue-row, .working-row, .dismiss-session")
+        .locator(".action-request, .hero-options, .queue-row, .working-row, .dismiss-session")
         .evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
       expect(targets.every(height => height >= 44)).toBe(true);
     }
@@ -414,8 +414,8 @@ test("attention cards and explicit background alert settings stay metadata-only"
     await expect(page.locator("#notify")).toHaveText("Enable background alerts");
     await expect(page.locator("#notify-note")).toBeVisible();
     await expect(page.locator("#notification-detail-options")).toBeHidden();
-    await page.locator("#notification-settings-close").click();
-    await expect(page.locator("#notification-settings")).toBeHidden();
+    await page.locator("#tray .tray-leading").click();
+    await expect(page.locator("#tray")).toBeHidden();
     expect(await notificationState(page)).toMatchObject({ permissionRequests: 0, subscriptionActive: false });
     await page.clock.install();
     const requestsBeforeDismiss = fixture.requests.length;
@@ -423,8 +423,8 @@ test("attention cards and explicit background alert settings stay metadata-only"
     await expect(page.locator(".working-row")).toHaveCount(0);
     await expect(page.locator("#directory-count")).toHaveText("Live · 1");
     await expect(page.locator(".all-clear-copy")).toHaveText("Nothing needs you.");
-    await expect(page.locator("#local-action-toast")).toBeVisible();
-    await expect(page.locator("#local-action-toast-copy")).toContainText("on this device");
+    await expect(page.locator("#tray[data-panel='undo']")).toBeVisible();
+    await expect(page.locator("#undo-copy")).toContainText("on this device");
     const dismissedStorage = await page.evaluate(() =>
       JSON.parse(localStorage.getItem("omp.sessions.dismissed.v2") ?? "null") as unknown,
     );
@@ -437,11 +437,11 @@ test("attention cards and explicit background alert settings stay metadata-only"
         sourceOrigin: fixture.origin,
       },
     ]);
-    await page.locator("#local-action-toast-undo").click();
+    await page.locator("#undo-dismissal").click();
     await expect(page.locator(".working-row")).toHaveCount(1);
     await page.getByRole("button", { name: "Hide ordinary-newest-0003 on this device" }).click();
     await page.clock.fastForward(5_100);
-    await expect(page.locator("#local-action-toast")).toBeHidden();
+    await expect(page.locator("#tray[data-panel='undo']")).toBeHidden();
     await expect(page.locator(".dismissed-control")).toContainText("1 hidden on this device");
     const restoreSurface = await page.locator(".dismissed-control").evaluate(element => {
       const action = element.querySelector("button");
@@ -458,16 +458,17 @@ test("attention cards and explicit background alert settings stay metadata-only"
 
     expect(await notificationState(page)).toMatchObject({ permissionRequests: 0, subscriptionActive: false });
     await page.locator("#settings").click();
-    await expect(page.locator("#notification-settings")).toBeVisible();
+    await expect(page.locator("#tray")).toBeVisible();
     await page.locator("#notify").click();
     await expect(page.locator("#notify")).toHaveText("Disable background alerts");
+    await page.locator("#alert-detail").click();
     await expect(page.locator("#notification-detail-options")).toBeVisible();
     await expect(page.locator('input[name="notification-detail"][value="session"]')).toBeChecked();
     await expect(page.locator(".detail-warning")).toContainText("notification history");
     const detailTargets = await page.locator(".detail-option").evaluateAll(elements =>
       elements.map(element => element.getBoundingClientRect().height),
     );
-    expect(detailTargets.every(height => height >= 44)).toBe(true);
+    expect(detailTargets.every(height => height >= 48)).toBe(true);
     await page.locator('input[name="notification-detail"][value="preview"]').check();
     await expect(page.locator('input[name="notification-detail"][value="preview"]')).toBeChecked();
     expect(await notificationState(page)).toMatchObject({

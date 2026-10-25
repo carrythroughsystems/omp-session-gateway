@@ -75,6 +75,7 @@ test("an open software keyboard cannot cover the composer", { tag: "@core" }, as
     await page.goto(fixture.origin);
 
     await page.getByRole("button", { name: "Open request" }).click();
+    await page.locator(".tray-expand").click();
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
     const composer = page.locator(".sh-composer-input");
     await expect(composer).toBeVisible();
@@ -115,6 +116,7 @@ test("the composer is large enough to focus without zooming in either orientatio
     await page.goto(fixture.origin);
 
     await page.getByRole("button", { name: "Open request" }).click();
+    await page.locator(".tray-expand").click();
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
     const composer = page.locator(".sh-composer-input");
     await expect(composer).toBeVisible();

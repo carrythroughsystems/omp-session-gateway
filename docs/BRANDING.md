@@ -133,7 +133,7 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   Area symbols use the self-hosted, lazily loaded Nerd Font subset (Space
   Grotesk/JetBrains Mono webfonts remain README/banner-only).
 - Radii: 12px rows/cards and hero, 999px pills. Borders 1px `border`;
-  shadows only on overlays (toast, sheets) — hierarchy comes from surface
+  shadows only on trays — hierarchy comes from surface
   steps, not elevation.
 - Masthead: brand row (mark 20px + mono eyebrow `PRIVATE TAILNET DIRECTORY` in
   live color + trailing 44px Settings control), then H1 `Sessions`/`Needs you`
@@ -159,8 +159,8 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   (several sources and `All hosts` scope). Waiting and held rows show project
   (and host); the hero shows project · model (and host).
 - Needs-you queue: one amber `Up next` hero (tile + title + summary, sentence-case
-  ask preview with a 2px amber rule, block `Open request`, quiet `Hold for
-  desk`/`Transcript` alternates), `Then` rows with chevrons, dashed `On hold`
+  ask preview with a 2px amber rule, block `Open request`, quiet 48px `Options`
+  opening `This request` with `Hold for desk`/`View transcript`), `Then` rows with chevrons, dashed `On hold`
   rows with `Requeue`, then working rows.
 - Working rows: one bordered frame per session — whole-row View button (tile,
   title, metadata line) and a quiet trailing 44px icon-only `Hide` control
@@ -177,13 +177,21 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   line), without repeating live counts already present in the masthead; `Host
   coverage incomplete` turns the dot amber. Alert state appears only while
   background alerts are enabled; otherwise a pill chip routes to Settings.
-- Settings sheet: bottom sheet with mono section kickers, the seven-state
-  alert toggle, detail options (only while enabled), and a mono build line.
+- Settings trays: `Background alerts` contains the seven-state toggle and mono build line;
+  enabled alerts expose `Alert detail · <level>`, opening a child with the three radios.
+- Trays (ADR-041): one native host for secondary surfaces, one topic/action per panel,
+  concise title and one 48px leading Close/Back control. Adjacent panels differ by at least
+  24px, with measured height and content transitions using ADR-040's Material tokens.
+  Context determines tone: requests are amber; alerts, recovery and Undo are neutral.
+  Native modality preserves context and focus; the grip alone drags, content scrolls,
+  and the bottom clears the safe area. Undo is a non-modal polite status tray.
+  Open request grows from metadata/Connecting to the actual pinned client at about 72%
+  of the visual viewport; Expand grows into the same full-screen session without remounting.
 - Status banner: full-width `surface` strip with a leading status dot
   (live/loading/danger). Unauthorized uses `danger` text + dot and hides rows.
 - Empty state: ghost mark (22% opacity), `NO LIVE SESSIONS` kicker, mono hint
   about `collab.autoStart`.
-- Focus: 2px `live` ring, 2px offset; dialogs take initial focus themselves.
+- Focus: 2px `live` ring, 2px offset; modal trays focus the current panel heading.
 - Motion (ADR-040): only on user-initiated transitions and genuine state changes,
   never on routine refreshes. Directory ↔ session is a shared-axis slide with the
   tapped tile morphing into the header tile; rows slide when a session changes
@@ -195,8 +203,8 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
 - Links: `live` color, hover lighten (`#5FD9A9`).
 
 Security-UX invariants (do not regress): capabilities fetched only on tap
-(no-store), never rendered into DOM attributes/history/storage; the Settings
-sheet keeps the standing community/affiliation line.
+(no-store), never rendered into DOM attributes/history/storage; Background alerts
+keeps the standing community/affiliation line.
 
 ## Relationship to upstream
 
