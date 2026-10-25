@@ -64,7 +64,7 @@
     "Redact invalid capability input from collaboration-link errors",
     "Correlate active Ask requests with explicit tool-call recommendation metadata",
     "Embed under gateway chrome without a competing client header, rail, or lifecycle overlay, retaining the gateway primary-action palette",
-    "Present an embedded active Ask in the client's sole composer without a duplicate transcript card",
+    "Present an embedded active Ask in the client's sole composer without a duplicate transcript card, keeping the transcript and composer at one tree position so an Ask starting or ending never remounts them (drafts, photos, and the Show earlier window survive)",
     "Capture, metadata-strip, bound, preview, and send phone photos through the existing encrypted image-prompt frame",
     "Offer separate rear-camera capture and existing-photo inputs behind one accessible Photo source panel",
     "Reject oversized decoded image dimensions before browser decode and use CSP-compatible data previews",

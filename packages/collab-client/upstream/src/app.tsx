@@ -317,7 +317,10 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 					data-rail={!embedded && railOpen ? "true" : "false"}
 					data-embedded-ask={embedded && snap.uiRequest !== null ? "true" : "false"}
 				>
-					{embedded && snap.uiRequest !== null ? (
+					{/* One tree shape whether or not an Ask is active: React keeps the transcript window and
+					    composer draft mounted while `.sh-embedded-body` switches between pass-through and
+					    the bounded Ask layout in CSS. */}
+					{embedded ? (
 						<div className="sh-embedded-body">
 							<div className="sh-transcript">
 								<Transcript
@@ -329,26 +332,28 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 										host={toolHost}
 										phase={snap.phase}
 										liveEpoch={snap.liveEpoch}
-										suppressAskTool
+										suppressAskTool={snap.uiRequest !== null}
 									/>
 							</div>
 							{composer}
 						</div>
 					) : (
-						<div className="sh-transcript">
-							<Transcript
-									entries={snap.entries}
-									stream={snap.stream}
-									streamDone={snap.streamDone}
-									activeTools={snap.activeTools}
-									working={snap.working}
-									host={toolHost}
-									phase={snap.phase}
-									liveEpoch={snap.liveEpoch}
-								/>
-						</div>
+						<>
+							<div className="sh-transcript">
+								<Transcript
+										entries={snap.entries}
+										stream={snap.stream}
+										streamDone={snap.streamDone}
+										activeTools={snap.activeTools}
+										working={snap.working}
+										host={toolHost}
+										phase={snap.phase}
+										liveEpoch={snap.liveEpoch}
+									/>
+							</div>
+							{composer}
+						</>
 					)}
-					{(!embedded || snap.uiRequest === null) && composer}
 				</section>
 				{!embedded && railOpen && (
 					<>

@@ -64,6 +64,24 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
           await expect(page.locator(".sh-transcript")).toContainText("Synthetic Ask answered: Implement ADR-0036 locally");
           fixture.upsert(GATEWAY_WORKING);
           await expect(page.locator('.triage-bar[data-kind="hold"]')).toHaveCount(0);
+          // A draft typed between Asks survives the next Ask: the composer and transcript keep their
+          // tree position, so React never remounts them when the Ask layout switches on and off.
+          await page.locator(".sh-composer-input").fill("draft kept across an ask");
+          await page.locator(".tr-root").evaluate(element => { (element as HTMLElement).dataset.identity = "kept"; });
+          await page.evaluate(async () => {
+            const socket = (globalThis as typeof globalThis & { __ompSyntheticSocket?: { sendHostFrame(frame: unknown): Promise<void> } }).__ompSyntheticSocket;
+            if (socket === undefined) throw new Error("missing synthetic socket");
+            await socket.sendHostFrame({ t: "ui-request", request: { reqId: 8, kind: "select", title: "Second question?", options: ["Yes", "No"], initialIndex: 0, selectionMarker: "radio" } });
+          });
+          await expect(page.locator(".sh-composer-ask-embedded")).toBeVisible();
+          await page.evaluate(async () => {
+            const socket = (globalThis as typeof globalThis & { __ompSyntheticSocket?: { sendHostFrame(frame: unknown): Promise<void> } }).__ompSyntheticSocket;
+            await socket?.sendHostFrame({ t: "ui-request-end", reqId: 8 });
+          });
+          await expect(page.locator(".sh-composer-ask-embedded")).toHaveCount(0);
+          await expect(page.locator(".sh-composer-input")).toHaveValue("draft kept across an ask");
+          expect(await page.locator(".tr-root").evaluate(element => (element as HTMLElement).dataset.identity)).toBe("kept");
+          await page.locator(".sh-composer-input").fill("");
           await page.locator(".tr-root").evaluate(element => { element.scrollTop = element.scrollHeight; });
           await screenshot("answered");
         }

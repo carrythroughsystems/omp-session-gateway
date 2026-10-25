@@ -243,6 +243,8 @@ export async function installSyntheticProductFixture(
 
         constructor(url: string) {
           this.url = url;
+          // Tests drive further host frames (a later Ask, its end) through the live socket.
+          Object.defineProperty(globalThis, "__ompSyntheticSocket", { configurable: true, value: this });
           queueMicrotask(() => {
             this.readyState = AskWebSocket.OPEN;
             this.onopen?.(new Event("open"));
