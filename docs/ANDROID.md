@@ -287,7 +287,8 @@ destination page. A missing or ambiguous credential surface still fails while th
 - Browser force-stop records delivery while stopped or suppression until relaunch; both variants
   still require a fresh post-relaunch delivery.
 - Origin-permission denial suppresses notifications; restoring permission must permit a fresh
-  delivery. Lock/resume and forced Doze record observed behavior, not a delivery guarantee: forced
+  delivery within the 160-second recovery window; its clear and ordinary deliveries retain the
+  steady-state minute. Lock/resume and forced Doze record observed behavior, not a delivery guarantee: forced
   Doze records delivery during Doze, delivery within a minute of exit, or a push the push service
   still holds (`undelivered_after_doze_exit`); privacy checks apply to anything that arrives. Doze
   is the last delivery phase, after the network transitions: afterwards the phone's frozen browser

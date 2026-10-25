@@ -21,6 +21,7 @@ const baseline: PushDeviceBaseline = { wifi: true, mobile: true, airplane: false
 const browserBaseline: PushBrowserBaseline = { subscribed: true, permission: "granted", detail: "session" };
 /** `staleSocket`: after a radio change brings the phone online (`after: "airplane"`, only the return from Airplane mode), Play Services' fresh push socket delivers what it held, then dies silently; pushes sent within `ms` of the change wait until it reconnects. */
 interface FakeOptions { failAfter?: number; forceDelivery?: boolean; dozeDelivery?: boolean; dozeHeld?: boolean; deferredAfterDoze?: boolean; staleSocket?: { ms: number; after: "airplane" | "any" }; cellular?: boolean; duplicate?: boolean; wrongTap?: boolean; cleanupFail?: PushCleanupStep; dndFlipAfter?: number; overlaps?: number; frozenHeartbeat?: boolean; browserPermission?: PushBrowserBaseline["permission"]; shutdownNotification?: boolean;
+  /** Holds delivery after the denied-to-granted permission transition. */ permissionRecoveryMs?: number;
   /** The directory shows the waiting asks newest first. */ wrongOrder?: boolean; /** That triage control reaches the gateway. */ triageMutation?: TriageAction["kind"]; /** A delayed stale tap still launches. */ staleLaunch?: boolean;
   /** A foreign post arrives while an owned activity-stop notice is showing. */ foreignDuringStop?: boolean }
 const SECONDARY = "synthetic-secondary";
@@ -155,7 +156,10 @@ function fake(options: FakeOptions = {}) {
     },
     answer: async () => { await effect(() => { asking = false; shown = undefined; }); },
     forceStop: async () => { await effect(() => { forced = true; shown = undefined; }); },
-    permission: async value => { await effect(() => { browser.permission = value; }); },
+    permission: async value => { await effect(() => {
+      if (browser.permission === "denied" && value === "granted" && options.permissionRecoveryMs !== undefined) socketStaleUntil = time + options.permissionRecoveryMs;
+      browser.permission = value;
+    }); },
     doze: async enabled => { await effect(() => { asleep = enabled; device.forcedDoze = enabled; device.batteryOverride = enabled; if (!enabled) dozed = true; if (!enabled && !options.dozeHeld) show(); }); },
     network: async value => { await effect(() => {
       const next = { airplane: value === "airplane", wifi: value === "wifi", mobile: value !== "airplane" };
@@ -408,6 +412,20 @@ test.each(["airplane", "any"] as const)("a push held while Play Services reconne
   const held = fake({ staleSocket: { ms: 170_000, after } });
   await expect(runAndroidPush(held.input)).rejects.toThrow(/^Android Push network_verified: .* timed out$/u);
   expect(held.state()).toMatchObject({ started: false, asking: false, device: baseline, browser: browserBaseline, shown: undefined });
+});
+
+test("permission restoration uses the bounded recovery window for its first delivery", async () => {
+  const recovered = fake({ permissionRecoveryMs: 70_000 });
+  expect((await runAndroidPush(recovered.input)).passed).toBe(true);
+  const final = parseAndroidPushProgress(recovered.checkpoints.at(-1));
+  expect(final.results.permission_verified).toMatchObject({ suppressed: true, freshDelivery: true });
+  expect(androidPushNeedsCleanup(final)).toBe(false);
+  expect(recovered.state()).toMatchObject({ started: false, secondaryStarted: false, asking: false, device: baseline, browser: browserBaseline, shown: undefined });
+
+  const held = fake({ permissionRecoveryMs: 170_000 });
+  await expect(runAndroidPush(held.input)).rejects.toThrow(/^Android Push permission_verified: Android Push notification delivery timed out$/u);
+  expect(androidPushNeedsCleanup(held.checkpoints.at(-1))).toBe(false);
+  expect(held.state()).toMatchObject({ started: false, secondaryStarted: false, asking: false, device: baseline, browser: browserBaseline, shown: undefined });
 });
 
 test("every non-idempotent interruption restores every baseline and stops both owned fixtures", async () => {

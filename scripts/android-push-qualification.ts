@@ -92,10 +92,11 @@ export interface AndroidPushRuntime {
 }
 
 /**
- * The bound for any push wait that follows a radio change. Every change gives Play Services a fresh
- * push socket, which can deliver what it held and then die silently until its next reconnect: in the
- * first v0.6.1-prealpha.1 campaign a clear sent right after the Airplane recovery arrived 61 s after
- * the answer, 0.4 s after the socket reconnected. Steady-state waits keep the one-minute bound.
+ * The bound for push waits after radio changes or notification-permission restoration.
+ * A radio change gives Play Services a fresh push socket, which can deliver what it held and then
+ * die silently until its next reconnect: in the first v0.6.1-prealpha.1 campaign a clear sent right
+ * after the Airplane recovery arrived 61 s after the answer, 0.4 s after the socket reconnected.
+ * Steady-state waits keep the one-minute bound.
  */
 const PUSH_RECOVERY_MS = 160_000;
 
@@ -522,7 +523,10 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           await runtime.pause(500);
         }
         await fixture("answer"); await snapshot(s => !s.inputRequired);
-        await runtime.permission("granted"); await delivery("private"); await clear();
+        await runtime.permission("granted");
+        // Permission restoration reopens the app and reconciles its subscription:
+        // the first background delivery is recovery, not steady state.
+        await delivery("private", "attention", true, PUSH_RECOVERY_MS); await clear();
         await finish("permission_verified", { suppressed: true, freshDelivery: true });
       });
       await attempt("lock_resume_verified", async () => {
