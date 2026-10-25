@@ -41,6 +41,36 @@ async function settlePublication(page: Page): Promise<void> {
   });
 }
 
+async function observeDirectoryStream(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const Native = EventSource;
+    const observed = globalThis as typeof globalThis & {
+      __oldDirectoryStream?: EventSource;
+      __directorySnapshotRevision?: number;
+    };
+    class ObservedSource extends Native {
+      constructor(url: string | URL, options?: EventSourceInit) {
+        super(url, options);
+        observed.__oldDirectoryStream = this;
+        this.addEventListener("snapshot", event => {
+          const snapshot = JSON.parse(event.data) as { revision: number };
+          // A mounted shell freezes the directory; acknowledge after its real stream listeners run.
+          requestAnimationFrame(() => {
+            if (observed.__oldDirectoryStream === this) observed.__directorySnapshotRevision = snapshot.revision;
+          });
+        });
+      }
+    }
+    globalThis.EventSource = ObservedSource;
+  });
+}
+
+async function waitForDirectorySnapshot(page: Page, revision: number): Promise<void> {
+  await page.waitForFunction(expected =>
+    (globalThis as typeof globalThis & { __directorySnapshotRevision?: number }).__directorySnapshotRevision === expected,
+  revision);
+}
+
 for (const freeze of [false, true]) {
   test(`council476: a foreground first-snapshot retry preserves its fault${freeze ? " after freeze" : ""}`, async ({ page }) => {
     const fixture = await startDashboardFixture([]);
@@ -71,16 +101,7 @@ for (const via of ["launch", "creation", "probe"] as const) {
   test(`council476: local ${via} 403 rejects pre-denial SSE metadata and clocks`, async ({ page, context }) => {
     const fixture = await startDashboardFixture([GATEWAY_WORKING]);
     await installSilentWebSocket(page);
-    await page.addInitScript(() => {
-      const Native = EventSource;
-      class ObservedSource extends Native {
-        constructor(url: string | URL, options?: EventSourceInit) {
-          super(url, options);
-          (globalThis as typeof globalThis & { __oldDirectoryStream?: EventSource }).__oldDirectoryStream = this;
-        }
-      }
-      globalThis.EventSource = ObservedSource;
-    });
+    await observeDirectoryStream(page);
     if (via === "creation") {
       fixture.configureCreation({});
       await page.route(`${fixture.origin}/api/v1/session-creations/*`, route => route.fulfill({ status: 403, body: "" }));
@@ -187,9 +208,7 @@ for (const failure of [404, 409, 503, "network"] as const) {
       await page.locator(".working-row").click();
       await expect(page.locator("#fleet-status")).toContainText("Away:");
       if (failure === 404 || failure === 409) {
-        const refreshed = page.waitForResponse(`${away.origin}/api/v1/sessions`);
         expiryRefresh.resolve();
-        await (await refreshed).finished();
         await expect(page.locator("#fleet-status")).toBeHidden();
       }
       await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
@@ -585,21 +604,23 @@ test("council477: a failed newer foreground launch prevents delayed bfcache reop
     await page.getByRole("button", { name: `View ${GATEWAY_WORKING.title}`, exact: true }).click();
     await expect(page.locator(".gateway-shell")).toBeVisible();
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    const refreshedTitle = "Refreshed foreground choice";
+    home.setSnapshot([GATEWAY_WORKING, { ...newer, title: refreshedTitle }]);
     await page.route(`${away.origin}/api/v1/sessions`, async route => {
       intercepted.resolve();
       await release.promise;
       await route.continue().catch(() => undefined);
     });
-    const localRefresh = page.waitForResponse(`${home.origin}/api/v1/sessions`);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
     await intercepted.promise;
-    await (await localRefresh).finished();
+    const foreground = page.getByRole("button", { name: `View ${refreshedTitle}`, exact: true });
+    await expect(foreground).toBeEnabled();
     await page.route(`${home.origin}/api/v1/sessions/${newer.instanceId}/launch`, route => route.fulfill({ status: 503, body: "" }));
-    await page.getByRole("button", { name: `View ${newer.title}`, exact: true }).click();
+    await foreground.click();
     await expect(page.locator("#status-banner")).toHaveText("The session could not be opened. Try again.");
-    const remoteRefresh = page.waitForResponse(`${away.origin}/api/v1/sessions`);
+    await expect(page.locator(".all-clear-title")).not.toHaveText("All clear");
     release.resolve();
-    await (await remoteRefresh).finished();
+    await expect(page.locator(".all-clear-title")).toHaveText("All clear");
     await settlePublication(page);
     expect(home.launchRequests.map(request => request.instanceId)).toEqual([GATEWAY_WORKING.instanceId]);
     await expect(page.locator(".gateway-shell")).toHaveCount(0);
@@ -617,6 +638,7 @@ for (const advance of ["next", "hold"] as const) {
       away.configureFleet("Away", [], [home.origin]);
       await installSyntheticProductFixture(context, key);
       await installPublicationReplay(context);
+      if (failure === "withdrawn") await observeDirectoryStream(page);
       const listGate = Promise.withResolvers<void>();
       const launchGate = Promise.withResolvers<void>();
       let reads = 0;
@@ -647,11 +669,8 @@ for (const advance of ["next", "hold"] as const) {
         await page.locator(".triage-action").click();
         await expect.poll(() => launches).toBe(1);
         if (failure === "withdrawn") {
-          home.setSnapshot([{ ...RELEASE_WAITING, canControl: false }]);
-          const refreshed = page.waitForResponse(`${home.origin}/api/v1/sessions`);
-          await page.evaluate(() => window.dispatchEvent(new Event("online")));
-          await (await refreshed).finished();
-          await settlePublication(page);
+          home.setSnapshot([{ ...RELEASE_WAITING, canControl: false }], 99);
+          await waitForDirectorySnapshot(page, 99);
           launchGate.resolve();
         }
         await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "launch-failed");
@@ -661,9 +680,7 @@ for (const advance of ["next", "hold"] as const) {
         await expect(page.locator(".triage-bar")).toBeVisible();
         if (failure === 404 || failure === 409) {
           expect(reads).toBe(1);
-          const refreshed = page.waitForResponse(`${home.origin}/api/v1/sessions`);
           listGate.resolve();
-          await (await refreshed).finished();
           await expect(page.locator('.triage-bar[data-kind="launch-failed"]')).toBeHidden();
           if (advance === "hold") await expect(page.locator(".triage-action")).toHaveText("Hold → next");
         }
@@ -681,6 +698,7 @@ test("successor4: local in-shell Control withdrawal retains its action notice", 
   const fixture = await startDashboardFixture([GATEWAY_WORKING], { roomKey: key });
   await installSyntheticProductFixture(context, key, { readOnly: true });
   await installPublicationReplay(context);
+  await observeDirectoryStream(page);
   const gate = Promise.withResolvers<void>();
   const intercepted = Promise.withResolvers<void>();
   await page.route(`${fixture.origin}/api/v1/sessions/*/launch`, async route => {
@@ -697,11 +715,8 @@ test("successor4: local in-shell Control withdrawal retains its action notice", 
     await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "connected");
     await page.locator(".shell-control").click();
     await intercepted.promise;
-    fixture.setSnapshot([{ ...GATEWAY_WORKING, canControl: false }]);
-    const refreshed = page.waitForResponse(`${fixture.origin}/api/v1/sessions`);
-    await page.evaluate(() => window.dispatchEvent(new Event("online")));
-    await (await refreshed).finished();
-    await settlePublication(page);
+    fixture.setSnapshot([{ ...GATEWAY_WORKING, canControl: false }], 99);
+    await waitForDirectorySnapshot(page, 99);
     gate.resolve();
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "launch-failed");
     await page.evaluate(() => (globalThis as typeof globalThis & { __replayAvailabilityState(): void }).__replayAvailabilityState());
@@ -724,6 +739,7 @@ for (const failure of [404, 409]) {
       await installSyntheticProductFixture(context, key);
       const gate = Promise.withResolvers<void>();
       const intercepted = Promise.withResolvers<void>();
+      const delivered = Promise.withResolvers<void>();
       let launches = 0;
       await page.route(`${away.origin}/api/v1/sessions/*/launch`, async route => {
         launches += 1;
@@ -740,6 +756,7 @@ for (const failure of [404, 409]) {
           intercepted.resolve();
           await gate.promise;
           await route.fulfill({ response }).catch(() => undefined);
+          delivered.resolve();
         });
         await page.locator(".triage-action").click();
         await intercepted.promise;
@@ -748,9 +765,9 @@ for (const failure of [404, 409]) {
           await page.locator(".gateway-shell").click({ position: { x: 2, y: 2 } });
           await expect(page.locator(".triage-action")).toHaveText("Hold → next");
         }
-        const refreshed = page.waitForResponse(`${away.origin}/api/v1/sessions`);
         gate.resolve();
-        await (await refreshed).finished();
+        await delivered.promise;
+        await settlePublication(page);
         await expect(page.locator("#fleet-status")).toBeHidden();
         await expect(page.locator(".triage-action")).toHaveText("Hold → next");
         expect(launches).toBe(1);
@@ -782,10 +799,8 @@ for (const remote of [false, true]) {
         await page.locator(".working-row").click();
         await intercepted.promise;
         target.setSnapshot([{ ...original, canControl, title: "Current authoritative title" }]);
-        const refreshed = page.waitForResponse(`${target.origin}/api/v1/sessions`);
-        await page.evaluate(() => window.dispatchEvent(new Event("online")));
-        await (await refreshed).finished();
-        await settlePublication(page);
+        if (remote) await page.evaluate(() => window.dispatchEvent(new Event("online")));
+        await expect(page.locator(".working-row")).toHaveAttribute("aria-label", "View Current authoritative title");
         gate.resolve();
         await expect(page.locator(".gateway-shell")).toBeVisible();
         if (canControl) await expect(page.locator(".shell-control")).toBeVisible();
@@ -815,9 +830,8 @@ test("successor4: distinct same-minute empty observations do not share one clock
     expect(home.disconnectEvents()).toBe(1);
     await expect(page.locator(".empty-coverage")).toContainText("0 of 2 hosts up to date");
     await page.clock.setFixedTime(new Date("2026-10-25T01:30:40Z"));
-    const refreshed = page.waitForResponse(`${away.origin}/api/v1/sessions`);
     gate.resolve();
-    await (await refreshed).finished();
+    await expect(page.locator(".empty-coverage")).toContainText("1 of 2 hosts up to date");
     await expect(page.locator("#empty-state")).toContainText("No sessions in the last received lists");
     await expect(page.locator("#empty-state")).not.toContainText("No sessions as of");
   } finally { gate.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
