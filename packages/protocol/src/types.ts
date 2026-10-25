@@ -33,6 +33,68 @@ export const FLEET_SOURCE_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/u;
 export const MAX_FLEET_LABEL_CODEPOINTS = 64;
 export const MAX_CLIENT_CONFIG_BYTES = 32 * 1024;
 
+export const SESSION_CREATION_VERSION = 1 as const;
+export const MAX_SESSION_CREATION_OPTIONS_BYTES = 64 * 1024;
+export const MAX_SESSION_CREATION_REQUEST_BYTES = 4 * 1024;
+export const MAX_SESSION_CREATION_STATUS_BYTES = 2 * 1024;
+export const MAX_SESSION_CREATION_PROJECTS = 16;
+export const MAX_SESSION_CREATION_WORKING_COPIES = 8;
+export const MAX_SESSION_CREATION_PROFILES = 8;
+export const SESSION_CREATION_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+export const SESSION_CREATION_STATES = [
+  "accepted", "launching", "awaiting_omp", "ready", "started_unavailable", "failed", "outcome_unknown",
+] as const;
+export type SessionCreationState = typeof SESSION_CREATION_STATES[number];
+export type SessionCreationUnavailableReason =
+  | "not_configured" | "tern_unavailable" | "configuration_unavailable" | "ledger_unavailable";
+export const SESSION_CREATION_ERRORS = {
+  failed: ["preflight_failed", "spawn_failed", "interrupted"],
+  started_unavailable: ["adoption_timeout", "correlation_ambiguous", "control_unavailable", "interrupted"],
+  outcome_unknown: ["launch_outcome_unknown", "interrupted"],
+} as const;
+export type SessionCreationError = typeof SESSION_CREATION_ERRORS[keyof typeof SESSION_CREATION_ERRORS][number];
+export interface SessionCreationChoice {
+  readonly id: string;
+  readonly label: string;
+}
+export interface SessionCreationProject extends SessionCreationChoice {
+  readonly workingCopies: readonly SessionCreationChoice[];
+}
+export type SessionCreationOptions = {
+  readonly version: typeof SESSION_CREATION_VERSION;
+  readonly revision: string;
+} & ({
+  readonly available: true;
+  readonly projects: readonly SessionCreationProject[];
+  readonly profiles: readonly SessionCreationChoice[];
+} | {
+  readonly available: false;
+  readonly reason: SessionCreationUnavailableReason;
+  readonly projects: readonly [];
+  readonly profiles: readonly [];
+});
+export interface SessionCreationRequest {
+  readonly clientOperationId: string;
+  readonly revision: string;
+  readonly projectId: string;
+  readonly workingCopyId: string;
+  readonly profileId: string;
+}
+export interface SessionCreationReceipt {
+  readonly operationId: string;
+  readonly state: SessionCreationState;
+}
+export type SessionCreationStatus = {
+  readonly operationId: string;
+  readonly updatedAt: string;
+} & (
+  | { readonly state: "accepted" | "launching" | "awaiting_omp" }
+  | { readonly state: "ready"; readonly session: { readonly instanceId: string; readonly generation: number } }
+  | { readonly state: "failed"; readonly error: typeof SESSION_CREATION_ERRORS.failed[number] }
+  | { readonly state: "started_unavailable"; readonly error: typeof SESSION_CREATION_ERRORS.started_unavailable[number] }
+  | { readonly state: "outcome_unknown"; readonly error: typeof SESSION_CREATION_ERRORS.outcome_unknown[number] }
+);
+
 
 export type LaunchMode = "view" | "control";
 /**

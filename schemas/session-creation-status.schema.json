@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp-session-gateway.local/schemas/session-creation-status.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operationId",
+    "state",
+    "updatedAt"
+  ],
+  "properties": {
+    "operationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "state": {
+      "enum": [
+        "accepted",
+        "launching",
+        "awaiting_omp",
+        "ready",
+        "started_unavailable",
+        "failed",
+        "outcome_unknown"
+      ]
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$"
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instanceId",
+        "generation"
+      ],
+      "properties": {
+        "instanceId": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{8,64}$"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "error": {
+      "type": "string"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "state": {
+          "enum": [
+            "accepted",
+            "launching",
+            "awaiting_omp"
+          ]
+        }
+      },
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "session"
+            ]
+          },
+          {
+            "required": [
+              "error"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {
+          "const": "ready"
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "not": {
+        "required": [
+          "error"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {
+          "const": "failed"
+        },
+        "error": {
+          "enum": [
+            "preflight_failed",
+            "spawn_failed",
+            "interrupted"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "not": {
+        "required": [
+          "session"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {
+          "const": "started_unavailable"
+        },
+        "error": {
+          "enum": [
+            "adoption_timeout",
+            "correlation_ambiguous",
+            "control_unavailable",
+            "interrupted"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "not": {
+        "required": [
+          "session"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {
+          "const": "outcome_unknown"
+        },
+        "error": {
+          "enum": [
+            "launch_outcome_unknown",
+            "interrupted"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "not": {
+        "required": [
+          "session"
+        ]
+      }
+    }
+  ]
+}

@@ -34,6 +34,22 @@ import {
   type SessionEvent,
   type SessionListResponse,
   type SessionMetadata,
+  SESSION_CREATION_VERSION,
+  SESSION_CREATION_UUID_PATTERN,
+  SESSION_CREATION_STATES,
+  SESSION_CREATION_ERRORS,
+  MAX_SESSION_CREATION_OPTIONS_BYTES,
+  MAX_SESSION_CREATION_REQUEST_BYTES,
+  MAX_SESSION_CREATION_STATUS_BYTES,
+  MAX_SESSION_CREATION_PROJECTS,
+  MAX_SESSION_CREATION_WORKING_COPIES,
+  MAX_SESSION_CREATION_PROFILES,
+  type SessionCreationChoice,
+  type SessionCreationOptions,
+  type SessionCreationRequest,
+  type SessionCreationReceipt,
+  type SessionCreationStatus,
+  type SessionCreationState,
 } from "./types.ts";
 
 const SESSION_ID_PATTERN = /^[^\0\r\n]{1,256}$/u;
@@ -725,6 +741,107 @@ export function parseFleetOrigin(value: unknown): string {
 export function parseFleetSourceId(value: unknown): string {
   if (typeof value !== "string" || !FLEET_SOURCE_ID_PATTERN.test(value)) throw new ProtocolValidationError();
   return value;
+}
+
+export function parseSessionCreationUuid(value: unknown): string {
+  if (typeof value !== "string" || !SESSION_CREATION_UUID_PATTERN.test(value)) throw new ProtocolValidationError();
+  return value;
+}
+
+function creationRecord(value: unknown, bound: number): JsonRecord {
+  const record = requireRecord(value);
+  try {
+    if (new TextEncoder().encode(JSON.stringify(record)).byteLength > bound) throw new ProtocolValidationError();
+  } catch {
+    throw new ProtocolValidationError();
+  }
+  return record;
+}
+
+function creationChoices<T extends SessionCreationChoice>(
+  value: unknown, maximum: number, parse: (value: unknown) => T,
+): T[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximum) throw new ProtocolValidationError();
+  const ids = new Set<string>();
+  return value.map((entry) => {
+    const parsed = parse(entry);
+    if (ids.has(parsed.id)) throw new ProtocolValidationError();
+    ids.add(parsed.id);
+    return parsed;
+  });
+}
+
+function creationChoice(value: unknown): SessionCreationChoice {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["id", "label"]);
+  return { id: parseFleetSourceId(record.id), label: parseFleetLabel(record.label) };
+}
+
+export function parseSessionCreationOptions(value: unknown): SessionCreationOptions {
+  const record = creationRecord(value, MAX_SESSION_CREATION_OPTIONS_BYTES);
+  requireExactKeys(record, ["version", "revision", "available", "projects", "profiles"],
+    record.available === false ? ["reason"] : []);
+  if (record.version !== SESSION_CREATION_VERSION) throw new ProtocolValidationError();
+  const revision = parseSessionCreationUuid(record.revision);
+  if (record.available === false) {
+    if (!["not_configured", "tern_unavailable", "configuration_unavailable", "ledger_unavailable"].includes(record.reason as string) ||
+        !Array.isArray(record.projects) || record.projects.length !== 0 ||
+        !Array.isArray(record.profiles) || record.profiles.length !== 0) throw new ProtocolValidationError();
+    return { version: 1, revision, available: false,
+      reason: record.reason as Extract<SessionCreationOptions, { available: false }>["reason"], projects: [], profiles: [] };
+  }
+  if (record.available !== true) throw new ProtocolValidationError();
+  const projects = creationChoices(record.projects, MAX_SESSION_CREATION_PROJECTS, (value) => {
+    const project = requireRecord(value);
+    requireExactKeys(project, ["id", "label", "workingCopies"]);
+    return { id: parseFleetSourceId(project.id), label: parseFleetLabel(project.label),
+      workingCopies: creationChoices(project.workingCopies, MAX_SESSION_CREATION_WORKING_COPIES, creationChoice) };
+  });
+  return { version: 1, revision, available: true, projects,
+    profiles: creationChoices(record.profiles, MAX_SESSION_CREATION_PROFILES, creationChoice) };
+}
+
+export function parseSessionCreationRequest(value: unknown): SessionCreationRequest {
+  const record = creationRecord(value, MAX_SESSION_CREATION_REQUEST_BYTES);
+  requireExactKeys(record, ["clientOperationId", "revision", "projectId", "workingCopyId", "profileId"]);
+  return { clientOperationId: parseSessionCreationUuid(record.clientOperationId), revision: parseSessionCreationUuid(record.revision),
+    projectId: parseFleetSourceId(record.projectId), workingCopyId: parseFleetSourceId(record.workingCopyId),
+    profileId: parseFleetSourceId(record.profileId) };
+}
+
+function creationState(value: unknown): SessionCreationState {
+  if (!SESSION_CREATION_STATES.includes(value as SessionCreationState)) throw new ProtocolValidationError();
+  return value as SessionCreationState;
+}
+
+export function parseSessionCreationReceipt(value: unknown): SessionCreationReceipt {
+  const record = creationRecord(value, MAX_SESSION_CREATION_STATUS_BYTES);
+  requireExactKeys(record, ["operationId", "state"]);
+  return { operationId: parseSessionCreationUuid(record.operationId), state: creationState(record.state) };
+}
+
+export function parseSessionCreationStatus(value: unknown): SessionCreationStatus {
+  const record = creationRecord(value, MAX_SESSION_CREATION_STATUS_BYTES);
+  const state = creationState(record.state);
+  const terminal = Object.hasOwn(SESSION_CREATION_ERRORS, state);
+  requireExactKeys(record, ["operationId", "state", "updatedAt",
+    ...(state === "ready" ? ["session"] : terminal ? ["error"] : [])]);
+  const operationId = parseSessionCreationUuid(record.operationId);
+  const updatedAt = requireDateTime(record.updatedAt);
+  if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u.test(updatedAt) ||
+      new Date(updatedAt).toISOString() !== updatedAt) throw new ProtocolValidationError();
+  if (state === "ready") {
+    const session = requireRecord(record.session);
+    requireExactKeys(session, ["instanceId", "generation"]);
+    return { operationId, state, updatedAt,
+      session: { instanceId: requireInstanceId(session.instanceId), generation: requireInteger(session.generation, 1) } };
+  }
+  if (terminal) {
+    const errors: readonly string[] = SESSION_CREATION_ERRORS[state as keyof typeof SESSION_CREATION_ERRORS];
+    if (typeof record.error !== "string" || !errors.includes(record.error)) throw new ProtocolValidationError();
+    return { operationId, state, updatedAt, error: record.error } as SessionCreationStatus;
+  }
+  return { operationId, state, updatedAt } as SessionCreationStatus;
 }
 
 /** Operator-authored display text: NFC, control and bidi characters stripped, 1..64 code points. */
