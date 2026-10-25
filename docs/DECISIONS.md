@@ -1659,7 +1659,7 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 
 ## ADR-036 — Federated dashboard origins through browser-direct CORS
 
-**Status:** Accepted
+**Status:** Accepted; exact creation routes and dashboard creation trust added by ADR-043
 
 **Date:** 2026-10-22
 
@@ -1669,13 +1669,13 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 
 - The hosting gateway serves `GET /api/v1/client-config` (`Cache-Control: no-store`, same-origin only; `403` when an `Origin` header is present and differs from `http.publicOrigin`; `404` on older gateways) returning `{ version: 1, local, targets, speech }` projected from named fields only.
 - A target gateway admits cross-origin requests only when the request `Origin` header is an exact match in `http.trustedDashboardOrigins` (canonical `URL.origin` spelling; `https:` in `tailscale-serve` mode, loopback `http://127.0.0.1:<port>` or `http://[::1]:<port>` allowed only in `dev-localhost` mode; never `*`, `null`, or `http.publicOrigin`).
-- Exact-origin admission is an explicit browser trust decision distinct from Tailscale authentication: a remote gateway that lists an origin in `http.trustedDashboardOrigins` trusts JavaScript served by that dashboard origin to read its session metadata and request View or Control capabilities using the viewer's own authorized Tailscale identity. Normal target-gateway authorization (loopback peer, TUN-mode Serve check, second-hop refusal, `auth.allowedLogins`, rate limits, and generation/freshness revalidation) still runs on every request.
-- The cross-origin surface is restricted to `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and `OPTIONS` preflight on those two paths. `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets never receive CORS headers. Admitted responses add `Access-Control-Allow-Origin: <exact origin>` and `Vary: Origin` (never `Access-Control-Allow-Credentials`), including problem responses (`400`/`403`/`404`/`409`/`413`/`415`/`429`/`500`) so the browser can distinguish `403` authorization denial from network/CORS failure. Cross-origin `POST .../launch` requires `Origin` in `http.trustedDashboardOrigins`, `Sec-Fetch-Site` absent or in `{same-site, cross-site}` (`none` and `same-origin` rejected on the cross-origin path), and exact `Content-Type: application/json`, leaving `requestHasValidMutationContext` unchanged for same-origin launches and push mutations.
+- Exact-origin admission is an explicit browser trust decision distinct from Tailscale authentication: a remote gateway that lists an origin in `http.trustedDashboardOrigins` trusts JavaScript served by that dashboard origin to read its session metadata and request View or Control capabilities using the viewer's own authorized Tailscale identity; when that target opts into ADR-043 creation, it also trusts those dashboards to create processes from its administrator-approved profiles. Normal target-gateway authorization (loopback peer, TUN-mode Serve check, second-hop refusal, `auth.allowedLogins`, rate limits, and generation/freshness revalidation) still runs on every request.
+- The cross-origin surface is restricted to `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), and `OPTIONS` preflight on those exact paths. `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets never receive CORS headers. Admitted responses add `Access-Control-Allow-Origin: <exact origin>` and `Vary: Origin` (never `Access-Control-Allow-Credentials`), including problem responses (`400`/`403`/`404`/`409`/`413`/`415`/`429`/`500`/`503`) so the browser can distinguish `403` authorization denial from network/CORS failure. Cross-origin launch and creation POSTs require `Origin` in `http.trustedDashboardOrigins`, `Sec-Fetch-Site` absent or in `{same-site, cross-site}` (`none` and `same-origin` rejected on the cross-origin path), and exact `Content-Type: application/json`; same-origin launch, creation, and push mutations retain `requestHasValidMutationContext`. Preflights are authenticated, route/method/header-specific, and consume no mutation tokens.
 - Document HTML responses extend `Content-Security-Policy` `connect-src` with each configured `fleet.targets[].origin` (never `http.trustedDashboardOrigins`).
 - The PWA keeps snapshot + SSE for `local` and polls each remote target's `GET /api/v1/sessions` every 10 seconds while visible (`mode: "cors"`, `credentials: "omit"`, `cache: "no-store"`, `redirect: "error"`), keys sessions in page memory by `SourceKey = id + "\0" + origin` (never sent on the wire), passes a source-bound `probeGateway` callback into the embedded client, and stores source-qualified triage records (`sourceId`, `sourceOrigin`) under `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`. Web Push, notifications, and app badges stay scoped to the home gateway only (one PWA per host for background alerts; no fleet push).
 - Rolling back with `omp-gateway rollback` to a retained runtime older than `FLEET_CONFIG_SINCE_VERSION` (`0.8.0`) while `http.trustedDashboardOrigins`, `fleet`, or `speech` is authored writes the full authored document to `<configDir>/config.pre-rollback.json` (mode `0600`, atomic; refusing rollback if that file already exists) and rewrites `config.json` without those three keys before starting the older target. Upgrades and reinstalls preserve the keys verbatim.
 
-**Consequences:** When `fleet.targets` and `http.trustedDashboardOrigins` are empty, the default single-host boundary and traffic profile are unchanged. Cold start of the installed PWA depends on the home gateway; if the home gateway is down while a remote host is up, the operator can open the remote gateway's Tailscale Serve origin directly. Removing an origin from `http.trustedDashboardOrigins` immediately blocks new cross-origin reads and launches from that dashboard (and a readable `403` disposes an active shell from that source in the dashboard), but does not revoke an already issued OMP capability on the relay until the OMP host stops collaboration or rotates the generation.
+**Consequences:** When `fleet.targets` and `http.trustedDashboardOrigins` are empty, the default single-host boundary and traffic profile are unchanged. Cold start of the installed PWA depends on the home gateway; if the home gateway is down while a remote host is up, the operator can open the remote gateway's Tailscale Serve origin directly. Removing an origin from `http.trustedDashboardOrigins` immediately blocks further cross-origin API requests from that dashboard (and a readable `403` disposes an active shell from that source in the dashboard), but neither kills a process already started through creation nor revokes an already issued OMP capability on the relay until the OMP host stops collaboration or rotates the generation.
 
 ---
 
@@ -1701,22 +1701,22 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 
 ## ADR-038 — Tern is an execution environment, not an integration
 
-**Status:** Accepted
+**Status:** Accepted; only the blanket creation prohibition is superseded by [ADR-043](#adr-043--opt-in-tern-creation-with-omp-native-adoption)
 
 **Date:** 2026-10-22
 
 **Context:** Operators run interactive `omp` processes inside Tern panes, tabs, and windows (locally or on remote workstations) and expect those sessions to appear in **OMP Sessions**. Upstream `pi-wire` also ships a Tern Surface Protocol (`tsp.ts`) module. Adding a Tern-specific discovery adapter, calling a Tern API, or scraping terminal panes would duplicate mainline OMP's local registry and couple the gateway to terminal multiplexer internals.
 
-**Decision:** Treat Tern strictly as an execution environment for stock OMP, not a gateway integration surface:
+**Decision:** Keep Tern an execution environment for stock OMP, not a discovery adapter or general control surface; ADR-043 permits only opt-in new-tab creation and inspect-metadata adoption:
 
 - Session identity remains OMP's `instanceId` and `generation`, published to `~/.omp/run/collab-hosts` (or `~/.<PI_CONFIG_DIR>/run/collab-hosts`) whenever `collab.autoStart` is `view` or `control` ([ADR-028](#adr-028--consume-mainline-omp-discovery-and-resolve-capabilities-only-at-launch)).
-- The gateway ships no Tern adapter, calls no Tern API, reads no `tsp.ts` frames, and performs no terminal or pane scraping. Tern pane, tab, or window IDs are at most auxiliary operator locators, never gateway session identities.
+- The gateway has no Tern discovery adapter or general Tern control API, reads no `tsp.ts` frames, and performs no terminal or pane scraping. Only ADR-043 may consume losslessly parsed local block/pane IDs and an `omp_session_file` basename for creation correlation; these never replace gateway session identity, and no session file is opened.
 - Multiple Tern windows or panes mirroring the same `omp` process share one OMP discovery entry and appear as one session row.
 - A remote Tern pane running `omp` on another host is discovered by the gateway running as that user on that execution host (and accessed either on that host's PWA or via browser-direct federation under [ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)), never through local terminal inspection on the viewing machine.
 - Launching **View** or **Control** from **OMP Sessions** always opens OMP's collaboration client in the browser; it never focuses, attaches to, or sends keystrokes to a native Tern pane.
-- A host without Tern installed is unaffected: `omp-gateway install`, `doctor`, discovery polling, and session launches have no Tern dependency.
+- Without an authored `tern` section, `omp-gateway install`, `doctor`, discovery polling, and existing session launches have no Tern dependency; configured creation failures do not disable discovery or existing launches.
 
-**Consequences:** Tern-hosted OMP works through the unchanged native discovery and launch path with zero Tern-specific gateway code. Support and qualification claims for Tern-hosted sessions follow the standard Tested / Supported / Qualified vocabulary ([ADR-030](#adr-030--claim-support-for-ci-tested-platform-families-separately-from-qualification)).
+**Consequences:** Tern-hosted OMP continues through unchanged OMP-native discovery and launch; only explicitly configured creation uses the bounded ADR-043 CLI boundary. Native handoff remains out of scope: Android Tern 0.9.5 is upstream-blocked by its missing browser-invocable intent filter ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)); desktop handoff is deferred. Support and qualification claims for Tern-hosted sessions follow the standard Tested / Supported / Qualified vocabulary ([ADR-030](#adr-030--claim-support-for-ci-tested-platform-families-separately-from-qualification)).
 
 ## ADR-039 — Session identity tiles with a self-hosted Nerd Font symbol subset
 
@@ -1861,3 +1861,115 @@ timestamp. Capabilities remain memory-only; CSP, daemon, protocol, pinned client
 change. Unit/browser tests cover record bounds, native close/resume, the real alerts control,
 scope/signature arrival gates and capability sinks. Existing visual zero-animation guards stay
 unchanged.
+
+---
+
+## ADR-043 — Opt-in Tern creation with OMP-native adoption
+
+**Status:** Accepted; narrowly supersedes ADR-038's blanket creation prohibition and extends
+ADR-036's exact CORS surface. OMP identity, terminal-independent discovery, mirroring, and the
+no-native-handoff boundary remain.
+
+**Date:** 2026-10-24
+
+**Context:** Operators want to start a new interactive OMP session from **OMP Sessions**, not
+inject commands into an existing terminal. Tern 0.9.5 provides bounded new-tab and inspection
+commands, but Tern identifiers are not OMP session identities and a successful tab receipt does
+not prove an adoptable collaboration host. A disconnected browser or interrupted daemon must
+not turn an uncertain spawn into a duplicate process. Creation also grants trusted dashboards
+a stronger privilege than reading metadata or opening an existing OMP collaboration session.
+
+**Decision:**
+
+- The optional administrator-authored `tern` configuration is absent by default. Execute only
+  on the host running OMP, as its OS user. Fixed project/working-copy/profile IDs select approved
+  canonical directories, an absolute Tern executable, and literal argv arrays with an absolute
+  OMP executable; the browser never supplies executables, paths, argv, or env. Unknown keys and
+  configured size/count limits fail closed. Missing runtime prerequisites disable creation only.
+- Invoke only `tern new tab --json --keep-open --cwd <canonical-path> -- <profile-argv…>` and
+  `tern inspect --json`, without a shell. At most one CLI child runs at a time; new-tab is
+  bounded to 8 KiB/10 s and inspect to 1 MiB/5 s, with kill-and-reap on bound or cancellation.
+  `profile.env` is the entire CLI-child environment, never merged with the daemon environment;
+  require absolute `HOME` and nonempty all-absolute `PATH`. Environment propagation across the
+  existing Tern GUI-server RPC boundary is not assumed. Tern's pane environment/settings must
+  already publish into `omp.discoveryDir` with Control enabled.
+- Inspect metadata only: losslessly parse unsigned 64-bit numeric IDs, reject remote host tags
+  at bit 56 or above, and require exactly one equality join from the returned block to
+  `sessions[].tabs[].blocks[].id` and `panes[].pane`. Use only the absolute `omp_session_file`
+  metadata string's basename in memory; never open, stat, tail, or scrape the JSONL file.
+  No fallback to focus, order, cwd, title, program, or PID; no `tsp.ts`, terminal content,
+  pane scraping, keystrokes, focus, attachment, `tern events`, or general Tern control surface.
+- OMP retains discovery ownership, `instanceId`, generation, collaboration controller, wire
+  protocol, and relay. Capture fresh pre-spawn baselines, require a post-spawn discovery round,
+  exclude baseline instance/session IDs, and match a complete maximal `[A-Za-z0-9-]+` session-ID
+  token in the basename without `.jsonl`. Publication and snapshot start times must not predate
+  launching. Exactly one fresh binding and current `registry.authorizeLaunch(..., "control")`
+  are required for `ready`; ambiguity, View-only access, clock discontinuities, and incomplete
+  metadata never relax these conditions. The poller's private observation seam contains only
+  stripped binding/timing/Control metadata, never capabilities, tokens, endpoints, or cwd.
+- Expose only authenticated `GET /api/v1/session-creation-options`,
+  `POST /api/v1/session-creations`, and `GET /api/v1/session-creations/:operationId`, plus their
+  exact authenticated CORS preflights. Same-origin mutations use `requestHasValidMutationContext`;
+  trusted-dashboard mutations use `requestHasTrustedDashboardContext` with exact JSON content
+  type. The target's Tailscale allowlist still applies. **An opted-in target trusts JavaScript
+  from every configured dashboard origin to create processes from its approved profiles.**
+  No wildcard or credentialed CORS, capability-bearing creation DTO, client-config version
+  change, or expansion of the excluded routes is allowed; responses remain `no-store`.
+- Persist private intent before spawn in `<stateDir>/session-creations.json` v1. Every state
+  transition is written, synchronized, atomically published, and directory-synchronized before
+  exposure or its dependent action. Ownership and idempotency are scoped to the normalized
+  authorized identity plus client-operation UUID, not Origin. Keep at most 64 records for
+  24 hours from acceptance, within 512 KiB; never evict unexpired records. Allow one globally
+  nonterminal operation, with no queue, and a separate 20/minute creation limiter charged only
+  after duplicate lookup. Identical replay returns the same operation; changed payload,
+  including revision, conflicts. The options revision is a fresh UUID per daemon lifetime.
+  Store only private owner/request IDs, timestamps, state, optional block ID/ready binding,
+  and closed errors; never labels, prompts, capabilities, paths, argv/env, raw CLI output, or
+  `omp_session_file`.
+- Classify outcomes as `ready`, definitely `failed`, confirmed `started_unavailable`, or
+  `outcome_unknown`, with a 110-second total operation deadline. Terminal states are immutable;
+  uncertainty never permits automatic re-spawn. On shutdown/restart, durable `accepted` becomes
+  `failed/interrupted`, `launching` becomes `outcome_unknown/interrupted`, and `awaiting_omp`
+  becomes `started_unavailable/interrupted`; never resume execution or adoption. Corrupt,
+  unsupported, unsafe, or unwritable ledgers disable creation without overwriting evidence.
+- Browser Close, backgrounding, navigation, disconnect, or abort stops watching, not the
+  accepted daemon operation, Tern tab, or OMP process. The wizard watches serially for at most
+  120 seconds; an explicit **Check creation** reads status or replays the identical request
+  after a lost acknowledgement, never inventing a replacement UUID. **Create and open Control**
+  authorizes the ordinary launch only after a foreground source refresh verifies the exact
+  instance/generation and Control; do not substitute a newer generation.
+- The optional First task is limited to 8,000 Unicode code points/32 KiB and stays in page
+  memory, bound to the exact source/instance/generation. No prompts in process arguments,
+  links, requests, ledger, logs, diagnostics, or browser storage. The client's optional
+  `takeInitialPromptDraft` drains once into an empty ordinary composer only in live writable
+  Control with healthy relay, no active Ask, no photo draft, and no pending photo send. It
+  never overwrites text, fills Ask, synthesizes keystrokes, or sends. Remember only bounded
+  source-qualified choice IDs/timestamps, never draft text, labels, paths, or operation IDs.
+- Embedded `loading: { received, total } | null` carries counters only. The shell shows
+  **Joining session…** before first live and **Reconnecting…** afterward, with floored,
+  clamped 0–100% only for valid positive totals. Forbidden, ended, and sustained-outage copy
+  keeps priority; announce only changed copy. Snapshot ingestion and transcript ownership stay
+  in the pinned client.
+
+**Consequences:** The CLI targets Tern's first window; this is an accepted limitation, not a
+window-selection promise. New tabs stay open on failure for operator inspection. An absent
+`tern` section preserves the existing no-Tern dependency, including no Tern doctor probe;
+configured `ternAvailable` reports runtime availability, not successful OMP adoption. Removing
+dashboard trust blocks further API requests but neither stops an accepted operation nor kills
+an already-started process, and does not revoke an issued OMP relay capability.
+
+Install/reinstall preserves authored `tern` verbatim. Every managed rollback conservatively
+projects it away with `projectPreTernConfig`, composed with `projectPreFleetConfig` when needed,
+after backing up the full authored document to private `config.pre-rollback.json` and refusing
+to overwrite that backup. Preserve the private ledger; older runtimes ignore it. Re-enabling
+creation requires explicit operator restoration, and rollback/uninstall never imply process
+termination. See [Operations](OPERATIONS.md#opt-in-tern-session-creation),
+[Protocol](PROTOCOL.md#session-creation-state-machine), and
+[Upgrade and rollback](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
+
+Native **Open in Tern** handoff is not implemented on any platform: Android Tern 0.9.5 is
+**upstream-blocked** by the missing browser-invocable intent filter
+([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)); desktop handoff is deferred.
+The Tern plugin, desk-handoff queue, and unified notifications are later work. The implementation
+and the read-only Pixel package inventory do not establish physical creation qualification;
+existing Tested / Supported / Qualified claims and upstream pins remain unchanged.

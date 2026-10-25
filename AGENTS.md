@@ -10,6 +10,9 @@ collaboration pages of currently running interactive Oh My Pi (OMP) processes.
 
 - Reuse OMP's existing `packages/collab-web` client and wire protocol.
 - The PWA lists sessions and launches that client; it does not render or mutate transcripts.
+- Opt-in Tern creation starts a new interactive OMP process on its execution host from
+  administrator-approved project, working-copy, and profile IDs, then adopts it through OMP's
+  own discovery (ADR-043). An optional first-task draft stays in browser memory and never auto-sends.
 - Consume mainline OMP’s discovery/query contract; keep gateway changes independent of OMP internals.
 - Do not add terminal injection, terminal or PTY scraping, QR decoding, clipboard monitoring,
   process-memory inspection, or saved-session-file scraping.
@@ -83,10 +86,10 @@ Gateway log fields are numeric or boolean only; never log strings from host quer
 
 ### HTTP and browser
 
-- Validate exact `Origin` on state-changing requests and evaluate `Sec-Fetch-Site` defensively (`requestHasValidMutationContext` for same-origin routes; `requestHasTrustedDashboardContext` for cross-origin launches from `http.trustedDashboardOrigins`).
-- Do not use wildcard CORS or `Access-Control-Allow-Credentials`. Cross-origin admission is bounded to at most 8 `http.trustedDashboardOrigins` and exposed only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and their `OPTIONS` preflights (`fleet.targets` is bounded to 7 remote targets, 8 sources total with `local`). `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin.
+- Validate exact `Origin` on state-changing requests and evaluate `Sec-Fetch-Site` defensively (`requestHasValidMutationContext` for same-origin routes; `requestHasTrustedDashboardContext` for cross-origin launches and creations from `http.trustedDashboardOrigins`).
+- Do not use wildcard CORS or `Access-Control-Allow-Credentials`. Cross-origin admission is bounded to at most 8 `http.trustedDashboardOrigins` and exposed only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), and their `OPTIONS` preflights (`fleet.targets` is bounded to 7 remote targets, 8 sources total with `local`). `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin. An opted-in target trusts those dashboards to create processes from its configured profiles, not merely read metadata or open existing sessions.
 - Keep `SourceKey` (`id + "\0" + origin`) strictly as a dashboard-side in-memory discriminator; never concatenate it into an OMP `instanceId` or send it on the wire. Device-local triage storage (`omp.sessions.held-asks.v2`, `omp.sessions.dismissed.v2`) records `sourceId` and `sourceOrigin` without labels or capabilities, and Web Push / app badges remain scoped to the home gateway only.
-- API and launch responses are `no-store`.
+- API, creation, and launch responses are `no-store`.
 - Set strict CSP (`connect-src` extended on document HTML only with `fleet.targets[].origin`), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, frame protections, and a narrow Permissions Policy (`microphone=()` by default and on all non-document responses; `microphone=(self)` on document HTML only when `speech.browserRecognition` is `true`).
 - `speech.browserRecognition` defaults to `false`. When enabled, the in-page Web Speech control mounts only in writable **Control**, and **Use text** only populates the composer draft — it never submits (**Send** remains a separate action).
 - The service worker caches only immutable application-shell assets and bypasses cross-origin, navigation, non-GET, `/api/`, and collaboration-client bootstrap traffic.
@@ -116,7 +119,8 @@ The supported settings contract is:
 - OMP publication is independent of gateway availability; OMP does not connect to the gateway.
 - Preserve `/collab`, `/collab view`, `/collab status`, `/collab stop`, `/join`, and
   `/leave` behavior.
-- Tern is an execution environment for stock OMP, not a gateway integration target (ADR-038): session identity stays OMP's `instanceId` and `generation` from `~/.omp/run/collab-hosts`, with no Tern adapter, Tern API, `tsp.ts` reader, or pane scraping.
+- Tern remains an execution environment for stock OMP (ADR-038, narrowly amended by ADR-043): session identity stays OMP's `instanceId` and `generation` from OMP-native discovery. No Tern discovery adapter or general control surface, `tsp.ts` reader, pane scraping, focus, attachment, or keystrokes; only opt-in ADR-043 new-tab creation and inspect-metadata adoption on the execution host.
+- Creation uses administrator-authored argv arrays and an explicit complete CLI environment, never browser-selected executables, paths, argv, env, or task text. Persist private capability-free intent before spawning; uncertainty never permits automatic re-spawn. Browser cancellation stops watching, not the process.
 
 ## Reliability and bounds
 

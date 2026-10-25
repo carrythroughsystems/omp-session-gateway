@@ -37,6 +37,14 @@ including in the registry: their gateway lifetime is confined to the query and n
 response. This is strictly narrower than the fork-era in-memory secret store, which retained links
 for the lifetime of a published session.
 
+The opt-in creation service subscribes to stripped poller observations through
+`subscribeObservations` and requests `refreshForAdoption` rounds started after the request,
+not merely an older in-flight poll. Reconciliation precedes observation publication. Concurrent
+fresh requests coalesce into one following round without overlapping reads; cancellation removes
+only the caller's wait. Observations contain binding/timing/Control metadata, never discovery
+tokens, endpoints, capabilities, full cwd, or Tern metadata. Ordinary polling, TTLs, and launch
+authorization remain unchanged.
+
 ### 1.3 `omp-gatewayd`
 
 A per-user daemon is the sole aggregator and remote authorization point.
@@ -53,9 +61,20 @@ Responsibilities:
 - embed or serve a pinned build/integration of OMP's existing `collab-web` client;
 - persist private VAPID/subscription material separately from the memory-only session registry and send metadata-only Web Push attention/resolution envelopes;
 - provide `install`, `status`, `doctor`, token rotation, and `uninstall` through `omp-gateway`.
-- serve `GET /api/v1/client-config` (same-origin only, `no-store`) and, when `http.trustedDashboardOrigins` is configured, admit browser-direct CORS requests from those exact origins only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and their `OPTIONS` preflights (`apps/gateway/src/http-policy.ts`, [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)) without server-side proxying or fleet push.
+- serve `GET /api/v1/client-config` (same-origin only, `no-store`) and, when `http.trustedDashboardOrigins` is configured, admit browser-direct CORS requests from those exact origins only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), and their `OPTIONS` preflights (`apps/gateway/src/http-policy.ts`, [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)) without server-side proxying or fleet push.
+- when explicitly configured, create a new interactive OMP process through the bounded Tern CLI
+  boundary and adopt it through OMP-native discovery, never through a terminal discovery adapter.
 
 The registry is intentionally empty after daemon restart. The next host poll repopulates it; no capability store exists.
+
+`apps/gateway/src/cli.ts:runServe()` owns `SessionCreationService`, the poller, HTTP server, and
+shutdown, just as it owns `PushService`; `service.ts` remains OS-service installation code.
+`tern-creation.ts` owns serialized admission, a private capability-free
+`<stateDir>/session-creations.json` ledger, state transitions, and adoption. `tern-cli.ts` owns
+only bounded subprocesses, lossless numeric-ID decoding, metadata projection, and child cleanup.
+Intent and every checkpoint are durable before exposure or dependent effects. Restart classifies
+in-flight operations conservatively without resuming or re-spawning; shutdown never closes Tern
+tabs, kills OMP, or modifies OMP discovery. See [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption).
 
 ### 1.4 OMP Sessions PWA
 
@@ -301,7 +320,7 @@ Process enumeration can find PIDs but cannot safely attach OMP's browser collabo
 Mainline OMP exposes the supported discovery/query surface needed here. Consume it rather than
 private deep imports, process inspection, or a second collaboration controller.
 
-The same rule applies to Tern ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration)): Tern is an execution environment, not a gateway integration target. An interactive `omp` process started inside a Tern pane publishes to `~/.omp/run/collab-hosts` through stock OMP's local registry, and the gateway reads no Tern API, `tsp.ts` surface, or pane state.
+The same discovery rule applies to Tern ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration), narrowly amended by [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)): an interactive `omp` process in a Tern pane publishes through stock OMP's local registry. The sole opt-in exception starts a new tab from administrator-approved argv and canonical working-copy choices, then uses `inspect --json` metadata for exact local block/pane and OMP-basename correlation. It never reads session-file contents, `tsp.ts` frames, or terminal content; it never injects keystrokes, focuses, or attaches to a pane. Tern IDs never become session identity, no general control surface is exposed, and a ready binding still requires ordinary generation-bound Control authorization.
 
 ## 5. Availability behavior
 

@@ -323,6 +323,43 @@ Web Push subscriptions, VAPID keys, notification tags, app badges, and service-w
 
 JavaScript strings cannot be reliably zeroized. Minimize lifetime, copies, closures, global state, and persistence instead of claiming memory erasure.
 
+### Opt-in creation and first-task drafts
+
+[ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) permits creation
+only from administrator-authored IDs resolving to approved canonical working copies, absolute
+executables, literal argv arrays, and a complete explicit CLI environment. The browser supplies
+none of those execution values. Never merge the daemon's environment or use a shell, task text,
+or labels as command input. The existing Tern GUI server's pane environment is a separate operator
+prerequisite, not an assumed forwarding mechanism.
+
+**Creation is stronger trust than directory/launch access:** a target with `tern` configured
+trusts every `http.trustedDashboardOrigins` entry's JavaScript to start processes from its
+approved profiles using the caller's allowed Tailscale identity. Removing that trust prevents
+further API requests, but does not cancel accepted work, kill a started OMP process, or revoke
+an already-issued relay capability. Browser Close/abort stops watching only. Neither an
+uncertain CLI result nor restart may trigger automatic re-spawn.
+
+Creation options expose only IDs/labels and an opaque per-daemon revision; status exposes only
+state/timestamp, closed errors, and an OMP instance/generation when ready. They carry no
+capabilities or execution paths. The private owner-scoped ledger contains operation/request
+IDs, normalized owner identity, timestamps, state, optional block ID and ready binding, and closed
+errors, never labels, paths, argv/env, prompts, capabilities, raw CLI output, or session-file
+paths. Its 64-record/24-hour/512-KiB bounds and durable-before-spawn checkpoints do not make it a
+capability store. Corruption or failed private durable writes disable creation without deleting
+evidence or affecting ordinary discovery/launch.
+
+The optional First task (8,000 code points/32 KiB maximum) never enters a gateway request,
+operation ledger, URL, log, diagnostic, notification, or browser storage. A volatile holder binds
+it to the exact source/instance/generation. The client's `takeInitialPromptDraft` drains it once
+only into an empty ordinary composer in live writable Control with a healthy relay, no active
+Ask, and no photo draft/pending photo send; it never overwrites an existing draft or sends.
+Cancel, changed binding, authorization loss, pagehide, or shell disposal clears the holder;
+background suspension alone may retain the unsent draft in that page's suspended flow.
+`omp.sessions.creation-prefs.v1` may store at most eight source-qualified choice records
+(`sourceId`, `sourceOrigin`, `projectId`, `workingCopyId`, `profileId`, `updatedAt`) in a versioned
+16-KiB record, validated against fresh options. It stores no labels, execution values, draft,
+operation IDs, client-operation IDs, or capabilities.
+
 ## 7. Browser controls
 
 Representative response policy; adapt CSP hashes/nonces to the build and configured relay allowlist:
@@ -340,9 +377,9 @@ Document HTML responses extend `connect-src` with each configured `fleet.targets
 Additional requirements:
 
 - exact `Origin` validation on `POST` and any future WebAuthn enrollment/assertion endpoints;
-- validate `Sec-Fetch-Site` when supplied (`same-origin` on same-origin mutations; `same-site` or `cross-site` accepted on `POST /api/v1/sessions/:instanceId/launch` **only** when the request `Origin` header is an exact match in `http.trustedDashboardOrigins` and `Content-Type` is `application/json` — missing Fetch Metadata is never permission to skip exact `Origin` validation);
+- validate `Sec-Fetch-Site` when supplied (`same-origin` on same-origin mutations; `same-site` or `cross-site` accepted on `POST /api/v1/sessions/:instanceId/launch` and `POST /api/v1/session-creations` **only** when the request `Origin` header is an exact match in `http.trustedDashboardOrigins` and `Content-Type` is exactly `application/json` — missing Fetch Metadata is never permission to skip exact `Origin` validation);
 - no wildcard CORS and no `Access-Control-Allow-Credentials`;
-- **federated dashboard origin exception ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):** when `http.trustedDashboardOrigins` is empty (default), no cross-origin API access is permitted. Any foreign non-admitted `Origin` on any `/api/` route except loopback `GET /api/v1/health` is refused with `403` before identity checks. A remote gateway that configures an origin in `http.trustedDashboardOrigins` makes an explicit browser trust decision: it trusts JavaScript served by that dashboard origin to read its session metadata (`GET /api/v1/sessions`) and request View or Control capabilities (`POST /api/v1/sessions/:instanceId/launch`) using the viewer's own authorized Tailscale identity. Only those two routes and their authenticated `OPTIONS` preflights (which never consume launch rate-limit tokens) may emit `Access-Control-Allow-Origin: <exact origin>` and `Vary: Origin`; `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin. Removing an origin from `http.trustedDashboardOrigins` blocks new cross-origin API reads and launches immediately (and a readable `403` disposes an active remote shell in the dashboard and sets the shell chip to `Access withdrawn`), but does not revoke an already issued OMP capability on the relay until the OMP host stops collaboration or rotates the generation;
+- **federated dashboard origin exception ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors), extended by ADR-043):** when `http.trustedDashboardOrigins` is empty (default), no cross-origin API access is permitted. Any foreign non-admitted `Origin` on any `/api/` route except loopback `GET /api/v1/health` is refused with `403` before identity checks. An explicitly trusted dashboard may read metadata, request existing View/Control capabilities, and, when the target opts in, create from approved profiles under the viewer's own authorized Tailscale identity. Only `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), and their authenticated `OPTIONS` preflights may emit `Access-Control-Allow-Origin: <exact origin>` and `Vary: Origin`; preflights consume no mutation tokens. `/api/v1/events`, `/api/v1/push/*`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin. Removing dashboard trust blocks further cross-origin API requests (and a readable `403` disposes the remote shell and shows `Access withdrawn`), but does not cancel accepted creation, kill a process, or revoke an already issued OMP relay capability;
 - all metadata rendered as text, never unsanitized HTML;
 - strip control/bidi characters or display them safely in titles/paths;
 - cap label length and session count;
@@ -392,6 +429,13 @@ The gateway is a reader and query client, not a publisher server. Required bound
 A discovery token is not a collaboration capability, but permits querying that host for links and
 therefore remains private. These controls reduce accidental and cross-user access; they are not a
 sandbox against same-user malware. The gateway has no capability store, even in memory.
+
+Opt-in Tern creation does not change these read-only discovery boundaries. It reads only bounded
+`inspect --json` metadata, parses numeric IDs losslessly, rejects remote-tagged IDs, and requires
+one exact local block/pane match plus a unique fresh OMP-native binding. `omp_session_file` is
+used only for a basename token match in memory; never open, stat, tail, or scrape that JSONL.
+No focus/order/cwd/PID fallback, pane content, `tsp.ts`, keystrokes, or native handoff is allowed.
+Control is reauthorized before ready and again through the ordinary capability launch path.
 
 Service installation and `doctor` do not trust a generic loopback health response. The daemon
 returns an HMAC over a fresh 256-bit challenge using its private `readiness-token`; managed startup
@@ -449,6 +493,12 @@ Forbidden:
 - browser network traces containing secret responses;
 - screenshots while a canary capability is visible;
 - unredacted tailnet names and identities in public bundles.
+
+Creation adds no logging exception: request payloads, operation/owner identifiers, labels,
+executable and working-copy paths, argv/env, raw Tern stdout/stderr or inspection output, and
+`omp_session_file` never enter logs or public errors. Diagnostics exclude the creation ledger,
+creation request payloads, argv/env, and raw CLI/inspection output; never add the ledger to a
+support archive. Snapshot progress publishes counters only, not transcript content.
 
 Test infrastructure must fail when a known canary appears in logs, files, Playwright traces, HARs, screenshots, video, browser history, DOM snapshots, caches, storage, service-worker state, or diagnostics archives.
 Tern, multi-host fleet, and speech test fixtures or qualification notes follow the same leak rules: never record a literal 43-character base64url token, a 64-hex discovery token, a collaboration capability, a real `*.ts.net` tailnet hostname (use `<name>.example.ts.net`), a public IPv4 address, or a `/Users/<name>` path.

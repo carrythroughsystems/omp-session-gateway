@@ -3,7 +3,8 @@
     "hostname": "127.0.0.1",
     "port": 4317,
     "publicOrigin": "https://host.example.ts.net",
-    // Opt-in: exact dashboard origins allowed to list and launch on this host.
+    // Opt-in: exact dashboard origins allowed to list and launch on this host,
+    // and to create approved processes if the tern section below is enabled.
     // The target must separately allow the user's Tailscale login below.
     "trustedDashboardOrigins": []
   },
@@ -27,4 +28,31 @@
     // Keyboard dictation remains available without this optional browser recognizer.
     "browserRecognition": false
   }
+  // Optional creation is absent by default. To opt in, add a comma after speech,
+  // then uncomment this entire block and replace these synthetic absolute paths.
+  // Trusted dashboards can create from these profiles; no browser command input.
+  // Working-copy paths must equal realpath. HOME/PATH are the COMPLETE CLI env;
+  // configure the Tern pane's own OMP environment and collab.autoStart=control too.
+  // The CLI targets the first Tern window. See docs/OPERATIONS.md for all bounds.
+  // "tern": {
+  //   "executable": "/usr/local/bin/tern",
+  //   "projects": [{
+  //     "id": "example",
+  //     "label": "Example project",
+  //     "workingCopies": [{
+  //       "id": "main",
+  //       "label": "main",
+  //       "path": "/srv/omp-projects/example"
+  //     }]
+  //   }],
+  //   "profiles": [{
+  //     "id": "omp",
+  //     "label": "OMP",
+  //     "argv": ["/usr/local/bin/omp"],
+  //     "env": {
+  //       "HOME": "/home/omp-demo",
+  //       "PATH": "/usr/local/bin:/usr/bin:/bin"
+  //     }
+  //   }]
+  // }
 }

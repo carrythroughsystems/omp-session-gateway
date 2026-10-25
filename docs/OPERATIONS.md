@@ -72,7 +72,7 @@ Each successful install keeps the active runtime plus the two most recent distin
 The gateway keeps its private configuration and state separate from OMP's discovery directory and never writes capabilities to disk:
 
 - **Gateway config directory** (`config.json`, `readiness-token`, and on Windows `omp-session-gateway-task.xml`): `${XDG_CONFIG_HOME:-~/.config}/omp-session-gateway` on Linux and macOS; `%LOCALAPPDATA%\OMP Session Gateway` on Windows.
-- **Gateway state directory** (`installation/current.json`, `installation/history.json`, `installation/versions/<version>-<digest>`, and `push.json`): `${XDG_STATE_HOME:-~/.local/state}/omp-session-gateway` on Linux and macOS; `%LOCALAPPDATA%\OMP Session Gateway\state` on Windows.
+- **Gateway state directory** (`installation/current.json`, `installation/history.json`, `installation/versions/<version>-<digest>`, `push.json`, and the private `session-creations.json` ledger when creation is used): `${XDG_STATE_HOME:-~/.local/state}/omp-session-gateway` on Linux and macOS; `%LOCALAPPDATA%\OMP Session Gateway\state` on Windows.
 - **OMP discovery directory** (owned by OMP, read-only to the gateway): `~/.omp/run/collab-hosts`, or `~/.<PI_CONFIG_DIR>/run/collab-hosts` when `PI_CONFIG_DIR` is set.
 
 The gateway reads each discovery file's `endpoint` field verbatim because OMP can relocate long Unix socket paths. Never delete or edit files inside OMP's discovery directory from the gateway.
@@ -86,7 +86,7 @@ The gateway reads each discovery file's `endpoint` field verbatim because OMP ca
 | `http.hostname` | `"127.0.0.1"` | `"127.0.0.1"` or `"::1"` | Loopback bind address; non-loopback addresses are rejected. |
 | `http.port` | `4317` | `1`–`65535` | Loopback HTTP port proxied by Tailscale Serve. |
 | `http.publicOrigin` | Set by `--origin` | Exact `https://` origin in production | External Tailscale Serve origin (exact `http://` loopback origin in `dev-localhost` mode). |
-| `http.trustedDashboardOrigins` | `[]` | `0`–`8` canonical origins (`https://` in `tailscale-serve` mode; loopback `http://127.0.0.1:<port>` or `http://[::1]:<port>` also allowed in `dev-localhost` mode; unique; `!= http.publicOrigin`) | Remote dashboard origins allowed to call `GET /api/v1/sessions` and `POST /api/v1/sessions/:instanceId/launch` via browser-direct CORS. |
+| `http.trustedDashboardOrigins` | `[]` | `0`–`8` canonical origins (`https://` in `tailscale-serve` mode; loopback `http://127.0.0.1:<port>` or `http://[::1]:<port>` also allowed in `dev-localhost` mode; unique; `!= http.publicOrigin`) | Remote dashboard origins allowed the exact list/launch and creation routes in [Cross-origin access](PROTOCOL.md#cross-origin-access); opting into `tern` trusts these dashboards to create approved processes too. |
 | `auth.mode` | `"tailscale-serve"` | `"tailscale-serve"` or `"dev-localhost"` | Production Tailscale Serve identity check or local development mode. |
 | `auth.allowedLogins` | Set by `--allow` | 1+ entries (`1`–`320` chars, no `*`) | Lowercased `Tailscale-User-Login` values allowed to access the gateway. |
 | `omp.discoveryDir` | `~/.omp/run/collab-hosts` | Absolute path, no NUL bytes | Explicit discovery path override when the service does not inherit a custom `PI_CONFIG_DIR`. |
@@ -97,6 +97,7 @@ The gateway reads each discovery file's `endpoint` field verbatim because OMP ca
 | `fleet.label` | First DNS label of `http.publicOrigin` host (loopback dev origins keep the literal host) | `1`–`64` NFC code points (control/bidi stripped) | Display label for this host in `GET /api/v1/client-config` and the **Host** picker. |
 | `fleet.targets` | `[]` | `0`–`7` `{ id, label, origin }` entries (`id` matches `^[a-z][a-z0-9-]{0,31}$` and `!= "local"`; `label` `1`–`64` code points; canonical `origin != http.publicOrigin`; unique `id` and `origin`) | Remote gateways polled directly by this host's PWA (at most 8 sources total including `local`). |
 | `speech.browserRecognition` | `false` | `true` or `false` | When `true`, sets `Permissions-Policy: microphone=(self)` on document HTML responses and enables the opt-in Web Speech microphone control in writable **Control** sessions. |
+| `tern` | Absent (creation unavailable) | Strict optional section, at most 32 KiB within the 64-KiB config | Administrator-approved new OMP creation on this execution host; see [setup below](#opt-in-tern-session-creation). |
 
 Only `ENOENT` or `ECONNREFUSED` proves a queried OMP host has exited; timeouts, permission or resource errors, and wire errors retain the card until `registry.ttlSeconds` expires. A host absent from OMP's discovery directory is removed on the next poll, and an absent discovery directory is valid when no sessions are sharing.
 
@@ -139,7 +140,124 @@ To list and launch sessions across multiple workstations from one installed **OM
    ```
 
 3. **Verify Tailscale identity and policy on every host:** confirm your user login is in `auth.allowedLogins` on both gateways and that your tailnet policy grants your user-owned browser/phone device HTTPS access to both hosts.
-4. **Apply and reload:** re-run `omp-gateway install --origin <origin> --allow <login>` on each edited host (which preserves `http.trustedDashboardOrigins`, `fleet`, and `speech` verbatim and restarts the service), then **reload the installed PWA** so it fetches the updated `GET /api/v1/client-config`.
+4. **Apply and reload:** re-run `omp-gateway install --origin <origin> --allow <login>` on each edited host (which preserves `http.trustedDashboardOrigins`, `fleet`, `speech`, and `tern` verbatim and restarts the service), then **reload the installed PWA** so it fetches the updated `GET /api/v1/client-config`.
+
+### Opt-in Tern session creation
+
+This is optional and absent by default ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)).
+Ordinary discovery and View/Control launch do not depend on Tern. Configure only on the
+**execution host** running OMP as the same OS user; a remote pane belongs to that host's
+gateway, not a local terminal inspector on the viewing device.
+
+**Trust disclosure:** enabling `tern` lets allowed identities, including JavaScript from every
+configured `http.trustedDashboardOrigins` dashboard, create processes from these profiles.
+This is stronger trust than reading metadata or opening an already-running session. Removing
+dashboard trust blocks subsequent API requests, not accepted operations or already-started
+processes; stopping those processes remains an operator action in Tern/OMP.
+
+Add a section such as this to the private `config.json`; all paths below are synthetic:
+
+```json
+{
+  "tern": {
+    "executable": "/usr/local/bin/tern",
+    "projects": [{
+      "id": "example",
+      "label": "Example project",
+      "workingCopies": [{
+        "id": "main",
+        "label": "main",
+        "path": "/srv/omp-projects/example"
+      }]
+    }],
+    "profiles": [{
+      "id": "omp",
+      "label": "OMP",
+      "argv": ["/usr/local/bin/omp"],
+      "env": {
+        "HOME": "/home/omp-demo",
+        "PATH": "/usr/local/bin:/usr/bin:/bin"
+      }
+    }]
+  }
+}
+```
+
+- **Absolute, canonical execution values:** use absolute Tern and profile executable paths.
+  Working-copy paths must be accessible directories equal to their `realpath`; an authored
+  symlink/alias is rejected, not silently followed. Executable symlinks are resolved to their
+  canonical executable regular-file target for invocation without rewriting authored config.
+  No `~`, shell expansion, shell wrappers, browser-selected paths, or task text in argv.
+- **Configuration bounds:** 1–16 projects; 1–8 working copies per project; 1–8 profiles.
+  IDs match `^[a-z][a-z0-9-]{0,31}$` (`local` is allowed here), unique per collection and per
+  project's copies; labels use fleet normalization (NFC, controls/bidi stripped, trimmed,
+  1–64 code points). `tern.executable` is at most 4,096 UTF-8 bytes. Each profile has 1–32
+  argv strings, absolute argv[0], at most 1,024 UTF-8 bytes per remaining argument and 8 KiB
+  total argv. Unknown keys, null substitutions, and NUL execution values are rejected.
+- **Explicit CLI environment:** `env` is the **entire** Tern CLI child's environment, never
+  merged with the LaunchAgent/service environment or interactive shell. Author `HOME`
+  (absolute) and `PATH` (every entry absolute and nonempty). At most 16 entries, names matching
+  `^[A-Z_][A-Z0-9_]{0,63}$`, at most 1,024 UTF-8 bytes/value and 8 KiB aggregate.
+  Do not rely on shell startup files to locate either executable.
+- **Separate Tern-pane prerequisite:** no claim is made that this CLI environment crosses the
+  existing Tern GUI-server RPC boundary. Configure OMP's HOME/settings/discovery environment
+  inside Tern first, with `collab.autoStart = control`, and ensure new panes publish into
+  `omp.discoveryDir`. View-only publication can appear in the directory but cannot complete
+  creation's **Create and open Control** adoption. Read back the setting in that environment:
+
+  ```sh
+  /usr/local/bin/omp config set collab.autoStart control
+  /usr/local/bin/omp config get collab.autoStart
+  ```
+
+- **First window only:** Tern's CLI creates the tab in the first window; the gateway does not
+  select, focus, or attach a window/pane. The tab uses `--keep-open`, including when the command
+  fails. Inspect that tab yourself rather than expecting gateway terminal content.
+- **Apply:** rerun install with your existing origin/allowlist; authored `tern` is preserved
+  verbatim, not normalized into a new default. Restart creates a new opaque options revision;
+  a stale review must fetch fresh options and require another explicit Create.
+
+In **New session**, choose Host, Project, Working copy when needed, and Profile. **Create and
+open Control** starts one operation. Optional **First task** is bounded to 8,000 code points /
+32 KiB, stays in page memory, and only fills an empty ordinary Control composer once;
+it is never put in argv, requests, storage, or logs, and never auto-sends.
+The daemon deadline is 110 seconds; browser watching is at most 120 seconds with serial status
+polls. Close, background, or navigation stops watching, not the operation. **Check creation**
+performs status lookup or explicitly replays the identical request after a lost acknowledgement;
+do not create a replacement merely because a request timed out.
+
+For `started_unavailable`, Tern started the command but the gateway could not adopt a unique
+Control host. For `outcome_unknown`, it may have started: check Tern and the directory before
+another explicit Create. Neither outcome is automatically retried. No native **Open in Tern**
+link is provided: Android 0.9.5 is [upstream-blocked](https://github.com/stencil-hq/tern-sdk/issues/143);
+desktop handoff is deferred.
+
+### Creation ledger recovery
+
+`<stateDir>/session-creations.json` is private state, not a support artifact: version 1 only,
+at most 64 operations, 24-hour retention from acceptance, 512 KiB maximum, and a single writer
+per user deployment. Do not point concurrent daemons at one state directory. Full unexpired
+capacity refuses new creation; it never evicts an unexpired record or creates an execution queue.
+Owner identity and request/operation IDs are private; no labels, prompts, paths, argv/env,
+capabilities, or raw CLI output belong in this ledger.
+
+After restart/shutdown, durable `accepted` becomes `failed/interrupted`, `launching` becomes
+`outcome_unknown/interrupted`, and `awaiting_omp` becomes `started_unavailable/interrupted`.
+Terminal records stay unchanged; execution/adoption never resumes automatically. A corrupt,
+unsupported, unsafe, unreadable, or unsynchronizable ledger disables creation without being
+replaced by an empty file. Ordinary directory and launch remain available.
+
+If `ledger_unavailable` appears, stop the gateway before repair, preserve the original ledger
+privately, and correct its ownership/permissions/storage fault or restore a known valid private
+v1 ledger. Do not paste its contents into an issue or delete it to clear uncertainty. If no valid
+ledger can be restored, first reconcile possible started processes in Tern/OMP, then explicitly
+archive the unusable file outside active state and restart without it. Removing a ledger loses
+its retained idempotency protection; never replay an old Create afterward as a new attempt.
+Neither repair nor restart stops Tern tabs or OMP.
+
+Every managed rollback removes authored `tern` after a private full-config backup and leaves
+this ledger intact. Re-enable creation only by explicit operator restoration on a compatible
+runtime; see [rollback behavior](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
 
 ## 5. Tailscale Serve
 
@@ -242,10 +360,10 @@ To update the gateway to a newer release:
 
 1. Download and verify the new release archive ([Verify a published build](RELEASE.md#verify-a-published-build)).
 2. Extract the archive and run the same `install` command with your production `--origin` and `--allow` flags.
-3. The installer preserves your existing port (when `--port` is omitted), `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `readiness-token`, and Web Push subscriptions, and switches the active runtime only after authenticated readiness passes.
+3. The installer preserves your existing port (when `--port` is omitted), `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `tern`, `readiness-token`, and Web Push subscriptions, and switches the active runtime only after authenticated readiness passes.
 4. Run `bun apps/gateway/src/cli.js status` and `bun apps/gateway/src/cli.js doctor` from the new extraction directory.
 
-Running `omp` sessions do not need to be restarted across a gateway update; the next discovery poll repopulates the directory within `registry.heartbeatSeconds` (default 10 s). If you need to revert, `omp-gateway rollback` (or `rollback --to <version-dir>`) restores a retained gateway runtime and preserves `readiness-token`, without downgrading or restarting `omp`. When rolling back to a retained runtime older than `FLEET_CONFIG_SINCE_VERSION` (`0.8.0`) while `http.trustedDashboardOrigins`, `fleet`, or `speech` is authored, `rollback` writes the full authored document to `<configDir>/config.pre-rollback.json` (`0600`, refusing the rollback if that file already exists), removes `http.trustedDashboardOrigins`, `fleet`, and `speech` from `config.json` before starting the older runtime, and prints restore steps (install `0.8.0` or newer, replace `config.json` with the backup, restart the gateway, and reload the PWA); see [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md#roll-back-to-a-retained-predecessor).
+Running `omp` sessions do not need to be restarted across a gateway update; the next discovery poll repopulates the directory within `registry.heartbeatSeconds` (default 10 s). If you need to revert, `omp-gateway rollback` (or `rollback --to <version-dir>`) restores a retained gateway runtime and preserves `readiness-token`, without downgrading or restarting `omp`. Every managed rollback projects authored `tern` away; targets older than `FLEET_CONFIG_SINCE_VERSION` (`0.8.0`) also project away authored `http.trustedDashboardOrigins`, `fleet`, and `speech`. A projecting rollback first saves the full authored document to private `<configDir>/config.pre-rollback.json`, refuses overwrite, and preserves the creation ledger; restore only explicitly on a runtime compatible with every saved key. See [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md#roll-back-to-a-retained-predecessor).
 
 ## 10. Lost phone and revocation
 
@@ -259,12 +377,16 @@ If a phone or browser device with tailnet access is lost or compromised:
 
 ## 11. `doctor` and diagnostics bundle
 
-`omp-gateway doctor` prints a JSON report with 18 boolean checks and exits non-zero if any check is `false`:
+`omp-gateway doctor` prints a JSON report with **18 base checks plus `ternAvailable` when configured**, all boolean, and exits non-zero if any check is `false`:
 
 - **Local configuration and files:** `config` (valid private `config.json`), `permissions` (private `readiness-token` and usable discovery path), `discoveryReadable` (`omp.discoveryDir` is absent or a private owner-only directory without symlinks), `assets` (built web assets present on disk), `compatibility` (`omp --version` on `PATH` is `>= 18.1.20`).
 - **Daemon and service:** `daemon` (loopback HMAC readiness proof succeeds), `serviceInstalled` (user service definition exists), `serviceActive` (user service is running).
 - **Loopback and Tailscale boundary:** `listenerLoopbackOnly` (bound to `127.0.0.1` or `::1` with a local TUN tailnet address), `loopbackTrustSound` (kernel TUN device present, not userspace networking), `tailscaleConnected` (`tailscale status` reports `Running`), `serveMapping` (`tailscale serve` proxies the exact `http.publicOrigin` host and port to the exact loopback origin), `funnelDisabled` (Tailscale Funnel is off).
 - **End-to-end Serve and relay health:** `identityAllowed` (authenticated `GET /api/v1/sessions` over the public Serve origin returns `200` with `Cache-Control: no-store`), `sessionHealth` (every listed session has a valid `lastSeenAt` timestamp), `pwa` (`/`, `/manifest.webmanifest`, and `/service-worker.js` return `200`), `securityHeaders` (`Content-Security-Policy` includes `default-src 'self'`), `relay` (outbound `HEAD` to `https://my.omp.sh` succeeds without creating a capability).
+- **Optional creation:** `ternAvailable` exists only when `config.tern` is authored. Its bounded
+  probe checks configured runtime paths, inspect usability, and ledger readability; it never
+  starts OMP and does not promise pane-environment correctness, successful adoption, or Control.
+  Without `tern`, there is no Tern probe or extra failing check.
 
 Note that `doctor` tests the host and an allowed metadata request from the workstation; it does not prove that unauthorized or tagged devices are denied. Complete the 3-step live check in [Validate the combined controls](#validate-the-combined-controls).
 
@@ -274,7 +396,7 @@ To create a redacted support archive without overwriting an existing file:
 bun apps/gateway/src/cli.js doctor --bundle
 ```
 
-Pass `--output <path>` to choose a custom filename. The archive (`omp-gateway-diagnostics.tar`) contains only `doctor.json` (product and protocol versions, OS/architecture, and the 18 boolean check results) and `manifest.json`. It excludes capabilities, tokens, headers, logins, tailnet names, session titles, paths, transcripts, browser storage, and raw logs. Never paste a collaboration link or token into an issue.
+Pass `--output <path>` to choose a custom filename. The archive (`omp-gateway-diagnostics.tar`) contains only `doctor.json` (product and protocol versions, OS/architecture, and the boolean check results, including `ternAvailable` only when configured) and `manifest.json`. It excludes capabilities, tokens, headers, logins, tailnet names, session titles, paths, transcripts, browser storage, raw logs, creation ledgers and request payloads, argv/env, and raw Tern CLI/inspection output. Never paste a collaboration link, token, or creation ledger into an issue.
 
 ### Troubleshooting by symptom
 
