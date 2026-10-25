@@ -6,11 +6,16 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LOG_AUDIT_SUCCESS, PERCY_RUNTIME_NOTICE, assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
-import { VISUAL_CASE_COUNT } from "../apps/web/visual/safe-reporter.ts";
+import { VISUAL_CASE_COUNT, VISUAL_PHASES } from "../apps/web/visual/safe-reporter.ts";
 
 const localSuccess = { code: 0, stdout: `visual: validated=${VISUAL_CASE_COUNT} queued=0 outcome=passed\n`, stderr: "" };
 const uploadSuccess = { code: 0, stdout: `visual: validated=${VISUAL_CASE_COUNT} queued=${VISUAL_CASE_COUNT} outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n`, stderr: "" };
 const auditSuccess = { code: 0, stdout: LOG_AUDIT_SUCCESS + "\n", stderr: "" };
+
+test("tray parity diagnostics retain their closed-set phase", () => {
+  expect(VISUAL_PHASES["parity-tray"]).toBe(true);
+  expect(VISUAL_PHASES["parity-settings"]).toBeUndefined();
+});
 
 test("local mode starts only the build and Playwright without Percy credentials or controls", async () => {
   const calls: Array<{ command: string[]; environment: NodeJS.ProcessEnv }> = [];

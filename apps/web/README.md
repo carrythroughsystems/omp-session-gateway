@@ -112,18 +112,21 @@ arrival gates, privacy, and optional synthetic screenshots via `OMP_FIRST_RUN_SC
 
 ## Multiple configured hosts
 
-`GET /api/v1/client-config` is loaded once per document, bounded to 32 KiB with a four-second
+`GET /api/v1/client-config` is loaded at bootstrap, bounded to 32 KiB with a four-second
 deadline. A 404 retains the local-only experience; malformed, unsupported or origin-mismatched
-configuration leaves the local directory usable and offers Reload. Configuration changes need
-a reload. The native Host picker scopes counts and actions, not transport work.
+configuration leaves the local directory usable and offers Try again in the single banner.
+Reconnect retries failed bootstrap after the local snapshot recovers. Changes to an already
+loaded configuration need a reload. The native Host picker scopes counts and actions, not transport work.
 
 `fleet.ts` owns DOM-free remote transport and persistence helpers. Each configured remote origin
 is fetched directly with CORS, omitted credentials, no-store and redirects refused. There is no
 gateway proxy, remote SSE, remote configuration discovery, remote health endpoint or fleet push.
 Visible pages poll every ten seconds with one coalesced request per host, a five-second deadline
 and an 8 MiB body cap. Transient failures retain disabled stale rows for 35 seconds, then remove
-them; a readable 403 clears rows immediately and stops automatic polling until Retry or foreground
-transition. Hiding/freezing aborts work without recording a failure. Each source owns its epoch,
+them; a readable 403 clears rows immediately and stops automatic polling until a foreground/online
+recheck, with no Retry action. Offline retains the observation clock and stale-grace deadline;
+scheduled recovery resumes polling without depending on an online event. Hiding/freezing aborts
+work without recording a failure. Each source owns its epoch,
 request sequence and revision domain; a completed full snapshot can have a lower revision after
 a remote daemon restarts.
 

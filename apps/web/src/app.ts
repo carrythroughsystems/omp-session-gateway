@@ -24,9 +24,10 @@ import type {
 } from "../../../packages/collab-client/upstream/src/embed-contract";
 import {
   FleetTransport, loadClientConfig, sourceKey, sessionKey, recordKey, recordRef,
-  readSourceRecords, boundedJson, describeFreshness, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
+  readSourceRecords, boundedJson, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
   type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
 } from "./fleet";
+import { sourceAvailability as describeSource, scopeCoverage as coverageForSources } from "./availability";
 import { createTray, type TrayPanel } from "./tray";
 import { SessionCreationController } from "./session-creation";
 
@@ -675,13 +676,28 @@ if (location.pathname === "/update/" || location.pathname === "/client/") {
   history.replaceState(null, "", "/");
 }
 
-type StatusKind = "ready" | "offline" | "tailnet" | "desktop" | "gateway" | "unauthorized" | "expired" | "loading";
+type StatusKind = "ready" | "offline" | "tailnet" | "desktop" | "gateway" | "configuration" | "unauthorized" | "expired" | "loading";
+
+function writeBanner(kind: StatusKind, content: HTMLElement): void {
+  statusBanner.dataset.kind = kind;
+  statusBanner.replaceChildren(content);
+  statusBanner.hidden = kind === "ready";
+}
 
 function setStatus(kind: StatusKind, message: string): void {
   if (kind === "ready" || kind === "unauthorized" || kind === "expired") clearTransportFailureTracking();
-  statusBanner.dataset.kind = kind;
-  statusBanner.replaceChildren(createTextElement("span", "status-copy", message));
-  statusBanner.hidden = kind === "ready";
+  const content = createTextElement("span", "status-copy", message);
+  if (kind === "ready" && fleetBootstrapFailed) {
+    kind = "configuration";
+    content.append(
+      createTextElement("strong", "status-title", "Fleet configuration unavailable"),
+      createTextElement("span", "status-detail", "The local list is available. Try again to check the configured hosts."),
+    );
+    const retry = createTextElement("button", "status-action", "Try again");
+    retry.addEventListener("click", () => void refreshAndConnect());
+    content.append(retry);
+  }
+  writeBanner(kind, content);
 }
 
 function parseDirectoryHistoryState(value: unknown): DirectoryHistoryState | undefined {
@@ -800,8 +816,6 @@ function showTransportFailure(kind: TransportFailureKind): void {
     );
   }
 
-  statusBanner.dataset.kind = kind;
-  statusBanner.replaceChildren(text);
   if (kind === "desktop" || extended) {
     const actions = document.createElement("span");
     actions.className = "status-actions";
@@ -825,7 +839,7 @@ function showTransportFailure(kind: TransportFailureKind): void {
     }
     text.append(actions);
   }
-  statusBanner.hidden = false;
+  writeBanner(kind, text);
   if (tracksVisibleFailure) scheduleTransportGuidance();
 }
 
@@ -1071,9 +1085,9 @@ function sourceFresh(key: SourceKey): boolean {
 function sourceAvailability(key: SourceKey) {
   if (key !== localKey) {
     const remote = remotes.get(key);
-    return describeFreshness(remote?.status ?? "unavailable", remote?.freshAt);
+    return describeSource(remote?.status ?? "unavailable", remote?.freshAt);
   }
-  return describeFreshness(
+  return describeSource(
     authorizationDenied ? "forbidden" : localFresh ? "fresh"
       : transportFailureKind !== undefined ? directoryLoaded ? "stale" : "unavailable"
         : directoryLoaded ? "refreshing" : "loading",
@@ -1081,21 +1095,15 @@ function sourceAvailability(key: SourceKey) {
   );
 }
 
-function scopeCoverage() {
-  const scoped = [...sources.keys()].filter(key => selectedScope === "all" || key === selectedScope);
-  const fresh = scoped.filter(sourceFresh).length;
-  const failed = fleetBootstrapFailed || scoped.some(key => sourceAvailability(key).failed);
-  return {
-    complete: !fleetBootstrapFailed && fresh === scoped.length,
-    failed,
-    title: failed ? "Host coverage incomplete" : "Checking host coverage",
-    copy: fleetBootstrapFailed ? "The configured hosts could not be confirmed."
-      : `${fresh} of ${scoped.length} host${scoped.length === 1 ? "" : "s"} up to date. ${failed ? "Other sessions may be missing." : "Refreshing the rest."}`,
-  };
+function scopeCoverage(scope = selectedScope) {
+  return coverageForSources(
+    [...sources.keys()].filter(key => scope === "all" || key === scope).map(sourceAvailability),
+    fleetBootstrapFailed,
+  );
 }
 
 function scopeComplete(scope = selectedScope): boolean {
-  return !fleetBootstrapFailed && [...sources.keys()].filter(key => scope === "all" || key === scope).every(sourceFresh);
+  return scopeCoverage(scope).complete;
 }
 
 function hostLabel(ref: Pick<SessionRef, "sourceKey">): string {
@@ -1161,13 +1169,6 @@ function remoteChanged(remote: FleetTransport): void {
 
 function renderFleetStatus(): void {
   fleetStatus.replaceChildren();
-  if (fleetBootstrapFailed) {
-    const row = createTextElement("div", "fleet-status-row", "Fleet configuration unavailable. Reload to check all hosts.");
-    const reload = createTextElement("button", "status-action", "Reload");
-    reload.addEventListener("click", () => location.reload());
-    row.append(reload);
-    fleetStatus.append(row);
-  }
   // The banner owns this gateway; only independent remote failures belong here.
   for (const [key, remote] of remotes) {
     const availability = sourceAvailability(key);
@@ -1203,6 +1204,7 @@ async function initializeFleet(): Promise<void> {
         remotes.set(key, new FleetTransport(target, remoteChanged));
       }
     }
+    fleetBootstrapFailed = false;
   } catch { fleetBootstrapFailed = true; }
   if (typeof localStorage !== "undefined") {
     const configured = [...sources.values()];
@@ -1664,7 +1666,8 @@ function renderWaitingQueue(
     summary.className = "all-held-summary";
     summary.append(
       createTextElement("span", "row-dot row-dot-held", ""),
-      createTextElement("strong", "", scopeComplete() ? `Queue clear · ${held.length} on hold — handle at desk` : `${held.length} on hold · some hosts unavailable`),
+      createTextElement("strong", "", scopeComplete() ? `Queue clear · ${held.length} on hold — handle at desk`
+        : scopeCoverage().failed ? `${held.length} on hold · some hosts unavailable` : `${held.length} on hold · checking other hosts`),
     );
     sessionList.append(summary);
   } else {
@@ -1896,6 +1899,7 @@ function renderEmptyState(): void {
   emptyState.querySelector(".empty-state-detail")?.remove();
   const coverage = scopeCoverage();
   const filtered = selectedScope !== "all";
+  const observation = filtered ? sourceAvailability(selectedScope) : undefined;
   const denied = filtered ? sourceAvailability(selectedScope).status === "forbidden"
     : [...sources.keys()].every(key => sourceAvailability(key).status === "forbidden");
   emptyState.dataset.state = coverage.complete && !filtered ? "empty" : "limited";
@@ -1905,7 +1909,9 @@ function renderEmptyState(): void {
   const title = denied ? "Sessions are hidden"
     : coverage.complete ? "No sessions on this host"
       : !coverage.failed ? "Checking for sessions"
-        : filtered ? "This host has not been checked" : "No sessions to show yet";
+        : filtered ? observation?.status === "expired" ? "Session list expired"
+          : observation?.time === undefined ? "This host has not been checked" : `No sessions as of ${observation.time}`
+          : "No sessions to show yet";
   const detail = denied ? "Ask the gateway operator to restore access."
     : coverage.complete ? "Choose another host or start a session here."
     : !coverage.failed ? "Waiting for the remaining hosts before confirming this list is empty."
@@ -1927,6 +1933,7 @@ function renderEmptyState(): void {
 function renderDirectoryContents(arrived = false): void {
   renderFleetStatus();
   sessionList.replaceChildren();
+  sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
   if (!directoryLoaded && sessions.size === 0 && !scopeCoverage().failed) {
     emptyState.hidden = true;
     directoryTitle.textContent = "Sessions";
@@ -1940,7 +1947,7 @@ function renderDirectoryContents(arrived = false): void {
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
     sessionList.className = "session-list";
-    sessionList.setAttribute("aria-label", "Live OMP sessions");
+    sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
     if (arrived) renderAllClear([], [], true);
     return;
   }
@@ -2130,14 +2137,6 @@ function renderConnectionState(shell: ActiveCollabShell): void {
       progressCopy = `${prefix} ${percent}%`;
     }
   }
-  if (!shell.hasBeenLive) {
-    if (!live || loading !== null) {
-      setConnectionState(shell.connectionChip, "connecting", progressCopy ?? "Connecting…");
-      return;
-    }
-    shell.hasBeenLive = true;
-  }
-
   const gatewayInterrupted = pathInterrupted(state.gatewayHealth);
   const relayInterrupted = pathInterrupted(state.relayHealth);
   if (gatewayInterrupted || relayInterrupted) {
@@ -2178,6 +2177,14 @@ function renderConnectionState(shell: ActiveCollabShell): void {
   }
   delete shell.interruptionStartedAt;
   delete shell.outagePath;
+  if (!shell.hasBeenLive) {
+    if (!live || loading !== null) {
+      setConnectionState(shell.connectionChip, "connecting", progressCopy ?? "Connecting…");
+      if (shell.triageBar.dataset.kind === "reconnecting") hideTriageBar(shell);
+      return;
+    }
+    shell.hasBeenLive = true;
+  }
   if (progressCopy !== null) {
     if (shell.recoveredTimeout !== undefined) {
       window.clearTimeout(shell.recoveredTimeout);
@@ -2377,7 +2384,8 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
   showTriageBar(
     shell,
     "clear",
-    scopeComplete(shell.scope) ? `Queue clear · ${held} on hold — handle at desk` : `${held} on hold · some hosts unavailable`,
+    scopeComplete(shell.scope) ? `Queue clear · ${held} on hold — handle at desk`
+      : scopeCoverage(shell.scope).failed ? `${held} on hold · some hosts unavailable` : `${held} on hold · checking other hosts`,
     "Sessions",
     returnToDirectory,
   );
@@ -2438,7 +2446,8 @@ function reconcileActiveCollabShell(): void {
   showTriageBar(
     shell,
     "clear",
-    scopeComplete(shell.scope) ? `✓ Answered — all clear · ${working} live` : "Answered — some hosts are unavailable",
+    scopeComplete(shell.scope) ? `✓ Answered — all clear · ${working} live`
+      : scopeCoverage(shell.scope).failed ? "Answered — some hosts are unavailable" : "Answered — checking other hosts",
     "Sessions",
     returnToDirectory,
   );
@@ -3187,7 +3196,9 @@ async function resolvePendingNotificationRoute(): Promise<void> {
   }
 }
 
+let fleetRecovery: Promise<void> | undefined;
 async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
+  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
   if (resetBackoff) reconnectAttempt = 0;
   clearReconnectTimeout();
   const epoch = directoryEpoch + 1;
@@ -3201,6 +3212,13 @@ async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
   eventStreamStale = false;
   const loaded = await loadSnapshot(epoch);
   if (loaded && epoch === directoryEpoch) {
+    if (fleetBootstrapFailed) {
+      fleetRecovery ??= initializeFleet().finally(() => { fleetRecovery = undefined; });
+      await fleetRecovery;
+      if (epoch !== directoryEpoch) return false;
+      render();
+      setStatus("ready", "");
+    }
     reconnectAttempt = 0;
     connectEvents(epoch);
     warmCollabClient();
@@ -3262,7 +3280,10 @@ window.addEventListener("pageshow", event => {
   void refreshAndConnect();
 });
 window.addEventListener("online", () => {
-  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  for (const remote of remotes.values()) {
+    remote.setVisible(document.visibilityState === "visible");
+    void remote.refresh(true);
+  }
   void refreshAndConnect();
 });
 window.addEventListener("pagehide", () => {
@@ -3288,7 +3309,7 @@ window.addEventListener("popstate", () => {
 window.addEventListener("offline", () => {
   localFresh = false;
   render();
-  for (const remote of remotes.values()) remote.setVisible(false);
+  for (const remote of remotes.values()) remote.interrupt();
   directoryEpoch += 1;
   directoryRevision = -1;
   snapshotController?.abort();
@@ -3340,7 +3361,10 @@ document.addEventListener("freeze", () => {
  * a timer that was frozen with it.
  */
 document.addEventListener("visibilitychange", () => {
-  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  for (const remote of remotes.values()) {
+    remote.setVisible(document.visibilityState === "visible");
+    if (document.visibilityState === "visible") void remote.refresh(true);
+  }
   if (document.visibilityState !== "visible") {
     if (creation.isActive) cancelLaunch();
     creation.cancel("background");

@@ -126,6 +126,7 @@ test("empty incomplete and filtered coverage have content and long failed hosts 
     expect(label.length).toBe(64);
     await page.goto(home.origin);
     await expect(page.locator("#empty-state")).toContainText("No sessions to show yet");
+    await expect(page.locator("#session-list")).toHaveAttribute("aria-label", "Listed OMP sessions");
     await expect(page.locator(".fleet-status-row")).toHaveCount(1);
     await page.getByLabel("Host", { exact: true }).selectOption({ label });
     await expect(page.locator("#empty-state")).toContainText("This host has not been checked");
@@ -133,5 +134,93 @@ test("empty incomplete and filtered coverage have content and long failed hosts 
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.getByRole("button", { name: "All hosts", exact: true }).click();
     await expect(page.getByLabel("Host", { exact: true })).toHaveValue("all");
+  } finally { await page.close(); await Promise.all([home.stop(), away.stop()]); }
+});
+
+test("offline keeps remote observations stale and scheduled recovery resumes polling without online", async ({ page }) => {
+  test.setTimeout(60_000);
+  const home = await startDashboardFixture([{ ...shared, title: "Home session" }]);
+  const away = await startDashboardFixture([{ ...shared, title: "Remote session" }]);
+  home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+  away.configureFleet("Away", [], [home.origin]);
+  try {
+    await page.clock.install({ time: new Date("2026-10-25T01:30:00Z") });
+    await page.goto(home.origin);
+    await expect(page.locator("#directory-count")).toHaveText("Live · 2");
+    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
+    home.setListFailure("malformed");
+    away.setListFailure("malformed");
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+      window.dispatchEvent(new Event("offline"));
+    });
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "offline");
+    await expect(page.locator("#status-banner > *")).toHaveCount(1);
+    await expect(page.locator(".fleet-status-row")).toHaveCount(0);
+    await expect(page.locator(".session-freshness")).toHaveCount(2);
+    for (const fact of await page.locator(".session-freshness").allTextContents()) expect(fact).toMatch(/^List as of .+\.$/u);
+    await page.clock.runFor(35_001);
+    await expect(page.locator(".working-row")).toHaveCount(1);
+    home.setListFailure(undefined);
+    away.setListFailure(undefined);
+    await page.evaluate(() => Object.defineProperty(navigator, "onLine", { configurable: true, value: true }));
+    // No online/visibility event: both retry chains must recover under their own timers.
+    // Resume real time for HTTP: a single virtual jump can fire a fetch deadline before the
+    // loopback server gets a turn, then leave its newly scheduled backoff frozen after the jump.
+    await page.clock.resume();
+    await expect(page.locator("#directory-count")).toHaveText("Live · 2", { timeout: 35_000 });
+    await expect(page.locator("#status-banner")).toBeHidden();
+    const requests = away.requestLog.filter(request => request.path === "/api/v1/sessions").length;
+    await expect.poll(() => away.requestLog.filter(request => request.path === "/api/v1/sessions").length, { timeout: 15_000 }).toBeGreaterThan(requests);
+  } finally { await page.close(); await Promise.all([home.stop(), away.stop()]); }
+});
+
+test("bootstrap and snapshot failure share one banner and configuration recovers without reload", async ({ page }) => {
+  const home = await startDashboardFixture([{ ...shared, title: "Home session" }]);
+  const away = await startDashboardFixture([]);
+  home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+  away.configureFleet("Away", [], [home.origin]);
+  let configBroken = true;
+  await page.route(`${home.origin}/api/v1/client-config`, async route => {
+    if (configBroken) await route.fulfill({ status: 503, body: "" });
+    else await route.continue();
+  });
+  home.setListFailure("malformed");
+  try {
+    await page.clock.install({ time: new Date("2026-10-25T01:30:00Z") });
+    await page.goto(home.origin);
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
+    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
+    await expect(page.locator("#status-banner > *")).toHaveCount(1);
+    await expect(page.locator(".fleet-status-row")).toHaveCount(0);
+    home.setListFailure(undefined);
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "configuration");
+    await expect(page.locator("#status-banner > *")).toHaveCount(1);
+    configBroken = false;
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect(page.locator("#status-banner")).toBeHidden();
+    await expect(page.locator(".all-clear-title")).toHaveText("All clear");
+    await expect(page.locator(".fleet-status-row")).toHaveCount(0);
+    await expect(page.getByLabel("Host", { exact: true })).toBeVisible();
+  } finally { await page.close(); await Promise.all([home.stop(), away.stop()]); }
+});
+
+test("filtered empty stale data keeps its successful observation clock", async ({ page }) => {
+  const home = await startDashboardFixture([]);
+  const away = await startDashboardFixture([]);
+  home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+  away.configureFleet("Away", [], [home.origin]);
+  try {
+    await page.goto(home.origin);
+    await page.getByLabel("Host", { exact: true }).selectOption({ label: "Away" });
+    await expect(page.locator("#empty-state")).toContainText("No sessions on this host");
+    away.setListFailure("malformed");
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(page.locator(".fleet-status-row")).toHaveAttribute("data-state", "stale");
+    const time = /List as of ([^.]+)\./u.exec(await page.locator(".fleet-status-row").innerText())?.[1];
+    expect(time).toBeDefined();
+    await expect(page.locator("#empty-state")).toContainText(`No sessions as of ${time}`);
+    await expect(page.locator("#session-list")).toHaveAttribute("aria-label", "Listed OMP sessions");
   } finally { await page.close(); await Promise.all([home.stop(), away.stop()]); }
 });

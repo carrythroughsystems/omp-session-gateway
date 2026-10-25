@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import type { CollabEmbedState } from "../../../packages/collab-client/upstream/src/embed-contract";
 import { startDashboardFixture, type DashboardFixture } from "./fixture-server";
-import { GATEWAY_WORKING, installSyntheticProductFixture } from "./synthetic-product-fixture";
+import { GATEWAY_WAITING, GATEWAY_WORKING, installSyntheticProductFixture } from "./synthetic-product-fixture";
 
 const FIRST_TASK = "SYNTHETIC_FIRST_TASK_MEMORY_ONLY_5eb931";
 interface ProgressHarness {
@@ -102,10 +102,10 @@ async function assertPrivate(page: Page, fixture: DashboardFixture): Promise<voi
   expect(persisted.includes(FIRST_TASK)).toBe(false);
 }
 
-async function setup(context: BrowserContext, page: Page): Promise<DashboardFixture> {
+async function setup(context: BrowserContext, page: Page, presentation: "full" | "request" = "full"): Promise<DashboardFixture> {
   const key = randomBytes(32);
-  const fixture = await startDashboardFixture([GATEWAY_WORKING], { roomKey: key });
-  await page.setViewportSize({ width: 412, height: 915 });
+  const fixture = await startDashboardFixture([presentation === "request" ? GATEWAY_WAITING : GATEWAY_WORKING], { roomKey: key });
+  if (presentation === "full") await page.setViewportSize({ width: 412, height: 915 });
   await installSyntheticProductFixture(context, key, {
     transcript: "Synthetic snapshot join", historyEntryCount: 99, activeAsk: false,
     manualSnapshot: true, randomSeed: 42,
@@ -116,7 +116,7 @@ async function setup(context: BrowserContext, page: Page): Promise<DashboardFixt
   });
   await installProgressHarness(context);
   await page.goto(fixture.origin, { waitUntil: "domcontentloaded" });
-  await page.locator(".working-row").first().click();
+  await page.locator(presentation === "request" ? ".action-request" : ".working-row").first().click();
   await expect(page.locator(".conn-chip")).toHaveText("Joining session… 0%");
   await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "connecting");
   return fixture;
@@ -204,6 +204,61 @@ test("chunked join and reconnect announce progress once, and Control accepts but
     expect(taskRequests).toBe(0);
   } finally { await fixture.stop(); }
 });
+
+test("the real client reports an initially unreachable relay before any live snapshot", async ({ context, page }) => {
+  const fixture = await startDashboardFixture([GATEWAY_WORKING], { roomKey: randomBytes(32) });
+  try {
+    // No synthetic client publications: close the intercepted wire before its first handshake.
+    await context.routeWebSocket(/.*/u, socket => socket.close({ code: 1013, reason: "synthetic relay unavailable" }));
+    await installProgressHarness(context);
+    await page.goto(fixture.origin);
+    await page.locator(".working-row").click();
+    await expect(page.locator(".conn-chip")).toHaveText("Relay unavailable", { timeout: 15_000 });
+    const state = await page.evaluate(() => (globalThis as typeof globalThis & ProgressGlobals).__ompProgress.state);
+    expect(state?.phase).not.toBe("live");
+    expect(state?.relayHealth.failureSince).not.toBeNull();
+    expect(state?.relayHealth.lastSuccessAt).toBeNull();
+    await expect(page.locator(".triage-copy")).toHaveText(/^(Reconnecting automatically…|Retrying in \d+s)$/u);
+    await assertPrivate(page, fixture);
+  } finally { await page.close(); await fixture.stop(); }
+});
+
+for (const path of ["gateway", "relay"] as const) {
+  test(`a pre-live ${path} outage has a visible named owner in the request tray`, async ({ context, page }) => {
+    const fixture = await setup(context, page, "request");
+    try {
+      await page.evaluate(path => {
+        const h = (globalThis as typeof globalThis & ProgressGlobals).__ompProgress;
+        h.held = true;
+        const key = path === "gateway" ? "gatewayHealth" : "relayHealth";
+        h.publish({ phase: "reconnecting", [key]: { ...h.state![key], state: "unreachable", failureSince: Date.now(), retryAt: null } });
+      }, path);
+      await expect(page.locator(".conn-chip")).toHaveText("Reconnecting…");
+      await page.evaluate(() => {
+        const now = Date.now();
+        Date.now = () => now + 3_001;
+        (globalThis as typeof globalThis & ProgressGlobals).__ompProgress.publish({});
+      });
+      const fault = path === "gateway" ? "Gateway unavailable" : "Relay unavailable";
+      const chip = page.locator(".tray-header .conn-chip");
+      await expect(chip).toHaveText(fault);
+      expect(await chip.evaluate(element => parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThan(0);
+      expect(await chip.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await expect(page.locator(".triage-copy")).toHaveText("Reconnecting automatically…");
+      expect(await page.locator("#tray").innerText()).toContain(fault);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.evaluate(path => {
+        const h = (globalThis as typeof globalThis & ProgressGlobals).__ompProgress;
+        const key = path === "gateway" ? "gatewayHealth" : "relayHealth";
+        h.publish({ phase: "connecting", [key]: { ...h.state![key], state: "healthy", failureSince: null } });
+      }, path);
+      await expect(chip).toHaveText("Joining session… 0%");
+      await expect(chip).toHaveAttribute("data-state", "connecting");
+      await expect(page.locator(".triage-bar")).toBeHidden();
+      await assertPrivate(page, fixture);
+    } finally { await fixture.stop(); }
+  });
+}
 
 test("progress floors and clamps percentages, clears null, and yields to forbidden, ended and sustained outages", async ({ context, page }) => {
   const fixture = await setup(context, page);

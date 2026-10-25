@@ -12,7 +12,7 @@ export const VISUAL_PHASES: Readonly<Record<string, true>> = {
   "negative-text": true, "negative-textual-resource": true, "negative-surface": true,
   "source-overflow": true, "source-network": true, "source-transcript": true, "source-header": true,
   "parity-directory": true, "parity-column": true, "parity-transcript": true, "parity-header": true,
-  "parity-ask": true, "parity-triage": true, "parity-settings": true, "parity-overflow": true,
+  "parity-ask": true, "parity-triage": true, "parity-tray": true, "parity-overflow": true,
   "parity-directory-x": true, "parity-directory-y": true, "parity-directory-width": true, "parity-directory-height": true,
 };
 export const VISUAL_UPLOAD_REASONS: Readonly<Record<string, true>> = {

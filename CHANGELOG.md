@@ -61,7 +61,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Remove Retry from access-denied hosts; restoring access requires an operator or identity change.
 - Keep session outage names in the connection chip and recovery timing in the triage bar,
   without repeating the same warning.
-- Show initial session joins as neutral progress rather than an interrupted connection.
+- Show initial session joins as neutral progress until gateway/relay health reports a fault;
+  keep the fault name visible in compact request trays as well as full sessions.
 - Replace unavailable Create actions with recovery choices, distinguish uncertain creation from
   failure, and identify Create-and-Control as a privileged action.
 - Refresh the embedded OMP client and wire pin to v18.12.6: coalesce streaming renders and parse
@@ -73,6 +74,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Keep remote observations stale and bounded while offline, and resume polling after scheduled
+  recovery even when the browser never emits an online event.
+- Give failed fleet bootstrap one banner owner and retry it when the local connection recovers.
+- Preserve the last successful empty-list clock, accessible Listed vocabulary, and neutral
+  checking copy in held queues and answer feedback.
 - Render Nerd Font Private Use Area symbols in session titles with a self-hosted Symbols Nerd
   Font Mono subset, split into immutable, content-hashed WOFF2 chunks loaded and cached only on
   first use; keep ordinary text on system fonts and make no remote font requests.
@@ -81,7 +87,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
   does not poison the shared Pixel lease before a mutating child has run (#430).
 - Recount prepared changelog entry-count drift against `release-text.json` before qualification,
   preserving every bullet, the exact requested candidate and immutable release records (#436).
-- Keep local 18-state visual validation required while making only Percy upload failures
+- Keep local 21-case visual validation required while making only Percy upload failures
   advisory, with visible local/upload outcomes and capability-free diagnostic artifacts.
   Snapshot queueing no longer claims confirmed submission before build finalization.
 

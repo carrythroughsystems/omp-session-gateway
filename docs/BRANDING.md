@@ -238,6 +238,8 @@ keeps the standing community/affiliation line.
 
 The banner owns device/local-gateway interruptions; host rows name only independently failed
 remote sources. Loading and foreground refresh are neutral, never warnings or Retry actions.
+Failed fleet bootstrap uses that same banner, not a second row; local transport failure takes
+precedence. Offline preserves remote observation clocks and expiry while recovery continues.
 Coverage aggregates `N of M hosts up to date` without repeating labels. Only complete coverage
 earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Listed · N` pill and
 `Sessions`. Cached rows retain legible text, with dashed borders, muted state badges, and
@@ -245,8 +247,10 @@ earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Liste
 with the same locale-aware hour/minute formatter, never the failed-check time.
 
 An empty incomplete list explains that sessions may be missing; it never claims all clear.
-Access denial is red and has no Retry promise. In a session, the chip names the interruption
-and the triage bar supplies retry timing rather than repeating the fault. Creation keeps its
+Access denial is red and has no Retry promise. A retained empty observation says `No sessions
+as of {time}`; an expired list does not claim it was empty. In a session, reported health faults
+override neutral initial joining; the chip's name remains visible in request trays, and the
+triage bar supplies retry timing rather than repeating the fault. Creation keeps its
 single-topic steps; the explicit Create-and-Control action is amber, and unavailable creation
 offers recovery choices instead of a disabled primary action.
 

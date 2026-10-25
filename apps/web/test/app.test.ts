@@ -2600,7 +2600,7 @@ describe("fleet directory bindings", () => {
     speech: { browserRecognition: false },
   };
 
-  test("404 is silent local-only; malformed and mismatched configuration keep the local directory with Reload", async () => {
+  test("404 is silent local-only; invalid configuration has one banner owner and no fleet row", async () => {
     const local = session("bootstrap-local-0001");
     const older = await bootApp({ permission: "denied", initialSessions: [local], suffix: "bootstrap-404" });
     expect(older.elements.fleetStatus.hidden).toBeTrue();
@@ -2611,9 +2611,15 @@ describe("fleet directory bindings", () => {
     ].entries()) {
       const harness = await bootApp({ permission: "denied", initialSessions: [local], clientConfig, suffix: `bootstrap-invalid-${index}` });
       expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
-      expect(harness.elements.fleetStatus.children[0]?.textContent).toStartWith("Fleet configuration unavailable. Reload to check all hosts.");
-      harness.elements.fleetStatus.querySelector("button")?.dispatchEvent(new Event("click"));
-      expect(harness.reloads.count).toBe(1);
+      expect(harness.elements.statusBanner.dataset.kind).toBe("configuration");
+      expect(harness.elements.statusBanner.children).toHaveLength(1);
+      expect(harness.elements.statusBanner.textContent).toContain("Fleet configuration unavailable");
+      expect(harness.elements.fleetStatus.children).toHaveLength(0);
+      harness.failNextListRequest();
+      harness.elements.statusBanner.querySelector("button")?.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "tailnet", 100);
+      expect(harness.elements.statusBanner.children).toHaveLength(1);
+      expect(harness.elements.fleetStatus.children).toHaveLength(0);
       expect(harness.fetchPaths.some(path => path.startsWith("https://remote.example"))).toBeFalse();
     }
   });
@@ -2902,6 +2908,7 @@ describe("fleet directory bindings", () => {
     await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "unavailable", 100);
     expect(harness.elements.emptyState.hidden).toBeFalse();
     expect(harness.elements.emptyState.textContent).toContain("No sessions to show yet");
+    expect(harness.elements.sessionList.getAttribute("aria-label")).toBe("Listed OMP sessions");
     harness.elements.hostPicker.value = "remote\0https://remote.example";
     harness.elements.hostPicker.dispatchEvent(new Event("change"));
     expect(harness.elements.emptyState.hidden).toBeFalse();
@@ -2912,6 +2919,82 @@ describe("fleet directory bindings", () => {
     await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "forbidden", 100);
     expect(harness.elements.fleetStatus.querySelector("button")).toBeNull();
     harness.setVisibility("hidden");
+  });
+
+  test("offline recovery without an online event resumes remote polling and keeps the retained clock", async () => {
+    const home = session("offline-fleet-home");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [home], remoteSessions: [session("offline-fleet-away")],
+      clientConfig: config, suffix: "offline-fleet-recovery",
+    });
+    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
+    harness.setRemoteStatus(503);
+    harness.setList(2, [home], 503);
+    harness.setOnline(false);
+    harness.window.dispatchEvent(new Event("offline"));
+    await settleUntil(() => harness.pendingDelays().includes(35_000), 100);
+    const facts = harness.elements.sessionList.querySelectorAll(".session-freshness");
+    expect(facts).toHaveLength(2);
+    expect(facts.every(fact => fact.textContent?.startsWith("List as of "))).toBeTrue();
+    expect(harness.elements.statusBanner.children).toHaveLength(1);
+    expect(harness.elements.fleetStatus.children).toHaveLength(0);
+    harness.setOnline(true); // Deliberately do not dispatch `online`.
+    harness.setRemoteStatus(200);
+    harness.setList(3, [home]);
+    harness.runTimers();
+    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
+    const requests = harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length;
+    harness.window.runTimersWithDelay(10_000);
+    await settleUntil(() => harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length > requests, 100);
+    expect(harness.elements.statusBanner.hidden).toBeTrue();
+    harness.setVisibility("hidden");
+  });
+
+  test("a retained empty observation says when it was empty, not never checked", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], remoteSessions: [], clientConfig: config, suffix: "retained-empty",
+    });
+    harness.setRemoteStatus(503);
+    harness.window.dispatchEvent(new Event("online"));
+    await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "stale", 100);
+    harness.elements.hostPicker.value = "remote\0https://remote.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    const time = /List as of ([^.]+)\./u.exec(harness.elements.fleetStatus.textContent ?? "")?.[1];
+    expect(time).toBeDefined();
+    expect(harness.elements.emptyState.textContent).toContain(`No sessions as of ${time}`);
+    expect(harness.elements.emptyState.textContent).not.toContain("has not been checked");
+    expect(harness.elements.sessionList.getAttribute("aria-label")).toBe("Listed OMP sessions");
+    harness.setVisibility("hidden");
+  });
+
+  test("held and answered feedback treats quiet revalidation as checking, not a failed host", async () => {
+    for (const action of ["held-directory", "hold", "answered"] as const) {
+      const waiting = session(`checking-${action}`, { inputRequired: true });
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [waiting], remoteSessions: [], clientConfig: config,
+        suffix: `checking-feedback-${action}`,
+      });
+      if (action === "held-directory") {
+        openHeroOptions(harness)?.dispatchEvent(new Event("click"));
+        harness.setVisibility("hidden");
+        expect(harness.elements.sessionList.querySelector(".all-held-summary")?.textContent).toContain("checking other hosts");
+        expect(harness.elements.sessionList.textContent).not.toContain("unavailable");
+      } else {
+        harness.elements.sessionList.querySelector(".action-request")?.dispatchEvent(new Event("click"));
+        await settleUntil(() => harness.embedCalls.length === 1, 100);
+        const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
+        harness.embedCalls[0]?.onStateChange?.({
+          phase: "live", endedReason: null, requestPending: true, responsePending: false, loading: null,
+          gatewayHealth: health, relayHealth: health,
+        });
+        harness.setVisibility("hidden");
+        if (action === "hold") harness.body.querySelector(".triage-action")?.dispatchEvent(new Event("click"));
+        else harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: session(waiting.instanceId) });
+        await settleUntil(() => harness.body.querySelector(".triage-copy")?.textContent?.includes("checking other hosts") === true, 100);
+        expect(harness.body.querySelector(".triage-copy")?.textContent).not.toContain("unavailable");
+      }
+      harness.window.dispatchEvent(new Event("pagehide"));
+    }
   });
 
   test("malformed remote data cannot assert fleet all-clear or erase home rows", async () => {

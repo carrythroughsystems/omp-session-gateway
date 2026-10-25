@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FleetSource, SessionCreationOptions } from "@omp-session-gateway/protocol";
 import {
-  FleetTransport, sourceKey, sessionKey, readSourceRecords, HELD_KEY, DISMISSED_KEY, boundedJson, describeFreshness,
+  FleetTransport, sourceKey, sessionKey, readSourceRecords, HELD_KEY, DISMISSED_KEY, boundedJson,
   SessionCreationTransport, CreationTransportError, readCreationPreferences, writeCreationPreferences, CREATION_PREFERENCES_KEY,
 } from "../src/fleet";
 
@@ -175,17 +175,6 @@ describe("creation preferences", () => {
 });
 
 describe("fleet transport", () => {
-  test("freshness distinguishes checking from failure and uses one successful-observation clock", () => {
-    const at = Date.parse("2026-10-25T01:30:00Z");
-    for (const status of ["loading", "fresh", "refreshing"] as const) {
-      expect(describeFreshness(status, at)).toMatchObject({ failed: false, retry: false });
-    }
-    expect(describeFreshness("forbidden", at)).toMatchObject({ failed: true, retry: false });
-    expect(describeFreshness("unavailable").copy).toBe("No session list received yet.");
-    expect(describeFreshness("stale", at).copy).toBe(describeFreshness("unavailable", at).copy);
-    expect(describeFreshness("stale", at).copy).toBe(`List as of ${describeFreshness("fresh", at).time}.`);
-  });
-
   test("visibility revalidation is refreshing, not a failed snapshot", async () => {
     const time = new Clock();
     // This fixture uses only the callable fetch interface, not Bun's extra fetch properties.
@@ -193,6 +182,10 @@ describe("fleet transport", () => {
     const transport = new FleetTransport(remote, () => {}, fetchSnapshot, time);
     transport.setVisible(true);
     await transport.refresh();
+    const epoch = transport.epoch;
+    transport.setVisible(true);
+    expect(transport.epoch).toBe(epoch);
+    expect(transport.status).toBe("fresh");
     transport.setVisible(false);
     expect(transport.status).toBe("refreshing");
     expect(transport.staleSince).toBeUndefined();
@@ -280,7 +273,47 @@ describe("fleet transport", () => {
     time.advance(35_000);
     await flush();
     expect(transport.snapshot).toBeUndefined();
-    expect(transport.status).toBe("unavailable");
+    expect(transport.status).toBe("expired");
+    transport.setVisible(false);
+  });
+
+  test("offline interruption retains its observation, expires at 35 seconds and recovers without a visibility event", async () => {
+    const time = new Clock();
+    let broken = false;
+    let requests = 0;
+    const fetchSnapshot = (async () => {
+      requests++;
+      if (broken) throw new TypeError("synthetic outage");
+      return snapshot(requests);
+    }) as unknown as typeof fetch;
+    const transport = new FleetTransport(remote, () => {}, fetchSnapshot, time);
+    transport.setVisible(true);
+    await transport.refresh();
+    const observedAt = transport.freshAt;
+    broken = true;
+    transport.interrupt();
+    expect(transport.status).toBe("stale");
+    expect(transport.freshAt).toBe(observedAt);
+    expect(transport.snapshot).toBeDefined();
+    await flush();
+    time.advance(34_999);
+    await flush();
+    expect(transport.snapshot).toBeDefined();
+    time.advance(1);
+    await flush();
+    expect(transport.status).toBe("expired");
+    expect(transport.snapshot).toBeUndefined();
+    expect(transport.freshAt).toBe(observedAt);
+    broken = false;
+    const requestsBeforeRecovery = requests;
+    time.advance(30_000);
+    await flush();
+    expect(transport.status).toBe("fresh");
+    expect(requests).toBeGreaterThan(requestsBeforeRecovery);
+    const requestsBeforePoll = requests;
+    time.advance(10_000);
+    await flush();
+    expect(requests).toBe(requestsBeforePoll + 1);
     transport.setVisible(false);
   });
 
