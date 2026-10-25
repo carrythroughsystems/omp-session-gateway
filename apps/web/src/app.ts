@@ -1847,11 +1847,14 @@ function setConnectionState(
   copy?: string,
 ): void {
   const label = copy ?? (state === "connected" ? "Connected" : state === "reconnecting" ? "Reconnecting…" : "Offline");
-  chip.dataset.state = state;
-  chip.dataset.compact = state === "connected" && copy === undefined ? "true" : "false";
-  chip.textContent = label;
-  chip.setAttribute("aria-label", label);
-  chip.title = label;
+  const compact = state === "connected" && copy === undefined ? "true" : "false";
+  if (chip.dataset.state !== state) chip.dataset.state = state;
+  if (chip.dataset.compact !== compact) chip.dataset.compact = compact;
+  if (chip.textContent !== label) {
+    chip.textContent = label;
+    chip.setAttribute("aria-label", label);
+    chip.title = label;
+  }
 }
 
 function sessionEndedCopy(reason: string | null): string {
@@ -1985,9 +1988,19 @@ function renderConnectionState(shell: ActiveCollabShell): void {
   }
 
   const live = state.phase === "live";
+  const loading = state.loading;
+  let progressCopy: string | null = null;
+  if (loading !== null) {
+    const prefix = shell.hasBeenLive ? "Reconnecting…" : "Joining session…";
+    progressCopy = prefix;
+    if (Number.isFinite(loading.received) && Number.isFinite(loading.total) && loading.total > 0) {
+      const percent = Math.max(0, Math.min(100, Math.floor(loading.received / loading.total * 100)));
+      progressCopy = `${prefix} ${percent}%`;
+    }
+  }
   if (!shell.hasBeenLive) {
-    if (!live) {
-      setConnectionState(shell.connectionChip, "reconnecting", "Connecting…");
+    if (!live || loading !== null) {
+      setConnectionState(shell.connectionChip, "reconnecting", progressCopy ?? "Connecting…");
       return;
     }
     shell.hasBeenLive = true;
@@ -2033,6 +2046,15 @@ function renderConnectionState(shell: ActiveCollabShell): void {
   }
   delete shell.interruptionStartedAt;
   delete shell.outagePath;
+  if (progressCopy !== null) {
+    if (shell.recoveredTimeout !== undefined) {
+      window.clearTimeout(shell.recoveredTimeout);
+      delete shell.recoveredTimeout;
+    }
+    setConnectionState(shell.connectionChip, "reconnecting", progressCopy);
+    if (shell.triageBar.dataset.kind === "reconnecting") hideTriageBar(shell);
+    return;
+  }
   if (recovered) {
     window.clearTimeout(shell.recoveredTimeout);
     setConnectionState(shell.connectionChip, "connected", "Connected");

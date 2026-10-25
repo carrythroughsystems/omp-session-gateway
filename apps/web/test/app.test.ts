@@ -2305,7 +2305,7 @@ describe("fleet directory bindings", () => {
     await settleUntil(() => harness.embedCalls.length === 1, 100);
     const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
     harness.embedCalls[0]?.onStateChange?.({
-      phase: "live", endedReason: null, requestPending: true, responsePending: false,
+      phase: "live", endedReason: null, requestPending: true, responsePending: false, loading: null,
       gatewayHealth: health, relayHealth: health,
     });
     const answered = session(home.instanceId);
@@ -2521,7 +2521,7 @@ describe("fleet directory bindings", () => {
       await settleUntil(() => harness.embedCalls.length === 1, 100);
       const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
       harness.embedCalls[0]?.onStateChange?.({
-        phase: "live", endedReason: null, requestPending: true, responsePending: false,
+        phase: "live", endedReason: null, requestPending: true, responsePending: false, loading: null,
         gatewayHealth: health, relayHealth: health,
       });
       expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Hold → next");

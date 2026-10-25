@@ -177,6 +177,7 @@ export function App({ capability, onDispose, embedOptions }: AppProps): ReactNod
 			endedReason: connectError,
 			requestPending: false,
 			responsePending: false,
+			loading: null,
 			gatewayHealth: UNKNOWN_PATH_HEALTH,
 			relayHealth: UNKNOWN_PATH_HEALTH,
 		});
@@ -219,6 +220,10 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 				endedReason: current.endedReason,
 				requestPending: current.uiRequest !== null,
 				responsePending: current.uiResponsePending,
+				loading: current.loading === null ? null : {
+					received: current.loading.received,
+					total: current.loading.total,
+				},
 				gatewayHealth: current.gatewayHealth,
 				relayHealth: current.relayHealth,
 			});
@@ -293,6 +298,7 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 			recommendedIndex={recommendedIndex}
 			embedded={embedded}
 			browserRecognitionEnabled={embedOptions?.browserRecognitionEnabled === true}
+			takeInitialPromptDraft={embedOptions?.takeInitialPromptDraft}
 		/>
 	);
 

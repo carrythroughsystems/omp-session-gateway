@@ -30,6 +30,19 @@ treats a readable authorization loss as terminal for automatic recovery, allowin
 only on foreground, pageshow, or online transitions. Non-embedded callers retain the same-origin
 health probe.
 
+The embed state includes required `loading: { received, total } | null` snapshot counters,
+without transcript entries. The gateway's sole chip displays **Joining session…** before the
+first live connection or **Reconnecting…** afterward, with a floored, clamped percentage only
+for valid positive totals. Existing authorization, ended, and sustained-outage messaging keeps
+priority; unchanged copy does not repeat live-region announcements.
+
+An optional `takeInitialPromptDraft()` callback drains a shell-owned volatile first-task draft.
+Composer calls it once only in live writable Control with a healthy relay, no active Ask, an
+empty ordinary text draft, and no photo draft, photo preparation, or pending photo send. It
+updates only the ordinary composer text: never Ask input, never a prompt submission, and never
+an overwrite. Reconnects, Ask transitions, clearing the draft, and rerenders do not seed again.
+The shell binds and clears its holder on disposal; no draft enters storage or gateway requests.
+
 The 18.12.6 refresh brings upstream render coalescing and streaming-tail Markdown parsing
 ([#14728](https://github.com/can1357/oh-my-pi/pull/14728)), linear-time Markdown/math lexing
 ([#13961](https://github.com/can1357/oh-my-pi/pull/13961),
