@@ -189,7 +189,7 @@ test("installed-PWA View and Control mount in the current window without losing 
     await expect(page.locator("#root[role='application']")).toHaveCount(1);
     await expect(page.locator(".shell-title")).toHaveText(SESSION_TITLE);
     await expect(page.locator(".shell-control")).toBeVisible();
-    await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "reconnecting");
+    await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "connecting");
     await expect(page.locator(".triage-bar")).toBeHidden();
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
     await expect(page.locator(".co-connect, .sh-connect, .sh-header, .sh-rail, .sh-banner, .sh-ended")).toHaveCount(0);
