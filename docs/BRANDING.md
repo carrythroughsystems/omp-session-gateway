@@ -189,6 +189,8 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   Each step has one topic, a distinct height, a primary Next/Done action, heading
   focus and a 48px Close/Back control. Skip and Not now are real exits/advances,
   not permission prompts. Resume the last step; completing or skipping stays done.
+  Noninteractive tray headings receive focus without an outline; interactive controls retain
+  their focus rings. The affiliation/build footer appears in Settings, not the introduction.
 - Settings trays: `Background alerts` contains the seven-state toggle and mono build line;
   enabled alerts expose `Alert detail · <level>`, opening a child with the three radios.
 - Trays (ADR-041): one native host for secondary surfaces, one topic/action per panel,

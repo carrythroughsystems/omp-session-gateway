@@ -1437,6 +1437,10 @@ body.collab-shell-active {
   font-size: 1.15rem;
   letter-spacing: -0.015em;
 }
+.tray .tray-header h2:focus-visible {
+  /* Heading focus announces a panel change; only interactive controls need a visible ring. */
+  outline: none;
+}
 .tray-leading, .tray-expand {
   min-width: 3rem;
   min-height: 3rem;
@@ -1488,6 +1492,7 @@ body.collab-shell-active {
 .first-run-body { padding-block: 1rem; }
 .first-run-connected { min-height: 176px; }
 .first-run-alerts { min-height: 288px; }
+.tray[data-panel="first-run-alerts"] .sheet-build { display: none; }
 .first-run-modes { min-height: 224px; display: grid; align-content: center; gap: 1.5rem; }
 .first-run-copy { margin: 0.75rem 0; color: var(--body); font-size: 0.9rem; line-height: 1.5; }
 .first-run-note { margin: 0; color: var(--muted); font: 0.7rem/1.5 var(--font-mono); }

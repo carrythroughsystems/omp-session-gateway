@@ -38,6 +38,7 @@ async function settledTray(page: Page, panel: string): Promise<number> {
   const tray = page.locator("#tray");
   await expect(tray).toHaveAttribute("data-panel", `first-run-${panel}`);
   await expect(tray.locator(`[data-panel="first-run-${panel}"] h2`)).toBeFocused();
+  await expect(tray.locator(`[data-panel="first-run-${panel}"] h2`)).toHaveCSS("outline-style", "none");
   await expect.poll(async () => tray.evaluate(element => element.getAnimations({ subtree: true }).filter(animation => animation.playState === "running").length)).toBe(0);
   return tray.evaluate(element => element.getBoundingClientRect().height);
 }
@@ -68,6 +69,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await capture("connected");
       await page.getByRole("button", { name: "Next", exact: true }).click();
       const alerts = await settledTray(page, "alerts");
+      await expect(page.locator("#alerts-panel .sheet-build")).toBeHidden();
       await capture("alerts");
       expect(await record(page)).toEqual({ version: 1, step: "alerts", updatedAt: "2026-08-21T12:10:00.000Z" });
       await page.evaluate(async () => navigator.serviceWorker.ready);
@@ -106,6 +108,8 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       expect(await record(page)).toMatchObject({ step: "done" });
       await page.locator("#settings").click();
       await expect(page.locator("#tray")).toHaveAttribute("data-panel", "alerts");
+      await expect(page.locator("#alerts-panel .sheet-build")).toBeVisible();
+      await expect(page.locator("#alerts-panel .sheet-build")).toContainText("Community project · not affiliated with OMP · build");
       await expect(page.locator("#notify")).toHaveCount(1);
       await expect(page.locator("#notify")).toHaveAttribute("data-state", "enabled");
       await page.locator("#notify").click();
