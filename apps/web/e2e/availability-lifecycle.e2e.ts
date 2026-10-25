@@ -805,7 +805,7 @@ test("successor4: distinct same-minute empty observations do not share one clock
     await expect(page.locator("#empty-state")).toContainText("Checking for sessions");
     await expect.poll(() => home.requests.includes("GET /api/v1/events")).toBe(true);
     await settlePublication(page);
-    home.setListFailure(503);
+    home.setListFailure("malformed");
     await page.route(`${home.origin}/api/v1/events`, route => route.abort("connectionrefused"));
     expect(home.disconnectEvents()).toBe(1);
     await expect(page.locator(".empty-coverage")).toContainText("0 of 2 hosts up to date");
