@@ -41,6 +41,17 @@ chunks contain at most 160 populated BMP PUA glyphs or 768 plane-15 glyphs each;
 their bytes and appends their `@font-face` rules without changing the shell precache list.
 See `licenses/fonts/nerd-fonts/` and `THIRD_PARTY_NOTICES.md` for licenses and icon-set attributions.
 
+## Motion
+
+Motion runs only on user-initiated transitions and genuine state changes (ADR-040). `render()`
+computes a structural signature before touching the DOM and starts a typed same-document view
+transition (`list`) only when it changed; a refresh that moves `lastSeenAt` alone commits without
+one. Launching from the directory runs a `forward` transition in which the tapped tile morphs into
+the shell header tile, and the interactive return runs `back`; renders that arrive during a
+navigation wait for it. Every commit is the same with or without motion: an unsupported browser,
+a hidden page, an open dialog, or `prefers-reduced-motion` skips the transition and applies the
+DOM directly. `e2e/motion.e2e.ts` pins which changes animate; the visual lane keeps reduced motion.
+
 ## Multiple configured hosts
 
 `GET /api/v1/client-config` is loaded once per document, bounded to 32 KiB with a four-second

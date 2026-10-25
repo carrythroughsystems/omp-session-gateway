@@ -1733,3 +1733,21 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 - Replace the single truncating detail line with a line of whole facts that wraps between facts, shows hosts only while several are in view, and omits a project that the title already names.
 
 **Consequences:** Titles match what the operator sees in the terminal on every device; first paint of a title with an icon costs one 17–70 KB chunk, then nothing. The repository carries 1.3 MB of font chunks whose provenance, checksum, and licenses are recorded in `THIRD_PARTY_NOTICES.md`, `licenses/fonts/nerd-fonts/`, and the release SBOM. The transcript rendered by the pinned collaboration client keeps its own font stacks and is unchanged by this decision.
+
+## ADR-040 — Motion on user transitions and genuine state changes
+
+**Status:** Accepted (supersedes the "list re-renders animate nothing" rule of [ADR-027](#adr-027--ship-the-couch-flow-visual-system-with-a-settings-sheet-and-a-precached-client) and the corresponding `BRANDING.md` motion rule)
+
+**Date:** 2026-10-24
+
+**Context:** ADR-027 forbade motion on list re-renders because the directory rebuilds every row on every SSE upsert, and an entrance animation attached to a row class would replay during routine metadata refreshes. The product bar has moved: OMP Sessions is a consumer-grade companion held to Family's standard of simplicity, fluidity, and delight, Android-first on the Pixel 10 Pro, with Material motion and the same anatomy on desktop. Static swaps between the directory and a session, and rows that jump when a session changes group, read as "digital whiplash" against that bar.
+
+**Decision:**
+
+- Motion runs only on user-initiated transitions and genuine state changes, never on routine refreshes. `render()` computes a structural signature (ordered groups, each session's source, instance, generation, tile state, and ask request) before touching the DOM; a render whose signature is unchanged — a `lastSeenAt` or uptime tick — commits without a transition. The first populated render and the first render after returning from a session settle in place.
+- Same-document View Transitions carry the motion. Three typed transitions: `forward` (directory → session: the directory column slides out, the shell slides in, and the tapped row's tile morphs into the header tile), `back` (the reverse, the header tile returning to its row), and `list` (rows slide between groups, entering rows rise in, leaving rows fade out, the heading cross-fades between `Sessions` and `Needs you`, and the Hide/Undo toast rises). Rows receive opaque inline transition names only for the duration of a list transition; the tapped tile receives its name only for the navigation. Material 3 emphasized curves, 200–400 ms, no overshoot; a pressed tile settles to 0.94.
+- The update callback is the single DOM commit with or without motion, so an unsupported browser, a hidden page, an open dialog, or `prefers-reduced-motion` (Android's "Remove animations") produces exactly the same DOM without any animation. Renders that arrive while a navigation transition runs wait for it to finish, because a rebuilt list would destroy the travelling tile and skip the transition.
+- A row keeps its tile, title, and facts while its session opens; only text-only actions swap their label to `Opening…`.
+- Shell-to-shell launches (Control upgrade, Next), bfcache resumes, disposal, and authorization withdrawal restore or replace the shell without motion.
+
+**Consequences:** The directory and the session read as one continuous space; a request that arrives moves its row into the queue instead of teleporting. Routine refreshes stay as cheap as before (one signature string per render). The visual lane keeps reduced motion and its zero-running-animations guard; the browser lane runs with motion live and `apps/web/e2e/motion.e2e.ts` proves which changes animate and which do not. Later layers (the tray system, first-run guidance, the all-clear moment) build on the same gate and tokens.

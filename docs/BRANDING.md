@@ -184,8 +184,14 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
 - Empty state: ghost mark (22% opacity), `NO LIVE SESSIONS` kicker, mono hint
   about `collab.autoStart`.
 - Focus: 2px `live` ring, 2px offset; dialogs take initial focus themselves.
-  Motion: none on list re-renders; only the loading dot pulses, and
-  `prefers-reduced-motion` disables it.
+- Motion (ADR-040): only on user-initiated transitions and genuine state changes,
+  never on routine refreshes. Directory ↔ session is a shared-axis slide with the
+  tapped tile morphing into the header tile; rows slide when a session changes
+  group, rise in when added, fade out when hidden, and the heading cross-fades
+  between `Sessions` and `Needs you`. Material 3 emphasized curves
+  (`--ease-emphasized`, `-decelerate`, `-accelerate`), 200–400 ms, no overshoot;
+  a pressed tile settles to 0.94. `prefers-reduced-motion` removes everything but
+  the final state, and the loading dot's pulse stops with it.
 - Links: `live` color, hover lighten (`#5FD9A9`).
 
 Security-UX invariants (do not regress): capabilities fetched only on tap

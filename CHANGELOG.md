@@ -18,6 +18,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
   between facts instead of truncating each one; hosts appear only while several are in view,
   the host picker becomes one compact scope control, `Hide` becomes an icon-only control with the
   same accessible name, and incomplete host coverage shows an amber dot.
+- Move between the directory and a session with a shared-axis slide in which the tapped tile
+  becomes the session header's tile, and move rows when a session changes group, is hidden, or
+  returns, with the heading cross-fading between `Sessions` and `Needs you` — Material emphasized
+  curves, 200–400 ms, typed same-document view transitions gated on a structural signature so a
+  routine refresh never animates; `prefers-reduced-motion` and unsupported browsers render the same
+  DOM without motion; a row keeps its tile and facts while its session opens (ADR-040).
 
 ### Changed
 
