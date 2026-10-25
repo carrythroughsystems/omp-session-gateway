@@ -151,6 +151,7 @@ Opt-in Tern creation (`config.json` → `tern`, [ADR-043](DECISIONS.md#adr-043--
 #### Prerequisites
 
 - **Execution host only:** Configure `tern` on the workstation where Tern and `omp` run under the same OS user as the `omp-session-gateway` user service (`omp-gatewayd`).
+- **Exercised on macOS only:** the end-to-end creation path (Tern 0.9.5, stock OMP 18.12.6) has been run on Apple silicon macOS. Linux and Windows hosts are Tested at most by the unit suites: on Windows the ledger skips the directory fsync (NTFS has no directory sync) and the Tern subprocess boundary is not exercised in CI.
 - **OMP `collab.autoStart` set to `control` in the Tern pane environment:** `profile.env` supplies only the `tern` CLI child's environment and is not assumed to cross Tern's GUI-server RPC boundary into the new pane. Inside a Tern shell on that host, ensure OMP uses the home/configuration root that publishes to `omp.discoveryDir` (`~/.omp/run/collab-hosts`) and has Control enabled (`view`-only sessions appear in the directory but cannot complete **Create and open Control** adoption):
 
   ```sh
