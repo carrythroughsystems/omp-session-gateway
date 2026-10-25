@@ -246,6 +246,10 @@ Hiding or opening a remote session is not local recovery. Remote expired-session
 feedback stays on that source; Refresh host checks its list without retrying a capability launch.
 Cross-host Next-ask failures name the target in the existing triage bar, not the healthy
 predecessor's connection chip, and offer Sessions to reach that host's list-only recovery.
+The target owns that notice through predecessor health and Hold updates. It has no expiry timer:
+Sessions, explicit dismissal, a new launch, or a successful target observation releases it.
+Its denial accent is red; non-auth target failures retain amber.
+Withdrawing View or Control during a launch names the unavailable mode instead of opening it.
 Coverage aggregates `N of M hosts up to date` without repeating labels. Only complete coverage
 earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Listed · N` pill and
 `Sessions`. Cached rows retain legible text, with dashed borders, muted state badges, and

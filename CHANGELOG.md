@@ -74,6 +74,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Preserve cross-host Next and Hold failure notices through updates from the session still on screen, until dismissal or target recovery.
+- Mark target-host access denial in red, distinct from amber connection or launch failures.
+- Reject an in-flight session launch when View or Control is withdrawn, including launches resumed after browser restoration.
+- Keep a newer session choice authoritative even when its launch fails while an older browser restoration is waiting.
 - Resume pending request previews after a browser back/forward-cache restore without reusing an old launch.
 - Restore remote sessions and update their request triage even when local authorization or the local list is unavailable.
 - Attribute failed cross-host Next-ask actions to the target host and refresh expired target lists without replaying a launch.

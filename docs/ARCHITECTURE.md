@@ -135,6 +135,11 @@ until persisted pageshow revalidates and relaunches. Local authorization withdra
 remote refresh during restoration, and remote triage gates on its own source freshness, not local
 directory readiness. Cross-host Next-ask failures retain the target's notice across predecessor
 health updates; expired targets still refresh, and Sessions returns to list-only recovery.
+Target-owned triage arbitrates all predecessor writers, including Hold reconciliation and short
+connection interruptions. Explicit dismissal also invalidates a pending expired-target feedback update.
+Launch acceptance revalidates current View/Control eligibility as well as source, generation and request.
+Every new launch intent advances the selection epoch, so a failed newer intent still supersedes an older
+resume. Creation establishes that epoch when its wizard opens; its launch handoff continues the same intent.
 Selected-source empty rendering also uses its own observation, with retained empty clocks ahead
 of neutral checking progress.
 

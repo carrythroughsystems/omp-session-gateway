@@ -1384,6 +1384,10 @@ body.collab-shell-active {
   background: var(--control);
 }
 
+.triage-bar[data-kind="launch-failed"][data-failure-kind="unauthorized"]::before {
+  background: var(--danger);
+}
+
 .triage-action {
   flex: none;
   min-height: 2.75rem;

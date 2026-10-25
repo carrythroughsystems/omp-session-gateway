@@ -192,6 +192,7 @@ interface ActiveCollabShell extends SessionRef {
   readonly shell: HTMLElement;
   answerShown: boolean;
   answerTriageVisible: boolean;
+  launchFailureSource?: SourceKey;
   triageTimeout?: number;
   hasBeenLive: boolean;
   latestEmbedState?: CollabEmbedState;
@@ -1187,6 +1188,9 @@ function cancelLaunch(source?: SourceKey, restore = true): void {
 function remoteChanged(remote: FleetTransport): void {
   if (remote.status === "fresh" || remote.status === "forbidden") remoteLaunchFailures.delete(remote.key);
   replaceSessionSnapshot(remote.snapshot?.sessions ?? [], remote.key, remote.status === "fresh");
+  if (remote.status === "fresh" && activeCollabShell?.launchFailureSource === remote.key) {
+    hideTriageBar(activeCollabShell, false);
+  }
   if (remote.status === "forbidden") {
     creation.cancel("forbidden", remote.key);
     clearCreationDraft(remote.key);
@@ -2051,9 +2055,18 @@ function hideTriageBar(shell: ActiveCollabShell, rerenderConnection = true): voi
   }
   shell.answerTriageVisible = false;
   shell.triageBar.hidden = true;
+  delete shell.launchFailureSource;
+  delete shell.triageBar.dataset.failureKind;
   delete shell.triageBar.dataset.dismissible;
   delete shell.shell.dataset.triageVisible;
   if (hidAnswerTriage && rerenderConnection) renderConnectionState(shell);
+}
+
+function dismissTriageBar(shell: ActiveCollabShell): void {
+  // A dismissed target action must not reappear when its pending list refresh completes.
+  if (shell.launchFailureSource !== undefined) selectionEpoch += 1;
+  hideTriageBar(shell);
+  reconcileActiveCollabShell();
 }
 
 function showTriageBar(
@@ -2063,6 +2076,7 @@ function showTriageBar(
   actionLabel?: string,
   action?: () => void,
 ): void {
+  if (shell.launchFailureSource !== undefined && kind !== "launch-failed") return;
   const drawCheck = kind === "clear" && copy.startsWith("✓ Answered — all clear") &&
     shell.triageBar.dataset.kind !== "clear";
   hideTriageBar(shell, false);
@@ -2096,10 +2110,18 @@ function showTriageBar(
   }
   shell.triageBar.hidden = false;
   shell.shell.dataset.triageVisible = "true";
-  if (kind === "next" || kind === "clear") {
+  if (kind === "next" || kind === "clear" || kind === "launch-failed") {
     shell.triageBar.dataset.dismissible = "true";
+  }
+  if (kind === "next" || kind === "clear") {
     shell.triageTimeout = window.setTimeout(() => hideTriageBar(shell), 8_000);
   }
+}
+
+function showLaunchFailure(shell: ActiveCollabShell, sourceKey: SourceKey, kind: "offline" | "unauthorized" | "expired", copy: string): void {
+  showTriageBar(shell, "launch-failed", copy, "Sessions", () => { void restoreDirectory(undefined, undefined, false); });
+  shell.launchFailureSource = sourceKey;
+  shell.triageBar.dataset.failureKind = kind;
 }
 
 function clearConnectionTimers(shell: ActiveCollabShell): void {
@@ -2193,7 +2215,7 @@ function renderConnectionState(shell: ActiveCollabShell): void {
       setConnectionState(shell.connectionChip, "reconnecting", "Reconnecting…");
       if (state.responsePending && !shell.answerTriageVisible) {
         showTriageBar(shell, "sending", "Sending…");
-      } else if (!shell.answerTriageVisible && !shell.triageBar.hidden) {
+      } else if (!shell.answerTriageVisible && !shell.triageBar.hidden && shell.launchFailureSource === undefined) {
         hideTriageBar(shell);
       }
       scheduleConnectionRender(shell, CONNECTION_EXTENDED_MS - elapsed, "delay");
@@ -2450,6 +2472,7 @@ function reconcileActiveCollabShell(): void {
   if (
     shell === undefined ||
     shell.answerShown ||
+    shell.launchFailureSource !== undefined ||
     shell.latestEmbedState?.responsePending === true
   ) {
     return;
@@ -2648,7 +2671,7 @@ function enterCollabClient(
       event.target !== null &&
       !triageBar.contains(event.target as Node)
     ) {
-      hideTriageBar(activeCollabShell ?? shellState);
+      dismissTriageBar(activeCollabShell ?? shellState);
     }
   });
   shell.addEventListener("keydown", event => {
@@ -2660,7 +2683,7 @@ function enterCollabClient(
     }
     if (event.key === "Escape" && triageBar.dataset.dismissible === "true") {
       event.preventDefault();
-      hideTriageBar(activeCollabShell ?? shellState);
+      dismissTriageBar(activeCollabShell ?? shellState);
     }
   });
   triageBar.addEventListener("pointerdown", event => {
@@ -2668,7 +2691,7 @@ function enterCollabClient(
   });
   triageBar.addEventListener("pointerup", event => {
     if (triageSwipeStart !== undefined && Math.abs(event.clientY - triageSwipeStart) >= 32) {
-      hideTriageBar(activeCollabShell ?? shellState);
+      dismissTriageBar(activeCollabShell ?? shellState);
     }
     triageSwipeStart = undefined;
   });
@@ -2846,6 +2869,10 @@ async function launch(
   if (!sourceFresh(session.sourceKey)) return false;
   const source = sources.get(session.sourceKey);
   if (source === undefined) return false;
+  // New intent supersedes a waiting restoration even when this launch subsequently fails.
+  // Creation's handoff continues the intent established when its wizard opened.
+  if (!creationHandoff) selectionEpoch += 1;
+  if (activeCollabShell?.launchFailureSource !== undefined) hideTriageBar(activeCollabShell, false);
   selectedScope = scope;
   hostPicker.value = scope;
   pendingNotificationLaunch = undefined;
@@ -2871,14 +2898,18 @@ async function launch(
     controller: new AbortController(), settled: false,
   };
   pendingLaunch = attempt;
-  const currentAttempt = (): boolean => {
+  const currentBinding = (): SessionMetadata | undefined => {
     const current = sessions.get(sessionKey(attempt.ref));
     return pendingLaunch === attempt && !attempt.settled && !attempt.controller.signal.aborted &&
       selectionEpoch === attempt.epoch && selectedScope === attempt.scope &&
       remotes.get(attempt.ref.sourceKey)?.epoch === attempt.sourceEpoch &&
       sources.get(attempt.ref.sourceKey) === source && sourceFresh(attempt.ref.sourceKey) &&
       current?.generation === attempt.ref.generation &&
-      (requestId === undefined || current.ask?.requestId === requestId);
+      (requestId === undefined || current.ask?.requestId === requestId) ? current : undefined;
+  };
+  const currentAttempt = (): boolean => {
+    const current = currentBinding();
+    return current !== undefined && (mode === "view" ? current.canView : current.canControl);
   };
   const sourceShell = activeCollabShell;
   // A row keeps its tile, title and facts while it opens (they travel into the shell); only a
@@ -2905,7 +2936,9 @@ async function launch(
 
   const resetButton = (): void => {
     if (button === undefined) return;
-    button.disabled = !sourceFresh(session.sourceKey) || (mode === "view" ? !session.canView : !session.canControl);
+    const current = sessions.get(sessionKey(attempt.ref));
+    button.disabled = !sourceFresh(session.sourceKey) || current?.generation !== attempt.ref.generation ||
+      (mode === "view" ? !current.canView : !current.canControl);
     delete button.dataset.busy;
     button.removeAttribute("aria-busy");
     if (labelOnly) button.textContent = idleLabel;
@@ -2913,6 +2946,11 @@ async function launch(
   let stylesheet: HTMLLinkElement | undefined;
   let startCollabWithCapability: StartCollabWithCapability;
   const discard = (): false => {
+    const current = currentBinding();
+    if (current !== undefined && !(mode === "view" ? current.canView : current.canControl)) {
+      fail("expired", `${mode === "control" ? "Control" : "View"} is no longer available for this session. Choose another session.`);
+      return false;
+    }
     const owned = pendingLaunch === attempt;
     settle();
     resetButton();
@@ -2935,8 +2973,7 @@ async function launch(
     if (remoteFailure && kind !== "unauthorized") remoteLaunchFailures.set(session.sourceKey, message);
     if (sourceShell !== undefined && activeCollabShell === sourceShell) {
       if (remoteFailure) {
-        showTriageBar(sourceShell, "launch-failed", kind === "unauthorized" ? message : `${source.label}: ${message}`, "Sessions",
-          () => { void restoreDirectory(undefined, undefined, false); });
+        showLaunchFailure(sourceShell, session.sourceKey, kind, kind === "unauthorized" ? message : `${source.label}: ${message}`);
         return true;
       }
       showTriageBar(sourceShell, "reconnecting", message, "Try again", () => {
@@ -3013,11 +3050,6 @@ async function launch(
       } else {
         fail("unauthorized", `Access withdrawn on ${source.label}. Choose another session.`);
         remotes.get(session.sourceKey)?.forbid();
-        if (sourceShell !== undefined && activeCollabShell === sourceShell) {
-          showTriageBar(sourceShell, "reconnecting", `Access withdrawn on ${source.label}. Choose another session.`, "Sessions", () => {
-            void restoreDirectory();
-          });
-        }
         applyActivatedWorkerUpdate();
       }
     } else if (response.status === 404 || response.status === 409) {
@@ -3029,9 +3061,8 @@ async function launch(
         else {
           remoteLaunchFailures.set(session.sourceKey, message);
           renderFleetStatus();
-          if (sourceShell !== undefined && activeCollabShell === sourceShell) {
-            showTriageBar(sourceShell, "launch-failed", `${source.label}: ${message}`, "Sessions",
-              () => { void restoreDirectory(undefined, undefined, false); });
+          if (sourceShell !== undefined && activeCollabShell === sourceShell && selectionEpoch === attempt.epoch) {
+            showLaunchFailure(sourceShell, session.sourceKey, "expired", `${source.label}: ${message}`);
           }
         }
       }
@@ -3302,6 +3333,7 @@ for (const id of ["#new-session", "#empty-new-session"]) {
   requiredElement<HTMLButtonElement>(id).addEventListener("click", () => {
     cancelLaunch();
     clearCreationDraft();
+    selectionEpoch += 1;
     creation.open();
   });
 }
