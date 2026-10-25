@@ -1172,6 +1172,23 @@ function createHideIcon(): SVGSVGElement {
   return svg;
 }
 
+function createExpandIcon(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
+  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("width", "20");
+  svg.setAttribute("height", "20");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(SVG_NAMESPACE, "path");
+  path.setAttribute("d", "M12 3h5v5M17 3l-6 6M8 17H3v-5M3 17l6-6");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.6");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.append(path);
+  return svg;
+}
+
 async function closeHeldAskNotification(held: HeldAsk): Promise<void> {
   if (recordRef(held).sourceKey !== localKey) return;
   if (!("serviceWorker" in navigator)) return;
@@ -1224,7 +1241,11 @@ function requeueHeldSession(session: SessionMetadata): void {
 
 function showDismissUndo(session: SessionMetadata): void {
   cancelPendingDismissUndo();
-  undoCopy.textContent = `Hidden “${sessionTitle(session)}” on this device · 5s`;
+  undoCopy.replaceChildren(
+    createTextElement("span", "undo-label", "Hidden on this device"),
+    createTitleElement("span", "undo-session-title", session),
+  );
+  undoPanel.replaceChildren(createSessionTile(session), undoCopy, undoButton);
   const pending = {
     sourceKey: session.sourceKey,
     instanceId: session.instanceId,
@@ -2275,7 +2296,8 @@ function enterCollabClient(
       const expand = document.createElement("button");
       expand.type = "button";
       expand.className = "tray-expand";
-      expand.textContent = "Expand";
+      expand.setAttribute("aria-label", "Expand to full screen");
+      expand.append(createExpandIcon());
       const promote = (): void => tray.promote(() => {
         if (activeCollabShell !== shellState || shellState.presentation !== "request-tray") return;
         if (shellState.latestEmbedState?.gatewayHealth.state === "forbidden") {
@@ -2284,6 +2306,7 @@ function enterCollabClient(
         }
         // Reparent, never remount: the client, relay and unsent composer draft stay alive.
         shellState.presentation = "full";
+        shellActions.append(connection);
         document.body.append(shell);
         tray.close(true, true);
         document.body.className = "collab-shell-active";
@@ -2291,7 +2314,10 @@ function enterCollabClient(
         history.replaceState({ ompCollab: true, ompTrayPromoted: true }, "", "/client/");
       });
       expand.addEventListener("click", promote);
-      tray.replace({ id: "request", title: "Request", tone: "attention", body: shell, actions: [expand] });
+      tray.replace({
+        id: "request", title: spokenTitle(session), tone: "attention", body: shell,
+        icon: createSessionTile(session), actions: [connection, expand],
+      });
       tray.heading?.addEventListener("click", promote);
       tray.expanded();
       history.replaceState({ ompCollab: true }, "", "/");
@@ -2423,11 +2449,6 @@ async function launch(
     if (tray.id === "request") tray.close(true, true);
     const preview = document.createElement("div");
     preview.className = "request-preview";
-    const identity = document.createElement("div");
-    identity.className = "hero-identity";
-    const copy = document.createElement("div");
-    copy.append(createTitleElement("h3", "", session), createSessionSummary(session));
-    identity.append(createSessionTile(session, "waiting"), copy);
     requestStatus = createTextElement("p", "request-status", "Connecting…");
     requestStatus.setAttribute("role", "status");
     requestRetry = document.createElement("button");
@@ -2436,8 +2457,8 @@ async function launch(
     requestRetry.textContent = "Try again";
     requestRetry.hidden = true;
     requestRetry.addEventListener("click", () => void launch(session, mode, button, requestId, scope, presentation));
-    preview.append(identity, createTextElement("p", "ask-preview", session.ask?.preview ?? "Waiting for your input"), requestStatus, requestRetry);
-    tray.open({ id: "request", title: "Request", tone: "attention", body: preview }, {
+    preview.append(createSessionSummary(session), createTextElement("p", "ask-preview", session.ask?.preview ?? "Waiting for your input"), requestStatus, requestRetry);
+    tray.open({ id: "request", title: spokenTitle(session), tone: "attention", body: preview, icon: createSessionTile(session) }, {
       onClose: () => { void restoreDirectory(); },
     });
   }

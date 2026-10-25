@@ -663,7 +663,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "hold");
     await expect(page.locator(".triage-copy")).toHaveText("Need the desk for this one?");
     await page.unroute(nextLaunchRoute);
-    await page.getByRole("button", { name: "Close Request", exact: true }).click();
+    await page.getByRole("button", { name: "Close Held flow next ask", exact: true }).click();
     await expect(page).toHaveURL(fixture.origin + "/");
     await expect(page.locator(".held-row .row-title")).toHaveText(SESSION_TITLE);
     await page.locator(".held-requeue").click();
@@ -768,7 +768,8 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await page.unroute(`${fixture.origin}/api/v1/sessions`);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect(page.locator(".conn-chip")).toHaveText("Relay unavailable", { timeout: 7_000 });
-    await page.locator(".shell-title").click();
+    // The tray title now expands; tap neutral client content to dismiss only answer feedback.
+    await page.locator(".sh-transcript").click({ position: { x: 2, y: 2 } });
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "reconnecting");
     await expect(page.locator(".triage-copy")).toContainText("Relay unavailable — retrying");
     await page.evaluate(() => {
@@ -1131,7 +1132,7 @@ test("answer feedback dismisses by tap-out, swipe, and the eight-second timeout"
     await page.locator(".shell-bar").dispatchEvent("pointerdown", { pointerId: 1, clientY: 20 });
     await expect(page.locator(".triage-bar")).toBeHidden();
 
-    await page.getByRole("button", { name: "Close Request", exact: true }).click();
+    await page.getByRole("button", { name: `Close ${SESSION_TITLE}`, exact: true }).click();
     await expect(page).toHaveURL(`${fixture.origin}/`);
     const second = {
       ...initial,
@@ -1151,7 +1152,7 @@ test("answer feedback dismisses by tap-out, swipe, and the eight-second timeout"
     await page.locator(".triage-bar").dispatchEvent("pointerup", { pointerId: 2, clientY: 20 });
     await expect(page.locator(".triage-bar")).toBeHidden();
 
-    await page.getByRole("button", { name: "Close Request", exact: true }).click();
+    await page.getByRole("button", { name: `Close ${SESSION_TITLE}`, exact: true }).click();
     await expect(page).toHaveURL(`${fixture.origin}/`);
     const third = {
       ...initial,

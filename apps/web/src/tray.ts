@@ -3,13 +3,14 @@ export interface TrayPanel {
   readonly title: string;
   readonly tone: "neutral" | "attention";
   readonly body: HTMLElement;
+  readonly icon?: HTMLElement;
   readonly actions?: readonly HTMLElement[];
 }
 
 interface PanelEntry {
   readonly panel: TrayPanel;
   readonly element: HTMLElement;
-  readonly heading: HTMLElement;
+  readonly heading: HTMLElement | undefined;
   height: number;
 }
 
@@ -110,31 +111,37 @@ export function createTray(host: HTMLDialogElement) {
     }
     entry.height = height;
     entry.element.style.maxHeight = "";
-    host.style.height = `${Math.min(viewportHeight() - 16, height + grip.offsetHeight + 2)}px`;
+    host.style.height = `${Math.min(viewportHeight() - 16, height + (grip.hidden ? 0 : grip.offsetHeight) + 2)}px`;
   };
   const build = (panel: TrayPanel): PanelEntry => {
     const element = document.createElement("section");
     element.className = "tray-panel";
     element.dataset.panel = panel.id;
-    const header = document.createElement("header");
-    header.className = "tray-header";
-    const leading = document.createElement("button");
-    leading.type = "button";
-    leading.className = "tray-leading";
-    const parent = current();
-    leading.setAttribute("aria-label", parent === undefined ? `Close ${panel.title}` : `Back to ${parent.panel.title}`);
-    leading.textContent = parent === undefined ? "⌄" : "‹";
-    leading.addEventListener("click", () => stack.length > 1 ? pop() : close());
-    const heading = document.createElement("h2");
-    heading.id = `tray-title-${++sequence}`;
-    heading.tabIndex = -1;
-    heading.textContent = panel.title;
-    header.append(leading, heading, ...(panel.actions ?? []));
+    let heading: HTMLElement | undefined;
+    if (host.dataset.mode !== "transient") {
+      const header = document.createElement("header");
+      header.className = "tray-header";
+      const leading = document.createElement("button");
+      leading.type = "button";
+      leading.className = "tray-leading";
+      const parent = current();
+      leading.setAttribute("aria-label", parent === undefined ? `Close ${panel.title}` : `Back to ${parent.panel.title}`);
+      leading.textContent = parent === undefined ? "⌄" : "‹";
+      leading.addEventListener("click", () => stack.length > 1 ? pop() : close());
+      heading = document.createElement("h2");
+      heading.id = `tray-title-${++sequence}`;
+      heading.tabIndex = -1;
+      heading.textContent = panel.title;
+      header.append(leading);
+      if (panel.icon !== undefined) header.append(panel.icon);
+      header.append(heading, ...(panel.actions ?? []));
+      element.append(header);
+    }
     const body = document.createElement("div");
     body.className = "tray-body";
     panel.body.hidden = false;
     body.append(panel.body);
-    element.append(header, body);
+    element.append(body);
     return { panel, element, heading, height: 0 };
   };
   const display = (entry: PanelEntry, previous?: PanelEntry): void => {
@@ -144,7 +151,8 @@ export function createTray(host: HTMLDialogElement) {
     entry.element.className = "tray-panel";
     host.dataset.panel = entry.panel.id;
     host.dataset.tone = entry.panel.tone;
-    host.setAttribute("aria-labelledby", entry.heading.id);
+    if (entry.heading === undefined) host.removeAttribute("aria-labelledby");
+    else host.setAttribute("aria-labelledby", entry.heading.id);
     measure(entry, previous);
     if (previous !== undefined && previous !== entry) {
       previous.element.inert = true;
@@ -155,7 +163,7 @@ export function createTray(host: HTMLDialogElement) {
         if (current() !== previous) previous.element.remove();
       }, 200);
     }
-    if (host.dataset.mode !== "transient") entry.heading.focus({ preventScroll: true });
+    entry.heading?.focus({ preventScroll: true });
   };
   const open = (panel: TrayPanel, options: { transientMs?: number; onClose?: () => void } = {}): void => {
     if (host.open) close(true);
@@ -167,6 +175,7 @@ export function createTray(host: HTMLDialogElement) {
     focused = false;
     onClose = options.onClose;
     host.dataset.mode = remaining > 0 ? "transient" : "modal";
+    grip.hidden = remaining > 0;
     host.setAttribute("role", remaining > 0 ? "status" : "dialog");
     if (remaining > 0) {
       host.setAttribute("aria-live", "polite");
@@ -236,7 +245,7 @@ export function createTray(host: HTMLDialogElement) {
     if (!focused) armTimer();
   });
   grip.addEventListener("pointerdown", event => {
-    if (pointer !== undefined || closing || expanding || event.button !== 0) return;
+    if (grip.hidden || pointer !== undefined || closing || expanding || event.button !== 0) return;
     pointer = { id: event.pointerId, y: event.clientY, distance: 0 };
     grip.setPointerCapture(event.pointerId);
   });

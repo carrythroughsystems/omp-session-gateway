@@ -57,10 +57,10 @@ DOM directly. `e2e/motion.e2e.ts` pins which changes animate; the visual lane ke
 ## Trays
 
 `src/tray.ts` owns one native `#tray` dialog and a maximum-three-panel stack (ADR-041).
-Each panel has one topic or primary action, a title, and a 48px leading Close or Back control.
+Each modal panel has one topic or primary action, a title, and a 48px leading Close or Back control.
 Settings opens **Background alerts**; only enabled alerts reveal **Alert detail**, whose radios
 apply immediately and return to the root. The existing notification elements are moved, not copied.
-**Options** opens **This request** with immediate Hold for desk and View transcript choices.
+The quiet, outlined **Options** chip opens **This request** with immediate Hold for desk and View transcript choices.
 
 Modal trays use `showModal()`, native focus containment and focus return, body scroll lock, and
 safe-area padding. Escape/platform close requests pop a child or dismiss the root without adding
@@ -70,12 +70,15 @@ Adjacent panels differ by at least 24px; reduced motion swaps instantly. Class-d
 the dialog modal until `transitionend` or a bounded fallback closes it on engines without
 `overlay`/`display` transitions. Backdrop coordinates provide light dismiss without `closedby`.
 
-Hide uses the same host non-modally with a polite status announcement and a five-second Undo
-window paused while hovered or focused. Generation/source-bound Undo and persistent Show all
+Hide uses the same host non-modally as a compact tile/copy/filled-Undo row, without a heading,
+grip or countdown. Its polite status announcement has a five-second Undo window paused while
+hovered or focused. Generation/source-bound Undo and persistent Show all
 retain their device-local semantics and storage formats.
 
 Open request immediately presents a compact amber loading tray. The ordinary validated launch
-mounts the pinned client once inside a roughly 72%-visual-viewport panel. Expand (or tapping the
+mounts the pinned client once inside a roughly 72%-visual-viewport panel. One header owns the
+session tile/title, connection dot and icon-only Expand control; the client's inner frame is flat,
+and its shell bar stays hidden until promotion. Expand (or tapping the
 tray title) grows to the visual viewport, then reparents the same shell and `#root` into the body;
 the relay socket and composer draft survive, and only promotion replaces the URL with `/client/`.
 Closing disposes synchronously and restores the cached directory. Pagehide drops the capability;

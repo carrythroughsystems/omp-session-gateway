@@ -184,9 +184,12 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   24px, with measured height and content transitions using ADR-040's Material tokens.
   Context determines tone: requests are amber; alerts, recovery and Undo are neutral.
   Native modality preserves context and focus; the grip alone drags, content scrolls,
-  and the bottom clears the safe area. Undo is a non-modal polite status tray.
+  and the bottom clears the safe area. Undo is a compact non-modal polite status row: tile,
+  two-line copy and filled Undo action, without a heading, grip or countdown.
   Open request grows from metadata/Connecting to the actual pinned client at about 72%
-  of the visual viewport; Expand grows into the same full-screen session without remounting.
+  of the visual viewport. One header owns Close, session tile/title, connection dot and icon-only
+  Expand; the inner shell bar is hidden and its frame flattened until promotion. Expand grows
+  into the same full-screen session without remounting.
 - Status banner: full-width `surface` strip with a leading status dot
   (live/loading/danger). Unauthorized uses `danger` text + dot and hides rows.
 - Empty state: ghost mark (22% opacity), `NO LIVE SESSIONS` kicker, mono hint

@@ -1776,7 +1776,10 @@ describe("dashboard attention and notifications", () => {
     expect(harness.elements.directoryCount.textContent).toBe("Live · 2");
     expect(harness.elements.sessionList.querySelector(".all-clear-copy")?.textContent).toBe("Nothing needs you.");
     expect(!harness.elements.trayHost.open).toBeFalse();
-    expect(harness.elements.undoCopy.textContent).toStartWith("Hidden “Dismiss One”");
+    expect(harness.elements.undoCopy.querySelector(".undo-label")?.textContent).toBe("Hidden on this device");
+    expect(harness.elements.undoCopy.querySelector(".undo-session-title")?.textContent).toBe("Dismiss One");
+    expect(harness.elements.trayHost.querySelector(".tray-header")).toBeNull();
+    expect(harness.elements.trayHost.querySelector(".tray-grip")?.hidden).toBeTrue();
     const stored = JSON.parse(
       harness.localStorage.getItem("omp.sessions.dismissed.v2") ?? "null",
     ) as Record<string, unknown>[];

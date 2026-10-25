@@ -98,11 +98,23 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await expect(page).toHaveURL(`${fixture.origin}/client/`);
       await page.locator(".shell-back").click();
       await expect(page.locator(".queue-hero")).toBeVisible();
+      await expect(page.locator(".hero-options")).toHaveCSS("min-height", "48px");
+      await expect(page.locator(".hero-options")).not.toHaveCSS("border-top-color", "rgba(0, 0, 0, 0)");
+      expect(await page.locator(".hero-options").evaluate(element => element.getBoundingClientRect().width))
+        .toBeLessThan(await page.locator(".action-request").evaluate(element => element.getBoundingClientRect().width));
 
       await page.locator(".dismiss-session").first().click();
       await expect(tray).toHaveAttribute("role", "status");
       expect(await tray.evaluate(element => element.matches(":modal"))).toBe(false);
       await capture("undo");
+      expect(heights.undo).toBeGreaterThanOrEqual(88);
+      expect(heights.undo).toBeLessThanOrEqual(96);
+      await expect(tray.locator("h2, .tray-header")).toHaveCount(0);
+      await expect(tray.locator(".tray-grip")).toBeHidden();
+      await expect(tray.locator(".session-tile")).toHaveCount(1);
+      await expect(tray.locator(".undo-label")).toHaveText("Hidden on this device");
+      await expect(tray).not.toContainText("5s");
+      await expect(page.locator("#undo-dismissal")).toHaveCSS("min-height", "48px");
       await page.locator("#undo-dismissal").click();
       await expect(tray).toBeHidden();
 
@@ -111,6 +123,9 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await page.locator(".action-request").click();
       await expect(tray).toBeVisible();
       await expect(tray.locator(".request-status")).toHaveText("Connecting…");
+      await expect(tray.locator(".tray-header h2")).toHaveText("Gateway auth hardening");
+      await expect(tray.locator(".tray-header .session-tile")).toHaveCount(1);
+      await expect(tray.locator(".request-preview h3, .request-preview .session-tile")).toHaveCount(0);
       await capture("request-connecting");
       releaseLaunch();
       await expect(tray.locator("#root .sh-app")).toHaveCount(1);
@@ -119,6 +134,27 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await expect(page.locator(".sh-ask-send")).toBeEnabled();
       await expect.poll(async () => tray.evaluate(element => element.getAnimations().length)).toBe(0);
       await capture("request-mounted");
+      const header = tray.locator('.tray-panel:not([inert]) .tray-header');
+      await expect(header.locator("h2")).toHaveText("Gateway auth hardening");
+      await expect(header.locator("h2")).toHaveCSS("text-overflow", "ellipsis");
+      await expect(tray).toHaveAttribute("aria-labelledby", (await header.locator("h2").getAttribute("id"))!);
+      await expect(header.getByRole("button", { name: "Close Gateway auth hardening", exact: true })).toBeVisible();
+      await expect(header.getByRole("button", { name: "Expand to full screen", exact: true }).locator("svg")).toHaveCount(1);
+      await expect(tray.locator(".shell-bar")).toHaveCSS("display", "none");
+      await expect(tray.locator(".sh-panel")).toHaveCSS("border-radius", "0px");
+      await expect(tray.locator(".sh-panel")).toHaveCSS("border-left-width", "0px");
+      await expect(tray.locator(".sh-main")).toHaveCSS("padding", "0px");
+      const frame = await tray.locator(".sh-panel").boundingBox();
+      const shell = await tray.locator(".gateway-shell").boundingBox();
+      expect(Math.abs(frame!.width - shell!.width)).toBeLessThanOrEqual(1);
+      expect((await tray.locator(".triage-bar").boundingBox())!.height).toBeLessThan(100);
+      const headerCenters = await header.locator(":scope > *").evaluateAll(elements => elements.map(element => {
+        const box = element.getBoundingClientRect();
+        return box.y + box.height / 2;
+      }));
+      expect(headerCenters).toHaveLength(5);
+      expect(Math.max(...headerCenters) - Math.min(...headerCenters)).toBeLessThanOrEqual(1);
+      const connection = await header.locator(".conn-chip").elementHandle();
       await page.locator(".sh-ask-send").click();
       await expect(page.locator(".sh-composer-ask-embedded")).toHaveCount(0);
       fixture.upsert(GATEWAY_WORKING);
@@ -137,6 +173,9 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await cdp.send("Animation.setPlaybackRate", { playbackRate: 1 });
       await expect(page).toHaveURL(`${fixture.origin}/client/`);
       expect(await root!.evaluate(element => element === document.querySelector("body > .gateway-shell > #root"))).toBe(true);
+      expect(await connection!.evaluate(element => element === document.querySelector(".shell-bar .conn-chip"))).toBe(true);
+      await expect(page.locator(".shell-bar")).toBeVisible();
+      await expect(page.locator(".sh-panel")).not.toHaveCSS("border-radius", "0px");
       expect(await relaySocketCount(page)).toBe(sockets);
       expect(fixture.launchRequests).toHaveLength(launches);
       await expect(page.locator(".sh-composer-input")).toHaveValue("Draft retained through expansion");
@@ -213,7 +252,7 @@ test("request close cancels late launch; failed launch retries; bfcache preserve
     await expect(page.locator("#tray #root .sh-app")).toHaveCount(1);
     await expect(page).toHaveURL(`${fixture.origin}/`);
     await assertPrivate(page, fixture);
-    await page.getByRole("button", { name: "Close Request", exact: true }).click();
+    await page.getByRole("button", { name: "Close Gateway auth hardening", exact: true }).click();
     await expect(page.locator("#root")).toHaveCount(0);
   } finally { await fixture.stop(); }
 });
@@ -237,7 +276,7 @@ test("reduced motion swaps and promotes instantly", async ({ page, context }, in
     await page.keyboard.press("Escape");
     await page.keyboard.press("Escape");
     await page.locator(".action-request").click();
-    await page.locator(".tray-expand").click();
+    await page.locator('#tray .tray-panel:not([inert]) .tray-header h2').click();
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
     await expect(page.locator("#tray")).toHaveCount(0);
   } finally { await fixture.stop(); }
@@ -284,7 +323,7 @@ test("withdrawn request access stays in the tray and an open keyboard leaves its
     await expect(page.locator(".request-status")).toHaveText("This tailnet identity is not authorized.");
     await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeHidden();
     await expect(page.locator("#root")).toHaveCount(0);
-    await page.getByRole("button", { name: "Close Request", exact: true }).click();
+    await page.getByRole("button", { name: "Close Gateway auth hardening", exact: true }).click();
     await page.unroute("**/launch");
     await page.locator(".action-request").click();
     await page.locator(".sh-ask-send").click();

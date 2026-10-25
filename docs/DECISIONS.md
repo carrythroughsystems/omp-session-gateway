@@ -1783,11 +1783,15 @@ Close/Back control, context-aware theme, and visibly different heights between s
   Troubleshooting is one content panel. Hero Options opens This request with immediate Hold and
   View transcript choices, not another confirmation.
 - Hide opens the same host through non-modal `show()`, `role=status` and polite live announcement.
+  A compact tile, two-line copy and filled Undo row replaces modal header/grip anatomy; no countdown.
   Its five-second timer pauses for hover/focus. Generation-bound Undo and persistent Show all keep
   the existing bounded device-local records; a superseding tray cancels the old timer.
 - Open request on the hero, Then and held rows opens compact metadata/Connecting immediately and
   runs the ordinary validated launch. Mount the existing pinned client and shell inside a roughly
-  72%-visual-viewport tray. Expand or tapping its title grows to full viewport with the long token,
+  72%-visual-viewport tray. The tray's single header contains Close, session tile/title, connection
+  dot and icon-only Expand. Hide the inner shell bar and flatten its frame only while in the tray;
+  promotion restores the shell bar and moves the same connection indicator back into it.
+  Expand or tapping its title grows to full viewport with the long token,
   then reparents the same shell into the body and replaces history with `/client/`. No second
   React root, capability or relay socket; no draft loss. Full-screen working View retains ADR-040.
 - Close restores the cached directory and disposes synchronously. Presentation is carried with
