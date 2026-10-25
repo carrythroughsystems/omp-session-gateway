@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.9.0] — 2026-10-25
+
+This release uses stock OMP v18.12.5 as its engineering baseline. The 44 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.
+
 ### Added
 
 - Opt-in **New session** creation in Tern from administrator-approved project, working-copy, and
