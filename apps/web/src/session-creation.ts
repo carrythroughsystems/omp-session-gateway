@@ -61,6 +61,7 @@ export class SessionCreationController {
   private request: AbortController | undefined;
   private timer: number | undefined;
   private deadline: number | undefined;
+  private progressState: string | undefined;
 
   constructor(private readonly deps: CreationDependencies) {}
 
@@ -108,6 +109,7 @@ export class SessionCreationController {
   }
 
   private panel(id: string, title: string, body: HTMLElement, back?: () => void): void {
+    this.progressState = undefined;
     body.className = `creation-body creation-${id}`;
     const close = button("Close", () => this.deps.tray.close());
     close.className = "creation-close";
@@ -297,6 +299,7 @@ export class SessionCreationController {
   }
 
   private progress(state: string): void {
+    if (this.deps.tray.id === "creation-progress" && this.progressState === state) return;
     const body = document.createElement("div");
     const copy = state === "awaiting_omp" ? "Tern started the command. Waiting for OMP to publish Control…"
       : state === "launching" ? "Starting OMP in Tern…" : "The host is preparing your session…";
@@ -304,6 +307,7 @@ export class SessionCreationController {
     status.setAttribute("role", "status");
     body.append(status, text("p", "Close stops watching here. It does not stop the command on the host."));
     this.panel("progress", "Starting session", body);
+    this.progressState = state;
   }
 
   private paused(copy = "Stopped watching. The command may still be starting on the host."): void {

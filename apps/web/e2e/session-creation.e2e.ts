@@ -31,8 +31,11 @@ async function panel(page: Page, step: string): Promise<number> {
   const bounds = await tray.boundingBox();
   expect(bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
   expect(bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
-  const controls = await current.locator("button").evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
-  expect(controls.every(height => height >= 48)).toBe(true);
+  // A status response can replace the progress panel between the animation and geometry reads.
+  await expect.poll(async () => {
+    const controls = await current.locator("button").evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
+    return controls.length > 0 && controls.every(height => height >= 48);
+  }).toBe(true);
   return bounds!.height;
 }
 
@@ -252,6 +255,7 @@ test("revision mismatch refreshes valid choices and requires another explicit Cr
 
 test("slow options and status responses cannot reopen a closed wizard or launch in the background", async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 915 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
   const fixture = await startDashboardFixture([]);
   fixture.configureCreation({ readySession, delayMs: { options: 300, status: 500 }, states: [{ state: "ready" }] });
   try {
