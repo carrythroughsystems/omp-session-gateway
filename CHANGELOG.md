@@ -8,22 +8,18 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Added
 
-- Show embedded snapshot progress in the gateway's sole joining/reconnecting chip without
-  repeated live-region announcements, and accept a memory-only first-task draft once into an
-  empty, healthy, live Control composer without sending or replacing an existing draft.
-- Opt-in, administrator-configured Tern session creation with durable idempotent intent,
-  conservative crash recovery, exact lossless pane correlation and OMP-native Control adoption (ADR-043).
-  Accept Tern's additive new-tab receipt metadata and wait for delayed session-file metadata.
-  Anchor adoption freshness to actual child creation and reserve execution across durable admission
-  so concurrent availability probes cannot occupy its CLI slot.
-- Add a source-bound **New session** wizard for opt-in Tern creation: approved choices,
-  explicit **Create and open Control**, bounded status watching, manual same-operation recovery,
-  device-local choice preferences, and a memory-only one-shot First task draft. Closing stops
-  watching rather than stopping the host command; uncertain outcomes never automatically recreate.
-  Creation progress shows Tern startup, OMP discovery, and Control opening as three explicit
-  steps with completed checks and a reduced-motion-aware active dot.
-  Fresh flows discard stale task drafts; lost-acknowledgement POST replay is limited to intents
-  younger than one hour, and cancelled or discarded handoffs settle their loading banner.
+- Opt-in **New session** creation in Tern from administrator-approved project, working-copy, and
+  profile choices on the execution host, with durable identity-scoped idempotency, lossless local
+  block/pane and basename correlation, OMP-native adoption into **Control**, conservative
+  interrupted/unknown outcome handling, and automatic `tern` removal on rollback with
+  `<configDir>/config.pre-rollback.json` backup ([ADR-043](docs/DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)).
+  The PWA's **Create and open Control** wizard shows progress as three steps, replays a
+  lost-acknowledgement request only within one hour, and never recreates on an uncertain outcome.
+  Embedded sessions report snapshot progress (`Joining session… 43%` / `Reconnecting… 43%`) in the
+  connection status chip and accept an optional memory-only **First task** draft once into an empty
+  writable Control composer without auto-sending; native **Open in Tern** handoff remains
+  upstream-blocked on Android ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143))
+  and deferred on desktop.
 - Resumable, skippable first-run trays for connection facts, optional background alerts, and
   View versus Control, reusing the existing tray and notification control. The bounded
   `omp.sessions.first-run.v1` record stores only step and timestamp. A same-scope queue clearance

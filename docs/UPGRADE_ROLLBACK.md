@@ -26,7 +26,7 @@ bun apps/gateway/src/cli.js status
 bun apps/gateway/src/cli.js doctor
 ```
 
-The installer validates your existing `config.json`, preserves an omitted `--port`, `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `readiness-token`, and Web Push state verbatim, and switches `installation/current.json` only after the new service passes its authenticated loopback readiness check. Reinstalling or upgrading never strips `http.trustedDashboardOrigins`, `fleet`, or `speech`. If startup or readiness fails, the installer restores the prior configuration, service definition, and verified runtime automatically.
+The installer validates your existing `config.json`, preserves an omitted `--port`, `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `tern`, `readiness-token`, and Web Push state verbatim, and switches `installation/current.json` only after the new service passes its authenticated loopback readiness check. Reinstalling or upgrading never strips `http.trustedDashboardOrigins`, `fleet`, `speech`, or `tern`. If startup or readiness fails, the installer restores the prior configuration, service definition, and verified runtime automatically.
 
 ## Roll back to a retained predecessor
 
@@ -44,15 +44,27 @@ bun apps/gateway/src/cli.js rollback --to <version>-<digest12>
 
 Each readiness-proven `install` keeps the active runtime plus the two most recent distinct predecessors in `installation/history.json` (plus any divergent version named by the on-disk service definition) and prunes older or never-activated staged directories. `rollback` itself never prunes, so you can switch back and forth between the active release and its predecessor; if you need a version that was already pruned, verify and `install` its release archive again.
 
+### Tern creation on every managed rollback
+
+Every managed `rollback` or `rollback --to` **conservatively disables creation** when `tern` is authored in `config.json`, regardless of the target version ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)), because older runtimes reject unknown root keys:
+
+1. `rollback` atomically writes the **full authored document** to `<configDir>/config.pre-rollback.json` with owner-only (`0600`) permissions. If `<configDir>/config.pre-rollback.json` already exists, `rollback` refuses to overwrite it and aborts before modifying `config.json` or the service (restore or move that backup file first).
+2. `rollback` removes `tern` from `<configDir>/config.json` (`projectPreTernConfig`, composed with `projectPreFleetConfig` when the target runtime is also older than `0.8.0`), using the same transactional failure recovery as `install`.
+3. `rollback` starts and readiness-checks the target runtime while preserving `<stateDir>/session-creations.json` (which older runtimes ignore) and leaving running Tern tabs and OMP processes untouched.
+
+To re-enable creation after installing a creation-capable runtime, copy `<configDir>/config.pre-rollback.json` back to `<configDir>/config.json`, remove `<configDir>/config.pre-rollback.json`, and run `bun apps/gateway/src/cli.js install --origin <origin> --allow <login>` and `bun apps/gateway/src/cli.js doctor` from the verified extraction directory ([Operations](OPERATIONS.md#opt-in-tern-session-creation)). Do not copy a backup containing `tern` onto a runtime that does not support creation.
+
 ### Rolling back across the `v0.8.0` fleet and speech configuration boundary
 
 Gateway runtimes older than `0.8.0` (`FLEET_CONFIG_SINCE_VERSION = "0.8.0"`) reject unknown `config.json` keys and refuse to start if `http.trustedDashboardOrigins`, `fleet`, or `speech` is present. When `omp-gateway rollback` (or `rollback --to`) targets a retained runtime older than `0.8.0` while any of those three keys is authored in `config.json` ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):
 
 1. `rollback` atomically writes your full authored configuration to `<configDir>/config.pre-rollback.json` with owner-only (`0600`) permissions. If `<configDir>/config.pre-rollback.json` already exists, `rollback` refuses to overwrite it and aborts before modifying `config.json` or the service.
-2. `rollback` rewrites `<configDir>/config.json` without `http.trustedDashboardOrigins`, `fleet`, and `speech`, then starts and readiness-checks the older runtime.
+2. `rollback` rewrites `<configDir>/config.json` without `http.trustedDashboardOrigins`, `fleet`, and `speech` (and without `tern` whenever authored, as above), then starts and readiness-checks the older runtime.
 3. `rollback` prints the path to `config.pre-rollback.json` and the restore steps.
 
-To restore your fleet and speech settings after upgrading back to `v0.8.0` or later:
+To restore your fleet and speech settings after upgrading back to `v0.8.0` or later, first
+confirm the selected runtime understands **every** saved key; if the backup contains `tern`,
+use a creation-capable runtime or omit that section until you deliberately re-enable it:
 
 ```sh
 cp "${XDG_CONFIG_HOME:-$HOME/.config}/omp-session-gateway/config.pre-rollback.json" \
@@ -80,7 +92,9 @@ Returning from `v0.4.0+` to `v0.3.0` also requires a stopped transition rather t
 ## What rollback never does
 
 - **Never downgrades, restarts, or reconfigures `omp`:** running OMP processes keep the code and `collab.autoStart` setting they started with.
-- **Never rotates `readiness-token` or rewrites same-schema `config.json`:** `readiness-token` is never rotated, and `config.json` is untouched unless rolling back to a runtime older than `0.8.0` while `http.trustedDashboardOrigins`, `fleet`, or `speech` is authored (in which case the full authored file is saved to `config.pre-rollback.json` first).
+- **Never rotates `readiness-token` or silently discards authored configuration:** `readiness-token` is never rotated. Configuration is untouched unless authored `tern` must be projected away on any rollback, or fleet/speech keys must be projected away for a target older than `0.8.0`; save the full authored document to private `config.pre-rollback.json` first and refuse to overwrite an existing backup.
+- **Never stops Tern or clears creation evidence:** preserve the private ledger; tabs and OMP
+  processes already started remain running, and uncertain outcomes are never automatically retried.
 - **Never edits Tailscale Serve mappings or tailnet policy:** your external HTTPS origin and allowlist remain in effect.
 - **Never restores `publisher-token` or `v0.3.0` compatibility:** pointer rollback only switches between retained mainline gateway runtimes (`v0.4.0+`).
 

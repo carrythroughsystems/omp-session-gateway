@@ -23,6 +23,13 @@ GitHub issues are the active work queue. [Compatibility](COMPATIBILITY.md) and
 
 ## Later or optional
 
+- Native **Open in Tern** handoff: Android Tern 0.9.5 is **upstream-blocked** on a missing
+  browser-invocable intent filter ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)),
+  and desktop handoff (`tern://` session routing) is deferred. Neither is part of
+  [ADR-043 creation](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption).
+- A separately scoped Tern plugin, not a discovery or terminal-scraping fallback.
+- A desk-handoff queue beyond this device's existing Hold action.
+- Unified cross-host notifications; current Web Push and badges remain home-gateway scoped.
 - A qualified self-hosted relay deployment mode.
 - Trusted Web Activity packaging.
 - Multiple desktop hosts with explicit grouping.
