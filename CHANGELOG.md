@@ -8,6 +8,14 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Unify Settings, Troubleshooting, Hide/Undo and request Options in one native tray system.
+  Open request connects inside an amber tray and expands into the same live session without
+  replacing its client, socket or composer draft. Nested focus/back, grip dismissal, safe areas,
+  paused Undo expiry and reduced-motion paths share one implementation (ADR-041).
+  Requests use one session-identity header and a flat client frame; Undo is a compact
+  tile/copy/action notice, and the hero's quiet Options chip is visibly tappable.
+  Keep successive requests coordinated with expansion and cancellation, let foreground choices
+  supersede background resume, and return keyboard focus to the request after closing its tray.
 - Document same-uid/private-ACL discovery for isolated OMP HOMEs and the unchanged
   18.12.5→18.12.6 collaboration contract; extend the local lifecycle proof with native-executable
   publication, real View/Control attach, restart and OMP-owned revocation checks, without changing

@@ -219,12 +219,12 @@ async function captureRuntimeScreens(browser: Browser, paths: CapturePaths): Pro
     await page.evaluate(async () => navigator.serviceWorker.ready);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator("#settings").click();
-    await page.locator("#notification-settings").waitFor({ state: "visible" });
+    await page.locator("#tray").waitFor({ state: "visible" });
     await page.locator('#notify[data-state="idle"]').waitFor({ state: "visible" });
     await page.locator("#notify").click();
     await page.locator('#notify[data-state="enabled"]').waitFor({ state: "visible" });
-    await page.locator("#notification-settings-close").click();
-    await page.locator("#notification-settings").waitFor({ state: "hidden" });
+    await page.locator("#tray .tray-leading").click();
+    await page.locator("#tray").waitFor({ state: "hidden" });
     // Enabling the subscription removes the resting surface's enable-alerts hint.
     await waitForCount(page, ".alerts-hint", 0);
     await captureProductPng(page, paths.allClear);
@@ -243,12 +243,12 @@ async function captureRuntimeScreens(browser: Browser, paths: CapturePaths): Pro
     await waitForExactText(page, ".queue-hero h2", "Gateway auth hardening");
     await page.locator(".queue-hero .ask-preview").filter({ hasText: "How should ADR-0036 proceed?" }).waitFor({ state: "visible" });
     await page.locator(".action-request").waitFor({ state: "visible" });
-    await waitForCount(page, ".hero-alt", 2);
+    await waitForCount(page, ".hero-options", 1);
     await waitForExactText(page, ".queue-row .row-title", "Release qualification");
     await waitForCount(page, ".queue-row", 1);
     await waitForCount(page, ".working-row", 3);
     const targetHeights = await page
-      .locator(".action-request, .hero-alt, .queue-row, .working-row")
+      .locator(".action-request, .hero-options, .queue-row, .working-row")
       .evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
     assertCondition(targetHeights.every(height => height >= 44), "captured directory has a sub-44px action target");
     const actionBox = await page.locator(".action-request").boundingBox();
@@ -264,7 +264,7 @@ async function captureRuntimeScreens(browser: Browser, paths: CapturePaths): Pro
     await captureProductPng(page, paths.needsYou);
 
     await page.locator(".action-request").click();
-    await page.waitForFunction(() => location.pathname === "/client/" && location.search === "" && location.hash === "");
+    await page.waitForFunction(() => location.pathname === "/" && document.querySelector('#tray[data-layout="expanded"]') !== null && location.search === "" && location.hash === "");
     await page.waitForFunction(() => document.querySelector('.conn-chip[data-state="connected"][data-compact="true"]'));
     await waitForCount(page, ".gateway-shell", 1);
     await waitForCount(page, ".sh-header, .sh-rail, .sh-rail-backdrop", 0);
@@ -295,12 +295,13 @@ async function captureRuntimeScreens(browser: Browser, paths: CapturePaths): Pro
     await captureProductPng(page, paths.openRequest);
 
     fixture.setSnapshot(INITIAL_SESSIONS);
-    await page.locator(".shell-back").click();
+    await page.locator("#tray .tray-leading").click();
     await page.locator(".all-clear-summary").waitFor({ state: "visible" });
     await waitForCount(page, ".working-row", 4);
     await page.locator("#settings").click();
-    await page.locator("#notification-settings").waitFor({ state: "visible" });
+    await page.locator("#tray").waitFor({ state: "visible" });
     await page.locator('#notify[data-state="enabled"]').waitFor({ state: "visible" });
+    await page.locator("#alert-detail").click();
     await page.locator("#notification-detail-options").waitFor({ state: "visible" });
     assertCondition(
       await page.locator('input[name="notification-detail"][value="session"]').isChecked(),
@@ -309,9 +310,9 @@ async function captureRuntimeScreens(browser: Browser, paths: CapturePaths): Pro
     await page.locator(".sheet-footnote").waitFor({ state: "visible" });
     await page.locator(".detail-warning").waitFor({ state: "visible" });
     const detailTargetHeights = await page
-      .locator(".detail-option, #notification-settings-close, #notify")
+      .locator(".detail-option, #tray .tray-leading")
       .evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
-    assertCondition(detailTargetHeights.every(height => height >= 44), "notification sheet has a sub-44px action target");
+    assertCondition(detailTargetHeights.every(height => height >= 48), "notification tray has a sub-48px action target");
     await captureProductPng(page, paths.notificationSettings);
     assertCondition(unexpectedRequests === 0, "runtime capture attempted an unexpected external request");
     return { tapPoint, unexpectedRequests };

@@ -243,6 +243,8 @@ export async function installSyntheticProductFixture(
 
         constructor(url: string) {
           this.url = url;
+          const counters = globalThis as typeof globalThis & { __ompRelaySocketCount?: number };
+          counters.__ompRelaySocketCount = (counters.__ompRelaySocketCount ?? 0) + 1;
           // Tests drive further host frames (a later Ask, its end) through the live socket.
           Object.defineProperty(globalThis, "__ompSyntheticSocket", { configurable: true, value: this });
           queueMicrotask(() => {

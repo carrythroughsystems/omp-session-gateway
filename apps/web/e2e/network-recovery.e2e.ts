@@ -156,7 +156,7 @@ test("a prolonged visible outage opens recovery help from the loaded shell", asy
     await page.route("**/*", route => route.abort("connectionrefused"));
     await page.getByRole("button", { name: "Troubleshooting" }).click();
 
-    const help = page.getByRole("dialog", { name: "Still unreachable?" });
+    const help = page.getByRole("dialog", { name: "Troubleshooting" });
     await expect(help).toBeVisible();
     await expect(help.getByText("Force stop", { exact: true })).toBeVisible();
     await expect(help.getByText("These steps are guidance, not a diagnosis", { exact: false })).toBeVisible();

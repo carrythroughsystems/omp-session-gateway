@@ -70,6 +70,12 @@ class FakeElement extends EventTarget {
   readonly dataset: Record<string, string> = {};
   /** Inline properties the app sets through CSSOM (transition names); read back by tests. */
   readonly style = {
+    overflow: "",
+    height: "",
+    bottom: "",
+    transform: "",
+    minHeight: "",
+    maxHeight: "",
     properties: new Map<string, string>(),
     setProperty(name: string, value: string): void {
       if (value === "") this.properties.delete(name);
@@ -83,6 +89,8 @@ class FakeElement extends EventTarget {
   className = "";
   disabled = false;
   hidden = false;
+  inert = false;
+  tabIndex = 0;
   id = "";
   open = false;
   type = "";
@@ -108,9 +116,14 @@ class FakeElement extends EventTarget {
     return this.children.filter(child => child.tagName !== "#text").length;
   }
 
+  get offsetHeight(): number {
+    return this.className === "tray-grip" ? 24 : 300;
+  }
+
   append(...nodes: (FakeElement | string)[]): void {
     for (const node of nodes) {
       const child = typeof node === "string" ? new FakeElement("#text", node) : node;
+      child.remove();
       this.children.push(child);
       child.parent = this;
       if (child.tagName === "link") queueMicrotask(() => child.dispatchEvent(new Event("load")));
@@ -125,6 +138,7 @@ class FakeElement extends EventTarget {
   remove(): void {
     const index = this.parent?.children.indexOf(this) ?? -1;
     if (index >= 0) this.parent?.children.splice(index, 1);
+    this.parent = undefined;
   }
 
   setAttribute(name: string, value: string): void {
@@ -149,6 +163,15 @@ class FakeElement extends EventTarget {
     this.open = true;
   }
 
+  show(): void { this.open = true; }
+  focus(): void { (document as unknown as FakeDocument).activeElement = this; }
+  contains(node: FakeElement): boolean {
+    return node === this || this.children.some(child => child.contains(node));
+  }
+  getBoundingClientRect(): { height: number; width: number; top: number; bottom: number; left: number; right: number } {
+    return { height: this.className === "tray-grip" ? 24 : 300, width: 396, top: 615, bottom: 915, left: 8, right: 404 };
+  }
+
   close(): void {
     this.open = false;
   }
@@ -163,6 +186,7 @@ class FakeElement extends EventTarget {
       if (part.startsWith(".")) return this.className.split(/\s+/u).includes(part.slice(1));
       if (part.startsWith("#")) return this.id === part.slice(1);
       if (part === "[data-instance-id]") return this.dataset.instanceId !== undefined;
+      if (part === "dialog[open]") return this.tagName === "dialog" && this.open;
       if (part === "link[data-omp-collab-styles]") return this.tagName === "link" && this.dataset.ompCollabStyles !== undefined;
       return this.tagName.toLowerCase() === part.toLowerCase();
     });
@@ -215,6 +239,7 @@ class FakeWindow extends EventTarget {
   readonly opened: string[] = [];
   readonly timers = new Map<number, { readonly callback: () => void; readonly delay: number }>();
   scrollY = 0;
+  innerHeight = 915;
   #nextTimer = 1;
 
   matchMedia(): { matches: boolean; addEventListener(): void } {
@@ -286,6 +311,7 @@ class FakeDocument extends EventTarget {
     style: {} as Record<string, string>,
   };
   visibilityState: "visible" | "hidden" = "visible";
+  activeElement: FakeElement | null = null;
 
   constructor(
     readonly bySelector: Record<string, FakeElement>,
@@ -363,8 +389,8 @@ interface BrowserHarness {
     readonly sessionList: FakeElement;
     readonly notificationButton: FakeElement;
     readonly notificationDisclosure: FakeElement;
-    readonly notificationSettings: FakeElement;
-    readonly networkRecoveryHelp: FakeElement;
+    readonly trayHost: FakeElement;
+    readonly alertDetailButton: FakeElement;
     readonly settingsButton: FakeElement;
     readonly notificationDetailOptions: FakeElement;
     readonly emptyState: FakeElement;
@@ -374,9 +400,8 @@ interface BrowserHarness {
     readonly directoryCount: FakeElement;
     readonly hostPicker: FakeElement;
     readonly fleetStatus: FakeElement;
-    readonly localActionToast: FakeElement;
-    readonly localActionToastCopy: FakeElement;
-    readonly localActionToastUndo: FakeElement;
+    readonly undoCopy: FakeElement;
+    readonly undoButton: FakeElement;
   };
   disconnectEvents(): void;
   expireEventLiveness(): void;
@@ -443,6 +468,11 @@ function session(
   };
 }
 
+function openHeroOptions(harness: BrowserHarness): FakeElement | null {
+  harness.elements.sessionList.querySelector(".hero-options")?.dispatchEvent(new Event("click"));
+  return harness.elements.trayHost.querySelector(".hero-hold");
+}
+
 async function settleUntil(predicate: () => boolean, attempts = 20): Promise<void> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (predicate()) return;
@@ -479,17 +509,13 @@ async function bootApp(options: {
   notificationButton.textContent = "Checking background alerts…";
   notificationButton.disabled = true;
   const notificationDisclosure = new FakeElement("p");
-  const notificationSettings = new FakeElement("dialog");
-  const networkRecoveryHelp = new FakeElement("dialog");
-  const networkRecoveryHelpClose = new FakeElement("button");
-  const notificationSettingsClose = new FakeElement("button");
+  const trayHost = new FakeElement("dialog");
+  const alertDetailButton = new FakeElement("button");
   const settingsButton = new FakeElement("button");
   const notificationDetailOptions = new FakeElement("fieldset");
   notificationDetailOptions.hidden = true;
-  const localActionToast = new FakeElement("aside");
-  localActionToast.hidden = true;
-  const localActionToastCopy = new FakeElement("span");
-  const localActionToastUndo = new FakeElement("button");
+  const undoCopy = new FakeElement("span");
+  const undoButton = new FakeElement("button");
   const notificationDetailInputs = (["private", "session", "preview"] as const).map(value => {
     const input = new FakeElement("input");
     input.type = "radio";
@@ -515,15 +541,16 @@ async function bootApp(options: {
     "#host-picker-label": new FakeElement("label"),
     "#fleet-status": fleetStatus,
     "#alert-scope": new FakeElement("p"),
-    "#local-action-toast": localActionToast,
-    "#local-action-toast-copy": localActionToastCopy,
-    "#local-action-toast-undo": localActionToastUndo,
-    "#notification-settings": notificationSettings,
-    "#notification-settings-close": notificationSettingsClose,
+    "#tray": trayHost,
+    "#alerts-panel": new FakeElement("section"),
+    "#detail-panel": new FakeElement("section"),
+    "#alert-detail": alertDetailButton,
+    "#undo-panel": new FakeElement("section"),
+    "#undo-copy": undoCopy,
+    "#undo-dismissal": undoButton,
     "#settings": settingsButton,
     "#notification-detail-options": notificationDetailOptions,
-    "#network-recovery-help": networkRecoveryHelp,
-    "#network-recovery-help-close": networkRecoveryHelpClose,
+    "#recovery-panel": new FakeElement("section"),
   };
   const document = new FakeDocument(bySelector, notificationDetailInputs);
   const window = new FakeWindow();
@@ -743,8 +770,8 @@ async function bootApp(options: {
       statusBanner,
       notificationButton,
       notificationDisclosure,
-      notificationSettings,
-      networkRecoveryHelp,
+      trayHost,
+      alertDetailButton,
       settingsButton,
       notificationDetailOptions,
       emptyState,
@@ -753,9 +780,8 @@ async function bootApp(options: {
       directoryCount,
       hostPicker,
       fleetStatus,
-      localActionToast,
-      localActionToastCopy,
-      localActionToastUndo,
+      undoCopy,
+      undoButton,
     },
     fetchPaths,
     fetchLocations,
@@ -800,6 +826,7 @@ async function bootApp(options: {
     },
     runUndoTimer(): void {
       window.runTimersWithDelay(5_000);
+      window.runTimersWithDelay(350);
     },
     pendingDelays(): number[] {
       return window.pendingDelays();
@@ -875,9 +902,10 @@ describe("dashboard attention and notifications", () => {
     expect(hero?.querySelector("h2")?.textContent).toBe("attention-control-0001");
     expect(hero?.querySelector(".ask-preview")?.textContent).toBe("Waiting for your input");
     expect(hero?.querySelector(".action-request")?.textContent).toBe("Open request");
-    expect(hero?.querySelectorAll(".hero-alt").map(action => action.textContent)).toEqual([
-      "Hold for desk",
-      "Transcript",
+    expect(hero?.querySelector(".hero-options")?.textContent).toBe("Options");
+    hero?.querySelector(".hero-options")?.dispatchEvent(new Event("click"));
+    expect(harness.elements.trayHost.querySelectorAll(".tray-choice").map(action => action.textContent)).toEqual([
+      "Hold for desk", "View transcript",
     ]);
     const waitingRows = harness.elements.sessionList.querySelectorAll(".queue-row");
     expect(waitingRows.map(row => row.querySelector(".row-title")?.textContent)).toEqual([
@@ -1018,7 +1046,7 @@ describe("dashboard attention and notifications", () => {
       // User action: Hide, then Undo; the row keeps the same opaque name across both.
       harness.elements.sessionList.querySelector(".dismiss-session")?.dispatchEvent(new Event("click"));
       expect(calls).toEqual(["list", "list"]);
-      harness.elements.localActionToastUndo.dispatchEvent(new Event("click"));
+      harness.elements.undoButton.dispatchEvent(new Event("click"));
       expect(calls).toEqual(["list", "list", "list"]);
       const restored = harness.elements.sessionList.querySelectorAll(".working-row-frame");
       expect(restored.map(row => row.style.getPropertyValue("view-transition-name"))).toEqual(names);
@@ -1317,13 +1345,14 @@ describe("dashboard attention and notifications", () => {
       .querySelectorAll(".status-action")
       .find(element => element.tagName === "button" && element.textContent === "Troubleshooting");
     troubleshooting?.dispatchEvent(new Event("click"));
-    expect(harness.elements.networkRecoveryHelp.open).toBeTrue();
+    expect(harness.elements.trayHost.open).toBeTrue();
 
     harness.setList(2, [base]);
     harness.window.dispatchEvent(new Event("online"));
     await settleUntil(() => harness.elements.statusBanner.hidden);
     expect(harness.elements.statusBanner.querySelector(".status-guidance")).toBeNull();
-    expect(harness.elements.networkRecoveryHelp.open).toBeFalse();
+    harness.window.runTimersWithDelay(350);
+    expect(harness.elements.trayHost.open).toBeFalse();
   });
   test("times out a hung snapshot and keeps retrying automatically", async () => {
     const base = session("snapshot-timeout-001");
@@ -1477,7 +1506,8 @@ describe("dashboard attention and notifications", () => {
 
     expect(harness.subscriptionRequests).toHaveLength(1);
     harness.elements.settingsButton.dispatchEvent(new Event("click"));
-    expect(harness.elements.notificationSettings.open).toBeTrue();
+    expect(harness.elements.trayHost.open).toBeTrue();
+    harness.elements.alertDetailButton.dispatchEvent(new Event("click"));
     expect(harness.elements.notificationDetailOptions.hidden).toBeFalse();
     const preview = harness.elements.notificationDetailInputs.find(input => input.value === "preview");
     expect(preview).toBeDefined();
@@ -1622,7 +1652,7 @@ describe("dashboard attention and notifications", () => {
       requestId: first.ask?.requestId,
     });
 
-    harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    openHeroOptions(harness)?.dispatchEvent(new Event("click"));
     await settleUntil(() => matching.closed);
 
     expect(unrelatedRequest.closed).toBeFalse();
@@ -1689,9 +1719,9 @@ describe("dashboard attention and notifications", () => {
       initialSessions: [first, second],
     });
 
-    const staleFirstHold = harness.elements.sessionList.querySelector(".hero-hold");
-    harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
-    harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    const staleFirstHold = openHeroOptions(harness);
+    openHeroOptions(harness)?.dispatchEvent(new Event("click"));
+    openHeroOptions(harness)?.dispatchEvent(new Event("click"));
     expect(harness.elements.directoryCount.textContent).toBe("2 waiting · 2 held");
     expect(harness.elements.sessionList.querySelector(".queue-hero")).toBeNull();
     expect(harness.elements.sessionList.querySelector(".all-held-summary")?.querySelector("strong")?.textContent).toBe(
@@ -1745,8 +1775,11 @@ describe("dashboard attention and notifications", () => {
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
     expect(harness.elements.directoryCount.textContent).toBe("Live · 2");
     expect(harness.elements.sessionList.querySelector(".all-clear-copy")?.textContent).toBe("Nothing needs you.");
-    expect(harness.elements.localActionToast.hidden).toBeFalse();
-    expect(harness.elements.localActionToastCopy.textContent).toStartWith("Hidden “Dismiss One”");
+    expect(!harness.elements.trayHost.open).toBeFalse();
+    expect(harness.elements.undoCopy.querySelector(".undo-label")?.textContent).toBe("Hidden on this device");
+    expect(harness.elements.undoCopy.querySelector(".undo-session-title")?.textContent).toBe("Dismiss One");
+    expect(harness.elements.trayHost.querySelector(".tray-header")).toBeNull();
+    expect(harness.elements.trayHost.querySelector(".tray-grip")?.hidden).toBeTrue();
     const stored = JSON.parse(
       harness.localStorage.getItem("omp.sessions.dismissed.v2") ?? "null",
     ) as Record<string, unknown>[];
@@ -1767,13 +1800,13 @@ describe("dashboard attention and notifications", () => {
       "sourceOrigin",
     ]);
 
-    harness.elements.localActionToastUndo.dispatchEvent(new Event("click"));
+    harness.elements.undoButton.dispatchEvent(new Event("click"));
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(2);
     expect(harness.localStorage.getItem("omp.sessions.dismissed.v2")).toBe("[]");
 
     harness.elements.sessionList.querySelectorAll(".dismiss-session")[0]?.dispatchEvent(new Event("click"));
     harness.runUndoTimer();
-    expect(harness.elements.localActionToast.hidden).toBeTrue();
+    expect(!harness.elements.trayHost.open).toBeTrue();
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
     expect(harness.fetchPaths).toHaveLength(networkCalls);
     const restore = harness.elements.sessionList
@@ -1838,7 +1871,7 @@ describe("dashboard attention and notifications", () => {
     expect(reloaded.elements.sessionList.querySelector(".queue-hero")?.dataset.instanceId).toBe(
       initial.instanceId,
     );
-    expect(reloaded.elements.localActionToast.hidden).toBeTrue();
+    expect(!reloaded.elements.trayHost.open).toBeTrue();
     expect(storage.getItem("omp.sessions.dismissed.v2")).toBe("[]");
   });
 
@@ -1934,7 +1967,7 @@ describe("dashboard attention and notifications", () => {
       suffix: "transport-local-records",
       initialSessions: [waiting, working],
     });
-    harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    openHeroOptions(harness)?.dispatchEvent(new Event("click"));
     harness.elements.sessionList.querySelector(".dismiss-session")?.dispatchEvent(new Event("click"));
     const heldBefore = harness.localStorage.getItem("omp.sessions.held-asks.v2");
     const dismissedBefore = harness.localStorage.getItem("omp.sessions.dismissed.v2");
@@ -2003,7 +2036,7 @@ describe("fleet directory bindings", () => {
     expect(failed.elements.sessionList.querySelector(".queue-hero")?.dataset.sourceKey).toBe("local\0https://sessions.example");
     expect(failed.fetchPaths.some(path => path.startsWith("https://remote.example"))).toBeFalse();
     // A local action must also preserve the inert remote records in the whole-map write.
-    failed.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    openHeroOptions(failed)?.dispatchEvent(new Event("click"));
     failed.elements.sessionList.querySelector(".dismiss-session")?.dispatchEvent(new Event("click"));
     expect(JSON.parse(storage.getItem("omp.sessions.held-asks.v2")!)).toContainEqual(held);
     expect(JSON.parse(storage.getItem("omp.sessions.dismissed.v2")!)).toContainEqual(dismissed);
@@ -2170,13 +2203,13 @@ describe("fleet directory bindings", () => {
     harness.elements.hostPicker.value = "remote\0https://remote.example";
     harness.elements.hostPicker.dispatchEvent(new Event("change"));
     expect(harness.elements.directoryCount.textContent).toBe("1 waiting");
-    harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    openHeroOptions(harness)?.dispatchEvent(new Event("click"));
     await Promise.resolve();
     expect(notification.closed).toBeFalse();
     harness.elements.hostPicker.value = "local\0https://sessions.example";
     harness.elements.hostPicker.dispatchEvent(new Event("change"));
     expect(harness.elements.sessionList.querySelector(".queue-hero")).not.toBeNull();
-    harness.elements.sessionList.querySelector(".hero-hold")?.dispatchEvent(new Event("click"));
+    openHeroOptions(harness)?.dispatchEvent(new Event("click"));
     await settleUntil(() => notification.closed);
     const held = JSON.parse(harness.localStorage.getItem("omp.sessions.held-asks.v2")!);
     expect(held.map((record: { sourceId: string }) => record.sourceId).sort()).toEqual(["local", "remote"]);
@@ -2200,7 +2233,7 @@ describe("fleet directory bindings", () => {
     harness.elements.hostPicker.dispatchEvent(new Event("change"));
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
     expect(harness.elements.sessionList.querySelector(".working-row")?.dataset.sourceKey).toBe("local\0https://sessions.example");
-    harness.elements.localActionToastUndo.dispatchEvent(new Event("click"));
+    harness.elements.undoButton.dispatchEvent(new Event("click"));
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(2);
     harness.setVisibility("hidden");
   });

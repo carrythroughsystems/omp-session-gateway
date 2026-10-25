@@ -136,10 +136,10 @@ export async function authenticateAndroidNotification(runtime: NotificationAuthe
 
 /** The installed app's device-local triage controls; `$ID` is the row's escaped instance ID. */
 const TRIAGE_CONTROLS = {
-  hold: 'article.queue-hero[data-instance-id="$ID"] .hero-hold',
+  hold: '#tray[data-panel="options"] .hero-hold',
   requeue: 'div.held-row[data-instance-id="$ID"] .held-requeue',
   hide: '.working-row-frame:has(> button.working-row[data-instance-id="$ID"]) .dismiss-session',
-  undo: '#local-action-toast:not([hidden]) #local-action-toast-undo',
+  undo: '#tray[open][data-panel="undo"] #undo-dismissal',
   showAll: "aside.dismissed-control > button",
 } as const;
 /** The app's Hold and Hide stores (apps/web/src/app.ts); records carry instance IDs, never capabilities. */
@@ -154,7 +154,7 @@ const DIRECTORY_STATE = `(() => {
   return { waiting: [...ids("article.queue-hero"), ...ids("button.queue-row")], held: ids("div.held-row"), working: ids("button.working-row"),
     hidden: hidden === null ? 0 : Number(hidden[1]), allHeld: document.querySelector(".all-held-summary") !== null,
     pending: waiting === null ? 0 : Number(waiting[1]), heldCount: waiting?.[2] === undefined ? 0 : Number(waiting[2]),
-    live: live === null ? 0 : Number(live[1]), toast: document.querySelector("#local-action-toast")?.hidden === false };
+    live: live === null ? 0 : Number(live[1]), toast: document.querySelector('#tray[open][data-panel="undo"]') !== null };
 })()`;
 
 /**
@@ -581,6 +581,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             await runtime.beforeEffect();
             counting = true;
             const clicked = await driver.evaluate<boolean>(`(() => {
+              if (${JSON.stringify(action.kind)} === "hold") {
+                const options = document.querySelector('article.queue-hero[data-instance-id="' + CSS.escape(${JSON.stringify("instanceId" in action ? action.instanceId : "")}) + '"] .hero-options');
+                if (!(options instanceof HTMLButtonElement) || options.disabled) return false;
+                options.click();
+              }
               const control = document.querySelector(${JSON.stringify(TRIAGE_CONTROLS[action.kind])}.replaceAll("$ID", CSS.escape(${JSON.stringify("instanceId" in action ? action.instanceId : "")})));
               if (!(control instanceof HTMLButtonElement) || control.disabled) return false;
               control.click(); return true;

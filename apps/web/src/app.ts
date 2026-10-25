@@ -27,6 +27,7 @@ import {
   readSourceRecords, boundedJson, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
   type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
 } from "./fleet";
+import { createTray } from "./tray";
 
 type SessionMetadata = Metadata & { readonly sourceKey: SourceKey };
 
@@ -59,8 +60,9 @@ function requiredElement<ElementType extends Element>(selector: string): Element
 const sessionList = requiredElement<HTMLElement>("#session-list");
 const emptyState = requiredElement<HTMLElement>("#empty-state");
 const statusBanner = requiredElement<HTMLElement>("#status-banner");
-const networkRecoveryHelp = requiredElement<HTMLDialogElement>("#network-recovery-help");
-const networkRecoveryHelpClose = requiredElement<HTMLButtonElement>("#network-recovery-help-close");
+const trayHost = requiredElement<HTMLDialogElement>("#tray");
+const tray = createTray(trayHost);
+const recoveryPanel = requiredElement<HTMLElement>("#recovery-panel");
 const notificationButton = requiredElement<HTMLButtonElement>("#notify");
 const notificationDisclosure = requiredElement<HTMLElement>("#notify-note");
 const directoryTitle = requiredElement<HTMLElement>("#directory-title");
@@ -69,13 +71,14 @@ const hostPicker = requiredElement<HTMLSelectElement>("#host-picker");
 const hostPickerLabel = requiredElement<HTMLElement>("#host-picker-label");
 const fleetStatus = requiredElement<HTMLElement>("#fleet-status");
 const alertScope = requiredElement<HTMLElement>("#alert-scope");
-const notificationSettings = requiredElement<HTMLDialogElement>("#notification-settings");
-const notificationSettingsClose = requiredElement<HTMLButtonElement>("#notification-settings-close");
+const alertsPanel = requiredElement<HTMLElement>("#alerts-panel");
+const detailPanel = requiredElement<HTMLElement>("#detail-panel");
+const alertDetailButton = requiredElement<HTMLButtonElement>("#alert-detail");
 const settingsButton = requiredElement<HTMLButtonElement>("#settings");
 const notificationDetailOptions = requiredElement<HTMLFieldSetElement>("#notification-detail-options");
-const localActionToast = requiredElement<HTMLElement>("#local-action-toast");
-const localActionToastCopy = requiredElement<HTMLElement>("#local-action-toast-copy");
-const localActionToastUndo = requiredElement<HTMLButtonElement>("#local-action-toast-undo");
+const undoPanel = requiredElement<HTMLElement>("#undo-panel");
+const undoCopy = requiredElement<HTMLElement>("#undo-copy");
+const undoButton = requiredElement<HTMLButtonElement>("#undo-dismissal");
 const notificationDetailInputs = [
   ...document.querySelectorAll<HTMLInputElement>('input[name="notification-detail"]'),
 ];
@@ -94,9 +97,7 @@ const DISMISSED_SESSIONS_STORAGE_KEY = DISMISSED_KEY;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 type TransportFailureKind = "offline" | "tailnet" | "desktop" | "gateway";
 
-interface PendingDismissToast extends SessionRef {
-  readonly timeout: number;
-}
+type LaunchPresentation = "full" | "request-tray";
 
 let localSource: FleetSource = { id: "local", label: "This host", origin: location.origin };
 const localKey = sourceKey(localSource);
@@ -132,6 +133,7 @@ interface LaunchAttempt {
   readonly epoch: number;
   readonly ref: SessionRef;
   readonly mode: LaunchMode;
+  readonly presentation: LaunchPresentation;
   readonly scope: SourceKey | "all";
   readonly sourceEpoch: number | undefined;
   readonly controller: AbortController;
@@ -143,7 +145,7 @@ let selectionEpoch = 0;
 let pendingLaunch: LaunchAttempt | undefined;
 let workerUpdatePending = false;
 let updateReloadTimeout: number | undefined;
-let pendingDismissToast: PendingDismissToast | undefined;
+let pendingDismissUndo: SessionRef | undefined;
 
 type NotificationControlState =
   | "checking"
@@ -175,6 +177,7 @@ interface ActiveCollabShell extends SessionRef {
   readonly scope: SourceKey | "all";
   readonly openedRequestId?: string;
   readonly mode: LaunchMode;
+  presentation: LaunchPresentation;
   readonly connectionChip: HTMLElement;
   readonly triageBar: HTMLElement;
   readonly shell: HTMLElement;
@@ -193,6 +196,7 @@ interface ActiveCollabShell extends SessionRef {
 interface DisposedShellResume extends SessionRef {
   readonly scope: SourceKey | "all";
   readonly mode: LaunchMode;
+  readonly presentation: LaunchPresentation;
   readonly requestId?: string;
 }
 
@@ -241,6 +245,7 @@ function setNotificationControl(state: NotificationControlState): void {
     state === "blocked" ||
     state === "unavailable";
   notificationDetailOptions.hidden = state !== "enabled";
+  alertDetailButton.hidden = state !== "enabled";
   notificationDisclosure.textContent =
     state === "blocked"
       ? "Notifications are blocked. Enable them in this site's browser settings."
@@ -250,6 +255,11 @@ function setNotificationControl(state: NotificationControlState): void {
   notificationDisclosure.hidden = state === "enabled";
   // The all-clear surface repeats the alert promise, so it re-renders with the control state.
   if (changed) render();
+  if (tray.id === "alerts") tray.refresh();
+}
+
+function openAlerts(): void {
+  tray.open({ id: "alerts", title: "Background alerts", tone: "neutral", body: alertsPanel });
 }
 
 function isNotificationSupportResponse(value: unknown): boolean {
@@ -317,6 +327,7 @@ async function savePushSubscription(
 function selectNotificationDetail(detailLevel: PushDetailLevel): void {
   currentNotificationDetail = detailLevel;
   for (const input of notificationDetailInputs) input.checked = input.value === detailLevel;
+  alertDetailButton.textContent = `Alert detail · ${detailLevel[0]!.toUpperCase()}${detailLevel.slice(1)} ›`;
 }
 
 function clearUpdateReloadTimeout(): void {
@@ -567,7 +578,7 @@ function clearTransportFailureTracking(): void {
     transportGuidanceTimeout = undefined;
   }
   transportFailureSince = undefined;
-  if (networkRecoveryHelp.open) networkRecoveryHelp.close();
+  if (tray.id === "recovery") tray.close();
   transportFailureKind = undefined;
 }
 
@@ -660,7 +671,9 @@ function showTransportFailure(kind: TransportFailureKind): void {
       troubleshooting.type = "button";
       troubleshooting.className = "status-action";
       troubleshooting.textContent = "Troubleshooting";
-      troubleshooting.addEventListener("click", () => networkRecoveryHelp.showModal());
+      troubleshooting.addEventListener("click", () => tray.open({
+        id: "recovery", title: "Troubleshooting", tone: "neutral", body: recoveryPanel,
+      }));
       actions.append(troubleshooting);
     }
     statusBanner.append(actions);
@@ -834,10 +847,9 @@ function isDismissed(session: SessionMetadata): boolean {
   );
 }
 
-function cancelPendingDismissToast(): void {
-  if (pendingDismissToast !== undefined) window.clearTimeout(pendingDismissToast.timeout);
-  pendingDismissToast = undefined;
-  localActionToast.hidden = true;
+function cancelPendingDismissUndo(): void {
+  pendingDismissUndo = undefined;
+  if (tray.id === "undo") tray.close(true, true);
 }
 
 function reconcileLocalRecords(authority: SourceKey = localKey): void {
@@ -868,14 +880,14 @@ function reconcileLocalRecords(authority: SourceKey = localKey): void {
   if (heldChanged) writeLocalRecords(HELD_ASKS_STORAGE_KEY, heldAsks.values());
   if (dismissedChanged) writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, dismissedSessions.values());
 
-  if (pendingDismissToast !== undefined && pendingDismissToast.sourceKey === authority) {
-    const session = sessions.get(sessionKey(pendingDismissToast));
+  if (pendingDismissUndo !== undefined && pendingDismissUndo.sourceKey === authority) {
+    const session = sessions.get(sessionKey(pendingDismissUndo));
     if (
       session === undefined ||
-      session.generation !== pendingDismissToast.generation ||
+      session.generation !== pendingDismissUndo.generation ||
       session.inputRequired
     ) {
-      cancelPendingDismissToast();
+      cancelPendingDismissUndo();
     }
   }
 }
@@ -947,10 +959,17 @@ async function probeSource(key: SourceKey, signal: AbortSignal): Promise<Snapsho
 
 function cancelLaunch(source?: SourceKey): void {
   if (pendingLaunch === undefined || (source !== undefined && pendingLaunch.ref.sourceKey !== source)) return;
-  pendingLaunch.settled = true;
-  if (pendingLaunch.deadline !== undefined) window.clearTimeout(pendingLaunch.deadline);
-  pendingLaunch.controller.abort();
+  const cancelled = pendingLaunch;
+  cancelled.settled = true;
+  if (cancelled.deadline !== undefined) window.clearTimeout(cancelled.deadline);
+  cancelled.controller.abort();
   pendingLaunch = undefined;
+  if (cancelled.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
+    // Compact requests have not displaced the directory. Dismiss without re-entering restore
+    // (or starting another snapshot), so the cancelling caller retains its status/route intent.
+    tray.close(true, true);
+    if (statusBanner.dataset.kind === "loading" && directoryLoaded && localFresh) setStatus("ready", "");
+  }
 }
 
 function remoteChanged(remote: FleetTransport): void {
@@ -1161,6 +1180,23 @@ function createHideIcon(): SVGSVGElement {
   return svg;
 }
 
+function createExpandIcon(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
+  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("width", "20");
+  svg.setAttribute("height", "20");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(SVG_NAMESPACE, "path");
+  path.setAttribute("d", "M12 3h5v5M17 3l-6 6M8 17H3v-5M3 17l6-6");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.6");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.append(path);
+  return svg;
+}
+
 async function closeHeldAskNotification(held: HeldAsk): Promise<void> {
   if (recordRef(held).sourceKey !== localKey) return;
   if (!("serviceWorker" in navigator)) return;
@@ -1211,26 +1247,23 @@ function requeueHeldSession(session: SessionMetadata): void {
   render();
 }
 
-function showDismissToast(session: SessionMetadata): void {
-  cancelPendingDismissToast();
-  localActionToastCopy.textContent = `Hidden “${sessionTitle(session)}” on this device · 5s`;
-  localActionToast.hidden = false;
-  const timeout = window.setTimeout(() => {
-    if (
-      pendingDismissToast?.sourceKey === session.sourceKey &&
-      pendingDismissToast.instanceId === session.instanceId &&
-      pendingDismissToast.generation === session.generation
-    ) {
-      pendingDismissToast = undefined;
-      localActionToast.hidden = true;
-    }
-  }, LOCAL_ACTION_UNDO_MS);
-  pendingDismissToast = {
+function showDismissUndo(session: SessionMetadata): void {
+  cancelPendingDismissUndo();
+  undoCopy.replaceChildren(
+    createTextElement("span", "undo-label", "Hidden on this device"),
+    createTitleElement("span", "undo-session-title", session),
+  );
+  undoPanel.replaceChildren(createSessionTile(session), undoCopy, undoButton);
+  const pending = {
     sourceKey: session.sourceKey,
     instanceId: session.instanceId,
     generation: session.generation,
-    timeout,
   };
+  pendingDismissUndo = pending;
+  tray.open({ id: "undo", title: "Hidden on this device", tone: "neutral", body: undoPanel }, {
+    transientMs: LOCAL_ACTION_UNDO_MS,
+    onClose: () => { if (pendingDismissUndo === pending) pendingDismissUndo = undefined; },
+  });
 }
 
 function dismissSession(session: SessionMetadata): void {
@@ -1256,17 +1289,16 @@ function dismissSession(session: SessionMetadata): void {
   );
   writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, dismissedSessions.values());
   render();
-  showDismissToast(current);
+  showDismissUndo(current);
 }
 
 function undoPendingDismissal(): void {
-  const pending = pendingDismissToast;
+  const pending = pendingDismissUndo;
   if (pending === undefined) return;
-  window.clearTimeout(pending.timeout);
-  pendingDismissToast = undefined;
+  pendingDismissUndo = undefined;
   dismissedSessions.delete(localRecordKey(pending, pending.generation));
   writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, dismissedSessions.values());
-  localActionToast.hidden = true;
+  tray.close(true, true);
   render();
 }
 
@@ -1275,7 +1307,7 @@ function restoreDismissedSessions(): void {
     if (selectedScope === "all" || recordRef(record).sourceKey === selectedScope) dismissedSessions.delete(key);
   }
   writeLocalRecords(DISMISSED_SESSIONS_STORAGE_KEY, dismissedSessions.values());
-  cancelPendingDismissToast();
+  cancelPendingDismissUndo();
   render();
 }
 
@@ -1337,7 +1369,7 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
     createTextElement("span", "row-chevron", "›"),
   );
   button.addEventListener("click", () =>
-    void launch(session, mode, button, session.ask?.requestId),
+    void launch(session, mode, button, session.ask?.requestId, selectedScope, "request-tray"),
   );
   return button;
 }
@@ -1365,7 +1397,7 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
     createTextElement("span", "row-time", waitingLabel(session)),
   );
   open.addEventListener("click", () =>
-    void launch(session, mode, open, session.ask?.requestId),
+    void launch(session, mode, open, session.ask?.requestId, selectedScope, "request-tray"),
   );
 
   const requeue = document.createElement("button");
@@ -1418,7 +1450,7 @@ function renderAllClear(
     hint.type = "button";
     hint.className = "alerts-hint";
     hint.textContent = notificationState === "blocked" ? "Alerts blocked · Settings" : "Enable alerts to get pinged";
-    hint.addEventListener("click", () => notificationSettings.showModal());
+    hint.addEventListener("click", openAlerts);
     summary.append(hint);
   }
   sessionList.append(summary);
@@ -1483,28 +1515,41 @@ function renderWaitingQueue(
     primary.disabled = !sourceFresh(hero.sourceKey) || (hero.canControl ? false : !hero.canView);
     primary.addEventListener("click", () => {
       const mode: LaunchMode = hero.canControl ? "control" : "view";
-      void launch(hero, mode, primary, hero.ask?.requestId);
+      void launch(hero, mode, primary, hero.ask?.requestId, selectedScope, "request-tray");
     });
     article.append(primary);
 
-    const alternatives = document.createElement("div");
-    alternatives.className = "hero-alternatives";
-    const hold = document.createElement("button");
-    hold.type = "button";
-    hold.className = "hero-alt hero-hold";
-    hold.textContent = "Hold for desk";
-    hold.addEventListener("click", () => holdSession(hero));
-    alternatives.append(hold);
-    if (hero.canControl && hero.canView) {
-      const transcript = document.createElement("button");
-      transcript.type = "button";
-      transcript.className = "hero-alt";
-      transcript.textContent = "Transcript";
-      transcript.disabled = !sourceFresh(hero.sourceKey);
-      transcript.addEventListener("click", () => void launch(hero, "view", transcript));
-      alternatives.append(transcript);
-    }
-    article.append(alternatives);
+    const options = document.createElement("button");
+    options.type = "button";
+    options.className = "hero-options";
+    options.textContent = "Options";
+    options.setAttribute("aria-haspopup", "dialog");
+    options.addEventListener("click", () => {
+      const choices = document.createElement("div");
+      const hold = document.createElement("button");
+      hold.type = "button";
+      hold.className = "tray-choice hero-hold";
+      hold.textContent = "Hold for desk";
+      hold.addEventListener("click", () => {
+        tray.close(true);
+        holdSession(hero);
+      });
+      choices.append(hold);
+      if (hero.canView) {
+        const transcript = document.createElement("button");
+        transcript.type = "button";
+        transcript.className = "tray-choice";
+        transcript.textContent = "View transcript";
+        transcript.disabled = !sourceFresh(hero.sourceKey);
+        transcript.addEventListener("click", () => {
+          tray.close(true);
+          void launch(hero, "view", transcript);
+        });
+        choices.append(transcript);
+      }
+      tray.open({ id: "options", title: "This request", tone: "attention", body: choices });
+    });
+    article.append(options);
     sessionList.append(article);
   }
 
@@ -1631,6 +1676,19 @@ function render(): void {
 }
 
 function renderDirectory(): void {
+  const focused = document.activeElement;
+  const keyed = focused?.matches(".action-request, .queue-row, .held-open")
+    ? focused.closest<HTMLElement>("[data-instance-id]") : null;
+  const focusRef = keyed?.dataset.instanceId === undefined ? undefined : {
+    sourceKey: keyed.dataset.sourceKey ?? localKey,
+    instanceId: keyed.dataset.instanceId,
+  };
+  renderDirectoryContents();
+  // Snapshot/SSE refreshes replace row nodes even when there is no structural animation.
+  if (focusRef !== undefined) focusDirectoryRequest(focusRef);
+}
+
+function renderDirectoryContents(): void {
   renderFleetStatus();
   sessionList.replaceChildren();
   if (!directoryLoaded && sessions.size === 0) {
@@ -1886,6 +1944,20 @@ function directoryTile(ref: Pick<SessionRef, "sourceKey" | "instanceId">): HTMLE
   return null;
 }
 
+function focusDirectoryRequest(ref: Pick<SessionRef, "sourceKey" | "instanceId">): HTMLElement {
+  for (const keyed of sessionList.querySelectorAll<HTMLElement>("[data-instance-id]")) {
+    if (keyed.dataset.instanceId !== ref.instanceId || (keyed.dataset.sourceKey ?? localKey) !== ref.sourceKey) continue;
+    const action = keyed.matches(".queue-row")
+      ? keyed as HTMLButtonElement
+      : keyed.querySelector<HTMLButtonElement>(".action-request, .held-open");
+    if (action === null || action.disabled) break;
+    action.focus({ preventScroll: true });
+    return action;
+  }
+  directoryTitle.focus({ preventScroll: true });
+  return directoryTitle;
+}
+
 /**
  * The interactive way back (shell Back, system back, the triage "Sessions" action): the shell
  * slides out while the directory slides in and the header tile returns to its row. Disposal and
@@ -1893,6 +1965,10 @@ function directoryTile(ref: Pick<SessionRef, "sourceKey" | "instanceId">): HTMLE
  */
 function returnToDirectory(historyValue?: unknown): void {
   const shell = activeCollabShell;
+  if (shell?.presentation === "request-tray" || tray.id === "request") {
+    void restoreDirectory(historyValue);
+    return;
+  }
   let tile: HTMLElement | null = null;
   const transition = transitionNavigation("back", () => {
     // Another path may already have restored the directory while this commit waited for its frame.
@@ -1909,8 +1985,11 @@ function returnToDirectory(historyValue?: unknown): void {
  * cannot be left waiting behind an inert shell — and resolves once the refreshed snapshot has
  * landed, so a resume can decide against current metadata rather than the pre-background copy.
  */
-function restoreDirectory(historyValue?: unknown): Promise<boolean> {
+function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, "sourceKey" | "instanceId">): Promise<boolean> {
+  const focusRef = activeCollabShell?.presentation === "request-tray" ? activeCollabShell
+    : requestRef ?? (pendingLaunch?.presentation === "request-tray" ? pendingLaunch.ref : undefined);
   cancelLaunch();
+  tray.close(true, true);
   selectionEpoch += 1;
   collabShellDisposedOnPageHide = false;
   disposedShellResume = undefined;
@@ -1933,8 +2012,17 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
   renderedSignature = snapshot.signature;
   history.replaceState({ ompDirectory: historyState }, "", "/");
   window.scrollTo(0, historyState.scrollY);
+  const focused = focusRef === undefined ? undefined : focusDirectoryRequest(focusRef);
+  const epoch = selectionEpoch;
   const refreshed = Promise.all([refreshAndConnect(), ...[...remotes.values()].map(remote => remote.refresh())])
-    .then(([local]) => local);
+    .then(([local]) => {
+      if (focusRef !== undefined && selectionEpoch === epoch && activeCollabShell === undefined &&
+        pendingLaunch === undefined && !trayHost.open &&
+        (document.activeElement === focused || document.activeElement === document.body)) {
+        focusDirectoryRequest(focusRef);
+      }
+      return local;
+    });
   applyActivatedWorkerUpdate();
   return refreshed;
 }
@@ -1952,15 +2040,18 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
  */
 async function resumeDisposedCollabShell(): Promise<void> {
   const resume = disposedShellResume;
-  const restored = await restoreDirectory();
-  if (resume === undefined || (!restored && resume.sourceKey === localKey)) return;
+  const refresh = restoreDirectory();
+  const epoch = selectionEpoch;
+  const restored = await refresh;
+  if (resume === undefined || (!restored && resume.sourceKey === localKey) ||
+    activeCollabShell !== undefined || pendingLaunch !== undefined || selectionEpoch !== epoch || trayHost.open) return;
   selectedScope = resume.scope;
   hostPicker.value = selectedScope;
   const session = sessions.get(sessionKey(resume));
   if (session === undefined || session.generation !== resume.generation) return;
   if (!(resume.mode === "control" ? session.canControl : session.canView)) return;
   const requestId = session.ask?.requestId === resume.requestId ? resume.requestId : undefined;
-  await launch(session, resume.mode, undefined, requestId);
+  await launch(session, resume.mode, undefined, requestId, resume.scope, resume.presentation);
 }
 
 async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: SessionMetadata): Promise<void> {
@@ -2119,16 +2210,7 @@ function warmCollabClient(): void {
   });
 }
 
-function enterCollabClient(
-  capability: string,
-  startCollabWithCapability: StartCollabWithCapability,
-  session: SessionMetadata,
-  mode: LaunchMode,
-  requestId?: string,
-  originTile: HTMLElement | null = null,
-): void {
-  setStatus("ready", "");
-  const fromDirectory = activeCollabShell === undefined;
+function captureDirectorySnapshot(): DashboardSnapshot {
   if (dashboardSnapshot === undefined) {
     const historyState: DirectoryHistoryState = {
       version: 2,
@@ -2151,8 +2233,27 @@ function enterCollabClient(
       signature: renderedSignature,
     };
   }
-  const snapshot = dashboardSnapshot;
+  return dashboardSnapshot;
+}
+
+function enterCollabClient(
+  capability: string,
+  startCollabWithCapability: StartCollabWithCapability,
+  session: SessionMetadata,
+  mode: LaunchMode,
+  requestId?: string,
+  originTile: HTMLElement | null = null,
+  presentation: LaunchPresentation = "full",
+): void {
+  setStatus("ready", "");
+  const fromDirectory = activeCollabShell === undefined;
+  const snapshot = captureDirectorySnapshot();
+  const previousShell = activeCollabShell;
+  // A successor may have waited through promotion; placement belongs to the live predecessor,
+  // not to the presentation captured when its launch request began.
+  presentation = previousShell?.presentation ?? presentation;
   disposeActiveCollab?.();
+  if (presentation === "request-tray") previousShell?.shell.remove();
 
   const shell = document.createElement("div");
   shell.className = "gateway-shell";
@@ -2162,7 +2263,10 @@ function enterCollabClient(
   back.type = "button";
   back.className = "shell-back";
   back.textContent = "← Sessions";
-  back.addEventListener("click", () => history.back());
+  back.addEventListener("click", () => {
+    if (shellState.presentation === "request-tray") returnToDirectory();
+    else history.back();
+  });
   const title = createTitleElement("span", "shell-title", session);
   const control = document.createElement("button");
   control.type = "button";
@@ -2209,6 +2313,12 @@ function enterCollabClient(
     }
   });
   shell.addEventListener("keydown", event => {
+    // A client-owned chooser can consume Escape by restoring focus without cancelling its
+    // default action. Do not turn that same gesture into a native dialog close request.
+    if (event.key === "Escape" && event.target !== document.activeElement) {
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Escape" && triageBar.dataset.dismissible === "true") {
       event.preventDefault();
       hideTriageBar(activeCollabShell ?? shellState);
@@ -2234,6 +2344,40 @@ function enterCollabClient(
   const commitHistory = location.pathname !== "/client/";
   const commit = (): void => {
     originTile?.style.setProperty("view-transition-name", "");
+    if (presentation === "request-tray") {
+      const expand = document.createElement("button");
+      expand.type = "button";
+      expand.className = "tray-expand";
+      expand.setAttribute("aria-label", "Expand to full screen");
+      expand.append(createExpandIcon());
+      const promote = (): void => tray.promote(() => {
+        if (activeCollabShell !== shellState || shellState.presentation !== "request-tray") return;
+        if (shellState.latestEmbedState?.gatewayHealth.state === "forbidden") {
+          void restoreDirectory();
+          return;
+        }
+        // Reparent, never remount: the client, relay and unsent composer draft stay alive.
+        shellState.presentation = "full";
+        shellActions.append(connection);
+        document.body.append(shell);
+        tray.close(true, true);
+        document.body.className = "collab-shell-active";
+        document.body.replaceChildren(shell);
+        // The same history shape as a full launch, so system back returns to the directory.
+        history.replaceState({ ompDirectory: snapshot.historyState }, "", "/");
+        history.pushState({ ompCollab: true }, "", "/client/");
+      });
+      expand.addEventListener("click", promote);
+      tray.replace({
+        id: "request", title: spokenTitle(session), tone: "attention", body: shell,
+        icon: createSessionTile(session), actions: [connection, expand], layout: "expanded",
+      });
+      tray.heading?.addEventListener("click", promote);
+      history.replaceState({ ompCollab: true }, "", "/");
+      document.title = `${spokenTitle(session)} · OMP Sessions`;
+      return;
+    }
+    tray.close(true, tray.id === "request");
     if (commitHistory) {
       history.replaceState({ ompDirectory: snapshot.historyState }, "", "/");
       history.pushState({ ompCollab: true }, "", "/client/");
@@ -2258,6 +2402,7 @@ function enterCollabClient(
     generation: session.generation,
     ...(requestId === undefined ? {} : { openedRequestId: requestId }),
     mode,
+    presentation,
     connectionChip: connection,
     triageBar,
     shell,
@@ -2298,6 +2443,7 @@ function enterCollabClient(
       instanceId: session.instanceId,
       generation: session.generation,
       mode,
+      presentation: shellState.presentation,
       ...(requestId === undefined ? {} : { requestId }),
     };
     dispose();
@@ -2339,6 +2485,7 @@ async function launch(
   button?: HTMLButtonElement,
   requestId?: string,
   scope = selectedScope,
+  presentation: LaunchPresentation = activeCollabShell?.presentation ?? "full",
 ): Promise<boolean> {
   if (!sourceFresh(session.sourceKey)) return false;
   const source = sources.get(session.sourceKey);
@@ -2348,11 +2495,31 @@ async function launch(
   pendingNotificationLaunch = undefined;
   pendingNotificationRoute = false;
   cancelLaunch();
+  let requestStatus: HTMLElement | undefined;
+  let requestRetry: HTMLButtonElement | undefined;
+  if (presentation === "request-tray" && activeCollabShell === undefined) {
+    captureDirectorySnapshot();
+    if (tray.id === "request") tray.close(true, true);
+    const preview = document.createElement("div");
+    preview.className = "request-preview";
+    requestStatus = createTextElement("p", "request-status", "Connecting…");
+    requestStatus.setAttribute("role", "status");
+    requestRetry = document.createElement("button");
+    requestRetry.type = "button";
+    requestRetry.className = "tray-choice";
+    requestRetry.textContent = "Try again";
+    requestRetry.hidden = true;
+    requestRetry.addEventListener("click", () => void launch(session, mode, button, requestId, scope, presentation));
+    preview.append(createSessionSummary(session), createTextElement("p", "ask-preview", session.ask?.preview ?? "Waiting for your input"), requestStatus, requestRetry);
+    tray.open({ id: "request", title: spokenTitle(session), tone: "attention", body: preview, icon: createSessionTile(session) }, {
+      onClose: () => { void restoreDirectory(undefined, session); },
+    });
+  }
   const attempt: LaunchAttempt = {
     id: ++launchSequence, epoch: selectionEpoch,
     ref: { sourceKey: session.sourceKey, instanceId: session.instanceId, generation: session.generation,
       ...(requestId === undefined ? {} : { requestId }) },
-    mode, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
+    mode, presentation, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
     controller: new AbortController(), settled: false,
   };
   pendingLaunch = attempt;
@@ -2398,8 +2565,13 @@ async function launch(
   let stylesheet: HTMLLinkElement | undefined;
   let startCollabWithCapability: StartCollabWithCapability;
   const discard = (): false => {
+    const owned = pendingLaunch === attempt;
     settle();
     resetButton();
+    if (owned && requestStatus !== undefined && tray.id === "request") {
+      requestStatus.textContent = "That session changed or expired. Try again from the directory.";
+      tray.refresh();
+    }
     if (pendingLaunch === undefined && activeCollabShell === undefined && stylesheet !== undefined) {
       stylesheet.remove();
       collabStylesheetLoad = undefined;
@@ -2418,7 +2590,7 @@ async function launch(
           "sending",
           mode === "view" ? "Opening view…" : "Opening control…",
         );
-        void launch(session, mode, button, requestId, scope);
+        void launch(session, mode, button, requestId, scope, presentation);
       });
       return true;
     }
@@ -2429,6 +2601,11 @@ async function launch(
       collabStylesheetLoad = undefined;
     }
     setStatus(kind, message);
+    if (requestStatus !== undefined && tray.id === "request") {
+      requestStatus.textContent = message;
+      if (requestRetry !== undefined) requestRetry.hidden = kind === "unauthorized";
+      tray.refresh();
+    }
     applyActivatedWorkerUpdate();
     return false;
   };
@@ -2479,8 +2656,7 @@ async function launch(
         authorizationDenied = true;
         fail("unauthorized", "This tailnet identity is not authorized.");
       } else {
-        settle();
-        resetButton();
+        fail("unauthorized", `Access withdrawn on ${source.label}. Choose another session.`);
         remotes.get(session.sourceKey)?.forbid();
         if (sourceShell !== undefined && activeCollabShell === sourceShell) {
           showTriageBar(sourceShell, "reconnecting", `Access withdrawn on ${source.label}. Choose another session.`, "Sessions", () => {
@@ -2516,7 +2692,7 @@ async function launch(
     }
     if (!currentAttempt()) return discard();
     capability = payload.capability;
-    enterCollabClient(capability, startCollabWithCapability, session, mode, requestId, originTile);
+    enterCollabClient(capability, startCollabWithCapability, session, mode, requestId, originTile, attempt.presentation);
     settle();
     capability = undefined;
     return true;
@@ -2743,15 +2919,17 @@ hostPicker.addEventListener("change", () => {
   render();
   applyActivatedWorkerUpdate();
 });
-settingsButton.addEventListener("click", () => notificationSettings.showModal());
+settingsButton.addEventListener("click", openAlerts);
 notificationButton.addEventListener("click", () => void toggleBackgroundNotifications());
-notificationSettingsClose.addEventListener("click", () => notificationSettings.close());
-localActionToastUndo.addEventListener("click", undoPendingDismissal);
-networkRecoveryHelpClose.addEventListener("click", () => networkRecoveryHelp.close());
+alertDetailButton.addEventListener("click", () => tray.push({
+  id: "detail", title: "Alert detail", tone: "neutral", body: detailPanel,
+}));
+undoButton.addEventListener("click", undoPendingDismissal);
 for (const input of notificationDetailInputs) {
   input.addEventListener("change", () => {
     if (!input.checked || notificationRegistration === undefined) return;
     const detailLevel = input.value as PushDetailLevel;
+    if (tray.id === "detail") tray.pop();
     void (async () => {
       const subscription = await notificationRegistration?.pushManager.getSubscription();
       if (subscription === null || subscription === undefined) return;
@@ -2777,6 +2955,13 @@ window.addEventListener("online", () => {
   void refreshAndConnect();
 });
 window.addEventListener("pagehide", () => {
+  const attempt = pendingLaunch;
+  if (attempt?.presentation === "request-tray" && activeCollabShell === undefined) {
+    disposedShellResume = {
+      ...attempt.ref, scope: attempt.scope, mode: attempt.mode, presentation: attempt.presentation,
+    };
+    collabShellDisposedOnPageHide = true;
+  }
   selectionEpoch += 1;
   cancelLaunch();
   for (const remote of remotes.values()) remote.setVisible(false);

@@ -181,7 +181,8 @@ test("installed-PWA View and Control mount in the current window without losing 
     const directoryScroll = await page.evaluate(() => window.scrollY);
     expect(directoryScroll).toBeGreaterThan(0);
 
-    await card.getByRole("button", { name: "Transcript" }).evaluate(
+    await card.getByRole("button", { name: "Options" }).evaluate(button => (button as HTMLButtonElement).click());
+    await page.getByRole("button", { name: "View transcript", exact: true }).evaluate(
       button => (button as HTMLButtonElement).click(),
     );
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
@@ -248,7 +249,8 @@ test("installed-PWA View and Control mount in the current window without losing 
     await page.locator(".queue-hero").getByRole("button", { name: "Open request" }).evaluate(
       button => (button as HTMLButtonElement).click(),
     );
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect(page.locator("#root[role='application']")).toHaveCount(1);
     await expect(page.locator(".shell-control")).toBeHidden();
     expect(fixture.launchRequests[1]).toEqual({
@@ -661,7 +663,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "hold");
     await expect(page.locator(".triage-copy")).toHaveText("Need the desk for this one?");
     await page.unroute(nextLaunchRoute);
-    await page.goBack();
+    await page.getByRole("button", { name: "Close Held flow next ask", exact: true }).click();
     await expect(page).toHaveURL(fixture.origin + "/");
     await expect(page.locator(".held-row .row-title")).toHaveText(SESSION_TITLE);
     await page.locator(".held-requeue").click();
@@ -766,7 +768,8 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await page.unroute(`${fixture.origin}/api/v1/sessions`);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect(page.locator(".conn-chip")).toHaveText("Relay unavailable", { timeout: 7_000 });
-    await page.locator(".shell-title").click();
+    // The tray title now expands; tap neutral client content to dismiss only answer feedback.
+    await page.locator(".sh-transcript").click({ position: { x: 2, y: 2 } });
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "reconnecting");
     await expect(page.locator(".triage-copy")).toContainText("Relay unavailable — retrying");
     await page.evaluate(() => {
@@ -1093,6 +1096,7 @@ test("answer feedback dismisses from the keyboard with Escape", { tag: "@core" }
     await installSilentWebSocket(page);
     await page.goto(fixture.origin);
     await page.getByRole("button", { name: "Open request" }).click();
+    await page.locator(".tray-expand").click();
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
     fixture.upsert(answeredSession(initial));
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "clear");
@@ -1112,9 +1116,11 @@ test("answer feedback dismisses by tap-out, swipe, and the eight-second timeout"
     await installSilentWebSocket(page);
     await page.goto(fixture.origin);
     await page.getByRole("button", { name: "Open request" }).click();
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     fixture.upsert(answeredSession(initial));
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "clear");
+    await expect.poll(() => page.locator("#tray").evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
     const inset = await page.evaluate(() => {
       const composer = document.querySelector(".sh-composer")?.getBoundingClientRect();
       const triage = document.querySelector(".triage-bar")?.getBoundingClientRect();
@@ -1126,7 +1132,7 @@ test("answer feedback dismisses by tap-out, swipe, and the eight-second timeout"
     await page.locator(".shell-bar").dispatchEvent("pointerdown", { pointerId: 1, clientY: 20 });
     await expect(page.locator(".triage-bar")).toBeHidden();
 
-    await page.goBack();
+    await page.getByRole("button", { name: `Close ${SESSION_TITLE}`, exact: true }).click();
     await expect(page).toHaveURL(`${fixture.origin}/`);
     const second = {
       ...initial,
@@ -1138,14 +1144,15 @@ test("answer feedback dismisses by tap-out, swipe, and the eight-second timeout"
     };
     fixture.upsert(second);
     await page.getByRole("button", { name: "Open request" }).click();
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     fixture.upsert(answeredSession(second));
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "clear");
     await page.locator(".triage-bar").dispatchEvent("pointerdown", { pointerId: 2, clientY: 80 });
     await page.locator(".triage-bar").dispatchEvent("pointerup", { pointerId: 2, clientY: 20 });
     await expect(page.locator(".triage-bar")).toBeHidden();
 
-    await page.goBack();
+    await page.getByRole("button", { name: `Close ${SESSION_TITLE}`, exact: true }).click();
     await expect(page).toHaveURL(`${fixture.origin}/`);
     const third = {
       ...initial,
@@ -1157,7 +1164,8 @@ test("answer feedback dismisses by tap-out, swipe, and the eight-second timeout"
     };
     fixture.upsert(third);
     await page.getByRole("button", { name: "Open request" }).click();
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     await page.clock.install();
     fixture.upsert(answeredSession(third));
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "clear");
@@ -1187,7 +1195,8 @@ test("a bfcache restore whose session changed generation returns to the live dir
     await page.locator(".queue-hero").getByRole("button", { name: "Open request" }).evaluate(
       button => (button as HTMLButtonElement).click(),
     );
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
     expect(fixture.launchRequests).toHaveLength(1);
 
@@ -1206,7 +1215,7 @@ test("a bfcache restore whose session changed generation returns to the live dir
     expect(bootstrapSocketCount).toBeGreaterThanOrEqual(1);
     await expect(page.locator("#root > .sh-app")).toHaveCount(0);
     await expect(page.locator(".gateway-shell")).toHaveCount(1);
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page).toHaveURL(`${fixture.origin}/`);
 
     // The host restarted while the page was frozen, which legitimately ended the session the shell
     // was showing. Resuming into its successor would hand the user a different conversation behind
@@ -1262,7 +1271,8 @@ test("a bfcache restore reopens the backgrounded session and stores no capabilit
     await page.locator(".queue-hero").getByRole("button", { name: "Open request" }).evaluate(
       button => (button as HTMLButtonElement).click(),
     );
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
     expect(fixture.launchRequests).toHaveLength(1);
 
@@ -1281,7 +1291,8 @@ test("a bfcache restore reopens the backgrounded session and stores no capabilit
     await page.evaluate(() =>
       window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })),
     );
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
     await expect(page.locator(".shell-title")).toHaveText(SESSION_TITLE);
     // Resume is a second launch, not a restored secret: the gateway is asked again for the same
@@ -1305,7 +1316,7 @@ test("a bfcache restore reopens the backgrounded session and stores no capabilit
         return (await cache.keys()).map(request => request.url);
       }))).flat(),
     }));
-    expect(residue.url).toBe(`${fixture.origin}/client/`);
+    expect(residue.url).toBe(`${fixture.origin}/`);
     expect(residue.historyState).not.toContain("standalone-launch-0001");
     expect(JSON.parse(residue.localStorage)).toEqual({ "omp.collab.name": "guest" });
     expect(residue.sessionStorage).toBe("{}");
@@ -1339,7 +1350,8 @@ test("a bfcache restore reopens a session whose question was answered elsewhere"
     await page.evaluate(() =>
       window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })),
     );
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
     expect(fixture.launchRequests[1]).toEqual({
       instanceId: "standalone-launch-0001",
@@ -1375,14 +1387,15 @@ test("backgrounding without a pagehide keeps the open session", { tag: "@core" }
     await page.locator(".queue-hero").getByRole("button", { name: "Open request" }).evaluate(
       button => (button as HTMLButtonElement).click(),
     );
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
 
     await setVisibility(page, "hidden");
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
     await setVisibility(page, "visible");
 
-    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
     await expect(page.locator(".shell-title")).toHaveText(SESSION_TITLE);
   } finally {

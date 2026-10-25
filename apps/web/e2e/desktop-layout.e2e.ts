@@ -34,6 +34,7 @@ test("a desktop window widens an open session but not the directory", { tag: "@c
     await expect(page.locator("body > main")).toHaveCSS("width", "560px");
 
     await page.getByRole("button", { name: "Open request" }).click();
+    await page.locator(".tray-expand").click();
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
     await expect(page.locator(".sh-composer-input")).toBeVisible();
     await expect(page.locator(".sh-transcript")).toHaveCSS("width", "900px");

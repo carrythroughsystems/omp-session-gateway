@@ -13,9 +13,11 @@ Implemented states:
 - View and Control launch actions through the pinned client's same-document, in-memory bootstrap;
 - stale generation/request, unavailable role, expired session, and process-ended errors;
 - explicit Settings-based Push v2 opt-in with Private/Session/Preview detail and exact-request routing;
+- one native tray system for Background alerts, Alert detail, Troubleshooting, request Options,
+  paused-on-interaction Undo, and requests that expand into the same live session;
 - privacy/security guidance.
 
-Background alerts (Web Push) are opt-in per device from the Settings sheet; see
+Background alerts (Web Push) are opt-in per device from the Settings tray; see
 [Compatibility](../../docs/COMPATIBILITY.md#platforms-and-browsers) for exact qualified
 combinations and evidence. Passkey enrollment and per-Control WebAuthn verification are not
 implemented.
@@ -46,11 +48,43 @@ See `licenses/fonts/nerd-fonts/` and `THIRD_PARTY_NOTICES.md` for licenses and i
 Motion runs only on user-initiated transitions and genuine state changes (ADR-040). `render()`
 computes a structural signature before touching the DOM and starts a typed same-document view
 transition (`list`) only when it changed; a refresh that moves `lastSeenAt` alone commits without
-one. Launching from the directory runs a `forward` transition in which the tapped tile morphs into
+one. Full-screen View from the directory runs a `forward` transition in which the tapped tile morphs into
 the shell header tile, and the interactive return runs `back`; renders that arrive during a
 navigation wait for it. Every commit is the same with or without motion: an unsupported browser,
 a hidden page, an open dialog, or `prefers-reduced-motion` skips the transition and applies the
 DOM directly. `e2e/motion.e2e.ts` pins which changes animate; the visual lane keeps reduced motion.
+
+## Trays
+
+`src/tray.ts` owns one native `#tray` dialog and a maximum-three-panel stack (ADR-041).
+Each modal panel has one topic or primary action, a title, and a 48px leading Close or Back control.
+Settings opens **Background alerts**; only enabled alerts reveal **Alert detail**, whose radios
+apply immediately and return to the root. The existing notification elements are moved, not copied.
+The quiet, outlined **Options** chip opens **This request** with immediate Hold for desk and View transcript choices.
+
+Modal trays use `showModal()`, native focus containment and focus return, body scroll lock, and
+safe-area padding. Escape/platform close requests pop a child or dismiss the root without adding
+history entries. Only the grip drags; the body scrolls independently. Content swaps make the
+outgoing panel inert and move focus to the incoming heading while measured heights transition.
+Adjacent panels differ by at least 24px; reduced motion swaps instantly. Class-driven exits keep
+the dialog modal until `transitionend` or a bounded fallback closes it on engines without
+`overlay`/`display` transitions. Backdrop coordinates provide light dismiss without `closedby`.
+
+Hide uses the same host non-modally as a compact tile/copy/filled-Undo row, without a heading,
+grip or countdown. Its polite status announcement has a five-second Undo window paused while
+hovered or focused. Generation/source-bound Undo and persistent Show all
+retain their device-local semantics and storage formats.
+
+Open request immediately presents a compact amber loading tray. The ordinary validated launch
+mounts the pinned client once inside a roughly 72%-visual-viewport panel. One header owns the
+session tile/title, connection dot and icon-only Expand control; the client's inner frame is flat,
+and its shell bar stays hidden until promotion. Expand (or tapping the
+tray title) grows to the visual viewport, then reparents the same shell and `#root` into the body;
+the relay socket and composer draft survive, and only promotion replaces the URL with `/client/`.
+Closing disposes synchronously and restores the cached directory. Pagehide drops the capability;
+bfcache resume revalidates and reacquires it with the original full/tray presentation. No document
+View Transition runs while the dialog is open. `e2e/trays.e2e.ts` covers these transitions and
+capability non-persistence; optional `OMP_TRAY_SCREENSHOTS` writes synthetic smoke screenshots.
 
 ## Multiple configured hosts
 
