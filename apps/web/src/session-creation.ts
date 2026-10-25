@@ -14,9 +14,10 @@ interface CreationDependencies {
   epoch(): number;
   authoritative(): boolean;
   discardDraft(): void;
+  cancelOpening(): void;
   forbidden(source: FleetSource): void;
   refresh(source: FleetSource): Promise<unknown>;
-  openReady(source: FleetSource, binding: ReadyBinding, draft: string, current: () => boolean, close: () => void): Promise<boolean>;
+  openReady(source: FleetSource, binding: ReadyBinding, draft: string, current: () => boolean): Promise<boolean>;
 }
 interface Intent {
   readonly source: FleetSource;
@@ -61,7 +62,7 @@ export class SessionCreationController {
   private request: AbortController | undefined;
   private timer: number | undefined;
   private deadline: number | undefined;
-  private progressState: string | undefined;
+  private progressState: number | undefined;
 
   constructor(private readonly deps: CreationDependencies) {}
 
@@ -88,6 +89,7 @@ export class SessionCreationController {
   cancel(reason: "background" | "close" | "selection" | "forbidden" | "pagehide" | "competing", key?: SourceKey): void {
     if (key !== undefined && sourceKey(this.intent?.source ?? this.source ?? { id: "", origin: "", label: "" }) !== key) return;
     this.stopRequests();
+    if (this.active) this.deps.cancelOpening();
     this.active = false;
     if (reason !== "background") { this.draft = ""; this.deps.discardDraft(); }
     if (this.deps.tray.id?.startsWith("creation-")) this.deps.tray.close(true, true);
@@ -299,15 +301,43 @@ export class SessionCreationController {
   }
 
   private progress(state: string): void {
-    if (this.deps.tray.id === "creation-progress" && this.progressState === state) return;
+    const active = state === "ready" ? 2 : state === "awaiting_omp" ? 1 : 0;
+    if (this.deps.tray.id === "creation-progress" && this.progressState === active) return;
     const body = document.createElement("div");
-    const copy = state === "awaiting_omp" ? "Tern started the command. Waiting for OMP to publish Control…"
-      : state === "launching" ? "Starting OMP in Tern…" : "The host is preparing your session…";
-    const status = text("p", copy);
+    const status = document.createElement("div");
     status.setAttribute("role", "status");
+    const steps = document.createElement("ol");
+    steps.className = "creation-steps";
+    steps.setAttribute("aria-label", "Session creation progress");
+    for (const [index, label] of ["Starting in Tern", "Waiting for OMP", "Opening Control"].entries()) {
+      const step = document.createElement("li");
+      step.className = "creation-step";
+      step.dataset.state = index < active ? "done" : index === active ? "active" : "future";
+      if (index === active) step.setAttribute("aria-current", "step");
+      if (index < active) {
+        const check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        check.setAttribute("class", "triage-check creation-step-check");
+        check.setAttribute("viewBox", "0 0 20 20");
+        check.setAttribute("aria-hidden", "true");
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M4 10l4 4 8-8");
+        path.setAttribute("pathLength", "1");
+        check.append(path);
+        step.append(check);
+        step.setAttribute("aria-label", `${label}, completed`);
+      } else {
+        const dot = document.createElement("span");
+        dot.className = "creation-step-dot";
+        dot.setAttribute("aria-hidden", "true");
+        step.append(dot);
+      }
+      step.append(label);
+      steps.append(step);
+    }
+    status.append(steps);
     body.append(status, text("p", "Close stops watching here. It does not stop the command on the host."));
     this.panel("progress", "Starting session", body);
-    this.progressState = state;
+    this.progressState = active;
   }
 
   private paused(copy = "Stopped watching. The command may still be starting on the host."): void {
@@ -357,8 +387,9 @@ export class SessionCreationController {
         if (this.deadline !== undefined) window.clearTimeout(this.deadline);
         this.deadline = undefined;
         if (status.state === "ready" && status.session !== undefined) {
+          this.progress("ready");
           const opened = await this.deps.openReady(intent.source, status.session, this.draft,
-            () => this.current(ticket), () => this.deps.tray.close(true, true));
+            () => this.current(ticket));
           if (!this.current(ticket)) return;
           if (opened) { this.intent = undefined; this.draft = ""; this.active = false; this.stopRequests(); }
           else this.paused("OMP is ready, but its exact Control session could not be opened here. Check creation to try opening that same session again.");

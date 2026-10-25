@@ -20,6 +20,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   explicit **Create and open Control**, bounded status watching, manual same-operation recovery,
   device-local choice preferences, and a memory-only one-shot First task draft. Closing stops
   watching rather than stopping the host command; uncertain outcomes never automatically recreate.
+  Creation progress shows Tern startup, OMP discovery, and Control opening as three explicit
+  steps with completed checks and a reduced-motion-aware active dot.
 - Resumable, skippable first-run trays for connection facts, optional background alerts, and
   View versus Control, reusing the existing tray and notification control. The bounded
   `omp.sessions.first-run.v1` record stores only step and timestamp. A same-scope queue clearance

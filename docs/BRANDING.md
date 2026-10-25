@@ -197,7 +197,10 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   Host, Project, Working copy, Profile, and review, one focused neutral panel at a time. Logical
   Back replaces the native panel; every step keeps heading focus, measured distinct heights and
   48px targets. `Create and open Control` names the authority explicitly. Optional First task
-  stays in memory and seeds the composer without sending. Starting/Stopped watching/terminal
+  stays in memory and seeds the composer without sending. Starting session shows three steps:
+  `Starting in Tern`, `Waiting for OMP`, `Opening Control`, with emerald completed checks, an
+  active status-pulse dot (still under reduced motion), and muted future steps. Opening Control
+  remains visible until the shell mounts. Starting/Stopped watching/terminal
   copy distinguishes observing from stopping the host command; `Check creation` never silently
   starts another operation. Unconfigured/older hosts offer `Retry options`, not a dead Create.
 - Trays (ADR-041): one native host for secondary surfaces, one topic/action per panel,

@@ -241,6 +241,7 @@ const creation = new SessionCreationController({
   epoch: () => selectionEpoch,
   authoritative: () => !fleetBootstrapFailed,
   discardDraft: () => clearCreationDraft(),
+  cancelOpening: () => cancelLaunch(),
   forbidden: source => {
     const key = sourceKey(source);
     clearCreationDraft(key);
@@ -255,7 +256,7 @@ const creation = new SessionCreationController({
     setStatus("unauthorized", "This tailnet identity is not authorized.");
   },
   refresh: source => sourceKey(source) === localKey ? refreshAndConnect() : remotes.get(sourceKey(source))!.refresh(true),
-  openReady: async (source, binding, draft, current, close) => {
+  openReady: async (source, binding, draft, current) => {
     const key = sourceKey(source);
     if (!current() || sources.get(key) !== source || activeCollabShell !== undefined || pendingLaunch !== undefined) return false;
     const refreshed = key === localKey ? await refreshAndConnect() : await remotes.get(key)?.refresh(true) === "healthy";
@@ -265,7 +266,6 @@ const creation = new SessionCreationController({
     if (session === undefined || session.generation !== binding.generation || !session.canControl || !sourceFresh(key)) return false;
     if (initialPromptDraft !== undefined && !sameBinding(initialPromptDraft.ref, ref)) clearCreationDraft();
     if (draft !== "") initialPromptDraft = { ref, text: draft };
-    close();
     return await launch(session, "control", undefined, undefined, selectedScope, "full", true);
   },
 });
@@ -2582,7 +2582,7 @@ function enterCollabClient(
       document.title = `${spokenTitle(session)} · OMP Sessions`;
       return;
     }
-    tray.close(true, tray.id === "request");
+    tray.close(true, tray.id === "request" || tray.id?.startsWith("creation-") === true);
     if (commitHistory) {
       history.replaceState({ ompDirectory: snapshot.historyState }, "", "/");
       history.pushState({ ompCollab: true }, "", "/client/");

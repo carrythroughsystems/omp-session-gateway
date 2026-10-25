@@ -171,6 +171,10 @@ The explicit **Create and open Control** action generates one operation UUID. Op
 requests time out after four seconds; POST after ten. Remote calls use CORS with omitted
 credentials and refused redirects; readable authorization loss revokes the source. Status polling
 starts one second after the preceding request completes, with a 120-second watching budget.
+Starting session shows **Starting in Tern → Waiting for OMP → Opening Control**: completed steps
+use the triage check, the active emerald dot uses the existing status pulse, and future steps are
+muted. Reduced motion keeps the dot still. Opening Control remains visible and cancellable until
+the ordinary session shell mounts.
 Closing, changing scope, competing navigation/trays, authorization loss, backgrounding, freeze,
 and pagehide stop watching, not the command running in Tern. Foregrounding never automatically
 creates or opens. **Check creation** reads the known operation or explicitly replays the identical

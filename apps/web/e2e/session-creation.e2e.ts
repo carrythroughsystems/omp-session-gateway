@@ -76,6 +76,11 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
     const key = randomBytes(32);
     const fixture = await startDashboardFixture([], { roomKey: key });
     const remote = await startDashboardFixture([]);
+    const opening = Promise.withResolvers<void>();
+    await page.route(`**/api/v1/sessions/${readySession.instanceId}/launch`, async route => {
+      await opening.promise;
+      await route.continue();
+    });
     const bodies: string[] = [];
     page.on("request", request => { if (request.url().includes("/api/") && request.postData() !== null) bodies.push(request.postData()!); });
     fixture.configureFleet("Creation host", [{ id: "remote", label: "Other host", origin: remote.origin }], []);
@@ -112,11 +117,32 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await expect(page.getByRole("textbox", { name: "First task (optional)" })).toHaveValue(TASK);
       await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
       await panel(page, "progress");
+      const steps = page.locator(".creation-step");
+      const activeStep = page.locator('.creation-step[aria-current="step"]');
+      await expect(steps).toHaveText(["Starting in Tern", "Waiting for OMP", "Opening Control"]);
+      await expect(activeStep).toHaveText("Starting in Tern");
+      expect(await steps.evaluateAll(elements => elements.map(element => (element as HTMLElement).dataset.state))).toEqual(["active", "future", "future"]);
+      const dot = page.locator('.creation-step[data-state="active"] .creation-step-dot');
+      expect(await dot.evaluate(element => getComputedStyle(element, "::before").animationName)).toBe("none");
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      expect(await dot.evaluate(element => getComputedStyle(element, "::before").animationName)).toBe("status-pulse");
+      expect(await dot.evaluate(element => getComputedStyle(element, "::before").animationDuration)).toBe("1.6s");
+      await page.emulateMedia({ reducedMotion: "reduce" });
       await capture(page, fixture, "accepted");
-      await expect(page.getByRole("status").filter({ hasText: "Starting OMP in Tern…" })).toBeVisible();
+      await expect.poll(() => fixture.requests.filter(request => request.startsWith("GET /api/v1/session-creations/")).length).toBeGreaterThanOrEqual(2);
+      await expect(activeStep).toHaveText("Starting in Tern");
       await capture(page, fixture, "launching");
-      await expect(page.getByRole("status").filter({ hasText: "Waiting for OMP to publish Control" })).toBeVisible();
+      await expect(activeStep).toHaveText("Waiting for OMP");
+      expect(await steps.evaluateAll(elements => elements.map(element => (element as HTMLElement).dataset.state))).toEqual(["done", "active", "future"]);
+      await expect(page.locator(".creation-step-check path")).toHaveAttribute("d", "M4 10l4 4 8-8");
       await capture(page, fixture, "awaiting-omp");
+      await expect(activeStep).toHaveText("Opening Control");
+      expect(await steps.evaluateAll(elements => elements.map(element => (element as HTMLElement).dataset.state))).toEqual(["done", "done", "active"]);
+      await expect(page.locator(".creation-step-check")).toHaveCount(2);
+      await expect(page.locator("#tray")).toBeVisible();
+      expect(fixture.launchRequests).toHaveLength(0);
+      await capture(page, fixture, "opening-control");
+      opening.resolve();
       await expect(page).toHaveURL(`${fixture.origin}/client/`);
       await expect(page.locator('.conn-chip[data-state="connected"]')).toBeVisible();
       await expect(page.locator(".sh-composer-input")).toHaveValue(TASK);
@@ -142,7 +168,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await page.getByRole("button", { name: "Careful OMP", exact: true }).click();
       await expect(page.getByRole("textbox", { name: "First task (optional)" })).toHaveValue("");
       expect(fixture.creationRequests).toHaveLength(1);
-    } finally { await fixture.stop(); await remote.stop(); }
+    } finally { opening.resolve(); await fixture.stop(); await remote.stop(); }
   });
 }
 

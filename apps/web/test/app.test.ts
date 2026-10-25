@@ -1078,6 +1078,60 @@ describe("source-bound session creation", () => {
     expect(validInitialPromptDraft("a".repeat(8_001))).toBeFalse();
   });
 
+  test("creation progress advances three steps and keeps Opening Control cancellable until mount", async () => {
+    for (const close of [false, true]) {
+      const gate = Promise.withResolvers<void>();
+      const ready = session("creation-progress-001");
+      let statusReads = 0;
+      const states = ["accepted", "launching", "awaiting_omp", "ready"];
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], suffix: `creation-progress-steps-${close}`, launchGate: gate.promise,
+        creationResponse: async (path, init) => {
+          if (path.endsWith("options")) return Response.json(choices);
+          if (init.method === "POST") return Response.json({ operationId, state: "accepted" });
+          const state = states[statusReads++]!;
+          return Response.json({ operationId, state, updatedAt: new Date().toISOString(),
+            ...(state === "ready" ? { session: { instanceId: ready.instanceId, generation: 1 } } : {}) });
+        },
+      });
+      await open(harness);
+      seed(harness, "SYNTHETIC_PROGRESS_DRAFT");
+      harness.setList(2, [ready]);
+      click(harness, "Create and open Control");
+      await settleUntil(() => statusReads === 1 && harness.pendingDelays().includes(1_000), 100);
+      const initial = currentPanel(harness);
+      const stepStates = (): (string | undefined)[] => currentPanel(harness).querySelectorAll("li").map(step => step.dataset.state);
+      expect(initial.querySelectorAll("li").map(step => step.textContent)).toEqual(["Starting in Tern", "Waiting for OMP", "Opening Control"]);
+      expect(stepStates()).toEqual(["active", "future", "future"]);
+      harness.window.runTimersWithDelay(1_000);
+      await settleUntil(() => statusReads === 2 && harness.pendingDelays().includes(1_000), 100);
+      expect(currentPanel(harness)).toBe(initial);
+      harness.window.runTimersWithDelay(1_000);
+      await settleUntil(() => stepStates()[1] === "active", 100);
+      expect(stepStates()).toEqual(["done", "active", "future"]);
+      expect(currentPanel(harness).querySelector("path")?.getAttribute("d")).toBe("M4 10l4 4 8-8");
+      harness.window.runTimersWithDelay(1_000);
+      await settleUntil(() => harness.launchRequests.length === 1, 200);
+      expect(stepStates()).toEqual(["done", "done", "active"]);
+      expect(currentPanel(harness).querySelectorAll("svg")).toHaveLength(2);
+      expect(harness.elements.trayHost.open).toBeTrue();
+      if (close) {
+        currentPanel(harness).querySelector(".tray-leading")!.dispatchEvent(new Event("click"));
+        expect(harness.launchRequests[0]!.init.signal!.aborted).toBeTrue();
+      }
+      gate.resolve();
+      if (close) {
+        for (let i = 0; i < 100; i++) await Promise.resolve();
+        expect(harness.embedCalls).toHaveLength(0);
+      } else {
+        await settleUntil(() => harness.embedCalls.length === 1, 200);
+        expect(harness.elements.trayHost.open).toBeFalse();
+        expect(harness.embedCalls[0]!.takeInitialPromptDraft?.()).toBe("SYNTHETIC_PROGRESS_DRAFT");
+      }
+      harness.window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
   test("a failed pre-mount launch retries the same binding with its draft, while explicit Close discards it", async () => {
     for (const close of [false, true]) {
       let launches = 0;

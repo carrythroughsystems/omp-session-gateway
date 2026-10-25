@@ -533,7 +533,8 @@ h1 {
   background: var(--muted);
 }
 
-.status[data-kind="loading"]::before {
+.status[data-kind="loading"]::before,
+.creation-step[data-state="active"] .creation-step-dot::before {
   animation: status-pulse 1.6s ease-in-out infinite;
 }
 
@@ -1511,6 +1512,17 @@ body.collab-shell-active {
 .creation-profile { min-height: 256px; }
 .creation-review { min-height: 352px; }
 .creation-progress { min-height: 208px; align-content: center; }
+.creation-steps { display: grid; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
+.creation-step {
+  display: grid; grid-template-columns: 1.25rem minmax(0, 1fr); align-items: center;
+  gap: 0.75rem; min-height: 2rem; color: var(--muted); font-size: 0.9rem; line-height: 1.5;
+}
+.creation-step[data-state="active"] { color: var(--ink); font-weight: 600; }
+.creation-step[data-state="future"] { color: var(--faint); }
+.creation-step .triage-check { width: 1.25rem; height: 1.25rem; margin: 0; }
+.creation-step-dot { display: grid; place-items: center; width: 1.25rem; height: 1.25rem; }
+.creation-step-dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.creation-step[data-state="active"] .creation-step-dot::before { background: var(--live); }
 .creation-terminal { min-height: 264px; align-content: center; }
 .creation-summary { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.4rem 1rem; font-size: 0.85rem; }
 .creation-summary dt { color: var(--muted); }
@@ -1997,7 +2009,8 @@ dialog:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   .tray, .tray::backdrop, .tray-panel { transition: none; }
-  .status[data-kind="loading"]::before {
+  .status[data-kind="loading"]::before,
+  .creation-step[data-state="active"] .creation-step-dot::before {
     animation: none;
   }
 
