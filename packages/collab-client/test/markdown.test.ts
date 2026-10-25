@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Markdown } from "../upstream/src/components/transcript/Markdown";
+import { Markdown, renderStreamingMarkdown, type FrozenMarkdownPrefix } from "../upstream/src/components/transcript/Markdown";
 
 function renderMarkdown(text: string): string {
   return renderToStaticMarkup(createElement(Markdown, { text }));
@@ -176,5 +176,79 @@ describe("transcript Markdown", () => {
 
     expect(html).toContain("<strong>bold</strong>");
     expect(html).toContain("\\frac");
+  });
+});
+
+const PARAGRAPHS = Array.from({ length: 6 }, (_, i) => `Paragraph ${i} has *emphasis* and \`code\`.`).join("\n\n");
+
+/** Upstream's corpus: block structure that can straddle a streamed blank line. */
+const STREAM_DOCS: Record<string, string> = {
+  paragraphs: `${PARAGRAPHS}\n`,
+  "list then prose": "- a\n- b\n\nprose after\n\n1. one\n2. two\n\n3) three\n\ntail",
+  "same-marker items across blank lines": "- a\n\n- b\n\n- c\n\nend\n\n* x\n\n+ y\n\n1. one\n\n2. two\n\n10. ten",
+  "nested list continuation": "- item\n\n  continued para\n\n  ```\n  code\n\n  more\n  ```\n\nafter",
+  "fence with blank lines": "Intro.\n\n```ts\nconst a = 1;\n\n\nconst b = 2;\n```\n\nAfter.\n\n~~~\nx\n\ny\n~~~\n\nend",
+  "indented code": "Intro.\n\n    code a\n\n    code b\n\nprose\n\n\tTabbed code\n\n\tmore\n\ndone",
+  blockquotes: "> a\n>\n> b\n\n> c\n\nlazy\n> d\ncontinued\n\nend",
+  "html blocks": "<div>\n\ninside\n\n</div>\n\nafter\n\n<!-- c\n\nc -->\n\ntext <span>x</span>\n\nend",
+  tables: "| a | b |\n|---|---|\n| 1 | 2 |\n\n| c |\n|---|\n\nafter",
+  headings: "# H1\n\ntext\n\nSetext\n===\n\n---\n\n## H2\n\nend",
+  "display math": "Intro.\n\n$$\na\n\nb\n$$\n\nAfter math.\n\n\\[\nx\n\n\\]\n\nend $x$ inline",
+  "unclosed display math": `Intro.\n\n$$\nx = 1\n\n${PARAGRAPHS}`,
+  "reference definitions": "See [the docs][d].\n\nMiddle.\n\n[d]: https://example.com\n\nAfter [d].",
+  "whitespace lines": "a\n\n\u00a0\n\nb\n\n \n\nc\n\n\u00a0x\n\nd",
+  "carriage returns": "a\r\n\r\nb\r\n\r\nc",
+  "gateway rejected currency and half delimiters": "it costs $5, and growth is $x^2$\n\n$$x$\n\nstreaming \\(x and \\[y",
+};
+
+describe("streaming Markdown", () => {
+  for (const [name, doc] of Object.entries(STREAM_DOCS)) {
+    test(`renders every streamed prefix like a one-shot render: ${name}`, () => {
+      for (const step of [1, 7]) {
+        let prefix: FrozenMarkdownPrefix = { source: "", html: "" };
+        for (let len = step; ; len = Math.min(doc.length, len + step)) {
+          const text = doc.slice(0, len);
+          const rendered = renderStreamingMarkdown(text, prefix);
+          expect(`<div class="tr-md">${rendered.html}</div>`).toBe(renderMarkdown(text));
+          prefix = rendered.prefix;
+          if (len === doc.length) break;
+        }
+      }
+    });
+  }
+
+  test("freezes settled blocks so each update re-parses only the tail", () => {
+    const doc = `${PARAGRAPHS}\n\nTail paragraph`;
+    let prefix: FrozenMarkdownPrefix = { source: "", html: "" };
+    for (let len = 1; len <= doc.length; len++) prefix = renderStreamingMarkdown(doc.slice(0, len), prefix).prefix;
+    expect(prefix.source).toBe(`${PARAGRAPHS}\n\n`);
+  });
+
+  test("drops the frozen prefix when the text is rewritten instead of extended", () => {
+    const { prefix } = renderStreamingMarkdown("one\n\ntwo\n\nthree", { source: "", html: "" });
+    expect(prefix.source).toBe("one\n\ntwo\n\n");
+    const rewritten = renderStreamingMarkdown("uno\n\ntwo", prefix);
+    expect(`<div class="tr-md">${rewritten.html}</div>`).toBe(renderMarkdown("uno\n\ntwo"));
+  });
+
+  test("sanitizes obfuscated javascript links in both frozen blocks and streaming tails", () => {
+    for (const href of ["java\tscript:alert(1)", "java&#x09;script:alert(1)", "java&#10;script:alert(1)", "javascript:alert(1)"]) {
+      const doc = `safe prefix\n\n[probe](<${href}>)\n\nNext paragraph\n\n[safe](https://example.com)`;
+      let prefix: FrozenMarkdownPrefix = { source: "", html: "" };
+      let frozeRejectedLink = false;
+      for (let length = 1; length <= doc.length; length++) {
+        const text = doc.slice(0, length);
+        const rendered = renderStreamingMarkdown(text, prefix);
+        expect(`<div class="tr-md">${rendered.html}</div>`).toBe(renderMarkdown(text));
+        expect(rendered.html).not.toMatch(/href="[^"]*(?:javascript|&#x09;|&#10;)/i);
+        if (rendered.prefix.source.includes("[probe]")) {
+          frozeRejectedLink = true;
+          expect(rendered.prefix.html).toContain("probe");
+          expect(rendered.prefix.html).not.toContain("<a ");
+        }
+        prefix = rendered.prefix;
+      }
+      expect(frozeRejectedLink).toBe(true);
+    }
   });
 });

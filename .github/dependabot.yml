@@ -11,7 +11,7 @@ updates:
       - dependency-name: "@oh-my-pi/pi-wire"
       - dependency-name: katex
       - dependency-name: lucide-react
-      - dependency-name: marked
+
       - dependency-name: react
       - dependency-name: react-dom
       # Keep the type surface aligned with the packageManager/CI Bun runtime.

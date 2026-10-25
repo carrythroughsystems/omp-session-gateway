@@ -12,6 +12,7 @@ const defaultReleaseRoot = join(root, "dist", "release");
 const archiveBase = `omp-session-gateway-${PRODUCT_VERSION}-bun`;
 const BUNDLED_WORKSPACES = ["apps/gateway", "apps/web", "packages/collab-client"] as const;
 const COLLAB_WEB_LICENSE_PATH = "licenses/collab-web/LICENSE";
+const MARKED_FORK_LICENSE_PATH = "licenses/pi-utils-marked/LICENSE";
 const NERD_FONT_LICENSE_PATH = "licenses/fonts/nerd-fonts/LICENSE";
 const NERD_FONT_ICON_SETS_PATH = "licenses/fonts/nerd-fonts/ICON_SETS.md";
 
@@ -59,6 +60,13 @@ export interface VendoredClientLockfile {
   readonly commit: string;
   readonly tag: string;
   readonly packageVersion: string;
+  readonly additionalSources: readonly {
+    readonly package: string;
+    readonly packageVersion: string;
+    readonly commit: string;
+    readonly sourcePath: string;
+    readonly vendoredPath: string;
+  }[];
 }
 
 interface RuntimeLicenseMetadata {
@@ -72,8 +80,8 @@ interface RuntimeLicenseMetadata {
 
 export const RUNTIME_LICENSES: Readonly<Record<string, RuntimeLicenseMetadata>> = {
   "@oh-my-pi/pi-wire": {
-    version: "18.4.2",
-    source: "https://github.com/can1357/oh-my-pi/tree/v18.4.2/packages/wire",
+    version: "18.12.6",
+    source: "https://github.com/can1357/oh-my-pi/tree/v18.12.6/packages/wire",
     licenseDeclared: "MIT",
     licenseConcluded: "MIT",
     copyrightText: "Copyright (c) 2025-2026 Can Bölük\nCopyright (c) 2026 Stencil Labs, Inc.",
@@ -240,15 +248,6 @@ export const RUNTIME_LICENSES: Readonly<Record<string, RuntimeLicenseMetadata>> 
     copyrightText:
       "Copyright (c) 2026 Lucide Icons and Contributors\nCopyright (c) 2013-present Cole Bemis",
     licensePath: "licenses/runtime/lucide-react/LICENSE",
-  },
-  marked: {
-    version: "18.0.9",
-    source: "https://github.com/markedjs/marked/tree/8e858a4f8e7f53ffeae7392a4c9f455e693aa737",
-    licenseDeclared: "MIT",
-    licenseConcluded: "MIT AND BSD-3-Clause",
-    copyrightText:
-      "Copyright (c) 2018+, MarkedJS\nCopyright (c) 2011-2018, Christopher Jeffrey\nCopyright (c) 2004, John Gruber",
-    licensePath: "licenses/runtime/marked/LICENSE",
   },
   react: {
     version: "19.2.7",
@@ -506,6 +505,24 @@ export function createSpdxSbom(
       "Copyright (c) 2025 Mario Zechner\nCopyright (c) 2025-2026 Can Bölük\nCopyright (c) 2026 Stencil Labs, Inc.",
     sourceInfo: `Vendored from ${client.commit} (${client.tag}) with local modifications documented in THIRD_PARTY_NOTICES.md`,
   };
+  const parserSources = client.additionalSources.filter(source => source.package === "@oh-my-pi/pi-utils");
+  const parser = parserSources[0];
+  if (parser === undefined || parserSources.some(source =>
+    source.commit !== client.commit || source.packageVersion !== parser.packageVersion
+  )) throw new Error("vendored Markdown sources must share the client source pin");
+  const markedForkPackage = {
+    name: "@oh-my-pi/pi-utils (vendored Markdown sources)",
+    SPDXID: "SPDXRef-Vendored-Pi-Utils-Markdown",
+    versionInfo: parser.packageVersion,
+    downloadLocation: `https://github.com/can1357/oh-my-pi/tree/${parser.commit}/packages/utils/src`,
+    filesAnalyzed: false,
+    licenseConcluded: "MIT AND BSD-3-Clause",
+    licenseDeclared: "MIT",
+    licenseComments: `License text: ${MARKED_FORK_LICENSE_PATH}; original Marked and Markdown notices preserved`,
+    copyrightText:
+      "Copyright (c) 2018+ MarkedJS\nCopyright (c) 2011-2018 Christopher Jeffrey\nCopyright (c) 2004 John Gruber\nCopyright (c) 2025 Mario Zechner\nCopyright (c) 2025-2026 Can Bölük\nCopyright (c) 2026 Stencil Labs, Inc.",
+    sourceInfo: `Pure-JavaScript source files only, not the pi-utils npm package: ${parserSources.map(source => source.sourcePath).join(", ")}; commit ${parser.commit}`,
+  };
   // The font file is MIT, but its glyph sets carry their own terms (licenses/fonts/nerd-fonts/ICON_SETS.md):
   // the concluded expression names every one of them, so the machine-readable SBOM says what the notices say.
   const nerdFontPackage = {
@@ -533,7 +550,7 @@ export function createSpdxSbom(
         created: source.created,
         creators: ["Tool: omp-session-gateway deterministic release builder"],
       },
-      packages: [rootPackage, collabWebPackage, nerdFontPackage, ...dependencies],
+      packages: [rootPackage, collabWebPackage, markedForkPackage, nerdFontPackage, ...dependencies],
       relationships: [
         {
           spdxElementId: "SPDXRef-DOCUMENT",
@@ -544,6 +561,11 @@ export function createSpdxSbom(
           spdxElementId: rootPackage.SPDXID,
           relationshipType: "CONTAINS",
           relatedSpdxElement: collabWebPackage.SPDXID,
+        },
+        {
+          spdxElementId: collabWebPackage.SPDXID,
+          relationshipType: "CONTAINS",
+          relatedSpdxElement: markedForkPackage.SPDXID,
         },
         {
           spdxElementId: rootPackage.SPDXID,
@@ -648,6 +670,9 @@ async function buildRelease(): Promise<void> {
   }
   if (!notices.includes(COLLAB_WEB_LICENSE_PATH)) {
     throw new Error(`THIRD_PARTY_NOTICES.md is missing license location ${COLLAB_WEB_LICENSE_PATH}`);
+  }
+  if (!notices.includes(MARKED_FORK_LICENSE_PATH) || (await readFile(join(root, MARKED_FORK_LICENSE_PATH))).byteLength === 0) {
+    throw new Error("vendored Markdown fork requires its original and fork license notices");
   }
   for (const dependency of dependencies) {
     const metadata = runtimeLicense(dependency);

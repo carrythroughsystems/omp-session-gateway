@@ -39,10 +39,9 @@
       "name": "@omp-session-gateway/collab-client",
       "version": "0.8.0",
       "dependencies": {
-        "@oh-my-pi/pi-wire": "18.4.2",
+        "@oh-my-pi/pi-wire": "18.12.6",
         "katex": "0.18.5",
         "lucide-react": "1.31.0",
-        "marked": "18.0.9",
         "react": "19.2.7",
         "react-dom": "19.2.7",
       },
@@ -69,7 +68,7 @@
 
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
 
-    "@oh-my-pi/pi-wire": ["@oh-my-pi/pi-wire@18.4.2", "", {}, "sha512-bnX5D4JYZIsyDTTrW9jV+kO0M5DJtnW7OYRnuXpe7u7PmGN/F8/Qtznc6gHnjwfL9RAFqOf1+1/oweyRuBSqmQ=="],
+    "@oh-my-pi/pi-wire": ["@oh-my-pi/pi-wire@18.12.6", "", {}, "sha512-NPREkkLEUqbcqJ5T/NOg2xF3d5wYSE92CWoEwxMvbyBerdyU0JhZKFgciiAiHTg5F/cH9oYJNr3Dm8MRVrpDWA=="],
 
     "@omp-session-gateway/collab-client": ["@omp-session-gateway/collab-client@workspace:packages/collab-client"],
 
@@ -414,8 +413,6 @@
     "lucide-react": ["lucide-react@1.31.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-G8u2eEtoHUnUa9f8lbvqDhCiORMnYLdUEo06EEG9MQvHQrInKcX3Pa2TH39MM5qyzRcWETxB0+aOwAPI1g1kEg=="],
 
     "map-age-cleaner": ["map-age-cleaner@0.1.3", "", { "dependencies": { "p-defer": "^1.0.0" } }, "sha512-bJzx6nMoP6PDLPBFmg7+xRKeFZvFboMrGlxmNj9ClvX53KrmvM5bXFXEWjbz4cz1AFn+jWJ9z/DJSz7hrs0w3w=="],
-
-    "marked": ["marked@18.0.9", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-/Sa4qiiHZxf0/FQdBBowr9q4r10krCwMvpK48FUBdXdUXScDxiQGR9zCPrFgRVR5LU3iySOiIjy09ZQvADir1w=="],
 
     "mem": ["mem@8.1.1", "", { "dependencies": { "map-age-cleaner": "^0.1.3", "mimic-fn": "^3.1.0" } }, "sha512-qFCFUDs7U3b8mBDPyz5EToEKoAkgCzqquIgi9nkkR9bixxOVOre+09lbuH7+9Kn2NFpm56M3GUWVbU2hQgdACA=="],
 

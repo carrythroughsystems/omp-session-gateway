@@ -4,6 +4,7 @@ import { AgentDrawer } from "./components/agents/AgentDrawer";
 import { AgentsPanel } from "./components/agents/AgentsPanel";
 import { Banners } from "./components/shell/Banners";
 import { Composer } from "./components/shell/Composer";
+import { recommendedOptionIndex } from "./components/shell/ask-recommendation";
 import { HeaderBar } from "./components/shell/HeaderBar";
 import { Toasts } from "./components/shell/Toasts";
 import { Transcript } from "./components/transcript/Transcript";
@@ -272,16 +273,41 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 	}, [title]);
 
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
+	const toggleRail = useCallback(() => setRailOpen(open => !open), []);
+	const closeDrawer = useCallback(() => setSelectedId(null), []);
+	const recommendedIndex = useMemo(
+		() => recommendedOptionIndex(snap),
+		[snap.uiRequest, snap.entries, snap.stream, snap.activeTools],
+	);
+	const composer = (
+		<Composer
+			client={client}
+			phase={snap.phase}
+			readOnly={snap.readOnly}
+			uiRequest={snap.uiRequest}
+			working={snap.working}
+			queuedMessageCount={snap.state?.queuedMessageCount ?? 0}
+			uiResponsePending={snap.uiResponsePending}
+			relayReady={snap.relayHealth.state === "healthy"}
+			entries={snap.entries}
+			recommendedIndex={recommendedIndex}
+			embedded={embedded}
+			browserRecognitionEnabled={embedOptions?.browserRecognitionEnabled === true}
+		/>
+	);
 
 	return (
 		<div className="sh-app" data-embedded={embedded ? "true" : undefined}>
 			{!embedded && <div className="sh-ambient" />}
 			{!embedded && (
 				<HeaderBar
-					snapshot={snap}
+					header={snap.header}
+					state={snap.state}
+					phase={snap.phase}
+					readOnly={snap.readOnly}
 					subCount={subCount}
 					railOpen={railOpen}
-					onToggleRail={() => setRailOpen(open => !open)}
+					onToggleRail={toggleRail}
 					onLeave={onLeave}
 				/>
 			)}
@@ -302,10 +328,11 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 										working={snap.working}
 										host={toolHost}
 										phase={snap.phase}
+										liveEpoch={snap.liveEpoch}
 										suppressAskTool
 									/>
 							</div>
-							<Composer client={client} snapshot={snap} embedded browserRecognitionEnabled={embedOptions?.browserRecognitionEnabled === true} />
+							{composer}
 						</div>
 					) : (
 						<div className="sh-transcript">
@@ -317,12 +344,11 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 									working={snap.working}
 									host={toolHost}
 									phase={snap.phase}
+									liveEpoch={snap.liveEpoch}
 								/>
 						</div>
 					)}
-					{(!embedded || snap.uiRequest === null) && (
-						<Composer client={client} snapshot={snap} embedded={embedded} browserRecognitionEnabled={embedOptions?.browserRecognitionEnabled === true} />
-					)}
+					{(!embedded || snap.uiRequest === null) && composer}
 				</section>
 				{!embedded && railOpen && (
 					<>
@@ -341,14 +367,15 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 			</main>
 			{drawerAgent && (
 				<>
-					<div className="ag-drawer-backdrop" onClick={() => setSelectedId(null)} />
+					<div className="ag-drawer-backdrop" onClick={closeDrawer} />
 					<AgentDrawer
 						agent={drawerAgent}
 						progress={snap.progress.get(drawerAgent.id)}
+						lifecycle={snap.lifecycle.get(drawerAgent.id)}
 						client={client}
 						readOnly={snap.readOnly}
 						host={toolHost}
-						onClose={() => setSelectedId(null)}
+						onClose={closeDrawer}
 					/>
 				</>
 			)}

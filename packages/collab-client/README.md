@@ -1,15 +1,15 @@
 # `packages/collab-client`
 
-Pinned integration of OMP's existing `packages/collab-web` source at tag `v18.4.2`, commit
-`4620bb8338e0ecace7ea237da9d5088d16068617`. The upstream collab package remains version
-`16.3.6`; `@oh-my-pi/pi-wire` is pinned exactly to `18.4.2`. Its wire source is unchanged
-from the previous engineering baseline; no collaboration protocol or relay framing changes.
+Pinned integration of OMP's existing `packages/collab-web` source at tag `v18.12.6`, commit
+`45c35e40c46166dc726ccc52f5d27f40f2449f99`. The upstream collab package remains version
+`16.3.6`; `@oh-my-pi/pi-wire` is pinned exactly to `18.12.6`. The collaboration protocol and
+relay framing are unchanged; the wire barrel's unrelated TSP runtime is not bundled.
 
 These are browser-client provenance pins, independent of both the minimum supported OMP host
-version (`>= 18.1.20`) and the root `UPSTREAM.lock.json` engineering host baseline (`v18.5.1`).
+version (`>= 18.1.20`) and the root `UPSTREAM.lock.json` engineering host baseline (`v18.12.5`).
 The gateway consumes the native registry and controller in stock OMP `>= 18.1.20` without a fork,
 custom OMP build, or gateway-specific OMP plugin, while this package pins the embedded browser
-client at `v18.4.2`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
+client at `v18.12.6`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
 deployment scope.
 
 The local patch passes the capability directly into the root `App` component. The installed PWA
@@ -30,9 +30,14 @@ treats a readable authorization loss as terminal for automatic recovery, allowin
 only on foreground, pageshow, or online transitions. Non-embedded callers retain the same-origin
 health probe.
 
-The 18.4.x refresh brings the redesigned inset transcript/composer panel, updated tool and agent
-surfaces, and upstream's coarse-pointer text sizing. The earlier local 16px text-field patch is
-now upstream code. Snapshot chunks now buffer inside upstream's guest replica and publish once
+The 18.12.6 refresh brings upstream render coalescing and streaming-tail Markdown parsing
+([#14728](https://github.com/can1357/oh-my-pi/pull/14728)), linear-time Markdown/math lexing
+([#13961](https://github.com/can1357/oh-my-pi/pull/13961),
+[#14667](https://github.com/can1357/oh-my-pi/pull/14667)), idle agent-drawer polling shutdown,
+and the eval renderer's printed table/JSON/Markdown views. Streaming updates publish at most
+once per animation frame; other frames flush synchronously. Memoized Composer/HeaderBar props
+remain stable across unrelated stream updates, including gateway Ask/photo/speech inputs.
+Snapshot chunks buffer inside upstream's guest replica and publish once
 on the final chunk or promised entry count, with live entries appended after the snapshot and
 finished stream ghosts cleared even when their entries arrive mid-snapshot. The transcript stays
 mounted and the last published rows remain visible during resynchronization, replacing the local
@@ -43,16 +48,26 @@ The local explicit `Show earlier` window remains: newest 150 entries initially, 
 with an anchored oldest entry and scroll position. Unlike upstream's automatic near-top expansion
 and tail re-windowing, this retains an expanded window across live appends and reconnects, and
 pairs tool results across the entire retained history. Initial and recovered `live` transitions
-still return the main transcript to its tail without discarding that window; the compact agent
+still return the main transcript to its tail without discarding that window. A monotonic live
+epoch preserves this edge even when React batches recovery with the first streamed commit; the compact agent
 transcript remains independent. The `wait` renderer and the retained hub-family renderers
 (`hub`, `irc`, `job`, `await`, `poll`, `cancel_job`) support older host releases.
 
 LaTeX delimiters render through KaTeX `0.18.5` as native MathML with `trust: false`; no KaTeX
-stylesheet, font URL, or remote asset is emitted. The browser bundle retains npm `marked`
-`18.0.9` and the unchanged pure delimiter grammar from `@oh-my-pi/pi-utils` `18.3.0` rather
-than adding that package's native dependency closure. Markdown links use the browser URL parser
+stylesheet, font URL, or remote asset is emitted. The browser bundle vendors the six pure
+TypeScript marked-fork, list-continuation, and math-grammar sources from pi-utils `18.12.6`,
+including its source-context and `startFrom` hooks. This replaces npm `marked` without installing
+pi-utils or pi-natives. Original Marked/Markdown and fork licences are retained in
+`licenses/pi-utils-marked/LICENSE`. Rejected currency openers and half-streamed delimiters keep
+their existing semantics, now supplied by upstream rather than a local npm-parser adapter.
+Markdown links in both settled and streaming blocks use the same browser URL parser
 before the HTTP(S)/mailto allowlist, rejecting control-character-obfuscated unsafe schemes while
 retaining relative links and fragments. All runtime assets remain first-party.
+
+Both text stacks fall back to `"Symbols Nerd Font Mono"` immediately before their generic family.
+The gateway's self-hosted, unicode-range-limited face supplies only Private Use Area glyphs (for
+example, icons printed by `ls`/`eza`); ordinary text stays on system fonts. The client defines no
+font face and loads no fonts of its own.
 
 Control sessions expose the existing OMP v3 `prompt.images` path as a phone-first photo action.
 The Photo action opens an explicit two-choice panel: **Take photo** invokes a rear-camera capture

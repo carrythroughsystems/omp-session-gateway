@@ -12,9 +12,9 @@ source locations, and required attributions are included at the stated archive p
 
 ## Bundled runtime dependencies
 
-### @oh-my-pi/pi-wire@18.4.2
+### @oh-my-pi/pi-wire@18.12.6
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/v18.4.2/packages/wire>
+- Source: <https://github.com/can1357/oh-my-pi/tree/v18.12.6/packages/wire>
 - License: MIT
 - Copyright: Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
 - License text: `licenses/runtime/@oh-my-pi__pi-wire/LICENSE`
@@ -117,13 +117,6 @@ source locations, and required attributions are included at the stated archive p
 - Copyright: Copyright (c) 2026 Lucide Icons and Contributors; Copyright (c) 2013-present Cole Bemis
 - License text: `licenses/runtime/lucide-react/LICENSE`
 
-### marked@18.0.9
-
-- Source: <https://github.com/markedjs/marked/tree/8e858a4f8e7f53ffeae7392a4c9f455e693aa737>
-- License: MIT, with the reproduced Markdown license and attribution
-- Copyright: Copyright (c) 2018+ MarkedJS; Copyright (c) 2011-2018 Christopher Jeffrey; Copyright (c) 2004 John Gruber
-- License text: `licenses/runtime/marked/LICENSE`
-
 ### minimalistic-assert@1.0.1
 
 - Source: <https://github.com/calvinmetcalf/minimalistic-assert/tree/v1.0.1>
@@ -194,10 +187,8 @@ source locations, and required attributions are included at the stated archive p
 
 ### @oh-my-pi/collab-web@16.3.6
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/4620bb8338e0ecace7ea237da9d5088d16068617/packages/collab-web>
-- Additional source: `@oh-my-pi/pi-utils@18.3.0` delimiter grammar from
-  <https://github.com/can1357/oh-my-pi/blob/62bc57be1b03ef0802a33cf7f5f530e534527531/packages/utils/src/math-delimiters.ts>
-- Pinned source: tag `v18.4.2`, commit `4620bb8338e0ecace7ea237da9d5088d16068617`
+- Source: <https://github.com/can1357/oh-my-pi/tree/45c35e40c46166dc726ccc52f5d27f40f2449f99/packages/collab-web>
+- Pinned source: tag `v18.12.6`, commit `45c35e40c46166dc726ccc52f5d27f40f2449f99`
 - License: MIT
 - Copyright: Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
 - License text: `licenses/collab-web/LICENSE`
@@ -207,9 +198,25 @@ source locations, and required attributions are included at the stated archive p
   gateway chrome and sole Ask-aware composer; strict read-only mutation guards; photo capture,
   metadata stripping, bounds, volatile previews, transcript acknowledgements, and retry; foreground,
   online, relay-room, and gateway-health transport recovery; generation-bound sends with fresh hello;
-  long-transcript windowing; exact-optional view-link typing; and redacted capability errors. The pure
-  delimiter grammar is vendored instead of adding `@oh-my-pi/pi-utils` and its native dependency
-  closure; the renderer retains the existing npm `marked` integration.
+  long-transcript windowing and coalescing-safe live-transition tail reset; exact-optional typing;
+  redacted capability errors; retained hub-family renderers; speech input; artwork exclusion; and
+  the gateway's self-hosted PUA symbol fallback. All dispositions are in `upstream/UPSTREAM.json`.
+
+### @oh-my-pi/pi-utils@18.12.6 — vendored Markdown sources only
+
+- Source: <https://github.com/can1357/oh-my-pi/tree/45c35e40c46166dc726ccc52f5d27f40f2449f99/packages/utils/src>
+- Exact source files: `marked.ts`, `marked/core.ts`, `marked/inline-closers.ts`,
+  `marked/inline-text.ts`, `marked-list.ts`, and `math-delimiters.ts`, copied without modifications
+  into `packages/collab-client/upstream/src/vendor/pi-utils/`.
+- License: MIT; original Marked MIT and Markdown BSD-3-Clause notices are preserved.
+- Copyright: Copyright (c) 2018+ MarkedJS; Copyright (c) 2011-2018 Christopher Jeffrey;
+  Copyright (c) 2004 John Gruber; Copyright (c) 2025 Mario Zechner;
+  Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
+- License text: `licenses/pi-utils-marked/LICENSE`
+- Distributed code: the same first-party `collab-client.<content-hash>.js` bundle.
+- Only these pure TypeScript sources are vendored. Neither the pi-utils npm package nor pi-natives
+  is installed or bundled. This fork replaces npm `marked`, supplying linear-time lexing,
+  source-context math hooks, and streaming-tail rendering without a native runtime closure.
 
 OMP itself is a separately installed mainline prerequisite, not a bundled or locally modified
 runtime component of this archive. The upstream OMP license text is retained at

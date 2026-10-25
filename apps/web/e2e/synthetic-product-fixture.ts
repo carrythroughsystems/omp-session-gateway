@@ -99,10 +99,17 @@ export const RELEASE_WAITING = syntheticSession(
 export async function installSyntheticProductFixture(
   context: BrowserContext,
   roomKey: Uint8Array,
-  options: { readonly readOnly?: boolean; readonly transcript?: string; readonly randomSeed?: number } = {},
+  options: {
+    readonly readOnly?: boolean;
+    readonly transcript?: string;
+    readonly randomSeed?: number;
+    readonly historyEntryCount?: number;
+    readonly streamedTranscript?: string;
+    readonly answerRequests?: boolean;
+  } = {},
 ): Promise<void> {
   await context.addInitScript(
-    ({ fixedNow, keyBytes, readOnly, transcript, randomSeed }) => {
+    ({ fixedNow, keyBytes, readOnly, transcript, randomSeed, historyEntryCount, streamedTranscript, answerRequests }) => {
       const fixedEpoch = new Date(fixedNow).getTime();
       const NativeDate = Date;
       class FixedDate extends NativeDate {
@@ -216,7 +223,7 @@ export async function installSyntheticProductFixture(
         new Uint8Array(keyBytes),
         "AES-GCM",
         false,
-        ["encrypt"],
+        ["encrypt", "decrypt"],
       );
       const encoder = new TextEncoder();
 
@@ -246,10 +253,37 @@ export async function installSyntheticProductFixture(
           this.readyState = AskWebSocket.CLOSED;
         }
 
-        send(): void {
-          if (this.sentWelcome) return;
+        send(data: ArrayBuffer | ArrayBufferView): void {
+          if (this.sentWelcome) {
+            if (answerRequests) void this.receiveGuestFrame(data);
+            return;
+          }
           this.sentWelcome = true;
           void this.sendHostFrames();
+        }
+
+        async receiveGuestFrame(data: ArrayBuffer | ArrayBufferView): Promise<void> {
+          const bytes = data instanceof ArrayBuffer
+            ? new Uint8Array(data)
+            : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+          const plaintext = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: bytes.slice(4, 16) }, await encryptionKey, bytes.slice(16),
+          );
+          const frame = JSON.parse(new TextDecoder().decode(plaintext));
+          if (frame.t !== "ui-response" || frame.reqId !== 7 || readOnly) return;
+          await this.sendHostFrame({ t: "ui-request-end", reqId: 7 });
+          await this.sendHostFrame({
+            t: "event",
+            event: { type: "tool_execution_end", toolCallId: "media-ask-active", toolName: "ask",
+              result: { content: [{ type: "text", text: "answered" }] }, isError: false },
+          });
+          await this.sendHostFrame({
+            t: "entry",
+            entry: {
+              id: "synthetic-answer", parentId: null, timestamp: fixedNow, type: "message",
+              message: { role: "user", content: `Synthetic Ask answered: ${String(frame.value)}`, timestamp: fixedEpoch },
+            },
+          });
         }
 
         async sendHostFrame(frame: unknown): Promise<void> {
@@ -302,6 +336,15 @@ export async function installSyntheticProductFixture(
             },
             ...(readOnly ? [] : [assistantEntry]),
           ];
+          entries.unshift(...Array.from({ length: historyEntryCount }, (_, index) => ({
+            ...assistantEntry,
+            id: `synthetic-history-${index}`,
+            message: {
+              ...assistantEntry.message,
+              content: [{ type: "text", text: `Synthetic earlier entry ${index}` }],
+              stopReason: "stop",
+            },
+          })));
           const frames = [
             {
               t: "welcome",
@@ -347,11 +390,35 @@ export async function installSyntheticProductFixture(
             },
           ];
           for (const frame of readOnly ? frames.slice(0, 3) : frames) await this.sendHostFrame(frame);
+          if (streamedTranscript !== undefined) {
+            for (let end = 1; end <= streamedTranscript.length; end += 7) {
+              await this.sendHostFrame({
+                t: "event",
+                event: {
+                  type: "message_update",
+                  message: { ...assistantEntry.message, content: [{ type: "text", text: streamedTranscript.slice(0, end) }], stopReason: "stop" },
+                },
+              });
+              await new Promise(resolve => setTimeout(resolve, 5));
+            }
+            await this.sendHostFrame({
+              t: "event",
+              event: {
+                type: "message_update",
+                message: { ...assistantEntry.message, content: [{ type: "text", text: streamedTranscript }], stopReason: "stop" },
+              },
+            });
+          }
         }
       }
       Object.defineProperty(globalThis, "WebSocket", { configurable: true, value: AskWebSocket });
     },
-    { fixedNow: FIXED_NOW, keyBytes: [...roomKey], readOnly: options.readOnly ?? false, transcript: options.transcript, randomSeed: options.randomSeed },
+    {
+      fixedNow: FIXED_NOW, keyBytes: [...roomKey], readOnly: options.readOnly ?? false,
+      transcript: options.transcript, randomSeed: options.randomSeed,
+      historyEntryCount: options.historyEntryCount ?? 0, streamedTranscript: options.streamedTranscript,
+      answerRequests: options.answerRequests ?? false,
+    },
   );
 }
 

@@ -787,6 +787,21 @@ Windows x64 baseline native hashes identify official npm artifacts, not qualific
 Published v0.6.3 qualification stays bound to v18.3.0. This source update requires fresh exact
 signed-candidate qualification before any stable claim; unpublished v18.4.3 is not the baseline.
 
+**Embedded-client engineering update (2026-10-24):** Refresh only the embedded collab-web source
+and npm wire pin to v18.12.6 (`45c35e40c46166dc726ccc52f5d27f40f2449f99`). The host baseline
+remains v18.12.5 and minimum host remains 18.1.20. Adopt render coalescing/streaming-tail parsing
+(#14728), linear-time Markdown/math lexing (#13961/#14667), idle agent-drawer polling shutdown,
+and the eval renderer's printed table/JSON/Markdown views. Amend ADR-022's npm-parser choice: upstream's
+`startFrom` and source-context hooks require its fork, so vendor the six exact pure TypeScript
+pi-utils parser/list/math sources, retaining original Marked/Markdown and fork licences, rather
+than installing pi-utils or pi-natives. Retire upstream-provided MathML and npm-parser delimiter
+adapters with regression tests; carry every remaining gateway behavior. Adapt URL sanitization
+to the fork's literal href entities and source-tab expansion before the browser-URL allowlist.
+Keep explicit 150/300 Show earlier windowing and a monotonic live-transition epoch across
+coalesced renders. Use the gateway's PUA-only symbol face as a text-stack fallback without
+client font loading. This is a source integration, not signed-artifact or device qualification;
+published history is unchanged and rollback to v0.8.0 restores the older v18.4.2 client.
+
 **Engineering baseline update (2026-10-01):** Accept published mainline v18.4.8
 (`717f97f4d22b3d65c4a4eef6a744255d46f4d1a6`, tree `3f8ecdad21e55c5f47785ccfbd4f8c0528186976`) as the
 engineering pin. `packages/coding-agent/src/collab` and `packages/collab-web` are byte-identical to

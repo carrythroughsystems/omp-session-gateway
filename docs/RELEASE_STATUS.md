@@ -2508,6 +2508,19 @@ Recorded 2026-10-03. Published-byte smoke passed against the stable source and d
 
 This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
 
+## Embedded client v18.12.6 — source integration only
+
+On 2026-10-24, the independent browser client and npm wire pin advance from v18.4.2 to v18.12.6
+(`45c35e40c46166dc726ccc52f5d27f40f2449f99`). This includes render coalescing, streaming-tail
+Markdown and linear-time parser/math sources, idle drawer polling shutdown, and eval rendering.
+The host baseline fields stay v18.12.5 and the minimum host stays 18.1.20. Gateway security/UX
+patches are carried or explicitly retired where upstream provides them; exact provenance and
+dispositions are in `packages/collab-client/upstream/UPSTREAM.json`.
+
+This is not a new release, native-device qualification, signed-candidate result, or relay soak.
+Published v0.8.0 and all historical records below retain their original evidence. Rolling back
+to v0.8.0 also restores its v18.4.2 embedded client; the two trees no longer share client bytes.
+
 ## Engineering baseline v18.12.5 — source pins only
 
 On 2026-10-21 (#423), `scripts/upstream-pins.ts` derived the stock OMP v18.12.5 source pin

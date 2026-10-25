@@ -8,10 +8,9 @@
     "typecheck": "bunx tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@oh-my-pi/pi-wire": "18.4.2",
+    "@oh-my-pi/pi-wire": "18.12.6",
     "katex": "0.18.5",
     "lucide-react": "1.31.0",
-    "marked": "18.0.9",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   }

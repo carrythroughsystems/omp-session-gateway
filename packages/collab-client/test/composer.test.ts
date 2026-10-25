@@ -1,15 +1,60 @@
 import type { AssistantMessage, ImageContent, SessionEntry } from "@oh-my-pi/pi-wire";
-import { describe, expect, test } from "bun:test";
-import type { KeyboardEvent } from "react";
-import { photoPromptAcknowledged, shouldSubmitOnEnter } from "../upstream/src/components/shell/Composer";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createElement, type KeyboardEvent } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { Composer, type ComposerProps, photoPromptAcknowledged, shouldSubmitOnEnter } from "../upstream/src/components/shell/Composer";
 import { recommendedOptionIndex } from "../upstream/src/components/shell/ask-recommendation";
-import type { ActiveTool, GuestSnapshot } from "../upstream/src/lib/client";
+import { GuestClient, type ActiveTool, type GuestSnapshot } from "../upstream/src/lib/client";
+import { encodeBase64Url } from "../upstream/src/lib/link";
+import { installDomGlobals, restoreDomGlobals } from "./react-dom-harness";
 
 const QUESTION = "How should ADR-0036 proceed?";
 const OPTIONS = [
   { label: "Implement ADR-0036 locally", description: "Apply the compatibility fix in the gateway." },
   { label: "Wait for upstream", description: "Leave the current behavior unchanged." },
 ];
+
+function composerProps(uiRequest: ComposerProps["uiRequest"]): ComposerProps {
+  return {
+    client: new GuestClient(`roomroomroom1234#${encodeBase64Url(new Uint8Array(32))}`, "tester"),
+    phase: "live", readOnly: false, uiRequest, working: true, queuedMessageCount: 0,
+    entries: [], recommendedIndex: undefined, uiResponsePending: false, relayReady: true,
+  };
+}
+
+describe("upstream composer field contract", () => {
+  beforeEach(() => installDomGlobals());
+  afterEach(() => restoreDomGlobals());
+  test("renders selectable Ask responses for mobile guests", () => {
+    const html = renderToStaticMarkup(createElement(Composer, composerProps({
+      reqId: 1, kind: "select", title: "Continue?",
+      options: ["Yes", { label: "No", description: "Stop here" }], selectionMarker: "radio",
+    })));
+    expect(html).toContain("Continue?");
+    expect(html).toContain("Yes");
+    expect(html).toContain("Stop here");
+  });
+
+  test("renders a submit field for custom Ask responses", () => {
+    const html = renderToStaticMarkup(createElement(Composer, composerProps({
+      reqId: 2, kind: "editor", title: "Other", prefill: "draft",
+    })));
+    expect(html).toContain("Other");
+    expect(html).toContain("draft");
+    expect(html).toContain("Submit");
+  });
+
+  test("keeps the editor submit enabled for whitespace-only drafts", () => {
+    const html = renderToStaticMarkup(createElement(Composer, composerProps({
+      reqId: 3, kind: "editor", title: "Other", prefill: "   ",
+    })));
+    const submit = { found: false, disabled: false };
+    new HTMLRewriter().on('button[title="submit response"]', {
+      element(el) { submit.found = true; submit.disabled = el.hasAttribute("disabled"); },
+    }).transform(html);
+    expect(submit).toEqual({ found: true, disabled: false });
+  });
+});
 
 describe("composer Enter and composition guard", () => {
   for (const [key, shiftKey, isComposing, composing, expected] of [
@@ -99,6 +144,7 @@ function photoPromptEntry(id: string, text: string, image: ImageContent = PHOTO)
 function snapshot(overrides: Partial<GuestSnapshot> = {}): GuestSnapshot {
   return {
     phase: "live",
+    liveEpoch: 1,
     endedReason: null,
     header: null,
     entries: [],
