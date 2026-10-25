@@ -53,9 +53,9 @@ async function installProgressHarness(context: BrowserContext): Promise<void> {
       export function startCollabWithCapability(container, capability, onDispose, options = {}) {
         const harness = globalThis.__ompProgress;
         const forward = state => { harness.state = state; harness.publications += 1; options.onStateChange?.(state); };
-        // While held, the real client's own publications are recorded but not forwarded, so a
-        // synthetic case cannot be overwritten by a late client state change.
-        const publish = state => { if (harness.held) { harness.state = state; return; } forward(state); };
+        // Freeze the synthetic merge base as well as the forwarded state. A late real-client
+        // publication must not replace the injected fault before publish({}) advances its clock.
+        const publish = state => { if (!harness.held) forward(state); };
         harness.publish = patch => forward({ ...harness.state, ...patch });
         return start(container, capability, onDispose, { ...options, onStateChange: publish,
           takeInitialPromptDraft: globalThis.__ompTakeProgressDraft });
