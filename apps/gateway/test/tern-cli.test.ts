@@ -9,6 +9,7 @@ import type { TernProfile } from "../src/config.ts";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+const spawnTime = { monotonicMs: expect.any(Number), wallTimeMs: expect.any(Number) };
 const inspect = (id = "317827580031", extra = ""): string => `{"sessions":[{"tabs":[{"blocks":[{"id":${id},"command":"SYNTHETIC_COMMAND_SECRET"}]}]}],"panes":[{"pane":${id},"omp_session_file":"/SYNTHETIC_PATH_SECRET/2026-10-24T00-00-00-000Z_session-one.jsonl"}]${extra}}`;
 // Verbatim receipt observed from Tern 0.9.5 on the execution host.
 const realReceipt = `{
@@ -79,7 +80,14 @@ describe("bounded Tern subprocess", () => {
   test("uses literal argv, keep-open, canonical executable and only the configured environment", async () => {
     const fixture = await fake();
     const cli = new TernCli(fixture.executable);
-    expect(await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal)).toEqual({ kind: "started", blockId: "515396075522" });
+    const before = { monotonicMs: performance.now(), wallTimeMs: Date.now() };
+    const result = await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal);
+    expect(result).toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
+    if (result.kind !== "started") throw new Error("expected confirmed start");
+    expect(result.spawnedAt.monotonicMs).toBeGreaterThanOrEqual(before.monotonicMs);
+    expect(result.spawnedAt.monotonicMs).toBeLessThanOrEqual(performance.now());
+    expect(result.spawnedAt.wallTimeMs).toBeGreaterThanOrEqual(before.wallTimeMs);
+    expect(result.spawnedAt.wallTimeMs).toBeLessThanOrEqual(Date.now());
     const received = JSON.parse(await readFile(join(fixture.root, "received"), "utf8"));
     expect(received.argv).toEqual(["new", "tab", "--json", "--keep-open", "--cwd", fixture.copy.path, "--",
       await realpath(process.execPath), "$(SYNTHETIC_ARG_SECRET)", "literal;argument"]);
@@ -93,7 +101,7 @@ describe("bounded Tern subprocess", () => {
   test("accepts the verbatim pretty-printed three-key Tern 0.9.5 receipt", async () => {
     const fixture = await fake();
     expect(await new TernCli(fixture.executable).createTab(fixture.copy, fixture.profile, new AbortController().signal))
-      .toEqual({ kind: "started", blockId: "515396075522" });
+      .toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
   });
   test("discards bounded additive receipt metadata while preserving a lossless local block", async () => {
     for (const receipt of [
@@ -102,7 +110,7 @@ describe("bounded Tern subprocess", () => {
     ]) {
       const fixture = await fake("success", receipt);
       const result = await new TernCli(fixture.executable).createTab(fixture.copy, fixture.profile, new AbortController().signal);
-      expect(result).toEqual({ kind: "started", blockId: "9007199254740993" });
+      expect(result).toEqual({ kind: "started", blockId: "9007199254740993", spawnedAt: spawnTime });
       expect(JSON.stringify(result)).not.toContain("TERN_RECEIPT_PRIVATE_CANARY");
     }
   });
@@ -149,6 +157,6 @@ describe("bounded Tern subprocess", () => {
     controller.abort();
     expect(await pending).toEqual({ kind: "unknown" });
     expect(await cli.createTab(fixture.copy, { ...fixture.profile, env: { ...fixture.profile.env, MODE: "success" } }, new AbortController().signal))
-      .toEqual({ kind: "started", blockId: "515396075522" });
+      .toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
   });
 });

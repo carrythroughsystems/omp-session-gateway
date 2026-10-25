@@ -8,7 +8,7 @@ import {
 import { readPrivateTextFile, writePrivateTextFile, type GatewayConfig, type TernProfile, type TernWorkingCopy } from "./config.ts";
 import type { AdoptionObservation, HostPoller } from "./omp-registry.ts";
 import type { SessionRegistry } from "./registry.ts";
-import { TernCli, validateTernRuntime, parseTernJson, matchingTernBasename, sessionBasenameMatches, type TernCliBoundary } from "./tern-cli.ts";
+import { TernCli, validateTernRuntime, parseTernJson, matchingTernBasename, sessionBasenameMatches, type TernCliBoundary, type TernSpawnTime } from "./tern-cli.ts";
 
 const RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_LEDGER_BYTES = 512 * 1024;
@@ -113,6 +113,7 @@ export class SessionCreationService {
   #stopped = false;
   #chain: Promise<unknown> = Promise.resolve();
   #execution: Promise<void> | undefined;
+  #executionPending = false;
   #abort = new AbortController();
   #availability: { at: number; reason?: SessionCreationUnavailableReason } | undefined;
   #probing: Promise<SessionCreationUnavailableReason | undefined> | undefined;
@@ -168,7 +169,7 @@ export class SessionCreationService {
     if (!config) return "not_configured";
     if (!config.executable || !config.projects?.length || !config.profiles?.length) return "configuration_unavailable";
     if (this.#stopped) return "tern_unavailable";
-    if (this.#execution || (this.#availability && this.#clock.monotonic() - this.#availability.at < 5000)) {
+    if (this.#executionPending || this.#execution || (this.#availability && this.#clock.monotonic() - this.#availability.at < 5000)) {
       return this.#availability?.reason;
     }
     this.#probing ??= (async () => {
@@ -216,17 +217,23 @@ export class SessionCreationService {
       const operationId = parseSessionCreationUuid(this.#uuid());
       const operation: Operation = { owner, request, createdAt, expiresAt: new Date(Date.parse(createdAt) + RETENTION_MS).toISOString(),
         status: { operationId, state: "accepted", updatedAt: createdAt } };
-      await this.#commit([...retained, operation]);
-      const execution = this.#execute(operationId, copy, profile, acceptedAt)
-        .catch(async () => {
-          if (!this.#healthy || this.#stopped) return;
-          const state = this.#operations.find(operation => operation.status.operationId === operationId)!.status.state;
-          if (state === "accepted") await this.#transition(operationId, { state: "failed", error: "preflight_failed" });
-          else if (state === "launching") await this.#transition(operationId, { state: "outcome_unknown", error: "launch_outcome_unknown" });
-          else if (state === "awaiting_omp") await this.#transition(operationId, { state: "started_unavailable", error: "adoption_timeout" });
-        }).catch(() => { /* Failed durable finalization disables creation; never expose uncommitted state. */ })
-        .finally(() => { if (this.#execution === execution) this.#execution = undefined; });
-      this.#execution = execution;
+      // Reserve execution before disk I/O so an expired options cache cannot start a competing probe.
+      this.#executionPending = true;
+      try {
+        await this.#commit([...retained, operation]);
+        const execution = this.#execute(operationId, copy, profile, acceptedAt)
+          .catch(async () => {
+            if (!this.#healthy || this.#stopped) return;
+            const state = this.#operations.find(operation => operation.status.operationId === operationId)!.status.state;
+            if (state === "accepted") await this.#transition(operationId, { state: "failed", error: "preflight_failed" });
+            else if (state === "launching") await this.#transition(operationId, { state: "outcome_unknown", error: "launch_outcome_unknown" });
+            else if (state === "awaiting_omp") await this.#transition(operationId, { state: "started_unavailable", error: "adoption_timeout" });
+          }).catch(() => { /* Failed durable finalization disables creation; never expose uncommitted state. */ })
+          .finally(() => { if (this.#execution === execution) this.#execution = undefined; });
+        this.#execution = execution;
+      } finally {
+        this.#executionPending = false;
+      }
       return { status: 202, receipt: { operationId, state: "accepted" } };
     });
   }
@@ -252,6 +259,8 @@ export class SessionCreationService {
     const timer = setTimeout(() => deadlineAbort.abort(), Math.max(0, acceptedAt + 110_000 - this.#clock.monotonic()));
     const signal = AbortSignal.any([this.#abort.signal, deadlineAbort.signal]);
     try {
+      // A probe already in flight before the reservation must release the CLI slot first.
+      await this.#probing;
       await this.#runOperation(operationId, copy, profile, acceptedAt, signal);
       if (deadlineAbort.signal.aborted && !this.#abort.signal.aborted) {
         const state = this.#operations.find(operation => operation.status.operationId === operationId)!.status.state;
@@ -285,12 +294,11 @@ export class SessionCreationService {
     const blocks = new Set(inspection.blocks);
     await this.#transition(operationId, { state: "launching" });
     if (signal.aborted) return;
-    const launching = this.#operations.find(operation => operation.status.operationId === operationId)!;
-    const launchingAt = Date.parse(launching.status.updatedAt);
-    const spawnedAt = this.#clock.monotonic();
+    let spawnedAt: TernSpawnTime | undefined;
     let latest: AdoptionObservation | undefined;
     const unsubscribe = this.#dependencies.poller.subscribeObservations(observation => {
-      if (observation.startedAt > spawnedAt && observation.round > baseline.observation.round) latest = observation;
+      if (observation.round > baseline.observation.round &&
+          (spawnedAt === undefined || observation.startedAt > spawnedAt.monotonicMs)) latest = observation;
     });
     try {
       const result = await this.#cli.createTab(copy, profile, signal);
@@ -299,17 +307,21 @@ export class SessionCreationService {
       if (result.kind === "unknown" || blocks.has(result.blockId)) {
         await this.#transition(operationId, { state: "outcome_unknown", error: "launch_outcome_unknown" }); return;
       }
+      const actualSpawnedAt = result.spawnedAt;
+      spawnedAt = actualSpawnedAt;
       await this.#transition(operationId, { state: "awaiting_omp" }, result.blockId);
       let viewOnly = false;
       const refresh = await this.#dependencies.poller.refreshForAdoption({ signal, timeoutMs: Math.min(5000, deadline - this.#clock.monotonic()) });
-      if (refresh.status === "ok" && refresh.observation.startedAt > spawnedAt && refresh.observation.round > baseline.observation.round) latest = refresh.observation;
+      if (refresh.status === "ok" && refresh.observation.startedAt > actualSpawnedAt.monotonicMs && refresh.observation.round > baseline.observation.round) latest = refresh.observation;
+      // Includes batches received while createTab was still resolving executable paths or its receipt.
+      if (latest && latest.startedAt <= actualSpawnedAt.monotonicMs) latest = undefined;
       while (!signal.aborted && this.#clock.monotonic() < deadline) {
         const current = await this.#cli.inspect(profile, signal);
         if (signal.aborted) break;
         const file = current && matchingTernBasename(current, result.blockId);
         if (file && latest?.directoryHealthy) {
           const eligible = latest.hosts.filter(host => !instances.has(host.instanceId) && !sessions.has(host.sessionId) &&
-            host.startedAt >= launchingAt && host.createdAt >= launchingAt && sessionBasenameMatches(file, host.sessionId));
+            host.startedAt >= actualSpawnedAt.wallTimeMs && host.createdAt >= actualSpawnedAt.wallTimeMs && sessionBasenameMatches(file, host.sessionId));
           const bindings = new Map(eligible.map(host => [`${host.instanceId}\0${host.generation}`, host]));
           if (bindings.size > 1) { await this.#transition(operationId, { state: "started_unavailable", error: "correlation_ambiguous" }); return; }
           const host = bindings.values().next().value;

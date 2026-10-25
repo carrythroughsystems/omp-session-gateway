@@ -40,6 +40,8 @@ interface FixtureOptions {
   oldObservation?: boolean;
   refreshUnavailable?: boolean;
   baselineInspection?: TernInspection;
+  beforeSpawn?: boolean;
+  heldAcceptedCommit?: boolean;
 }
 async function fixture(options: FixtureOptions = {}) {
   let now = initialTime, monotonic = 1, uuidCall = 0, polls = 0, inspections = 0, creates = 0;
@@ -47,6 +49,10 @@ async function fixture(options: FixtureOptions = {}) {
   const writes: string[] = [];
   const completed = Promise.withResolvers<void>();
   const entered = Promise.withResolvers<void>();
+  const spawnGate = Promise.withResolvers<void>();
+  const commitGate = Promise.withResolvers<void>();
+  const probeGate = Promise.withResolvers<void>();
+  let commitHeld = false, inspecting = false, collisions = 0;
   const listeners = new Set<(batch: AdoptionObservation) => void>();
   const batch = (hosts: AdoptionObservation["hosts"]): AdoptionObservation => ({ round: polls, startedAt: monotonic,
     directoryHealthy: options.preflight !== false, knownInstanceIds: hosts.map(host => host.instanceId), hosts });
@@ -62,8 +68,13 @@ async function fixture(options: FixtureOptions = {}) {
     write: async text => {
       writes.push(text);
       if (writes.length === options.failWrite) { completed.resolve(); throw new Error(secret); }
-      contents = text;
       const state = JSON.parse(text).operations.at(-1)?.status.state;
+      if (state === "accepted" && options.heldAcceptedCommit) {
+        commitHeld = true; entered.resolve();
+        await commitGate.promise;
+        commitHeld = false;
+      }
+      contents = text;
       if (["ready", "failed", "started_unavailable", "outcome_unknown"].includes(state)) completed.resolve();
     },
   };
@@ -80,42 +91,116 @@ async function fixture(options: FixtureOptions = {}) {
           await held(signal); return { status: "aborted" };
         }
         if (polls > 1 && options.refreshUnavailable) return { status: "timed_out" };
-        const observation = batch(polls === 1 ? options.baseline ?? [] : options.hosts ?? [host]);
+        const observation = batch(polls === 1 ? options.baseline ?? [] : options.hosts ?? [{ ...host, startedAt: now, createdAt: now }]);
         for (const listener of listeners) listener(observation);
         return { status: "ok", observation };
       },
     },
     cli: {
       async inspect() {
-        inspections++;
-        if (inspections <= 2) return options.baselineInspection ?? empty; // availability, then preflight
-        if (options.lateMetadata && inspections >= 3 && inspections <= 5) {
-          return parseTernInspection(new TextEncoder().encode(
-            '{"sessions":[{"tabs":[{"blocks":[{"id":42}]}]}],"panes":[{"pane":42,"omp_session_file":null}]}',
-          ));
-        }
-        return options.inspection ?? target;
+        if (inspecting) { collisions++; return undefined; }
+        inspecting = true;
+        try {
+          if (options.heldAcceptedCommit && commitHeld) await probeGate.promise;
+          inspections++;
+          if (creates === 0) return options.baselineInspection ?? empty; // availability probes and preflight
+          if (options.lateMetadata && inspections >= 3 && inspections <= 5) {
+            return parseTernInspection(new TextEncoder().encode(
+              '{"sessions":[{"tabs":[{"blocks":[{"id":42}]}]}],"panes":[{"pane":42,"omp_session_file":null}]}',
+            ));
+          }
+          return options.inspection ?? target;
+        } finally { inspecting = false; }
       },
       async createTab(_copy, _profile, signal) {
         creates++;
         expect(JSON.parse(contents!).operations[0].status.state).toBe("launching");
+        if (options.beforeSpawn) { entered.resolve(); await spawnGate.promise; }
+        const spawnedAt = { monotonicMs: monotonic, wallTimeMs: now };
         if (options.earlyObservation) {
           polls++; monotonic++;
-          for (const listener of listeners) listener({ ...batch(options.hosts ?? [host]),
+          for (const listener of listeners) listener({ ...batch(options.hosts ?? [{ ...host, startedAt: now, createdAt: now }]),
             ...(options.oldObservation ? { startedAt: monotonic - 2 } : {}) });
         }
         if (options.heldSpawn) await held(signal);
-        return options.start ?? { kind: "started", blockId: "42" };
+        return options.start ?? { kind: "started", blockId: "42", spawnedAt };
       },
     },
   });
   const finish = async () => { await completed.promise; await service.stop(); };
   return { service, writes, finish, entered: entered.promise, get creates() { return creates; }, get contents() { return contents; },
+    completed: completed.promise, releaseSpawn: spawnGate.resolve, releaseCommit: commitGate.resolve, releaseProbe: probeGate.resolve,
+    get collisions() { return collisions; },
+    observe(hosts: AdoptionObservation["hosts"]) {
+      polls++; monotonic++;
+      for (const listener of listeners) listener(batch(hosts));
+    },
     get subscriptions() { return listeners.size; }, get inspections() { return inspections; },
     advance(ms: number) { now += ms; monotonic += ms; } };
 }
 
 describe("durable session creation transitions", () => {
+  test("rejects an observation from a pre-spawn CLI hold when the following fresh refresh times out", async () => {
+    const f = await fixture({ beforeSpawn: true, refreshUnavailable: true });
+    await f.service.accept("owner", request, () => true);
+    await f.entered;
+    f.observe([host]);
+    f.advance(1);
+    f.releaseSpawn();
+    await f.finish();
+    expect(f.service.status("owner", operationId)).toMatchObject({ state: "started_unavailable", error: "adoption_timeout" });
+  });
+  test("options during the accepted disk checkpoint cannot collide with operation execution", async () => {
+    const f = await fixture({ heldAcceptedCommit: true });
+    const admitted = f.service.accept("owner", request, () => true);
+    await f.entered;
+    f.advance(5001);
+    const options = f.service.options();
+    // Let a newly started availability probe reach its CLI await before releasing the disk checkpoint.
+    await Promise.resolve();
+    f.releaseCommit();
+    await admitted;
+    await f.completed;
+    f.releaseProbe();
+    await options;
+    await f.finish();
+    expect(f.service.status("owner", operationId)).toMatchObject({ state: "ready" });
+    expect(f.collisions).toBe(0);
+    expect(f.creates).toBe(1);
+  });
+  test("execution waits for a probe already in flight before its reservation", async () => {
+    const f = await fixture({ heldAcceptedCommit: true });
+    let options: Promise<unknown> | undefined;
+    const admitted = f.service.accept("owner", request, () => {
+      f.advance(5001);
+      options = f.service.options();
+      return true;
+    });
+    await f.entered;
+    await Promise.resolve();
+    f.releaseCommit();
+    await admitted;
+    expect(f.service.status("owner", operationId)?.state).toBe("accepted");
+    expect(f.collisions).toBe(0);
+    expect(f.creates).toBe(0);
+    f.releaseProbe();
+    await options;
+    await f.finish();
+    expect(f.service.status("owner", operationId)?.state).toBe("ready");
+    expect(f.collisions).toBe(0);
+  });
+  for (const olderField of ["startedAt", "createdAt"] as const) {
+    test(`rejects ${olderField} before actual spawn even when the observation round is fresh`, async () => {
+      const f = await fixture({ beforeSpawn: true,
+        hosts: [{ ...host, startedAt: initialTime + 2, createdAt: initialTime + 2, [olderField]: initialTime + 1 }] });
+      await f.service.accept("owner", request, () => true);
+      await f.entered;
+      f.advance(2);
+      f.releaseSpawn();
+      await f.finish();
+      expect(f.service.status("owner", operationId)).toMatchObject({ state: "started_unavailable", error: "adoption_timeout" });
+    });
+  }
   test("persists accepted then launching then awaiting then ready; carries no execution secrets", async () => {
     const f = await fixture({ earlyObservation: true, refreshUnavailable: true });
     expect(await f.service.accept(" Owner@EXAMPLE.COM ", request, () => true)).toEqual({ status: 202, receipt: { operationId, state: "accepted" } });
@@ -128,6 +213,7 @@ describe("durable session creation transitions", () => {
     expect(f.writes.join()).not.toContain("/synthetic");
     expect(f.writes.join()).not.toContain("session-one.jsonl");
     expect(f.writes.join()).not.toContain("capability");
+    expect(f.writes.join()).not.toContain("spawnedAt");
   });
   test("coalesces concurrent identity-scoped duplicates without charging admission or respawning", async () => {
     const f = await fixture(); let charges = 0;

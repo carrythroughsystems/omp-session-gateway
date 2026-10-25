@@ -132,8 +132,12 @@ export function sessionBasenameMatches(basename: string, sessionId: string): boo
   return basename.endsWith(".jsonl") && /^[A-Za-z0-9-]+$/u.test(sessionId) &&
     tokens.includes(sessionId);
 }
+export interface TernSpawnTime {
+  readonly monotonicMs: number;
+  readonly wallTimeMs: number;
+}
 export type TernCreateResult = { readonly kind: "not_started" } | { readonly kind: "unknown" } |
-  { readonly kind: "started"; readonly blockId: string };
+  { readonly kind: "started"; readonly blockId: string; readonly spawnedAt: TernSpawnTime };
 export interface TernCliBoundary {
   inspect(profile: TernProfile, signal: AbortSignal): Promise<TernInspection | undefined>;
   createTab(copy: TernWorkingCopy, profile: TernProfile, signal: AbortSignal): Promise<TernCreateResult>;
@@ -159,7 +163,7 @@ export class TernCli implements TernCliBoundary {
   #busy = false;
   constructor(readonly executable: string, readonly timeouts = { inspect: 5000, create: 10_000 }) {}
   async #run(args: readonly string[], profile: TernProfile, signal: AbortSignal, bound: number, timeout: number): Promise<
-    { kind: "not_started" } | { kind: "unknown" } | { kind: "output"; bytes: Uint8Array }> {
+    { kind: "not_started" } | { kind: "unknown" } | { kind: "output"; bytes: Uint8Array; spawnedAt: TernSpawnTime }> {
     if (this.#busy || signal.aborted) return { kind: "not_started" };
     this.#busy = true;
     let child: Bun.Subprocess<"ignore", "pipe", "ignore"> | undefined;
@@ -171,6 +175,7 @@ export class TernCli implements TernCliBoundary {
       const executable = await realpath(this.executable);
       if (signal.aborted) return { kind: "not_started" };
       child = Bun.spawn([executable, ...args], { env: { ...profile.env }, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+      const spawnedAt = { monotonicMs: performance.now(), wallTimeMs: Date.now() };
       reader = child.stdout.getReader();
       signal.addEventListener("abort", kill, { once: true });
       timer = setTimeout(kill, timeout);
@@ -189,7 +194,7 @@ export class TernCli implements TernCliBoundary {
       const bytes = new Uint8Array(length);
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-      return { kind: "output", bytes };
+      return { kind: "output", bytes, spawnedAt };
     } catch {
       if (child) kill();
       return { kind: child ? "unknown" : "not_started" };
@@ -217,7 +222,7 @@ export class TernCli implements TernCliBoundary {
       for (const key of ["session", "tab"]) {
         if (Object.hasOwn(receipt, key)) unsignedTernId(receipt[key]);
       }
-      return { kind: "started", blockId: localTernId(receipt.block) };
+      return { kind: "started", blockId: localTernId(receipt.block), spawnedAt: result.spawnedAt };
     } catch { return { kind: "unknown" }; }
   }
 }
