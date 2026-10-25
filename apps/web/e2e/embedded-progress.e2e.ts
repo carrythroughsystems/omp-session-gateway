@@ -15,6 +15,7 @@ interface ProgressHarness {
   state: CollabEmbedState | null;
   publish(patch: Partial<CollabEmbedState>): void;
   observer?: MutationObserver;
+  held?: boolean;
 }
 interface ProgressGlobals {
   __ompProgress: ProgressHarness;
@@ -51,8 +52,11 @@ async function installProgressHarness(context: BrowserContext): Promise<void> {
       import { startCollabWithCapability as start } from ${JSON.stringify(original.href)};
       export function startCollabWithCapability(container, capability, onDispose, options = {}) {
         const harness = globalThis.__ompProgress;
-        const publish = state => { harness.state = state; harness.publications += 1; options.onStateChange?.(state); };
-        harness.publish = patch => publish({ ...harness.state, ...patch });
+        const forward = state => { harness.state = state; harness.publications += 1; options.onStateChange?.(state); };
+        // While held, the real client's own publications are recorded but not forwarded, so a
+        // synthetic case cannot be overwritten by a late client state change.
+        const publish = state => { if (harness.held) { harness.state = state; return; } forward(state); };
+        harness.publish = patch => forward({ ...harness.state, ...patch });
         return start(container, capability, onDispose, { ...options, onStateChange: publish,
           takeInitialPromptDraft: globalThis.__ompTakeProgressDraft });
       }
@@ -203,6 +207,8 @@ test("chunked join and reconnect announce progress once, and Control accepts but
 test("progress floors and clamps percentages, clears null, and yields to forbidden, ended and sustained outages", async ({ context, page }) => {
   const fixture = await setup(context, page);
   try {
+    // Hold the real client's own publications so a late one cannot overwrite a synthetic case.
+    await page.evaluate(() => { (globalThis as typeof globalThis & ProgressGlobals).__ompProgress.held = true; });
     for (const [received, total, suffix] of [
       [3, 7, " 42%"], [-10, 100, " 0%"], [150, 100, " 100%"],
       [Number.MAX_VALUE, Number.MIN_VALUE, " 100%"], [1, 0, ""], [1, -1, ""],
@@ -215,6 +221,7 @@ test("progress floors and clamps percentages, clears null, and yields to forbidd
     }
     await page.evaluate(() => (globalThis as typeof globalThis & ProgressGlobals).__ompProgress.publish({ loading: null }));
     await expect(page.locator(".conn-chip")).toHaveText("Connecting…");
+    await page.evaluate(() => { (globalThis as typeof globalThis & ProgressGlobals).__ompProgress.held = false; });
     await chunk(page, 100, true);
     await expect(page.locator(".conn-chip")).toHaveText("Connected");
     await page.evaluate(() => {
