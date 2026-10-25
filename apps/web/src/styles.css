@@ -8,7 +8,8 @@
    steps, never decoration. One accent per state: emerald = live, amber =
    needs-you/privileged, red = unauthorized. Spacing on a 4px grid. */
 
-:root {
+:root,
+body:not(.collab-shell-active) {
   color-scheme: dark;
   --ground: #060809;
   --raised: #0b0e11;
@@ -53,6 +54,15 @@ body {
   margin: 0;
   min-height: 100dvh;
   background: var(--ground);
+}
+
+/* The client's global reset is loaded while a request still overlays the directory. Keep the
+   gateway's dark context and scroll surface; only the embedded shell adopts client typography. */
+body:not(.collab-shell-active) {
+  height: auto;
+  overflow: auto;
+  font-size: 1rem;
+  line-height: normal;
 }
 
 a {
@@ -1127,6 +1137,7 @@ body.collab-shell-active {
   min-width: 0;
   overflow: hidden;
   background: var(--ground);
+  font: 400 13.5px / 1.5 var(--font-ui, var(--font-sans));
 }
 
 .gateway-shell > #root {

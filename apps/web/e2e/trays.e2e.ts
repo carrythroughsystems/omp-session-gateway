@@ -57,6 +57,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       expect(await tray.locator('[data-panel="alerts"]').evaluate(element => (element as HTMLElement).inert && element.getAttribute("aria-hidden") === "true")).toBe(true);
       await expect.poll(async () => tray.evaluate(element => element.getAnimations().length)).toBe(0);
       await capture("alert-detail");
+      expect(await tray.locator('[data-panel="detail"] .tray-body').evaluate(element => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
       expect(Math.abs(heights["alert-detail"]! - heights["background-alerts"]!)).toBeGreaterThanOrEqual(24);
       const targets = await tray.locator('.tray-panel:not([inert]) button, .detail-option').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
       expect(targets.every(height => height >= 48)).toBe(true);
@@ -113,6 +114,8 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await capture("request-connecting");
       releaseLaunch();
       await expect(tray.locator("#root .sh-app")).toHaveCount(1);
+      await expect(page.locator("body")).toHaveCSS("background-color", "rgb(6, 8, 9)");
+      await expect(page.locator("body")).toHaveCSS("font-size", "16px");
       await expect(page.locator(".sh-ask-send")).toBeEnabled();
       await expect.poll(async () => tray.evaluate(element => element.getAnimations().length)).toBe(0);
       await capture("request-mounted");

@@ -116,6 +116,10 @@ class FakeElement extends EventTarget {
     return this.children.filter(child => child.tagName !== "#text").length;
   }
 
+  get offsetHeight(): number {
+    return this.className === "tray-grip" ? 24 : 300;
+  }
+
   append(...nodes: (FakeElement | string)[]): void {
     for (const node of nodes) {
       const child = typeof node === "string" ? new FakeElement("#text", node) : node;

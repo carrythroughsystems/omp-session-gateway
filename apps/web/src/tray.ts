@@ -102,14 +102,15 @@ export function createTray(host: HTMLDialogElement) {
     }
     entry.element.style.minHeight = "";
     entry.element.style.maxHeight = "none";
-    let height = entry.element.getBoundingClientRect().height;
+    // Layout height, not the transformed bounding box: an entering panel starts at scale(.96).
+    let height = entry.element.offsetHeight;
     if (adjacent !== undefined && Math.abs(height - adjacent.height) < 24) {
       height = adjacent.height + 24;
       entry.element.style.minHeight = `${height}px`;
     }
     entry.height = height;
     entry.element.style.maxHeight = "";
-    host.style.height = `${Math.min(viewportHeight() - 16, height + grip.getBoundingClientRect().height + 2)}px`;
+    host.style.height = `${Math.min(viewportHeight() - 16, height + grip.offsetHeight + 2)}px`;
   };
   const build = (panel: TrayPanel): PanelEntry => {
     const element = document.createElement("section");
