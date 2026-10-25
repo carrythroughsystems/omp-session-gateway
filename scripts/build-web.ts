@@ -2,6 +2,7 @@ import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promis
 import { createHash } from "node:crypto";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import nerdSymbols from "../apps/web/src/fonts/nerd-symbols/manifest.json";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const webSource = join(root, "apps", "web", "src");
@@ -75,7 +76,27 @@ const webBuild = await buildEntrypoint(join(webSource, "app.ts"), join(temporary
 const webScriptSource = webBuild.find(path => extname(path) === ".js");
 if (webScriptSource === undefined) throw new Error("web build did not emit JavaScript");
 const webScript = await moveHashedAsset(webScriptSource, "app");
-const stylesheetSource = await readFile(join(webSource, "styles.css"));
+const lazyAssets: string[] = [];
+const fontFaces: string[] = [];
+for (const chunk of nerdSymbols.chunks) {
+  const content = await readFile(join(webSource, "fonts", "nerd-symbols", chunk.file));
+  const filename = `nerd-symbols-${basename(chunk.file, ".woff2")}.${digest(content)}.woff2`;
+  const url = `/assets/${filename}`;
+  await writeFile(join(assetRoot, filename), content);
+  lazyAssets.push(url);
+  fontFaces.push(`@font-face {
+  font-family: "${nerdSymbols.family}";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("${url}") format("woff2");
+  unicode-range: ${chunk.unicodeRange};
+}`);
+}
+const stylesheetSource = `${await readFile(join(webSource, "styles.css"), "utf8")}
+/* Generated: Nerd Font symbol subset (see apps/web/src/fonts/nerd-symbols/manifest.json) */
+${fontFaces.join("\n\n")}
+`;
 const stylesheet = `/assets/app.${digest(stylesheetSource)}.css`;
 await writeFile(join(outputRoot, stylesheet.slice(1)), stylesheetSource);
 
@@ -110,6 +131,7 @@ const shellAssets = [webScript, stylesheet, clientModule, clientStylesheet];
 const cacheName = `omp-sessions-shell-${digest(shellAssets.join("\0"))}`;
 const workerBuild = await buildEntrypoint(join(webSource, "service-worker.ts"), join(temporaryRoot, "worker"), {
   __SHELL_ASSETS__: JSON.stringify(shellAssets),
+  __LAZY_ASSETS__: JSON.stringify(lazyAssets),
   __CACHE_NAME__: JSON.stringify(cacheName),
 });
 const workerSource = workerBuild.find(path => basename(path) === "service-worker.js");

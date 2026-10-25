@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
+import nerdSymbols from "../apps/web/src/fonts/nerd-symbols/manifest.json";
 
 export const PRODUCT_VERSION = "0.8.0";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -11,6 +12,8 @@ const defaultReleaseRoot = join(root, "dist", "release");
 const archiveBase = `omp-session-gateway-${PRODUCT_VERSION}-bun`;
 const BUNDLED_WORKSPACES = ["apps/gateway", "apps/web", "packages/collab-client"] as const;
 const COLLAB_WEB_LICENSE_PATH = "licenses/collab-web/LICENSE";
+const NERD_FONT_LICENSE_PATH = "licenses/fonts/nerd-fonts/LICENSE";
+const NERD_FONT_ICON_SETS_PATH = "licenses/fonts/nerd-fonts/ICON_SETS.md";
 
 export interface ArchiveFile {
   readonly path: string;
@@ -503,6 +506,21 @@ export function createSpdxSbom(
       "Copyright (c) 2025 Mario Zechner\nCopyright (c) 2025-2026 Can Bölük\nCopyright (c) 2026 Stencil Labs, Inc.",
     sourceInfo: `Vendored from ${client.commit} (${client.tag}) with local modifications documented in THIRD_PARTY_NOTICES.md`,
   };
+  // The font file is MIT, but its glyph sets carry their own terms (licenses/fonts/nerd-fonts/ICON_SETS.md):
+  // the concluded expression names every one of them, so the machine-readable SBOM says what the notices say.
+  const nerdFontPackage = {
+    name: nerdSymbols.family,
+    SPDXID: "SPDXRef-Vendored-Nerd-Font-Symbols",
+    versionInfo: nerdSymbols.source.version,
+    downloadLocation: `https://github.com/${nerdSymbols.source.project}/releases/download/${nerdSymbols.source.version}/${nerdSymbols.source.archive}`,
+    filesAnalyzed: false,
+    licenseConcluded: `${nerdSymbols.source.license} AND Apache-2.0 AND CC-BY-4.0 AND OFL-1.1 AND OFL-1.1-RFN AND Unlicense`,
+    licenseDeclared: nerdSymbols.source.license,
+    licenseComments: `License text: ${NERD_FONT_LICENSE_PATH}; icon-set licenses (Codicons and Font Awesome CC BY 4.0, Material Design Icons Apache-2.0, Weather Icons OFL-1.1, Pomicons OFL-1.1-RFN, Font Logos Unlicense, remaining sets MIT) with CC BY 4.0 attributions: ${NERD_FONT_ICON_SETS_PATH}`,
+    copyrightText: "Copyright (c) 2014 Ryan L McIntyre",
+    checksums: [{ algorithm: "SHA256", checksumValue: nerdSymbols.source.sha256.toUpperCase() }],
+    sourceInfo: `PUA-only WOFF2 subsets of ${nerdSymbols.source.face}; local modifications documented in THIRD_PARTY_NOTICES.md`,
+  };
 
   return `${JSON.stringify(
     {
@@ -515,7 +533,7 @@ export function createSpdxSbom(
         created: source.created,
         creators: ["Tool: omp-session-gateway deterministic release builder"],
       },
-      packages: [rootPackage, collabWebPackage, ...dependencies],
+      packages: [rootPackage, collabWebPackage, nerdFontPackage, ...dependencies],
       relationships: [
         {
           spdxElementId: "SPDXRef-DOCUMENT",
@@ -526,6 +544,11 @@ export function createSpdxSbom(
           spdxElementId: rootPackage.SPDXID,
           relationshipType: "CONTAINS",
           relatedSpdxElement: collabWebPackage.SPDXID,
+        },
+        {
+          spdxElementId: rootPackage.SPDXID,
+          relationshipType: "CONTAINS",
+          relatedSpdxElement: nerdFontPackage.SPDXID,
         },
         ...dependencies.map(dependency => ({
           spdxElementId: rootPackage.SPDXID,
@@ -712,6 +735,8 @@ async function buildRelease(): Promise<void> {
     const files = await archiveFiles(staging);
     for (const file of files) {
       if (file.path.endsWith(".map")) throw new Error("release archive must not contain source maps");
+      // WOFF2 is binary font data, not a text sink for collaboration capabilities.
+      if (file.path.endsWith(".woff2")) continue;
       const text = file.content.toString("utf8");
       if (findCapabilityLeaks(text).length > 0) {
         throw new Error(`release archive contains a capability-shaped value: ${file.path}`);

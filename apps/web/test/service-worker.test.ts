@@ -9,6 +9,7 @@ const GLOBAL_NAMES = [
   "navigator",
   "registration",
   "__SHELL_ASSETS__",
+  "__LAZY_ASSETS__",
   "__CACHE_NAME__",
   "skipWaiting",
 ] as const;
@@ -21,15 +22,17 @@ const cacheAdds: string[][] = [];
 const cacheDeletes: string[] = [];
 const cachePuts: string[] = [];
 const fetched: string[] = [];
+const cachedResponses = new Map<string, Response>();
 const cache = {
   async addAll(paths: readonly string[]): Promise<void> {
     cacheAdds.push([...paths]);
   },
-  async match(): Promise<Response | undefined> {
-    return undefined;
+  async match(request: { url: string }): Promise<Response | undefined> {
+    return cachedResponses.get(request.url)?.clone();
   },
-  async put(request: { url: string }): Promise<void> {
+  async put(request: { url: string }, response: Response): Promise<void> {
     cachePuts.push(request.url);
+    cachedResponses.set(request.url, response.clone());
   },
 };
 const caches = {
@@ -151,6 +154,7 @@ Object.defineProperties(globalThis, {
   },
   location: { configurable: true, value: { origin: "https://sessions.example" } },
   __SHELL_ASSETS__: { configurable: true, value: ["/assets/app.0123456789ab.js"] },
+  __LAZY_ASSETS__: { configurable: true, value: ["/assets/nerd-symbols-md-01.0123456789ab.woff2"] },
   __CACHE_NAME__: { configurable: true, value: "omp-sessions-shell-current" },
 });
 
@@ -667,7 +671,7 @@ describe("notification service worker", () => {
     expect(fetched).toEqual([]);
   });
 
-  test("caches only the shell, activates without navigating any client, and keeps fetch exclusions", async () => {
+  test("precaches only the shell, activates without navigating any client, and keeps fetch exclusions", async () => {
     // Chromium reports each window's creation URL, not the route it later reached through the
     // history API. An idle directory, a pending launch, and a live `/client/` collaboration therefore
     // all look like `/` to the worker, and none of them may be navigated.
@@ -724,5 +728,40 @@ describe("notification service worker", () => {
     expect(await shellResponse).toBeInstanceOf(Response);
     expect(fetched).toEqual([shellRequest.url]);
     expect(cachePuts).toEqual([shellRequest.url]);
+  });
+
+  test("caches lazy fonts on first use without precaching or intercepting unlisted fonts", async () => {
+    cacheAdds.length = 0;
+    cachePuts.length = 0;
+    fetched.length = 0;
+    cachedResponses.clear();
+    let installCompletion: Promise<void> | undefined;
+    listener("install")({ waitUntil(promise: Promise<void>): void { installCompletion = promise; } });
+    await installCompletion;
+    expect(cacheAdds).toEqual([["/assets/app.0123456789ab.js"]]);
+    expect(fetched).toEqual([]);
+    expect(cachedResponses.size).toBe(0);
+
+    const request = {
+      method: "GET",
+      mode: "same-origin",
+      url: "https://sessions.example/assets/nerd-symbols-md-01.0123456789ab.woff2",
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let response: Promise<Response> | undefined;
+      listener("fetch")({ request, respondWith(promise: Promise<Response>): void { response = promise; } });
+      expect(await (await response)?.text()).toBe("asset");
+      expect(fetched).toEqual([request.url]);
+      expect(cachePuts).toEqual([request.url]);
+    }
+
+    let responded = false;
+    listener("fetch")({
+      request: { ...request, url: "https://sessions.example/assets/other.woff2" },
+      respondWith(): void { responded = true; },
+    });
+    expect(responded).toBeFalse();
+    expect(fetched).toEqual([request.url]);
+    expect(cachePuts).toEqual([request.url]);
   });
 });

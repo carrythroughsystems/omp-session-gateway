@@ -329,7 +329,8 @@ Additional requirements:
 - all metadata rendered as text, never unsanitized HTML;
 - strip control/bidi characters or display them safely in titles/paths;
 - cap label length and session count;
-- service worker caches only queryless, content-hashed static shell files (the app shell plus the pinned collaboration-client module and stylesheet — never a capability-bearing response) and explicitly bypasses cross-origin requests, `/api/`, `/internal/`, `/client/`, `/collab/`, `/update/`, navigation, query-bearing URLs, and all non-GET requests;
+- service worker caches only explicitly listed, queryless, content-hashed static assets (the precached app shell plus the pinned collaboration-client module and stylesheet, and first-party-served Private Use Area font chunks cached lazily on first use — never a capability-bearing response) and explicitly bypasses cross-origin requests, `/api/`, `/internal/`, `/client/`, `/collab/`, `/update/`, navigation, query-bearing URLs, and all non-GET requests;
+- text uses system/local fonts; the only bundled web font is a self-hosted Symbols Nerd Font Mono subset for Private Use Area glyphs, loaded from the gateway under the existing `default-src 'self'` policy with no remote font requests;
 - service worker Push handling accepts exact `attention`/`clear`/`activity_stop` envelopes, uses one per-instance tag, updates only the bounded app badge count, and never fetches or receives a collaboration capability;
 - transient directory transport failure retains the last authenticated metadata only in volatile page memory, marks it stale with the last-fresh timestamp, and disables no actions solely because SSE disconnected; authorization failure clears it;
 - no capability in Redux/React Query persistence, devtools globals, error boundaries, replay tools, performance marks, history state, or directory snapshots;

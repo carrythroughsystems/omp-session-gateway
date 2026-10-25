@@ -209,9 +209,12 @@ function isSameDeliveryTarget(subscription: StoredPushSubscription, other: Store
   );
 }
 
+/** OS notification surfaces cannot load the dashboard's symbol font, so Nerd Font icons (Private Use Area) leave the body. */
+const PRIVATE_USE_PATTERN = /[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]+ ?/gu;
+
 function sessionNotificationBody(session: SessionMetadata, detailLevel: PushDetailLevel): string | undefined {
   if (detailLevel === "private") return undefined;
-  const labels = [session.title, session.cwdLabel].filter(
+  const labels = [session.title, session.cwdLabel].map(value => value?.replace(PRIVATE_USE_PATTERN, "").trim()).filter(
     (value, index, values): value is string =>
       value !== undefined && value.length > 0 && values.indexOf(value) === index,
   );

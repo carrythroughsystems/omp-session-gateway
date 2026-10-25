@@ -126,7 +126,7 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
   const document = JSON.parse(createSpdxSbom(lock, deterministicSource, client, lockSha256)) as {
     documentNamespace: string;
     creationInfo: { created: string };
-    packages: Array<{ name: string; versionInfo: string; licenseDeclared: string; sourceInfo?: string }>;
+    packages: Array<{ name: string; versionInfo: string; licenseDeclared: string; licenseConcluded?: string; sourceInfo?: string }>;
   };
   expect(document.documentNamespace).toBe(
     `https://github.com/carrythroughsystems/omp-session-gateway/sbom/${PRODUCT_VERSION}/${"a".repeat(40)}`,
@@ -135,12 +135,16 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
   expect(document.packages.map(pkg => `${pkg.name}@${pkg.versionInfo}`)).toEqual([
     `omp-session-gateway@${PRODUCT_VERSION}`,
     "@oh-my-pi/collab-web@16.3.6",
+    "Symbols Nerd Font Mono@v3.5.1",
     ...expectedRuntimeDependencies,
   ]);
   expect(document.packages[0]?.sourceInfo).toContain(lockSha256);
   expect(document.packages.find(pkg => pkg.name === "@oh-my-pi/collab-web")?.sourceInfo).toContain(client.commit);
   expect(document.packages.find(pkg => pkg.name === "lucide-react")?.licenseDeclared).toBe("ISC");
   expect(document.packages.find(pkg => pkg.name === "react")?.licenseDeclared).toBe("MIT");
+  const font = document.packages.find(pkg => pkg.name === "Symbols Nerd Font Mono");
+  expect(font?.licenseDeclared).toBe("MIT");
+  expect(font?.licenseConcluded).toBe("MIT AND Apache-2.0 AND CC-BY-4.0 AND OFL-1.1 AND OFL-1.1-RFN AND Unlicense");
 
   const otherSourceDocument = JSON.parse(
     createSpdxSbom(lock, releaseSourceFromEpoch("c".repeat(40), "1700000000"), client, lockSha256),

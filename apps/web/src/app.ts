@@ -91,6 +91,7 @@ const TRANSPORT_GUIDANCE_DELAY_MS = 45_000;
 const LOCAL_ACTION_UNDO_MS = 5_000;
 const HELD_ASKS_STORAGE_KEY = HELD_KEY;
 const DISMISSED_SESSIONS_STORAGE_KEY = DISMISSED_KEY;
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 type TransportFailureKind = "offline" | "tailnet" | "desktop" | "gateway";
 
 interface PendingDismissToast extends SessionRef {
@@ -733,6 +734,66 @@ function sessionTitle(session: SessionMetadata): string {
   return session.title || session.cwdLabel || "OMP session";
 }
 
+/** Nerd Font icons (Private Use Area) in OMP titles. Tern lifts a leading icon into a tile beside the title; so does the directory. */
+const GLYPH_RUN_PATTERN = /[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]+/gu;
+const LEADING_GLYPH_PATTERN = /^[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]+ ?/u;
+
+type SessionTileState = "working" | "idle" | "unknown" | "waiting" | "held";
+
+/** Text with every icon run spoken as a space; empty when the label was icons only. */
+function spokenText(value: string): string {
+  return value.replace(GLYPH_RUN_PATTERN, " ").replace(/\s+/gu, " ").trim();
+}
+
+/** The title text after its leading icon; the icon belongs to the tile. */
+function titleText(session: SessionMetadata): string {
+  return sessionTitle(session).replace(LEADING_GLYPH_PATTERN, "") || spokenText(session.cwdLabel ?? "") || "OMP session";
+}
+
+/** Icon tile: the title's leading Nerd Font icon, else a monogram, with the session's state as a badge. */
+function createSessionTile(session: SessionMetadata, state?: SessionTileState): HTMLElement {
+  const tile = createTextElement("span", "session-tile", "");
+  tile.setAttribute("aria-hidden", "true");
+  // One icon cell only: a host-controlled run of icons never grows past the tile.
+  const icon = [...(LEADING_GLYPH_PATTERN.exec(sessionTitle(session))?.[0] ?? "")][0];
+  tile.append(icon === undefined
+    ? createTextElement("span", "tile-monogram", [...titleText(session)][0]?.toLocaleUpperCase() ?? "")
+    : createTextElement("span", "glyph", icon));
+  if (state !== undefined) tile.dataset.state = state;
+  return tile;
+}
+
+/** Renders the title text; any icon run inside it still draws as an icon cell with a terminal's padding space folded into the cell gap. */
+function createTitleElement(tagName: string, className: string, session: SessionMetadata): HTMLElement {
+  const element = createTextElement(tagName, className, "");
+  const title = titleText(session);
+  let index = 0;
+  for (const match of title.matchAll(GLYPH_RUN_PATTERN)) {
+    if (match.index > index) element.append(title.slice(index, match.index));
+    const glyph = createTextElement("span", "glyph", match[0]);
+    glyph.setAttribute("aria-hidden", "true");
+    element.append(glyph);
+    index = match.index + match[0].length;
+    if (title[index] === " ") index += 1;
+  }
+  if (index < title.length) element.append(title.slice(index));
+  return element;
+}
+
+/** The title for accessible names, the document title, and other surfaces that cannot draw icon cells. */
+function spokenTitle(session: SessionMetadata): string {
+  return spokenText(sessionTitle(session)) || spokenText(session.cwdLabel ?? "") || "OMP session";
+}
+
+function activityState(session: SessionMetadata): SessionTileState {
+  return session.busy === true ? "working" : session.busy === false ? "idle" : "unknown";
+}
+
+/** Host names only discriminate when more than one host is in view. */
+function hostVisible(): boolean {
+  return sources.size > 1 && selectedScope === "all";
+}
+
 function localRecordKey(ref: Pick<SessionRef, "sourceKey" | "instanceId">, suffix: string | number): string {
   return `${sessionKey(ref)}\0${suffix}`;
 }
@@ -978,8 +1039,12 @@ function elapsedLabel(startedAt: number): string {
   if (elapsedMinutes < 1) return "<1m";
   if (elapsedMinutes < 60) return `${elapsedMinutes}m`;
   const hours = Math.floor(elapsedMinutes / 60);
-  const minutes = elapsedMinutes % 60;
-  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+  if (hours < 24) {
+    const minutes = elapsedMinutes % 60;
+    return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+  }
+  const days = Math.floor(hours / 24);
+  return hours % 24 === 0 ? `${days}d` : `${days}d ${hours % 24}h`;
 }
 
 function waitingLabel(session: SessionMetadata): string {
@@ -1048,11 +1113,50 @@ function createQueueKicker(label: string, detail?: string): HTMLElement {
   return kicker;
 }
 
+/** One metadata line of discrete facts; each fact stays whole and the line wraps between facts. */
+function createRowMeta(facts: readonly (readonly [className: string, value: string | undefined])[]): HTMLElement | undefined {
+  const meta = document.createElement("span");
+  meta.className = "row-meta";
+  for (const [className, value] of facts) {
+    if (value !== undefined && value.length > 0) meta.append(createTextElement("span", `fact ${className}`, value));
+  }
+  return meta.childElementCount > 0 ? meta : undefined;
+}
+
+/** Where a session runs: its host (only while several are in view) and its project, unless the title already is the project. */
+function contextFacts(session: SessionMetadata): (readonly [className: string, value: string | undefined])[] {
+  return [
+    ["host-label", hostVisible() ? hostLabel(session) : undefined],
+    ["working-context", session.cwdLabel === sessionTitle(session) ? undefined : session.cwdLabel],
+  ];
+}
+
 function createSessionSummary(session: SessionMetadata): HTMLElement {
-  const values = [hostLabel(session), session.cwdLabel, session.model].filter(
-    (value): value is string => value !== undefined && value.length > 0,
-  );
-  return createTextElement("p", "session-summary", values.join(" · ") || "Live OMP session");
+  return createRowMeta([
+    ...contextFacts(session),
+    ["working-model", session.model === undefined ? undefined : modelSlug(session.model)],
+  ]) ?? createTextElement("span", "row-meta", "Live OMP session");
+}
+
+function createHideIcon(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
+  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("width", "20");
+  svg.setAttribute("height", "20");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+  for (const [name, attributes] of [
+    ["path", { d: "M2.6 10c1.9-3 4.4-4.5 7.4-4.5s5.5 1.5 7.4 4.5c-1.9 3-4.4 4.5-7.4 4.5S4.5 13 2.6 10Z", "stroke-linejoin": "round" }],
+    ["circle", { cx: "10", cy: "10", r: "2.4" }],
+    ["path", { d: "M4.5 15.5l11-11", "stroke-linecap": "round" }],
+  ] as const) {
+    const shape = document.createElementNS(SVG_NAMESPACE, name);
+    shape.setAttribute("stroke", "currentColor");
+    shape.setAttribute("stroke-width", "1.6");
+    for (const [attribute, value] of Object.entries(attributes)) shape.setAttribute(attribute, value);
+    svg.append(shape);
+  }
+  return svg;
 }
 
 async function closeHeldAskNotification(held: HeldAsk): Promise<void> {
@@ -1182,32 +1286,26 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   button.dataset.instanceId = session.instanceId;
   button.dataset.sourceKey = session.sourceKey;
   button.disabled = !session.canView || !sourceFresh(session.sourceKey);
-  button.setAttribute("aria-label", `View ${sessionTitle(session)}`);
+  button.setAttribute("aria-label", `View ${spokenTitle(session)}`);
   const copy = document.createElement("span");
   copy.className = "working-copy";
-  const details = document.createElement("span");
-  details.className = "working-details";
-  details.append(
-    createTextElement("span", "host-label", hostLabel(session)),
-    createTextElement("span", "row-time", uptimeLabel(session)),
-    createTextElement("span", "session-activity", session.busy === true ? "· Working" : session.busy === false ? "· Idle" : "· Activity unknown"),
-  );
-  if (session.cwdLabel) {
-    details.append(createTextElement("span", "working-context", `· ${session.cwdLabel}`));
-  }
-  if (session.model) {
-    details.append(createTextElement("span", "working-model", `· ${modelSlug(session.model)}`));
-  }
-  copy.append(createTextElement("span", "row-title", sessionTitle(session)), details);
-  button.append(createTextElement("span", "row-dot row-dot-live", ""), copy);
+  copy.append(createTitleElement("span", "row-title", session));
+  const details = createRowMeta([
+    ...contextFacts(session),
+    ["session-activity", session.busy === true ? "Working" : session.busy === false ? "Idle" : "Activity unknown"],
+    ["row-time", uptimeLabel(session)],
+    ["working-model", session.model === undefined ? undefined : modelSlug(session.model)],
+  ]);
+  if (details !== undefined) copy.append(details);
+  button.append(createSessionTile(session, activityState(session)), copy);
   button.addEventListener("click", () => void launch(session, "view", button));
 
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "dismiss-session";
-  dismiss.textContent = "Hide";
   dismiss.title = "Hide on this device — the OMP process keeps running";
-  dismiss.setAttribute("aria-label", `Hide ${sessionTitle(session)} on this device`);
+  dismiss.setAttribute("aria-label", `Hide ${spokenTitle(session)} on this device`);
+  dismiss.append(createHideIcon());
   dismiss.addEventListener("click", () => dismissSession(session));
   frame.append(button, dismiss);
   return frame;
@@ -1223,13 +1321,15 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
   button.disabled = !sourceFresh(session.sourceKey) || (mode === "control" ? !session.canControl : !session.canView);
   button.setAttribute(
     "aria-label",
-    session.canControl ? `Open request in ${sessionTitle(session)}` : `View ${sessionTitle(session)}`,
+    session.canControl ? `Open request in ${spokenTitle(session)}` : `View ${spokenTitle(session)}`,
   );
   const copy = document.createElement("span");
   copy.className = "row-copy";
-  copy.append(createTextElement("span", "row-title", sessionTitle(session)), createTextElement("span", "host-label", hostLabel(session)));
+  copy.append(createTitleElement("span", "row-title", session));
+  const meta = createRowMeta(contextFacts(session));
+  if (meta !== undefined) copy.append(meta);
   button.append(
-    createTextElement("span", "row-dot row-dot-waiting", ""),
+    createSessionTile(session, "waiting"),
     copy,
     createTextElement("span", "row-time", waitingLabel(session)),
     createTextElement("span", "row-chevron", "›"),
@@ -1251,12 +1351,14 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   open.type = "button";
   open.className = "held-open";
   open.disabled = !sourceFresh(session.sourceKey) || (mode === "control" ? !session.canControl : !session.canView);
-  open.setAttribute("aria-label", `Open held request in ${sessionTitle(session)}`);
+  open.setAttribute("aria-label", `Open held request in ${spokenTitle(session)}`);
   const copy = document.createElement("span");
   copy.className = "row-copy";
-  copy.append(createTextElement("span", "row-title", sessionTitle(session)), createTextElement("span", "host-label", hostLabel(session)));
+  copy.append(createTitleElement("span", "row-title", session));
+  const meta = createRowMeta(contextFacts(session));
+  if (meta !== undefined) copy.append(meta);
   open.append(
-    createTextElement("span", "row-dot row-dot-held", ""),
+    createSessionTile(session, "held"),
     copy,
     createTextElement("span", "row-time", waitingLabel(session)),
   );
@@ -1268,7 +1370,7 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   requeue.type = "button";
   requeue.className = "held-requeue";
   requeue.textContent = "Requeue";
-  requeue.setAttribute("aria-label", `Return ${sessionTitle(session)} to the queue`);
+  requeue.setAttribute("aria-label", `Return ${spokenTitle(session)} to the queue`);
   requeue.addEventListener("click", () => requeueHeldSession(session));
   row.append(open, requeue);
   return row;
@@ -1293,6 +1395,7 @@ function renderAllClear(
 ): void {
   const summary = document.createElement("div");
   summary.className = "all-clear-summary";
+  summary.dataset.complete = String(scopeComplete());
   const alertsLive = notificationState === "enabled" && (sources.size === 1 || selectedScope === localKey);
   const message = document.createElement("div");
   message.className = "all-clear-message";
@@ -1363,11 +1466,13 @@ function renderWaitingQueue(
         ),
       );
     }
-    article.append(
-      createTextElement("h2", "", sessionTitle(hero)),
-      createSessionSummary(hero),
-      askPreview,
-    );
+    const identity = document.createElement("div");
+    identity.className = "hero-identity";
+    const heading = document.createElement("div");
+    heading.className = "row-copy";
+    heading.append(createTitleElement("h2", "", hero), createSessionSummary(hero));
+    identity.append(createSessionTile(hero, "waiting"), heading);
+    article.append(identity, askPreview);
 
     const primary = document.createElement("button");
     primary.type = "button";
@@ -1920,7 +2025,7 @@ function enterCollabClient(
   back.className = "shell-back";
   back.textContent = "← Sessions";
   back.addEventListener("click", () => history.back());
-  const title = createTextElement("span", "shell-title", sessionTitle(session));
+  const title = createTitleElement("span", "shell-title", session);
   const control = document.createElement("button");
   control.type = "button";
   control.className = "shell-control";
@@ -1938,9 +2043,13 @@ function enterCollabClient(
   const shellActions = document.createElement("span");
   shellActions.className = "shell-actions";
   shellActions.append(control, connection);
+  const headingCopy = document.createElement("span");
+  headingCopy.className = "shell-heading-copy";
+  headingCopy.append(title);
+  if (sources.size > 1) headingCopy.append(createTextElement("span", "host-label shell-host", hostLabel(session)));
   const heading = document.createElement("span");
   heading.className = "shell-heading";
-  heading.append(title, createTextElement("span", "host-label shell-host", hostLabel(session)));
+  heading.append(createSessionTile(session), headingCopy);
   bar.append(back, heading, shellActions);
 
   const container = document.createElement("div");
@@ -1990,7 +2099,7 @@ function enterCollabClient(
   }
   document.body.className = "collab-shell-active";
   document.body.replaceChildren(shell);
-  document.title = `${sessionTitle(session)} · OMP Sessions`;
+  document.title = `${spokenTitle(session)} · OMP Sessions`;
 
   const shellState: ActiveCollabShell = {
     sourceKey: session.sourceKey,

@@ -26,7 +26,20 @@ it is idle with no pending launch, routed notification, or mounted collaboration
 
 The dashboard receives metadata only. It must not render transcripts, prefetch capabilities, or implement the OMP collaboration protocol.
 
-The service worker may cache only immutable versioned application-shell assets. It must bypass `/api/`, `/client/`, launch responses, and collaboration navigation. Use no third-party runtime scripts, fonts, analytics, or CDNs.
+The service worker precaches only immutable, versioned application-shell assets. Content-hashed,
+first-party-served Symbols Nerd Font Mono chunks cover only Private Use Area glyphs; they are
+downloaded lazily by `unicode-range`, cached on first use in the shell cache, and served cache-first
+thereafter. It must bypass `/api/`, `/client/`, launch responses, and collaboration navigation.
+Use no third-party runtime scripts, remote fonts, analytics, or CDNs.
+
+Text keeps system/local font stacks; the symbols use the Mono face's uniform one-em advance and
+never replace ordinary Unicode characters. Regenerate the vendored Nerd Fonts v3.5.1 subsets with
+`bun scripts/vendor-nerd-symbols.ts` (fontTools with Brotli and `pyftsubset` on `PATH`;
+`FONTTOOLS_PYTHON` can select its Python environment). The script downloads and SHA-256-verifies
+the pinned archive, or accepts `--source <directory>` for an already-extracted copy. Deterministic
+chunks contain at most 160 populated BMP PUA glyphs or 768 plane-15 glyphs each; the build hashes
+their bytes and appends their `@font-face` rules without changing the shell precache list.
+See `licenses/fonts/nerd-fonts/` and `THIRD_PARTY_NOTICES.md` for licenses and icon-set attributions.
 
 ## Multiple configured hosts
 
