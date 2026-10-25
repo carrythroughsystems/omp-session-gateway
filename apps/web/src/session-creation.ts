@@ -140,7 +140,11 @@ export class SessionCreationController {
     if (step === "host") {
       body.append(text("p", "Choose the execution host. OMP will start in Tern there."));
       for (const source of this.deps.sources()) {
-        const choice = button(source.label, () => { this.source = source; void this.loadOptions(true); });
+        const choice = button(source.label, () => {
+          if (this.source !== source) { this.draft = ""; this.deps.discardDraft(); }
+          this.source = source;
+          void this.loadOptions(true);
+        });
         choice.setAttribute("aria-pressed", String(this.source === source));
         body.append(choice);
       }
@@ -199,6 +203,9 @@ export class SessionCreationController {
         const valid = validInitialPromptDraft(draft.value);
         create.disabled = !valid;
         draft.setAttribute("aria-invalid", String(!valid));
+        note.textContent = valid
+          ? "Up to 8,000 characters. Kept only in this page; added to the Control composer, never sent automatically."
+          : "First task is too long. Keep it within 8,000 characters and 32 KiB before creating.";
         // Invalid input stays only in its textarea, never in the tracking intent or shell holder.
         this.draft = valid ? draft.value : "";
       };
@@ -301,7 +308,7 @@ export class SessionCreationController {
 
   private paused(copy = "Stopped watching. The command may still be starting on the host."): void {
     const body = document.createElement("div");
-    body.append(text("p", copy), button("Check creation", () => void this.watch(false), true),
+    body.append(text("p", `Creation on ${this.intent?.source.label ?? this.source!.label}. ${copy}`), button("Check creation", () => void this.watch(false), true),
       button("Start another session", () => { this.draft = ""; this.startChoices(); }));
     this.panel("terminal", "Stopped watching", body);
   }

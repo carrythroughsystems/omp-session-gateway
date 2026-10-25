@@ -229,6 +229,7 @@ test("lost acknowledgement and background resume use only explicit Check, with i
 });
 
 test("revision mismatch refreshes valid choices and requires another explicit Create", async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 915 });
   const fixture = await startDashboardFixture([]);
   fixture.configureCreation({ revisionMismatchOnce: true, states: [{ state: "failed", error: "preflight_failed" }] });
   try {
@@ -246,6 +247,46 @@ test("revision mismatch refreshes valid choices and requires another explicit Cr
     await panel(page, "terminal");
     expect(fixture.creationRequests).toHaveLength(2);
     expect(fixture.creationRequests[0]!.clientOperationId).not.toBe(fixture.creationRequests[1]!.clientOperationId);
+  } finally { await fixture.stop(); }
+});
+
+test("slow options and status responses cannot reopen a closed wizard or launch in the background", async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 915 });
+  const fixture = await startDashboardFixture([]);
+  fixture.configureCreation({ readySession, delayMs: { options: 300, status: 500 }, states: [{ state: "ready" }] });
+  try {
+    await page.goto(fixture.origin);
+    await page.locator("#new-session").click();
+    await expect(page.locator("#tray")).toHaveAttribute("data-panel", "creation-progress");
+    await page.getByRole("button", { name: "Close New session", exact: true }).click();
+    await expect(page.locator("#tray")).toBeHidden();
+    await expect.poll(() => fixture.requests.filter(request => request.endsWith("/session-creation-options")).length).toBe(1);
+    await review(page);
+    const draft = page.getByRole("textbox", { name: "First task (optional)" });
+    await draft.fill("a".repeat(8_001));
+    await expect(page.getByRole("button", { name: "Create and open Control", exact: true })).toBeDisabled();
+    await expect(draft).toHaveAttribute("aria-invalid", "true");
+    await capture(page, fixture, "draft-too-long");
+    await draft.fill(TASK);
+    await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
+    await expect.poll(() => fixture.requests.filter(request => request.startsWith("GET /api/v1/session-creations/")).length).toBe(1);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(page.locator("#tray")).toBeHidden();
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    // The fixture publishes only when the delayed status response completes.
+    await expect(page.locator(".working-row")).toBeVisible();
+    expect(fixture.launchRequests).toHaveLength(0);
+    await page.locator("#new-session").click();
+    await panel(page, "terminal");
+    expect(fixture.creationRequests).toHaveLength(1);
+    await page.getByRole("button", { name: "Close Stopped watching", exact: true }).click();
+    await privateSinks(page, fixture);
   } finally { await fixture.stop(); }
 });
 

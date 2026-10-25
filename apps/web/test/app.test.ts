@@ -1077,6 +1077,55 @@ describe("source-bound session creation", () => {
     expect(validInitialPromptDraft("𐐀".repeat(8_001))).toBeFalse();
     expect(validInitialPromptDraft("a".repeat(8_001))).toBeFalse();
   });
+
+  test("a failed pre-mount launch retries the same binding with its draft, while explicit Close discards it", async () => {
+    for (const close of [false, true]) {
+      let launches = 0;
+      const ready = session("created-retry-0001");
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], suffix: `creation-open-retry-${close}`,
+        creationResponse: async (path, init) => Response.json(path.endsWith("options") ? choices
+          : init.method === "POST" ? { operationId, state: "accepted" }
+            : { operationId, state: "ready", updatedAt: new Date().toISOString(), session: { instanceId: ready.instanceId, generation: 1 } }),
+        launchResponse: async () => ++launches === 1 ? new Response(null, { status: 503 }) : Response.json({
+          generation: 1, mode: "control", capability: ["CREATION", "CANARY", "0000000000000000"].join("__"),
+        }),
+      });
+      await open(harness);
+      seed(harness, "SYNTHETIC_RETRY_DRAFT");
+      harness.setList(2, [ready]);
+      click(harness, "Create and open Control");
+      await settleUntil(() => launches === 1 && harness.elements.trayHost.dataset.panel === "creation-terminal", 200);
+      if (close) {
+        currentPanel(harness).querySelector(".tray-leading")!.dispatchEvent(new Event("click"));
+        harness.window.runTimersWithDelay(350);
+        document.querySelector("#new-session")!.dispatchEvent(new Event("click"));
+      }
+      click(harness, "Check creation");
+      await settleUntil(() => harness.embedCalls.length === 1, 200);
+      expect(harness.embedCalls[0]!.takeInitialPromptDraft?.()).toBe(close ? undefined : "SYNTHETIC_RETRY_DRAFT");
+      expect(harness.fetchPaths.filter(path => path === "/api/v1/session-creations")).toHaveLength(1);
+      harness.window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
+  test("readable creation authorization loss clears the source and stops tracking", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [session("creation-forbidden-01")], suffix: "creation-forbidden",
+      creationResponse: async (path, init) => path.endsWith("options") ? Response.json(choices)
+        : init.method === "POST" ? Response.json({ operationId, state: "accepted" }) : new Response(null, { status: 403 }),
+    });
+    await open(harness);
+    seed(harness, "SYNTHETIC_REVOKED_DRAFT");
+    click(harness, "Create and open Control");
+    await settleUntil(() => harness.elements.statusBanner.dataset.kind === "unauthorized", 100);
+    expect(harness.elements.trayHost.open).toBeFalse();
+    expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
+    expect(harness.launchRequests).toHaveLength(0);
+    expect(harness.pendingDelays()).not.toContain(1_000);
+    expect(JSON.stringify([...harness.localStorage.values])).not.toContain("SYNTHETIC_REVOKED_DRAFT");
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
 });
 
 describe("dashboard attention and notifications", () => {
