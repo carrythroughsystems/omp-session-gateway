@@ -76,7 +76,9 @@ describe("lossless bounded Tern metadata", () => {
   });
 });
 
-describe("bounded Tern subprocess", () => {
+// The fake Tern executable is a shebang script, which Windows cannot execute directly; Tern session
+// creation is exercised on POSIX hosts only (docs/OPERATIONS.md), so the subprocess boundary is too.
+describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
   test("uses literal argv, keep-open, canonical executable and only the configured environment", async () => {
     const fixture = await fake();
     const cli = new TernCli(fixture.executable);

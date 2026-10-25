@@ -936,7 +936,9 @@ export async function writePrivateTextFile(
     }
     if (process.platform === "win32") await applyWindowsAcl(path, false);
     else await chmod(path, 0o600);
-    if (options.syncDirectory === true) {
+    // Windows cannot fsync a directory handle (EPERM); the file sync plus the atomic rename or link
+    // is the strongest checkpoint NTFS offers, so the directory sync applies to POSIX only.
+    if (options.syncDirectory === true && process.platform !== "win32") {
       const directory = await open(dirname(path), "r");
       try {
         await directory.sync();

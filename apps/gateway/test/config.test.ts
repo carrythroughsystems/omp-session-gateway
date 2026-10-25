@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import {
   type ConfigOverrides,
@@ -48,7 +48,7 @@ describe("opt-in Tern configuration", () => {
     for (const value of [null, { ...tern, [secret]: true }, { ...tern, executable: "relative" },
       { ...tern, executable: "/bad\0path" }, { ...tern, projects: [] }, { ...tern, profiles: [profile, profile] },
       { ...tern, profiles: [{ ...profile, env: { PATH: "/bin" } }] },
-      { ...tern, profiles: [{ ...profile, env: { HOME: "/home", PATH: "/bin:" } }] },
+      { ...tern, profiles: [{ ...profile, env: { HOME: "/home", PATH: `/bin${delimiter}` } }] },
       { ...tern, profiles: [{ ...profile, env: { HOME: "/home", PATH: "relative" } }] },
       { ...tern, profiles: [{ ...profile, env: { ...profile.env, lowercase: secret } }] },
       { ...tern, profiles: [{ ...profile, argv: ["/omp", "x".repeat(1025)] }] },
