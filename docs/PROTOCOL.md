@@ -444,8 +444,10 @@ hash; restart invalidates old options for new admissions. Configuration is immut
 that lifetime. Unavailable options still return `200`, with `projects: []`, `profiles: []`,
 and one closed `SessionCreationUnavailableReason`: `not_configured`, `tern_unavailable`,
 `configuration_unavailable`, or `ledger_unavailable`. Never expose paths, argv, or env.
-Absence of `tern` means unavailable, not an automatic default. A browser treats `404` from an
-older gateway as unavailable, not as permission to guess creation support from client-config.
+Absence of `tern` reports `not_configured`, not an automatic default; an authored empty
+`tern: {}` is preserved but reports `configuration_unavailable`. A nonempty partial recipe is
+rejected during configuration parsing. A browser treats `404` from an older gateway as
+unavailable, not as permission to guess creation support from client-config.
 Availability probes are bounded/coalesced and cached for five seconds; during creation they
 reuse cached availability rather than starting a competing inspector.
 

@@ -149,6 +149,11 @@ Ordinary discovery and View/Control launch do not depend on Tern. Configure only
 **execution host** running OMP as the same OS user; a remote pane belongs to that host's
 gateway, not a local terminal inspector on the viewing device.
 
+An authored `"tern": {}` is accepted and preserved verbatim but remains unavailable with
+`configuration_unavailable`; absence instead reports `not_configured`. A nonempty section
+must supply the complete `executable`, `projects`, and `profiles` recipe; partial recipes are
+rejected rather than filled from defaults.
+
 **Trust disclosure:** enabling `tern` lets allowed identities, including JavaScript from every
 configured `http.trustedDashboardOrigins` dashboard, create processes from these profiles.
 This is stronger trust than reading metadata or opening an already-running session. Removing
@@ -188,7 +193,7 @@ Add a section such as this to the private `config.json`; all paths below are syn
   symlink/alias is rejected, not silently followed. Executable symlinks are resolved to their
   canonical executable regular-file target for invocation without rewriting authored config.
   No `~`, shell expansion, shell wrappers, browser-selected paths, or task text in argv.
-- **Configuration bounds:** 1–16 projects; 1–8 working copies per project; 1–8 profiles.
+- **Nonempty configuration bounds:** 1–16 projects; 1–8 working copies per project; 1–8 profiles.
   IDs match `^[a-z][a-z0-9-]{0,31}$` (`local` is allowed here), unique per collection and per
   project's copies; labels use fleet normalization (NFC, controls/bidi stripped, trimmed,
   1–64 code points). `tern.executable` is at most 4,096 UTF-8 bytes. Each profile has 1–32
