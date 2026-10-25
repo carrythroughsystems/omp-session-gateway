@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { relaySocketCount, startDashboardFixture, type DashboardFixture } from "./fixture-server";
-import { GATEWAY_WAITING, GATEWAY_WORKING, INITIAL_SESSIONS, installSyntheticProductFixture } from "./synthetic-product-fixture";
+import { GATEWAY_WAITING, GATEWAY_WORKING, INITIAL_SESSIONS, RELEASE_WAITING, installSyntheticProductFixture } from "./synthetic-product-fixture";
 
 async function assertPrivate(page: Page, fixture: DashboardFixture): Promise<void> {
   const residue = await page.evaluate(async () => ({
@@ -348,4 +348,198 @@ test("withdrawn request access stays in the tray and an open keyboard leaves its
     await page.locator(".sh-composer-input").fill("Keyboard-safe draft");
     await assertPrivate(page, fixture);
   } finally { await fixture.stop(); }
+});
+
+test("request lifecycle: a delayed successor inherits the promoted shell", async ({ page, context }, info) => {
+  test.skip(!info.project.name.startsWith("pixel"));
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([GATEWAY_WAITING, RELEASE_WAITING], { roomKey: key });
+  const intercepted = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  try {
+    await installSyntheticProductFixture(context, key);
+    await page.goto(fixture.origin);
+    await page.locator(".action-request").click();
+    await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+    const previousSocket = await page.evaluateHandle(() =>
+      (globalThis as typeof globalThis & { __ompSyntheticSocket: { readyState: number } }).__ompSyntheticSocket);
+    await page.route(`**/sessions/${RELEASE_WAITING.instanceId}/launch`, async route => {
+      const response = await route.fetch();
+      intercepted.resolve();
+      await release.promise;
+      await route.fulfill({ response }).catch(() => undefined);
+    });
+    await page.locator(".triage-action").click();
+    await intercepted.promise;
+    await page.getByRole("button", { name: "Expand to full screen", exact: true }).click();
+    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    release.resolve();
+    await expect.poll(() => relaySocketCount(page)).toBe(2);
+    await expect(page.locator("body > .gateway-shell > #root .sh-app")).toHaveCount(1);
+    await expect(page.locator(".shell-title")).toHaveText("Release qualification");
+    await expect(page.locator("#tray[open]")).toHaveCount(0);
+    expect(await previousSocket.evaluate(socket => socket.readyState)).toBe(3);
+    expect(await page.evaluate(() =>
+      (globalThis as typeof globalThis & { __ompSyntheticSocket: { readyState: number } }).__ompSyntheticSocket.readyState)).toBe(1);
+    await assertPrivate(page, fixture);
+    await page.goBack();
+    await expect(page.locator("#session-list")).toBeVisible();
+    await expect(page.locator("#root")).toHaveCount(0);
+  } finally { release.resolve(); await page.close(); await fixture.stop(); }
+});
+
+test("request lifecycle: replacing a growing request permits another promotion", async ({ page, context }, info) => {
+  test.skip(!info.project.name.startsWith("pixel"));
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([GATEWAY_WAITING, RELEASE_WAITING], { roomKey: key });
+  const intercepted = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  try {
+    await installSyntheticProductFixture(context, key);
+    await page.goto(fixture.origin);
+    await page.locator(".action-request").click();
+    await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+    await expect.poll(() => page.locator("#tray").evaluate(element => element.getAnimations().length)).toBe(0);
+    const historyLength = await page.evaluate(() => history.length);
+    await page.clock.install();
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Animation.enable");
+    await cdp.send("Animation.setPlaybackRate", { playbackRate: 0.1 });
+    await page.route(`**/sessions/${RELEASE_WAITING.instanceId}/launch`, async route => {
+      const response = await route.fetch();
+      intercepted.resolve();
+      await release.promise;
+      await route.fulfill({ response }).catch(() => undefined);
+    });
+    await page.locator(".triage-action").click();
+    await intercepted.promise;
+    await page.locator(".tray-expand").evaluate(element => (element as HTMLButtonElement).click());
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "full");
+    release.resolve();
+    await expect(page.locator('#tray .tray-panel:not([inert]) h2')).toHaveText("Release qualification");
+    await cdp.send("Animation.setPlaybackRate", { playbackRate: 1 });
+    await page.clock.runFor(500);
+    await expect(page.locator("#tray")).toHaveAttribute("data-layout", "expanded");
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    const replacementRoot = await page.locator("#root").elementHandle();
+    await page.getByRole("button", { name: "Expand to full screen", exact: true }).click();
+    await page.clock.runFor(500);
+    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    expect(await replacementRoot!.evaluate(element => element === document.querySelector("body > .gateway-shell > #root"))).toBe(true);
+    expect(await page.evaluate(() => history.length)).toBe(historyLength + 1);
+    expect(await page.evaluate(() => history.state)).toEqual({ ompCollab: true });
+    await page.goBack();
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    await expect(page.locator("#session-list")).toBeVisible();
+    await assertPrivate(page, fixture);
+  } finally { release.resolve(); await page.close(); await fixture.stop(); }
+});
+
+test("request lifecycle: snapshot withdrawal cancels a compact request", async ({ page, context }, info) => {
+  test.skip(!info.project.name.startsWith("pixel"));
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([GATEWAY_WAITING], { roomKey: key });
+  const intercepted = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const delivered = Promise.withResolvers<void>();
+  try {
+    await installSyntheticProductFixture(context, key);
+    await page.goto(fixture.origin);
+    await page.route("**/launch", async route => {
+      const response = await route.fetch();
+      intercepted.resolve();
+      await release.promise;
+      await route.fulfill({ response }).catch(() => undefined);
+      delivered.resolve();
+    });
+    await page.locator(".action-request").click();
+    await intercepted.promise;
+    await expect(page.locator(".request-status")).toHaveText("Connecting…");
+    fixture.setListFailure("forbidden");
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "unauthorized");
+    await expect(page.locator("#tray")).toBeHidden();
+    await expect(page.locator("#status-banner")).toHaveText("This tailnet identity is not authorized.");
+    await page.locator("#settings").click();
+    await expect(page.locator("#tray")).toHaveAttribute("data-panel", "alerts");
+    release.resolve();
+    await delivered.promise;
+    await expect(page.locator("#root")).toHaveCount(0);
+    expect(await relaySocketCount(page)).toBe(0);
+    await expect(page.locator("#tray")).toHaveAttribute("data-panel", "alerts");
+    await assertPrivate(page, fixture);
+  } finally { release.resolve(); await page.close(); await fixture.stop(); }
+});
+
+test("request lifecycle: delayed bfcache resume yields to a foreground launch", async ({ page, context }, info) => {
+  test.skip(!info.project.name.startsWith("pixel"));
+  const key = randomBytes(32);
+  const working = { ...GATEWAY_WORKING, instanceId: "foreground-choice-0001", title: "Foreground choice" };
+  const home = await startDashboardFixture([GATEWAY_WAITING, working], { roomKey: key });
+  const away = await startDashboardFixture([INITIAL_SESSIONS[1]!], { roomKey: key });
+  home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], []);
+  away.configureFleet("Away", [], [home.origin]);
+  const intercepted = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const delivered = Promise.withResolvers<void>();
+  try {
+    await installSyntheticProductFixture(context, key);
+    await page.goto(home.origin);
+    await expect(page.locator(".working-row")).toHaveCount(2);
+    await page.locator(".action-request").click();
+    await expect(page.locator("#tray #root .sh-app")).toHaveCount(1);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await expect(page.locator("#root .sh-app")).toHaveCount(0);
+    await page.route(`${away.origin}/api/v1/sessions`, async route => {
+      const response = await route.fetch();
+      intercepted.resolve();
+      await release.promise;
+      await route.fulfill({ response }).catch(() => undefined);
+      delivered.resolve();
+    });
+    const localRefresh = page.waitForResponse(`${home.origin}/api/v1/sessions`);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await intercepted.promise;
+    await (await localRefresh).finished();
+    await page.getByRole("button", { name: "View Foreground choice", exact: true }).click();
+    await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice");
+    const foregroundRoot = await page.locator("#root").elementHandle();
+    release.resolve();
+    await delivered.promise;
+    // The resumed snapshot and its continuation settle before checking that no POST was sent.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(home.launchRequests.map(request => request.instanceId)).toEqual([GATEWAY_WAITING.instanceId, working.instanceId]);
+    await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice");
+    expect(await foregroundRoot!.evaluate(element => element === document.querySelector("#root"))).toBe(true);
+    expect(await relaySocketCount(page)).toBe(2);
+    await assertPrivate(page, home);
+    await assertPrivate(page, away);
+  } finally { release.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
+});
+
+test("request lifecycle: keyboard close restores request focus across row refresh", async ({ page, context }, info) => {
+  test.skip(!info.project.name.startsWith("pixel"));
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([GATEWAY_WAITING], { roomKey: key });
+  try {
+    await installSyntheticProductFixture(context, key);
+    await page.goto(fixture.origin);
+    await page.locator(".action-request").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#tray #root .sh-app")).toHaveCount(1);
+    fixture.upsert({ ...GATEWAY_WAITING, model: "fixture/focus-restored" });
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#tray")).toBeHidden();
+    await expect(page.locator(".queue-hero")).toContainText("focus-restored");
+    await expect(page.locator(".action-request")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#tray #root .sh-app")).toHaveCount(1);
+    fixture.remove(GATEWAY_WAITING.instanceId, GATEWAY_WAITING.generation);
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#root")).toHaveCount(0);
+    await expect(page.locator(".action-request")).toHaveCount(0);
+    await expect(page.locator("#directory-title")).toBeFocused();
+    await expect(page.locator("#directory-title")).toHaveCSS("outline-style", "none");
+    await assertPrivate(page, fixture);
+  } finally { await page.close(); await fixture.stop(); }
 });

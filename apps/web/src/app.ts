@@ -60,7 +60,8 @@ function requiredElement<ElementType extends Element>(selector: string): Element
 const sessionList = requiredElement<HTMLElement>("#session-list");
 const emptyState = requiredElement<HTMLElement>("#empty-state");
 const statusBanner = requiredElement<HTMLElement>("#status-banner");
-const tray = createTray(requiredElement<HTMLDialogElement>("#tray"));
+const trayHost = requiredElement<HTMLDialogElement>("#tray");
+const tray = createTray(trayHost);
 const recoveryPanel = requiredElement<HTMLElement>("#recovery-panel");
 const notificationButton = requiredElement<HTMLButtonElement>("#notify");
 const notificationDisclosure = requiredElement<HTMLElement>("#notify-note");
@@ -958,10 +959,17 @@ async function probeSource(key: SourceKey, signal: AbortSignal): Promise<Snapsho
 
 function cancelLaunch(source?: SourceKey): void {
   if (pendingLaunch === undefined || (source !== undefined && pendingLaunch.ref.sourceKey !== source)) return;
-  pendingLaunch.settled = true;
-  if (pendingLaunch.deadline !== undefined) window.clearTimeout(pendingLaunch.deadline);
-  pendingLaunch.controller.abort();
+  const cancelled = pendingLaunch;
+  cancelled.settled = true;
+  if (cancelled.deadline !== undefined) window.clearTimeout(cancelled.deadline);
+  cancelled.controller.abort();
   pendingLaunch = undefined;
+  if (cancelled.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
+    // Compact requests have not displaced the directory. Dismiss without re-entering restore
+    // (or starting another snapshot), so the cancelling caller retains its status/route intent.
+    tray.close(true, true);
+    if (statusBanner.dataset.kind === "loading" && directoryLoaded && localFresh) setStatus("ready", "");
+  }
 }
 
 function remoteChanged(remote: FleetTransport): void {
@@ -1668,6 +1676,19 @@ function render(): void {
 }
 
 function renderDirectory(): void {
+  const focused = document.activeElement;
+  const keyed = focused?.matches(".action-request, .queue-row, .held-open")
+    ? focused.closest<HTMLElement>("[data-instance-id]") : null;
+  const focusRef = keyed?.dataset.instanceId === undefined ? undefined : {
+    sourceKey: keyed.dataset.sourceKey ?? localKey,
+    instanceId: keyed.dataset.instanceId,
+  };
+  renderDirectoryContents();
+  // Snapshot/SSE refreshes replace row nodes even when there is no structural animation.
+  if (focusRef !== undefined) focusDirectoryRequest(focusRef);
+}
+
+function renderDirectoryContents(): void {
   renderFleetStatus();
   sessionList.replaceChildren();
   if (!directoryLoaded && sessions.size === 0) {
@@ -1923,6 +1944,20 @@ function directoryTile(ref: Pick<SessionRef, "sourceKey" | "instanceId">): HTMLE
   return null;
 }
 
+function focusDirectoryRequest(ref: Pick<SessionRef, "sourceKey" | "instanceId">): HTMLElement {
+  for (const keyed of sessionList.querySelectorAll<HTMLElement>("[data-instance-id]")) {
+    if (keyed.dataset.instanceId !== ref.instanceId || (keyed.dataset.sourceKey ?? localKey) !== ref.sourceKey) continue;
+    const action = keyed.matches(".queue-row")
+      ? keyed as HTMLButtonElement
+      : keyed.querySelector<HTMLButtonElement>(".action-request, .held-open");
+    if (action === null || action.disabled) break;
+    action.focus({ preventScroll: true });
+    return action;
+  }
+  directoryTitle.focus({ preventScroll: true });
+  return directoryTitle;
+}
+
 /**
  * The interactive way back (shell Back, system back, the triage "Sessions" action): the shell
  * slides out while the directory slides in and the header tile returns to its row. Disposal and
@@ -1950,7 +1985,9 @@ function returnToDirectory(historyValue?: unknown): void {
  * cannot be left waiting behind an inert shell — and resolves once the refreshed snapshot has
  * landed, so a resume can decide against current metadata rather than the pre-background copy.
  */
-function restoreDirectory(historyValue?: unknown): Promise<boolean> {
+function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, "sourceKey" | "instanceId">): Promise<boolean> {
+  const focusRef = activeCollabShell?.presentation === "request-tray" ? activeCollabShell
+    : requestRef ?? (pendingLaunch?.presentation === "request-tray" ? pendingLaunch.ref : undefined);
   cancelLaunch();
   tray.close(true, true);
   selectionEpoch += 1;
@@ -1975,8 +2012,17 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
   renderedSignature = snapshot.signature;
   history.replaceState({ ompDirectory: historyState }, "", "/");
   window.scrollTo(0, historyState.scrollY);
+  const focused = focusRef === undefined ? undefined : focusDirectoryRequest(focusRef);
+  const epoch = selectionEpoch;
   const refreshed = Promise.all([refreshAndConnect(), ...[...remotes.values()].map(remote => remote.refresh())])
-    .then(([local]) => local);
+    .then(([local]) => {
+      if (focusRef !== undefined && selectionEpoch === epoch && activeCollabShell === undefined &&
+        pendingLaunch === undefined && !trayHost.open &&
+        (document.activeElement === focused || document.activeElement === document.body)) {
+        focusDirectoryRequest(focusRef);
+      }
+      return local;
+    });
   applyActivatedWorkerUpdate();
   return refreshed;
 }
@@ -1994,8 +2040,11 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
  */
 async function resumeDisposedCollabShell(): Promise<void> {
   const resume = disposedShellResume;
-  const restored = await restoreDirectory();
-  if (resume === undefined || (!restored && resume.sourceKey === localKey)) return;
+  const refresh = restoreDirectory();
+  const epoch = selectionEpoch;
+  const restored = await refresh;
+  if (resume === undefined || (!restored && resume.sourceKey === localKey) ||
+    activeCollabShell !== undefined || pendingLaunch !== undefined || selectionEpoch !== epoch || trayHost.open) return;
   selectedScope = resume.scope;
   hostPicker.value = selectedScope;
   const session = sessions.get(sessionKey(resume));
@@ -2200,6 +2249,9 @@ function enterCollabClient(
   const fromDirectory = activeCollabShell === undefined;
   const snapshot = captureDirectorySnapshot();
   const previousShell = activeCollabShell;
+  // A successor may have waited through promotion; placement belongs to the live predecessor,
+  // not to the presentation captured when its launch request began.
+  presentation = previousShell?.presentation ?? presentation;
   disposeActiveCollab?.();
   if (presentation === "request-tray") previousShell?.shell.remove();
 
@@ -2318,10 +2370,9 @@ function enterCollabClient(
       expand.addEventListener("click", promote);
       tray.replace({
         id: "request", title: spokenTitle(session), tone: "attention", body: shell,
-        icon: createSessionTile(session), actions: [connection, expand],
+        icon: createSessionTile(session), actions: [connection, expand], layout: "expanded",
       });
       tray.heading?.addEventListener("click", promote);
-      tray.expanded();
       history.replaceState({ ompCollab: true }, "", "/");
       document.title = `${spokenTitle(session)} · OMP Sessions`;
       return;
@@ -2461,7 +2512,7 @@ async function launch(
     requestRetry.addEventListener("click", () => void launch(session, mode, button, requestId, scope, presentation));
     preview.append(createSessionSummary(session), createTextElement("p", "ask-preview", session.ask?.preview ?? "Waiting for your input"), requestStatus, requestRetry);
     tray.open({ id: "request", title: spokenTitle(session), tone: "attention", body: preview, icon: createSessionTile(session) }, {
-      onClose: () => { void restoreDirectory(); },
+      onClose: () => { void restoreDirectory(undefined, session); },
     });
   }
   const attempt: LaunchAttempt = {

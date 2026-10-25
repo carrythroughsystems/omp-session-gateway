@@ -1798,6 +1798,12 @@ Close/Back control, context-aware theme, and visibly different heights between s
 - Close restores the cached directory and disposes synchronously. Presentation is carried with
   the validated attempt, live shell and memory-only bfcache intent. Pagehide/cancellation invalidate
   late mounts and promotions. Resume revalidates and reacquires rather than retaining a capability.
+  A successor inherits its live predecessor's presentation at mount; panel replacement cancels
+  old growth callbacks and restores that panel's own layout. Cancelling an unmounted request
+  immediately dismisses its compact modal without overriding the caller's directory status.
+  Resume relinquishes foreground ownership if a launch, shell, tray or selection change intervenes
+  during refresh. Request close returns focus by source/instance to its request action (preserved
+  across refreshed row nodes), or to the directory heading when that action is no longer available.
   No document view transition runs while a tray is open.
 
 **Consequences:** Secondary surfaces share anatomy, motion and accessibility. Request handling can

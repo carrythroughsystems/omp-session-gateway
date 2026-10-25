@@ -5,6 +5,7 @@ export interface TrayPanel {
   readonly body: HTMLElement;
   readonly icon?: HTMLElement;
   readonly actions?: readonly HTMLElement[];
+  readonly layout?: "expanded";
 }
 
 interface PanelEntry {
@@ -34,6 +35,7 @@ export function createTray(host: HTMLDialogElement) {
   let focused = false;
   let closing = false;
   let expanding = false;
+  let promotionCleanup: (() => void) | undefined;
   let pointer: { id: number; y: number; distance: number } | undefined;
   const current = (): PanelEntry | undefined => stack.at(-1);
   const viewportHeight = (): number => window.visualViewport?.height ?? window.innerHeight;
@@ -46,7 +48,13 @@ export function createTray(host: HTMLDialogElement) {
     document.body.style.overflow = overflow;
     overflow = undefined;
   };
+  const resetPromotion = (): void => {
+    promotionCleanup?.();
+    promotionCleanup = undefined;
+    expanding = false;
+  };
   const finishClose = (): void => {
+    resetPromotion();
     if (host.open) host.close();
     restoreScroll();
     content.replaceChildren();
@@ -56,7 +64,6 @@ export function createTray(host: HTMLDialogElement) {
     host.style.transform = "";
     delete host.dataset.layout;
     closing = false;
-    expanding = false;
     pointer = undefined;
   };
   const close = (immediate = false, silent = false): void => {
@@ -66,6 +73,7 @@ export function createTray(host: HTMLDialogElement) {
       return;
     }
     closing = true;
+    resetPromotion();
     clearTimer();
     const ticket = ++sequence;
     const callback = onClose;
@@ -145,6 +153,10 @@ export function createTray(host: HTMLDialogElement) {
     return { panel, element, heading, height: 0 };
   };
   const display = (entry: PanelEntry, previous?: PanelEntry): void => {
+    resetPromotion();
+    ++sequence;
+    if (entry.panel.layout === undefined) delete host.dataset.layout;
+    else host.dataset.layout = entry.panel.layout;
     content.append(entry.element);
     entry.element.inert = false;
     entry.element.removeAttribute("aria-hidden");
@@ -279,15 +291,23 @@ export function createTray(host: HTMLDialogElement) {
     get id(): string | undefined { return current()?.panel.id; },
     get heading(): HTMLElement | undefined { return current()?.heading; },
     refresh(): void { const entry = current(); if (entry !== undefined && host.open) measure(entry); },
-    expanded(): void { host.dataset.layout = "expanded"; resize(); },
     promote(done: () => void): void {
       if (expanding || !host.open || closing) return;
       expanding = true;
       const ticket = ++sequence;
       host.dataset.layout = "full";
       resize();
-      const finish = (): void => {
+      let fallback: number | undefined;
+      const cleanup = (): void => {
         host.removeEventListener("transitionend", ended);
+        if (fallback !== undefined) window.clearTimeout(fallback);
+      };
+      const finish = (): void => {
+        cleanup();
+        // An invalidated completion must release its own latch, never a newer promotion's.
+        if (promotionCleanup !== cleanup) return;
+        promotionCleanup = undefined;
+        expanding = false;
         if (sequence !== ticket || closing || !host.open) return;
         ++sequence;
         done();
@@ -295,10 +315,11 @@ export function createTray(host: HTMLDialogElement) {
       const ended = (event: TransitionEvent): void => {
         if (event.target === host && event.propertyName === "height") finish();
       };
+      promotionCleanup = cleanup;
       if (reduced.matches) finish();
       else {
         host.addEventListener("transitionend", ended);
-        window.setTimeout(finish, 450);
+        fallback = window.setTimeout(finish, 450);
       }
     },
   };

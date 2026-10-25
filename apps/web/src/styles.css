@@ -85,6 +85,8 @@ button {
   outline-offset: 2px;
 }
 
+#directory-title:focus { outline: none; }
+
 .skip-link {
   position: fixed;
   inset: 0 auto auto 0;
