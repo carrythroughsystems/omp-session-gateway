@@ -22,10 +22,11 @@ interface CreationDependencies {
 interface Intent {
   readonly source: FleetSource;
   readonly request: SessionCreationRequest;
-  readonly started: number;
+  readonly createdAt: number;
   operationId?: string;
 }
 const WATCH_MS = 120_000;
+const REPLAY_MS = 60 * 60 * 1_000;
 const text = (tag: "p" | "dt" | "dd", copy: string): HTMLElement => {
   const node = document.createElement(tag);
   node.textContent = copy;
@@ -125,6 +126,8 @@ export class SessionCreationController {
 
   private startChoices(): void {
     this.intent = undefined;
+    this.draft = "";
+    this.deps.discardDraft();
     this.history = [];
     this.options = undefined;
     const configured = this.deps.sources();
@@ -284,7 +287,7 @@ export class SessionCreationController {
     if (!this.active || this.deps.tray.id !== "creation-review" || this.intent !== undefined ||
       this.options?.available !== true || this.source === undefined || !validInitialPromptDraft(this.draft)) return;
     this.intent = {
-      source: this.source, started: Date.now(),
+      source: this.source, createdAt: Date.now(),
       request: { clientOperationId: crypto.randomUUID(), revision: this.options.revision,
         projectId: this.projectId, workingCopyId: this.workingCopyId, profileId: this.profileId },
     };
@@ -343,7 +346,7 @@ export class SessionCreationController {
   private paused(copy = "Stopped watching. The command may still be starting on the host."): void {
     const body = document.createElement("div");
     body.append(text("p", `Creation on ${this.intent?.source.label ?? this.source!.label}. ${copy}`), button("Check creation", () => void this.watch(false), true),
-      button("Start another session", () => { this.draft = ""; this.startChoices(); }));
+      button("Start another session", () => this.startChoices()));
     this.panel("terminal", "Stopped watching", body);
   }
 
@@ -355,12 +358,12 @@ export class SessionCreationController {
     this.active = true;
     this.epoch = this.deps.epoch();
     const ticket = this.serial;
-    const single = Date.now() - intent.started >= WATCH_MS;
+    const single = Date.now() - intent.createdAt >= WATCH_MS;
     if (!single) this.deadline = window.setTimeout(() => {
       if (!this.current(ticket)) return;
       this.stopRequests();
       this.paused();
-    }, Math.max(0, WATCH_MS - (Date.now() - intent.started)));
+    }, Math.max(0, WATCH_MS - (Date.now() - intent.createdAt)));
     this.progress("accepted");
     const poll = async (): Promise<void> => {
       if (!this.current(ticket)) return;
@@ -369,7 +372,17 @@ export class SessionCreationController {
       try {
         const transport = this.transport(intent.source);
         if (intent.operationId === undefined) {
-          // Explicit Check is the only replay after a lost acknowledgement; payload identity is frozen.
+          const age = Date.now() - intent.createdAt;
+          if (!first && (age < 0 || age >= REPLAY_MS)) {
+            // Do not replay beyond the browser's conservative bound, even if the daemon forgot it.
+            await this.deps.refresh(intent.source).catch(() => undefined);
+            if (this.current(ticket)) {
+              this.stopRequests();
+              this.paused("The acknowledgement was lost and the session may already exist. This request is too old to replay safely. Check Tern and the directory before creating another.");
+            }
+            return;
+          }
+          // Explicit Check may replay only a recent lost acknowledgement; payload identity is frozen.
           const receipt = await transport.create(intent.request, controller.signal);
           if (!this.current(ticket)) return;
           intent.operationId = receipt.operationId;
@@ -396,6 +409,7 @@ export class SessionCreationController {
         } else {
           this.stopRequests();
           this.draft = "";
+          this.deps.discardDraft();
           this.terminal(status.state);
         }
       } catch (error) {
@@ -409,7 +423,7 @@ export class SessionCreationController {
           this.admissionFailure(error.code);
         } else this.paused(error instanceof CreationTransportError && error.code === "not_found"
           ? "This creation is no longer available to this identity. Check Tern and the directory before creating another."
-          : "The host response was lost. Check creation to look up the same operation; it will not create a new operation.");
+          : "The host response was lost. Check creation looks up an acknowledged operation or replays the same request only during its first hour. After that, a lost acknowledgement can only be checked in the directory.");
       }
     };
     await poll();
@@ -432,7 +446,7 @@ export class SessionCreationController {
       : state === "outcome_unknown" ? "It may have started. Check Tern and the directory before creating another."
         : "The operation did not start a command. A new attempt needs another explicit Create action.";
     body.append(text("p", copy), button("Refresh directory", () => { void this.deps.refresh(this.source!); this.cancel("close"); }),
-      button("Start another session", () => { this.intent = undefined; this.startChoices(); }));
+      button("Start another session", () => this.startChoices()));
     this.panel("terminal", state === "failed" ? "Session did not start" : state === "outcome_unknown" ? "Outcome unknown" : "Started in Tern", body);
   }
 }

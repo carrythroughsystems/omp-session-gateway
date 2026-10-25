@@ -139,6 +139,7 @@ interface LaunchAttempt {
   readonly ref: SessionRef;
   readonly mode: LaunchMode;
   readonly presentation: LaunchPresentation;
+  readonly creationHandoff: boolean;
   readonly scope: SourceKey | "all";
   readonly sourceEpoch: number | undefined;
   readonly controller: AbortController;
@@ -259,12 +260,12 @@ const creation = new SessionCreationController({
   openReady: async (source, binding, draft, current) => {
     const key = sourceKey(source);
     if (!current() || sources.get(key) !== source || activeCollabShell !== undefined || pendingLaunch !== undefined) return false;
+    const ref: SessionRef = { sourceKey: key, ...binding };
+    if (initialPromptDraft !== undefined && !sameBinding(initialPromptDraft.ref, ref)) clearCreationDraft();
     const refreshed = key === localKey ? await refreshAndConnect() : await remotes.get(key)?.refresh(true) === "healthy";
     if (!refreshed || !current() || sources.get(key) !== source || activeCollabShell !== undefined || pendingLaunch !== undefined) return false;
-    const ref: SessionRef = { sourceKey: key, ...binding };
     const session = sessions.get(sessionKey(ref));
     if (session === undefined || session.generation !== binding.generation || !session.canControl || !sourceFresh(key)) return false;
-    if (initialPromptDraft !== undefined && !sameBinding(initialPromptDraft.ref, ref)) clearCreationDraft();
     if (draft !== "") initialPromptDraft = { ref, text: draft };
     return await launch(session, "control", undefined, undefined, selectedScope, "full", true);
   },
@@ -1113,6 +1114,7 @@ function cancelLaunch(source?: SourceKey): void {
     tray.close(true, true);
     if (statusBanner.dataset.kind === "loading" && directoryLoaded && localFresh) setStatus("ready", "");
   }
+  if (cancelled.creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
 }
 
 function remoteChanged(remote: FleetTransport): void {
@@ -2739,7 +2741,7 @@ async function launch(
     id: ++launchSequence, epoch: selectionEpoch,
     ref: { sourceKey: session.sourceKey, instanceId: session.instanceId, generation: session.generation,
       ...(requestId === undefined ? {} : { requestId }) },
-    mode, presentation, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
+    mode, presentation, creationHandoff, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
     controller: new AbortController(), settled: false,
   };
   pendingLaunch = attempt;
@@ -2788,6 +2790,7 @@ async function launch(
     const owned = pendingLaunch === attempt;
     settle();
     resetButton();
+    if (owned && creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
     if (owned && requestStatus !== undefined && tray.id === "request") {
       requestStatus.textContent = "That session changed or expired. Try again from the directory.";
       tray.refresh();

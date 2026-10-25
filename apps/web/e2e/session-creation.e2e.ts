@@ -257,6 +257,119 @@ test("lost acknowledgement and background resume use only explicit Check, with i
   } finally { await fixture.stop(); }
 });
 
+test("an hour-old lost acknowledgement refreshes the directory without replaying POST", async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 915 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const fixture = await startDashboardFixture([]);
+  fixture.configureCreation({ lostAcknowledgement: true, readySession, states: [{ state: "ready" }] });
+  try {
+    await page.goto(fixture.origin);
+    await review(page);
+    await page.getByRole("textbox", { name: "First task (optional)" }).fill(TASK);
+    const createdAt = await page.evaluate(() => {
+      const now = Date.now();
+      Date.now = () => now;
+      return now;
+    });
+    await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
+    await panel(page, "terminal");
+    const listsBefore = fixture.requests.filter(request => request === "GET /api/v1/sessions").length;
+    await page.evaluate(now => { Date.now = () => now + 3_600_000; }, createdAt);
+    await page.getByRole("button", { name: "Check creation", exact: true }).click();
+    await expect(page.locator("#tray")).toContainText("acknowledgement was lost and the session may already exist");
+    await expect.poll(() => fixture.requests.filter(request => request === "GET /api/v1/sessions").length).toBe(listsBefore + 1);
+    expect(fixture.creationRequests).toHaveLength(1);
+    expect(fixture.requests.filter(request => request.startsWith("GET /api/v1/session-creations/"))).toHaveLength(0);
+    expect(fixture.launchRequests).toHaveLength(0);
+    await privateSinks(page, fixture);
+  } finally { await fixture.stop(); }
+});
+
+test("a fresh flow clears both backgrounded review text and an abandoned ready draft", async ({ page, context }) => {
+  await page.setViewportSize({ width: 412, height: 915 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([], { roomKey: key });
+  fixture.configureCreation({ readySession, states: [{ state: "ready" }] });
+  let launches = 0;
+  await page.route(`**/api/v1/sessions/${readySession.instanceId}/launch`, async route => {
+    if (++launches === 1) await route.fulfill({ status: 503, body: "" });
+    else await route.continue();
+  });
+  try {
+    await installSyntheticProductFixture(context, key, { activeAsk: false });
+    await page.goto(fixture.origin);
+    await review(page);
+    await page.getByRole("textbox", { name: "First task (optional)" }).fill(TASK);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(page.locator("#tray")).toBeHidden();
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await review(page);
+    await expect(page.getByRole("textbox", { name: "First task (optional)" })).toHaveValue("");
+    await page.getByRole("textbox", { name: "First task (optional)" }).fill(TASK);
+    await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
+    await expect(page.locator("#tray")).toContainText("exact Control session could not be opened");
+    await page.getByRole("button", { name: "Start another session", exact: true }).click();
+    await panel(page, "project");
+    await page.getByRole("button", { name: "Synthetic project", exact: true }).click();
+    await page.getByRole("button", { name: "Main", exact: true }).click();
+    await page.getByRole("button", { name: "OMP", exact: true }).click();
+    await expect(page.getByRole("textbox", { name: "First task (optional)" })).toHaveValue("");
+    await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
+    await expect(page.locator('.conn-chip[data-state="connected"]')).toBeVisible();
+    await expect(page.locator(".sh-composer-input")).toHaveValue("");
+    expect(fixture.creationRequests).toHaveLength(2);
+    expect(fixture.creationRequests[0]!.clientOperationId).not.toBe(fixture.creationRequests[1]!.clientOperationId);
+    await privateSinks(page, fixture);
+  } finally { await fixture.stop(); }
+});
+
+for (const reason of ["close", "hidden"] as const) {
+  test(`creation handoff ${reason} clears the pending Opening control banner`, async ({ page, context }) => {
+    await page.setViewportSize({ width: 412, height: 915 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const key = randomBytes(32);
+    const fixture = await startDashboardFixture([], { roomKey: key });
+    fixture.configureCreation({ readySession, states: [{ state: "ready" }] });
+    const opening = Promise.withResolvers<void>();
+    const arrived = Promise.withResolvers<void>();
+    const settled = Promise.withResolvers<void>();
+    await page.route(`**/api/v1/sessions/${readySession.instanceId}/launch`, async route => {
+      arrived.resolve();
+      await opening.promise;
+      try { await route.continue(); } finally { settled.resolve(); }
+    });
+    try {
+      await installSyntheticProductFixture(context, key, { activeAsk: false });
+      // Keep SSE snapshots from settling the launch banner on the launch's behalf.
+      await page.goto(`${fixture.origin}/collab/synthetic-expired-0001?activity=stopped&generation=1`);
+      await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "expired");
+      await review(page);
+      await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
+      await arrived.promise;
+      await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "loading");
+      if (reason === "close") await page.getByRole("button", { name: "Close Starting session", exact: true }).click();
+      else await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await expect(page.locator("#tray")).toBeHidden();
+      await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "ready");
+      await expect(page.locator("#status-banner")).toBeHidden();
+      opening.resolve();
+      await settled.promise;
+      await expect(page.locator(".gateway-shell")).toHaveCount(0);
+      await privateSinks(page, fixture);
+    } finally { opening.resolve(); await fixture.stop(); }
+  });
+}
+
 test("revision mismatch refreshes valid choices and requires another explicit Create", async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 915 });
   const fixture = await startDashboardFixture([]);

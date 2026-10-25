@@ -178,8 +178,10 @@ the ordinary session shell mounts.
 Closing, changing scope, competing navigation/trays, authorization loss, backgrounding, freeze,
 and pagehide stop watching, not the command running in Tern. Foregrounding never automatically
 creates or opens. **Check creation** reads the known operation or explicitly replays the identical
-POST after a lost acknowledgement; after the watching deadline it performs only one bounded check.
-No uncertain outcome automatically retries creation.
+POST after a lost acknowledgement only while the intent is younger than one hour. At one hour or
+later, a known operation remains GET-only; without an operation ID, Check refreshes the directory
+and warns that the session may already exist, never POSTing again. After the watching deadline it
+performs only one bounded check. No uncertain outcome automatically retries creation.
 
 Only `{sourceId, sourceOrigin, projectId, workingCopyId, profileId, updatedAt}` choices persist in
 `omp.sessions.creation-prefs.v1`: version 1, at most eight records and 16 KiB. Removed/rebound
@@ -187,13 +189,16 @@ sources are pruned only after an authoritative bootstrap. Storage failure leaves
 Tracking intents and the optional **First task** remain in page memory, never requests, history,
 storage, logs, or process arguments. The task is bounded to 8,000 Unicode code points / 32 KiB;
 backgrounding preserves it in the suspended flow, while explicit Close, selection changes,
-authorization loss and pagehide discard it.
+authorization loss and pagehide discard it. Starting a fresh flow, including **Start another
+session** or reopening a backgrounded review without a creation intent, clears the old task.
 
 Ready refreshes that source, requires the exact instance/generation and Control, then opens the
 ordinary full-screen client. A source/instance/generation-bound holder supplies the draft once
 through `takeInitialPromptDraft`; only the client inserts it into an empty, live writable composer.
 It never sends, overwrites an existing draft, or fills an Ask. A failed pre-mount open may retry
-the same binding; cancellation, changed bindings and shell disposal discard the holder.
+the same binding; cancellation, changed bindings, starting another flow and shell disposal discard
+the holder. Cancelling or discarding a pending creation handoff clears its Opening control banner
+without replacing a newer failure status.
 
 `e2e/session-creation.e2e.ts` covers the wizard, terminal states, lost acknowledgements, native
 Back, background/foreground, preferences, source-bound CORS and private sinks. Set

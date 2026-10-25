@@ -1011,6 +1011,174 @@ describe("source-bound session creation", () => {
     harness.window.dispatchEvent(new Event("pagehide"));
   });
 
+  for (const age of [3_599_999, 3_600_000, 25 * 60 * 60 * 1_000]) {
+    test(`creation replay is bounded at ${age}ms after a lost acknowledgement`, async () => {
+      const previousNow = Date.now;
+      let now = previousNow();
+      Date.now = () => now;
+      let harness: BrowserHarness | undefined;
+      try {
+        const posted: string[] = [];
+        let statuses = 0;
+        harness = await bootApp({
+          permission: "denied", initialSessions: [], suffix: `creation-replay-age-${age}`,
+          creationResponse: async (path, init) => {
+            if (path.endsWith("options")) return Response.json(choices);
+            if (init.method === "POST") {
+              posted.push(String(init.body));
+              if (posted.length === 1) throw new TypeError("synthetic acknowledgement lost");
+              return Response.json({ operationId, state: "accepted" });
+            }
+            statuses++;
+            return Response.json({ operationId, state: "failed", error: "spawn_failed", updatedAt: new Date().toISOString() });
+          },
+        });
+        await open(harness);
+        click(harness, "Create and open Control");
+        await settleUntil(() => harness!.elements.trayHost.dataset.panel === "creation-terminal", 100);
+        const listsBefore = harness.fetchPaths.filter(path => path === "/api/v1/sessions").length;
+        now += age;
+        click(harness, "Check creation");
+        await settleUntil(() => harness!.elements.trayHost.dataset.panel === "creation-terminal", 200);
+        if (age < 3_600_000) {
+          expect(posted).toHaveLength(2);
+          expect(posted[1]).toBe(posted[0]);
+          expect(statuses).toBe(1);
+        } else {
+          expect(posted).toHaveLength(1);
+          expect(statuses).toBe(0);
+          expect(harness.fetchPaths.filter(path => path === "/api/v1/sessions").length).toBe(listsBefore + 1);
+          expect(currentPanel(harness).textContent).toContain("acknowledgement was lost");
+          expect(currentPanel(harness).textContent).toContain("session may already exist");
+          click(harness, "Check creation");
+          await settleUntil(() => harness!.elements.trayHost.dataset.panel === "creation-terminal", 200);
+          expect(posted).toHaveLength(1);
+        }
+        expect(harness.pendingDelays()).not.toContain(1_000);
+        expect(harness.launchRequests).toHaveLength(0);
+      } finally {
+        harness?.window.dispatchEvent(new Event("pagehide"));
+        Date.now = previousNow;
+      }
+    });
+  }
+
+  test("creation replay stays GET-only for an acknowledged intent older than one hour", async () => {
+    let statuses = 0;
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], suffix: "creation-old-known-operation",
+      creationResponse: async (path, init) => {
+        if (path.endsWith("options")) return Response.json(choices);
+        if (init.method === "POST") return Response.json({ operationId, state: "accepted" });
+        statuses++;
+        return statuses === 1
+          ? Response.json({ operationId, state: "awaiting_omp", updatedAt: new Date().toISOString() })
+          : new Response(null, { status: 404 });
+      },
+    });
+    await open(harness);
+    click(harness, "Create and open Control");
+    await settleUntil(() => statuses === 1 && harness.pendingDelays().includes(1_000), 100);
+    currentPanel(harness).querySelector(".tray-leading")!.dispatchEvent(new Event("click"));
+    harness.window.runTimersWithDelay(350);
+    harness.advanceClock(25 * 60 * 60 * 1_000);
+    document.querySelector("#new-session")!.dispatchEvent(new Event("click"));
+    click(harness, "Check creation");
+    await settleUntil(() => harness.elements.trayHost.dataset.panel === "creation-terminal", 100);
+    expect(statuses).toBe(2);
+    expect(harness.fetchPaths.filter(path => path === "/api/v1/session-creations")).toHaveLength(1);
+    expect(currentPanel(harness).textContent).toContain("no longer available");
+    expect(harness.pendingDelays()).not.toContain(1_000);
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  test("fresh creation after backgrounded review starts with an empty first task", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], suffix: "creation-fresh-background-review",
+      creationResponse: async () => Response.json(choices),
+    });
+    await open(harness);
+    seed(harness, "SYNTHETIC_ABANDONED_REVIEW_TASK");
+    harness.setVisibility("hidden");
+    harness.setVisibility("visible");
+    await open(harness);
+    expect(currentPanel(harness).querySelector("textarea")!.value).toBe("");
+    expect(harness.fetchPaths.filter(path => path === "/api/v1/session-creations")).toHaveLength(0);
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  test("fresh creation discards the failed ready holder even if that binding is observed again", async () => {
+    let launches = 0;
+    const posted: string[] = [];
+    const ready = session("creation-abandoned-draft");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], suffix: "creation-fresh-failed-holder",
+      creationResponse: async (path, init) => {
+        if (path.endsWith("options")) return Response.json(choices);
+        if (init.method === "POST") {
+          posted.push(String(init.body));
+          return Response.json({ operationId, state: "accepted" });
+        }
+        return Response.json({ operationId, state: "ready", updatedAt: new Date().toISOString(),
+          session: { instanceId: ready.instanceId, generation: 1 } });
+      },
+      launchResponse: async () => ++launches === 1 ? new Response(null, { status: 503 }) : Response.json({
+        generation: 1, mode: "control", capability: ["FRESH", "CREATION", "CANARY", "0000000000000000"].join("__"),
+      }),
+    });
+    await open(harness);
+    seed(harness, "SYNTHETIC_ABANDONED_READY_TASK");
+    harness.setList(2, [ready]);
+    click(harness, "Create and open Control");
+    await settleUntil(() => launches === 1 && harness.elements.trayHost.dataset.panel === "creation-terminal", 200);
+    click(harness, "Start another session");
+    await settleUntil(() => harness.elements.trayHost.dataset.panel === "creation-project", 100);
+    click(harness, "Synthetic project");
+    click(harness, "OMP");
+    expect(currentPanel(harness).querySelector("textarea")!.value).toBe("");
+    click(harness, "Create and open Control");
+    await settleUntil(() => harness.embedCalls.length === 1, 200);
+    expect(posted).toHaveLength(2);
+    expect(JSON.parse(posted[0]!).clientOperationId).not.toBe(JSON.parse(posted[1]!).clientOperationId);
+    expect(harness.embedCalls[0]!.takeInitialPromptDraft?.()).toBeUndefined();
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  for (const reason of ["close", "hidden", "discard", "offline"] as const) {
+    test(`creation handoff status settles after ${reason} without replacing a newer failure`, async () => {
+      const gate = Promise.withResolvers<void>();
+      const ready = session("creation-banner-0001");
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], suffix: `creation-banner-${reason}`, launchGate: gate.promise,
+        // A stale notification locks SSE status changes; the launch must settle its own banner.
+        ...(reason === "discard" ? { pathname: "/collab/synthetic-expired-0001", search: "?activity=stopped&generation=1" } : {}),
+        creationResponse: async (path, init) => Response.json(path.endsWith("options") ? choices
+          : init.method === "POST" ? { operationId, state: "accepted" }
+            : { operationId, state: "ready", updatedAt: new Date().toISOString(), session: { instanceId: ready.instanceId, generation: 1 } }),
+      });
+      await open(harness);
+      harness.setList(2, [ready]);
+      click(harness, "Create and open Control");
+      await settleUntil(() => harness.launchRequests.length === 1, 200);
+      expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+      if (reason === "discard") {
+        harness.emit("session_upsert", { type: "session_upsert", revision: 3, session: { ...ready, generation: 2 } });
+        expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+      } else if (reason === "hidden") harness.setVisibility("hidden");
+      else {
+        if (reason === "offline") harness.window.dispatchEvent(new Event("offline"));
+        currentPanel(harness).querySelector(".tray-leading")!.dispatchEvent(new Event("click"));
+      }
+      gate.resolve();
+      if (reason === "discard") await settleUntil(() => harness.elements.trayHost.dataset.panel === "creation-terminal", 200);
+      else for (let i = 0; i < 100; i++) await Promise.resolve();
+      expect(harness.elements.statusBanner.dataset.kind).toBe(reason === "offline" ? "offline" : "ready");
+      expect(harness.elements.statusBanner.hidden).toBe(reason !== "offline");
+      expect(harness.embedCalls).toHaveLength(0);
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
+
   for (const reason of ["hidden", "scope", "close", "pagehide", "competing"] as const) {
     test(`${reason} invalidates a late ready status and clears or suspends its draft`, async () => {
       const pending = Promise.withResolvers<Response>();
