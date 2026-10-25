@@ -52,6 +52,18 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Show one connection-interruption story in the directory banner, reserve host rows for
+  independently failed sources, and keep routine refreshes quiet with no Retry action.
+- Report host coverage as counts without repeating host names; mark cached sessions and their
+  counts as listed rather than live, using one consistent “list as of” clock.
+- Keep empty and host-filtered directories informative when coverage is incomplete, without
+  claiming there are no sessions on an unreachable or unauthorized host.
+- Remove Retry from access-denied hosts; restoring access requires an operator or identity change.
+- Keep session outage names in the connection chip and recovery timing in the triage bar,
+  without repeating the same warning.
+- Show initial session joins as neutral progress rather than an interrupted connection.
+- Replace unavailable Create actions with recovery choices, distinguish uncertain creation from
+  failure, and identify Create-and-Control as a privileged action.
 - Refresh the embedded OMP client and wire pin to v18.12.6: coalesce streaming renders and parse
   only Markdown tails (#14728), take linear-time Markdown/math lexing (#13961, #14667), stop idle
   agent-drawer polling, and adopt the eval renderer rework. Vendor the pure-JavaScript marked fork

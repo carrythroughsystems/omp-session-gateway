@@ -113,11 +113,17 @@ for (const state of VISUAL_STATES) {
       roomKey,
       ...(authority === undefined ? {} : { syntheticAuthority: authority }),
     });
+    const away = state === "directory-partial-coverage" ? await startDashboardFixture([]) : undefined;
+    if (away !== undefined) {
+      fixture.configureFleet("MacBook", [{ id: "studio", label: "Studio", origin: away.origin }], [away.origin]);
+      away.configureFleet("Studio", [], [fixture.origin]);
+      away.setListFailure("malformed");
+    }
     let unexpectedRequests = 0;
     try {
       await installSyntheticProductFixture(context, roomKey, { readOnly: state === "collab-view", transcript: TRANSCRIPT, randomSeed: 42 });
       await context.route("**/*", async route => {
-        if (new URL(route.request().url()).origin === fixture.origin) await route.continue();
+        if ([fixture.origin, away?.origin].includes(new URL(route.request().url()).origin)) await route.continue();
         else { unexpectedRequests++; await route.abort("blockedbyclient"); }
       });
       phase = "directory";
@@ -144,6 +150,13 @@ for (const state of VISUAL_STATES) {
       phase = "state";
       if (state === "directory-empty") {
         if (!(await page.locator("body").innerText()).includes("collab.autoStart")) throw new Error("visual state: empty guidance missing");
+      } else if (state === "directory-partial-coverage") {
+        await page.locator('.fleet-status-row[data-state="unavailable"]').waitFor();
+        if (await page.locator(".fleet-status-row").count() !== 1 ||
+          await page.locator(".all-clear-copy").textContent() !== "1 of 2 hosts up to date. Other sessions may be missing." ||
+          await page.locator("#directory-count").textContent() !== `Listed · ${INITIAL_SESSIONS.length}`) {
+          throw new Error("visual state: partial coverage mismatch");
+        }
       } else if (state === "directory-needs-you") {
         if (await page.locator(".working-row").count() !== 3 || await page.locator(".queue-row").count() !== 1 ||
           await page.locator(".queue-hero h2").textContent() !== GATEWAY_WAITING.title) throw new Error("visual state: attention ordering mismatch");
@@ -257,6 +270,7 @@ for (const state of VISUAL_STATES) {
     } finally {
       await context.close();
       await fixture.stop();
+      await away?.stop();
     }
   });
 }

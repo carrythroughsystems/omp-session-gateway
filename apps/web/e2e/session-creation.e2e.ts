@@ -210,7 +210,7 @@ for (const missing of [404, "not_configured", "tern_unavailable", "configuration
       await page.goto(fixture.origin);
       await page.locator("#new-session").click();
       await panel(page, "terminal");
-      await expect(page.getByRole("button", { name: "Create and open Control", exact: true })).toBeDisabled();
+      await expect(page.getByRole("button", { name: "Create and open Control", exact: true })).toHaveCount(0);
       expect(fixture.creationRequests).toHaveLength(0);
       await capture(page, fixture, `unavailable-${missing}`);
       fixture.configureCreation({ readySession });
@@ -379,6 +379,7 @@ test("revision mismatch refreshes valid choices and requires another explicit Cr
     await review(page);
     await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
     await panel(page, "project");
+    await expect(page.locator(".creation-project .creation-notice")).toHaveText("Choices refreshed. Review them and choose Create again.");
     await expect(page.getByRole("button", { name: "Synthetic project", exact: true })).toHaveAttribute("aria-pressed", "true");
     expect(fixture.creationRequests).toHaveLength(1);
     await capture(page, fixture, "revision-mismatch");

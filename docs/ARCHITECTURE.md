@@ -302,12 +302,12 @@ each source viewport → installed @percy/dom serialization → exact-material/c
 guards → Percy SDK → host-restricted, JavaScript-disabled discovery → advisory visual build`.
 
 The shared deterministic fixture also supplies README capture without changing its default
-content or ordering. Local visual validation checks all 18 states and source/serialized geometry
+content or ordering. Local visual validation checks all 21 state/project pairs and source/serialized geometry
 without starting Percy or passing credentials. Upload mode rechecks the exact SDK POST, requires
 a healthy session, all submissions and finalization, and never falls back. No live OMP, real
 transcript, production gateway, capability canary or third-party runtime asset belongs in this
 flow. Synthetic authority stays in source-context memory; serialized HTML/resources fail if it
-appears. Before uploading, a native-Node testing host runs the same 18 states without a real token
+appears. Before uploading, a native-Node testing host runs the same 21 cases without a real token
 or vendor effects. A private pipe supplies a shared ephemeral synthetic authority; the retained
 fixture guard and both scanners check the exact redacted non-`ci` log candidate and reject a
 planted SDK-log canary. Percy uploads those redacted CLI logs with builds; the separate CI-log

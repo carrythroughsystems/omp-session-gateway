@@ -84,9 +84,9 @@ test("failure states keep stale sessions, exact copy, timestamps, and mobile fit
     });
     await expect(page.locator("#status-banner .status-title")).toHaveText("Tailnet unreachable");
     await expect(page.locator("#status-banner .status-detail")).toHaveText(
-      "This device is online, but your tailnet isn't answering — Tailscale is off or logged out here.",
+      "This device is online, but your tailnet isn't answering. Check that Tailscale is connected.",
     );
-    await expect(page.locator("#status-banner .status-freshness")).toContainText("Last seen");
+    await expect(page.locator("#status-banner .status-freshness")).toContainText("list as of");
     await assertFits();
 
     const eventRequestsBeforeTailnetRecovery = eventRequestCount();
@@ -103,7 +103,7 @@ test("failure states keep stale sessions, exact copy, timestamps, and mobile fit
     });
     await expect(page.locator("#status-banner .status-title")).toHaveText("Desktop unreachable");
     await expect(page.locator("#status-banner .status-detail")).toContainText(
-      "Tailnet looks fine, but the desktop isn't answering — asleep, or the gateway stopped. Last seen",
+      "The desktop isn't answering. Check that it is awake and the gateway is running. Showing the list as of",
     );
     await expect.poll(
       () => page.locator("#status-banner .status-action").evaluate(element => element.getBoundingClientRect().height),

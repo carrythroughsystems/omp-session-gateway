@@ -1357,7 +1357,7 @@ describe("dashboard attention and notifications", () => {
     const first = await bootApp({ ...options, suffix: "first-run-fresh" });
     const host = first.elements.trayHost;
     expect(host.dataset.panel).toBe("first-run-connected");
-    expect(host.querySelector(".first-run-copy")?.textContent).toBe("This phone is on your tailnet. This host is publishing 1 live session.");
+    expect(host.querySelector(".first-run-copy")?.textContent).toBe("This phone is on your tailnet. 1 live session is listed across the checked hosts.");
     expect(host.querySelector(".tray-leading")?.getAttribute("aria-label")).toBe("Skip introduction");
     expect(first.permissionRequests.count).toBe(0);
     expect(first.launchRequests).toEqual([]);
@@ -1889,10 +1889,10 @@ describe("dashboard attention and notifications", () => {
       "Tailnet unreachable",
     );
     expect(tailnet.elements.statusBanner.querySelector(".status-detail")?.textContent).toBe(
-      "This device is online, but your tailnet isn't answering — Tailscale is off or logged out here.",
+      "This device is online, but your tailnet isn't answering. Check that Tailscale is connected.",
     );
     expect(tailnet.elements.statusBanner.querySelector(".status-freshness")?.textContent).toContain(
-      "Last seen",
+      "list as of",
     );
     expect(tailnet.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
   });
@@ -1946,6 +1946,7 @@ describe("dashboard attention and notifications", () => {
     harness.failNextListRequest();
     harness.window.dispatchEvent(new Event("online"));
     await settleUntil(() => harness.elements.statusBanner.querySelector(".status-guidance") !== null);
+    expect(harness.elements.statusBanner.children).toHaveLength(1);
     expect(harness.elements.statusBanner.querySelector(".status-guidance")?.textContent).toContain(
       "The browser may be stuck after sleep or a network change",
     );
@@ -2610,7 +2611,7 @@ describe("fleet directory bindings", () => {
     ].entries()) {
       const harness = await bootApp({ permission: "denied", initialSessions: [local], clientConfig, suffix: `bootstrap-invalid-${index}` });
       expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
-      expect(harness.elements.fleetStatus.children[0]?.textContent).toStartWith("Fleet configuration unavailable — reload this app");
+      expect(harness.elements.fleetStatus.children[0]?.textContent).toStartWith("Fleet configuration unavailable. Reload to check all hosts.");
       harness.elements.fleetStatus.querySelector("button")?.dispatchEvent(new Event("click"));
       expect(harness.reloads.count).toBe(1);
       expect(harness.fetchPaths.some(path => path.startsWith("https://remote.example"))).toBeFalse();
@@ -2846,6 +2847,73 @@ describe("fleet directory bindings", () => {
     harness.setVisibility("hidden");
   });
 
+  test("one interruption has one banner owner while quiet refresh has no failure row or Retry", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [session("freshness-home-0001")],
+      remoteSessions: [session("freshness-away-0001")], clientConfig: config, suffix: "freshness-ownership",
+    });
+    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
+    harness.setVisibility("hidden");
+    expect(harness.elements.fleetStatus.children).toHaveLength(0);
+    harness.setVisibility("visible");
+    expect(harness.elements.fleetStatus.children).toHaveLength(0);
+    harness.disconnectEvents();
+    expect(harness.elements.statusBanner.children).toHaveLength(1);
+    expect(harness.elements.fleetStatus.children).toHaveLength(0);
+    expect(harness.elements.directoryCount.textContent).toBe("Listed · 2");
+    expect(harness.elements.directoryCount.className).toContain("count-pill-listed");
+    expect(harness.elements.sessionList.querySelector(".working-row-frame")?.dataset.fresh).toBe("false");
+    expect(harness.elements.sessionList.querySelector(".session-tile")?.dataset.state).toBe("unknown");
+    const coverage = harness.elements.sessionList.querySelector(".all-clear-copy")?.textContent ?? "";
+    expect(coverage).not.toContain("Home");
+    expect(coverage).not.toContain("Remote");
+    harness.setVisibility("hidden");
+  });
+
+  test("failed sources share byte-identical list-as-of timestamps with the banner and cached rows", async () => {
+    const originalNow = Date.now;
+    Date.now = () => Date.parse("2026-10-25T01:30:00Z");
+    try {
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [session("clock-home-0001")],
+        remoteSessions: [session("clock-away-0001")], clientConfig: config, suffix: "freshness-clocks",
+      });
+      await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
+      harness.setRemoteStatus(503);
+      harness.window.dispatchEvent(new Event("online"));
+      await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "stale", 100);
+      await settleUntil(() => FakeEventSource.instances.length === 2, 100);
+      harness.disconnectEvents();
+      const clock = /List as of ([^.]+)\./u.exec(harness.elements.statusBanner.textContent ?? "")?.[1];
+      expect(clock).toBeDefined();
+      expect(harness.elements.statusBanner.children).toHaveLength(1);
+      expect(harness.elements.fleetStatus.children).toHaveLength(1);
+      expect(harness.elements.fleetStatus.textContent).toContain(`List as of ${clock}.`);
+      expect(harness.elements.sessionList.querySelectorAll(".session-freshness").every(node => node.textContent === `List as of ${clock}.`)).toBeTrue();
+      harness.setVisibility("hidden");
+    } finally { Date.now = originalNow; }
+  });
+
+  test("empty and filtered incomplete coverage stay truthful; forbidden sources offer no Retry", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], clientConfig: config,
+      remotePayload: { malformed: true }, suffix: "empty-incomplete",
+    });
+    await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "unavailable", 100);
+    expect(harness.elements.emptyState.hidden).toBeFalse();
+    expect(harness.elements.emptyState.textContent).toContain("No sessions to show yet");
+    harness.elements.hostPicker.value = "remote\0https://remote.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    expect(harness.elements.emptyState.hidden).toBeFalse();
+    expect(harness.elements.emptyState.textContent).toContain("This host has not been checked");
+    expect(harness.elements.emptyState.querySelector("button")?.textContent).toBe("All hosts");
+    harness.setRemoteStatus(403);
+    harness.window.dispatchEvent(new Event("online"));
+    await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "forbidden", 100);
+    expect(harness.elements.fleetStatus.querySelector("button")).toBeNull();
+    harness.setVisibility("hidden");
+  });
+
   test("malformed remote data cannot assert fleet all-clear or erase home rows", async () => {
     const harness = await bootApp({
       permission: "denied", initialSessions: [session("fleet-home-0001")],
@@ -2853,7 +2921,7 @@ describe("fleet directory bindings", () => {
     });
     await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "unavailable", 100);
     expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("Host coverage incomplete");
-    expect(harness.elements.sessionList.querySelector(".all-clear-copy")?.textContent).toBe("Unavailable: Remote.");
+    expect(harness.elements.sessionList.querySelector(".all-clear-copy")?.textContent).toBe("1 of 2 hosts up to date. Other sessions may be missing.");
     harness.elements.hostPicker.value = "local\0https://sessions.example";
     harness.elements.hostPicker.dispatchEvent(new Event("change"));
     expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("All clear");

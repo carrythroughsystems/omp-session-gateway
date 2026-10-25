@@ -24,7 +24,7 @@ import type {
 } from "../../../packages/collab-client/upstream/src/embed-contract";
 import {
   FleetTransport, loadClientConfig, sourceKey, sessionKey, recordKey, recordRef,
-  readSourceRecords, boundedJson, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
+  readSourceRecords, boundedJson, describeFreshness, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
   type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
 } from "./fleet";
 import { createTray, type TrayPanel } from "./tray";
@@ -354,9 +354,9 @@ function firstRunPanel(step: Exclude<FirstRunStep, "done">): TrayPanel {
     mark.removeAttribute("id");
     mark.setAttribute("width", "32");
     mark.setAttribute("height", "32");
-    const count = scopedSessions().length;
+    const count = scopedSessions().filter(session => sourceFresh(session.sourceKey)).length;
     body.append(mark, createTextElement("p", "first-run-copy",
-      `This phone is on your tailnet. ${localSource.label} is publishing ${count === 0 ? "no live sessions yet" : `${count} live session${count === 1 ? "" : "s"}`}.`),
+      `This phone is on your tailnet. ${count === 0 ? "No live sessions are listed yet" : `${count} live session${count === 1 ? " is" : "s are"} listed across the checked hosts`}.`),
     createTextElement("p", "first-run-note", "Capabilities are requested only when you tap an action."));
   } else if (step === "alerts") {
     const notNow = document.createElement("button");
@@ -680,8 +680,7 @@ type StatusKind = "ready" | "offline" | "tailnet" | "desktop" | "gateway" | "una
 function setStatus(kind: StatusKind, message: string): void {
   if (kind === "ready" || kind === "unauthorized" || kind === "expired") clearTransportFailureTracking();
   statusBanner.dataset.kind = kind;
-  statusBanner.replaceChildren();
-  statusBanner.textContent = message;
+  statusBanner.replaceChildren(createTextElement("span", "status-copy", message));
   statusBanner.hidden = kind === "ready";
 }
 
@@ -751,28 +750,32 @@ function showTransportFailure(kind: TransportFailureKind): void {
   } else {
     clearTransportFailureTracking();
   }
+  transportFailureKind = kind;
   directoryRevision = -1;
   render();
-  const asOf =
-    lastFreshAt === undefined
-      ? "before the last successful connection"
-      : new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" }).format(lastFreshAt);
+  const freshness = sourceAvailability(localKey);
+  const asOf = freshness.time;
+  const listCopy = asOf === undefined ? "No session list received yet."
+    : sources.size > 1 ? `${localSource.label}: ${freshness.copy}`
+      : `Showing the list as of ${asOf}.`;
   const copy: Record<TransportFailureKind, readonly [string, string]> = {
     offline: [
       "You're offline",
-      "This device has no connection. Showing the list as of " + asOf + " — retries automatically.",
+      `This device has no connection. ${listCopy} Retries automatically.`,
     ],
     tailnet: [
       "Tailnet unreachable",
-      "This device is online, but your tailnet isn't answering — Tailscale is off or logged out here.",
+      "This device is online, but your tailnet isn't answering. Check that Tailscale is connected.",
     ],
     desktop: [
       "Desktop unreachable",
-      "Tailnet looks fine, but the desktop isn't answering — asleep, or the gateway stopped. Last seen " + asOf + ".",
+      `The desktop isn't answering. Check that it is awake and the gateway is running. ${listCopy}`,
     ],
     gateway: [
       "Gateway unavailable",
-      "Live updates paused; showing the list as of " + asOf + ". Reconnects automatically.",
+      sources.size === 1 && asOf !== undefined
+        ? `Live updates paused; showing the list as of ${asOf}. Reconnects automatically.`
+        : `Live updates paused. ${listCopy} Reconnects automatically.`,
     ],
   };
   const [title, body] = copy[kind];
@@ -783,7 +786,7 @@ function showTransportFailure(kind: TransportFailureKind): void {
     createTextElement("span", "status-detail", body),
   );
   if (kind === "tailnet") {
-    text.append(createTextElement("span", "status-freshness", "Last seen " + asOf + "."));
+    text.append(createTextElement("span", "status-freshness", listCopy));
   }
 
   const extended = transportGuidanceVisible(kind);
@@ -820,7 +823,7 @@ function showTransportFailure(kind: TransportFailureKind): void {
       });
       actions.append(troubleshooting);
     }
-    statusBanner.append(actions);
+    text.append(actions);
   }
   statusBanner.hidden = false;
   if (tracksVisibleFailure) scheduleTransportGuidance();
@@ -918,7 +921,7 @@ function createSessionTile(session: SessionMetadata, state?: SessionTileState): 
   tile.append(icon === undefined
     ? createTextElement("span", "tile-monogram", [...titleText(session)][0]?.toLocaleUpperCase() ?? "")
     : createTextElement("span", "glyph", icon));
-  if (state !== undefined) tile.dataset.state = state;
+  if (state !== undefined) tile.dataset.state = sourceFresh(session.sourceKey) ? state : "unknown";
   return tile;
 }
 
@@ -1065,8 +1068,34 @@ function sourceFresh(key: SourceKey): boolean {
   return key === localKey ? localFresh : remotes.get(key)?.status === "fresh";
 }
 
+function sourceAvailability(key: SourceKey) {
+  if (key !== localKey) {
+    const remote = remotes.get(key);
+    return describeFreshness(remote?.status ?? "unavailable", remote?.freshAt);
+  }
+  return describeFreshness(
+    authorizationDenied ? "forbidden" : localFresh ? "fresh"
+      : transportFailureKind !== undefined ? directoryLoaded ? "stale" : "unavailable"
+        : directoryLoaded ? "refreshing" : "loading",
+    lastFreshAt,
+  );
+}
+
+function scopeCoverage() {
+  const scoped = [...sources.keys()].filter(key => selectedScope === "all" || key === selectedScope);
+  const fresh = scoped.filter(sourceFresh).length;
+  const failed = fleetBootstrapFailed || scoped.some(key => sourceAvailability(key).failed);
+  return {
+    complete: !fleetBootstrapFailed && fresh === scoped.length,
+    failed,
+    title: failed ? "Host coverage incomplete" : "Checking host coverage",
+    copy: fleetBootstrapFailed ? "The configured hosts could not be confirmed."
+      : `${fresh} of ${scoped.length} host${scoped.length === 1 ? "" : "s"} up to date. ${failed ? "Other sessions may be missing." : "Refreshing the rest."}`,
+  };
+}
+
 function scopeComplete(scope = selectedScope): boolean {
-  return [...sources.keys()].filter(key => scope === "all" || key === scope).every(sourceFresh);
+  return !fleetBootstrapFailed && [...sources.keys()].filter(key => scope === "all" || key === scope).every(sourceFresh);
 }
 
 function hostLabel(ref: Pick<SessionRef, "sourceKey">): string {
@@ -1133,33 +1162,25 @@ function remoteChanged(remote: FleetTransport): void {
 function renderFleetStatus(): void {
   fleetStatus.replaceChildren();
   if (fleetBootstrapFailed) {
-    const row = createTextElement("div", "status-guidance fleet-status-row", "Fleet configuration unavailable — reload this app");
+    const row = createTextElement("div", "fleet-status-row", "Fleet configuration unavailable. Reload to check all hosts.");
     const reload = createTextElement("button", "status-action", "Reload");
     reload.addEventListener("click", () => location.reload());
     row.append(reload);
     fleetStatus.append(row);
   }
-  if (sources.size > 1 && (selectedScope === "all" || selectedScope === localKey) && !localFresh) {
-    const detail = authorizationDenied ? "Access withdrawn."
-      : directoryLoaded ? `Live updates unavailable.${lastFreshAt === undefined ? "" : ` Stale since ${new Date(lastFreshAt).toLocaleTimeString()}.`}`
-        : "Loading sessions…";
-    const row = createTextElement("div", "status-guidance fleet-status-row", `${localSource.label}: ${detail}`);
-    row.dataset.sourceKey = localKey;
-    row.dataset.state = authorizationDenied ? "forbidden" : directoryLoaded ? "stale" : "loading";
-    const retry = createTextElement("button", "status-action", "Retry");
-    retry.addEventListener("click", () => void refreshAndConnect());
-    row.append(retry);
-    fleetStatus.append(row);
-  }
+  // The banner owns this gateway; only independent remote failures belong here.
   for (const [key, remote] of remotes) {
-    if ((selectedScope !== "all" && selectedScope !== key) || remote.status === "fresh") continue;
-    const detail = remote.status === "loading" || (remote.status === "stale" && remote.staleSince === undefined) ? "Refreshing sessions…"
-      : remote.status === "forbidden" ? "Access withdrawn."
-        : `Cannot reach this host from this app.${remote.snapshot !== undefined && remote.staleSince !== undefined ? ` Stale since ${new Date(remote.staleSince).toLocaleTimeString()}.` : ""}`;
-    const row = createTextElement("div", "status-guidance fleet-status-row", `${remote.source.label}: ${detail}`);
+    const availability = sourceAvailability(key);
+    if ((selectedScope !== "all" && selectedScope !== key) || !availability.failed ||
+      (navigator.onLine === false && remote.status !== "forbidden")) continue;
+    const detail = remote.status === "forbidden" ? "Access withdrawn."
+      : `Host unavailable. ${availability.copy}`;
+    const row = document.createElement("div");
+    row.className = "fleet-status-row";
+    row.append(createTextElement("span", "fleet-status-copy", `${remote.source.label}: ${detail}`));
     row.dataset.sourceKey = key;
     row.dataset.state = remote.status;
-    if (remote.status !== "loading") {
+    if (availability.retry) {
       const retry = createTextElement("button", "status-action", "Retry");
       retry.addEventListener("click", () => void remote.refresh(true));
       row.append(retry);
@@ -1306,10 +1327,15 @@ function contextFacts(session: SessionMetadata): Fact[] {
   ];
 }
 
+function freshnessFacts(session: SessionMetadata): Fact[] {
+  const availability = sourceAvailability(session.sourceKey);
+  return availability.current ? [] : [["session-freshness", availability.failed ? availability.copy : "Updating…"]];
+}
+
 function createSessionSummary(session: SessionMetadata): HTMLElement {
   return createRowMeta([
     contextFacts(session),
-    [["working-model", session.model === undefined ? undefined : modelSlug(session.model)]],
+    sourceFresh(session.sourceKey) ? [["working-model", session.model === undefined ? undefined : modelSlug(session.model)]] : freshnessFacts(session),
   ]) ?? createTextElement("span", "row-meta", "Live OMP session");
 }
 
@@ -1470,6 +1496,7 @@ function restoreDismissedSessions(): void {
 function createWorkingRow(session: SessionMetadata): HTMLElement {
   const frame = document.createElement("div");
   frame.className = "working-row-frame";
+  frame.dataset.fresh = String(sourceFresh(session.sourceKey));
   const button = document.createElement("button");
   button.type = "button";
   button.className = "working-row";
@@ -1482,11 +1509,11 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   copy.append(createTitleElement("span", "row-title", session));
   const details = createRowMeta([
     contextFacts(session),
-    [
+    sourceFresh(session.sourceKey) ? [
       ["session-activity", session.busy === true ? "Working" : session.busy === false ? "Idle" : "Activity unknown"],
       ["row-time", uptimeLabel(session)],
       ["working-model", session.model === undefined ? undefined : modelSlug(session.model)],
-    ],
+    ] : freshnessFacts(session),
   ]);
   if (details !== undefined) copy.append(details);
   button.append(createSessionTile(session, activityState(session)), copy);
@@ -1508,6 +1535,7 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "queue-row";
+  button.dataset.fresh = String(sourceFresh(session.sourceKey));
   button.dataset.instanceId = session.instanceId;
   button.dataset.sourceKey = session.sourceKey;
   button.disabled = !sourceFresh(session.sourceKey) || (mode === "control" ? !session.canControl : !session.canView);
@@ -1518,7 +1546,7 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
   const copy = document.createElement("span");
   copy.className = "row-copy";
   copy.append(createTitleElement("span", "row-title", session));
-  const meta = createRowMeta([contextFacts(session)]);
+  const meta = createRowMeta([contextFacts(session), freshnessFacts(session)]);
   if (meta !== undefined) copy.append(meta);
   button.append(
     createSessionTile(session, "waiting"),
@@ -1536,6 +1564,7 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   const mode: LaunchMode = session.canControl ? "control" : "view";
   const row = document.createElement("div");
   row.className = "held-row";
+  row.dataset.fresh = String(sourceFresh(session.sourceKey));
   row.dataset.instanceId = session.instanceId;
   row.dataset.sourceKey = session.sourceKey;
 
@@ -1547,7 +1576,7 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   const copy = document.createElement("span");
   copy.className = "row-copy";
   copy.append(createTitleElement("span", "row-title", session));
-  const meta = createRowMeta([contextFacts(session)]);
+  const meta = createRowMeta([contextFacts(session), freshnessFacts(session)]);
   if (meta !== undefined) copy.append(meta);
   open.append(
     createSessionTile(session, "held"),
@@ -1586,26 +1615,27 @@ function renderAllClear(
   dismissed: readonly SessionMetadata[],
   arrived: boolean,
 ): void {
+  const coverage = scopeCoverage();
   const summary = document.createElement("div");
   summary.className = "all-clear-summary";
-  summary.dataset.complete = String(scopeComplete());
+  summary.dataset.complete = String(coverage.complete);
   if (arrived) summary.dataset.arrived = "true";
   const alertsLive = notificationState === "enabled" && (sources.size === 1 || selectedScope === localKey);
   const message = document.createElement("div");
   message.className = "all-clear-message";
   message.append(
-    createTextElement("h2", "all-clear-title", scopeComplete() ? "All clear" : "Host coverage incomplete"),
+    createTextElement("h2", "all-clear-title", coverage.complete ? "All clear" : coverage.title),
     createTextElement(
       "p",
       "all-clear-copy",
-      scopeComplete()
+      coverage.complete
         ? `Nothing needs you.${alertsLive ? " Alerts are on for input requests and activity stops." : ""}`
-        : `Unavailable: ${[...sources].filter(([key]) => (selectedScope === "all" || key === selectedScope) && !sourceFresh(key)).map(([, source]) => source.label).join(", ")}.`,
+        : coverage.copy,
     ),
   );
   summary.append(createTextElement("span", "all-clear-dot", ""), message);
   // Keep the ping promise honest: without an active subscription, surface the path to one.
-  if ((sources.size === 1 || selectedScope === localKey) && (notificationState === "idle" || notificationState === "blocked")) {
+  if (coverage.complete && (sources.size === 1 || selectedScope === localKey) && (notificationState === "idle" || notificationState === "blocked")) {
     const hint = document.createElement("button");
     hint.type = "button";
     hint.className = "alerts-hint";
@@ -1615,7 +1645,7 @@ function renderAllClear(
   }
   sessionList.append(summary);
   if (working.length > 0) {
-    sessionList.append(createQueueKicker("Live sessions"));
+    sessionList.append(createQueueKicker(coverage.complete ? "Live sessions" : "Sessions"));
     for (const session of working) sessionList.append(createWorkingRow(session));
   }
   appendDismissedControl(dismissed);
@@ -1627,6 +1657,7 @@ function renderWaitingQueue(
   working: readonly SessionMetadata[],
   dismissed: readonly SessionMetadata[],
 ): void {
+  if (!scopeComplete()) renderAllClear([], [], false);
   const [hero, ...remaining] = waiting;
   if (hero === undefined) {
     const summary = document.createElement("div");
@@ -1640,6 +1671,7 @@ function renderWaitingQueue(
     sessionList.append(createQueueKicker("Up next", selectedScope === "all" && sources.size > 1 ? "observed waiting order" : waitingLabel(hero)));
     const article = document.createElement("article");
     article.className = "queue-hero";
+    article.dataset.fresh = String(sourceFresh(hero.sourceKey));
     article.dataset.instanceId = hero.instanceId;
     article.dataset.sourceKey = hero.sourceKey;
     const askPreview = createTextElement(
@@ -1724,7 +1756,7 @@ function renderWaitingQueue(
     for (const session of held) sessionList.append(createHeldRow(session));
   }
   if (working.length > 0) {
-    sessionList.append(createQueueKicker(`Live sessions · ${working.length}`));
+    sessionList.append(createQueueKicker(`${scopeComplete() ? "Live sessions" : "Sessions"} · ${working.length}`));
     for (const session of working) sessionList.append(createWorkingRow(session));
   }
   appendDismissedControl(dismissed);
@@ -1860,18 +1892,51 @@ function renderDirectory(arrived = false): void {
   if (focusRef !== undefined) focusDirectoryRequest(focusRef);
 }
 
+function renderEmptyState(): void {
+  emptyState.querySelector(".empty-state-detail")?.remove();
+  const coverage = scopeCoverage();
+  const filtered = selectedScope !== "all";
+  const denied = filtered ? sourceAvailability(selectedScope).status === "forbidden"
+    : [...sources.keys()].every(key => sourceAvailability(key).status === "forbidden");
+  emptyState.dataset.state = coverage.complete && !filtered ? "empty" : "limited";
+  if (emptyState.dataset.state === "empty") return;
+  const body = document.createElement("div");
+  body.className = "empty-state-detail";
+  const title = denied ? "Sessions are hidden"
+    : coverage.complete ? "No sessions on this host"
+      : !coverage.failed ? "Checking for sessions"
+        : filtered ? "This host has not been checked" : "No sessions to show yet";
+  const detail = denied ? "Ask the gateway operator to restore access."
+    : coverage.complete ? "Choose another host or start a session here."
+    : !coverage.failed ? "Waiting for the remaining hosts before confirming this list is empty."
+      : filtered ? "Its sessions may appear when the connection returns."
+        : "Some hosts could not be checked. Sessions may appear when they reconnect.";
+  body.append(createTextElement("h2", "", title), createTextElement("p", "", detail));
+  if (!denied) body.append(createTextElement("p", "empty-coverage", coverage.complete ? "No live sessions are listed here." : coverage.copy));
+  if (filtered) {
+    const all = createTextElement("button", "status-action", "All hosts");
+    all.addEventListener("click", () => {
+      hostPicker.value = "all";
+      hostPicker.dispatchEvent(new Event("change"));
+    });
+    body.append(all);
+  }
+  emptyState.append(body);
+}
+
 function renderDirectoryContents(arrived = false): void {
   renderFleetStatus();
   sessionList.replaceChildren();
-  if (!directoryLoaded && sessions.size === 0) {
+  if (!directoryLoaded && sessions.size === 0 && !scopeCoverage().failed) {
     emptyState.hidden = true;
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
     return;
   }
   const visibleSessions = scopedSessions();
-  emptyState.hidden = visibleSessions.length > 0 || !scopeComplete();
+  emptyState.hidden = visibleSessions.length > 0;
   if (visibleSessions.length === 0) {
+    renderEmptyState();
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
     sessionList.className = "session-list";
@@ -1900,20 +1965,20 @@ function renderDirectoryContents(arrived = false): void {
   }
 
   directoryTitle.textContent = "Sessions";
-  directoryCount.className = "count-pill count-pill-live";
+  directoryCount.className = `count-pill ${scopeComplete() ? "count-pill-live" : "count-pill-listed"}`;
   const liveWorkingCount = working.length + dismissed.length;
-  directoryCount.textContent = `Live · ${liveWorkingCount}`;
+  directoryCount.textContent = `${scopeComplete() ? "Live" : "Listed"} · ${liveWorkingCount}`;
   sessionList.className = "session-list all-clear";
-  sessionList.setAttribute("aria-label", "Live OMP sessions");
+  sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
   renderAllClear(working, dismissed, arrived);
 }
 
 function setConnectionState(
   chip: HTMLElement,
-  state: "connected" | "reconnecting" | "offline",
+  state: "connected" | "connecting" | "reconnecting" | "offline" | "forbidden",
   copy?: string,
 ): void {
-  const label = copy ?? (state === "connected" ? "Connected" : state === "reconnecting" ? "Reconnecting…" : "Offline");
+  const label = copy ?? (state === "connected" ? "Connected" : state === "connecting" ? "Connecting…" : state === "reconnecting" ? "Reconnecting…" : "Offline");
   const compact = state === "connected" && copy === undefined ? "true" : "false";
   if (chip.dataset.state !== state) chip.dataset.state = state;
   if (chip.dataset.compact !== compact) chip.dataset.compact = compact;
@@ -1926,7 +1991,7 @@ function setConnectionState(
 
 function sessionEndedCopy(reason: string | null): string {
   const exitCode = reason?.match(/\bexit(?:ed)?(?:\s+with)?(?:\s+code)?\s+(-?\d+)\b/iu)?.[1];
-  return exitCode === undefined ? "Mac/session ended" : `Mac/session ended · exit ${exitCode}`;
+  return exitCode === undefined ? "Session ended" : `Session ended · exit ${exitCode}`;
 }
 
 function hideTriageBar(shell: ActiveCollabShell, rerenderConnection = true): void {
@@ -2012,11 +2077,10 @@ function pathInterrupted(health: PathHealth): boolean {
 }
 
 function retryingCopy(path: "gateway" | "relay", state: CollabEmbedState): string {
-  const label = path === "gateway" ? "Gateway unavailable" : "Relay unavailable";
   const retryAt = path === "gateway" ? state.gatewayHealth.retryAt : state.relayHealth.retryAt;
-  if (retryAt === null) return `${label} — retrying…`;
+  if (retryAt === null) return "Reconnecting automatically…";
   const seconds = Math.max(0, Math.ceil((retryAt - Date.now()) / 1_000));
-  return seconds > 0 ? `${label} — retrying in ${seconds}s` : `${label} — retrying…`;
+  return seconds > 0 ? `Retrying in ${seconds}s` : "Reconnecting automatically…";
 }
 
 function scheduleConnectionRender(shell: ActiveCollabShell, delay: number, kind: "delay" | "tick"): void {
@@ -2036,7 +2100,8 @@ function renderConnectionState(shell: ActiveCollabShell): void {
   if (state === undefined || activeCollabShell !== shell) return;
   if (state.gatewayHealth.state === "forbidden") {
     clearConnectionTimers(shell);
-    setConnectionState(shell.connectionChip, "offline", "Access withdrawn — return to sessions");
+    setConnectionState(shell.connectionChip, "forbidden", "Access withdrawn");
+    showTriageBar(shell, "ended", "This identity can no longer access the session.", "Back to Sessions", returnToDirectory);
     return;
   }
 
@@ -2067,7 +2132,7 @@ function renderConnectionState(shell: ActiveCollabShell): void {
   }
   if (!shell.hasBeenLive) {
     if (!live || loading !== null) {
-      setConnectionState(shell.connectionChip, "reconnecting", progressCopy ?? "Connecting…");
+      setConnectionState(shell.connectionChip, "connecting", progressCopy ?? "Connecting…");
       return;
     }
     shell.hasBeenLive = true;
@@ -2338,7 +2403,7 @@ function reconcileActiveCollabShell(): void {
     shell.answerShown = true;
     clearConnectionTimers(shell);
     setConnectionState(shell.connectionChip, "offline", "Ended");
-    showTriageBar(shell, "ended", "Mac/session ended", "Back to Sessions", returnToDirectory);
+    showTriageBar(shell, "ended", "Session ended", "Back to Sessions", returnToDirectory);
     return;
   }
   if (shell.openedRequestId !== undefined && current.ask?.requestId === shell.openedRequestId) {
@@ -2494,7 +2559,7 @@ function enterCollabClient(
     void launch(current, "control", control, current.ask?.requestId, shellState.scope);
   });
   const connection = createTextElement("span", "conn-chip", "Connecting…");
-  setConnectionState(connection, "reconnecting", "Connecting…");
+  setConnectionState(connection, "connecting", "Connecting…");
   connection.setAttribute("role", "status");
   connection.setAttribute("aria-live", "polite");
   connection.setAttribute("aria-atomic", "true");

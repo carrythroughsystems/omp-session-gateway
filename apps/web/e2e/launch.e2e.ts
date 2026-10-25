@@ -714,7 +714,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".triage-bar")).toBeHidden();
     await expect(page.locator(".conn-chip")).toHaveText("Relay unavailable", { timeout: 5_000 });
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "reconnecting");
-    await expect(page.locator(".triage-copy")).toContainText("Relay unavailable — retrying");
+    await expect(page.locator(".triage-copy")).toHaveText(/^(Retrying in \d+s|Reconnecting automatically…)$/u);
     await page.evaluate(() => {
       const socket = (globalThis as typeof globalThis & {
         __askSocket?: { allowRecovery(): void };
@@ -777,7 +777,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     // The tray title now expands; tap neutral client content to dismiss only answer feedback.
     await page.locator(".sh-transcript").click({ position: { x: 2, y: 2 } });
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "reconnecting");
-    await expect(page.locator(".triage-copy")).toContainText("Relay unavailable — retrying");
+    await expect(page.locator(".triage-copy")).toHaveText(/^(Retrying in \d+s|Reconnecting automatically…)$/u);
     await page.evaluate(() => {
       const socket = (globalThis as typeof globalThis & {
         __askSocket?: { allowRecovery(): void };
@@ -987,7 +987,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "offline");
     await expect(page.locator(".conn-chip")).toHaveText("Ended");
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "ended");
-    await expect(page.locator(".triage-copy")).toHaveText("Mac/session ended · exit 0");
+    await expect(page.locator(".triage-copy")).toHaveText("Session ended · exit 0");
     await expect(page.locator(".triage-action")).toHaveText("Back to Sessions");
     await expect(page.locator(".sh-ended")).toHaveCount(0);
     const snapshotsAtEnd = fixture.requests.filter(request => request === "GET /api/v1/sessions").length;

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FleetSource, SessionCreationOptions } from "@omp-session-gateway/protocol";
 import {
-  FleetTransport, sourceKey, sessionKey, readSourceRecords, HELD_KEY, DISMISSED_KEY, boundedJson,
+  FleetTransport, sourceKey, sessionKey, readSourceRecords, HELD_KEY, DISMISSED_KEY, boundedJson, describeFreshness,
   SessionCreationTransport, CreationTransportError, readCreationPreferences, writeCreationPreferences, CREATION_PREFERENCES_KEY,
 } from "../src/fleet";
 
@@ -175,6 +175,35 @@ describe("creation preferences", () => {
 });
 
 describe("fleet transport", () => {
+  test("freshness distinguishes checking from failure and uses one successful-observation clock", () => {
+    const at = Date.parse("2026-10-25T01:30:00Z");
+    for (const status of ["loading", "fresh", "refreshing"] as const) {
+      expect(describeFreshness(status, at)).toMatchObject({ failed: false, retry: false });
+    }
+    expect(describeFreshness("forbidden", at)).toMatchObject({ failed: true, retry: false });
+    expect(describeFreshness("unavailable").copy).toBe("No session list received yet.");
+    expect(describeFreshness("stale", at).copy).toBe(describeFreshness("unavailable", at).copy);
+    expect(describeFreshness("stale", at).copy).toBe(`List as of ${describeFreshness("fresh", at).time}.`);
+  });
+
+  test("visibility revalidation is refreshing, not a failed snapshot", async () => {
+    const time = new Clock();
+    // This fixture uses only the callable fetch interface, not Bun's extra fetch properties.
+    const fetchSnapshot = (async () => snapshot(1)) as unknown as typeof fetch;
+    const transport = new FleetTransport(remote, () => {}, fetchSnapshot, time);
+    transport.setVisible(true);
+    await transport.refresh();
+    transport.setVisible(false);
+    expect(transport.status).toBe("refreshing");
+    expect(transport.staleSince).toBeUndefined();
+    expect(transport.snapshot?.revision).toBe(1);
+    transport.setVisible(true);
+    expect(transport.status).toBe("refreshing");
+    await transport.refresh();
+    expect(transport.status).toBe("fresh");
+    transport.setVisible(false);
+  });
+
   test("coalesces requests, binds CORS options, and accepts lower revisions after a restart", async () => {
     const time = new Clock();
     const requests: RequestInit[] = [];

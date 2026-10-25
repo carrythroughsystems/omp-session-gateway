@@ -19,9 +19,24 @@ export const sourceKey = (source: FleetSource): SourceKey => `${source.id}\0${so
 export const sessionKey = (ref: Pick<SessionRef, "sourceKey" | "instanceId">): string =>
   `${ref.sourceKey}\0${ref.instanceId}`;
 export type SnapshotResult = "healthy" | "unavailable" | "forbidden";
-export type SourceStatus = "loading" | "fresh" | "stale" | "unavailable" | "forbidden";
+export type SourceStatus = "loading" | "fresh" | "refreshing" | "stale" | "unavailable" | "forbidden";
 export const SNAPSHOT_BYTES = 8 * 1024 * 1024;
 export const STALE_GRACE_MS = 35_000;
+
+const freshnessClock = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
+
+/** A successful observation, never the time a failed check happened. */
+export function describeFreshness(status: SourceStatus, freshAt?: number) {
+  const time = freshAt === undefined ? undefined : freshnessClock.format(freshAt);
+  return {
+    status,
+    current: status === "fresh",
+    failed: status === "stale" || status === "unavailable" || status === "forbidden",
+    retry: status === "stale" || status === "unavailable",
+    time,
+    copy: time === undefined ? "No session list received yet." : `List as of ${time}.`,
+  };
+}
 
 export async function boundedJson(response: Response, maximum: number, strict = false): Promise<unknown> {
   const declared = response.headers.get("content-length");
@@ -109,7 +124,7 @@ export class FleetTransport {
     this.request?.controller.abort();
     this.request = undefined;
     this.clearTimer();
-    if (this.status === "fresh") this.status = "stale";
+    if (this.status === "fresh") this.status = "refreshing";
     this.changed(this);
     if (visible) {
       this.failures = 0;

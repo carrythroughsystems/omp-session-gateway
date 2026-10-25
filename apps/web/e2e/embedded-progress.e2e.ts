@@ -118,6 +118,7 @@ async function setup(context: BrowserContext, page: Page): Promise<DashboardFixt
   await page.goto(fixture.origin, { waitUntil: "domcontentloaded" });
   await page.locator(".working-row").first().click();
   await expect(page.locator(".conn-chip")).toHaveText("Joining session… 0%");
+  await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "connecting");
   return fixture;
 }
 
@@ -235,7 +236,7 @@ test("progress floors and clamps percentages, clears null, and yields to forbidd
       (globalThis as typeof globalThis & ProgressGlobals).__ompProgress.publish({ loading: { received: 50, total: 100 } });
     });
     await expect(page.locator(".conn-chip")).toHaveText("Gateway unavailable");
-    await expect(page.locator(".triage-copy")).toHaveText("Gateway unavailable — retrying…");
+    await expect(page.locator(".triage-copy")).toHaveText("Reconnecting automatically…");
     await page.evaluate(() => {
       const h = (globalThis as typeof globalThis & ProgressGlobals).__ompProgress;
       h.publish({ phase: "ended", endedReason: "Session exited with code 0", gatewayHealth: { ...h.state!.gatewayHealth, state: "healthy", failureSince: null } });
@@ -245,7 +246,8 @@ test("progress floors and clamps percentages, clears null, and yields to forbidd
       const h = (globalThis as typeof globalThis & ProgressGlobals).__ompProgress;
       h.publish({ gatewayHealth: { ...h.state!.gatewayHealth, state: "forbidden" } });
     });
-    await expect(page.locator(".conn-chip")).toHaveText("Access withdrawn — return to sessions");
+    await expect(page.locator(".conn-chip")).toHaveText("Access withdrawn");
+    await expect(page.locator(".triage-action")).toHaveText("Back to Sessions");
     await assertPrivate(page, fixture);
   } finally { await fixture.stop(); }
 });

@@ -207,14 +207,14 @@ This browser evidence is not real-host Tern or physical-device qualification.
 
 ## Synthetic visual review
 
-From the repository root, `bun run test:visual` builds the real dashboard/client and validates six
-states at 390×844, 810×1080 and 1280×800 (18 unique state/project names). It never starts Percy
+From the repository root, `bun run test:visual` builds the real dashboard/client and validates seven
+states at 390×844, 810×1080 and 1280×800 (21 unique state/project names), including partial host coverage. It never starts Percy
 or passes a token. Fixed clock/randomness, en-US/UTC, dark theme, reduced motion and DPR 1 keep
 captures deterministic. Directory asks are metadata-only; collaboration prose/code are authored
 synthetic content from `e2e/synthetic-product-fixture.ts`, whose defaults also serve README capture.
 
 `bun run test:visual:percy` requires `PERCY_TOKEN`, a healthy local Percy server started by the
-pinned CLI, all 18 guarded submissions and a finalized build. Native Node.js (24.22.0 LTS in CI)
+pinned CLI, all 21 guarded submissions and a finalized build. Native Node.js (24.22.0 LTS in CI)
 must be on `PATH` for the Percy CLI only; builds and the visual worker stay on Bun 1.4.0. CI
 passes the executable from its SHA-pinned setup-node step; missing local Node fails closed with
 `reason=node-missing`. Percy must not run under Bun's HTTP compatibility layer.
@@ -227,7 +227,7 @@ and header-alignment checks rather than the normal View width.
 This advisory signal does not replace functional e2e or qualification. Project setup, eligible
 CI events and review policy are in [BrowserStack](../../docs/BROWSERSTACK.md).
 Failures report only closed-set phases/reasons and bounded counts, never raw Percy/browser text.
-Upload mode additionally runs an 18-state testing-host preflight and scans the redacted CLI logs
+Upload mode additionally runs a 21-case testing-host preflight and scans the redacted CLI logs
 Percy would receive; the vendor uploads CLI logs with builds even while CI-log upload is disabled.
 The retained fixture guard must also reject a planted SDK-log canary. This preflight never runs
 in local mode or uses a real token.
