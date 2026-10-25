@@ -34,6 +34,15 @@ test("an absent observation never invents a timestamp; equal instants are byte-i
   expect(scopeCoverage([sourceAvailability("refreshing", observedAt)]).copy).toBe("0 of 1 host up to date. Refreshing the rest.");
 });
 
+test("successor4: descriptors retain exact observation instants independently of their clock text", () => {
+  const first = sourceAvailability("stale", observedAt + 5_000);
+  const second = sourceAvailability("fresh", observedAt + 40_000);
+  expect(first.time).toBe(second.time);
+  expect(first.observedAt).toBe(observedAt + 5_000);
+  expect(second.observedAt).toBe(observedAt + 40_000);
+  expect(sourceAvailability("withdrawn", observedAt).observedAt).toBeUndefined();
+});
+
 test("counterexample: a withdrawn observation cannot reuse its old timestamp as an empty-list certificate", () => {
   const withdrawn = sourceAvailability("withdrawn", observedAt);
   expect(withdrawn).toMatchObject({

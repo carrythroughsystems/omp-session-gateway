@@ -74,6 +74,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Keep failed local targets distinct from an open remote session, including Next, Hold, and withdrawn Control actions.
+- Clear expired-target notices after successful list recovery instead of recreating a resolved failure.
+- Restore Hold immediately when a target failure is dismissed while its list refresh is still pending.
+- Build a newly opened session's title and Control action from the latest authoritative metadata.
+- Show a shared empty-list clock only when the hosts' observation instants actually match.
 - Preserve cross-host Next and Hold failure notices through updates from the session still on screen, until dismissal or target recovery.
 - Mark target-host access denial in red, distinct from amber connection or launch failures.
 - Reject an in-flight session launch when View or Control is withdrawn, including launches resumed after browser restoration.

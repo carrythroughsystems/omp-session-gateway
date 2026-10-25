@@ -137,11 +137,17 @@ directory readiness. Cross-host Next-ask failures retain the target's notice acr
 health updates; expired targets still refresh, and Sessions returns to list-only recovery.
 Target-owned triage arbitrates all predecessor writers, including Hold reconciliation and short
 connection interruptions. Explicit dismissal also invalidates a pending expired-target feedback update.
+Mounted action failures use this owner whether the target is local or remote. Local success paths release
+the owner just like remote observations; a successful expiry refresh never recreates a failed host row.
+Pending launches, not `answerShown`, suppress Hold reconciliation, so dismissal can restore Hold immediately.
 Launch acceptance revalidates current View/Control eligibility as well as source, generation and request.
+The accepted shell receives that revalidated metadata, including its current title and Control affordance.
 Every new launch intent advances the selection epoch, so a failed newer intent still supersedes an older
 resume. Creation establishes that epoch when its wizard opens; its launch handoff continues the same intent.
 Selected-source empty rendering also uses its own observation, with retained empty clocks ahead
 of neutral checking progress.
+Availability descriptors retain the exact successful observation instant separately from formatted time;
+All-hosts empty rendering compares those instants before claiming a shared clock.
 
 Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and keeps its collaboration shell mounted while offering source-appropriate recovery.
 

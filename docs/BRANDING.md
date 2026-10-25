@@ -249,12 +249,16 @@ predecessor's connection chip, and offer Sessions to reach that host's list-only
 The target owns that notice through predecessor health and Hold updates. It has no expiry timer:
 Sessions, explicit dismissal, a new launch, or a successful target observation releases it.
 Its denial accent is red; non-auth target failures retain amber.
+Local targets follow the same ownership as remote targets, including in-session mode withdrawal.
+Successful expiry refresh ends the failure notice; dismissing it restores Hold without waiting for refresh.
 Withdrawing View or Control during a launch names the unavailable mode instead of opening it.
 Coverage aggregates `N of M hosts up to date` without repeating labels. Only complete coverage
 earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Listed · N` pill and
 `Sessions`. Cached rows retain legible text, with dashed borders, muted state badges, and
 `List as of {time}` metadata. Every availability clock formats the last successful observation
 with the same locale-aware hour/minute formatter, never the failed-check time.
+Multiple empty lists share an `as of` clock only when their underlying observation instants match,
+not merely because their formatted hour and minute happen to match.
 
 An empty incomplete list explains that sessions may be missing; it never claims all clear.
 Access denial is red and has no Retry promise. A retained empty observation says `No sessions

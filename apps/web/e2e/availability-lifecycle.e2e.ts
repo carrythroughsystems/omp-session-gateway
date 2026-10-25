@@ -167,6 +167,7 @@ for (const failure of [404, 409, 503, "network"] as const) {
   test(`council476: remote launch ${failure} leaves the independent local banner intact`, async ({ page }) => {
     const home = await startDashboardFixture([]);
     const away = await startDashboardFixture([GATEWAY_WORKING]);
+    const expiryRefresh = Promise.withResolvers<void>();
     home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
     away.configureFleet("Away", [], [home.origin]);
     home.setListFailure("malformed");
@@ -178,10 +179,21 @@ for (const failure of [404, 409, 503, "network"] as const) {
       await page.goto(home.origin);
       await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
       await page.clock.pauseAt(new Date(time.getTime() + 1_000));
+      if (failure === 404 || failure === 409) await page.route(`${away.origin}/api/v1/sessions`, async route => {
+        const response = await route.fetch();
+        await expiryRefresh.promise;
+        await route.fulfill({ response }).catch(() => undefined);
+      });
       await page.locator(".working-row").click();
       await expect(page.locator("#fleet-status")).toContainText("Away:");
+      if (failure === 404 || failure === 409) {
+        const refreshed = page.waitForResponse(`${away.origin}/api/v1/sessions`);
+        expiryRefresh.resolve();
+        await (await refreshed).finished();
+        await expect(page.locator("#fleet-status")).toBeHidden();
+      }
       await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
-    } finally { await page.close(); await Promise.all([home.stop(), away.stop()]); }
+    } finally { expiryRefresh.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
   });
 }
 
@@ -366,10 +378,11 @@ for (const failure of [404, 409, 503, "network"] as const) {
       await page.locator(".triage-action").click();
       await expect(page.locator("#fleet-status")).toContainText("Away:");
       release.resolve();
-      if (failure === 404 || failure === 409) await expect(page.locator("#fleet-status")).toContainText("The list has been refreshed.");
-      const priorReads = reads;
-      await page.getByRole("button", { name: "Refresh host", exact: true }).click();
-      await expect.poll(() => reads).toBe(priorReads + 1);
+      if (failure !== 404 && failure !== 409) {
+        const priorReads = reads;
+        await page.getByRole("button", { name: "Refresh host", exact: true }).click();
+        await expect.poll(() => reads).toBe(priorReads + 1);
+      }
       expect(launches).toBe(1);
       await expect(page.locator("#fleet-status")).toBeHidden();
       await expect(page.locator("#status-banner")).toBeHidden();
@@ -587,4 +600,220 @@ test("council477: a failed newer foreground launch prevents delayed bfcache reop
     await expect(page.locator(".gateway-shell")).toHaveCount(0);
     await expect(page.locator("#session-list")).toBeVisible();
   } finally { release.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
+});
+
+for (const advance of ["next", "hold"] as const) {
+  for (const failure of [403, 404, 409, 503, "withdrawn"] as const) {
+    test(`successor4: remote ${advance} retains local target ${failure}`, async ({ page, context }) => {
+      const key = randomBytes(32);
+      const home = await startDashboardFixture([RELEASE_WAITING], { roomKey: key });
+      const away = await startDashboardFixture([GATEWAY_WAITING], { roomKey: key });
+      home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+      away.configureFleet("Away", [], [home.origin]);
+      await installSyntheticProductFixture(context, key);
+      await installPublicationReplay(context);
+      const listGate = Promise.withResolvers<void>();
+      const launchGate = Promise.withResolvers<void>();
+      let reads = 0;
+      let launches = 0;
+      await page.route(`${home.origin}/api/v1/sessions/*/launch`, async route => {
+        launches += 1;
+        if (failure !== "withdrawn") { await route.fulfill({ status: failure, body: "" }); return; }
+        const response = await route.fetch();
+        await launchGate.promise;
+        await route.fulfill({ response }).catch(() => undefined);
+      });
+      try {
+        await page.goto(home.origin);
+        await expect(page.locator("#directory-count")).toHaveText("2 waiting");
+        await page.locator(".queue-hero").filter({ has: page.getByRole("heading", { name: GATEWAY_WAITING.title!, exact: true }) })
+          .locator(".action-request").or(page.getByRole("button", { name: `Open request in ${GATEWAY_WAITING.title}`, exact: true })).click();
+        await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+        if (advance === "next") {
+          away.upsert(GATEWAY_WORKING);
+          await page.evaluate(() => window.dispatchEvent(new Event("online")));
+          await expect(page.locator(".triage-action")).toHaveText("Next ask →");
+        }
+        if (failure === 404 || failure === 409) await page.route(`${home.origin}/api/v1/sessions`, async route => {
+          reads += 1;
+          await listGate.promise;
+          await route.continue().catch(() => undefined);
+        });
+        await page.locator(".triage-action").click();
+        await expect.poll(() => launches).toBe(1);
+        if (failure === "withdrawn") {
+          home.setSnapshot([{ ...RELEASE_WAITING, canControl: false }]);
+          const refreshed = page.waitForResponse(`${home.origin}/api/v1/sessions`);
+          await page.evaluate(() => window.dispatchEvent(new Event("online")));
+          await (await refreshed).finished();
+          await settlePublication(page);
+          launchGate.resolve();
+        }
+        await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "launch-failed");
+        await page.evaluate(() => (globalThis as typeof globalThis & { __replayAvailabilityState(): void }).__replayAvailabilityState());
+        await expect(page.locator(".triage-copy")).toContainText("Home");
+        await expect(page.locator(".triage-action")).toHaveText("Sessions");
+        await expect(page.locator(".triage-bar")).toBeVisible();
+        if (failure === 404 || failure === 409) {
+          expect(reads).toBe(1);
+          const refreshed = page.waitForResponse(`${home.origin}/api/v1/sessions`);
+          listGate.resolve();
+          await (await refreshed).finished();
+          await expect(page.locator('.triage-bar[data-kind="launch-failed"]')).toBeHidden();
+          if (advance === "hold") await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+        }
+        expect(launches).toBe(1);
+        await expect(page.locator(".gateway-shell")).toBeVisible();
+        home.assertNoCapabilityMaterial(await page.content());
+        away.assertNoCapabilityMaterial(await page.content());
+      } finally { listGate.resolve(); launchGate.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
+    });
+  }
+}
+
+test("successor4: local in-shell Control withdrawal retains its action notice", async ({ page, context }) => {
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([GATEWAY_WORKING], { roomKey: key });
+  await installSyntheticProductFixture(context, key, { readOnly: true });
+  await installPublicationReplay(context);
+  const gate = Promise.withResolvers<void>();
+  const intercepted = Promise.withResolvers<void>();
+  await page.route(`${fixture.origin}/api/v1/sessions/*/launch`, async route => {
+    const response = await route.fetch();
+    if (route.request().postDataJSON().mode === "control") {
+      intercepted.resolve();
+      await gate.promise;
+    }
+    await route.fulfill({ response }).catch(() => undefined);
+  });
+  try {
+    await page.goto(fixture.origin);
+    await page.locator(".working-row").click();
+    await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "connected");
+    await page.locator(".shell-control").click();
+    await intercepted.promise;
+    fixture.setSnapshot([{ ...GATEWAY_WORKING, canControl: false }]);
+    const refreshed = page.waitForResponse(`${fixture.origin}/api/v1/sessions`);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await (await refreshed).finished();
+    await settlePublication(page);
+    gate.resolve();
+    await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "launch-failed");
+    await page.evaluate(() => (globalThis as typeof globalThis & { __replayAvailabilityState(): void }).__replayAvailabilityState());
+    await expect(page.locator(".triage-copy")).toContainText("Control is no longer available");
+    await expect(page.locator(".triage-action")).toHaveText("Sessions");
+    await expect(page.locator(".triage-bar")).toBeVisible();
+    expect(fixture.launchRequests).toHaveLength(2);
+    fixture.assertNoCapabilityMaterial(await page.content());
+  } finally { gate.resolve(); await page.close(); await fixture.stop(); }
+});
+
+for (const failure of [404, 409]) {
+  for (const dismiss of [false, true]) {
+    test(`successor4: expired Hold target ${failure} releases${dismiss ? " on dismissal during refresh" : " on fresh observation"}`, async ({ page, context }) => {
+      const key = randomBytes(32);
+      const home = await startDashboardFixture([GATEWAY_WAITING], { roomKey: key });
+      const away = await startDashboardFixture([RELEASE_WAITING], { roomKey: key });
+      home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+      away.configureFleet("Away", [], [home.origin]);
+      await installSyntheticProductFixture(context, key);
+      const gate = Promise.withResolvers<void>();
+      const intercepted = Promise.withResolvers<void>();
+      let launches = 0;
+      await page.route(`${away.origin}/api/v1/sessions/*/launch`, async route => {
+        launches += 1;
+        await route.fulfill({ status: failure, headers: { "Access-Control-Allow-Origin": home.origin }, body: "" });
+      });
+      try {
+        await page.goto(home.origin);
+        await expect(page.locator("#directory-count")).toHaveText("2 waiting");
+        await page.locator(".queue-hero").filter({ has: page.getByRole("heading", { name: GATEWAY_WAITING.title!, exact: true }) })
+          .locator(".action-request").or(page.getByRole("button", { name: `Open request in ${GATEWAY_WAITING.title}`, exact: true })).click();
+        await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+        await page.route(`${away.origin}/api/v1/sessions`, async route => {
+          const response = await route.fetch();
+          intercepted.resolve();
+          await gate.promise;
+          await route.fulfill({ response }).catch(() => undefined);
+        });
+        await page.locator(".triage-action").click();
+        await intercepted.promise;
+        await expect(page.locator(".triage-action")).toHaveText("Sessions");
+        if (dismiss) {
+          await page.locator(".gateway-shell").click({ position: { x: 2, y: 2 } });
+          await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+        }
+        const refreshed = page.waitForResponse(`${away.origin}/api/v1/sessions`);
+        gate.resolve();
+        await (await refreshed).finished();
+        await expect(page.locator("#fleet-status")).toBeHidden();
+        await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+        expect(launches).toBe(1);
+      } finally { gate.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
+    });
+  }
+}
+
+for (const remote of [false, true]) {
+  for (const canControl of [false, true]) {
+    test(`successor4: ${remote ? "remote" : "local"} View mounts authoritative Control=${canControl}`, async ({ page }) => {
+      const original = { ...GATEWAY_WORKING, canControl: !canControl };
+      const home = await startDashboardFixture(remote ? [] : [original]);
+      const away = await startDashboardFixture(remote ? [original] : []);
+      home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+      away.configureFleet("Away", [], [home.origin]);
+      const target = remote ? away : home;
+      const gate = Promise.withResolvers<void>();
+      const intercepted = Promise.withResolvers<void>();
+      await installSilentWebSocket(page);
+      await page.route(`${target.origin}/api/v1/sessions/*/launch`, async route => {
+        const response = await route.fetch();
+        intercepted.resolve();
+        await gate.promise;
+        await route.fulfill({ response }).catch(() => undefined);
+      });
+      try {
+        await page.goto(home.origin);
+        await page.locator(".working-row").click();
+        await intercepted.promise;
+        target.setSnapshot([{ ...original, canControl, title: "Current authoritative title" }]);
+        const refreshed = page.waitForResponse(`${target.origin}/api/v1/sessions`);
+        await page.evaluate(() => window.dispatchEvent(new Event("online")));
+        await (await refreshed).finished();
+        await settlePublication(page);
+        gate.resolve();
+        await expect(page.locator(".gateway-shell")).toBeVisible();
+        if (canControl) await expect(page.locator(".shell-control")).toBeVisible();
+        else await expect(page.locator(".shell-control")).toBeHidden();
+        await expect(page.locator(".shell-title")).toHaveText("Current authoritative title");
+        target.assertNoCapabilityMaterial(await page.content());
+      } finally { gate.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
+    });
+  }
+}
+
+test("successor4: distinct same-minute empty observations do not share one clock", async ({ page }) => {
+  const home = await startDashboardFixture([]);
+  const away = await startDashboardFixture([]);
+  home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+  away.configureFleet("Away", [], [home.origin]);
+  const gate = Promise.withResolvers<void>();
+  await page.clock.setFixedTime(new Date("2026-10-25T01:30:05Z"));
+  await page.route(`${away.origin}/api/v1/sessions`, async route => { await gate.promise; await route.continue().catch(() => undefined); });
+  try {
+    await page.goto(home.origin);
+    await expect(page.locator("#empty-state")).toContainText("Checking for sessions");
+    await expect.poll(() => home.requests.includes("GET /api/v1/events")).toBe(true);
+    await settlePublication(page);
+    home.setListFailure(503);
+    await page.route(`${home.origin}/api/v1/events`, route => route.abort("connectionrefused"));
+    expect(home.disconnectEvents()).toBe(1);
+    await expect(page.locator(".empty-coverage")).toContainText("0 of 2 hosts up to date");
+    await page.clock.setFixedTime(new Date("2026-10-25T01:30:40Z"));
+    const refreshed = page.waitForResponse(`${away.origin}/api/v1/sessions`);
+    gate.resolve();
+    await (await refreshed).finished();
+    await expect(page.locator("#empty-state")).toContainText("No sessions in the last received lists");
+    await expect(page.locator("#empty-state")).not.toContainText("No sessions as of");
+  } finally { gate.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
 });

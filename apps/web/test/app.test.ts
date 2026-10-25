@@ -502,6 +502,7 @@ async function bootApp(options: {
   readonly permission: NotificationPermission;
   readonly initialSessions: readonly SessionMetadata[];
   readonly initialListStatus?: number;
+  readonly listResponse?: () => Promise<Response>;
   readonly workerResponse?: unknown;
   readonly permissionResult?: NotificationPermission;
   readonly existingSubscription?: boolean;
@@ -751,6 +752,7 @@ async function bootApp(options: {
       });
     }
     if (path !== "/api/v1/sessions") throw new Error(`unexpected fetch: ${path}`);
+    if (options.listResponse !== undefined) return await options.listResponse();
     if (failedListRequests > 0) {
       failedListRequests -= 1;
       throw new TypeError("network request failed");
@@ -2754,6 +2756,212 @@ describe("fleet directory bindings", () => {
   };
 
   for (const advance of ["next", "hold"] as const) {
+    for (const failure of [403, 404, 409, 503, "withdrawn"] as const) {
+      test(`successor4: remote ${advance} owns local target ${failure}`, async () => {
+        const home = session(`local-target-${advance}-${failure}`, { inputRequired: true });
+        const remote = session(`remote-predecessor-${advance}-${failure}`, { inputRequired: true });
+        const payload = { revision: 1, sessions: [remote] };
+        const listGate = Promise.withResolvers<void>();
+        const launchGate = Promise.withResolvers<void>();
+        let holdList = false;
+        let reads = 0;
+        const harness = await bootApp({
+          permission: "denied", initialSessions: [home], clientConfig: config, remotePayload: payload,
+          suffix: `local-target-${advance}-${failure}`,
+          listResponse: async () => {
+            reads += 1;
+            if (holdList) await listGate.promise;
+            return Response.json({ revision: 1, sessions: [home] });
+          },
+          launchResponse: async (path, init) => {
+            if (!path.startsWith("https://remote.example")) {
+              if (failure !== "withdrawn") return new Response(null, { status: failure });
+              await launchGate.promise;
+            }
+            const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+            return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+          },
+        });
+        try {
+          await settleUntil(() => harness.elements.directoryCount.textContent === "2 waiting", 100);
+          const hero = harness.elements.sessionList.querySelector(".queue-hero")!;
+          const open = hero.dataset.sourceKey === "remote\0https://remote.example" ? hero.querySelector(".action-request")
+            : harness.elements.sessionList.querySelectorAll(".queue-row").find(row => row.dataset.sourceKey === "remote\0https://remote.example");
+          open!.dispatchEvent(new Event("click"));
+          await settleUntil(() => harness.embedCalls.length === 1, 100);
+          const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
+          const healthy = { phase: "live" as const, endedReason: null, requestPending: advance === "hold",
+            responsePending: false, loading: null, gatewayHealth: health, relayHealth: health };
+          harness.embedCalls[0]!.onStateChange!(healthy);
+          if (advance === "next") {
+            payload.revision += 1;
+            payload.sessions = [session(remote.instanceId)];
+            harness.window.dispatchEvent(new Event("online"));
+            await settleUntil(() => harness.body.querySelector(".triage-action")?.textContent === "Next ask →", 100);
+          }
+          const priorReads = reads;
+          holdList = true;
+          harness.body.querySelector(".triage-action")!.dispatchEvent(new Event("click"));
+          await settleUntil(() => harness.launchRequests.length === 2, 100);
+          if (failure === "withdrawn") {
+            harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: { ...home, canControl: false } });
+            launchGate.resolve();
+          }
+          for (let i = 0; i < 100; i++) await Promise.resolve();
+          harness.embedCalls[0]!.onStateChange!(healthy);
+          expect(harness.body.querySelector(".triage-bar")?.hidden).toBeFalse();
+          expect(harness.body.querySelector(".triage-bar")?.dataset.kind).toBe("launch-failed");
+          expect(harness.body.querySelector(".triage-copy")?.textContent).toContain("Home");
+          expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Sessions");
+          expect(harness.disposals.count).toBe(0);
+          if (failure === 404 || failure === 409) {
+            expect(reads).toBe(priorReads + 1);
+            listGate.resolve();
+            for (let i = 0; i < 100; i++) await Promise.resolve();
+            expect(harness.body.querySelector(".triage-bar")?.dataset.kind === "launch-failed" && !harness.body.querySelector(".triage-bar")?.hidden).toBeFalse();
+            if (advance === "hold") expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Hold → next");
+          }
+          if (failure === 503 || failure === "withdrawn") {
+            harness.body.querySelector(".triage-action")!.dispatchEvent(new Event("click"));
+            expect(harness.elements.statusBanner.textContent).toContain(failure === "withdrawn" ? "Control is no longer available" : "The session could not be opened");
+          }
+          expect(harness.launchRequests).toHaveLength(2);
+        } finally { listGate.resolve(); launchGate.resolve(); harness.window.dispatchEvent(new Event("pagehide")); }
+      });
+    }
+  }
+
+  test("successor4: local in-shell Control withdrawal remains target-owned", async () => {
+    const home = session("local-control-upgrade");
+    const gate = Promise.withResolvers<void>();
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [home], suffix: "local-control-upgrade",
+      launchResponse: async (_path, init) => {
+        const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+        if (body.mode === "control") await gate.promise;
+        return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+      },
+    });
+    try {
+      harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.embedCalls.length === 1, 100);
+      harness.body.querySelector(".shell-control")!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.launchRequests.length === 2, 100);
+      harness.setList(2, [{ ...home, canControl: false }]);
+      harness.window.dispatchEvent(new Event("online"));
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      gate.resolve();
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
+      harness.embedCalls[0]!.onStateChange!({ phase: "live", endedReason: null, requestPending: false, responsePending: false,
+        loading: null, gatewayHealth: health, relayHealth: health });
+      expect(harness.embedCalls).toHaveLength(1);
+      expect(harness.body.querySelector(".triage-bar")?.hidden).toBeFalse();
+      expect(harness.body.querySelector(".triage-copy")?.textContent).toContain("Control is no longer available");
+      expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Sessions");
+    } finally { gate.resolve(); harness.window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  for (const failure of [404, 409]) {
+    for (const dismiss of [false, true]) {
+      test(`successor4: expired Hold target ${failure} releases feedback${dismiss ? " during refresh dismissal" : " on observation"}`, async () => {
+        const home = session(`expiry-home-${failure}-${dismiss}`, { inputRequired: true });
+        const remote = session(`expiry-remote-${failure}-${dismiss}`, { inputRequired: true });
+        const gate = Promise.withResolvers<void>();
+        let hold = false;
+        let reads = 0;
+        const harness = await bootApp({
+          permission: "denied", initialSessions: [home], clientConfig: config, suffix: `expiry-dismiss-${failure}-${dismiss}`,
+          remoteResponse: async () => {
+            reads += 1;
+            if (hold) await gate.promise;
+            return Response.json({ revision: 1, sessions: [remote] });
+          },
+          launchResponse: async (path, init) => {
+            if (path.startsWith("https://remote.example")) return new Response(null, { status: failure });
+            const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+            return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+          },
+        });
+        try {
+          await settleUntil(() => harness.elements.directoryCount.textContent === "2 waiting", 100);
+          const hero = harness.elements.sessionList.querySelector(".queue-hero")!;
+          const open = hero.dataset.sourceKey === "local\0https://sessions.example" ? hero.querySelector(".action-request")
+            : harness.elements.sessionList.querySelectorAll(".queue-row").find(row => row.dataset.sourceKey === "local\0https://sessions.example");
+          open!.dispatchEvent(new Event("click"));
+          await settleUntil(() => harness.embedCalls.length === 1, 100);
+          const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
+          harness.embedCalls[0]!.onStateChange!({ phase: "live", endedReason: null, requestPending: true, responsePending: false,
+            loading: null, gatewayHealth: health, relayHealth: health });
+          hold = true;
+          const priorReads = reads;
+          harness.body.querySelector(".triage-action")!.dispatchEvent(new Event("click"));
+          await settleUntil(() => reads === priorReads + 1, 100);
+          expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Sessions");
+          if (dismiss) {
+            harness.body.querySelector(".gateway-shell")!.dispatchEvent(new Event("pointerdown"));
+            expect(harness.body.querySelector(".triage-bar")?.hidden).toBeFalse();
+            expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Hold → next");
+          }
+          gate.resolve();
+          for (let i = 0; i < 100; i++) await Promise.resolve();
+          expect(harness.elements.fleetStatus.hidden).toBeTrue();
+          expect(harness.body.querySelector(".triage-action")?.textContent).toBe("Hold → next");
+          expect(harness.launchRequests).toHaveLength(2);
+        } finally { gate.resolve(); harness.window.dispatchEvent(new Event("pagehide")); }
+      });
+    }
+  }
+
+  for (const remote of [false, true]) {
+    for (const canControl of [false, true]) {
+      test(`successor4: ${remote ? "remote" : "local"} View mounts current Control=${canControl}`, async () => {
+        const original = session(`current-view-${remote}-${canControl}`, { canControl: !canControl });
+        const payload = { revision: 1, sessions: remote ? [original] : [] };
+        const gate = Promise.withResolvers<void>();
+        const harness = await bootApp({
+          permission: "denied", initialSessions: remote ? [] : [original], clientConfig: config, remotePayload: payload,
+          suffix: `current-view-${remote}-${canControl}`, launchGate: gate.promise,
+        });
+        try {
+          await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 1, 100);
+          harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+          await settleUntil(() => harness.launchRequests.length === 1, 100);
+          const current = { ...original, canControl, title: "Current authoritative title" };
+          if (remote) { payload.revision += 1; payload.sessions = [current]; }
+          else harness.setList(2, [current]);
+          harness.window.dispatchEvent(new Event("online"));
+          for (let i = 0; i < 100; i++) await Promise.resolve();
+          gate.resolve();
+          await settleUntil(() => harness.embedCalls.length === 1, 100);
+          expect(harness.body.querySelector(".shell-control")?.hidden).toBe(!canControl);
+          expect(harness.body.querySelector(".shell-title")?.textContent).toBe(current.title);
+        } finally { gate.resolve(); harness.window.dispatchEvent(new Event("pagehide")); }
+      });
+    }
+  }
+
+  test("successor4: distinct empty observations in one minute do not claim a shared instant", async () => {
+    const previousNow = Date.now;
+    let now = Date.parse("2026-10-25T01:30:05Z");
+    Date.now = () => now;
+    const gate = Promise.withResolvers<void>();
+    let harness: BrowserHarness | undefined;
+    try {
+      harness = await bootApp({
+        permission: "denied", initialSessions: [], clientConfig: config, suffix: "distinct-empty-instants",
+        remoteResponse: async () => { await gate.promise; return Response.json({ revision: 1, sessions: [] }); },
+      });
+      harness.disconnectEvents();
+      now += 35_000;
+      gate.resolve();
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      expect(harness.elements.emptyState.textContent).toContain("No sessions in the last received lists");
+      expect(harness.elements.emptyState.textContent).not.toContain("No sessions as of");
+    } finally { gate.resolve(); harness?.window.dispatchEvent(new Event("pagehide")); Date.now = previousNow; }
+  });
+
+  for (const advance of ["next", "hold"] as const) {
     for (const status of [403, 503]) {
       test(`council477: ${advance} target ${status} owns triage through predecessor updates`, async () => {
         const home = session(`owner-home-${advance}-${status}`, { inputRequired: true });
@@ -2972,9 +3180,15 @@ describe("fleet directory bindings", () => {
     test(`successor3: remote Next ask ${failure} retains target ownership and list-only recovery`, async () => {
       const home = session(`next-home-${failure}`, { inputRequired: true });
       const remote = session(`next-remote-${failure}`, { inputRequired: true });
+      const expiryRefresh = Promise.withResolvers<void>();
+      let remoteReads = 0;
       const harness = await bootApp({
         permission: "denied", initialSessions: [home], remoteSessions: [remote],
         clientConfig: config, suffix: `next-remote-failure-${failure}`,
+        remoteResponse: async () => {
+          if (++remoteReads > 1 && (failure === 404 || failure === 409)) await expiryRefresh.promise;
+          return Response.json({ revision: 1, sessions: [remote] });
+        },
         launchResponse: async (path, init) => {
           if (path.startsWith("https://remote.example")) {
             if (failure === "network") throw new TypeError("connection lost");
@@ -3009,14 +3223,20 @@ describe("fleet directory bindings", () => {
       }
       harness.body.querySelector(".triage-action")!.dispatchEvent(new Event("click"));
       expect(harness.elements.fleetStatus.textContent).toContain("Remote:");
-      const refresh = harness.elements.fleetStatus.querySelector(".status-action")!;
-      expect(refresh.textContent).toBe("Refresh host");
       const launches = harness.launchRequests.length;
-      const refreshReads = harness.fetchPaths.length;
-      refresh.dispatchEvent(new Event("click"));
-      for (let i = 0; i < 100; i++) await Promise.resolve();
+      if (failure === 404 || failure === 409) {
+        expiryRefresh.resolve();
+        for (let i = 0; i < 100; i++) await Promise.resolve();
+        expect(harness.elements.fleetStatus.hidden).toBeTrue();
+      } else {
+        const refresh = harness.elements.fleetStatus.querySelector(".status-action")!;
+        expect(refresh.textContent).toBe("Refresh host");
+        const refreshReads = harness.fetchPaths.length;
+        refresh.dispatchEvent(new Event("click"));
+        for (let i = 0; i < 100; i++) await Promise.resolve();
+        expect(harness.fetchPaths.slice(refreshReads)).toEqual(["https://remote.example/api/v1/sessions"]);
+      }
       expect(harness.launchRequests).toHaveLength(launches);
-      expect(harness.fetchPaths.slice(refreshReads)).toEqual(["https://remote.example/api/v1/sessions"]);
       harness.window.dispatchEvent(new Event("pagehide"));
     });
   }
@@ -3122,7 +3342,8 @@ describe("fleet directory bindings", () => {
       await settleUntil(() => harness.launchRequests.length === 1, 100);
       for (let i = 0; i < 100; i++) await Promise.resolve();
       expect(harness.elements.statusBanner.dataset.kind).toBe("desktop");
-      expect(harness.elements.fleetStatus.textContent).toContain("Remote:");
+      if (failure === 404 || failure === 409) expect(harness.elements.fleetStatus.hidden).toBeTrue();
+      else expect(harness.elements.fleetStatus.textContent).toContain("Remote:");
       harness.window.dispatchEvent(new Event("pagehide"));
     });
   }

@@ -1185,13 +1185,19 @@ function cancelLaunch(source?: SourceKey, restore = true): void {
   if (cancelled.creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
 }
 
-function remoteChanged(remote: FleetTransport): void {
-  if (remote.status === "fresh" || remote.status === "forbidden") remoteLaunchFailures.delete(remote.key);
-  replaceSessionSnapshot(remote.snapshot?.sessions ?? [], remote.key, remote.status === "fresh");
-  if (remote.status === "fresh" && activeCollabShell?.launchFailureSource === remote.key) {
+function releaseLaunchFailure(sourceKey: SourceKey): void {
+  remoteLaunchFailures.delete(sourceKey);
+  if (activeCollabShell?.launchFailureSource === sourceKey) {
     hideTriageBar(activeCollabShell, false);
+    reconcileActiveCollabShell();
   }
+}
+
+function remoteChanged(remote: FleetTransport): void {
+  replaceSessionSnapshot(remote.snapshot?.sessions ?? [], remote.key, remote.status === "fresh");
+  if (remote.status === "fresh") releaseLaunchFailure(remote.key);
   if (remote.status === "forbidden") {
+    remoteLaunchFailures.delete(remote.key);
     creation.cancel("forbidden", remote.key);
     clearCreationDraft(remote.key);
     cancelLaunch(remote.key);
@@ -1943,6 +1949,7 @@ function renderEmptyState(): void {
   const retainedEmpty = observations.every(source => source.time !== undefined &&
     (source.status === "fresh" || source.status === "refreshing" || source.status === "stale"));
   const sharedTime = observations[0]?.time;
+  const sharedInstant = observations[0]?.observedAt;
   emptyState.dataset.state = coverage.complete && !filtered ? "empty" : "limited";
   if (emptyState.dataset.state === "empty") return;
   const body = document.createElement("div");
@@ -1951,7 +1958,7 @@ function renderEmptyState(): void {
     : withdrawn ? "Session list withdrawn"
     : coverage.complete ? "No sessions on this host"
       : expired ? observation === undefined ? "Session lists expired" : "Session list expired"
-        : retainedEmpty ? observations.every(source => source.time === sharedTime)
+        : retainedEmpty ? observations.every(source => source.observedAt === sharedInstant)
           ? `No sessions as of ${sharedTime}` : "No sessions in the last received lists"
           : !coverage.failed ? "Checking for sessions"
             : observation !== undefined ? "This host has not been checked" : "No sessions to show yet";
@@ -2421,7 +2428,6 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
     session => sourceFresh(session.sourceKey) && (sessionKey(session) !== sessionKey(current) || session.ask?.requestId !== currentRequestId),
   );
   if (next !== undefined) {
-    shell.answerShown = true;
     showTriageBar(shell, "sending", "Opening next request…");
     const mode: LaunchMode = next.canControl ? "control" : "view";
     const opened = await launch(next, mode, undefined, next.ask?.requestId, shell.scope);
@@ -2429,25 +2435,7 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
       holdSession(current, false);
       return;
     }
-    if (activeCollabShell !== shell) return;
-    shell.answerShown = false;
-    const latestCurrent = sessions.get(sessionKey(current));
-    if (
-      latestCurrent?.generation !== current.generation ||
-      latestCurrent.ask?.requestId !== currentRequestId
-    ) {
-      reconcileActiveCollabShell();
-      return;
-    }
-    if (next.sourceKey !== localKey &&
-      (remoteLaunchFailures.has(next.sourceKey) || remotes.get(next.sourceKey)?.status === "forbidden")) return;
-    showTriageBar(
-      shell,
-      "hold",
-      "Couldn't open the next request. This one is still queued.",
-      "Try again",
-      () => void holdCurrentAskAndAdvance(shell, current),
-    );
+    if (activeCollabShell === shell) reconcileActiveCollabShell();
     return;
   }
   if (!holdSession(current, false)) return;
@@ -2472,6 +2460,7 @@ function reconcileActiveCollabShell(): void {
   if (
     shell === undefined ||
     shell.answerShown ||
+    pendingLaunch !== undefined ||
     shell.launchFailureSource !== undefined ||
     shell.latestEmbedState?.responsePending === true
   ) {
@@ -2972,18 +2961,8 @@ async function launch(
     const remoteFailure = session.sourceKey !== localKey;
     if (remoteFailure && kind !== "unauthorized") remoteLaunchFailures.set(session.sourceKey, message);
     if (sourceShell !== undefined && activeCollabShell === sourceShell) {
-      if (remoteFailure) {
-        showLaunchFailure(sourceShell, session.sourceKey, kind, kind === "unauthorized" ? message : `${source.label}: ${message}`);
-        return true;
-      }
-      showTriageBar(sourceShell, "reconnecting", message, "Try again", () => {
-        showTriageBar(
-          sourceShell,
-          "sending",
-          mode === "view" ? "Opening view…" : "Opening control…",
-        );
-        void launch(session, mode, button, requestId, scope, presentation);
-      });
+      if (!remoteFailure) setStatus(kind, message);
+      showLaunchFailure(sourceShell, session.sourceKey, kind, kind === "unauthorized" ? message : `${source.label}: ${message}`);
       return true;
     }
     // A concurrent launch may already have mounted a collaboration; its route and styles stay put.
@@ -3045,6 +3024,9 @@ async function launch(
   if (!response.ok) {
     if (response.status === 403) {
       if (session.sourceKey === localKey) {
+        if (sourceShell !== undefined && sourceShell.sourceKey !== localKey) {
+          fail("unauthorized", `Access withdrawn on ${source.label}. Choose another session.`);
+        }
         withdrawLocalAuthorization();
         return discard();
       } else {
@@ -3054,17 +3036,12 @@ async function launch(
       }
     } else if (response.status === 404 || response.status === 409) {
       const preservedShell = fail("expired", "That session changed or expired. Try again.");
-      if ((!preservedShell || session.sourceKey !== localKey) &&
-        (session.sourceKey === localKey ? await refreshAndConnect() : await remotes.get(session.sourceKey)?.refresh() === "healthy")) {
-        const message = "That session changed or expired. The list has been refreshed.";
-        if (session.sourceKey === localKey) setStatus("expired", message);
-        else {
-          remoteLaunchFailures.set(session.sourceKey, message);
-          renderFleetStatus();
-          if (sourceShell !== undefined && activeCollabShell === sourceShell && selectionEpoch === attempt.epoch) {
-            showLaunchFailure(sourceShell, session.sourceKey, "expired", `${source.label}: ${message}`);
-          }
-        }
+      const refreshEpoch = selectionEpoch;
+      const refreshed = session.sourceKey === localKey ? await refreshAndConnect()
+        : await remotes.get(session.sourceKey)?.refresh() === "healthy";
+      // A successful observation releases source-owned failure feedback; never recreate it.
+      if (refreshed && !preservedShell && session.sourceKey === localKey && selectionEpoch === refreshEpoch) {
+        setStatus("expired", "That session changed or expired. The list has been refreshed.");
       }
     } else {
       fail("offline", "The session could not be opened. Try again.");
@@ -3086,10 +3063,11 @@ async function launch(
       fail("offline", "Gateway unavailable. Check your tailnet connection and try again.");
       return false;
     }
-    if (!currentAttempt()) return discard();
+    const current = currentBinding();
+    if (current === undefined || !(mode === "view" ? current.canView : current.canControl)) return discard();
     if (remoteLaunchFailures.delete(session.sourceKey)) renderFleetStatus();
     capability = payload.capability;
-    enterCollabClient(capability, startCollabWithCapability, session, mode, requestId, originTile, attempt.presentation);
+    enterCollabClient(capability, startCollabWithCapability, current, mode, requestId, originTile, attempt.presentation);
     settle();
     capability = undefined;
     return true;
@@ -3131,6 +3109,7 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
     }
   }
   if (event.type !== "snapshot") reconcileLocalRecords();
+  releaseLaunchFailure(localKey);
   render();
   reconcileActiveCollabShell();
   return true;
@@ -3175,6 +3154,7 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     lastFreshAt = Date.now();
     clearLocalTransportFailure();
     replaceSessionSnapshot(payload.sessions);
+    releaseLaunchFailure(localKey);
     render();
     setStatus("ready", "");
     return true;
@@ -3234,6 +3214,7 @@ function connectEvents(epoch: number): void {
     lastFreshAt = Date.now();
     localFresh = true;
     clearLocalTransportFailure();
+    releaseLaunchFailure(localKey);
     armEventLiveness(source, epoch);
     if (!notificationRouteStatusLocked) setStatus("ready", "");
   });

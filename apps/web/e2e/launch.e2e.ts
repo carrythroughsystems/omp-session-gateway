@@ -637,9 +637,9 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await page.locator(".triage-action").click();
     await expect(page.locator(".shell-title")).toHaveText(SESSION_TITLE);
     await expect(page.locator(".triage-copy")).toHaveText(
-      "Couldn't open the next request. This one is still queued.",
+      "Need the desk for this one?",
     );
-    await expect(page.locator(".triage-action")).toHaveText("Try again");
+    await expect(page.locator(".triage-action")).toHaveText("Hold → next");
     expect(await page.evaluate(() =>
       JSON.parse(localStorage.getItem("omp.sessions.held-asks.v2") ?? "[]"),
     )).toEqual([]);
