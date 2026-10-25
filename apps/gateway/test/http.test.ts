@@ -15,6 +15,8 @@ import { SafeLogger } from "../src/logger.ts";
 import { PushService } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { StaticAssetStore } from "../src/static.ts";
+import { SessionCreationProblem, type SessionCreationService } from "../src/tern-creation.ts";
+import type { SessionCreationRequest, SessionCreationReceipt, SessionCreationStatus } from "@omp-session-gateway/protocol";
 
 const viewCapability = ["HTTP", "VIEW", "CANARY", "00000000000000000000"].join("__");
 const controlCapability = ["HTTP", "CONTROL", "CANARY", "00000000000000000000"].join("__");
@@ -34,6 +36,40 @@ const validateSessionEvent = schemaValidator.compile(
 const validateClientConfig = schemaValidator.compile(
   await Bun.file(new URL("../../../schemas/client-config.schema.json", import.meta.url)).json(),
 );
+const validateCreationOptions = schemaValidator.compile(
+  await Bun.file(new URL("../../../schemas/session-creation-options.schema.json", import.meta.url)).json(),
+);
+const validateCreationStatus = schemaValidator.compile(
+  await Bun.file(new URL("../../../schemas/session-creation-status.schema.json", import.meta.url)).json(),
+);
+const creationId = "11111111-2222-4333-8444-555555555555";
+const creationBody: SessionCreationRequest = {
+  clientOperationId: creationId, revision: creationId, projectId: "project", workingCopyId: "main", profileId: "omp",
+};
+function creationStub(): Pick<SessionCreationService, "options" | "accept" | "status"> {
+  const records = new Map<string, { owner: string; request: SessionCreationRequest; receipt: SessionCreationReceipt }>();
+  return {
+    async options() {
+      return { version: 1, revision: creationId, available: true,
+        projects: [{ id: "project", label: "Project", workingCopies: [{ id: "main", label: "Main" }] }],
+        profiles: [{ id: "omp", label: "OMP" }] };
+    },
+    async accept(owner, request, admitNew) {
+      const prior = records.get(owner + request.clientOperationId);
+      if (prior) {
+        if (JSON.stringify(prior.request) !== JSON.stringify(request)) throw new SessionCreationProblem(409, "operation_conflict");
+        return { status: 200, receipt: prior.receipt };
+      }
+      if (!admitNew()) throw new SessionCreationProblem(429, "rate_limited");
+      const receipt: SessionCreationReceipt = { operationId: request.clientOperationId, state: "accepted" };
+      records.set(owner + request.clientOperationId, { owner, request, receipt });
+      return { status: 202, receipt };
+    },
+    status(owner, id): SessionCreationStatus | undefined {
+      return records.has(owner + id) ? { operationId: id, state: "accepted", updatedAt: "2026-10-24T00:00:00.000Z" } : undefined;
+    },
+  };
+}
 
 function config(mode: GatewayConfig["auth"]["mode"] = "tailscale-serve"): GatewayConfig {
   return {
@@ -152,6 +188,45 @@ afterAll(async () => {
 });
 
 describe("HTTP boundary", () => {
+  test("admits exact creation requests, returns schema-safe no-store metadata and owner-scoped status", async () => {
+    const base = config();
+    const handler = createTestHttpHandler({ config: { ...base, auth: { ...base.auth, allowedLogins: ["allowed@example.com", "other@example.com"] } },
+      registry: populatedRegistry(), staticAssets: assets, creationService: creationStub() });
+    const options = await handler(request("/api/v1/session-creation-options"), peer);
+    expect(options.status).toBe(200); expect(validateCreationOptions(await options.json())).toBe(true);
+    expect(options.headers.get("Cache-Control")).toContain("no-store");
+    const post = (body: unknown, headers: HeadersInit = { Origin: origin, "Content-Type": "application/json" }) =>
+      request("/api/v1/session-creations", { method: "POST", headers, body: JSON.stringify(body) });
+    expect((await handler(post(creationBody), peer)).status).toBe(202);
+    expect((await handler(post(creationBody), peer)).status).toBe(200);
+    const status = await handler(request(`/api/v1/session-creations/${creationId}`), peer);
+    expect(validateCreationStatus(await status.json())).toBe(true);
+    expect(status.headers.get("Cache-Control")).toContain("no-store");
+    expect((await handler(request(`/api/v1/session-creations/${creationId}`, {}, "other@example.com"), peer)).status).toBe(404);
+    for (const path of [`/api/v1/session-creations/${creationId.toUpperCase().replace("555555555555", "AAAAAAAAAAAA")}`,
+      `/api/v1/session-creations/${creationId}/extra`]) expect((await handler(request(path), peer)).status).toBe(404);
+    expect((await handler(request(`/api/v1/session-creations/${creationId}?extra=1`), peer)).status).toBe(400);
+    expect((await handler(post(creationBody, { "Content-Type": "application/json" }), peer)).status).toBe(403);
+    expect((await handler(post(creationBody, { Origin: origin, "Content-Type": "text/plain" }), peer)).status).toBe(415);
+    expect((await handler(post(creationBody, { Origin: origin, "Content-Type": "application/json", "Sec-Fetch-Site": "cross-site" }), peer)).status).toBe(403);
+    for (const body of [{ ...creationBody, argv: ["CREATION_HTTP_SECRET_CANARY"] }, { ...creationBody, profileId: null }, { ...creationBody, prompt: "x".repeat(4096) }]) {
+      const response = await handler(post(body), peer); expect(response.status).toBe(400);
+      expect(await response.text()).not.toContain("CREATION_HTTP_SECRET_CANARY");
+    }
+    const conflict = await handler(post({ ...creationBody, revision: "aaaaaaaa-2222-4333-8444-555555555555" }), peer);
+    expect(conflict.status).toBe(409); expect(await conflict.json()).toMatchObject({ code: "operation_conflict" });
+    expect((await handler(request("/api/v1/session-creation-options", {}, ""), peer)).status).toBe(403);
+  });
+  test("isolates creation rate keys and leaves duplicate receipts readable after exhaustion", async () => {
+    const handler = createTestHttpHandler({ config: config(), registry: populatedRegistry(), staticAssets: assets, creationService: creationStub() });
+    const post = (i: number) => request("/api/v1/session-creations", { method: "POST",
+      headers: { Origin: origin, "Content-Type": "application/json" },
+      body: JSON.stringify({ ...creationBody, clientOperationId: `11111111-2222-4333-8444-${String(i).padStart(12, "0")}` }) });
+    for (let i = 0; i < 20; i++) expect((await handler(post(i), peer)).status).toBe(202);
+    expect((await handler(post(20), peer)).status).toBe(429);
+    expect((await handler(post(0), peer)).status).toBe(200);
+    expect((await handler(launchRequest(), peer)).status).toBe(200);
+  });
   test("proves loopback readiness with a readiness-token HMAC challenge", async () => {
     const readinessToken = "T".repeat(43);
     const challenge = "C".repeat(43);
@@ -1165,6 +1240,41 @@ describe("HTTP boundary", () => {
 });
 
 describe("browser-direct fleet boundary", () => {
+  test("exposes only exact creation routes with authenticated header-minimal preflight and no credential grant", async () => {
+    const dashboard = "https://dashboard.example.ts.net";
+    const base = config();
+    const handler = createTestHttpHandler({ config: { ...base, http: { ...base.http, trustedDashboardOrigins: [dashboard] } },
+      registry: populatedRegistry(), staticAssets: assets, creationService: creationStub() });
+    for (const [path, method] of [["/api/v1/session-creation-options", "GET"],
+      ["/api/v1/session-creations", "POST"], [`/api/v1/session-creations/${creationId}`, "GET"]] as const) {
+      const response = await handler(request(path, { method: "OPTIONS", headers: { Origin: dashboard,
+        "Access-Control-Request-Method": method, ...(method === "POST" ? { "Access-Control-Request-Headers": "content-type" } : {}) } }), peer);
+      expect(response.status).toBe(204);
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe(dashboard);
+      expect(response.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+      expect(response.headers.get("Access-Control-Max-Age")).toBeNull();
+      for (const identity of ["", "unauthorized@example.com"]) {
+        const denied = await handler(request(path, { method: "OPTIONS", headers: { Origin: dashboard, "Access-Control-Request-Method": method } }, identity), peer);
+        expect(denied.status).toBe(403); expect(denied.headers.get("Access-Control-Allow-Origin")).toBeNull();
+      }
+      const extra = await handler(request(path, { method: "OPTIONS", headers: { Origin: dashboard,
+        "Access-Control-Request-Method": method, "Access-Control-Request-Headers": "authorization" } }), peer);
+      expect(extra.status).toBe(403); expect(extra.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    }
+    for (const type of ["application/json; charset=utf-8", "Application/JSON", "text/plain"]) {
+      const response = await handler(request("/api/v1/session-creations", { method: "POST", headers: {
+        Origin: dashboard, "Sec-Fetch-Site": "cross-site", "Content-Type": type }, body: JSON.stringify(creationBody) }), peer);
+      expect(response.status).toBe(403);
+    }
+    const created = await handler(request("/api/v1/session-creations", { method: "POST", headers: {
+      Origin: dashboard, "Sec-Fetch-Site": "cross-site", "Content-Type": "application/json" }, body: JSON.stringify(creationBody) }), peer);
+    expect(created.status).toBe(202); expect(created.headers.get("Access-Control-Allow-Origin")).toBe(dashboard);
+    expect(created.headers.get("Cache-Control")).toContain("no-store");
+    expect(created.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+    expect(await created.text()).not.toMatch(/capability|argv|env|path/u);
+    const rejected = await handler(request("/api/v1/session-creations/not-a-uuid", { headers: { Origin: dashboard } }), peer);
+    expect(rejected.status).toBe(403); expect(rejected.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
   const dashboard = "https://dashboard.example.ts.net";
   const target = { id: "remote", label: "Remote", origin: "https://remote.example.ts.net" };
   const launchPath = "/api/v1/sessions/http-instance-000001/launch";

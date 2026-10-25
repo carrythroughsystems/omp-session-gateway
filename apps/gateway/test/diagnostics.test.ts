@@ -61,6 +61,10 @@ describe("redacted diagnostics", () => {
       capability: "DIAGNOSTIC_CONTROL_CANARY_0000000000000000",
       fullPath: "/Users/alice/secret-project",
       identity: "alice@example.com",
+      creationLedger: "CREATION_LEDGER_DIAGNOSTIC_CANARY",
+      argv: ["CREATION_ARGV_DIAGNOSTIC_CANARY"],
+      env: { SECRET: "CREATION_ENV_DIAGNOSTIC_CANARY" },
+      ternInspection: "TERN_INSPECTION_DIAGNOSTIC_CANARY",
     };
     const first = diagnosticsBundleBytes(source);
     const second = diagnosticsBundleBytes(source);
@@ -72,6 +76,11 @@ describe("redacted diagnostics", () => {
     expect(archiveText).not.toContain(source.capability);
     expect(archiveText).not.toContain(source.fullPath);
     expect(archiveText).not.toContain(source.identity);
+    for (const excluded of [source.creationLedger, ...source.argv, source.env.SECRET, source.ternInspection]) {
+      expect(archiveText).not.toContain(excluded);
+    }
+    expect(entries.get("manifest.json")?.toString("utf8")).toContain("session creation ledgers and request payloads");
+    expect(entries.get("manifest.json")?.toString("utf8")).toContain("raw Tern inspection output");
 
     const root = await mkdtemp(join(tmpdir(), "omp-diagnostics-"));
     roots.push(root);

@@ -11,6 +11,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Show embedded snapshot progress in the gateway's sole joining/reconnecting chip without
   repeated live-region announcements, and accept a memory-only first-task draft once into an
   empty, healthy, live Control composer without sending or replacing an existing draft.
+- Opt-in, administrator-configured Tern session creation with durable idempotent intent,
+  conservative crash recovery, exact lossless pane correlation and OMP-native Control adoption (ADR-043).
+  Accept Tern's additive new-tab receipt metadata and wait for delayed session-file metadata.
+  Anchor adoption freshness to actual child creation and reserve execution across durable admission
+  so concurrent availability probes cannot occupy its CLI slot.
 - Resumable, skippable first-run trays for connection facts, optional background alerts, and
   View versus Control, reusing the existing tray and notification control. The bounded
   `omp.sessions.first-run.v1` record stores only step and timestamp. A same-scope queue clearance

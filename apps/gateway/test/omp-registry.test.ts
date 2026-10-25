@@ -16,6 +16,7 @@ import {
   OmpLaunchResolver,
   resolveOmpDiscoveryDirectory,
   startHostPoller,
+  type OmpDiscoveryObservation,
 } from "../src/omp-registry.ts";
 import { SessionRegistry, type SessionActivityStopEvent } from "../src/registry.ts";
 
@@ -48,6 +49,77 @@ interface HostDouble {
 }
 
 const cleanups: (() => Promise<void>)[] = [];
+
+describe("fresh adoption observation ordering", () => {
+  function controlled() {
+    const rounds: { resolve: (value: OmpDiscoveryObservation) => void; promise: Promise<OmpDiscoveryObservation> }[] = [];
+    const next = Promise.withResolvers<void>();
+    let active = 0;
+    const reader = new OmpHostReader({ directory: "/unused-synthetic-discovery" });
+    reader.observe = async () => {
+      expect(active++).toBe(0);
+      const round = Promise.withResolvers<OmpDiscoveryObservation>();
+      rounds.push(round);
+      if (rounds.length === 2) next.resolve();
+      try { return await round.promise; } finally { active--; }
+    };
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
+    const poller = startHostPoller({ reader, registry, intervalMs: 60000 });
+    cleanups.push(async () => { poller.stop(); });
+    return { rounds, registry, poller, next: next.promise };
+  }
+  const observation: OmpDiscoveryObservation = { hosts: [], retained: new Set(["retained-instance"]), directoryHealthy: true };
+  test("ordinary poll joins the old round while fresh callers share exactly one following round", async () => {
+    const f = controlled();
+    const ordinary = f.poller.poll();
+    const a = f.poller.refreshForAdoption({ signal: new AbortController().signal, timeoutMs: 5000 });
+    const b = f.poller.refreshForAdoption({ signal: new AbortController().signal, timeoutMs: 5000 });
+    const published: number[] = [];
+    let reconciled = 0;
+    const reconcile = f.registry.reconcile.bind(f.registry);
+    f.registry.reconcile = input => { reconciled++; return reconcile(input); };
+    const unsubscribe = f.poller.subscribeObservations(batch => {
+      expect(reconciled).toBe(batch.round);
+      published.push(batch.round);
+      expect(batch.knownInstanceIds).toEqual(["retained-instance"]);
+      expect(JSON.stringify(batch)).not.toMatch(/token|endpoint|cwd|capability/u);
+    });
+    f.rounds[0]!.resolve(observation);
+    await ordinary;
+    await f.next;
+    expect(f.rounds).toHaveLength(2);
+    f.rounds[1]!.resolve(observation);
+    const results = await Promise.all([a, b]);
+    expect(results).toEqual([
+      { status: "ok", observation: expect.objectContaining({ round: 2 }) },
+      { status: "ok", observation: expect.objectContaining({ round: 2 }) },
+    ]);
+    expect(published).toEqual([1, 2]);
+    unsubscribe();
+  });
+  test("cancelling sole queued demand prevents an unnecessary following observation", async () => {
+    const f = controlled();
+    const signal = new AbortController();
+    const fresh = f.poller.refreshForAdoption({ signal: signal.signal, timeoutMs: 5000 });
+    signal.abort();
+    expect(await fresh).toEqual({ status: "aborted" });
+    const ordinary = f.poller.poll();
+    f.rounds[0]!.resolve(observation); await ordinary;
+    expect(f.rounds).toHaveLength(1);
+  });
+  test("stopping resolves waiters and suppresses reconciliation/publication from an older read", async () => {
+    const f = controlled();
+    let publications = 0;
+    f.poller.subscribeObservations(() => { publications++; });
+    const fresh = f.poller.refreshForAdoption({ signal: new AbortController().signal, timeoutMs: 5000 });
+    const ordinary = f.poller.poll();
+    f.poller.stop();
+    expect(await fresh).toEqual({ status: "stopped" });
+    f.rounds[0]!.resolve(observation); await ordinary;
+    expect(publications).toBe(0); expect(f.registry.snapshot().revision).toBe(0);
+    expect(await f.poller.refreshForAdoption({ signal: new AbortController().signal, timeoutMs: 5000 })).toEqual({ status: "stopped" });
+  });
+});
 
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();

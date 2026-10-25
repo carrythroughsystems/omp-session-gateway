@@ -13,6 +13,7 @@ import {
   loadReadinessToken,
   loopbackHttpOrigin,
   projectPreFleetConfig,
+  projectPreTernConfig,
   publicOriginHttpsPort,
   restoreGatewayConfigFile,
   removeLegacyPublisherToken,
@@ -35,6 +36,7 @@ import {
 import { OmpHostReader, OmpLaunchResolver, startHostPoller } from "./omp-registry.ts";
 import { SafeLogger } from "./logger.ts";
 import { PushService } from "./push.ts";
+import { SessionCreationService } from "./tern-creation.ts";
 import { SessionRegistry } from "./registry.ts";
 import {
   assertServiceInstallPreflight,
@@ -200,6 +202,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     intervalMs: config.registry.heartbeatSeconds * 1_000,
     onEvent: (event, detail) => logger.event("info", event, detail),
   });
+  const creationService = await SessionCreationService.open({ config, poller, registry });
   let stopping = false;
   let resolveStop: () => void = () => undefined;
   const stopped = new Promise<void>(resolve => {
@@ -222,6 +225,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
       staticAssets,
       logger,
       pushService,
+      creationService,
       readinessToken: token,
       ...(readinessInstance === undefined ? {} : { readinessInstance }),
       endpointHealthy: () => poller.discoveryHealthy,
@@ -241,7 +245,11 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     try {
       http?.stop(true);
     } finally {
-      await pushService.stop();
+      try {
+        await creationService.stop();
+      } finally {
+        await pushService.stop();
+      }
     }
   }
 }
@@ -438,9 +446,12 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
   const readinessToken = await loadReadinessToken(config);
   const targetVersion = basename(target.runtime.directory).slice(0, -13);
   const configSnapshot = await captureGatewayConfigFile(config.paths.configPath);
-  const projection = configSnapshot.content === undefined || Bun.semver.order(targetVersion, FLEET_CONFIG_SINCE_VERSION) >= 0
-    ? undefined
-    : projectPreFleetConfig(JSON.parse(configSnapshot.content) as unknown);
+  let projection = configSnapshot.content === undefined
+    ? undefined : projectPreTernConfig(JSON.parse(configSnapshot.content) as unknown);
+  if (projection && Bun.semver.order(targetVersion, FLEET_CONFIG_SINCE_VERSION) < 0) {
+    const fleet = projectPreFleetConfig(projection.document);
+    projection = { document: fleet.document, removedKeys: [...projection.removedKeys, ...fleet.removedKeys] };
+  }
   const backupPath = join(config.paths.configDir, "config.pre-rollback.json");
   if (projection !== undefined && projection.removedKeys.length > 0) {
     try {
@@ -458,10 +469,10 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
       configProjected = true;
       await writePrivateTextFile(config.paths.configPath, `${JSON.stringify(projection.document, null, 2)}\n`);
       console.log(
-        `Saved the full authored configuration to ${backupPath}; removed ${projection.removedKeys.join(", ")} from ${config.paths.configPath} for runtime ${targetVersion} (older than ${FLEET_CONFIG_SINCE_VERSION}).`,
+        `Saved the full authored configuration to ${backupPath}; removed ${projection.removedKeys.join(", ")} from ${config.paths.configPath} for runtime ${targetVersion}.`,
       );
       console.log(
-        `To restore: first install ${FLEET_CONFIG_SINCE_VERSION} or newer, replace ${config.paths.configPath} with ${backupPath}, restart the gateway, and reload the PWA.`,
+        `To restore: install a runtime supporting every saved configuration section, replace ${config.paths.configPath} with ${backupPath}, restart the gateway, and reload the PWA. Tern creation requires explicit re-enablement.`,
       );
     }
     // Same commit order as install: the service definition is rewritten first and `current.json`
