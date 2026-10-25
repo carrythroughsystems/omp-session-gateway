@@ -548,11 +548,16 @@ for (const remote of [false, true]) {
             await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
           }
           await intercepted.promise;
-          target.setSnapshot([{ ...original, [mode === "control" ? "canControl" : "canView"]: false }]);
-          const refreshed = page.waitForResponse(`${target.origin}/api/v1/sessions`);
-          await page.evaluate(() => window.dispatchEvent(new Event("online")));
-          await (await refreshed).finished();
-          await settlePublication(page);
+          const withdrawnTitle = "Current withdrawn session";
+          target.setSnapshot([{ ...original, title: withdrawnTitle, [mode === "control" ? "canControl" : "canView"]: false }]);
+          // Local snapshots publish over SSE; only remote lists need an explicit refresh.
+          if (remote) await page.evaluate(() => window.dispatchEvent(new Event("online")));
+          if (mode === "view") {
+            await expect(page.locator(".working-row")).toHaveAttribute("aria-label", `View ${withdrawnTitle}`);
+            await expect(page.locator(".working-row")).toBeDisabled();
+          } else {
+            await expect(page.locator(".action-request")).toHaveText("View transcript");
+          }
           release.resolve();
           await expect(page.locator(remote ? "#fleet-status" : "#status-banner"))
             .toContainText(`${mode === "control" ? "Control" : "View"} is no longer available for this session.`);
