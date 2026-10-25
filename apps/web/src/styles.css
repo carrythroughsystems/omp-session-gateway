@@ -1642,8 +1642,165 @@ body.collab-shell-active {
   }
 }
 
-/* No entrance animation: the list re-renders on every SSE upsert, and a replayed
-   fade would flash rows during routine metadata refreshes. */
+/* ——— Motion (ADR-040) ————————————————————————————————————————————
+   Motion exists only on user-initiated transitions and genuine state changes; app.ts gates every
+   view transition on a structural signature, so a routine metadata refresh never animates. Three
+   typed transitions: `forward` (directory → session), `back` (session → directory), `list` (rows
+   changing group, entering, or leaving). Material 3 emphasized curves, 200–400 ms, no overshoot.
+   `prefers-reduced-motion` removes everything but the final state. */
+
+:root {
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-emphasized-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
+  --motion-short: 200ms;
+  --motion-medium: 300ms;
+  --motion-long: 400ms;
+}
+
+@keyframes motion-fade-in {
+  from { opacity: 0; }
+}
+
+@keyframes motion-fade-out {
+  to { opacity: 0; }
+}
+
+@keyframes motion-from-right {
+  from { transform: translateX(8%); }
+}
+
+@keyframes motion-to-left {
+  to { transform: translateX(-6%); }
+}
+
+@keyframes motion-from-left {
+  from { transform: translateX(-8%); }
+}
+
+@keyframes motion-to-right {
+  to { transform: translateX(6%); }
+}
+
+@keyframes motion-row-in {
+  from { transform: translateY(12px); }
+}
+
+@keyframes motion-row-out {
+  to { transform: translateY(-8px); }
+}
+
+@keyframes motion-toast-in {
+  from { transform: translateY(100%); }
+}
+
+/* Navigation: the whole root never snapshots; the directory column and the session shell are the
+   two travelling surfaces (shared axis X) and the tapped tile is the shared element between them. */
+html:active-view-transition-type(forward, back) {
+  view-transition-name: none;
+}
+
+html:active-view-transition-type(forward, back) body > main {
+  view-transition-name: directory;
+}
+
+html:active-view-transition-type(forward, back) .gateway-shell {
+  view-transition-name: session;
+}
+
+html:active-view-transition-type(forward, back) .shell-heading .session-tile {
+  view-transition-name: session-tile;
+}
+
+::view-transition-group(directory),
+::view-transition-group(session) {
+  animation-duration: var(--motion-medium);
+  animation-timing-function: var(--ease-emphasized);
+}
+
+html:active-view-transition-type(forward)::view-transition-old(directory) {
+  animation: var(--motion-short) var(--ease-emphasized-accelerate) both motion-fade-out,
+    var(--motion-medium) var(--ease-emphasized) both motion-to-left;
+}
+
+html:active-view-transition-type(forward)::view-transition-new(session) {
+  animation: var(--motion-short) var(--ease-emphasized-decelerate) 60ms both motion-fade-in,
+    var(--motion-medium) var(--ease-emphasized) both motion-from-right;
+}
+
+html:active-view-transition-type(back)::view-transition-old(session) {
+  animation: var(--motion-short) var(--ease-emphasized-accelerate) both motion-fade-out,
+    var(--motion-medium) var(--ease-emphasized) both motion-to-right;
+}
+
+html:active-view-transition-type(back)::view-transition-new(directory) {
+  animation: var(--motion-short) var(--ease-emphasized-decelerate) 60ms both motion-fade-in,
+    var(--motion-medium) var(--ease-emphasized) both motion-from-left;
+}
+
+/* The tile travels as one surface: geometry interpolates, the two images swap without a ghost. */
+::view-transition-group(session-tile) {
+  animation-duration: var(--motion-medium);
+  animation-timing-function: var(--ease-emphasized);
+}
+
+::view-transition-old(session-tile),
+::view-transition-new(session-tile) {
+  animation-duration: var(--motion-short);
+  mix-blend-mode: normal;
+  height: 100%;
+  overflow: clip;
+}
+
+/* List changes: only rows move. The root stays live so kickers, counts and banners snap, and the
+   heading cross-fades between "Sessions" and "Needs you". */
+html:active-view-transition-type(list) {
+  view-transition-name: none;
+}
+
+html:active-view-transition-type(list) .directory-heading {
+  view-transition-name: directory-heading;
+}
+
+html:active-view-transition-type(list) .local-action-toast:not([hidden]) {
+  view-transition-name: local-action-toast;
+}
+
+::view-transition-group(.omp-row) {
+  animation-duration: var(--motion-medium);
+  animation-timing-function: var(--ease-emphasized);
+}
+
+::view-transition-image-pair(.omp-row),
+::view-transition-group(directory-heading) {
+  animation-duration: var(--motion-short);
+}
+
+::view-transition-old(.omp-row):only-child {
+  animation: var(--motion-short) var(--ease-emphasized-accelerate) both motion-fade-out,
+    var(--motion-short) var(--ease-emphasized-accelerate) both motion-row-out;
+}
+
+::view-transition-new(.omp-row):only-child {
+  animation: var(--motion-short) var(--ease-emphasized-decelerate) 40ms both motion-fade-in,
+    var(--motion-medium) var(--ease-emphasized-decelerate) both motion-row-in;
+}
+
+::view-transition-new(local-action-toast):only-child {
+  animation: var(--motion-short) var(--ease-emphasized-decelerate) both motion-fade-in,
+    var(--motion-medium) var(--ease-emphasized-decelerate) both motion-toast-in;
+}
+
+/* Tactile press: the tile settles under the thumb; the row surface still darkens as before. */
+.session-tile {
+  transition: transform 120ms var(--ease-emphasized);
+}
+
+.working-row:active:not(:disabled) .session-tile,
+.queue-row:active:not(:disabled) .session-tile,
+.held-open:active:not(:disabled) .session-tile {
+  transform: scale(0.94);
+}
 
 dialog:focus-visible {
   /* The sheet itself takes initial modal focus; the backdrop already marks modality. */
@@ -1653,5 +1810,16 @@ dialog:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .status[data-kind="loading"]::before {
     animation: none;
+  }
+
+  .session-tile {
+    transition: none;
+  }
+
+  ::view-transition-group(*),
+  ::view-transition-image-pair(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
   }
 }

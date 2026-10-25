@@ -68,6 +68,17 @@ class FakeElement extends EventTarget {
   readonly attributes = new Map<string, string>();
   readonly children: FakeElement[] = [];
   readonly dataset: Record<string, string> = {};
+  /** Inline properties the app sets through CSSOM (transition names); read back by tests. */
+  readonly style = {
+    properties: new Map<string, string>(),
+    setProperty(name: string, value: string): void {
+      if (value === "") this.properties.delete(name);
+      else this.properties.set(name, value);
+    },
+    getPropertyValue(name: string): string {
+      return this.properties.get(name) ?? "";
+    },
+  };
   checked = false;
   className = "";
   disabled = false;
@@ -146,17 +157,30 @@ class FakeElement extends EventTarget {
     return this.querySelectorAll(selector)[0] ?? null;
   }
 
+  /** Simple selectors only (class, id, tag, the two attribute forms), optionally comma-separated. */
+  matches(selector: string): boolean {
+    return selector.split(",").map(part => part.trim()).some(part => {
+      if (part.startsWith(".")) return this.className.split(/\s+/u).includes(part.slice(1));
+      if (part.startsWith("#")) return this.id === part.slice(1);
+      if (part === "[data-instance-id]") return this.dataset.instanceId !== undefined;
+      if (part === "link[data-omp-collab-styles]") return this.tagName === "link" && this.dataset.ompCollabStyles !== undefined;
+      return this.tagName.toLowerCase() === part.toLowerCase();
+    });
+  }
+
+  closest(selector: string): FakeElement | null {
+    let element: FakeElement | undefined = this;
+    while (element !== undefined) {
+      if (element.tagName !== "#text" && element.matches(selector)) return element;
+      element = element.parent;
+    }
+    return null;
+  }
+
   querySelectorAll(selector: string): FakeElement[] {
-    const matches = (element: FakeElement): boolean => {
-      if (selector.startsWith(".")) return element.className.split(/\s+/u).includes(selector.slice(1));
-      if (selector.startsWith("#")) return element.id === selector.slice(1);
-      if (selector === "[data-instance-id]") return element.dataset.instanceId !== undefined;
-      if (selector === "link[data-omp-collab-styles]") return element.tagName === "link" && element.dataset.ompCollabStyles !== undefined;
-      return element.tagName.toLowerCase() === selector.toLowerCase();
-    };
     const found: FakeElement[] = [];
     const visit = (element: FakeElement): void => {
-      if (matches(element)) found.push(element);
+      if (element.tagName !== "#text" && element.matches(selector)) found.push(element);
       for (const child of element.children) visit(child);
     };
     for (const child of this.children) visit(child);
@@ -963,6 +987,54 @@ describe("dashboard attention and notifications", () => {
     expect(iconsOnly?.querySelector(".row-title")?.textContent).toBe("tools");
     expect(iconsOnly?.getAttribute("aria-label")).toBe("View tools");
     expect(harness.elements.sessionList.querySelectorAll(".dismiss-session")[1]?.getAttribute("aria-label")).toBe("Hide tools on this device");
+  });
+
+  test("animates only genuine list changes and user actions, never routine refreshes or hidden pages", async () => {
+    const first = session("motion-gate-0001", { busy: true, startedAt: "2026-07-21T11:00:00.000Z" });
+    const second = session("motion-gate-0002", { busy: true, startedAt: "2026-07-21T10:00:00.000Z" });
+    const harness = await bootApp({ permission: "denied", suffix: "motion-gate", initialSessions: [first, second] });
+    const calls: string[] = [];
+    const fakeDocument = globalThis.document as unknown as Record<string, unknown>;
+    class FakeViewTransition {
+      get types(): Set<string> { return new Set(); }
+    }
+    Object.defineProperty(globalThis, "ViewTransition", { configurable: true, value: FakeViewTransition });
+    fakeDocument.startViewTransition = (options: { update: () => void; types: readonly string[] }) => {
+      calls.push(options.types.join());
+      options.update();
+      return { ready: Promise.resolve(), finished: Promise.resolve(), updateCallbackDone: Promise.resolve(), skipTransition(): void {} };
+    };
+    try {
+      // Routine refresh: only lastSeenAt moved.
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: { ...first, lastSeenAt: "2026-07-21T10:05:00.000Z" } });
+      expect(calls).toEqual([]);
+      // Genuine state change: Working → Idle.
+      harness.emit("session_upsert", { type: "session_upsert", revision: 3, session: { ...first, busy: false } });
+      expect(calls).toEqual(["list"]);
+      const rows = harness.elements.sessionList.querySelectorAll(".working-row-frame");
+      expect(rows.map(row => row.style.getPropertyValue("view-transition-class"))).toEqual(["omp-row", "omp-row"]);
+      const names = rows.map(row => row.style.getPropertyValue("view-transition-name"));
+      expect(new Set(names).size).toBe(2);
+      // User action: Hide, then Undo; the row keeps the same opaque name across both.
+      harness.elements.sessionList.querySelector(".dismiss-session")?.dispatchEvent(new Event("click"));
+      expect(calls).toEqual(["list", "list"]);
+      harness.elements.localActionToastUndo.dispatchEvent(new Event("click"));
+      expect(calls).toEqual(["list", "list", "list"]);
+      const restored = harness.elements.sessionList.querySelectorAll(".working-row-frame");
+      expect(restored.map(row => row.style.getPropertyValue("view-transition-name"))).toEqual(names);
+      // Group change: the first session asks for input and becomes the hero.
+      harness.emit("session_upsert", { type: "session_upsert", revision: 4, session: session(first.instanceId, { ...first, busy: false, inputRequired: true }) });
+      expect(calls).toEqual(["list", "list", "list", "list"]);
+      expect(harness.elements.sessionList.querySelector(".queue-hero")?.style.getPropertyValue("view-transition-class")).toBe("omp-row");
+      // Hidden page: the same kind of change renders without motion.
+      harness.setVisibility("hidden");
+      harness.emit("session_upsert", { type: "session_upsert", revision: 5, session: { ...second, busy: false } });
+      expect(calls).toHaveLength(4);
+      expect(harness.elements.sessionList.querySelector(".working-row-frame")?.querySelector(".session-tile")?.dataset.state).toBe("idle");
+    } finally {
+      delete fakeDocument.startViewTransition;
+      delete (globalThis as Record<string, unknown>).ViewTransition;
+    }
   });
 
   test("shows host facts only while several hosts are in view", async () => {

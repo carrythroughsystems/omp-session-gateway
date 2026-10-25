@@ -167,6 +167,8 @@ interface DashboardSnapshot {
   readonly title: string;
   readonly bodyClass: string;
   readonly historyState: DirectoryHistoryState;
+  /** The list signature the cached rows show, so the first refresh after a return animates only real changes. */
+  readonly signature: string | undefined;
 }
 
 interface ActiveCollabShell extends SessionRef {
@@ -1521,8 +1523,114 @@ function renderWaitingQueue(
   appendDismissedControl(dismissed);
 }
 
+/* ——— Motion ——————————————————————————————————————————————————————
+   Motion runs only on user-initiated transitions and genuine state changes (ADR-040): a
+   same-document view transition wraps a DOM commit when the browser supports typed transitions,
+   the document is visible, no dialog holds the top layer, and the user has not asked for reduced
+   motion. Routine SSE refreshes render without one because `render()` compares a structural
+   signature first. The update callback always runs, so every caller's DOM commit is the same
+   with or without motion. */
+type MotionType = "forward" | "back" | "list";
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const rowNames = new Map<string, string>();
+
+function motionAllowed(): boolean {
+  return typeof document.startViewTransition === "function" &&
+    typeof ViewTransition !== "undefined" && "types" in ViewTransition.prototype &&
+    !reducedMotion.matches && document.visibilityState === "visible" &&
+    document.querySelector("dialog[open]") === null;
+}
+
+function transitionDocument(type: MotionType, update: () => void): ViewTransition | undefined {
+  if (!motionAllowed()) {
+    update();
+    return undefined;
+  }
+  const transition = document.startViewTransition({ update, types: [type] });
+  // A skipped transition (duplicate name, hidden page, newer transition) still ran `update`.
+  transition.ready.catch(() => undefined);
+  return transition;
+}
+
+/** One stable, opaque transition name per session so a row keeps its identity across rebuilds. */
+function rowName(key: string): string {
+  let name = rowNames.get(key);
+  if (name === undefined) {
+    name = `omp-row-${rowNames.size + 1}`;
+    rowNames.set(key, name);
+  }
+  return name;
+}
+
+/** Names the directory rows for one list transition; names are inline so they exist only while it runs. */
+function nameDirectoryRows(named: boolean): void {
+  for (const child of sessionList.children) {
+    const element = child as HTMLElement;
+    const keyed = element.matches("[data-instance-id]") ? element : element.querySelector<HTMLElement>("[data-instance-id]");
+    if (keyed === null) continue;
+    element.style.setProperty("view-transition-name", named ? rowName(`${keyed.dataset.sourceKey ?? ""}\0${keyed.dataset.instanceId ?? ""}`) : "");
+    element.style.setProperty("view-transition-class", named ? "omp-row" : "");
+  }
+}
+
+/** What the directory shows, minus everything that changes on a routine refresh (clock labels, freshness copy). */
+function directorySignature(): string {
+  if (!directoryLoaded && sessions.size === 0) return "loading";
+  const visible = scopedSessions();
+  if (visible.length === 0) return `empty:${scopeComplete()}`;
+  const identity = (session: SessionMetadata, state: SessionTileState): unknown[] =>
+    [session.sourceKey, session.instanceId, session.generation, state, session.ask?.requestId ?? null];
+  return JSON.stringify([
+    selectedScope,
+    orderedWaitingSessions().map(session => identity(session, "waiting")),
+    orderedHeldSessions().map(session => identity(session, "held")),
+    orderedWorkingSessions().map(session => identity(session, activityState(session))),
+    orderedDismissedSessions().map(session => [session.sourceKey, session.instanceId, session.generation]),
+  ]);
+}
+
+let renderedSignature: string | undefined;
+/** A navigation transition in flight: renders wait for it, or a refresh would destroy the travelling tile. */
+let navigationTransition: ViewTransition | undefined;
+let renderHeld = false;
+
+function transitionNavigation(type: "forward" | "back", update: () => void): ViewTransition | undefined {
+  const transition = transitionDocument(type, update);
+  if (transition === undefined) return undefined;
+  navigationTransition = transition;
+  transition.finished.finally(() => {
+    if (navigationTransition === transition) navigationTransition = undefined;
+    if (renderHeld) {
+      renderHeld = false;
+      render();
+    }
+  });
+  return transition;
+}
+
 function render(): void {
   if (activeCollabShell !== undefined) return;
+  if (navigationTransition !== undefined) {
+    renderHeld = true;
+    return;
+  }
+  const signature = directorySignature();
+  // The first populated render settles in place; afterwards only structural changes animate.
+  const animate = renderedSignature !== undefined && renderedSignature !== "loading" && renderedSignature !== signature && motionAllowed();
+  renderedSignature = signature;
+  if (!animate) {
+    renderDirectory();
+    return;
+  }
+  nameDirectoryRows(true);
+  const transition = transitionDocument("list", () => {
+    renderDirectory();
+    nameDirectoryRows(true);
+  });
+  transition?.finished.finally(() => nameDirectoryRows(false));
+}
+
+function renderDirectory(): void {
   renderFleetStatus();
   sessionList.replaceChildren();
   if (!directoryLoaded && sessions.size === 0) {
@@ -1768,8 +1876,32 @@ function renderConnectionState(shell: ActiveCollabShell): void {
     reconcileActiveCollabShell();
   }
 }
+/** The tile of the directory row for a session, if that row is rendered. */
+function directoryTile(ref: Pick<SessionRef, "sourceKey" | "instanceId">): HTMLElement | null {
+  for (const keyed of sessionList.querySelectorAll<HTMLElement>("[data-instance-id]")) {
+    if (keyed.dataset.instanceId !== ref.instanceId || (keyed.dataset.sourceKey ?? localKey) !== ref.sourceKey) continue;
+    const row = keyed.matches(".working-row") ? keyed : keyed.closest<HTMLElement>(".queue-hero, .queue-row, .held-row") ?? keyed;
+    return row.querySelector<HTMLElement>(".session-tile");
+  }
+  return null;
+}
+
+/**
+ * The interactive way back (shell Back, system back, the triage "Sessions" action): the shell
+ * slides out while the directory slides in and the header tile returns to its row. Disposal and
+ * recovery paths call `restoreDirectory` directly and never animate.
+ */
 function returnToDirectory(historyValue?: unknown): void {
-  void restoreDirectory(historyValue);
+  const shell = activeCollabShell;
+  let tile: HTMLElement | null = null;
+  const transition = transitionNavigation("back", () => {
+    // Another path may already have restored the directory while this commit waited for its frame.
+    if (activeCollabShell !== shell || dashboardSnapshot === undefined) return;
+    void restoreDirectory(historyValue);
+    tile = shell === undefined ? null : directoryTile(shell);
+    tile?.style.setProperty("view-transition-name", "session-tile");
+  });
+  transition?.finished.finally(() => tile?.style.setProperty("view-transition-name", ""));
 }
 
 /**
@@ -1797,6 +1929,8 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
   document.body.replaceChildren(...snapshot.children);
   document.title = snapshot.title;
   dashboardSnapshot = undefined;
+  // The cached rows show the list as it was at launch; the first refresh animates only what changed since.
+  renderedSignature = snapshot.signature;
   history.replaceState({ ompDirectory: historyState }, "", "/");
   window.scrollTo(0, historyState.scrollY);
   const refreshed = Promise.all([refreshAndConnect(), ...[...remotes.values()].map(remote => remote.refresh())])
@@ -1991,8 +2125,10 @@ function enterCollabClient(
   session: SessionMetadata,
   mode: LaunchMode,
   requestId?: string,
+  originTile: HTMLElement | null = null,
 ): void {
   setStatus("ready", "");
+  const fromDirectory = activeCollabShell === undefined;
   if (dashboardSnapshot === undefined) {
     const historyState: DirectoryHistoryState = {
       version: 2,
@@ -2012,8 +2148,10 @@ function enterCollabClient(
       title: document.title,
       bodyClass: document.body.className,
       historyState,
+      signature: renderedSignature,
     };
   }
+  const snapshot = dashboardSnapshot;
   disposeActiveCollab?.();
 
   const shell = document.createElement("div");
@@ -2093,13 +2231,25 @@ function enterCollabClient(
   snapshotController = undefined;
   clearReconnectTimeout();
   reconnectAttempt = 0;
-  if (location.pathname !== "/client/") {
-    history.replaceState({ ompDirectory: dashboardSnapshot.historyState }, "", "/");
-    history.pushState({ ompCollab: true }, "", "/client/");
+  const commitHistory = location.pathname !== "/client/";
+  const commit = (): void => {
+    originTile?.style.setProperty("view-transition-name", "");
+    if (commitHistory) {
+      history.replaceState({ ompDirectory: snapshot.historyState }, "", "/");
+      history.pushState({ ompCollab: true }, "", "/client/");
+    }
+    document.body.className = "collab-shell-active";
+    document.body.replaceChildren(shell);
+    document.title = `${spokenTitle(session)} · OMP Sessions`;
+  };
+  // Only a launch from the directory travels: the row's tile becomes the header tile while the
+  // directory slides out. Shell-to-shell launches (Control, Next) replace the shell in place.
+  if (fromDirectory) {
+    originTile?.style.setProperty("view-transition-name", "session-tile");
+    transitionNavigation("forward", commit);
+  } else {
+    commit();
   }
-  document.body.className = "collab-shell-active";
-  document.body.replaceChildren(shell);
-  document.title = `${spokenTitle(session)} · OMP Sessions`;
 
   const shellState: ActiveCollabShell = {
     sourceKey: session.sourceKey,
@@ -2216,12 +2366,16 @@ async function launch(
       (requestId === undefined || current.ask?.requestId === requestId);
   };
   const sourceShell = activeCollabShell;
+  // A row keeps its tile, title and facts while it opens (they travel into the shell); only a
+  // text-only action swaps its label.
+  const originTile = button?.closest<HTMLElement>("[data-instance-id]")?.querySelector<HTMLElement>(".session-tile") ?? null;
+  const labelOnly = button !== undefined && button.querySelector(".session-tile") === null;
   const idleLabel = button?.textContent ?? (mode === "view" ? "View" : "Control");
   if (button !== undefined) {
     button.disabled = true;
     button.dataset.busy = "true";
     button.setAttribute("aria-busy", "true");
-    button.textContent = mode === "view" ? "Opening view…" : "Opening control…";
+    if (labelOnly) button.textContent = mode === "view" ? "Opening view…" : "Opening control…";
   } else if (sourceShell === undefined) {
     setStatus("loading", mode === "view" ? "Opening view…" : "Opening control…");
   }
@@ -2239,7 +2393,7 @@ async function launch(
     button.disabled = !sourceFresh(session.sourceKey) || (mode === "view" ? !session.canView : !session.canControl);
     delete button.dataset.busy;
     button.removeAttribute("aria-busy");
-    button.textContent = idleLabel;
+    if (labelOnly) button.textContent = idleLabel;
   };
   let stylesheet: HTMLLinkElement | undefined;
   let startCollabWithCapability: StartCollabWithCapability;
@@ -2362,7 +2516,7 @@ async function launch(
     }
     if (!currentAttempt()) return discard();
     capability = payload.capability;
-    enterCollabClient(capability, startCollabWithCapability, session, mode, requestId);
+    enterCollabClient(capability, startCollabWithCapability, session, mode, requestId, originTile);
     settle();
     capability = undefined;
     return true;
