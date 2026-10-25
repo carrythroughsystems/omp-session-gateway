@@ -39,6 +39,7 @@
           <h1 id="directory-title" tabindex="-1">Sessions</h1>
           <p id="directory-count" class="count-pill" hidden></p>
         </div>
+        <button id="new-session" class="new-session" type="button" aria-haspopup="dialog">New session</button>
         <label id="host-picker-label" class="host-picker" hidden>
           <select id="host-picker" aria-label="Host"></select>
         </label>
@@ -55,6 +56,7 @@
         <p class="empty-kicker">No live sessions</p>
         <h2>Start an interactive OMP process.</h2>
         <p>With <code>collab.autoStart</code> configured it appears here automatically — no link copy or <code>/collab</code> command is needed.</p>
+        <button id="empty-new-session" class="new-session" type="button" aria-haspopup="dialog">New session</button>
       </section>
       <section id="session-list" class="session-list" aria-label="Live OMP sessions"></section>
     </main>

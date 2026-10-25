@@ -19,6 +19,9 @@ Implemented states:
 - one-shot all-clear arrival when the last queued/held request clears or ends, with an
   answered/all-clear check draw-in inside the session shell;
 - privacy/security guidance.
+- opt-in **New session** trays for host, approved project/working copy/profile, review, and
+  creation tracking; **Create and open Control** adopts the new OMP session through its ordinary
+  discovery and generation-bound launch, never a native Tern handoff.
 
 Background alerts (Web Push) are opt-in per device from the Settings tray; see
 [Compatibility](../../docs/COMPATIBILITY.md#platforms-and-browsers) for exact qualified
@@ -154,6 +157,44 @@ Focused checks: `bun --cwd=apps/web run typecheck` and `bun test apps/web/test`.
 `e2e/fleet.e2e.ts` runs two real loopback origins with reciprocal exact-origin CORS, verifies
 preflight and credential omission, and audits a metadata-only request log for forbidden remote
 SSE/configuration/push traffic. Browser coverage uses the repository's normal browser runner.
+
+## Creating a session in Tern
+
+**New session** appears beside the directory controls and in its empty state. A host must opt in
+with administrator-approved Tern choices; an older or unconfigured gateway shows an honest
+unavailable panel with **Retry options**, never a guessed executable or path. The wizard uses
+logical Back on the existing native tray, replacing one panel per step without browser history
+entries. One host and one working copy skip their respective choice panels; a scoped/remembered
+host and valid remembered choices are preselected against fresh options.
+
+The explicit **Create and open Control** action generates one operation UUID. Options/status
+requests time out after four seconds; POST after ten. Remote calls use CORS with omitted
+credentials and refused redirects; readable authorization loss revokes the source. Status polling
+starts one second after the preceding request completes, with a 120-second watching budget.
+Closing, changing scope, competing navigation/trays, authorization loss, backgrounding, freeze,
+and pagehide stop watching, not the command running in Tern. Foregrounding never automatically
+creates or opens. **Check creation** reads the known operation or explicitly replays the identical
+POST after a lost acknowledgement; after the watching deadline it performs only one bounded check.
+No uncertain outcome automatically retries creation.
+
+Only `{sourceId, sourceOrigin, projectId, workingCopyId, profileId, updatedAt}` choices persist in
+`omp.sessions.creation-prefs.v1`: version 1, at most eight records and 16 KiB. Removed/rebound
+sources are pruned only after an authoritative bootstrap. Storage failure leaves creation usable.
+Tracking intents and the optional **First task** remain in page memory, never requests, history,
+storage, logs, or process arguments. The task is bounded to 8,000 Unicode code points / 32 KiB;
+backgrounding preserves it in the suspended flow, while explicit Close, selection changes,
+authorization loss and pagehide discard it.
+
+Ready refreshes that source, requires the exact instance/generation and Control, then opens the
+ordinary full-screen client. A source/instance/generation-bound holder supplies the draft once
+through `takeInitialPromptDraft`; only the client inserts it into an empty, live writable composer.
+It never sends, overwrites an existing draft, or fills an Ask. A failed pre-mount open may retry
+the same binding; cancellation, changed bindings and shell disposal discard the holder.
+
+`e2e/session-creation.e2e.ts` covers the wizard, terminal states, lost acknowledgements, native
+Back, background/foreground, preferences, source-bound CORS and private sinks. Set
+`OMP_CREATION_SCREENSHOTS` for synthetic step/state captures at 412×915 and 1280×800.
+This browser evidence is not real-host Tern or physical-device qualification.
 
 ## Synthetic visual review
 

@@ -7,6 +7,8 @@ export interface TrayPanel {
   readonly actions?: readonly HTMLElement[];
   readonly layout?: "expanded";
   readonly leadingLabel?: string;
+  /** Logical Back for flows that replace one native panel instead of growing the stack. */
+  readonly onBack?: () => void;
   /** Runs only when this panel becomes current, including native Back/pop. */
   readonly onShow?: () => void;
 }
@@ -18,8 +20,20 @@ interface PanelEntry {
   height: number;
 }
 
+export interface Tray {
+  open(panel: TrayPanel, options?: { transientMs?: number; onClose?: () => void; parents?: readonly TrayPanel[] }): void;
+  push(panel: TrayPanel): void;
+  pop(): void;
+  replace(panel: TrayPanel): void;
+  close(immediate?: boolean, silent?: boolean): void;
+  readonly id: string | undefined;
+  readonly heading: HTMLElement | undefined;
+  refresh(): void;
+  promote(done: () => void): void;
+}
+
 /** One native top-layer surface. Descriptors and callbacks never contain client capabilities. */
-export function createTray(host: HTMLDialogElement) {
+export function createTray(host: HTMLDialogElement): Tray {
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
   const grip = document.createElement("div");
   grip.className = "tray-grip";
@@ -139,8 +153,8 @@ export function createTray(host: HTMLDialogElement) {
       leading.className = "tray-leading";
       const parent = current();
       leading.setAttribute("aria-label", panel.leadingLabel ?? (parent === undefined ? `Close ${panel.title}` : `Back to ${parent.panel.title}`));
-      leading.textContent = parent === undefined ? "⌄" : "‹";
-      leading.addEventListener("click", () => stack.length > 1 ? pop() : close());
+      leading.textContent = parent === undefined && panel.onBack === undefined ? "⌄" : "‹";
+      leading.addEventListener("click", () => panel.onBack !== undefined ? panel.onBack() : stack.length > 1 ? pop() : close());
       heading = document.createElement("h2");
       heading.id = `tray-title-${++sequence}`;
       heading.tabIndex = -1;
@@ -239,7 +253,11 @@ export function createTray(host: HTMLDialogElement) {
   };
   host.addEventListener("cancel", event => {
     event.preventDefault();
-    if (stack.length > 1) {
+    const back = current()?.panel.onBack;
+    if (back !== undefined) {
+      restoreAfterNativeClose = !event.cancelable;
+      back();
+    } else if (stack.length > 1) {
       // Chromium makes consecutive platform close requests non-cancelable without a new
       // activation. Preserve the popped stack and restore modality after its forced close.
       restoreAfterNativeClose = !event.cancelable;

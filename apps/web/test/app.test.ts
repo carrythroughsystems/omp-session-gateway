@@ -2,6 +2,7 @@ import { afterAll, describe, expect, mock, test } from "bun:test";
 import { MAX_FRAME_BYTES, MAX_SESSIONS, type SessionMetadata } from "@omp-session-gateway/protocol";
 import fc, { type AsyncCommand } from "fast-check";
 import type { CollabEmbedOptions } from "../../../packages/collab-client/upstream/src/embed-contract";
+import { validInitialPromptDraft } from "../src/session-creation";
 
 let embedStart: (options: CollabEmbedOptions) => () => void;
 mock.module("fleet-test-collab", () => ({
@@ -514,6 +515,7 @@ async function bootApp(options: {
   readonly remotePayload?: unknown;
   readonly launchGate?: Promise<void>;
   readonly launchResponse?: (path: string, init: RequestInit) => Promise<Response>;
+  readonly creationResponse?: (path: string, init: RequestInit) => Promise<Response>;
   readonly suffix: string;
 }): Promise<BrowserHarness> {
   FakeEventSource.instances.length = 0;
@@ -568,6 +570,8 @@ async function bootApp(options: {
     "#notification-detail-options": notificationDetailOptions,
     "#recovery-panel": new FakeElement("section"),
     "#gateway-mark": new FakeElement("svg"),
+    "#new-session": new FakeElement("button"),
+    "#empty-new-session": new FakeElement("button"),
   };
   const document = new FakeDocument(bySelector, notificationDetailInputs);
   const window = new FakeWindow();
@@ -707,6 +711,9 @@ async function bootApp(options: {
     const path = typeof input === "string" ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
     fetchPaths.push(path);
     fetchLocations.push(location.pathname + location.search);
+    if (path.includes("/session-creation")) {
+      return options.creationResponse === undefined ? new Response(null, { status: 404 }) : await options.creationResponse(path, init);
+    }
     if (path === "/api/v1/client-config") {
       if (options.clientConfigStatus !== undefined) return new Response(null, { status: options.clientConfigStatus });
       return options.clientConfig === undefined ? new Response(null, { status: 404 }) : Response.json(options.clientConfig);
@@ -897,6 +904,179 @@ afterAll(() => {
     else Object.defineProperty(globalThis, name, descriptor);
   }
   Date.now = nativeNow;
+});
+
+describe("source-bound session creation", () => {
+  const revision = "88330a3a-cc71-4de3-941a-33012d026f14";
+  const operationId = "88330a3a-cc71-4de3-941a-33012d026f15";
+  const choices = { version: 1, revision, available: true, projects: [
+    { id: "synthetic", label: "Synthetic project", workingCopies: [{ id: "main", label: "Main" }] },
+  ], profiles: [{ id: "omp", label: "OMP" }] };
+  const currentPanel = (harness: BrowserHarness): FakeElement => harness.elements.trayHost.querySelectorAll("section")
+    .find(element => !element.inert && element.dataset.panel === harness.elements.trayHost.dataset.panel)!;
+  const click = (harness: BrowserHarness, label: string): void => {
+    const target = currentPanel(harness)?.querySelectorAll("button").find(button => button.textContent === label);
+    expect(target).toBeDefined();
+    target!.dispatchEvent(new Event("click"));
+  };
+  const open = async (harness: BrowserHarness): Promise<void> => {
+    document.querySelector("#new-session")!.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.elements.trayHost.dataset.panel === "creation-project", 100);
+    click(harness, "Synthetic project");
+    expect(harness.elements.trayHost.dataset.panel).toBe("creation-profile");
+    click(harness, "OMP");
+    expect(harness.elements.trayHost.dataset.panel).toBe("creation-review");
+  };
+  const seed = (harness: BrowserHarness, value: string): void => {
+    const textarea = currentPanel(harness).querySelector("textarea")!;
+    textarea.value = value;
+    textarea.dispatchEvent(new Event("input"));
+  };
+
+  test("refreshes and opens only the exact ready Control binding, draining its volatile draft once", async () => {
+    const ready = session("created-session-001", { generation: 7 });
+    const posted: unknown[] = [];
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], suffix: "creation-ready",
+      creationResponse: async (path, init) => {
+        if (path.endsWith("options")) return Response.json(choices);
+        if (init.method === "POST") {
+          posted.push(JSON.parse(String(init.body)));
+          return Response.json({ operationId, state: "accepted" }, { status: 202 });
+        }
+        return Response.json({ operationId, state: "ready", updatedAt: new Date().toISOString(), session: { instanceId: ready.instanceId, generation: 7 } });
+      },
+    });
+    await open(harness);
+    const draft = ["SYNTHETIC", "FIRST_TASK", "CANARY"].join("_");
+    seed(harness, draft);
+    harness.setList(2, [ready]);
+    click(harness, "Create and open Control");
+    await settleUntil(() => harness.embedCalls.length === 1, 200);
+    expect(harness.launchRequests).toHaveLength(1);
+    expect(JSON.parse(String(harness.launchRequests[0]!.init.body))).toEqual({ mode: "control", generation: 7 });
+    expect(harness.body.querySelector(".gateway-shell")?.dataset.presentation).not.toBe("request-tray");
+    expect(harness.embedCalls[0]!.takeInitialPromptDraft?.()).toBe(draft);
+    expect(harness.embedCalls[0]!.takeInitialPromptDraft?.()).toBeUndefined();
+    const sinks = JSON.stringify({ posted, storage: [...harness.localStorage.values], history: history.state, requests: harness.fetchPaths });
+    expect(sinks).not.toContain(draft);
+    expect(sinks).not.toContain("CANARY_VALUE");
+    harness.window.dispatchEvent(new Event("pagehide"));
+    expect(harness.embedCalls[0]!.takeInitialPromptDraft?.()).toBeUndefined();
+  });
+
+  for (const kind of ["generation", "control", "missing"] as const) {
+    test(`refuses ready handoff after ${kind} changed`, async () => {
+      const ready = session("created-session-002", { generation: 2 });
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], suffix: `creation-stale-${kind}`,
+        creationResponse: async (path, init) => Response.json(path.endsWith("options") ? choices
+          : init.method === "POST" ? { operationId, state: "accepted" }
+            : { operationId, state: "ready", updatedAt: new Date().toISOString(), session: { instanceId: ready.instanceId, generation: 2 } }),
+      });
+      await open(harness);
+      harness.setList(2, kind === "missing" ? [] : [{ ...ready, generation: kind === "generation" ? 3 : 2, canControl: kind !== "control" }]);
+      click(harness, "Create and open Control");
+      await settleUntil(() => harness.elements.trayHost.dataset.panel === "creation-terminal", 200);
+      expect(harness.launchRequests).toHaveLength(0);
+      expect(currentPanel(harness).textContent).toContain("exact Control session");
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
+
+  test("lost acknowledgement requires explicit identical replay and never generates another UUID", async () => {
+    const posted: string[] = [];
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], suffix: "creation-lost-ack",
+      creationResponse: async (path, init) => {
+        if (path.endsWith("options")) return Response.json(choices);
+        if (init.method === "POST") {
+          posted.push(String(init.body));
+          if (posted.length === 1) throw new TypeError("synthetic acknowledgement lost");
+          return Response.json({ operationId, state: "accepted" });
+        }
+        return Response.json({ operationId, state: "failed", error: "spawn_failed", updatedAt: new Date().toISOString() });
+      },
+    });
+    await open(harness);
+    click(harness, "Create and open Control");
+    await settleUntil(() => harness.elements.trayHost.dataset.panel === "creation-terminal", 100);
+    expect(posted).toHaveLength(1);
+    expect(currentPanel(harness).textContent).toContain("response was lost");
+    click(harness, "Check creation");
+    await settleUntil(() => currentPanel(harness).textContent!.includes("did not start a command"), 100);
+    expect(posted).toHaveLength(2);
+    expect(posted[0]).toBe(posted[1]);
+    expect(harness.launchRequests).toHaveLength(0);
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  for (const reason of ["hidden", "scope", "close", "pagehide", "competing"] as const) {
+    test(`${reason} invalidates a late ready status and clears or suspends its draft`, async () => {
+      const pending = Promise.withResolvers<Response>();
+      let statusSignal: AbortSignal | null | undefined;
+      const ready = session("created-session-003");
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], suffix: `creation-cancel-${reason}`,
+        creationResponse: async (path, init) => {
+          if (path.endsWith("options")) return Response.json(choices);
+          if (init.method === "POST") return Response.json({ operationId, state: "accepted" });
+          statusSignal = init.signal;
+          return pending.promise;
+        },
+      });
+      await open(harness);
+      seed(harness, "SYNTHETIC_SUSPENDED_TASK");
+      harness.setList(2, [ready]);
+      click(harness, "Create and open Control");
+      await settleUntil(() => statusSignal !== undefined, 100);
+      if (reason === "hidden") harness.setVisibility("hidden");
+      else if (reason === "scope") harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      else if (reason === "close") currentPanel(harness).querySelector(".tray-leading")!.dispatchEvent(new Event("click"));
+      else if (reason === "competing") harness.elements.settingsButton.dispatchEvent(new Event("click"));
+      else harness.window.dispatchEvent(new Event("pagehide"));
+      expect(statusSignal!.aborted).toBeTrue();
+      pending.resolve(Response.json({ operationId, state: "ready", updatedAt: new Date().toISOString(), session: { instanceId: ready.instanceId, generation: 1 } }));
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      if (reason === "hidden") harness.setVisibility("visible");
+      expect(harness.launchRequests).toHaveLength(0);
+      expect(harness.embedCalls).toHaveLength(0);
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
+
+  test("polling waits for completion, stops at 120 seconds, and a late manual Check is one GET", async () => {
+    let statuses = 0;
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], suffix: "creation-deadline",
+      creationResponse: async (path, init) => {
+        if (path.endsWith("options")) return Response.json(choices);
+        if (init.method === "POST") return Response.json({ operationId, state: "accepted" });
+        statuses++;
+        return Response.json({ operationId, state: "awaiting_omp", updatedAt: new Date().toISOString() });
+      },
+    });
+    await open(harness);
+    click(harness, "Create and open Control");
+    await settleUntil(() => statuses === 1 && harness.pendingDelays().includes(1_000), 100);
+    harness.window.runTimersWithDelay(1_000);
+    await settleUntil(() => statuses === 2 && harness.pendingDelays().includes(1_000), 100);
+    harness.advanceClock(120_001);
+    const deadline = harness.pendingDelays().find(delay => delay > 110_000)!;
+    harness.window.runTimersWithDelay(deadline);
+    expect(currentPanel(harness).textContent).toContain("Stopped watching");
+    click(harness, "Check creation");
+    await settleUntil(() => statuses === 3 && harness.elements.trayHost.dataset.panel === "creation-terminal", 100);
+    expect(harness.pendingDelays()).not.toContain(1_000);
+    expect(harness.fetchPaths.filter(path => path === "/api/v1/session-creations")).toHaveLength(1);
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  test("first-task limits count Unicode code points, not UTF-16 code units", () => {
+    expect(validInitialPromptDraft("𐐀".repeat(8_000))).toBeTrue();
+    expect(validInitialPromptDraft("𐐀".repeat(8_001))).toBeFalse();
+    expect(validInitialPromptDraft("a".repeat(8_001))).toBeFalse();
+  });
 });
 
 describe("dashboard attention and notifications", () => {

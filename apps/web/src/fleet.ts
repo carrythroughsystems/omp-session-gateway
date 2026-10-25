@@ -1,6 +1,10 @@
 import {
   MAX_CLIENT_CONFIG_BYTES, MAX_SESSIONS, INSTANCE_ID_PATTERN,
   parseClientConfigResponse, parseSessionListResponse, parseFleetSourceId, parseFleetOrigin,
+  parseJsonFrame, parseSessionCreationOptions, parseSessionCreationRequest, parseSessionCreationReceipt,
+  parseSessionCreationStatus, parseSessionCreationUuid,
+  MAX_SESSION_CREATION_OPTIONS_BYTES, MAX_SESSION_CREATION_STATUS_BYTES,
+  type SessionCreationOptions, type SessionCreationRequest, type SessionCreationReceipt, type SessionCreationStatus,
   type ClientConfigResponse, type FleetSource, type SessionListResponse,
 } from "@omp-session-gateway/protocol";
 
@@ -19,7 +23,7 @@ export type SourceStatus = "loading" | "fresh" | "stale" | "unavailable" | "forb
 export const SNAPSHOT_BYTES = 8 * 1024 * 1024;
 export const STALE_GRACE_MS = 35_000;
 
-export async function boundedJson(response: Response, maximum: number): Promise<unknown> {
+export async function boundedJson(response: Response, maximum: number, strict = false): Promise<unknown> {
   const declared = response.headers.get("content-length");
   if (declared !== null && Number(declared) > maximum) throw new Error("response exceeds bound");
   if (response.body === null) throw new Error("missing response body");
@@ -41,7 +45,7 @@ export async function boundedJson(response: Response, maximum: number): Promise<
   const bytes = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  return strict ? parseJsonFrame(bytes) : JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
 }
 
 interface FleetClock {
@@ -219,6 +223,92 @@ export class FleetTransport {
   }
 }
 
+const CREATION_PROBLEMS = [
+  "revision_mismatch", "operation_conflict", "creation_busy", "rate_limited",
+  "tern_unavailable", "creation_capacity", "ledger_unavailable",
+] as const;
+type CreationProblem = typeof CREATION_PROBLEMS[number] | "forbidden" | "not_found" | "unavailable" | "rejected";
+export class CreationTransportError extends Error {
+  constructor(readonly code: CreationProblem) { super("Session creation request unavailable"); }
+}
+
+/** No retries: an explicit Check may replay a frozen POST, never an automatic transport retry. */
+export class SessionCreationTransport {
+  constructor(
+    readonly source: FleetSource,
+    private readonly forbidden: (source: FleetSource) => void,
+    private readonly fetcher: typeof fetch = fetch,
+    private readonly time: FleetClock = clock,
+  ) {}
+
+  options(signal: AbortSignal): Promise<SessionCreationOptions | undefined> {
+    return this.request("/api/v1/session-creation-options", undefined, signal, 4_000,
+      MAX_SESSION_CREATION_OPTIONS_BYTES, parseSessionCreationOptions, true);
+  }
+
+  async create(request: SessionCreationRequest, signal: AbortSignal): Promise<SessionCreationReceipt> {
+    const payload = parseSessionCreationRequest(request);
+    return (await this.request("/api/v1/session-creations", payload, signal, 10_000,
+      MAX_SESSION_CREATION_STATUS_BYTES, parseSessionCreationReceipt))!;
+  }
+
+  async status(operationId: string, signal: AbortSignal): Promise<SessionCreationStatus> {
+    const id = parseSessionCreationUuid(operationId);
+    return (await this.request(`/api/v1/session-creations/${id}`, undefined, signal, 4_000,
+      MAX_SESSION_CREATION_STATUS_BYTES, parseSessionCreationStatus))!;
+  }
+
+  private async request<T>(
+    path: string, payload: SessionCreationRequest | undefined, signal: AbortSignal, timeoutMs: number,
+    maximum: number, parse: (value: unknown) => T, missingOptions = false,
+  ): Promise<T | undefined> {
+    if (signal.aborted) throw new CreationTransportError("unavailable");
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    const timeout = this.time.setTimeout(abort, timeoutMs);
+    try {
+      const remote = this.source.id !== "local";
+      const fetchRequest = this.fetcher;
+      const response = await fetchRequest(`${remote ? this.source.origin : ""}${path}`, {
+        method: payload === undefined ? "GET" : "POST",
+        ...(payload === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+        cache: "no-store", credentials: remote ? "omit" : "same-origin", redirect: "error",
+        ...(remote ? { mode: "cors" as const } : {}), signal: controller.signal,
+      });
+      if (controller.signal.aborted) throw new CreationTransportError("unavailable");
+      if (response.status === 403) {
+        this.forbidden(this.source);
+        throw new CreationTransportError("forbidden");
+      }
+      if (response.status === 404) {
+        if (missingOptions) return undefined;
+        throw new CreationTransportError("not_found");
+      }
+      if (!response.ok) {
+        let code: CreationProblem = response.status >= 400 && response.status < 500 ? "rejected" : "unavailable";
+        try {
+          const problem = await boundedJson(response, MAX_SESSION_CREATION_STATUS_BYTES, true);
+          if (problem !== null && typeof problem === "object" && "code" in problem &&
+            CREATION_PROBLEMS.includes(problem.code as typeof CREATION_PROBLEMS[number])) {
+            code = problem.code as typeof CREATION_PROBLEMS[number];
+          }
+        } catch { /* Never retain or expose arbitrary server error content. */ }
+        throw new CreationTransportError(code);
+      }
+      const result = parse(await boundedJson(response, maximum, true));
+      if (controller.signal.aborted) throw new CreationTransportError("unavailable");
+      return result;
+    } catch (error) {
+      if (error instanceof CreationTransportError) throw error;
+      throw new CreationTransportError("unavailable");
+    } finally {
+      this.time.clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+    }
+  }
+}
+
 export interface SourceRecord { readonly sourceId: string; readonly sourceOrigin: string }
 export interface HeldAsk extends SourceRecord {
   readonly instanceId: string; readonly requestId: string; readonly heldAt: string;
@@ -284,4 +374,73 @@ export function readSourceRecords(
     }
   } catch { /* Optional storage: retain in-memory decisions even if migration cannot commit. */ }
   return records;
+}
+
+export interface CreationPreference extends SourceRecord {
+  readonly projectId: string;
+  readonly workingCopyId: string;
+  readonly profileId: string;
+  readonly updatedAt: string;
+}
+export const CREATION_PREFERENCES_KEY = "omp.sessions.creation-prefs.v1";
+const MAX_CREATION_PREFERENCES_BYTES = 16 * 1024;
+
+function creationPreference(value: unknown): CreationPreference | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const keys = ["sourceId", "sourceOrigin", "projectId", "workingCopyId", "profileId", "updatedAt"];
+  if (Object.keys(record).length !== keys.length || keys.some(key => !Object.hasOwn(record, key)) || !timestamp(record.updatedAt)) return undefined;
+  try {
+    return {
+      sourceId: parseFleetSourceId(record.sourceId), sourceOrigin: parseFleetOrigin(record.sourceOrigin),
+      projectId: parseFleetSourceId(record.projectId), workingCopyId: parseFleetSourceId(record.workingCopyId),
+      profileId: parseFleetSourceId(record.profileId), updatedAt: record.updatedAt,
+    };
+  } catch { return undefined; }
+}
+
+/** Only fixed option IDs and source bindings persist; never operation IDs or task text. */
+export function writeCreationPreferences(
+  storage: Pick<Storage, "setItem">,
+  preferences: Iterable<CreationPreference>,
+): void {
+  const choices = new Map<string, CreationPreference>();
+  for (const value of preferences) {
+    const record = creationPreference(value);
+    if (record === undefined) continue;
+    choices.set(record.sourceId, record);
+  }
+  const bounded = [...choices.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 8);
+  const serialized = JSON.stringify({ version: 1, choices: bounded });
+  if (new TextEncoder().encode(serialized).byteLength > MAX_CREATION_PREFERENCES_BYTES) return;
+  try { storage.setItem(CREATION_PREFERENCES_KEY, serialized); } catch { /* Optional device-local preference. */ }
+}
+
+export function readCreationPreferences(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  sources: readonly FleetSource[],
+  authoritative: boolean,
+): Map<SourceKey, CreationPreference> {
+  const preferences = new Map<SourceKey, CreationPreference>();
+  try {
+    const serialized = storage.getItem(CREATION_PREFERENCES_KEY);
+    if (serialized === null) return preferences;
+    const value: unknown = new TextEncoder().encode(serialized).byteLength <= MAX_CREATION_PREFERENCES_BYTES
+      ? JSON.parse(serialized) : undefined;
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      const record = value as Record<string, unknown>;
+      if (Object.keys(record).length === 2 && record.version === 1 && Array.isArray(record.choices) && record.choices.length <= 8) {
+        const ids = new Set<string>();
+        for (const value of record.choices) {
+          const choice = creationPreference(value);
+          if (choice === undefined || ids.has(choice.sourceId)) continue;
+          ids.add(choice.sourceId);
+          if (authoritative && !sources.some(source => source.id === choice.sourceId && source.origin === choice.sourceOrigin)) continue;
+          preferences.set(`${choice.sourceId}\0${choice.sourceOrigin}`, choice);
+        }
+      }
+    }
+  } catch { /* An invalid or unavailable record is not a prerequisite for creation. */ }
+  if (authoritative) writeCreationPreferences(storage, preferences.values());
+  return preferences;
 }

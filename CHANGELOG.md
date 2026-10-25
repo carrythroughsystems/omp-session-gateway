@@ -16,6 +16,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Accept Tern's additive new-tab receipt metadata and wait for delayed session-file metadata.
   Anchor adoption freshness to actual child creation and reserve execution across durable admission
   so concurrent availability probes cannot occupy its CLI slot.
+- Add a source-bound **New session** wizard for opt-in Tern creation: approved choices,
+  explicit **Create and open Control**, bounded status watching, manual same-operation recovery,
+  device-local choice preferences, and a memory-only one-shot First task draft. Closing stops
+  watching rather than stopping the host command; uncertain outcomes never automatically recreate.
 - Resumable, skippable first-run trays for connection facts, optional background alerts, and
   View versus Control, reusing the existing tray and notification control. The bounded
   `omp.sessions.first-run.v1` record stores only step and timestamp. A same-scope queue clearance
