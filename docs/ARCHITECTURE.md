@@ -119,6 +119,17 @@ A pending retry preserves the named local fault, even before the first successfu
 Remote launch denial uses its forbidden host row without replacing an independent local banner.
 Bootstrap recovery updates the existing local source's label in place; its origin-bound object
 identity remains stable for accepted creation intents and their exact Ready handoff.
+Visible guidance timing is separate from the named local fault: hiding, expiry messages, and
+remote mounts cannot clear that fault or cancel its retry chain. Only a successful local
+observation or a replacement named local fault changes its ownership.
+Local list, launch, creation and embedded-probe denials share one withdrawal transition: clear
+metadata and clock, invalidate the event epoch, close the stream, cancel local work, and require
+a fresh authorized snapshot. Late pre-denial upserts, keepalives and errors cannot resurrect it.
+Remote launch errors remain source-scoped, including 404/409 and transport failures. Their host
+notice lasts until that source is checked successfully or a launch succeeds; Refresh host never
+replays a capability request. Observation-aware empty copy also covers All hosts and single-host views.
+Denying or programmatically cancelling an unmounted request preview restores and consumes its directory snapshot
+without starting another fetch or reverting a newer host selection.
 
 Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and offers retry without unmounting its collaboration shell.
 

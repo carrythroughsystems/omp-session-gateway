@@ -242,6 +242,8 @@ Failed fleet bootstrap uses that same banner, not a second row; local transport 
 precedence. Offline preserves remote observation clocks and expiry while recovery continues.
 An established fault stays named during a pending retry, even before the first snapshot.
 Remote launch denial belongs to its host row, never the device/local authorization banner.
+Hiding or opening a remote session is not local recovery. Remote expired-session and failed-launch
+feedback stays on that source; Refresh host checks its list without retrying a capability launch.
 Coverage aggregates `N of M hosts up to date` without repeating labels. Only complete coverage
 earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Listed · N` pill and
 `Sessions`. Cached rows retain legible text, with dashed borders, muted state badges, and
@@ -252,6 +254,7 @@ An empty incomplete list explains that sessions may be missing; it never claims 
 Access denial is red and has no Retry promise. A retained empty observation says `No sessions
 as of {time}`; an expired or authorization-withdrawn list does not claim it was empty.
 Withdrawal invalidates the old observation clock until a fresh authorized snapshot arrives.
+These observation distinctions apply to All hosts and single-host directories too.
 In a session, reported health faults
 override neutral initial joining; the chip's name remains visible in request trays, and the
 triage bar supplies retry timing rather than repeating the fault. Creation keeps its

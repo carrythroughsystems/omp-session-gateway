@@ -109,6 +109,7 @@ const localSource = { id: "local", label: "This host", origin: location.origin }
 const localKey = sourceKey(localSource);
 const sources = new Map<SourceKey, FleetSource>([[localKey, localSource]]);
 const remotes = new Map<SourceKey, FleetTransport>();
+const remoteLaunchFailures = new Map<SourceKey, string>();
 let selectedScope: SourceKey | "all" = "all";
 let browserRecognitionEnabled = false;
 let fleetBootstrapFailed = false;
@@ -249,16 +250,7 @@ const creation = new SessionCreationController({
     const key = sourceKey(source);
     clearCreationDraft(key);
     if (key !== localKey) { remotes.get(key)?.forbid(); return; }
-    authorizationDenied = true;
-    localFresh = false;
-    directoryLoaded = false;
-    localObservationWithdrawn = true;
-    lastFreshAt = undefined;
-    replaceSessionSnapshot([], localKey, false);
-    cancelLaunch(localKey);
-    if (activeCollabShell?.sourceKey === localKey) returnToDirectory();
-    render();
-    setStatus("unauthorized", "This tailnet identity is not authorized.");
+    withdrawLocalAuthorization();
   },
   refresh: source => sourceKey(source) === localKey ? refreshAndConnect() : remotes.get(sourceKey(source))!.refresh(true),
   openReady: async (source, binding, draft, current) => {
@@ -688,7 +680,8 @@ function writeBanner(kind: StatusKind, content: HTMLElement): void {
 }
 
 function setStatus(kind: StatusKind, message: string): void {
-  if (kind === "ready" || kind === "unauthorized" || kind === "expired") clearTransportFailureTracking();
+  // Presentation changes are not evidence that the local connection recovered.
+  if (kind !== "unauthorized" && (authorizationDenied || transportFailureKind !== undefined)) return;
   const content = createTextElement("span", "status-copy", message);
   if (kind === "ready" && fleetBootstrapFailed) {
     kind = "configuration";
@@ -732,13 +725,17 @@ function parseDirectoryHistoryState(value: unknown): DirectoryHistoryState | und
   return { version: 2, scope: typeof record.scope === "string" && sources.has(record.scope) ? record.scope : "all", order, scrollY: record.scrollY };
 }
 
-function clearTransportFailureTracking(): void {
+function resetTransportGuidance(): void {
   if (transportGuidanceTimeout !== undefined) {
     window.clearTimeout(transportGuidanceTimeout);
     transportGuidanceTimeout = undefined;
   }
   transportFailureSince = undefined;
   if (tray.id === "recovery") tray.close();
+}
+
+function clearLocalTransportFailure(): void {
+  resetTransportGuidance();
   transportFailureKind = undefined;
 }
 
@@ -767,7 +764,7 @@ function showTransportFailure(kind: TransportFailureKind): void {
     if (transportFailureSince === undefined) transportFailureSince = Date.now();
     transportFailureKind = kind;
   } else {
-    clearTransportFailureTracking();
+    resetTransportGuidance();
   }
   transportFailureKind = kind;
   directoryRevision = -1;
@@ -1082,7 +1079,7 @@ function scopedSessions(scope = selectedScope): SessionMetadata[] {
 }
 
 function sourceFresh(key: SourceKey): boolean {
-  return key === localKey ? localFresh : remotes.get(key)?.status === "fresh";
+  return key === localKey ? localFresh && !authorizationDenied && !localObservationWithdrawn : remotes.get(key)?.status === "fresh";
 }
 
 function sourceAvailability(key: SourceKey) {
@@ -1118,13 +1115,17 @@ async function probeSource(key: SourceKey, signal: AbortSignal): Promise<Snapsho
   if (signal.aborted) return "unavailable";
   if (key !== localKey) return await remotes.get(key)?.probe(signal) ?? "unavailable";
   localProbe ??= (async (): Promise<SnapshotResult> => {
+    const epoch = directoryEpoch;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 5_000);
     try {
       const response = await fetch("/api/v1/sessions", {
         cache: "no-store", credentials: "same-origin", redirect: "error", signal: controller.signal,
       });
-      if (response.status === 403) return "forbidden";
+      if (response.status === 403) {
+        if (epoch === directoryEpoch) withdrawLocalAuthorization();
+        return "forbidden";
+      }
       if (!response.ok) return "unavailable";
       parseSessionListResponse(await boundedJson(response, SNAPSHOT_BYTES));
       return "healthy";
@@ -1141,7 +1142,32 @@ async function probeSource(key: SourceKey, signal: AbortSignal): Promise<Snapsho
   return await promise;
 }
 
-function cancelLaunch(source?: SourceKey): void {
+function withdrawLocalAuthorization(): void {
+  authorizationDenied = true;
+  localFresh = false;
+  directoryLoaded = false;
+  localObservationWithdrawn = true;
+  lastFreshAt = undefined;
+  directoryEpoch += 1;
+  directoryRevision = -1;
+  snapshotController?.abort();
+  snapshotController = undefined;
+  events?.close();
+  events = undefined;
+  clearEventLiveness();
+  clearReconnectTimeout();
+  eventStreamStale = false;
+  clearLocalTransportFailure();
+  replaceSessionSnapshot([], localKey, false);
+  creation.cancel("forbidden", localKey);
+  clearCreationDraft(localKey);
+  cancelLaunch(localKey);
+  if (activeCollabShell?.sourceKey === localKey) void restoreDirectory(undefined, undefined, false);
+  render();
+  setStatus("unauthorized", "This tailnet identity is not authorized.");
+}
+
+function cancelLaunch(source?: SourceKey, restore = true): void {
   if (pendingLaunch === undefined || (source !== undefined && pendingLaunch.ref.sourceKey !== source)) return;
   const cancelled = pendingLaunch;
   cancelled.settled = true;
@@ -1149,15 +1175,17 @@ function cancelLaunch(source?: SourceKey): void {
   cancelled.controller.abort();
   pendingLaunch = undefined;
   if (cancelled.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
-    // Compact requests have not displaced the directory. Dismiss without re-entering restore
-    // (or starting another snapshot), so the cancelling caller retains its status/route intent.
-    tray.close(true, true);
+    if (restore && dashboardSnapshot !== undefined) {
+      // Consume the preview's snapshot without reverting a newer host selection or retrying.
+      void restoreDirectory({ ompDirectory: { ...dashboardSnapshot.historyState, scope: selectedScope } }, cancelled.ref, false);
+    } else tray.close(true, true);
     if (statusBanner.dataset.kind === "loading" && directoryLoaded && localFresh) setStatus("ready", "");
   }
   if (cancelled.creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
 }
 
 function remoteChanged(remote: FleetTransport): void {
+  if (remote.status === "fresh" || remote.status === "forbidden") remoteLaunchFailures.delete(remote.key);
   replaceSessionSnapshot(remote.snapshot?.sessions ?? [], remote.key, remote.status === "fresh");
   if (remote.status === "forbidden") {
     creation.cancel("forbidden", remote.key);
@@ -1175,17 +1203,18 @@ function renderFleetStatus(): void {
   // The banner owns this gateway; only independent remote failures belong here.
   for (const [key, remote] of remotes) {
     const availability = sourceAvailability(key);
-    if ((selectedScope !== "all" && selectedScope !== key) || !availability.failed ||
+    const launchFailure = remoteLaunchFailures.get(key);
+    if ((selectedScope !== "all" && selectedScope !== key) || (!availability.failed && launchFailure === undefined) ||
       (navigator.onLine === false && remote.status !== "forbidden")) continue;
     const detail = remote.status === "forbidden" ? "Access withdrawn."
-      : `Host unavailable. ${availability.copy}`;
+      : availability.failed ? `Host unavailable. ${availability.copy}` : launchFailure!;
     const row = document.createElement("div");
     row.className = "fleet-status-row";
     row.append(createTextElement("span", "fleet-status-copy", `${remote.source.label}: ${detail}`));
     row.dataset.sourceKey = key;
-    row.dataset.state = remote.status;
-    if (availability.retry) {
-      const retry = createTextElement("button", "status-action", "Retry");
+    row.dataset.state = availability.failed ? remote.status : "launch-failed";
+    if (availability.retry || launchFailure !== undefined) {
+      const retry = createTextElement("button", "status-action", availability.failed ? "Retry" : "Refresh host");
       retry.addEventListener("click", () => void remote.refresh(true));
       row.append(retry);
     }
@@ -1902,10 +1931,14 @@ function renderEmptyState(): void {
   emptyState.querySelector(".empty-state-detail")?.remove();
   const coverage = scopeCoverage();
   const filtered = selectedScope !== "all";
-  const observation = filtered ? sourceAvailability(selectedScope) : undefined;
-  const withdrawn = observation?.status === "withdrawn";
-  const denied = filtered ? sourceAvailability(selectedScope).status === "forbidden"
-    : [...sources.keys()].every(key => sourceAvailability(key).status === "forbidden");
+  const observations = [...sources.keys()].filter(key => !filtered || key === selectedScope).map(sourceAvailability);
+  const observation = observations.length === 1 ? observations[0] : undefined;
+  const withdrawn = observations.some(source => source.status === "withdrawn");
+  const expired = observations.some(source => source.status === "expired");
+  const denied = observations.every(source => source.status === "forbidden");
+  const retainedEmpty = observations.every(source => source.time !== undefined &&
+    (source.status === "fresh" || source.status === "refreshing" || source.status === "stale"));
+  const sharedTime = observations[0]?.time;
   emptyState.dataset.state = coverage.complete && !filtered ? "empty" : "limited";
   if (emptyState.dataset.state === "empty") return;
   const body = document.createElement("div");
@@ -1914,14 +1947,15 @@ function renderEmptyState(): void {
     : withdrawn ? "Session list withdrawn"
     : coverage.complete ? "No sessions on this host"
       : !coverage.failed ? "Checking for sessions"
-        : filtered ? observation?.status === "expired" ? "Session list expired"
-          : observation?.time === undefined ? "This host has not been checked" : `No sessions as of ${observation.time}`
-          : "No sessions to show yet";
+        : expired ? observation === undefined ? "Session lists expired" : "Session list expired"
+          : retainedEmpty ? observations.every(source => source.time === sharedTime)
+            ? `No sessions as of ${sharedTime}` : "No sessions in the last received lists"
+            : observation !== undefined ? "This host has not been checked" : "No sessions to show yet";
   const detail = denied ? "Ask the gateway operator to restore access."
     : withdrawn ? "A fresh authorized list is needed before showing sessions."
     : coverage.complete ? "Choose another host or start a session here."
     : !coverage.failed ? "Waiting for the remaining hosts before confirming this list is empty."
-      : filtered ? "Its sessions may appear when the connection returns."
+      : observation !== undefined ? "Its sessions may appear when the connection returns."
         : "Some hosts could not be checked. Sessions may appear when they reconnect.";
   body.append(createTextElement("h2", "", title), createTextElement("p", "", detail));
   if (!denied) body.append(createTextElement("p", "empty-coverage", coverage.complete ? "No live sessions are listed here." : coverage.copy));
@@ -2272,10 +2306,10 @@ function returnToDirectory(historyValue?: unknown): void {
  * cannot be left waiting behind an inert shell — and resolves once the refreshed snapshot has
  * landed, so a resume can decide against current metadata rather than the pre-background copy.
  */
-function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, "sourceKey" | "instanceId">): Promise<boolean> {
+function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, "sourceKey" | "instanceId">, refresh = true): Promise<boolean> {
   const focusRef = activeCollabShell?.presentation === "request-tray" ? activeCollabShell
     : requestRef ?? (pendingLaunch?.presentation === "request-tray" ? pendingLaunch.ref : undefined);
-  cancelLaunch();
+  cancelLaunch(undefined, false);
   tray.close(true, true);
   selectionEpoch += 1;
   collabShellDisposedOnPageHide = false;
@@ -2299,7 +2333,12 @@ function restoreDirectory(historyValue?: unknown, requestRef?: Pick<SessionRef, 
   renderedSignature = snapshot.signature;
   history.replaceState({ ompDirectory: historyState }, "", "/");
   window.scrollTo(0, historyState.scrollY);
+  render();
   const focused = focusRef === undefined ? undefined : focusDirectoryRequest(focusRef);
+  if (!refresh || authorizationDenied) {
+    applyActivatedWorkerUpdate();
+    return Promise.resolve(false);
+  }
   const epoch = selectionEpoch;
   const refreshed = Promise.all([refreshAndConnect(), ...[...remotes.values()].map(remote => remote.refresh())])
     .then(([local]) => {
@@ -2633,10 +2672,12 @@ function enterCollabClient(
     triageSwipeStart = undefined;
   });
 
-  snapshotController?.abort();
-  snapshotController = undefined;
-  clearReconnectTimeout();
-  reconnectAttempt = 0;
+  if (session.sourceKey === localKey) {
+    snapshotController?.abort();
+    snapshotController = undefined;
+    clearReconnectTimeout();
+    reconnectAttempt = 0;
+  }
   const commitHistory = location.pathname !== "/client/";
   const commit = (): void => {
     originTile?.style.setProperty("view-transition-name", "");
@@ -2912,12 +2953,13 @@ async function launch(
       stylesheet?.remove();
       collabStylesheetLoad = undefined;
     }
-    const remoteDenial = kind === "unauthorized" && session.sourceKey !== localKey;
-    if (remoteDenial) {
-      // Its forbidden host row owns the denial; keep any independent local banner intact.
-      if (tray.id === "request") tray.close(true, true);
+    const remoteFailure = session.sourceKey !== localKey;
+    if (remoteFailure) {
+      if (kind !== "unauthorized") remoteLaunchFailures.set(session.sourceKey, message);
+      if (tray.id === "request") void restoreDirectory(undefined, session, false);
+      renderFleetStatus();
     } else setStatus(kind, message);
-    if (!remoteDenial && requestStatus !== undefined && tray.id === "request") {
+    if (!remoteFailure && requestStatus !== undefined && tray.id === "request") {
       requestStatus.textContent = message;
       if (requestRetry !== undefined) requestRetry.hidden = kind === "unauthorized";
       tray.refresh();
@@ -2969,10 +3011,8 @@ async function launch(
   if (!response.ok) {
     if (response.status === 403) {
       if (session.sourceKey === localKey) {
-        authorizationDenied = true;
-        creation.cancel("forbidden", localKey);
-        clearCreationDraft(localKey);
-        fail("unauthorized", "This tailnet identity is not authorized.");
+        withdrawLocalAuthorization();
+        return discard();
       } else {
         fail("unauthorized", `Access withdrawn on ${source.label}. Choose another session.`);
         remotes.get(session.sourceKey)?.forbid();
@@ -2986,7 +3026,12 @@ async function launch(
     } else if (response.status === 404 || response.status === 409) {
       const preservedShell = fail("expired", "That session changed or expired. Try again.");
       if (!preservedShell && (session.sourceKey === localKey ? await refreshAndConnect() : await remotes.get(session.sourceKey)?.refresh() === "healthy")) {
-        setStatus("expired", "That session changed or expired. The list has been refreshed.");
+        const message = "That session changed or expired. The list has been refreshed.";
+        if (session.sourceKey === localKey) setStatus("expired", message);
+        else {
+          remoteLaunchFailures.set(session.sourceKey, message);
+          renderFleetStatus();
+        }
       }
     } else {
       fail("offline", "The session could not be opened. Try again.");
@@ -3009,6 +3054,7 @@ async function launch(
       return false;
     }
     if (!currentAttempt()) return discard();
+    if (remoteLaunchFailures.delete(session.sourceKey)) renderFleetStatus();
     capability = payload.capability;
     enterCollabClient(capability, startCollabWithCapability, session, mode, requestId, originTile, attempt.presentation);
     settle();
@@ -3025,11 +3071,13 @@ async function launch(
 
 function applyEvent(event: SessionEvent, epoch: number): boolean {
   if (epoch !== directoryEpoch || event.revision < directoryRevision) return false;
+  if (localObservationWithdrawn && event.type !== "snapshot") return false;
   directoryRevision = event.revision;
   authorizationDenied = false;
   directoryLoaded = true;
   localFresh = true;
   lastFreshAt = Date.now();
+  clearLocalTransportFailure();
   if (event.type === "snapshot") {
     localObservationWithdrawn = false;
     replaceSessionSnapshot(event.sessions);
@@ -3080,18 +3128,7 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     responseReceived = true;
     if (epoch !== directoryEpoch) return false;
     if (response.status === 403) {
-      authorizationDenied = true;
-      creation.cancel("forbidden", localKey);
-      clearCreationDraft(localKey);
-      directoryLoaded = false;
-      localFresh = false;
-      localObservationWithdrawn = true;
-      lastFreshAt = undefined;
-      replaceSessionSnapshot([], localKey, false);
-      cancelLaunch(localKey);
-      if (activeCollabShell?.sourceKey === localKey) returnToDirectory();
-      render();
-      setStatus("unauthorized", "This tailnet identity is not authorized.");
+      withdrawLocalAuthorization();
       return false;
     }
     if (!response.ok) throw new Error("snapshot failed");
@@ -3103,6 +3140,7 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     directoryLoaded = true;
     localFresh = true;
     lastFreshAt = Date.now();
+    clearLocalTransportFailure();
     replaceSessionSnapshot(payload.sessions);
     render();
     setStatus("ready", "");
@@ -3162,6 +3200,7 @@ function connectEvents(epoch: number): void {
     }
     lastFreshAt = Date.now();
     localFresh = true;
+    clearLocalTransportFailure();
     armEventLiveness(source, epoch);
     if (!notificationRouteStatusLocked) setStatus("ready", "");
   });
@@ -3385,11 +3424,12 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") {
     if (creation.isActive) cancelLaunch();
     creation.cancel("background");
-    clearTransportFailureTracking();
+    resetTransportGuidance();
     return;
   }
   maybeStartFirstRun();
   if (authorizationDenied || directoryStreamIsLive()) return;
+  if (transportFailureKind !== undefined) showTransportFailure(transportFailureKind);
   localFresh = false;
   render();
   void refreshAndConnect();

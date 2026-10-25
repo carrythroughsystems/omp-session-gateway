@@ -74,6 +74,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Preserve local connection faults and recovery across phone backgrounding and remote-session opens.
+- Withdraw local sessions and invalidate old live events after authorization denial from launch,
+  creation, or embedded probes, not only directory-list requests.
+- Keep remote expired-session and failed-launch feedback on that host instead of replacing a local fault.
+- Explain withdrawn, expired, and retained-empty observations in All hosts and single-host directories.
+- Restore the current directory scope after a request preview is denied or cancelled.
 - Keep the named connection fault visible while retrying a failed first session list.
 - Report a remote launch access denial on that host alone, preserving the local connection story.
 - Keep accepted session creation attached to the same host when fleet configuration recovers.

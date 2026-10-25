@@ -1407,6 +1407,29 @@ describe("source-bound session creation", () => {
     expect(JSON.stringify([...harness.localStorage.values])).not.toContain("SYNTHETIC_REVOKED_DRAFT");
     harness.window.dispatchEvent(new Event("pagehide"));
   });
+
+  test("council476: creation denial invalidates the pre-denial stream and observation", async () => {
+    const oldSession = session("creation-denied-stream");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [oldSession], suffix: "creation-denied-old-stream",
+      creationResponse: async (path, init) => path.endsWith("options") ? Response.json(choices)
+        : init.method === "POST" ? Response.json({ operationId, state: "accepted" }) : new Response(null, { status: 403 }),
+    });
+    const oldStream = FakeEventSource.instances.at(-1)!;
+    await open(harness);
+    click(harness, "Create and open Control");
+    await settleUntil(() => harness.elements.statusBanner.dataset.kind === "unauthorized", 100);
+    oldStream.emit("session_upsert", { type: "session_upsert", revision: 99, session: oldSession });
+    oldStream.emit("keepalive", {});
+    oldStream.onerror?.();
+    expect(harness.elements.statusBanner.dataset.kind).toBe("unauthorized");
+    expect(oldStream.closed).toBeTrue();
+    expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
+    harness.setOnline(false);
+    harness.window.dispatchEvent(new Event("offline"));
+    expect(harness.elements.statusBanner.textContent).toContain("The previous session list was withdrawn.");
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
 });
 
 describe("dashboard attention and notifications", () => {
@@ -2291,6 +2314,56 @@ describe("dashboard attention and notifications", () => {
     harness.freeze();
   });
 
+  for (const freeze of [false, true]) {
+    test(`council476: first-snapshot fault survives hide/show${freeze ? " and freeze" : ""}`, async () => {
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], initialListStatus: 503, suffix: `first-fault-visibility-${freeze}`,
+      });
+      harness.hangNextListRequest();
+      harness.setVisibility("hidden");
+      if (freeze) harness.freeze();
+      harness.setVisibility("visible");
+      await settleUntil(() => harness.fetchPaths.filter(path => path === "/api/v1/sessions").length === 2);
+      expect(harness.elements.statusBanner.dataset.kind).toBe("desktop");
+      expect(harness.elements.statusBanner.children).toHaveLength(1);
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
+
+  for (const via of ["launch", "probe"] as const) {
+    test(`council476: local ${via} denial withdraws metadata and rejects pre-denial events`, async () => {
+      const oldSession = session(`local-${via}-denied`);
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [oldSession], suffix: `local-${via}-withdrawal`,
+        ...(via === "launch" ? { launchResponse: async () => new Response(null, { status: 403 }) } : {}),
+      });
+      const oldStream = FakeEventSource.instances.at(-1)!;
+      harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+      if (via === "probe") {
+        await settleUntil(() => harness.embedCalls.length === 1, 100);
+        harness.setList(2, [], 403);
+        await harness.embedCalls[0]!.probeGateway!(new AbortController().signal);
+      } else await settleUntil(() => harness.elements.statusBanner.dataset.kind === "unauthorized", 100);
+      oldStream.emit("session_upsert", { type: "session_upsert", revision: 99, session: oldSession });
+      oldStream.emit("keepalive", {});
+      oldStream.onerror?.();
+      expect(harness.elements.statusBanner.dataset.kind).toBe("unauthorized");
+      expect(oldStream.closed).toBeTrue();
+      expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
+      harness.setOnline(false);
+      harness.window.dispatchEvent(new Event("offline"));
+      expect(harness.elements.statusBanner.textContent).toContain("The previous session list was withdrawn.");
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
+
+  test("council476: a retained empty single-host observation keeps its clock in All hosts", async () => {
+    const harness = await bootApp({ permission: "denied", initialSessions: [], suffix: "all-retained-empty" });
+    harness.disconnectEvents();
+    expect(harness.elements.emptyState.textContent).toContain("No sessions as of");
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
   test("does not count offline time toward browser recovery guidance", async () => {
     const base = session("offline-guidance-001");
     const harness = await bootApp({
@@ -2677,6 +2750,112 @@ describe("fleet directory bindings", () => {
     speech: { browserRecognition: false },
   };
 
+  test("council476: a remote request mount preserves the local first-snapshot fault and retry", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], initialListStatus: 503, clientConfig: config,
+      remoteSessions: [session("remote-while-local-down", { inputRequired: true })], suffix: "remote-mount-local-retry",
+    });
+    await settleUntil(() => harness.elements.sessionList.querySelector(".action-request") !== null, 100);
+    harness.elements.sessionList.querySelector(".action-request")!.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.embedCalls.length === 1, 100);
+    expect(harness.elements.statusBanner.dataset.kind).toBe("desktop");
+    const retry = harness.pendingDelays().find(delay => delay <= 4_000);
+    expect(retry).toBeDefined();
+    harness.setList(2, []);
+    harness.window.runTimersWithDelay(retry!);
+    await settleUntil(() => FakeEventSource.instances.length === 1, 100);
+    expect(harness.elements.statusBanner.hidden).toBeTrue();
+    expect(harness.embedCalls).toHaveLength(1);
+    expect(harness.elements.trayHost.dataset.panel).toBe("request");
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  for (const failure of [404, 409, 503, "network"] as const) {
+    test(`council476: remote launch ${failure} never replaces the local fault`, async () => {
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], initialListStatus: 503, clientConfig: config,
+        remoteSessions: [session("remote-action-failure")], suffix: `remote-action-${failure}`,
+        launchResponse: async () => {
+          if (failure === "network") throw new TypeError("synthetic remote failure");
+          return new Response(null, { status: failure });
+        },
+      });
+      await settleUntil(() => harness.elements.sessionList.querySelector(".working-row") !== null, 100);
+      harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.launchRequests.length === 1, 100);
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      expect(harness.elements.statusBanner.dataset.kind).toBe("desktop");
+      expect(harness.elements.fleetStatus.textContent).toContain("Remote:");
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
+
+  for (const multiple of [false, true]) {
+    test(`council476: All hosts names withdrawn observations (${multiple ? "fleet" : "single"})`, async () => {
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [session("all-withdrawn")],
+        ...(multiple ? { clientConfig: config } : {}), suffix: `all-withdrawn-${multiple}`,
+      });
+      harness.setList(2, [], 403);
+      harness.window.dispatchEvent(new Event("online"));
+      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "unauthorized", 100);
+      harness.setOnline(false);
+      harness.window.dispatchEvent(new Event("offline"));
+      expect(harness.elements.emptyState.textContent).toContain("Session list withdrawn");
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
+
+  test("council476: All hosts names an expired list instead of an unobserved empty directory", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], clientConfig: config,
+      remoteSessions: [session("all-expired")], suffix: "all-expired",
+    });
+    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 1", 100);
+    harness.setRemoteStatus(503);
+    harness.window.dispatchEvent(new Event("online"));
+    await settleUntil(() => harness.pendingDelays().includes(35_000), 100);
+    harness.advanceClock(35_001);
+    harness.window.runTimersWithDelay(35_000);
+    expect(harness.elements.emptyState.textContent).toContain("Session lists expired");
+    harness.window.dispatchEvent(new Event("pagehide"));
+  });
+
+  for (const exit of ["denied", "scope-cancel"] as const) {
+    test(`council476: ${exit} request tray restores the directory snapshot before another scope opens`, async () => {
+      const gate = Promise.withResolvers<void>();
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [session("snapshot-home")], clientConfig: config,
+        remoteSessions: [session("snapshot-remote", { inputRequired: true })], suffix: `snapshot-restore-${exit}`,
+        launchResponse: async (path, init) => {
+          if (path.startsWith("https://remote.example")) {
+            if (exit === "scope-cancel") await gate.promise;
+            return new Response(null, { status: 403 });
+          }
+          const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+          return Response.json({ ...body, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+        },
+      });
+      await settleUntil(() => harness.elements.directoryCount.textContent === "1 waiting", 100);
+      harness.elements.hostPicker.value = "remote\0https://remote.example";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      harness.elements.sessionList.querySelector(".action-request")!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.launchRequests.length === 1, 100);
+      if (exit === "denied") await settleUntil(() => harness.elements.fleetStatus.textContent?.includes("Access withdrawn") === true, 100);
+      harness.elements.hostPicker.value = "local\0https://sessions.example";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      gate.resolve();
+      harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.embedCalls.length === 1, 100);
+      harness.body.querySelector(".shell-back")!.dispatchEvent(new Event("click"));
+      // The fake history has no browser traversal; deliver the resulting restoration event.
+      harness.window.dispatchEvent(new Event("popstate"));
+      await settleUntil(() => harness.body.querySelector(".gateway-shell") === null, 100);
+      expect(harness.elements.hostPicker.value).toBe("local\0https://sessions.example");
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
+
   for (const localFailure of [false, true]) {
     test(`counterexample: remote launch denial owns only its row (${localFailure ? "local fault retained" : "healthy local"})`, async () => {
       const harness = await bootApp({
@@ -2815,8 +2994,9 @@ describe("fleet directory bindings", () => {
       harness.elements.hostPicker.dispatchEvent(new Event("change"));
       let mark = harness.timerMark();
       harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
-      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "offline", 100);
-      expect(harness.elements.statusBanner.textContent).toBe("The gateway returned an invalid launch response.");
+      const owner = source === "local" ? harness.elements.statusBanner : harness.elements.fleetStatus;
+      await settleUntil(() => owner.textContent?.includes("The gateway returned an invalid launch response.") === true, 100);
+      if (source === "remote") expect(harness.elements.statusBanner.hidden).toBeTrue();
       expect(harness.embedCalls).toHaveLength(0);
       expect(harness.elements.sessionList.querySelector(".working-row")?.disabled).toBeFalse();
       expect(harness.pendingDelaysSince(mark)).not.toContain(10_000);
@@ -2824,6 +3004,7 @@ describe("fleet directory bindings", () => {
       mark = harness.timerMark();
       harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
       await settleUntil(() => harness.embedCalls.length === 1, 100);
+      if (source === "remote") expect(harness.elements.fleetStatus.hidden).toBeTrue();
       expect(harness.pendingDelaysSince(mark)).not.toContain(10_000);
       harness.window.dispatchEvent(new Event("pagehide"));
     }
@@ -2857,9 +3038,10 @@ describe("fleet directory bindings", () => {
       if (stage === "body") await settleUntil(() => bodyStarted, 100);
       expect(harness.pendingDelaysSince(mark)).toContain(10_000);
       harness.runTimersSince(mark);
-      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "offline", 100);
+      await settleUntil(() => harness.elements.fleetStatus.textContent?.includes("Gateway unavailable.") === true, 100);
       expect(harness.launchRequests[0]?.init.signal?.aborted).toBeTrue();
-      expect(harness.elements.statusBanner.textContent).toBe("Gateway unavailable. Check your tailnet connection and try again.");
+      expect(harness.elements.statusBanner.hidden).toBeTrue();
+      expect(harness.elements.fleetStatus.textContent).toContain("Remote: Gateway unavailable. Check your tailnet connection and try again.");
       expect(harness.embedCalls).toHaveLength(0);
       expect(harness.elements.sessionList.querySelector(".working-row")?.disabled).toBeFalse();
       expect(harness.pendingDelaysSince(mark)).not.toContain(10_000);
