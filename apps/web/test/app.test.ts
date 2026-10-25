@@ -500,6 +500,7 @@ async function settleUntil(predicate: () => boolean, attempts = 20): Promise<voi
 async function bootApp(options: {
   readonly permission: NotificationPermission;
   readonly initialSessions: readonly SessionMetadata[];
+  readonly initialListStatus?: number;
   readonly workerResponse?: unknown;
   readonly permissionResult?: NotificationPermission;
   readonly existingSubscription?: boolean;
@@ -511,6 +512,7 @@ async function bootApp(options: {
   readonly firstRun?: boolean;
   readonly clientConfig?: unknown;
   readonly clientConfigStatus?: number;
+  readonly clientConfigResponse?: () => Response;
   readonly remoteSessions?: readonly SessionMetadata[];
   readonly remotePayload?: unknown;
   readonly launchGate?: Promise<void>;
@@ -611,7 +613,7 @@ async function bootApp(options: {
   const fetchLocations: string[] = [];
   let listRevision = 1;
   let listSessions = [...options.initialSessions];
-  let listStatus = 200;
+  let listStatus = options.initialListStatus ?? 200;
   let remoteStatus = 200;
   const launchRequests: { path: string; init: RequestInit }[] = [];
   const embedCalls: CollabEmbedOptions[] = [];
@@ -715,6 +717,7 @@ async function bootApp(options: {
       return options.creationResponse === undefined ? new Response(null, { status: 404 }) : await options.creationResponse(path, init);
     }
     if (path === "/api/v1/client-config") {
+      if (options.clientConfigResponse !== undefined) return options.clientConfigResponse();
       if (options.clientConfigStatus !== undefined) return new Response(null, { status: options.clientConfigStatus });
       return options.clientConfig === undefined ? new Response(null, { status: 404 }) : Response.json(options.clientConfig);
     }
@@ -786,7 +789,9 @@ async function bootApp(options: {
   // app.ts bootstraps at import time, so a cache-busted test module is required for an isolated page.
   await import(`../src/app.ts?${options.suffix}`);
   await settleUntil(() => notificationButton.textContent !== "Checking background alerts…");
-  await settleUntil(() => FakeEventSource.instances.length === 1);
+  if (options.initialListStatus === undefined || options.initialListStatus === 200) {
+    await settleUntil(() => FakeEventSource.instances.length === 1);
+  }
   if (options.pathname?.startsWith("/collab/") === true) {
     await settleUntil(() => statusBanner.dataset.kind === "expired", 100);
   }
@@ -932,6 +937,60 @@ describe("source-bound session creation", () => {
     textarea.value = value;
     textarea.dispatchEvent(new Event("input"));
   };
+
+  for (const firstLaunchFails of [false, true]) {
+    test(`counterexample: bootstrap recovery preserves an accepted creation intent (${firstLaunchFails ? "check again" : "open"})`, async () => {
+      const ready = session("creation-bootstrap-bound", { generation: 7 });
+      let configRecovered = false;
+      let recoveredReads = 0;
+      let launches = 0;
+      const posted: string[] = [];
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [], suffix: `creation-bootstrap-${firstLaunchFails}`,
+        clientConfigResponse: () => {
+          if (!configRecovered) return new Response(null, { status: 503 });
+          recoveredReads++;
+          return Response.json({
+            version: 1, local: { id: "local", label: "Recovered host", origin: "https://sessions.example" },
+            targets: [], speech: { browserRecognition: false },
+          });
+        },
+        creationResponse: async (path, init) => {
+          if (path.endsWith("options")) return Response.json(choices);
+          if (init.method === "POST") {
+            posted.push(String(init.body));
+            return Response.json({ operationId, state: "accepted" });
+          }
+          configRecovered = true;
+          return Response.json({ operationId, state: "ready", updatedAt: new Date().toISOString(),
+            session: { instanceId: ready.instanceId, generation: ready.generation } });
+        },
+        launchResponse: async () => {
+          if (++launches === 1 && firstLaunchFails) return new Response(null, { status: 503 });
+          return Response.json({ mode: "control", generation: 7, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+        },
+      });
+      await open(harness);
+      harness.setList(2, [ready]);
+      click(harness, "Create and open Control");
+      await settleUntil(() => recoveredReads === 1, 100);
+      for (let i = 0; i < 200; i++) await Promise.resolve();
+      expect(launches).toBe(1);
+      if (firstLaunchFails) {
+        expect(harness.elements.trayHost.dataset.panel).toBe("creation-terminal");
+        currentPanel(harness).querySelector(".tray-leading")!.dispatchEvent(new Event("click"));
+        harness.window.runTimersWithDelay(350);
+        document.querySelector("#new-session")!.dispatchEvent(new Event("click"));
+        expect(harness.elements.trayHost.dataset.panel).toBe("creation-terminal");
+        click(harness, "Check creation");
+        await settleUntil(() => harness.embedCalls.length === 1, 200);
+        expect(launches).toBe(2);
+      }
+      expect(harness.embedCalls).toHaveLength(1);
+      expect(posted).toHaveLength(1);
+      harness.window.dispatchEvent(new Event("pagehide"));
+    });
+  }
 
   test("refreshes and opens only the exact ready Control binding, draining its volatile draft once", async () => {
     const ready = session("created-session-001", { generation: 7 });
@@ -2214,6 +2273,24 @@ describe("dashboard attention and notifications", () => {
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
   });
 
+  test("counterexample: a failed first snapshot keeps its fault banner while its retry is pending", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], initialListStatus: 503, suffix: "first-failure-pending",
+    });
+    expect(harness.elements.statusBanner.dataset.kind).toBe("desktop");
+    const copy = harness.elements.statusBanner.textContent;
+    harness.setList(2, []);
+    harness.hangNextListRequest();
+    const retryDelay = Math.min(...harness.pendingDelays().filter(delay => delay <= 4_000));
+    harness.window.runTimersWithDelay(retryDelay);
+    await settleUntil(() => harness.fetchPaths.filter(path => path === "/api/v1/sessions").length === 2);
+    expect(harness.elements.statusBanner.dataset.kind).toBe("desktop");
+    expect(harness.elements.statusBanner.textContent).toBe(copy);
+    expect(harness.elements.statusBanner.children).toHaveLength(1);
+    harness.setVisibility("hidden");
+    harness.freeze();
+  });
+
   test("does not count offline time toward browser recovery guidance", async () => {
     const base = session("offline-guidance-001");
     const harness = await bootApp({
@@ -2599,6 +2676,55 @@ describe("fleet directory bindings", () => {
     targets: [{ id: "remote", label: "Remote", origin: "https://remote.example" }],
     speech: { browserRecognition: false },
   };
+
+  for (const localFailure of [false, true]) {
+    test(`counterexample: remote launch denial owns only its row (${localFailure ? "local fault retained" : "healthy local"})`, async () => {
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [session("denied-launch-home")],
+        remoteSessions: [session("denied-launch-away")], clientConfig: config,
+        suffix: `remote-denial-owner-${localFailure}`,
+        launchResponse: async () => new Response(null, { status: 403 }),
+      });
+      await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
+      if (localFailure) harness.disconnectEvents();
+      harness.elements.hostPicker.value = "remote\0https://remote.example";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.elements.fleetStatus.children[0]?.dataset.state === "forbidden", 100);
+      expect(harness.elements.statusBanner.dataset.kind).toBe(localFailure ? "gateway" : "ready");
+      expect(harness.elements.statusBanner.hidden).toBe(!localFailure);
+      expect(harness.elements.fleetStatus.children).toHaveLength(1);
+      expect(harness.elements.fleetStatus.querySelector("button")).toBeNull();
+      harness.elements.hostPicker.value = "all";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
+      harness.setVisibility("hidden");
+    });
+  }
+
+  test("counterexample: authorization withdrawal cannot certify an empty local observation after offline", async () => {
+    const home = session("withdrawn-observation");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [home], clientConfig: config, remoteSessions: [], suffix: "withdrawn-then-offline",
+    });
+    harness.elements.hostPicker.value = "local\0https://sessions.example";
+    harness.elements.hostPicker.dispatchEvent(new Event("change"));
+    harness.setList(2, [], 403);
+    harness.window.dispatchEvent(new Event("online"));
+    await settleUntil(() => harness.elements.statusBanner.dataset.kind === "unauthorized", 100);
+    harness.setOnline(false);
+    harness.window.dispatchEvent(new Event("offline"));
+    expect(harness.elements.emptyState.textContent).toContain("Session list withdrawn");
+    expect(harness.elements.emptyState.textContent).not.toContain("No sessions as of");
+    expect(harness.elements.statusBanner.textContent).toContain("The previous session list was withdrawn.");
+    expect(harness.elements.statusBanner.textContent).not.toContain("List as of");
+    harness.setOnline(true);
+    harness.setList(3, []);
+    harness.window.dispatchEvent(new Event("online"));
+    await settleUntil(() => harness.elements.emptyState.textContent?.includes("No sessions on this host") === true, 100);
+    expect(harness.elements.emptyState.textContent).not.toContain("withdrawn");
+    harness.setVisibility("hidden");
+  });
 
   test("404 is silent local-only; invalid configuration has one banner owner and no fleet row", async () => {
     const local = session("bootstrap-local-0001");

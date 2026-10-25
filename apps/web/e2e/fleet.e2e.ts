@@ -89,6 +89,53 @@ test("selection changes discard a late remote launch instead of mounting it", as
   } finally { release.resolve(); await page.close(); await Promise.all([home.stop(), away.stop()]); }
 });
 
+test("counterexample: a remote launch 403 leaves the global banner to the local source", async ({ page }) => {
+  const home = await startDashboardFixture([{ ...shared, title: "Home session" }]);
+  const away = await startDashboardFixture([{ ...shared, title: "Remote session" }]);
+  home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+  away.configureFleet("Away", [], [home.origin]);
+  await installSilentWebSocket(page);
+  await page.route(`${away.origin}/api/v1/sessions/*/launch`, route => route.fulfill({
+    status: 403, headers: { "Access-Control-Allow-Origin": home.origin }, body: "",
+  }));
+  try {
+    await page.clock.install({ time: new Date("2026-10-25T01:30:00Z") });
+    await page.goto(home.origin);
+    await expect(page.locator("#directory-count")).toHaveText("Live · 2");
+    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
+    await page.getByRole("button", { name: "View Remote session", exact: true }).click();
+    await expect(page.locator(".fleet-status-row")).toContainText("Away: Access withdrawn.");
+    await expect(page.locator(".fleet-status-row")).toHaveCount(1);
+    await expect(page.locator("#status-banner")).toBeHidden();
+    await expect(page.getByRole("button", { name: "View Home session", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+  } finally { await page.close(); await Promise.all([home.stop(), away.stop()]); }
+});
+
+test("counterexample: local authorization loss followed by offline does not invent an empty observation", async ({ page }) => {
+  const home = await startDashboardFixture([{ ...shared, title: "Home session" }]);
+  const away = await startDashboardFixture([]);
+  home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);
+  away.configureFleet("Away", [], [home.origin]);
+  try {
+    await page.clock.install({ time: new Date("2026-10-25T01:30:00Z") });
+    await page.goto(home.origin);
+    await page.getByLabel("Host", { exact: true }).selectOption({ label: "Home" });
+    await expect(page.locator("#directory-count")).toHaveText("Live · 1");
+    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
+    home.setListFailure("forbidden");
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "unauthorized");
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+      window.dispatchEvent(new Event("offline"));
+    });
+    await expect(page.locator("#empty-state")).toContainText("Session list withdrawn");
+    await expect(page.locator("#empty-state")).not.toContainText("No sessions as of");
+    await expect(page.locator("#status-banner")).toContainText("The previous session list was withdrawn.");
+  } finally { await page.close(); await Promise.all([home.stop(), away.stop()]); }
+});
+
 test("one interrupted gateway owns the story while quiet host revalidation stays neutral", async ({ page }) => {
   const home = await startDashboardFixture([{ ...shared, title: "Home session" }]);
   const away = await startDashboardFixture([{ ...shared, title: "Remote session" }]);

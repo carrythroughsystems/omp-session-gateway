@@ -107,12 +107,18 @@ For the local source (`id: "local"`), the PWA receives metadata from `GET /api/v
 
 A native `<select>` labeled **Host** filters the directory across **All hosts**, the local host label, and configured `fleet.targets` in configuration order; filter state lives in volatile page/history state only and never changes background polling. Every session row, hero card, held row, and active collaboration shell bar displays its host label. **All clear** and **No live sessions** require fresh snapshots for every source in scope. Otherwise, coverage aggregates counts, accessible names say **Listed**, and quiet checks are not host failures. Only independent failed remote sources get named rows; the banner owns device/local-gateway connectivity. Under **All hosts**, waiting sessions follow first observation of each exact ask (`observed waiting order`, tie-broken by `sourceKey` then `instanceId`); a selected host keeps `ask.since` FIFO. A readable remote `403` clears rows, marks the source forbidden, cancels its launches, stops automatic polling until a foreground/online recheck, and disposes its active shell; it offers no **Retry**. Other failures retain disabled stale rows for 35 seconds, then expire them while retaining the successful **List as of** clock and `Host unavailable` row. A retained empty observation says **No sessions as of** that clock, not that the host was never checked.
 
-`availability.ts` is the pure seven-state presentation model: loading, fresh, refreshing, stale,
-expired, unavailable and forbidden. `fleet.ts` owns transport/retention; `app.ts` adapts its local
+`availability.ts` is the pure eight-state presentation model: loading, fresh, refreshing, stale,
+expired, unavailable, forbidden and withdrawn. An authorization-withdrawn observation cannot
+certify an empty list or reuse its old clock, including during a later offline retry; only a
+fresh authorized snapshot restores that observation. `fleet.ts` owns transport/retention; `app.ts` adapts its local
 and remote observations to the model and writes every banner through one single-child writer.
 Offline marks remotes stale without hiding them or stopping their retry chain; the grace deadline
 still runs. Every reconnect restores visibility idempotently, so recovery never requires an
 `online` event. Hiding/freezing still aborts without inventing a failure.
+A pending retry preserves the named local fault, even before the first successful snapshot.
+Remote launch denial uses its forbidden host row without replacing an independent local banner.
+Bootstrap recovery updates the existing local source's label in place; its origin-bound object
+identity remains stable for accepted creation intents and their exact Ready handoff.
 
 Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and offers retry without unmounting its collaboration shell.
 

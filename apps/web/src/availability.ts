@@ -1,17 +1,18 @@
-export type SourceStatus = "loading" | "fresh" | "refreshing" | "stale" | "expired" | "unavailable" | "forbidden";
+export type SourceStatus = "loading" | "fresh" | "refreshing" | "stale" | "expired" | "unavailable" | "forbidden" | "withdrawn";
 
 const freshnessClock = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
 
 /** A successful observation, never the time a failed check happened. */
 export function sourceAvailability(status: SourceStatus, freshAt?: number) {
-  const time = freshAt === undefined ? undefined : freshnessClock.format(freshAt);
+  const time = status === "withdrawn" || freshAt === undefined ? undefined : freshnessClock.format(freshAt);
   return {
     status,
     current: status === "fresh",
-    failed: status === "stale" || status === "expired" || status === "unavailable" || status === "forbidden",
+    failed: status === "stale" || status === "expired" || status === "unavailable" || status === "forbidden" || status === "withdrawn",
     retry: status === "stale" || status === "expired" || status === "unavailable",
     time,
-    copy: time === undefined ? "No session list received yet." : `List as of ${time}.`,
+    copy: status === "withdrawn" ? "The previous session list was withdrawn."
+      : time === undefined ? "No session list received yet." : `List as of ${time}.`,
   };
 }
 

@@ -33,3 +33,13 @@ test("an absent observation never invents a timestamp; equal instants are byte-i
   expect(sourceAvailability("stale", observedAt).copy).toBe(sourceAvailability("expired", observedAt).copy);
   expect(scopeCoverage([sourceAvailability("refreshing", observedAt)]).copy).toBe("0 of 1 host up to date. Refreshing the rest.");
 });
+
+test("counterexample: a withdrawn observation cannot reuse its old timestamp as an empty-list certificate", () => {
+  const withdrawn = sourceAvailability("withdrawn", observedAt);
+  expect(withdrawn).toMatchObject({
+    status: "withdrawn", current: false, failed: true, retry: false,
+    copy: "The previous session list was withdrawn.",
+  });
+  expect(withdrawn.time).toBeUndefined();
+  expect(scopeCoverage([withdrawn])).toMatchObject({ complete: false, failed: true });
+});

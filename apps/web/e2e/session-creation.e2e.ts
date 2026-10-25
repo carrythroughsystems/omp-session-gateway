@@ -69,6 +69,33 @@ async function privateSinks(page: Page, fixture: DashboardFixture, bodies: reado
   }
 }
 
+test("counterexample: an accepted creation stays bound through bootstrap recovery and opens Control", async ({ page, context }) => {
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([], { roomKey: key });
+  fixture.configureCreation({ readySession, states: [{ state: "ready" }] });
+  let configRecovered = false;
+  await page.route(`${fixture.origin}/api/v1/client-config`, async route => {
+    if (!configRecovered) await route.fulfill({ status: 503, body: "" });
+    else await route.continue();
+  });
+  await page.route(`${fixture.origin}/api/v1/session-creations/*`, async route => {
+    configRecovered = true;
+    await route.continue();
+  });
+  try {
+    await installSyntheticProductFixture(context, key, { activeAsk: false, randomSeed: 42 });
+    await page.goto(fixture.origin);
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "configuration");
+    await review(page);
+    await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
+    await expect(page.locator(".gateway-shell")).toBeVisible();
+    await expect(page.locator(".shell-title")).toHaveText("Synthetic created session");
+    expect(fixture.creationRequests).toHaveLength(1);
+    expect(fixture.launchRequests).toEqual([{ instanceId: readySession.instanceId, generation: 3, mode: "control" }]);
+    await privateSinks(page, fixture);
+  } finally { await page.close(); await fixture.stop(); }
+});
+
 for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 }]) {
   test(`creation wizard to full-screen Control and one-shot task at ${viewport.width}x${viewport.height}`, async ({ page, context }) => {
     await page.setViewportSize(viewport);

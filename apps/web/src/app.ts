@@ -105,7 +105,7 @@ type TransportFailureKind = "offline" | "tailnet" | "desktop" | "gateway";
 
 type LaunchPresentation = "full" | "request-tray";
 
-let localSource: FleetSource = { id: "local", label: "This host", origin: location.origin };
+const localSource = { id: "local", label: "This host", origin: location.origin } satisfies FleetSource;
 const localKey = sourceKey(localSource);
 const sources = new Map<SourceKey, FleetSource>([[localKey, localSource]]);
 const remotes = new Map<SourceKey, FleetTransport>();
@@ -120,6 +120,7 @@ let dismissedSessions = new Map<string, DismissedSession>();
 let events: EventSource | undefined;
 let directoryLoaded = false;
 let authorizationDenied = false;
+let localObservationWithdrawn = false;
 let notificationState: NotificationControlState = "checking";
 let directoryEpoch = 0;
 let directoryRevision = -1;
@@ -251,6 +252,8 @@ const creation = new SessionCreationController({
     authorizationDenied = true;
     localFresh = false;
     directoryLoaded = false;
+    localObservationWithdrawn = true;
+    lastFreshAt = undefined;
     replaceSessionSnapshot([], localKey, false);
     cancelLaunch(localKey);
     if (activeCollabShell?.sourceKey === localKey) returnToDirectory();
@@ -771,7 +774,7 @@ function showTransportFailure(kind: TransportFailureKind): void {
   render();
   const freshness = sourceAvailability(localKey);
   const asOf = freshness.time;
-  const listCopy = asOf === undefined ? "No session list received yet."
+  const listCopy = asOf === undefined ? freshness.copy
     : sources.size > 1 ? `${localSource.label}: ${freshness.copy}`
       : `Showing the list as of ${asOf}.`;
   const copy: Record<TransportFailureKind, readonly [string, string]> = {
@@ -1088,7 +1091,7 @@ function sourceAvailability(key: SourceKey) {
     return describeSource(remote?.status ?? "unavailable", remote?.freshAt);
   }
   return describeSource(
-    authorizationDenied ? "forbidden" : localFresh ? "fresh"
+    authorizationDenied ? "forbidden" : localObservationWithdrawn ? "withdrawn" : localFresh ? "fresh"
       : transportFailureKind !== undefined ? directoryLoaded ? "stale" : "unavailable"
         : directoryLoaded ? "refreshing" : "loading",
     lastFreshAt,
@@ -1195,8 +1198,8 @@ async function initializeFleet(): Promise<void> {
   try {
     const config = await loadClientConfig(location.origin);
     if (config !== undefined) {
-      localSource = config.local;
-      sources.set(localKey, localSource);
+      // Identity is already origin-bound. Keep in-flight creation intents on this same source.
+      localSource.label = config.local.label;
       browserRecognitionEnabled = config.speech.browserRecognition;
       for (const target of config.targets) {
         const key = sourceKey(target);
@@ -1900,6 +1903,7 @@ function renderEmptyState(): void {
   const coverage = scopeCoverage();
   const filtered = selectedScope !== "all";
   const observation = filtered ? sourceAvailability(selectedScope) : undefined;
+  const withdrawn = observation?.status === "withdrawn";
   const denied = filtered ? sourceAvailability(selectedScope).status === "forbidden"
     : [...sources.keys()].every(key => sourceAvailability(key).status === "forbidden");
   emptyState.dataset.state = coverage.complete && !filtered ? "empty" : "limited";
@@ -1907,12 +1911,14 @@ function renderEmptyState(): void {
   const body = document.createElement("div");
   body.className = "empty-state-detail";
   const title = denied ? "Sessions are hidden"
+    : withdrawn ? "Session list withdrawn"
     : coverage.complete ? "No sessions on this host"
       : !coverage.failed ? "Checking for sessions"
         : filtered ? observation?.status === "expired" ? "Session list expired"
           : observation?.time === undefined ? "This host has not been checked" : `No sessions as of ${observation.time}`
           : "No sessions to show yet";
   const detail = denied ? "Ask the gateway operator to restore access."
+    : withdrawn ? "A fresh authorized list is needed before showing sessions."
     : coverage.complete ? "Choose another host or start a session here."
     : !coverage.failed ? "Waiting for the remaining hosts before confirming this list is empty."
       : filtered ? "Its sessions may appear when the connection returns."
@@ -2848,7 +2854,7 @@ async function launch(
     button.dataset.busy = "true";
     button.setAttribute("aria-busy", "true");
     if (labelOnly) button.textContent = mode === "view" ? "Opening view…" : "Opening control…";
-  } else if (sourceShell === undefined) {
+  } else if (sourceShell === undefined && session.sourceKey === localKey) {
     setStatus("loading", mode === "view" ? "Opening view…" : "Opening control…");
   }
   const settle = (): void => {
@@ -2906,8 +2912,12 @@ async function launch(
       stylesheet?.remove();
       collabStylesheetLoad = undefined;
     }
-    setStatus(kind, message);
-    if (requestStatus !== undefined && tray.id === "request") {
+    const remoteDenial = kind === "unauthorized" && session.sourceKey !== localKey;
+    if (remoteDenial) {
+      // Its forbidden host row owns the denial; keep any independent local banner intact.
+      if (tray.id === "request") tray.close(true, true);
+    } else setStatus(kind, message);
+    if (!remoteDenial && requestStatus !== undefined && tray.id === "request") {
       requestStatus.textContent = message;
       if (requestRetry !== undefined) requestRetry.hidden = kind === "unauthorized";
       tray.refresh();
@@ -3021,6 +3031,7 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
   localFresh = true;
   lastFreshAt = Date.now();
   if (event.type === "snapshot") {
+    localObservationWithdrawn = false;
     replaceSessionSnapshot(event.sessions);
   } else if (event.type === "session_upsert") {
     const session = { ...event.session, sourceKey: localKey };
@@ -3057,7 +3068,9 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
-  if (!directoryLoaded) setStatus("loading", "Loading sessions…");
+  if (!directoryLoaded && transportFailureKind === undefined && !authorizationDenied && !localObservationWithdrawn) {
+    setStatus("loading", "Loading sessions…");
+  }
   try {
     const response = await fetch("/api/v1/sessions", {
       cache: "no-store",
@@ -3072,6 +3085,8 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
       clearCreationDraft(localKey);
       directoryLoaded = false;
       localFresh = false;
+      localObservationWithdrawn = true;
+      lastFreshAt = undefined;
       replaceSessionSnapshot([], localKey, false);
       cancelLaunch(localKey);
       if (activeCollabShell?.sourceKey === localKey) returnToDirectory();
@@ -3084,6 +3099,7 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     if (epoch !== directoryEpoch || payload.revision < directoryRevision) return false;
     directoryRevision = payload.revision;
     authorizationDenied = false;
+    localObservationWithdrawn = false;
     directoryLoaded = true;
     localFresh = true;
     lastFreshAt = Date.now();
@@ -3139,6 +3155,7 @@ function connectEvents(epoch: number): void {
   }
   source.addEventListener("keepalive", () => {
     if (events !== source || epoch !== directoryEpoch) return;
+    if (localObservationWithdrawn) return;
     if (eventStreamStale) {
       failEventStream(source, epoch);
       return;

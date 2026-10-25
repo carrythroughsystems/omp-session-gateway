@@ -74,6 +74,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Keep the named connection fault visible while retrying a failed first session list.
+- Report a remote launch access denial on that host alone, preserving the local connection story.
+- Keep accepted session creation attached to the same host when fleet configuration recovers.
+- Distinguish an authorization-withdrawn list from an observed empty list, even after going offline.
 - Keep remote observations stale and bounded while offline, and resume polling after scheduled
   recovery even when the browser never emits an online event.
 - Give failed fleet bootstrap one banner owner and retry it when the local connection recovers.

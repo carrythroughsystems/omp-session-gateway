@@ -48,6 +48,32 @@ test("dashboard reconnects after its live transport is interrupted", { tag: "@co
   }
 });
 
+test("counterexample: first snapshot failure stays named throughout a pending scheduled retry", async ({ page }) => {
+  const fixture = await startDashboardFixture([]);
+  const pending = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let requests = 0;
+  await page.route(`${fixture.origin}/api/v1/sessions`, async route => {
+    if (++requests === 1) { await route.fulfill({ status: 503, body: "" }); return; }
+    pending.resolve();
+    await release.promise;
+    await route.continue().catch(() => undefined);
+  });
+  try {
+    await page.clock.install({ time: new Date("2026-10-25T01:30:00Z") });
+    await page.goto(fixture.origin);
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
+    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
+    await page.clock.runFor(4_000);
+    await pending.promise;
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
+    await expect(page.locator(".status-title")).toHaveText("Desktop unreachable");
+    await expect(page.locator("#status-banner > *")).toHaveCount(1);
+    release.resolve();
+    await expect(page.locator("#status-banner")).toBeHidden();
+  } finally { release.resolve(); await page.close(); await fixture.stop(); }
+});
+
 test("failure states keep stale sessions, exact copy, timestamps, and mobile fit", async ({ context, page }) => {
   test.setTimeout(60_000);
   const active = session();
