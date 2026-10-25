@@ -54,6 +54,8 @@ function manifest(): string {
         "account identities and tailnet DNS names",
         "session metadata, transcripts, prompts, and tool output",
         "full filesystem paths, browser storage, relay frames, and raw logs",
+        "session creation ledgers and request payloads",
+        "creation executable argv/env and raw Tern inspection output",
       ],
     },
     null,

@@ -152,7 +152,7 @@ export function requestHasValidMutationContext(request: Request, expectedOrigin:
   return fetchSite === null || fetchSite === "same-origin";
 }
 
-/** A narrowly opted-in dashboard may launch, but never inherits the local mutation context. */
+/** An opted-in dashboard may launch or create approved sessions, never inherit local mutation context. */
 export function requestHasTrustedDashboardContext(
   request: Request,
   trustedOrigins: readonly string[],

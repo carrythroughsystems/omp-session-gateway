@@ -51,7 +51,8 @@ describe("doctor reports mainline compatibility and discovery health", () => {
   test("withholds trust without a tunnel device and compatibility without a reachable OMP", async () => {
     await isolatedRoot();
 
-    const report = await runDoctorChecks({ tunDevicePresent: () => false, ompVersion: async () => undefined });
+    const report = await runDoctorChecks({ tunDevicePresent: () => false, ompVersion: async () => undefined,
+      ternAvailable: async () => { throw new Error("unconfigured probe must not run"); } });
 
     expect(report.service).toBe("omp-session-gateway");
     expect(report.checks).toMatchObject({
@@ -62,8 +63,22 @@ describe("doctor reports mainline compatibility and discovery health", () => {
       sessionHealth: false,
     });
     expect(Object.values(report.checks).every(value => typeof value === "boolean")).toBe(true);
+    expect(Object.hasOwn(report.checks, "ternAvailable")).toBe(false);
     // Deliberately no assertion on listenerLoopbackOnly: no daemon runs in this isolated root, so
     // false would discriminate nothing about whether topology withholds that secondary claim.
+  }, 30_000);
+
+  test("reports configured Tern availability as an injected boolean without starting a command", async () => {
+    const root = await isolatedRoot();
+    const path = join(root, "config/omp-session-gateway/config.json");
+    const document = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...document, tern: {} }));
+    let probes = 0;
+    const report = await runDoctorChecks({ ompVersion: async () => "18.1.20",
+      ternAvailable: async () => { probes++; throw new Error("TERN_DOCTOR_PRIVATE_CANARY"); } });
+    expect(probes).toBe(1);
+    expect(report.checks.ternAvailable).toBe(false);
+    expect(JSON.stringify(report)).not.toContain("TERN_DOCTOR_PRIVATE_CANARY");
   }, 30_000);
 
   test("reports sound trust and compatibility at the minimum mainline release", async () => {

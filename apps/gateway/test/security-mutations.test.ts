@@ -39,6 +39,14 @@ interface Mutation {
 
 const MUTATIONS: readonly Mutation[] = [
   {
+    name: "trusted dashboard creation bypasses exact JSON admission",
+    file: "apps/gateway/src/auth.ts",
+    find: 'if (request.headers.get("Content-Type") !== "application/json") return undefined;',
+    replace: 'if (false && request.headers.get("Content-Type") !== "application/json") return undefined;',
+    target: "apps/gateway/test/http.test.ts",
+    mustFail: "exposes only exact creation routes with authenticated header-minimal preflight and no credential grant",
+  },
+  {
     name: "untrusted dashboard origins admitted to browser-direct metadata",
     file: "apps/gateway/src/http-policy.ts",
     find: 'if (origin === null || !config.http.trustedDashboardOrigins.includes(origin)) return undefined;',

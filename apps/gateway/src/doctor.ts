@@ -11,6 +11,7 @@ import {
   loopbackHttpOrigin,
 } from "./config.ts";
 import { OmpHostReader } from "./omp-registry.ts";
+import { probeTernAvailability } from "./tern-creation.ts";
 import type { DoctorReport } from "./diagnostics.ts";
 import { type UserServiceStatus, userServiceStatus } from "./service.ts";
 
@@ -413,6 +414,7 @@ export async function runDoctorChecks(
      * above: the real one queries whatever service manager this machine runs.
      */
     readonly serviceStatus?: (config: GatewayConfig) => Promise<UserServiceStatus>;
+    readonly ternAvailable?: (config: GatewayConfig) => Promise<boolean>;
   } = {},
 ): Promise<DoctorReport> {
   const checks: Record<string, boolean> = {
@@ -444,6 +446,10 @@ export async function runDoctorChecks(
     return { service: "omp-session-gateway", checks };
   }
 
+  if (config.tern !== undefined) {
+    try { checks.ternAvailable = await (options.ternAvailable ?? probeTernAvailability)(config); }
+    catch { checks.ternAvailable = false; }
+  }
   checks.assets = await localAssetsPresent();
   checks.compatibility = await ompVersionSupported(options.ompVersion ?? installedOmpVersion);
   let readinessToken: string | undefined;

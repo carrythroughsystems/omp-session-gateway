@@ -1290,7 +1290,7 @@ describe("rollback fleet configuration projection", () => {
     expect(state.installed[0].document).toEqual(projected);
     expect(state.activated).toBe(true);
     expect(run.stdout).toContain("removed http.trustedDashboardOrigins, fleet, speech");
-    expect(run.stdout).toContain("To restore: first install 0.8.0 or newer");
+    expect(run.stdout).toContain("To restore: install a runtime supporting every saved configuration section");
     expect(run.stdout).toContain("restart the gateway, and reload the PWA");
     expect(run.stdout).not.toContain("Configuration and readiness token were preserved.");
   });

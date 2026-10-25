@@ -15,6 +15,9 @@ import {
   parseNotificationRoute,
   parsePushSubscriptionRequest,
   parsePushUnsubscribeRequest,
+  parseSessionCreationRequest,
+  SESSION_CREATION_UUID_PATTERN,
+  MAX_SESSION_CREATION_REQUEST_BYTES,
 } from "@omp-session-gateway/protocol";
 import {
   authorizeHttpRequest,
@@ -28,6 +31,7 @@ import type { GatewayConfig } from "./config.ts";
 import { SafeLogger } from "./logger.ts";
 import { SessionRegistry } from "./registry.ts";
 import type { PushService } from "./push.ts";
+import { SessionCreationProblem, type SessionCreationService } from "./tern-creation.ts";
 
 import { StaticAssetStore } from "./static.ts";
 import type { LaunchResolution } from "./omp-registry.ts";
@@ -212,6 +216,7 @@ export function createHttpHandler(options: {
   readonly launchResolver: LaunchBroker;
   readonly staticAssets: StaticAssetStore;
   readonly pushService?: PushService;
+  readonly creationService?: Pick<SessionCreationService, "options" | "accept" | "status">;
   readonly logger?: SafeLogger;
   readonly readinessToken?: string;
   readonly readinessInstance?: string;
@@ -233,9 +238,9 @@ export function createHttpHandler(options: {
   const { config, registry, staticAssets, launchResolver } = options;
   const logger = options.logger ?? new SafeLogger();
   const identityCapacity = config.auth.mode === "dev-localhost" ? 1 : config.auth.allowedLogins.length;
-  // Each admitted identity can own exactly two keys (`launch` and `push`), so configured identities
+  // Each admitted identity owns three keys (`launch`, `push`, `creation`), so configured identities
   // can never deny one another merely by filling the bounded map.
-  const limiter = new LaunchRateLimiter(20, 60_000, Math.max(2, identityCapacity * 2));
+  const limiter = new LaunchRateLimiter(20, 60_000, Math.max(3, identityCapacity * 3));
   const now = options.now ?? Date.now;
   const tailnetPresent = options.tailnetPresent ?? createTailnetPresenceProbe();
   // `tailscale-serve` mode trusts an identity header from any loopback peer, which is only sound
@@ -334,6 +339,42 @@ export function createHttpHandler(options: {
     }
     if (url.pathname === "/api/v1/sessions" && request.method === "GET") {
       return Response.json(registry.snapshot());
+    }
+    if (url.pathname === "/api/v1/session-creation-options" && request.method === "GET" && options.creationService) {
+      return Response.json(await options.creationService.options());
+    }
+    if (url.pathname === "/api/v1/session-creations" && request.method === "POST" && options.creationService) {
+      const validContext = origin === config.http.publicOrigin
+        ? requestHasValidMutationContext(request, config.http.publicOrigin)
+        : requestHasTrustedDashboardContext(request, config.http.trustedDashboardOrigins) !== undefined;
+      if (!validContext) return problem(403, "forbidden", "Forbidden");
+      if (request.headers.get("Content-Type")?.toLowerCase() !== "application/json") {
+        return problem(415, "unsupported_media_type", "Expected application/json");
+      }
+      let creationRequest;
+      try {
+        creationRequest = parseSessionCreationRequest(parseJsonFrame(await readBoundedBody(request, MAX_SESSION_CREATION_REQUEST_BYTES)));
+      } catch {
+        return problem(400, "bad_request", "Invalid request");
+      }
+      try {
+        const result = await options.creationService.accept(authorization.identityKey, creationRequest,
+          () => limiter.allow(`${authorization.identityKey}\0creation`, now()));
+        return Response.json(result.receipt, { status: result.status });
+      } catch (error) {
+        if (error instanceof SessionCreationProblem) return problem(error.status, error.code, "Session creation is unavailable");
+        return problem(503, "tern_unavailable", "Session creation is unavailable");
+      }
+    }
+    const creationMatch = /^\/api\/v1\/session-creations\/([^/]+)$/u.exec(url.pathname);
+    if (creationMatch && SESSION_CREATION_UUID_PATTERN.test(creationMatch[1]!) && request.method === "GET" && options.creationService) {
+      try {
+        const status = options.creationService.status(authorization.identityKey, creationMatch[1]!);
+        return status ? Response.json(status) : problem(404, "not_found", "Not found");
+      } catch (error) {
+        if (error instanceof SessionCreationProblem) return problem(error.status, error.code, "Session creation is unavailable");
+        return problem(503, "ledger_unavailable", "Session creation is unavailable");
+      }
     }
     if (url.pathname === "/api/v1/events" && request.method === "GET") {
       // Re-read per keepalive: an admitted stream must not outlive the topology that justified it.
@@ -491,6 +532,7 @@ export function startHttpServer(options: {
   readonly launchResolver: LaunchBroker;
   readonly staticAssets: StaticAssetStore;
   readonly pushService?: PushService;
+  readonly creationService?: Pick<SessionCreationService, "options" | "accept" | "status">;
   readonly logger?: SafeLogger;
   readonly readinessToken: string;
   readonly readinessInstance?: string;

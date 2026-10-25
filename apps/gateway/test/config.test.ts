@@ -16,6 +16,8 @@ import {
   readinessTokenMatches,
   publicOriginHttpsPort,
   projectPreFleetConfig,
+  projectPreTernConfig,
+  parseTernConfig,
   readPrivateTextFile,
   removeLegacyPublisherToken,
   restoreGatewayConfigFile,
@@ -26,6 +28,62 @@ import {
 } from "../src/config.ts";
 
 const roots: string[] = [];
+
+describe("opt-in Tern configuration", () => {
+  const profile = { id: "local", label: " OMP ", argv: ["/synthetic/omp", "--flag"],
+    env: { HOME: "/synthetic/home", PATH: "/synthetic/bin:/usr/bin:/bin" } };
+  const tern = { executable: "/synthetic/tern", projects: [{ id: "project", label: " Project ",
+    workingCopies: [{ id: "main", label: "Main", path: "/synthetic/work" }] }], profiles: [profile] };
+  test("preserves absence and authored empty sections without manufacturing execution defaults", async () => {
+    const root = await privateRoot();
+    const path = join(root, "config.json");
+    await writePrivateTextFile(path, JSON.stringify({ auth: { mode: "dev-localhost" } }));
+    expect((await loadGatewayConfig({ configPath: path })).tern).toBeUndefined();
+    await writePrivateTextFile(path, JSON.stringify({ auth: { mode: "dev-localhost" }, tern: {} }));
+    expect((await loadGatewayConfig({ configPath: path })).tern).toEqual({});
+    expect(parseTernConfig(tern).profiles?.[0]?.label).toBe("OMP");
+  });
+  test("rejects unknown/null execution fields, aliases, duplicate IDs, env and size overflows without echo", () => {
+    const secret = "TERN_CONFIG_SECRET_CANARY";
+    for (const value of [null, { ...tern, [secret]: true }, { ...tern, executable: "relative" },
+      { ...tern, executable: "/bad\0path" }, { ...tern, projects: [] }, { ...tern, profiles: [profile, profile] },
+      { ...tern, profiles: [{ ...profile, env: { PATH: "/bin" } }] },
+      { ...tern, profiles: [{ ...profile, env: { HOME: "/home", PATH: "/bin:" } }] },
+      { ...tern, profiles: [{ ...profile, env: { HOME: "/home", PATH: "relative" } }] },
+      { ...tern, profiles: [{ ...profile, env: { ...profile.env, lowercase: secret } }] },
+      { ...tern, profiles: [{ ...profile, argv: ["/omp", "x".repeat(1025)] }] },
+      { ...tern, profiles: [{ ...profile, argv: Array.from({ length: 33 }, () => "/omp") }] },
+      { ...tern, profiles: [{ ...profile, argv: Array.from({ length: 10 }, () => "x".repeat(1000)).map((x, i) => i === 0 ? "/omp" : x) }] },
+      { ...tern, profiles: [{ ...profile, env: { ...profile.env, LONG: "x".repeat(1025) } }] },
+      { ...tern, profiles: [{ ...profile, env: { ...profile.env, ...Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`E${i}`, "x"])) } }] },
+      { ...tern, profiles: [{ ...profile, env: { ...profile.env, ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`E${i}`, "x".repeat(1000)])) } }] },
+      { ...tern, projects: Array.from({ length: 17 }, (_, i) => ({ ...tern.projects[0], id: `p${i}` })) },
+      { ...tern, profiles: Array.from({ length: 9 }, (_, i) => ({ ...profile, id: `p${i}` })) },
+      { ...tern, projects: [{ ...tern.projects[0], workingCopies: Array.from({ length: 9 }, (_, i) => ({ id: `w${i}`, label: "W", path: "/work" })) }] },
+      { ...tern, projects: [{ ...tern.projects[0], workingCopies: [{ id: "main", label: "Main", path: null }] }] },
+    ]) {
+      expect(() => parseTernConfig(value)).toThrow("invalid tern configuration");
+      try { parseTernConfig(value); } catch (error) { expect(String(error)).not.toContain(secret); }
+    }
+  });
+  test("rollback removes only Tern and composes with legacy fleet/speech projection", () => {
+    const document = { tern, fleet: {}, speech: {}, omp: { discoveryDir: "/synthetic/discovery" }, http: { trustedDashboardOrigins: [] } };
+    const current = projectPreTernConfig(document);
+    expect(current.removedKeys).toEqual(["tern"]);
+    expect(current.document).toEqual({ fleet: {}, speech: {}, omp: document.omp, http: document.http });
+    expect(projectPreFleetConfig(current.document).document).toEqual({ omp: document.omp, http: {} });
+    expect(document.tern).toBe(tern);
+  });
+  test("directory-synced publication retains private file mode and refuses unsafe publication", async () => {
+    const root = await privateRoot();
+    const path = join(root, "ledger.json");
+    await writePrivateTextFile(path, "first", { syncDirectory: true });
+    expect(await readPrivateTextFile(path, 100)).toBe("first");
+    if (process.platform !== "win32") expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    await expect(writePrivateTextFile(path, "second", { exclusive: true, syncDirectory: true })).rejects.toThrow();
+    expect(await readPrivateTextFile(path, 100)).toBe("first");
+  });
+});
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
@@ -1393,7 +1451,7 @@ describe("production config authoring", () => {
     expect((await loadGatewayConfig({ configPath: paths.configPath })).omp).toEqual(priorDocument.omp);
   }, 20_000);
 
-  test("preserves authored fleet and speech sections verbatim on reinstall and leaves unchanged bytes alone", async () => {
+  test("preserves authored fleet, speech and tern sections verbatim on reinstall and leaves unchanged bytes alone", async () => {
     const paths = await isolatedHome();
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
     const document = {
@@ -1403,6 +1461,9 @@ describe("production config authoring", () => {
         targets: [{ id: "remote", label: " Remote\u202e ", origin: "https://remote.example.ts.net" }],
       },
       speech: { browserRecognition: true },
+      tern: { executable: "/synthetic/tern", projects: [{ id: "project", label: " Project\u202e ",
+        workingCopies: [{ id: "main", label: " Main ", path: "/synthetic/work" }] }],
+        profiles: [{ id: "omp", label: " OMP ", argv: ["/synthetic/omp"], env: { HOME: "/synthetic", PATH: "/bin" } }] },
     };
     const text = `${JSON.stringify(document)} \n`;
     await writePrivateTextFile(paths.configPath, text);
@@ -1414,15 +1475,17 @@ describe("production config authoring", () => {
     expect(rewritten.http.trustedDashboardOrigins).toEqual(["https://dashboard.example.ts.net"]);
     expect(rewritten.fleet).toEqual(document.fleet);
     expect(rewritten.speech).toEqual(document.speech);
+    expect(rewritten.tern).toEqual(document.tern);
     const loaded = await loadGatewayConfig();
     expect(loaded.fleet.label).toBe("Studio é");
     expect(loaded.fleet.targets[0]?.label).toBe("Remote");
-    for (const authored of [{ fleet: {}, speech: {} }, { fleet: { targets: [] }, speech: { browserRecognition: false } }]) {
+    for (const authored of [{ fleet: {}, speech: {}, tern: {} }, { fleet: { targets: [] }, speech: { browserRecognition: false }, tern: document.tern }]) {
       await writePrivateTextFile(paths.configPath, JSON.stringify({ ...serveDocument(), ...authored }));
       await writeGatewayConfigFile({ ...options, port: 4412 });
       const preserved = JSON.parse(await readFile(paths.configPath, "utf8"));
       expect(preserved.fleet).toEqual(authored.fleet);
       expect(preserved.speech).toEqual(authored.speech);
+      expect(preserved.tern).toEqual(authored.tern);
       expect(preserved.http.trustedDashboardOrigins).toBeUndefined();
     }
   }, 20_000);

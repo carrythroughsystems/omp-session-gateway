@@ -552,10 +552,25 @@ export class OmpLaunchResolver {
   }
 }
 
+export interface AdoptionObservation {
+  readonly round: number;
+  readonly startedAt: number;
+  readonly directoryHealthy: boolean;
+  readonly knownInstanceIds: readonly string[];
+  readonly hosts: readonly {
+    readonly instanceId: string; readonly generation: number; readonly sessionId: string;
+    readonly pid: number; readonly startedAt: number; readonly createdAt: number; readonly canControl: boolean;
+  }[];
+}
+export type AdoptionRefresh = { readonly status: "ok"; readonly observation: AdoptionObservation } |
+  { readonly status: "aborted" | "timed_out" | "stopped" };
+
 export interface HostPoller {
   /** False while OMP's discovery directory itself is unusable. */
   readonly discoveryHealthy: boolean;
   poll(): Promise<void>;
+  subscribeObservations(listener: (observation: AdoptionObservation) => void): () => void;
+  refreshForAdoption(options: { readonly signal: AbortSignal; readonly timeoutMs: number }): Promise<AdoptionRefresh>;
   stop(): void;
 }
 
@@ -574,9 +589,15 @@ export function startHostPoller(options: {
   let healthy = true;
   let inFlight: Promise<void> | undefined;
   let stopped = false;
+  let roundNumber = 0;
+  const listeners = new Set<(observation: AdoptionObservation) => void>();
+  const waiters = new Set<{ minimum: number; finish: (result: AdoptionRefresh) => void }>();
   const round = async (): Promise<void> => {
+    const currentRound = ++roundNumber;
+    const startedAt = performance.now();
     try {
       const observation = await options.reader.observe();
+      if (stopped) return;
       healthy = observation.directoryHealthy;
       const result = options.registry.reconcile({
         observed: observation.hosts.map(host => host.session),
@@ -589,15 +610,36 @@ export function startHostPoller(options: {
           hosts: observation.hosts.length,
         });
       }
+      const batch: AdoptionObservation = {
+        round: currentRound, startedAt, directoryHealthy: healthy,
+        knownInstanceIds: [...new Set([...observation.retained, ...observation.hosts.map(host => host.snapshot.instanceId)])],
+        hosts: observation.hosts.map(({ entry, snapshot }) => ({
+          instanceId: snapshot.instanceId, generation: snapshot.generation, sessionId: snapshot.sessionId,
+          pid: snapshot.pid, startedAt: snapshot.startedAt, createdAt: entry.createdAt, canControl: snapshot.access === "control",
+        })),
+      };
+      for (const listener of listeners) {
+        try { listener(batch); } catch { /* One consumer must not prevent other observations. */ }
+      }
+      for (const waiter of waiters) if (waiter.minimum <= currentRound) waiter.finish({ status: "ok", observation: batch });
     } catch {
+      if (stopped) return;
       healthy = false;
       options.onEvent?.("omp.poll_failed", {});
+      const batch: AdoptionObservation = {
+        round: currentRound, startedAt, directoryHealthy: false, hosts: [], knownInstanceIds: [],
+      };
+      for (const listener of listeners) {
+        try { listener(batch); } catch { /* Isolate consumers. */ }
+      }
+      for (const waiter of waiters) if (waiter.minimum <= currentRound) waiter.finish({ status: "ok", observation: batch });
     }
   };
   const poll = (): Promise<void> => {
     if (stopped) return Promise.resolve();
     inFlight ??= round().finally(() => {
       inFlight = undefined;
+      if (!stopped && [...waiters].some(waiter => waiter.minimum > roundNumber)) void poll();
     });
     return inFlight;
   };
@@ -608,9 +650,34 @@ export function startHostPoller(options: {
       return healthy;
     },
     poll,
+    subscribeObservations(listener) {
+      if (!stopped) listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    refreshForAdoption({ signal, timeoutMs }) {
+      if (stopped) return Promise.resolve({ status: "stopped" });
+      if (signal.aborted) return Promise.resolve({ status: "aborted" });
+      const { promise, resolve } = Promise.withResolvers<AdoptionRefresh>();
+        const minimum = roundNumber + 1;
+        const waiter = { minimum, finish };
+        const abort = (): void => finish({ status: "aborted" });
+        const timer = setTimeout(() => finish({ status: "timed_out" }), Math.min(5000, Math.max(0, timeoutMs)));
+        function finish(result: AdoptionRefresh): void {
+          if (!waiters.delete(waiter)) return;
+          clearTimeout(timer);
+          signal.removeEventListener("abort", abort);
+          resolve(result);
+        }
+        waiters.add(waiter);
+        signal.addEventListener("abort", abort, { once: true });
+      if (!inFlight) void poll();
+      return promise;
+    },
     stop(): void {
       stopped = true;
       clearInterval(timer);
+      listeners.clear();
+      for (const waiter of waiters) waiter.finish({ status: "stopped" });
     },
   };
 }

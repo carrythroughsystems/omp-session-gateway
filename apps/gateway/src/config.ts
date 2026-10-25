@@ -17,7 +17,25 @@ import { resolveOmpDiscoveryDirectory } from "./omp-registry.ts";
 export type AuthMode = "tailscale-serve" | "dev-localhost";
 export const FLEET_CONFIG_SINCE_VERSION = "0.8.0";
 
+export interface TernProfile {
+  readonly id: string;
+  readonly label: string;
+  readonly argv: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+}
+export interface TernWorkingCopy {
+  readonly id: string;
+  readonly label: string;
+  readonly path: string;
+}
+export interface TernConfig {
+  readonly executable?: string;
+  readonly projects?: readonly { readonly id: string; readonly label: string; readonly workingCopies: readonly TernWorkingCopy[] }[];
+  readonly profiles?: readonly TernProfile[];
+}
+
 export interface GatewayConfig {
+  readonly tern?: TernConfig;
   readonly http: {
     readonly hostname: "127.0.0.1" | "::1";
     readonly port: number;
@@ -615,11 +633,78 @@ export function projectPreFleetConfig(document: unknown): {
   return { document: projected, removedKeys };
 }
 
+/** Empty authored sections are preserved but unavailable; partial execution recipes are refused. */
+export function parseTernConfig(value: unknown): TernConfig {
+  const invalid = (): never => { throw new Error("invalid tern configuration"); };
+  const object = (value: unknown, keys: readonly string[]): Record<string, unknown> => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return invalid();
+    const result = value as Record<string, unknown>;
+    if (Object.keys(result).some(key => !keys.includes(key))) return invalid();
+    return result;
+  };
+  const text = (value: unknown, maximum: number, absolute = false): string => {
+    if (typeof value !== "string" || value.includes("\0") || Buffer.byteLength(value) > maximum ||
+        (absolute && !isAbsolute(value))) return invalid();
+    return value;
+  };
+  const list = <T extends { readonly id: string }>(value: unknown, maximum: number, parse: (entry: unknown) => T): T[] => {
+    if (!Array.isArray(value) || value.length < 1 || value.length > maximum) return invalid();
+    const entries = value.map(parse);
+    if (new Set(entries.map(entry => entry.id)).size !== entries.length) return invalid();
+    return entries;
+  };
+  try {
+    if (Buffer.byteLength(JSON.stringify(value)) > 32 * 1024) return invalid();
+    const record = object(value, ["executable", "projects", "profiles"]);
+    if (Object.keys(record).length === 0) return {};
+    const executable = text(record.executable, 4096, true);
+    const projects = list(record.projects, 16, value => {
+      const project = object(value, ["id", "label", "workingCopies"]);
+      return { id: parseFleetSourceId(project.id), label: parseFleetLabel(project.label),
+        workingCopies: list(project.workingCopies, 8, value => {
+          const copy = object(value, ["id", "label", "path"]);
+          return { id: parseFleetSourceId(copy.id), label: parseFleetLabel(copy.label), path: text(copy.path, 4096, true) };
+        }) };
+    });
+    const profiles = list(record.profiles, 8, value => {
+      const profile = object(value, ["id", "label", "argv", "env"]);
+      if (!Array.isArray(profile.argv) || profile.argv.length < 1 || profile.argv.length > 32) return invalid();
+      const argv = profile.argv.map((arg, index) => text(arg, index === 0 ? 4096 : 1024, index === 0));
+      if (Buffer.byteLength(JSON.stringify(argv)) > 8192) return invalid();
+      if (typeof profile.env !== "object" || profile.env === null || Array.isArray(profile.env)) return invalid();
+      const entries = Object.entries(profile.env);
+      if (entries.length > 16 || Buffer.byteLength(JSON.stringify(profile.env)) > 8192) return invalid();
+      const env: Record<string, string> = Object.create(null) as Record<string, string>;
+      for (const [key, value] of entries) {
+        if (!/^[A-Z_][A-Z0-9_]{0,63}$/u.test(key)) return invalid();
+        env[key] = text(value, 1024);
+      }
+      text(env.HOME, 1024, true);
+      if (typeof env.PATH !== "string" || env.PATH.split(process.platform === "win32" ? ";" : ":")
+        .some(part => part.length === 0 || !isAbsolute(part))) return invalid();
+      return { id: parseFleetSourceId(profile.id), label: parseFleetLabel(profile.label), argv, env };
+    });
+    return { executable, projects, profiles };
+  } catch {
+    return invalid();
+  }
+}
+
+export function projectPreTernConfig(document: unknown): {
+  readonly document: Record<string, unknown>; readonly removedKeys: readonly string[];
+} {
+  if (typeof document !== "object" || document === null || Array.isArray(document)) throw new Error("config must be an object");
+  const projected = { ...document } as Record<string, unknown>;
+  const removedKeys = Object.hasOwn(projected, "tern") ? ["tern"] : [];
+  delete projected.tern;
+  return { document: projected, removedKeys };
+}
+
 function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("config must be an object");
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (!["http", "auth", "registry", "omp", "fleet", "speech"].includes(key)) throw new Error(`unknown config key: ${key}`);
+    if (!["http", "auth", "registry", "omp", "fleet", "speech", "tern"].includes(key)) throw new Error(`unknown config key: ${key}`);
   }
   const http = configSection(record, "http");
   const auth = configSection(record, "auth");
@@ -710,6 +795,7 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
       targets: fleetTargets(fleet.targets ?? [], mode, publicOrigin.origin),
     },
     speech: { browserRecognition },
+    ...(Object.hasOwn(record, "tern") ? { tern: parseTernConfig(record.tern) } : {}),
     // Written only when asserted, so an ordinary config keeps the shape it had before this field
     // existed and the safe reading is the absent one.
     auth: { mode, allowedLogins, ...(declaredTrust ? { trustIdentityWithoutTailnetDevice: true } : {}) },
@@ -829,7 +915,7 @@ export async function readPrivateTextFile(path: string, maximumBytes: number): P
 export async function writePrivateTextFile(
   path: string,
   content: string,
-  options: { readonly exclusive?: boolean } = {},
+  options: { readonly exclusive?: boolean; readonly syncDirectory?: boolean } = {},
 ): Promise<void> {
   const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const handle = await open(temporaryPath, "wx", 0o600);
@@ -850,6 +936,14 @@ export async function writePrivateTextFile(
     }
     if (process.platform === "win32") await applyWindowsAcl(path, false);
     else await chmod(path, 0o600);
+    if (options.syncDirectory === true) {
+      const directory = await open(dirname(path), "r");
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+    }
   } finally {
     await rm(temporaryPath, { force: true });
   }
@@ -906,6 +1000,7 @@ export async function writeGatewayConfigFile(options: {
         readonly omp?: Partial<GatewayConfig["omp"]>;
         readonly fleet?: { readonly label?: string; readonly targets?: readonly FleetSource[] };
         readonly speech?: Partial<GatewayConfig["speech"]>;
+        readonly tern?: TernConfig;
       };
   const mode = options.mode ?? "tailscale-serve";
   const origin = new URL(options.publicOrigin);
@@ -923,6 +1018,7 @@ export async function writeGatewayConfigFile(options: {
     ...(priorDocument?.omp === undefined ? {} : { omp: priorDocument.omp }),
     ...(priorDocument?.fleet === undefined ? {} : { fleet: priorDocument.fleet }),
     ...(priorDocument?.speech === undefined ? {} : { speech: priorDocument.speech }),
+    ...(priorDocument?.tern === undefined ? {} : { tern: priorDocument.tern }),
     http: {
       hostname: priorConfig?.http.hostname ?? "127.0.0.1",
       port: validatePort(options.port ?? priorConfig?.http.port ?? 4317),

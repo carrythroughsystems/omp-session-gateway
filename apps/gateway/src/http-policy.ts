@@ -1,4 +1,5 @@
 import type { GatewayConfig } from "./config.ts";
+import { SESSION_CREATION_UUID_PATTERN } from "@omp-session-gateway/protocol";
 
 const CSP_PREFIX =
   "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' wss://my.omp.sh";
@@ -33,6 +34,10 @@ export function apiSecurityHeaders(): Record<string, string> {
 function corsRouteMethod(request: Request): "GET" | "POST" | undefined {
   const pathname = new URL(request.url).pathname;
   if (pathname === "/api/v1/sessions") return "GET";
+  if (pathname === "/api/v1/session-creation-options") return "GET";
+  if (pathname === "/api/v1/session-creations") return "POST";
+  const creation = /^\/api\/v1\/session-creations\/([^/]+)$/u.exec(pathname);
+  if (creation && SESSION_CREATION_UUID_PATTERN.test(creation[1]!)) return "GET";
   if (/^\/api\/v1\/sessions\/[^/]{1,384}\/launch$/u.test(pathname)) return "POST";
   return undefined;
 }
