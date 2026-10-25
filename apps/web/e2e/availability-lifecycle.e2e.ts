@@ -83,9 +83,10 @@ for (const freeze of [false, true]) {
     });
     try {
       await page.clock.install({ time });
+      // Pause before navigation so setup cannot start a retry that freeze must abort.
+      await page.clock.pauseAt(new Date(time.getTime() + 1_000));
       await page.goto(fixture.origin);
       await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
-      await page.clock.pauseAt(new Date(time.getTime() + 1_000));
       await visibility(page, "hidden", freeze);
       await visibility(page, "visible");
       await expect.poll(() => requests).toBe(2);
@@ -169,9 +170,9 @@ test("council476: a healthy remote request does not recover or stop the local re
   await installSilentWebSocket(page);
   try {
     await page.clock.install({ time });
+    await page.clock.pauseAt(new Date(time.getTime() + 1_000));
     await page.goto(home.origin);
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
-    await page.clock.pauseAt(new Date(time.getTime() + 1_000));
     await page.locator(".action-request").click();
     await expect(page.locator(".gateway-shell")).toBeVisible();
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
@@ -197,9 +198,9 @@ for (const failure of [404, 409, 503, "network"] as const) {
       : await route.fulfill({ status: failure, headers: { "Access-Control-Allow-Origin": home.origin }, body: "" }));
     try {
       await page.clock.install({ time });
+      await page.clock.pauseAt(new Date(time.getTime() + 1_000));
       await page.goto(home.origin);
       await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
-      await page.clock.pauseAt(new Date(time.getTime() + 1_000));
       if (failure === 404 || failure === 409) await page.route(`${away.origin}/api/v1/sessions`, async route => {
         const response = await route.fetch();
         await expiryRefresh.promise;

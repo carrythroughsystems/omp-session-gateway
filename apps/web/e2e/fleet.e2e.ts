@@ -235,9 +235,9 @@ test("bootstrap and snapshot failure share one banner and configuration recovers
   home.setListFailure("malformed");
   try {
     await page.clock.install({ time: new Date("2026-10-25T01:30:00Z") });
+    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
     await page.goto(home.origin);
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
-    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
     await expect(page.locator("#status-banner > *")).toHaveCount(1);
     await expect(page.locator(".fleet-status-row")).toHaveCount(0);
     home.setListFailure(undefined);
