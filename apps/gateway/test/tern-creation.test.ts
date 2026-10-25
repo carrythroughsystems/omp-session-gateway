@@ -37,6 +37,9 @@ interface FixtureOptions {
   heldAdoption?: boolean;
   earlyObservation?: boolean;
   lateMetadata?: boolean;
+  oldObservation?: boolean;
+  refreshUnavailable?: boolean;
+  baselineInspection?: TernInspection;
 }
 async function fixture(options: FixtureOptions = {}) {
   let now = initialTime, monotonic = 1, uuidCall = 0, polls = 0, inspections = 0, creates = 0;
@@ -76,6 +79,7 @@ async function fixture(options: FixtureOptions = {}) {
         if ((polls === 1 && options.heldPreflight) || (polls > 1 && options.heldAdoption)) {
           await held(signal); return { status: "aborted" };
         }
+        if (polls > 1 && options.refreshUnavailable) return { status: "timed_out" };
         const observation = batch(polls === 1 ? options.baseline ?? [] : options.hosts ?? [host]);
         for (const listener of listeners) listener(observation);
         return { status: "ok", observation };
@@ -84,7 +88,7 @@ async function fixture(options: FixtureOptions = {}) {
     cli: {
       async inspect() {
         inspections++;
-        if (inspections <= 2) return empty; // availability, then preflight
+        if (inspections <= 2) return options.baselineInspection ?? empty; // availability, then preflight
         if (options.lateMetadata && inspections === 3) return { blocks: ["42"], panes: [{ paneId: "42" }] };
         return options.inspection ?? target;
       },
@@ -93,7 +97,8 @@ async function fixture(options: FixtureOptions = {}) {
         expect(JSON.parse(contents!).operations[0].status.state).toBe("launching");
         if (options.earlyObservation) {
           polls++; monotonic++;
-          for (const listener of listeners) listener(batch(options.hosts ?? [host]));
+          for (const listener of listeners) listener({ ...batch(options.hosts ?? [host]),
+            ...(options.oldObservation ? { startedAt: monotonic - 2 } : {}) });
         }
         if (options.heldSpawn) await held(signal);
         return options.start ?? { kind: "started", blockId: "42" };
@@ -108,7 +113,7 @@ async function fixture(options: FixtureOptions = {}) {
 
 describe("durable session creation transitions", () => {
   test("persists accepted then launching then awaiting then ready; carries no execution secrets", async () => {
-    const f = await fixture({ earlyObservation: true });
+    const f = await fixture({ earlyObservation: true, refreshUnavailable: true });
     expect(await f.service.accept(" Owner@EXAMPLE.COM ", request, () => true)).toEqual({ status: 202, receipt: { operationId, state: "accepted" } });
     await f.finish();
     expect(f.writes.map(text => JSON.parse(text).operations[0].status.state)).toEqual(["accepted", "launching", "awaiting_omp", "ready"]);
@@ -145,6 +150,8 @@ describe("durable session creation transitions", () => {
     [{ preflight: false }, "failed", "preflight_failed"],
     [{ start: { kind: "not_started" } }, "failed", "spawn_failed"],
     [{ start: { kind: "unknown" } }, "outcome_unknown", "launch_outcome_unknown"],
+    [{ baselineInspection: target }, "outcome_unknown", "launch_outcome_unknown"],
+    [{ earlyObservation: true, oldObservation: true, refreshUnavailable: true }, "started_unavailable", "adoption_timeout"],
     [{ hosts: [host, { ...host, instanceId: "another-instance" }] }, "started_unavailable", "correlation_ambiguous"],
     [{ hosts: [{ ...host, canControl: false }] }, "started_unavailable", "control_unavailable"],
     [{ hosts: [] }, "started_unavailable", "adoption_timeout"],

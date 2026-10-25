@@ -305,7 +305,7 @@ export class SessionCreationService {
       if (refresh.status === "ok" && refresh.observation.startedAt > spawnedAt && refresh.observation.round > baseline.observation.round) latest = refresh.observation;
       while (!signal.aborted && this.#clock.monotonic() < deadline) {
         const current = await this.#cli.inspect(profile, signal);
-        if (signal.aborted) return;
+        if (signal.aborted) break;
         const file = current && matchingTernBasename(current, result.blockId);
         if (file && latest?.directoryHealthy) {
           const eligible = latest.hosts.filter(host => !instances.has(host.instanceId) && !sessions.has(host.sessionId) &&
@@ -320,7 +320,7 @@ export class SessionCreationService {
         }
         await this.#clock.sleep(Math.min(1000, Math.max(0, deadline - this.#clock.monotonic())), signal);
       }
-      if (!signal.aborted) await this.#transition(operationId, { state: "started_unavailable", error: viewOnly ? "control_unavailable" : "adoption_timeout" });
+      if (!this.#abort.signal.aborted) await this.#transition(operationId, { state: "started_unavailable", error: viewOnly ? "control_unavailable" : "adoption_timeout" });
     } finally { unsubscribe(); latest = undefined; instances.clear(); sessions.clear(); blocks.clear(); }
   }
   async stop(): Promise<void> {

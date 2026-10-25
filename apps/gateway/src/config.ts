@@ -920,12 +920,12 @@ export async function writePrivateTextFile(
   const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const handle = await open(temporaryPath, "wx", 0o600);
   try {
-    await handle.writeFile(content, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     if (options.exclusive === true) {
       if (process.platform === "win32") await applyWindowsAcl(temporaryPath, false);
       // A hard link publishes the completed file atomically and, unlike rename, never replaces a

@@ -658,18 +658,18 @@ export function startHostPoller(options: {
       if (stopped) return Promise.resolve({ status: "stopped" });
       if (signal.aborted) return Promise.resolve({ status: "aborted" });
       const { promise, resolve } = Promise.withResolvers<AdoptionRefresh>();
-        const minimum = roundNumber + 1;
-        const waiter = { minimum, finish };
-        const abort = (): void => finish({ status: "aborted" });
-        const timer = setTimeout(() => finish({ status: "timed_out" }), Math.min(5000, Math.max(0, timeoutMs)));
-        function finish(result: AdoptionRefresh): void {
-          if (!waiters.delete(waiter)) return;
-          clearTimeout(timer);
-          signal.removeEventListener("abort", abort);
-          resolve(result);
-        }
-        waiters.add(waiter);
-        signal.addEventListener("abort", abort, { once: true });
+      const minimum = roundNumber + 1;
+      const waiter = { minimum, finish };
+      const abort = (): void => finish({ status: "aborted" });
+      const timer = setTimeout(() => finish({ status: "timed_out" }), Math.min(5000, Math.max(0, timeoutMs)));
+      function finish(result: AdoptionRefresh): void {
+        if (!waiters.delete(waiter)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        resolve(result);
+      }
+      waiters.add(waiter);
+      signal.addEventListener("abort", abort, { once: true });
       if (!inFlight) void poll();
       return promise;
     },
