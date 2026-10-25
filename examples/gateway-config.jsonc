@@ -28,31 +28,39 @@
     // Keyboard dictation remains available without this optional browser recognizer.
     "browserRecognition": false
   }
-  // Optional creation is absent by default. To opt in, add a comma after speech,
-  // then uncomment this entire block and replace these synthetic absolute paths.
-  // Trusted dashboards can create from these profiles; no browser command input.
-  // Working-copy paths must equal realpath. HOME/PATH are the COMPLETE CLI env;
-  // configure the Tern pane's own OMP environment and collab.autoStart=control too.
-  // The CLI targets the first Tern window. See docs/OPERATIONS.md for all bounds.
+  // Optional Tern creation is absent by default. To opt in on this execution host,
+  // add a comma after speech, uncomment the block below, strip // comments when writing
+  // strict JSON to <configDir>/config.json, replace the synthetic paths, and re-run
+  // omp-gateway install --origin <origin> --allow <login>. Working-copy paths must equal
+  // their realpath; profile.env is the complete CLI child environment (not merged with
+  // process.env) and requires absolute HOME and PATH. Configure OMP inside Tern with
+  // collab.autoStart=control first. The CLI opens the tab in Tern's first window.
+  // See docs/OPERATIONS.md#opt-in-tern-session-creation.
   // "tern": {
   //   "executable": "/usr/local/bin/tern",
-  //   "projects": [{
-  //     "id": "example",
-  //     "label": "Example project",
-  //     "workingCopies": [{
-  //       "id": "main",
-  //       "label": "main",
-  //       "path": "/srv/omp-projects/example"
-  //     }]
-  //   }],
-  //   "profiles": [{
-  //     "id": "omp",
-  //     "label": "OMP",
-  //     "argv": ["/usr/local/bin/omp"],
-  //     "env": {
-  //       "HOME": "/home/user",
-  //       "PATH": "/usr/local/bin:/usr/bin:/bin"
+  //   "projects": [
+  //     {
+  //       "id": "alpha-founder",
+  //       "label": "Alpha Founder",
+  //       "workingCopies": [
+  //         {
+  //           "id": "main",
+  //           "label": "main",
+  //           "path": "/home/user/Development/alpha-founder"
+  //         }
+  //       ]
   //     }
-  //   }]
+  //   ],
+  //   "profiles": [
+  //     {
+  //       "id": "omp",
+  //       "label": "OMP",
+  //       "argv": ["/opt/homebrew/bin/omp"],
+  //       "env": {
+  //         "HOME": "/home/user",
+  //         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+  //       }
+  //     }
+  //   ]
   // }
 }

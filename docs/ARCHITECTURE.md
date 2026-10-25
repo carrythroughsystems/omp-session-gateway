@@ -37,10 +37,11 @@ including in the registry: their gateway lifetime is confined to the query and n
 response. This is strictly narrower than the fork-era in-memory secret store, which retained links
 for the lifetime of a published session.
 
-The opt-in creation service subscribes to stripped poller observations through
-`subscribeObservations` and requests `refreshForAdoption` rounds started after the request,
-not merely an older in-flight poll. Reconciliation precedes observation publication. Concurrent
-fresh requests coalesce into one following round without overlapping reads; cancellation removes
+The opt-in creation service (`apps/gateway/src/tern-creation.ts`) subscribes to stripped poller
+observations in `apps/gateway/src/omp-registry.ts` through `subscribeObservations` and requests
+`refreshForAdoption` rounds started after the request, not merely an older in-flight poll.
+Reconciliation precedes observation publication. Concurrent fresh requests coalesce into one
+following round without overlapping reads; cancellation removes
 only the caller's wait. Observations contain binding/timing/Control metadata, never discovery
 tokens, endpoints, capabilities, full cwd, or Tern metadata. Ordinary polling, TTLs, and launch
 authorization remain unchanged.
@@ -320,7 +321,7 @@ Process enumeration can find PIDs but cannot safely attach OMP's browser collabo
 Mainline OMP exposes the supported discovery/query surface needed here. Consume it rather than
 private deep imports, process inspection, or a second collaboration controller.
 
-The same discovery rule applies to Tern ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration), narrowly amended by [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)): an interactive `omp` process in a Tern pane publishes through stock OMP's local registry. The sole opt-in exception starts a new tab from administrator-approved argv and canonical working-copy choices, then uses `inspect --json` metadata for exact local block/pane and OMP-basename correlation. It never reads session-file contents, `tsp.ts` frames, or terminal content; it never injects keystrokes, focuses, or attaches to a pane. Tern IDs never become session identity, no general control surface is exposed, and a ready binding still requires ordinary generation-bound Control authorization.
+The same discovery rule applies to Tern ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration), narrowly amended by [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)): an interactive `omp` process in a Tern pane publishes through stock OMP's local registry. The sole opt-in exception starts a new tab from administrator-approved `argv` and canonical working-copy choices, then uses `tern inspect --json` metadata for exact local block/pane and `omp_session_file` basename correlation. It never reads session-file contents, `tsp.ts` frames, or terminal content; it never injects keystrokes, focuses, or attaches to a pane. Tern IDs never become session identity, no general control surface is exposed, and a `ready` binding still requires ordinary generation-bound Control authorization.
 
 ## 5. Availability behavior
 

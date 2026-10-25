@@ -144,125 +144,109 @@ To list and launch sessions across multiple workstations from one installed **OM
 
 ### Opt-in Tern session creation
 
-This is optional and absent by default ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)).
-Ordinary discovery and View/Control launch do not depend on Tern. Configure only on the
-**execution host** running OMP as the same OS user; a remote pane belongs to that host's
-gateway, not a local terminal inspector on the viewing device.
+Opt-in Tern creation (`config.json` → `tern`, [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)) lets **OMP Sessions** start a new interactive `omp` process in a Tern tab on the execution host from administrator-approved project, working-copy, and profile choices, then open it in **Control**. It is absent by default (`not_configured`); ordinary session discovery and View/Control launches do not require Tern.
 
-An authored `"tern": {}` is accepted and preserved verbatim but remains unavailable with
-`configuration_unavailable`; absence instead reports `not_configured`. A nonempty section
-must supply the complete `executable`, `projects`, and `profiles` recipe; partial recipes are
-rejected rather than filled from defaults.
+**Trust disclosure:** Enabling `tern` lets allowed Tailscale identities — including JavaScript served by every origin in `http.trustedDashboardOrigins` — start processes from your configured profiles. Removing a dashboard origin blocks new cross-origin API requests immediately, but does not stop an accepted creation or kill an already-running OMP process.
 
-**Trust disclosure:** enabling `tern` lets allowed identities, including JavaScript from every
-configured `http.trustedDashboardOrigins` dashboard, create processes from these profiles.
-This is stronger trust than reading metadata or opening an already-running session. Removing
-dashboard trust blocks subsequent API requests, not accepted operations or already-started
-processes; stopping those processes remains an operator action in Tern/OMP.
+#### Prerequisites
 
-Add a section such as this to the private `config.json`; all paths below are synthetic:
-
-```json
-{
-  "tern": {
-    "executable": "/usr/local/bin/tern",
-    "projects": [{
-      "id": "example",
-      "label": "Example project",
-      "workingCopies": [{
-        "id": "main",
-        "label": "main",
-        "path": "/srv/omp-projects/example"
-      }]
-    }],
-    "profiles": [{
-      "id": "omp",
-      "label": "OMP",
-      "argv": ["/usr/local/bin/omp"],
-      "env": {
-        "HOME": "/home/user",
-        "PATH": "/usr/local/bin:/usr/bin:/bin"
-      }
-    }]
-  }
-}
-```
-
-- **Absolute, canonical execution values:** use absolute Tern and profile executable paths.
-  Working-copy paths must be accessible directories equal to their `realpath`; an authored
-  symlink/alias is rejected, not silently followed. Executable symlinks are resolved to their
-  canonical executable regular-file target for invocation without rewriting authored config.
-  No `~`, shell expansion, shell wrappers, browser-selected paths, or task text in argv.
-- **Nonempty configuration bounds:** 1–16 projects; 1–8 working copies per project; 1–8 profiles.
-  IDs match `^[a-z][a-z0-9-]{0,31}$` (`local` is allowed here), unique per collection and per
-  project's copies; labels use fleet normalization (NFC, controls/bidi stripped, trimmed,
-  1–64 code points). `tern.executable` is at most 4,096 UTF-8 bytes. Each profile has 1–32
-  argv strings, absolute argv[0], at most 1,024 UTF-8 bytes per remaining argument and 8 KiB
-  total argv. Unknown keys, null substitutions, and NUL execution values are rejected.
-- **Explicit CLI environment:** `env` is the **entire** Tern CLI child's environment, never
-  merged with the LaunchAgent/service environment or interactive shell. Author `HOME`
-  (absolute) and `PATH` (every entry absolute and nonempty). At most 16 entries, names matching
-  `^[A-Z_][A-Z0-9_]{0,63}$`, at most 1,024 UTF-8 bytes/value and 8 KiB aggregate.
-  Do not rely on shell startup files to locate either executable.
-- **Separate Tern-pane prerequisite:** no claim is made that this CLI environment crosses the
-  existing Tern GUI-server RPC boundary. Configure OMP's HOME/settings/discovery environment
-  inside Tern first, with `collab.autoStart = control`, and ensure new panes publish into
-  `omp.discoveryDir`. View-only publication can appear in the directory but cannot complete
-  creation's **Create and open Control** adoption. Read back the setting in that environment:
+- **Execution host only:** Configure `tern` on the workstation where Tern and `omp` run under the same OS user as the `omp-session-gateway` user service (`omp-gatewayd`).
+- **OMP `collab.autoStart` set to `control` in the Tern pane environment:** `profile.env` supplies only the `tern` CLI child's environment and is not assumed to cross Tern's GUI-server RPC boundary into the new pane. Inside a Tern shell on that host, ensure OMP uses the home/configuration root that publishes to `omp.discoveryDir` (`~/.omp/run/collab-hosts`) and has Control enabled (`view`-only sessions appear in the directory but cannot complete **Create and open Control** adoption):
 
   ```sh
-  /usr/local/bin/omp config set collab.autoStart control
-  /usr/local/bin/omp config get collab.autoStart
+  /opt/homebrew/bin/omp config set collab.autoStart control
+  /opt/homebrew/bin/omp config get collab.autoStart
   ```
 
-- **First window only:** Tern's CLI creates the tab in the first window; the gateway does not
-  select, focus, or attach a window/pane. The tab uses `--keep-open`, including when the command
-  fails. Inspect that tab yourself rather than expecting gateway terminal content.
-- **Apply:** rerun install with your existing origin/allowlist; authored `tern` is preserved
-  verbatim, not normalized into a new default. Restart creates a new opaque options revision;
-  a stale review must fetch fresh options and require another explicit Create.
+- **First-window limitation:** Tern's CLI opens the new tab in Tern's **first window** with `--keep-open`. Keep a Tern window open on the host; if a command fails, inspect that kept-open tab in Tern.
+- **Canonical working copies and complete CLI environment:**
+  - `executable` (at most 4,096 UTF-8 bytes) and each `profile.argv[0]` (at most 4,096 UTF-8 bytes) must be absolute paths to executable regular files. Executable symlinks are resolved to their canonical target at invocation without rewriting `config.json`.
+  - Each `workingCopies[].path` (at most 4,096 UTF-8 bytes) must be an accessible directory whose path equals its `realpath`; symlinks and aliases are rejected.
+  - `profile.argv` holds 1–32 literal strings (at most 1,024 UTF-8 bytes per argument after `argv[0]`, 8 KiB total) executed without a shell.
+  - `profile.env` is the **entire** environment passed to the `tern` CLI child — never merged with `process.env`. Author 1–16 entries (`^[A-Z_][A-Z0-9_]{0,63}$`, at most 1,024 UTF-8 bytes per value, 8 KiB total) including an absolute `HOME` and a `PATH` whose entries are all non-empty absolute paths.
+  - Section bounds: at most 32 KiB (within the 64 KiB `config.json` limit), 1–16 `projects`, 1–8 `workingCopies` per project, and 1–8 `profiles`. IDs match `^[a-z][a-z0-9-]{0,31}$` (`local` is permitted here) and must be unique within their collection; labels use fleet normalization (NFC, control/bidi characters stripped, trimmed, 1–64 code points). Unknown keys, NUL bytes, and partial `tern` objects missing `executable`, `projects`, or `profiles` fail closed; an authored empty `"tern": {}` is preserved verbatim and reports `configuration_unavailable`.
 
-In **New session**, choose Host, Project, Working copy when needed, and Profile. **Create and
-open Control** starts one operation. Optional **First task** is bounded to 8,000 code points /
-32 KiB, stays in page memory, and only fills an empty ordinary Control composer once;
-it is never put in argv, requests, storage, or logs, and never auto-sends.
-The daemon deadline is 110 seconds; browser watching is at most 120 seconds with serial status
-polls. Close, background, or navigation stops watching, not the operation. **Check creation**
-performs status lookup or explicitly replays the identical request after a lost acknowledgement;
-do not create a replacement merely because a request timed out.
+#### Setup steps
 
-For `started_unavailable`, Tern started the command but the gateway could not adopt a unique
-Control host. For `outcome_unknown`, it may have started: check Tern and the directory before
-another explicit Create. Neither outcome is automatically retried. No native **Open in Tern**
-link is provided: Android 0.9.5 is [upstream-blocked](https://github.com/stencil-hq/tern-sdk/issues/143);
-desktop handoff is deferred.
+1. **Verify canonical paths on the execution host:**
+
+   ```sh
+   realpath /home/user/Development/alpha-founder
+   which tern omp
+   ```
+
+   Confirm the printed working-copy path matches the path you will put in `config.json` and both executables exist.
+
+2. **Merge the `tern` section into `<configDir>/config.json`** alongside your existing `http`, `auth`, `registry`, `fleet`, and `speech` settings (`${XDG_CONFIG_HOME:-~/.config}/omp-session-gateway/config.json` on Linux and macOS; `%LOCALAPPDATA%\OMP Session Gateway\config.json` on Windows):
+
+   ```json
+   {
+     "tern": {
+       "executable": "/usr/local/bin/tern",
+       "projects": [
+         {
+           "id": "alpha-founder",
+           "label": "Alpha Founder",
+           "workingCopies": [
+             {
+               "id": "main",
+               "label": "main",
+               "path": "/home/user/Development/alpha-founder"
+             }
+           ]
+         }
+       ],
+       "profiles": [
+         {
+           "id": "omp",
+           "label": "OMP",
+           "argv": ["/opt/homebrew/bin/omp"],
+           "env": {
+             "HOME": "/home/user",
+             "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+           }
+         }
+       ]
+     }
+   }
+   ```
+
+3. **Apply the configuration and restart the service:**
+
+   ```sh
+   bun apps/gateway/src/cli.js install \
+     --origin https://host.example.ts.net \
+     --allow you@example.com
+   ```
+
+   `install` validates `config.json`, preserves the authored `tern` section verbatim, and restarts the daemon with a fresh options `revision` UUID.
+
+4. **Verify with `doctor`:**
+
+   ```sh
+   bun apps/gateway/src/cli.js doctor
+   ```
+
+   When `config.tern` is authored, `doctor` prints the 18 base boolean checks plus `"ternAvailable": true` (and exits `0` when all checks pass). `ternAvailable` checks configured runtime paths, `tern inspect --json` usability, and `<stateDir>/session-creations.json` readability without starting OMP.
+
+5. **Create a session from OMP Sessions:**
+   Reload the PWA, tap **New session**, select **Host** (skipped with one source) → **Project** → **Working copy** (skipped when one) → **Profile**, optionally enter a **First task** draft (up to 8,000 code points / 32 KiB, kept only in page memory), and tap **Create and open Control**.
+   - **`ready`:** The app refreshes the selected source, verifies the exact `instanceId`, `generation`, and Control, opens full-screen **Control**, and places the optional **First task** draft into the empty ordinary composer once without sending.
+   - **`started_unavailable`:** Tern started the command, but the gateway could not adopt a unique Control session within the 110-second daemon deadline (for example, `collab.autoStart` is `view` or `off`, or the command exited early). Tap **Refresh directory** or inspect the kept-open tab in Tern.
+   - **`failed`:** Preflight validation or OS process creation failed before a child started.
+   - **`outcome_unknown`:** The CLI child started, but its output was lost, timed out, or interrupted. Check Tern and the session directory before tapping **Start another session**; the gateway never retries an uncertain spawn automatically.
+   - **Stopped watching (`Close`, backgrounding, or the 120-second browser watch limit):** Browser polling stops while the accepted daemon operation continues. Reopen **New session** and tap **Check creation** to query the same operation (or replay the identical request when the POST acknowledgement was lost). Native **Open in Tern** handoff is not provided ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)).
 
 ### Creation ledger recovery
 
-`<stateDir>/session-creations.json` is private state, not a support artifact: version 1 only,
-at most 64 operations, 24-hour retention from acceptance, 512 KiB maximum, and a single writer
-per user deployment. Do not point concurrent daemons at one state directory. Full unexpired
-capacity refuses new creation; it never evicts an unexpired record or creates an execution queue.
-Owner identity and request/operation IDs are private; no labels, prompts, paths, argv/env,
-capabilities, or raw CLI output belong in this ledger.
+`<stateDir>/session-creations.json` is a private version-1 ledger (`0600` / owner-only ACL, at most 64 records, 24-hour retention from acceptance, 512 KiB maximum, single daemon writer per state directory). It stores only private owner/operation/request IDs, timestamps, state, optional decimal block ID, ready `{ instanceId, generation }`, and closed error codes — never capabilities, labels, prompts, paths, argv, env, or raw CLI output.
 
-After restart/shutdown, durable `accepted` becomes `failed/interrupted`, `launching` becomes
-`outcome_unknown/interrupted`, and `awaiting_omp` becomes `started_unavailable/interrupted`.
-Terminal records stay unchanged; execution/adoption never resumes automatically. A corrupt,
-unsupported, unsafe, unreadable, or unsynchronizable ledger disables creation without being
-replaced by an empty file. Ordinary directory and launch remain available.
-
-If `ledger_unavailable` appears, stop the gateway before repair, preserve the original ledger
-privately, and correct its ownership/permissions/storage fault or restore a known valid private
-v1 ledger. Do not paste its contents into an issue or delete it to clear uncertainty. If no valid
-ledger can be restored, first reconcile possible started processes in Tern/OMP, then explicitly
-archive the unusable file outside active state and restart without it. Removing a ledger loses
-its retained idempotency protection; never replay an old Create afterward as a new attempt.
-Neither repair nor restart stops Tern tabs or OMP.
-
-Every managed rollback removes authored `tern` after a private full-config backup and leaves
-this ledger intact. Re-enable creation only by explicit operator restoration on a compatible
-runtime; see [rollback behavior](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
+- **Crash and restart classification:** On startup and shutdown, the daemon reclassifies nonterminal records before accepting creation traffic: `accepted → failed/interrupted`, `launching → outcome_unknown/interrupted`, and `awaiting_omp → started_unavailable/interrupted`. Terminal records remain unchanged until their 24-hour `expiresAt`, and the daemon never resumes adoption or re-spawns a process.
+- **Recovering from `ledger_unavailable` (`ternAvailable: false`):** If `<stateDir>/session-creations.json` is corrupt, exceeds 512 KiB, uses an unsupported version, or has unsafe permissions, creation fails closed (`GET /api/v1/session-creation-options` reports `reason: "ledger_unavailable"`, `POST` and status `GET` return `503 ledger_unavailable`, and `doctor` reports `"ternAvailable": false`) while existing session discovery and launches keep working. The daemon never overwrites an invalid ledger automatically:
+  1. Check Tern and **OMP Sessions** first to verify whether an earlier creation already started an `omp` process.
+  2. If permissions were widened on Linux or macOS, restore owner-only permissions (`chmod 600 "${XDG_STATE_HOME:-$HOME/.local/state}/omp-session-gateway/session-creations.json"`); if the file is corrupt (or has invalid ACLs on Windows at `%LOCALAPPDATA%\OMP Session Gateway\state\session-creations.json`), move `session-creations.json` out of `<stateDir>` (never paste it into an issue; `doctor --bundle` excludes it).
+  3. Re-run `bun apps/gateway/src/cli.js install --origin <origin> --allow <login>` from the verified extraction directory to restart the service, then run `bun apps/gateway/src/cli.js doctor` to confirm `"ternAvailable": true`. Moving or removing the file clears the 24-hour idempotency history, so do not replay an older creation request afterward.
+- **Rollback behavior:** Every managed `omp-gateway rollback` (or `rollback --to`) removes `tern` from `config.json` (and removes `http.trustedDashboardOrigins`, `fleet`, and `speech` when rolling back below `0.8.0`) after saving the full authored configuration to `<configDir>/config.pre-rollback.json` (`0600`; if that backup file already exists, `rollback` refuses to overwrite it until you restore or move the backup). Rollback preserves `<stateDir>/session-creations.json` and leaves running Tern tabs and OMP processes untouched. Restore `tern` only through an explicit operator action after returning to a creation-capable runtime; see [Upgrade and rollback](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
 
 ## 5. Tailscale Serve
 

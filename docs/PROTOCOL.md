@@ -389,108 +389,84 @@ Error behavior:
 
 ### Session creation DTO rules
 
-[ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) adds
-`SessionCreationOptions`, `SessionCreationRequest`, `SessionCreationReceipt`, and
-`SessionCreationStatus` in `packages/protocol`, parsed by `parseSessionCreationOptions`,
-`parseSessionCreationRequest`, `parseSessionCreationReceipt`, and `parseSessionCreationStatus`.
-These are creation-only DTOs, not changes to client-config v1, `SessionMetadata`, list/SSE,
-launch, the OMP discovery/query wire, or relay frames. The three public schemas are
-`schemas/session-creation-options.schema.json`, `schemas/session-creation-request.schema.json`,
-and `schemas/session-creation-status.schema.json`; receipts use the shared protocol parser.
+[ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) adds `SessionCreationOptions`, `SessionCreationRequest`, `SessionCreationReceipt`, and `SessionCreationStatus` in `packages/protocol` (`parseSessionCreationOptions`, `parseSessionCreationRequest`, `parseSessionCreationReceipt`, `parseSessionCreationStatus`). Public JSON Schemas are `schemas/session-creation-options.schema.json`, `schemas/session-creation-request.schema.json`, and `schemas/session-creation-status.schema.json`. `client-config` v1, `SessionMetadata`, list/SSE, launch DTOs, and OMP discovery/relay frames are unchanged.
 
-All objects, including nested choices and ready bindings, require exact keys. Reject unknown
-keys, duplicate JSON keys, null substitutions, invalid state/field combinations, and bounds
-violations. `clientOperationId`, `operationId`, and `revision` are canonical **lowercase UUIDv4**
-strings (`SESSION_CREATION_UUID_PATTERN`, parsed by `parseSessionCreationUuid`).
-Choice IDs use `^[a-z][a-z0-9-]{0,31}$` without reserving `local`. Choice labels use fleet
-normalization: NFC, controls/bidi stripped, trimmed, 1–64 Unicode code points.
+Every object (including nested choices and `ready` bindings) enforces `requireExactKeys` and rejects unknown keys, duplicate JSON keys, `null` substitutions, invalid state/field combinations, and size overflows:
 
-| Bound | Limit |
-| --- | --- |
-| Options response (`MAX_SESSION_CREATION_OPTIONS_BYTES`) | 64 KiB UTF-8 |
-| POST body (`MAX_SESSION_CREATION_REQUEST_BYTES`) | 4 KiB UTF-8 |
-| Receipt/status (`MAX_SESSION_CREATION_STATUS_BYTES`) | 2 KiB UTF-8 |
-| Available projects / working copies per project / profiles | 1–16 / 1–8 / 1–8 |
-| Ready `session.instanceId` | `^[a-z0-9-]{8,64}$` |
-| Ready `session.generation` | Safe integer, 1–9,007,199,254,740,991 |
-| Status `updatedAt` | Canonical UTC ISO timestamp `YYYY-MM-DDTHH:mm:ss.sssZ` |
+| DTO / Schema | Field | Type / Constraint |
+| --- | --- | --- |
+| `SessionCreationOptions` (`schemas/session-creation-options.schema.json`, $\le 64\text{ KiB}$) | `version` | Literal `1` (`SESSION_CREATION_VERSION`) |
+| | `revision` | Canonical lowercase UUIDv4 (`SESSION_CREATION_UUID_PATTERN`), generated once per daemon lifetime |
+| | `available` | `boolean` |
+| | `reason` | Required iff `available === false` (forbidden when `true`): `"not_configured" \| "tern_unavailable" \| "configuration_unavailable" \| "ledger_unavailable"` |
+| | `projects` | `[]` when `available === false`; otherwise `1`–`16` `{ id, label, workingCopies }` (`1`–`8` `{ id, label }` per project) |
+| | `profiles` | `[]` when `available === false`; otherwise `1`–`8` `{ id, label }` |
+| `SessionCreationRequest` (`schemas/session-creation-request.schema.json`, $\le 4\text{ KiB}$) | `clientOperationId` | Canonical lowercase UUIDv4 generated per explicit **Create** action |
+| | `revision` | Canonical lowercase UUIDv4 matching current options `revision` |
+| | `projectId`, `workingCopyId`, `profileId` | Configured choice IDs matching `^[a-z][a-z0-9-]{0,31}$` (`local` is permitted; project/profile IDs unique in their collections, working-copy IDs unique within a project; choice `label` values normalized to `1`–`64` NFC code points) |
+| `SessionCreationReceipt` (`parseSessionCreationReceipt`, $\le 2\text{ KiB}$) | `operationId` | Canonical lowercase UUIDv4 assigned by the daemon |
+| | `state` | `"accepted"` on `202 Accepted`; current `SessionCreationState` on `200 OK` idempotent replay |
+| `SessionCreationStatus` (`schemas/session-creation-status.schema.json`, $\le 2\text{ KiB}$) | `operationId` | Canonical lowercase UUIDv4 |
+| | `state` | `"accepted" \| "launching" \| "awaiting_omp" \| "ready" \| "started_unavailable" \| "failed" \| "outcome_unknown"` |
+| | `updatedAt` | Canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`) |
+| | `session` | Required iff `state === "ready"`: `{ instanceId: "^[a-z0-9-]{8,64}$", generation: 1..9007199254740991 }` |
+| | `error` | Required iff state is `failed`, `started_unavailable`, or `outcome_unknown` (closed `SessionCreationError`) |
 
-Project IDs and profile IDs are unique in their collections; working-copy IDs are unique
-within a project. Labels, executable/working-copy paths, argv/env, prompt text, raw CLI output,
-and capabilities are never echoed in problem bodies. Public options contain authored display
-labels, but never execution values; receipts/status contain no labels or capabilities.
+Public options expose only choice IDs and display labels — never filesystem paths, executables, `argv`, or `env`. Receipts, status responses, and problem bodies never echo labels, paths, `argv`, `env`, prompt text, raw CLI output, or capabilities.
 
 ### `GET /api/v1/session-creation-options`
 
-Authenticated, no query parameters, `no-store`. Returns `SessionCreationOptions` with exactly
-`version`, `revision`, `available`, `projects`, `profiles`, and `reason` **iff unavailable**:
+Authenticated, no query parameters, `Cache-Control: no-store, max-age=0`. Returns `200 OK` with `SessionCreationOptions`:
 
 ```json
 {
   "version": 1,
   "revision": "14f3cfa2-c391-4ada-91f0-e486fd5bfccc",
   "available": true,
-  "projects": [{
-    "id": "example",
-    "label": "Example project",
-    "workingCopies": [{ "id": "main", "label": "main" }]
-  }],
+  "projects": [
+    {
+      "id": "alpha-founder",
+      "label": "Alpha Founder",
+      "workingCopies": [{ "id": "main", "label": "main" }]
+    }
+  ],
   "profiles": [{ "id": "omp", "label": "OMP" }]
 }
 ```
 
-`revision` is an opaque random UUIDv4 generated once per daemon lifetime, not a configuration
-hash; restart invalidates old options for new admissions. Configuration is immutable during
-that lifetime. Unavailable options still return `200`, with `projects: []`, `profiles: []`,
-and one closed `SessionCreationUnavailableReason`: `not_configured`, `tern_unavailable`,
-`configuration_unavailable`, or `ledger_unavailable`. Never expose paths, argv, or env.
-Absence of `tern` reports `not_configured`, not an automatic default; an authored empty
-`tern: {}` is preserved but reports `configuration_unavailable`. A nonempty partial recipe is
-rejected during configuration parsing. A browser treats `404` from an older gateway as
-unavailable, not as permission to guess creation support from client-config.
-Availability probes are bounded/coalesced and cached for five seconds; during creation they
-reuse cached availability rather than starting a competing inspector.
+- `revision` is an opaque random UUIDv4 generated once per daemon lifetime; restarting the daemon invalidates previously fetched options without exposing a configuration hash.
+- When `available` is `false`, the response still returns `200 OK` with `projects: []`, `profiles: []`, and `reason`:
+  - `not_configured`: `config.tern` is absent.
+  - `configuration_unavailable`: `config.tern` is `{}` or a configured executable/working-copy runtime check failed.
+  - `tern_unavailable`: `tern inspect --json` failed or timed out, or the service is stopping.
+  - `ledger_unavailable`: `<stateDir>/session-creations.json` failed validation or could not be read/written safely.
+- Availability probes are demand-driven, coalesced, and cached for 5 seconds; while an operation owns the single CLI slot, `options` reuses the latest cached availability instead of spawning a second `tern` subprocess. A `404` on an older gateway is treated by the browser as unavailable.
 
 ### `POST /api/v1/session-creations`
 
-Authenticated, no query parameters. `SessionCreationRequest` has exactly:
+Authenticated, no query parameters, `Cache-Control: no-store, max-age=0`. Request body (`SessionCreationRequest`, $\le 4\text{ KiB}$):
 
 ```json
 {
   "clientOperationId": "4e86bd6c-f68a-4d96-8f34-bb7d67cdbe58",
   "revision": "14f3cfa2-c391-4ada-91f0-e486fd5bfccc",
-  "projectId": "example",
+  "projectId": "alpha-founder",
   "workingCopyId": "main",
   "profileId": "omp"
 }
 ```
 
-The IDs select fixed administrator-authored choices. There is no executable, path, command,
-argv, env, prompt, label, mode, or capability field. Same-origin admission uses
-`requestHasValidMutationContext`; cross-origin admission uses
-`requestHasTrustedDashboardContext` with exact `Content-Type: application/json`, as for launch.
+Admission and idempotency rules (executed inside one serialized admission section):
 
-- New operation: persist intent before scheduling execution, then `202` with
-  `SessionCreationReceipt` exactly `{ "operationId": "<uuid-v4>", "state": "accepted" }`.
-- Identical parsed payload for the **same normalized authorized identity + clientOperationId**:
-  `200` with the same operation ID and current `SessionCreationState`. Duplicate lookup precedes
-  revision/availability/rate admission, so a retained replay works across daemon revisions
-  and unavailable options; GET status is authoritative.
-- Same identity/clientOperationId with any changed field, including revision:
-  `409 operation_conflict`. New IDs with a stale options revision get `409 revision_mismatch`.
-- At most one nonterminal operation globally, with no queue. A distinct new operation while
-  busy gets `429 creation_busy`. The per-identity `creation` limiter is 20/minute, separate
-  from `launch` and `push`, with total key capacity `Math.max(3, identityCapacity * 3)`.
-  Charge only genuinely new admission after duplicate lookup; replay and OPTIONS cost no token.
-- Request abort, disconnect, browser Close, or navigation never cancels an accepted operation.
-  No DELETE/cancel/retry-creation endpoint exists.
+- **Mutation context:** Same-origin requests require `requestHasValidMutationContext`; cross-origin requests from `http.trustedDashboardOrigins` require `requestHasTrustedDashboardContext` with exact `Content-Type: application/json`.
+- **Idempotent replay (`200 OK`):** Keyed by **normalized authorized identity + `clientOperationId`** (independent of `Origin`). If an unexpired record matches both keys and the parsed request payload is identical, the gateway returns `200 OK` with `{ "operationId": "<uuid-v4>", "state": "<current-state>" }` before checking current `revision`, availability, busy state, or rate limits.
+- **Conflict (`409 operation_conflict`):** Same normalized identity + `clientOperationId` with any changed request field (including `revision`).
+- **New admission (`202 Accepted`):** Verified against current `revision` (`409 revision_mismatch` on mismatch), active operation slot (at most one nonterminal operation globally; `429 creation_busy` with no queue), availability (`503 tern_unavailable` or `503 ledger_unavailable`), configured choice IDs (`400 bad_request`), ledger capacity ($\le 64$ unexpired records; `503 creation_capacity`), and the per-identity `creation` rate limiter (`20/min`, tracked-key map capacity `Math.max(3, identityCapacity * 3)` where `identityCapacity` is `auth.allowedLogins.length` or `1` in `dev-localhost` mode, charged only for genuinely new admissions; `429 rate_limited`). The daemon persists `accepted` before returning `202 { "operationId": "<uuid-v4>", "state": "accepted" }` and scheduling execution.
+- **No remote cancellation:** Browser disconnect, request abort, or closing the tray never cancels an accepted daemon operation; no `DELETE` or cancel route exists.
 
 ### `GET /api/v1/session-creations/:operationId`
 
-Authenticated owner-scoped status, no query parameters, `no-store`. The path must match the
-exact lowercase UUIDv4 spelling; do not normalize encoded, uppercase, malformed, or extra
-segments into a valid operation path. `SessionCreationStatus` has exactly `operationId`,
-`state`, `updatedAt`, plus the state-dependent fields below:
+Authenticated owner-scoped status, no query parameters, `Cache-Control: no-store, max-age=0`. `:operationId` must match `SESSION_CREATION_UUID_PATTERN` (exact lowercase UUIDv4). Returns `200 OK` with `SessionCreationStatus` ($\le 2\text{ KiB}$):
 
 ```json
 {
@@ -501,91 +477,59 @@ segments into a valid operation path. `SessionCreationStatus` has exactly `opera
 }
 ```
 
-| State (`SessionCreationState`) | Additional required fields | Forbidden fields |
+| `state` (`SessionCreationState`) | Required state-specific field | Forbidden fields |
 | --- | --- | --- |
 | `accepted`, `launching`, `awaiting_omp` | None | `session`, `error` |
-| `ready` | `session: { instanceId, generation }` only | `error` |
-| `failed` | `error: preflight_failed \| spawn_failed \| interrupted` | `session` |
-| `started_unavailable` | `error: adoption_timeout \| correlation_ambiguous \| control_unavailable \| interrupted` | `session` |
-| `outcome_unknown` | `error: launch_outcome_unknown \| interrupted` | `session` |
+| `ready` | `session: { instanceId, generation }` | `error` |
+| `failed` | `error: "preflight_failed" \| "spawn_failed" \| "interrupted"` | `session` |
+| `started_unavailable` | `error: "adoption_timeout" \| "correlation_ambiguous" \| "control_unavailable" \| "interrupted"` | `session` |
+| `outcome_unknown` | `error: "launch_outcome_unknown" \| "interrupted"` | `session` |
 
-Unknown, expired, and another authorized identity's operations all return the same non-enumerating
-`404 not_found`. Ownership uses the normalized authorized identity, **not Origin**: that
-identity may inspect its operation from a different explicitly trusted dashboard. Status GET
-reads committed state only and never executes Tern. A ledger fault returns
-`503 ledger_unavailable`, not an uncommitted in-memory result.
+Unknown, expired, malformed-UUID, and other-identity operations all return `404 not_found`. Ownership is bound to the normalized authorized identity (not `Origin`), so the same identity can inspect its operation from another trusted dashboard. Status `GET` reads committed state only and never invokes Tern.
 
 ### Session creation state machine
 
-Every edge is durably written, synchronized, atomically published, and directory-synchronized
-before it becomes observable or its dependent action occurs:
+Every state transition is durably committed to `<stateDir>/session-creations.json` (write → `fsync` → atomic rename → directory `fsync`) before becoming observable in HTTP responses or triggering its dependent external action:
 
-| From → To | Trigger / durable boundary |
+| From → To | Trigger and durable boundary |
 | --- | --- |
-| none → `accepted` | Valid new request admitted; persist intent before all execution and 202 acknowledgement |
-| `accepted` → `launching` | Fresh OMP observation and Tern inspection preflight succeeds within 10 seconds; persist spawn-attempt marker **before** spawning |
-| `accepted` → `failed/preflight_failed` | Selected executable/path/inspection/discovery cannot be validated |
-| `accepted` → `failed/interrupted` | Shutdown/restart before a launching marker; never spawn from recovered accepted intent |
-| `launching` → `failed/spawn_failed` | OS process creation definitively failed before a child existed |
-| `launching` → `awaiting_omp` | CLI confirms one valid local block receipt; persist decimal-string block ID |
-| `launching` → `outcome_unknown/launch_outcome_unknown` | Child existed but output/result is lost, malformed, oversized, nonzero, timed out, or cancelled |
-| `launching` → `outcome_unknown/interrupted` | Shutdown/restart crosses the spawn-attempt window |
-| `awaiting_omp` → `ready` | Exact local block/pane join and unique fresh OMP binding pass current Control authorization |
-| `awaiting_omp` → `started_unavailable/correlation_ambiguous` | Multiple eligible OMP bindings; never choose arbitrarily |
-| `awaiting_omp` → `started_unavailable/control_unavailable` | Deadline reached with only a uniquely identified View-only host |
-| `awaiting_omp` → `started_unavailable/adoption_timeout` | Deadline without adoptable binding, including absent metadata or early command exit |
-| `awaiting_omp` → `started_unavailable/interrupted` | Shutdown/restart after durable confirmed start |
+| none → `accepted` | Valid new request admitted; durable intent committed before `202` response and before any preflight/spawn work |
+| `accepted` → `launching` | Runtime validation, fresh OMP discovery round (`refreshForAdoption`), and `tern inspect --json` preflight succeed within 10 s; baseline instance/session/block IDs recorded in memory; `launching` committed **before** `Bun.spawn` |
+| `accepted` → `failed` (`preflight_failed`) | Runtime path check, OMP discovery baseline, or `tern inspect --json` preflight fails or times out |
+| `accepted` → `failed` (`interrupted`) | Daemon shutdown or startup recovery before `launching` was committed; spawning is prohibited afterward |
+| `launching` → `failed` (`spawn_failed`) | OS process creation definitively failed before a child process existed |
+| `launching` → `awaiting_omp` | `tern new tab --json --keep-open --cwd <path> -- <argv…>` exits `0` within 10 s / 8 KiB with one valid local block receipt (`block` $< 2^{56}$ and not in pre-spawn baseline); decimal block ID committed with `awaiting_omp` |
+| `launching` → `outcome_unknown` (`launch_outcome_unknown`) | Child process existed, but stdout was lost, malformed, oversized, non-zero exit, timed out, or matched an existing baseline block ID |
+| `launching` → `outcome_unknown` (`interrupted`) | Daemon shutdown or startup recovery while in `launching` |
+| `awaiting_omp` → `ready` | Serial `tern inspect --json` (1 s interval, 5 s / 1 MiB bound) and post-spawn OMP discovery observation yield an exact 1:1 local `block === blocks[].id === panes[].pane` match, a single fresh OMP binding whose `sessionId` is a complete `[A-Za-z0-9-]+` token of `basename(omp_session_file)` minus `.jsonl` (with `startedAt` and `createdAt` $\ge$ `launching.updatedAt`, excluding baseline instance/session IDs), and `registry.authorizeLaunch(instanceId, generation, "control")` succeeds |
+| `awaiting_omp` → `started_unavailable` (`correlation_ambiguous`) | More than one eligible `(instanceId, generation)` binding matches |
+| `awaiting_omp` → `started_unavailable` (`control_unavailable`) | 110 s total operation deadline reached while the unique matching host is `view`-only |
+| `awaiting_omp` → `started_unavailable` (`adoption_timeout`) | 110 s total operation deadline reached without an adoptable binding (including missing `omp_session_file` or early process exit) |
+| `awaiting_omp` → `started_unavailable` (`interrupted`) | Daemon shutdown or startup recovery after `awaiting_omp` was committed |
 
-The total daemon deadline is **110 seconds from acceptance**. Terminal states are immutable.
-Restart classifies the three nonterminal states as above before serving creation traffic;
-it never resumes execution/adoption or automatically re-spawns. A failed durable checkpoint
-disables creation and cannot acknowledge success or permit a new spawn. A tab/OMP process
-already created may survive any browser/daemon cancellation.
-
-Adoption captures pre-spawn instance/session/block baselines, requires a discovery round started
-after spawning, and requires publication/snapshot start times no earlier than launching.
-Losslessly decoded unsigned 64-bit block IDs must equal one block ID and one pane ID, with no
-remote tag at bit 56 or above. Only a complete maximal `[A-Za-z0-9-]+` session-ID token in the
-`omp_session_file` basename without `.jsonl` can match OMP's own snapshot; no file contents are
-read. Exclude baseline IDs and deduplicate instance/generation bindings; no heuristic fallback.
-`registry.authorizeLaunch(instanceId, generation, "control")` is required before ready.
-Ready returns no capability: foreground source refresh must find that exact binding and Control
-before the ordinary launch POST, without substituting a newer generation.
+All terminal states (`ready`, `failed`, `started_unavailable`, `outcome_unknown`) are immutable. Total daemon execution is bounded to **110 seconds** monotonically from acceptance. `ready` carries only `{ instanceId, generation }`; the browser refreshes the selected source and calls ordinary `POST /api/v1/sessions/:instanceId/launch` (`mode: "control"`) to obtain the capability.
 
 ### Creation retention, errors, and browser watching
 
-The private `<stateDir>/session-creations.json` v1 ledger holds at most 64 records/512 KiB for
-**24 hours from acceptance**. Prune expired terminal records at startup/before admission;
-never evict an unexpired record for capacity. Idempotency and status lookup are guaranteed
-only inside that retention window; replay after expiry can be a new operation, not recovery.
-The ledger contains only owner/request IDs, state/timestamps, optional block ID, ready binding,
-and closed errors, never capabilities, labels, prompts, paths, argv/env, or raw CLI output.
-Corrupt/unsupported ledgers are preserved and creation fails closed.
+- **Ledger retention (`<stateDir>/session-creations.json`):** Version 1, at most 64 records, 512 KiB maximum, retained for **24 hours** from acceptance (`createdAt`). Expired terminal records are pruned at startup and before new admissions; unexpired records are never evicted.
+- **Problem responses (`application/problem+json`):** Use `{ code, message }` with fixed messages that never echo IDs, paths, `argv`, `env`, or CLI output. Terminal `status.error` values are returned inside `200 OK` `SessionCreationStatus` payloads, not as HTTP problem codes:
 
-HTTP problems reuse exactly `{ code, message }` with `Content-Type: application/problem+json`;
-messages are generic and never echo IDs or execution/CLI data. Terminal `status.error` values
-above are operation outcomes in a `200` status body, not HTTP problem codes.
+| HTTP status | `code` | Route(s) | Condition |
+| --- | --- | --- | --- |
+| `400 Bad Request` | `bad_request` | Options `GET`, Creations `POST`, Status `GET` | Query parameters on any route; malformed/oversized JSON body, unknown keys, or invalid UUID/choice ID in Creations `POST` |
+| `403 Forbidden` | `forbidden` | All creation routes and `OPTIONS` | Missing/disallowed Tailscale identity, unallowlisted `Origin`, invalid `Sec-Fetch-Site`, or cross-origin `POST` without exact `Content-Type: application/json` |
+| `404 Not Found` | `not_found` | Status `GET` (and unmatched paths) | Unknown, expired, non-UUIDv4 `:operationId` path segment, or another identity's `operationId` |
+| `409 Conflict` | `operation_conflict` | Creations `POST` | Same normalized identity + `clientOperationId` replayed with a different payload (including `revision`) |
+| `409 Conflict` | `revision_mismatch` | Creations `POST` | New `clientOperationId` submitted with a stale options `revision` |
+| `415 Unsupported Media Type` | `unsupported_media_type` | Creations `POST` | Same-origin `POST` without `Content-Type: application/json` |
+| `429 Too Many Requests` | `rate_limited` | Creations `POST` | Per-identity `creation` limiter (`20/min`) exceeded on a new operation |
+| `429 Too Many Requests` | `creation_busy` | Creations `POST` | Another creation operation is currently nonterminal (`accepted`, `launching`, or `awaiting_omp`) |
+| `503 Service Unavailable` | `tern_unavailable` | Creations `POST` | `tern` is unconfigured, runtime/inspect probe failed, or service is stopping |
+| `503 Service Unavailable` | `creation_capacity` | Creations `POST` | Ledger already holds 64 unexpired operations |
+| `503 Service Unavailable` | `ledger_unavailable` | Creations `POST`, Status `GET` | Private ledger could not be validated, read, or durably committed |
+| `500 Internal Server Error` | `internal_error` | All routes | Unexpected unhandled exception boundary |
 
-| HTTP status | Problem `code` / meaning |
-| --- | --- |
-| `400` | `bad_request`: malformed/oversized body, invalid choices, or query parameters |
-| `403` | `forbidden`: identity, Origin, or mutation-context refusal; cross-origin non-exact JSON also uses 403 |
-| `404` | `not_found`: unknown/expired/other-owner operation or unmatched API path |
-| `409` | `operation_conflict`, `revision_mismatch` |
-| `415` | `unsupported_media_type`: invalid same-origin JSON content type |
-| `429` | `rate_limited`, `creation_busy` |
-| `503` | `tern_unavailable`, `creation_capacity`, `ledger_unavailable` |
-| `500` | Existing generic `internal_error` boundary for an unexpected handler failure |
-
-Browser transport bounds are options 4 seconds, POST 10 seconds, status 4 seconds; remote
-requests use `mode: "cors"`, `credentials: "omit"`, `redirect: "error"` and local requests use
-same-origin credentials. No blind POST retries. Poll serially one second after the preceding
-status completes, for at most 120 seconds from the explicit Create action. Scope/source change,
-competing launch/tray, readable authorization loss, hidden/freeze/pagehide, or Close relinquishes
-automatic opening. Keep at most one paused capability-free tracking intent in page memory.
-**Check creation** explicitly GETs a known operation or replays the identical POST after a lost
-acknowledgement, never generating a new UUID automatically; after the watch deadline it is one
-bounded request, not another polling loop. Reload loses this tracking.
+- **Browser transport and watching (`SessionCreationTransport`, `SessionCreationController`):** Options `GET` timeout 4 s, creations `POST` timeout 10 s, status `GET` timeout 4 s; local requests use same-origin credentials, remote requests use `mode: "cors"`, `credentials: "omit"`, `redirect: "error"`, with no automatic `POST` retries. Status polling runs serially 1 s after each response completes for at most 120 s from the explicit **Create** action. Scope/source change, competing launch/tray, readable `403`, `visibilitychange` to hidden, `freeze`/`pagehide`, or **Close** stops watching while the daemon operation continues. One paused capability-free intent is held in page memory so **Check creation** can `GET` status (or replay the identical `POST` when the acknowledgement was lost) without generating a new UUID.
 
 ### `GET /api/v1/health`
 

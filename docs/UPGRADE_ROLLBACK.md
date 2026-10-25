@@ -46,29 +46,13 @@ Each readiness-proven `install` keeps the active runtime plus the two most recen
 
 ### Tern creation on every managed rollback
 
-Every managed `rollback` or `rollback --to` **conservatively disables creation** when `tern` is
-authored, regardless of the target version ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)).
-Older runtimes reject the unknown root key; no future release-version threshold is assumed.
+Every managed `rollback` or `rollback --to` **conservatively disables creation** when `tern` is authored in `config.json`, regardless of the target version ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)), because older runtimes reject unknown root keys:
 
-1. Atomically save the **full authored document** to `<configDir>/config.pre-rollback.json`
-   with private mode/ACL (`0600` on POSIX). Refuse to overwrite an existing backup and abort
-   before configuration/service mutation.
-2. `projectPreTernConfig` removes only `tern`. If the target is also older than `0.8.0`,
-   compose with `projectPreFleetConfig` to remove the fleet/speech keys below, using one full
-   backup and the existing transactional failure recovery.
-3. Start/readiness-check the selected runtime. Preserve the private
-   `<stateDir>/session-creations.json` ledger; older runtimes ignore it. Never resume or
-   automatically replay a recorded creation on returning to a newer runtime.
+1. `rollback` atomically writes the **full authored document** to `<configDir>/config.pre-rollback.json` with owner-only (`0600`) permissions. If `<configDir>/config.pre-rollback.json` already exists, `rollback` refuses to overwrite it and aborts before modifying `config.json` or the service (restore or move that backup file first).
+2. `rollback` removes `tern` from `<configDir>/config.json` (`projectPreTernConfig`, composed with `projectPreFleetConfig` when the target runtime is also older than `0.8.0`), using the same transactional failure recovery as `install`.
+3. `rollback` starts and readiness-checks the target runtime while preserving `<stateDir>/session-creations.json` (which older runtimes ignore) and leaving running Tern tabs and OMP processes untouched.
 
-After installing a runtime that understands `tern`, review the saved configuration and restore
-the section only through an explicit operator action, then rerun install and doctor. Do not
-automatically restore the full backup onto a runtime that rejects any of its keys. Remove the
-backup only after securely preserving any settings you need and completing restoration; its
-existence intentionally blocks another projecting rollback. See
-[creation setup and recovery](OPERATIONS.md#opt-in-tern-session-creation).
-
-Rollback, uninstall, configuration removal, and browser cancellation do not close a Tern tab
-or kill an already-started OMP process. Inspect and stop such processes explicitly in Tern/OMP.
+To re-enable creation after installing a creation-capable runtime, copy `<configDir>/config.pre-rollback.json` back to `<configDir>/config.json`, remove `<configDir>/config.pre-rollback.json`, and run `bun apps/gateway/src/cli.js install --origin <origin> --allow <login>` and `bun apps/gateway/src/cli.js doctor` from the verified extraction directory ([Operations](OPERATIONS.md#opt-in-tern-session-creation)). Do not copy a backup containing `tern` onto a runtime that does not support creation.
 
 ### Rolling back across the `v0.8.0` fleet and speech configuration boundary
 

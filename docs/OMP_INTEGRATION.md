@@ -271,14 +271,13 @@ is absent or safely readable (`discoveryReadable`), and reports `sessionHealth`.
 
 ## 6. Client and qualification boundary
 
-The gateway embeds the pinned OMP `collab-web` integration with in-memory capability bootstrap. The
-photo composer uses existing encrypted v3 image prompts; it does not add a gateway media endpoint
-or alter the discovery/query contract.
-Its embed contract publishes only `loading: { received, total } | null` snapshot counters for
-the gateway's joining/reconnecting chip. An optional `takeInitialPromptDraft()` drains a
-memory-only first-task draft once into the empty ordinary composer, only in live writable
-Control with a healthy relay, no active Ask and no photo draft or pending send. It never seeds
-Ask input, overwrites text, or submits; reconnects and rerenders do not reapply it.
+The gateway embeds the pinned OMP `collab-web` integration with in-memory capability bootstrap. Its
+embed contract publishes only `loading: { received, total } | null` snapshot counters for the
+gateway's joining/reconnecting chip and accepts an optional one-shot `takeInitialPromptDraft()`
+callback that drains a memory-only first-task draft once into an empty ordinary composer in live
+writable Control (with a healthy relay, no active Ask, and no photo draft or pending send), without
+auto-sending or reapplying on reconnect. The photo composer uses existing encrypted v3 image
+prompts; it does not add a gateway media endpoint or alter the discovery/query contract.
 
 Behavioral coverage for the registry reader and broker lives in
 `apps/gateway/test/omp-registry.test.ts`. Release qualification exercises the stock OMP binary,
@@ -291,51 +290,27 @@ failures, capability non-persistence, and the client/relay path; see [TEST_PLAN.
 Tern remains a terminal execution environment with OMP-native discovery ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration)); [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) permits only opt-in creation of a new OMP process and metadata-only adoption:
 
 - **Terminal-independent discovery:** stock OMP `>= 18.1.20` started inside a Tern pane, tab, or window publishes its discovery file and query endpoint under `~/.omp/run/collab-hosts` (or `~/.<PI_CONFIG_DIR>/run/collab-hosts`) whenever `collab.autoStart` is `control` or `view`, using the same OS user and configuration root as `omp-gatewayd`.
-- **Identity and mirroring:** gateway session identity remains OMP's `instanceId` and `generation`. Only an explicitly requested creation reads lossless local Tern block/pane IDs for exact correlation; the confirmed block ID may be retained in the private operation ledger, never used as session identity. Multiple Tern windows or panes mirroring a single `omp` process still correspond to one OMP discovery entry and therefore render one session row in **OMP Sessions**.
-- **Remote Tern panes:** an `omp` process running inside a Tern pane on a remote machine is discovered by the gateway running on that execution host (and surfaced either on that host's PWA or through browser-direct federation under [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)), never by inspecting local terminal windows on the viewing workstation.
+- **Identity and mirroring:** gateway session identity remains OMP's `instanceId` and `generation`. Only an explicitly requested creation reads lossless local Tern block/pane IDs for exact correlation; the confirmed block ID is recorded only in the private operation ledger, never used as session identity. Multiple Tern windows or panes mirroring a single `omp` process still correspond to one OMP discovery entry and render one session row in **OMP Sessions**.
+- **Remote Tern panes:** an `omp` process running inside a Tern pane on a remote machine is discovered by the gateway running on that execution host (and accessed either on that host's PWA or through browser-direct federation under [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)), never by inspecting local terminal windows on the viewing workstation.
 - **Browser launch semantics:** tapping **View** or **Control** in **OMP Sessions** always mounts the embedded OMP `collab-web` client in the browser; it never focuses, attaches to, or sends keystrokes to a native Tern pane.
-- **Default has no Tern dependency:** without an authored `tern` section, installation, `doctor`, discovery polling, and existing launches never probe or require Tern. Configured creation failure disables only creation. No Tern discovery adapter, general control surface, `tsp.ts` reader, or pane scraping is permitted; engineering and embedded-client pins are unchanged by creation.
+- **Default has no Tern dependency:** without an authored `tern` section, installation, `doctor`, discovery polling, and existing launches never probe or require Tern. Configured creation failure disables only creation. No Tern discovery adapter, general control surface, `tsp.ts` reader, or pane scraping is permitted; engineering and embedded-client pins are unchanged.
 
 ### Opt-in creation and adoption
 
-Configure the bounded `tern` section on the **execution host**, not the viewing phone or a
-gateway proxy; see [operator setup](OPERATIONS.md#opt-in-tern-session-creation).
-**New session** selects Host → Project → Working copy (when needed) → Profile, then
-**Create and open Control**. An optional **First task** stays in page memory and only seeds the
-ordinary empty Control composer once; **Send** remains separate.
+Configure the optional `tern` section on the **execution host** ([Operations setup](OPERATIONS.md#opt-in-tern-session-creation)). In **OMP Sessions**, **New session** walks through **Host** (when multiple sources exist) → **Project** → **Working copy** (when multiple exist) → **Profile** → **Create and open Control**, with an optional memory-only **First task** draft that seeds the empty Control composer once without auto-sending.
 
-The daemon uses an argv array for `tern new tab --json --keep-open --cwd <canonical-path> --
-<approved-argv…>`, then bounded `tern inspect --json` polling. It joins the returned numeric
-block losslessly to exactly one local block and pane. The `omp_session_file` metadata string's
-basename must contain the complete OMP snapshot session-ID token; its JSONL file is never
-opened or inspected. Baselines, post-spawn discovery rounds, timestamps, uniqueness, and fresh
-Control authorization exclude old or ambiguous hosts. The ready operation returns only OMP's
-instance/generation; a source refresh and ordinary Control launch fetch the capability.
+The daemon executes `[executable, "new", "tab", "--json", "--keep-open", "--cwd", path, "--", ...profile.argv]` and polls `tern inspect --json` serially. It decodes unsigned 64-bit IDs losslessly, rejects remote host tags at bit 56 or above, requires an exact 1:1 `block === blocks[].id === panes[].pane` match, and matches the complete `[A-Za-z0-9-]+` `sessionId` token in `basename(omp_session_file)` (minus `.jsonl`) against a post-spawn OMP discovery round without opening the JSONL file. Once a single fresh host binding passes `registry.authorizeLaunch(instanceId, generation, "control")`, status becomes `ready` with `{ instanceId, generation }`, and the browser refreshes the source and runs the ordinary Control launch.
 
-The CLI acts on Tern's **first window**, not a browser-selected window. The explicit profile
-environment is the entire environment of the CLI child, not a claim that Tern forwards it
-through its existing GUI server into the pane. Configure the Tern-side OMP environment and
-`collab.autoStart = control` to publish into the gateway's `omp.discoveryDir` beforehand.
-Cancellation stops browser watching, not the accepted creation or started process.
-`started_unavailable` means the command started but cannot be opened here; `outcome_unknown`
-means it may have started. Check Tern and the directory before explicitly creating another;
-neither outcome is automatically retried.
-
-Native **Open in Tern** is out of scope on every platform: Android 0.9.5 is
-**upstream-blocked** ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143));
-desktop handoff is deferred. No guessed deep link, focus command, attachment, or keystroke
-fallback is allowed.
+Tern's CLI opens the tab in the **first window** with `--keep-open`. `profile.env` is the complete environment of the `tern` CLI child and is not assumed to cross Tern's GUI-server RPC boundary into the pane, so OMP's Tern pane environment must already publish into `omp.discoveryDir` with `collab.autoStart = control`. Closing or backgrounding the browser stops watching without stopping the daemon operation or Tern tab; `started_unavailable` and `outcome_unknown` never auto-retry. Native **Open in Tern** handoff is out of scope on every platform: Android Tern `0.9.5` is upstream-blocked ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)) and desktop handoff is deferred.
 
 ### Pixel installed-build inventory (2026-10-24)
 
-Read-only package inspection recorded a Pixel 10 Pro on Android 17 (security patch
-2026-10-05), Chrome 155.0.8059.84, Tailscale installed, and Tern Android `so.stencil.tern`
-0.9.5 (versionCode 905; minSdk 28, targetSdk 34, sideloaded). Gateway PWAs were installed.
-The activity resolver exposed only `MAIN`/`LAUNCHER`: no `VIEW`, `BROWSABLE`, URL scheme,
-domain, or App Links registration; `pm get-app-links` returned no entries.
-[The upstream report](https://github.com/stencil-hq/tern-sdk/issues/143) records the same
-handler gap. This establishes the installed-build native-handoff blocker, **not** a successful
-creation, browser-to-Tern navigation, or physical-device qualification of ADR-043.
+Read-only device and desktop CLI probes on 2026-10-24 recorded:
+
+- **Android build (`Pixel 10 Pro`, `blazer`, Android 17 patch `2026-10-05`):** Chrome `155.0.8059.84`, Tailscale `com.tailscale.ipn`, installed **OMP Sessions** WebAPKs, and sideloaded Tern Android `so.stencil.tern` `0.9.5` (`versionCode 905`, `minSdk 28`, `targetSdk 34`).
+- **Intent-filter probe (`dumpsys package so.stencil.tern`, `pm get-app-links so.stencil.tern`):** `so.stencil.tern/so.stencil.platform.StencilActivity` declares only `android.intent.action.MAIN` + category `LAUNCHER` — no `VIEW`, `BROWSABLE`, URL scheme, domain, or App Links ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)).
+- **Desktop CLI probe (macOS, Tern `0.9.5` build `2863c37`):** `tern new tab --json --keep-open --cwd <dir> -- <argv…>` prints `{"block": <uint64>}` in the first window; `tern inspect --json` prints `sessions[].tabs[].blocks[]` and `panes[]` with matching numeric `id` and `pane` (observed `317827580031` on both) and `omp_session_file` (`<ISO-timestamp>_<sessionId>.jsonl`). `/Applications/Tern.app` registers URL scheme `tern` ("Tern pairing link", role Viewer) without documented session-routing semantics.
+- **Boundary:** Confirms the Android native-handoff blocker and desktop CLI correlation facts; it is not an end-to-end physical qualification of ADR-043 creation.
 
 ### Developer-workstation smoke (2026-10-22)
 

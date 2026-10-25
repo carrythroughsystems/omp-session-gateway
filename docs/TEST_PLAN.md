@@ -45,29 +45,27 @@ not qualify an actual OMP binary, native host, relay, or physical client.
 
 ### Opt-in Tern creation and embedded progress
 
-Required automated cases below exercise [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption).
-They are behavioral acceptance requirements, not a claim of physical qualification:
+Required automated cases below exercise [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) (behavioral test coverage, not physical-device qualification):
 
 | Area / suites | Required cases |
 | --- | --- |
-| Protocol (`packages/protocol/test/protocol.test.ts`) | Exact keys at every level, duplicate JSON keys, malformed/null/oversized bodies, canonical UUIDv4, ID/label/count bounds, all options availability reasons, receipt states, status field/error combinations, and parser/schema parity for the three public schemas |
-| Configuration (`apps/gateway/test/config.test.ts`) | Absent `tern` means not_configured without probing; authored empty object is preserved and configuration_unavailable, nonempty partial recipe rejected; strict nested keys; 32-KiB section/64-KiB document; absolute executables and canonical working copies; argv/env entry/aggregate bounds; required absolute HOME/all-absolute nonempty PATH; no inherited environment; authored-section preservation and byte-identical no-op reinstall |
-| CLI (`apps/gateway/test/tern-cli.test.ts`) | Literal argv with no shell/labels/task text; complete explicit env; lossless unsafe-number neighbors, uint64 edges and bit-56 host tags; duplicate/malformed/trailing/oversized JSON and parser resource bounds; exact one-block/one-pane equality; no focus/cwd/PID fallback; timeout, overflow, cancellation and read-error kill/reap/stdout cleanup; one CLI child at a time |
-| Adoption (`apps/gateway/test/omp-registry.test.ts`, creation service tests) | Fresh round starts after request, older round queues exactly one following round, coalesced waiters, cancellation isolation, reconcile-before-publish, stop suppression; OMP publication before receipt; post-spawn poll before filename metadata; old poll finishing after spawn; stale/baseline instance/session reuse; complete-token vs prefix collision; duplicate and ambiguous bindings; timestamp discontinuity; missing metadata, early exit, View-only and registry-capacity refusal |
-| Durable service (`apps/gateway/test/tern-creation.test.ts`) | Every state edge and 110-second deadline; concurrent identical acceptance, changed-payload/revision conflict, current-state replay across revision/availability changes, identity isolation, global busy, full unexpired capacity, 24-hour expiry; injected failure before/after write/fsync/atomic publish/directory sync/spawn/receipt/ready; accepted/launching/awaiting restart classification and no automatic re-spawn; corrupt/unsupported/unsafe ledgers preserved; status never starts Tern |
-| HTTP/security (`apps/gateway/test/http.test.ts`, `apps/gateway/test/security-mutations.test.ts`) | Exact new routes/methods and no query strings; owner/unknown/expired same 404; closed error codes; no-store on success/error; third-key rate isolation, duplicate-before-rate, no OPTIONS charge; exact-origin/Fetch Metadata/JSON context, authenticated route-specific GET/POST preflights and forbidden unsupported headers/methods/paths; no unintended CORS on excluded routes |
-| Operations (`apps/gateway/test/doctor.test.ts`, `diagnostics.test.ts`, `cli.test.ts`) | No Tern check/probe when absent; configured ternAvailable remains boolean and does not launch OMP; ledger/request/argv/env/raw CLI excluded from diagnostics; shutdown finalization does not kill tabs/OMP; every managed rollback projects tern away with one full private backup, refuses overwrite, composes fleet projection, preserves ledger, and retains transactional failure recovery |
-| Web (`apps/web/test/`, `apps/web/e2e/`) | Local/remote and empty-directory New session; options/POST/status bounds and credentials; Host/Working copy skips, logical Back/native cancel/focus/modality/48px controls without deeper native stack; ID-only bounded preferences validated against fresh options; explicit Create UUID; serial 1-second polling/120-second watch; lost acknowledgement and explicit identical replay; no automatic retry/create/open; 403/404/revision/busy/unavailable/terminal outcomes |
-| Lifecycle/handoff (`apps/web/test/`, `apps/web/e2e/`) | Cancel watching on source/scope/tray/launch/auth/hidden/freeze/pagehide/Close while daemon continues; at most one memory-only Check intent; source refresh, exact generation and Control before ordinary launch; late/stale/colliding-source ready cannot open; background return cannot auto-open; never substitute newer generation |
-| Draft and progress (`packages/collab-client/test/`, `apps/web/test/`, `apps/web/e2e/`) | Initial null/loading/completion/reconnect counters only; Joining vs Reconnecting, floor/clamp/invalid totals and failure priority, no duplicate announcements; 8,000-code-point/32-KiB draft once into empty healthy writable Control only; Ask/View/existing text/photo/pending send block consumption; no auto-send; reconnect/rerender cannot reapply; exact-binding retry-before-mount and disposal clear correctly |
+| Protocol (`packages/protocol/test/session-creation.test.ts`) | Exact keys at every level, duplicate JSON keys, malformed/null/oversized bodies, canonical lowercase UUIDv4, ID/label/count bounds, all options availability reasons, receipt states, status field/error combinations, and parser/schema parity for the three public schemas |
+| Configuration (`apps/gateway/test/config.test.ts`) | Absent `tern` reports `not_configured` without probing; authored `"tern": {}` is preserved verbatim and reports `configuration_unavailable`, while nonempty partial `tern` objects missing `executable`, `projects`, or `profiles` are rejected; strict nested keys; 32-KiB section / 64-KiB document; absolute executables and canonical `realpath` working copies; `argv`/`env` entry and aggregate bounds; required absolute `HOME` and all-absolute non-empty `PATH`; no inherited `process.env`; authored-section preservation, byte-identical no-op reinstall, and `projectPreTernConfig` rollback projection |
+| CLI (`apps/gateway/test/tern-cli.test.ts`) | Literal `argv` with no shell, labels, or task text; complete explicit `env`; lossless unsafe-number neighbors (`2^53 - 1`, `2^53`, `2^53 + 1`), uint64 edges, and bit-56 remote host tags; duplicate/malformed/trailing/oversized JSON and parser resource bounds; exact 1:1 block/pane equality; no focus/cwd/PID fallback; timeout, overflow, cancellation, and read-error kill/reap/stdout cleanup; one CLI child at a time |
+| Adoption (`apps/gateway/test/omp-registry.test.ts`, `apps/gateway/test/tern-creation.test.ts`) | Fresh round starts after request, older round queues one following round, coalesced waiters, cancellation isolation, reconcile-before-publish, stop suppression; OMP discovery publication arriving before `tern new tab` returns; post-spawn poll before filename metadata; old poll finishing after spawn; stale/baseline instance/session reuse; complete-token vs prefix collision; duplicate and ambiguous bindings; timestamp discontinuity; missing metadata, early exit, View-only, and registry-capacity refusal |
+| Durable service (`apps/gateway/test/tern-creation.test.ts`) | Every state edge and 110-second deadline; concurrent identical acceptance, changed-payload/revision conflict, current-state replay across revision/availability changes, identity isolation, global busy (`429 creation_busy`), full 64-record unexpired capacity (`503 creation_capacity`), 24-hour expiry; injected failure before/after write/fsync/atomic publish/directory sync/spawn/receipt/ready; `accepted`/`launching`/`awaiting_omp` restart classification and no automatic re-spawn; corrupt/unsupported/unsafe ledgers preserved; status `GET` never starts Tern |
+| HTTP/security (`apps/gateway/test/http.test.ts`, `apps/gateway/test/security-mutations.test.ts`) | Exact new routes/methods and no query strings; owner/unknown/expired return identical `404`; closed error codes; `no-store` on success/error; third-key `creation` rate isolation, duplicate-before-rate, no `OPTIONS` charge; exact-origin / Fetch Metadata / JSON context, authenticated route-specific `GET`/`POST` preflights, and forbidden unsupported headers/methods/paths; no unintended CORS on excluded routes |
+| Operations (`apps/gateway/test/doctor.test.ts`, `apps/gateway/test/diagnostics.test.ts`, `apps/gateway/test/cli.test.ts`) | No Tern check/probe when `tern` is absent; configured `ternAvailable` remains boolean and does not launch OMP; ledger/request/`argv`/`env`/raw CLI excluded from diagnostics; shutdown finalization does not kill tabs/OMP; every managed rollback projects `tern` away with one full private backup, refuses overwrite, composes fleet projection, preserves ledger, and retains transactional failure recovery |
+| Web (`apps/web/test/fleet.test.ts`, `apps/web/test/app.test.ts`, `apps/web/e2e/session-creation.e2e.ts`, `apps/web/e2e/trays.e2e.ts`) | Local/remote and empty-directory **New session**; options/POST/status bounds and credentials; Host/Working copy skips, logical `onBack`/native cancel/focus/modality/48px controls within the three-panel tray limit; ID-only bounded `omp.sessions.creation-prefs.v1` validated against fresh options; explicit Create UUID; serial 1-second polling / 120-second watch; lost acknowledgement and explicit identical replay; no automatic retry/create/open; `403`/`404`/revision/busy/unavailable/terminal outcomes |
+| Lifecycle/handoff (`apps/web/test/app.test.ts`, `apps/web/e2e/session-creation.e2e.ts`) | Cancel watching on source/scope/tray/launch/auth/hidden/freeze/pagehide/Close while daemon continues; at most one memory-only **Check creation** intent; source refresh, exact generation, and Control verified before ordinary launch; late/stale/colliding-source `ready` cannot open; background return never auto-opens; never substitute a newer generation |
+| Draft and progress (`packages/collab-client/test/embed.test.ts`, `packages/collab-client/test/initial-prompt-draft.test.ts`, `apps/web/test/app.test.ts`, `apps/web/e2e/embedded-progress.e2e.ts`, `apps/web/e2e/launch.e2e.ts`) | Initial `null` / loading / completion / reconnect counters only; `Joining session… 43%` vs `Reconnecting… 43%`, floor/clamp/invalid totals and failure priority, no duplicate live-region announcements; 8,000-code-point / 32-KiB draft consumed once into empty healthy writable Control only; Ask/View/existing text/photo/pending send block consumption; no auto-send; reconnect/rerender cannot reapply; exact-binding retry-before-mount and disposal clear holder |
 
-Creation leak fixtures use distinctive synthetic prompt, label, path, argv/env, raw CLI, token,
-and capability sentinels. Scan logs/errors, ledger, diagnostics, DOM/history, storage/caches,
-and retained artifacts against their allowed sinks: execution values only in private config /
-CLI invocation memory, first-task text only in volatile flow/composer memory until explicit
-Send, and no capabilities in creation DTOs or ledger. Creation may read OMP's discovery contract
-but never open session JSONL contents or modify/remove OMP-owned discovery files or sockets.
-Disable secret-bearing trace/HAR/video.
+Creation leak fixtures use distinctive synthetic prompt, label, path, `argv`/`env`, raw CLI, token,
+and capability sentinels across logs, problem responses, `<stateDir>/session-creations.json`,
+diagnostics archives, DOM/history, and browser storage/caches. Execution values stay in private
+config and CLI invocation memory; first-task text stays in volatile page/composer memory until
+explicit **Send**; no capabilities enter creation DTOs or the ledger; and session JSONL files and
+OMP discovery artifacts are never opened or modified by creation.
 
 ### HTTP/auth
 
@@ -618,45 +616,22 @@ To execute the manual Tern verification gate on a gateway workstation:
 ### I. Opt-in Tern creation physical acceptance — pending
 
 The [Pixel installed-build inventory](OMP_INTEGRATION.md#pixel-installed-build-inventory-2026-10-24)
-is read-only evidence for Android's native-handoff blocker, not a creation or progress pass.
-The following gates remain **pending physical verification** until exact candidate/host/client
-receipts are recorded; do not transfer the older developer-workstation smoke to ADR-043:
+records the read-only Android native-handoff probe and desktop CLI correlation probe; end-to-end
+physical verification of [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)
+remains **pending physical verification** across the following checks:
 
-1. Record sanitized host OS, Tern/OMP/Bun versions, gateway candidate, and phone/browser build.
-   Use only synthetic choices/task text and placeholder origins/paths in evidence.
-2. Start the gateway through its real per-user service, not an interactive-shell environment.
-   Use absolute executables and explicit HOME/PATH; confirm the CLI can inspect Tern and the
-   Tern pane's independently configured OMP environment publishes to `omp.discoveryDir` with Control.
-3. Capture a sanitized new-tab receipt and inspection: prove exact local block/pane equality
-   and a stock OMP basename's complete session-ID token matching its OMP-native snapshot.
-   Do not capture session-file contents, capability responses, raw private paths, or pane text.
-4. In the installed Pixel PWA over Tailscale Serve, create locally from approved choices.
-   Confirm one first-window Tern tab, one new OMP-native row, ordinary full-screen Control,
-   and an optional First task appearing once unsent in the ordinary composer.
-5. Repeat on a remote execution host through the exact trusted-dashboard CORS/preflight path.
-   Include colliding instance IDs across sources; opening must bind only the selected source,
-   instance, generation, and Control. Untrusted origins/identities cannot create.
-6. Close/background/change scope while starting, then explicitly Check creation. The daemon
-   continues, foreground return never auto-opens, and no replacement process is created.
-   Drop a POST acknowledgement and require identical explicit replay to find the same operation.
-7. Induce definitely failed, confirmed-started/unadoptable (including View-only), and unknown
-   outcomes. Verify honest copy, kept-open failure tab, no automatic retry, and manual directory
-   recovery; operator inspection precedes any new Create.
-8. Interrupt/restart at accepted, launching, and awaiting_omp checkpoints. Confirm the three
-   conservative interrupted states, preserved ledger, no resumed adoption or duplicate spawn.
-9. Open a large existing transcript and observe Joining percentage through live; interrupt
-   connectivity and observe Reconnecting through live without duplicate announcements,
-   draft reapplication, or changes to forbidden/ended/outage priority.
-10. Test native Back/Close, logical Back, keyboard/visual viewport, focus return, reduced motion,
-    and empty-directory entry on Pixel. Ask/photo/existing-text states must never be overwritten
-    or auto-sent by first-task seeding.
-11. Remove `tern`: ordinary install/doctor/discovery/launch still work with no Tern probe.
-    Re-enable, then managed rollback: full private backup, tern projection, retained ledger,
-    no killed OMP/tab, and explicit compatible-runtime restoration only.
-12. Scan all evidence and allowed browser/state sinks for synthetic secrets and excluded execution
-    values. Native handoff is **not** an acceptance workaround: Android 0.9.5 remains
-    [upstream-blocked on #143](https://github.com/stencil-hq/tern-sdk/issues/143);
-    desktop handoff is deferred.
+1. Record sanitized host OS, Tern/OMP/Bun versions, gateway build, and phone/browser versions using synthetic choices, task text, and placeholder origins/paths.
+2. Run the gateway through its per-user service (not an interactive shell) with absolute executables and explicit `HOME`/`PATH`; confirm `omp-gateway doctor` reports `"ternAvailable": true` and Tern's pane environment publishes to the directory configured in `omp.discoveryDir` with `collab.autoStart = control`.
+3. Capture sanitized `tern new tab --json` output (`{"block": <uint64>}`) and `tern inspect --json` output proving exact local block/pane equality and a stock OMP `omp_session_file` basename matching `OmpHostSnapshot.sessionId`, without capturing session-file contents, capabilities, private paths, or pane text.
+4. From the installed Pixel PWA over Tailscale Serve, create a local session from the configured project, working-copy, and profile choices and verify one first-window Tern tab, one new OMP-native directory row, ordinary full-screen **Control**, and an optional **First task** draft appearing once unsent in the empty Control composer.
+5. Repeat against a remote execution host through the trusted-dashboard CORS/preflight path, including colliding `instanceId` values across sources, and verify that opening binds only the selected source, `instanceId`, `generation`, and Control while untrusted origins/identities are denied.
+6. Close, background, or change scope during startup, then use **Check creation**: confirm the daemon continues, foreground return never auto-opens, and a dropped POST acknowledgement replays the identical `clientOperationId` to recover the same operation.
+7. Exercise `failed`, `started_unavailable` (including a `view`-only host), and `outcome_unknown`: confirm accurate status copy, kept-open Tern tab on command failure, no automatic retry, and manual directory refresh.
+8. Restart the daemon at `accepted`, `launching`, and `awaiting_omp` checkpoints and verify conservative reclassification (`failed/interrupted`, `outcome_unknown/interrupted`, `started_unavailable/interrupted`) with no resumed adoption or duplicate spawn.
+9. Open a large transcript and verify `Joining session… <pct>%` through live, then interrupt connectivity and verify `Reconnecting… <pct>%` through live without duplicate announcements, draft reapplication, or altered forbidden/ended/outage priority.
+10. Verify native Back/Close, logical Back, keyboard/visual viewport sizing, focus return, reduced motion, empty-directory **New session**, and non-overwrite when Ask, photo, or existing composer text is present.
+11. Remove `tern` and verify ordinary `install`, `doctor` (18 checks), discovery, and launch; re-enable `tern` and run `omp-gateway rollback` to verify `<configDir>/config.pre-rollback.json` backup, overwrite refusal, `tern` removal, preserved ledger, untouched Tern/OMP processes, and explicit restoration.
+12. Run capability and identifier leak scans across all captured artifacts. Native **Open in Tern** handoff remains out of scope ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)).
 
 ## 5. Relay soak test
 

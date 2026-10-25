@@ -1866,110 +1866,28 @@ unchanged.
 
 ## ADR-043 — Opt-in Tern creation with OMP-native adoption
 
-**Status:** Accepted; narrowly supersedes ADR-038's blanket creation prohibition and extends
-ADR-036's exact CORS surface. OMP identity, terminal-independent discovery, mirroring, and the
-no-native-handoff boundary remain.
+**Status:** Accepted; narrowly supersedes [ADR-038](#adr-038--tern-is-an-execution-environment-not-an-integration)'s blanket creation prohibition and extends [ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)'s exact CORS surface. OMP identity, terminal-independent discovery, mirroring, and the no-native-handoff boundary remain unchanged.
 
 **Date:** 2026-10-24
 
-**Context:** Operators want to start a new interactive OMP session from **OMP Sessions**, not
-inject commands into an existing terminal. Tern 0.9.5 provides bounded new-tab and inspection
-commands, but Tern identifiers are not OMP session identities and a successful tab receipt does
-not prove an adoptable collaboration host. A disconnected browser or interrupted daemon must
-not turn an uncertain spawn into a duplicate process. Creation also grants trusted dashboards
-a stronger privilege than reading metadata or opening an existing OMP collaboration session.
+**Context:** Operators want to start a new interactive `omp` session in Tern from **OMP Sessions** on their phone or browser, see join and reconnect progress on large transcripts, and optionally prepare a first-task draft while the session starts — without terminal scraping or command injection. Probes of Tern `0.9.5` established three constraints:
 
-**Decision:**
+1. **Desktop CLI correlation:** On macOS (`tern 0.9.5`, build `2863c37`), `tern new tab --json --keep-open --cwd <dir> -- <argv…>` opens a tab in the first window's shown session and prints `{"block": <uint64>}`; `tern inspect --json` returns `sessions[].tabs[].blocks[]` and `panes[]` where a block's `id` equals its pane's `pane` (observed `317827580031` on both), and `omp_session_file` is the absolute OMP session JSONL path whose basename (`<ISO-timestamp>_<sessionId>.jsonl`) contains the `<sessionId>` token that OMP publishes in `OmpHostSnapshot.sessionId`. Remote-host panes carry a host tag at bit 56 or above, so numeric IDs must be decoded losslessly without `Number` conversion and remote-tagged IDs rejected for local adoption.
+2. **Native handoff blocker:** On Android 17 (Pixel 10 Pro, `so.stencil.tern` `0.9.5`, `versionCode 905`), `dumpsys package` and `pm get-app-links` show only `MAIN` + `LAUNCHER` on `StencilActivity` — no `VIEW` or `BROWSABLE` intent filter, URL scheme, or App Links ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)) — while desktop `tern://` registers a pairing-link viewer without documented session-routing semantics. Same-device native **Open in Tern** handoff is therefore upstream-blocked on Android and deferred on desktop.
+3. **Operational safety and trust:** A tab receipt does not prove that OMP published a controllable collaboration host, and an interrupted HTTP request or daemon restart during spawn has an uncertain outcome that must never auto-retry into a duplicate process. Cross-origin creation also grants trusted dashboard origins a stronger privilege than listing sessions or launching an existing room.
 
-- The optional administrator-authored `tern` configuration is absent by default. Execute only
-  on the host running OMP, as its OS user. Fixed project/working-copy/profile IDs select approved
-  canonical directories, an absolute Tern executable, and literal argv arrays with an absolute
-  OMP executable; the browser never supplies executables, paths, argv, or env. Unknown keys and
-  configured size/count limits fail closed. Missing runtime prerequisites disable creation only.
-- Invoke only `tern new tab --json --keep-open --cwd <canonical-path> -- <profile-argv…>` and
-  `tern inspect --json`, without a shell. At most one CLI child runs at a time; new-tab is
-  bounded to 8 KiB/10 s and inspect to 1 MiB/5 s, with kill-and-reap on bound or cancellation.
-  `profile.env` is the entire CLI-child environment, never merged with the daemon environment;
-  require absolute `HOME` and nonempty all-absolute `PATH`. Environment propagation across the
-  existing Tern GUI-server RPC boundary is not assumed. Tern's pane environment/settings must
-  already publish into `omp.discoveryDir` with Control enabled.
-- Inspect metadata only: losslessly parse unsigned 64-bit numeric IDs, reject remote host tags
-  at bit 56 or above, and require exactly one equality join from the returned block to
-  `sessions[].tabs[].blocks[].id` and `panes[].pane`. Use only the absolute `omp_session_file`
-  metadata string's basename in memory; never open, stat, tail, or scrape the JSONL file.
-  No fallback to focus, order, cwd, title, program, or PID; no `tsp.ts`, terminal content,
-  pane scraping, keystrokes, focus, attachment, `tern events`, or general Tern control surface.
-- OMP retains discovery ownership, `instanceId`, generation, collaboration controller, wire
-  protocol, and relay. Capture fresh pre-spawn baselines, require a post-spawn discovery round,
-  exclude baseline instance/session IDs, and match a complete maximal `[A-Za-z0-9-]+` session-ID
-  token in the basename without `.jsonl`. Publication and snapshot start times must not predate
-  launching. Exactly one fresh binding and current `registry.authorizeLaunch(..., "control")`
-  are required for `ready`; ambiguity, View-only access, clock discontinuities, and incomplete
-  metadata never relax these conditions. The poller's private observation seam contains only
-  stripped binding/timing/Control metadata, never capabilities, tokens, endpoints, or cwd.
-- Expose only authenticated `GET /api/v1/session-creation-options`,
-  `POST /api/v1/session-creations`, and `GET /api/v1/session-creations/:operationId`, plus their
-  exact authenticated CORS preflights. Same-origin mutations use `requestHasValidMutationContext`;
-  trusted-dashboard mutations use `requestHasTrustedDashboardContext` with exact JSON content
-  type. The target's Tailscale allowlist still applies. **An opted-in target trusts JavaScript
-  from every configured dashboard origin to create processes from its approved profiles.**
-  No wildcard or credentialed CORS, capability-bearing creation DTO, client-config version
-  change, or expansion of the excluded routes is allowed; responses remain `no-store`.
-- Persist private intent before spawn in `<stateDir>/session-creations.json` v1. Every state
-  transition is written, synchronized, atomically published, and directory-synchronized before
-  exposure or its dependent action. Ownership and idempotency are scoped to the normalized
-  authorized identity plus client-operation UUID, not Origin. Keep at most 64 records for
-  24 hours from acceptance, within 512 KiB; never evict unexpired records. Allow one globally
-  nonterminal operation, with no queue, and a separate 20/minute creation limiter charged only
-  after duplicate lookup. Identical replay returns the same operation; changed payload,
-  including revision, conflicts. The options revision is a fresh UUID per daemon lifetime.
-  Store only private owner/request IDs, timestamps, state, optional block ID/ready binding,
-  and closed errors; never labels, prompts, capabilities, paths, argv/env, raw CLI output, or
-  `omp_session_file`.
-- Classify outcomes as `ready`, definitely `failed`, confirmed `started_unavailable`, or
-  `outcome_unknown`, with a 110-second total operation deadline. Terminal states are immutable;
-  uncertainty never permits automatic re-spawn. On shutdown/restart, durable `accepted` becomes
-  `failed/interrupted`, `launching` becomes `outcome_unknown/interrupted`, and `awaiting_omp`
-  becomes `started_unavailable/interrupted`; never resume execution or adoption. Corrupt,
-  unsupported, unsafe, or unwritable ledgers disable creation without overwriting evidence.
-- Browser Close, backgrounding, navigation, disconnect, or abort stops watching, not the
-  accepted daemon operation, Tern tab, or OMP process. The wizard watches serially for at most
-  120 seconds; an explicit **Check creation** reads status or replays the identical request
-  after a lost acknowledgement, never inventing a replacement UUID. **Create and open Control**
-  authorizes the ordinary launch only after a foreground source refresh verifies the exact
-  instance/generation and Control; do not substitute a newer generation.
-- The optional First task is limited to 8,000 Unicode code points/32 KiB and stays in page
-  memory, bound to the exact source/instance/generation. No prompts in process arguments,
-  links, requests, ledger, logs, diagnostics, or browser storage. The client's optional
-  `takeInitialPromptDraft` drains once into an empty ordinary composer only in live writable
-  Control with healthy relay, no active Ask, no photo draft, and no pending photo send. It
-  never overwrites text, fills Ask, synthesizes keystrokes, or sends. Remember only bounded
-  source-qualified choice IDs/timestamps, never draft text, labels, paths, or operation IDs.
-- Embedded `loading: { received, total } | null` carries counters only. The shell shows
-  **Joining session…** before first live and **Reconnecting…** afterward, with floored,
-  clamped 0–100% only for valid positive totals. Forbidden, ended, and sustained-outage copy
-  keeps priority; announce only changed copy. Snapshot ingestion and transcript ownership stay
-  in the pinned client.
+**Decision:** Permit one opt-in creation adapter on the execution host where OMP runs, governed by these invariants:
 
-**Consequences:** The CLI targets Tern's first window; this is an accepted limitation, not a
-window-selection promise. New tabs stay open on failure for operator inspection. An absent
-`tern` section preserves the existing no-Tern dependency, including no Tern doctor probe;
-configured `ternAvailable` reports runtime availability, not successful OMP adoption. Removing
-dashboard trust blocks further API requests but neither stops an accepted operation nor kills
-an already-started process, and does not revoke an issued OMP relay capability.
+- **Opt-in host configuration (`config.json` → `tern`):** Absent by default (`not_configured`); an authored `"tern": {}` is preserved verbatim and reports `configuration_unavailable`. Runs only on the execution host as the OMP OS user. Bounded to 32 KiB (within the 64 KiB config limit), 1–16 `projects`, 1–8 canonical `realpath` `workingCopies` per project, and 1–8 `profiles` (IDs match `^[a-z][a-z0-9-]{0,31}$` without reserving `local`; labels use fleet normalization: NFC, control/bidi characters stripped, trimmed, 1–64 code points). Each profile defines an absolute executable in `argv[0]` (1–32 literal strings, at most 4,096 bytes for `argv[0]`, 1,024 bytes per remaining argument, and 8 KiB total) and an explicit `env` map (1–16 entries matching `^[A-Z_][A-Z0-9_]{0,63}$`, at most 1,024 bytes per value and 8 KiB total, with required absolute `HOME` and non-empty all-absolute `PATH`) that forms the entire Tern CLI child environment without merging `process.env`. Unknown keys and partial objects missing `executable`, `projects`, or `profiles` fail closed. The browser sends only configured `projectId`, `workingCopyId`, and `profileId` — never executables, paths, arguments, environment variables, or task text.
+- **Bounded Tern CLI boundary (`apps/gateway/src/tern-cli.ts`):** Invokes only `[executable, "new", "tab", "--json", "--keep-open", "--cwd", path, "--", ...profile.argv]` (8 KiB / 10 s) and `[executable, "inspect", "--json"]` (1 MiB / 5 s) without a shell, one subprocess at a time, killing and reaping the child on timeout, overflow, or cancellation. A bounded lossless tokenizer parses unsigned 64-bit integer lexemes via `BigInt` into decimal strings without `Number` conversion, rejects remote host tags at bit 56 or above, requires an exact 1:1 match between the returned `block`, `sessions[].tabs[].blocks[].id`, and `panes[].pane`, and extracts only the basename of `omp_session_file` in memory without opening, stating, or reading the JSONL file. Never fall back to focus, order, cwd, title, program, or PID; never read `tsp.ts` frames or terminal content; never invoke `tern events`, focus, attach, or inject keystrokes.
+- **OMP-native adoption (`apps/gateway/src/omp-registry.ts`, `tern-creation.ts`):** OMP retains session identity (`instanceId`, `generation`), discovery ownership, collaboration controller, wire protocol, and relay. Before spawning, the service captures baseline instance IDs, session IDs, and local block IDs within a 10-second preflight budget. After a confirmed new block, it subscribes to stripped poller observation batches (`subscribeObservations`) and requests a discovery round started after the spawn (`refreshForAdoption`). Adoption requires a post-spawn discovery round, excludes baseline instance and session IDs, requires snapshot and publication timestamps no earlier than `launching`, matches a complete maximal `[A-Za-z0-9-]+` `sessionId` token in the `omp_session_file` basename (minus `.jsonl`), requires a single unique `instanceId`/`generation` binding, and verifies `registry.authorizeLaunch(instanceId, generation, "control")` before persisting `ready`.
+- **HTTP, CORS, and rate-limit contract:** Expose only authenticated `GET /api/v1/session-creation-options` (64 KiB), `POST /api/v1/session-creations` (4 KiB request, 2 KiB receipt), and `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4, 2 KiB), plus their authenticated `OPTIONS` preflights under `corsRouteMethod`. Same-origin POSTs require `requestHasValidMutationContext`; cross-origin POSTs require `requestHasTrustedDashboardContext` with exact `Content-Type: application/json`. Options carry a per-daemon-lifetime UUIDv4 `revision` and choice IDs/labels only; status and problem bodies never echo paths, argv, env, or raw CLI output. A third per-identity limiter key (`creation`, 20/min, total key capacity `Math.max(3, identityCapacity * 3)`) charges only genuinely new admissions after idempotency lookup. All responses are `no-store`, and `client-config` v1 is unchanged.
+- **Durable ledger, state machine, and crash recovery (`<stateDir>/session-creations.json`):** Version 1, private mode (`0600` / owner ACL), at most 64 records, 512 KiB, 24-hour retention from acceptance, one nonterminal operation globally (`429 creation_busy`, no queue), and a 110-second total deadline. Every state transition (`accepted → launching → awaiting_omp → ready | started_unavailable | failed | outcome_unknown`) is written, fsynced, atomically published, and directory-synced before exposure or `Bun.spawn`. Idempotency and status ownership are scoped to normalized authorized identity (lowercased, trimmed NFC Tailscale login) + `clientOperationId` (not `Origin`): identical replay returns `200` with current state; changed payload (including `revision`) returns `409 operation_conflict`; unknown, expired, or other-identity operations return `404`. Startup and shutdown classify nonterminal records conservatively (`accepted → failed/interrupted`, `launching → outcome_unknown/interrupted`, `awaiting_omp → started_unavailable/interrupted`) and never resume execution or automatically re-spawn. Corrupt or unwritable ledgers fail closed (`503 ledger_unavailable`) without overwriting the file or impairing existing session discovery and launch.
+- **Browser wizard, watching lifecycle, and volatile first-task draft:** **New session** runs in the native tray via `replace()` with an optional `TrayPanel.onBack` callback (invoked by the leading Back control and native cancel before popping the stack): Host (skipped with one source) → Project → Working copy (skipped when one) → Profile → **Create session** review (**Create and open Control** + optional **First task** textarea bounded to 8,000 Unicode code points / 32 KiB) → **Starting session** progress. The browser polls status serially at 1-second intervals for at most 120 seconds. Closing, backgrounding, scope change, competing launch/tray, or authorization loss stops browser watching without cancelling the daemon operation; one paused in-memory intent supports manual **Check creation** (status `GET` or identical `POST` replay when the acknowledgement was lost, never a new UUID). On `ready`, the app refreshes that source, verifies the exact `instanceId`, `generation`, and Control, closes the wizard, and runs the ordinary full-screen `launch()`. The volatile draft holder bound to `{source, instanceId, generation}` is drained once by `CollabEmbedOptions.takeInitialPromptDraft()` into an empty ordinary Composer only in live writable Control with a healthy relay, no active Ask, and no photo draft or pending send — never auto-sent and never persisted. `localStorage` key `omp.sessions.creation-prefs.v1` (at most 8 source-qualified records, 16 KiB) stores only choice IDs and `updatedAt`.
+- **Embedded snapshot progress:** `CollabEmbedState.loading: { received: number; total: number } | null` forwards snapshot counters only (`null` when no client exists or loading finishes). `renderConnectionState` displays `Joining session… 43%` before first live and `Reconnecting… 43%` after an earlier live connection, flooring and clamping to 0–100%, omitting the percentage for zero/invalid totals, preserving forbidden/ended/outage priority, and updating the DOM only when the copy changes.
 
-Install/reinstall preserves authored `tern` verbatim. Every managed rollback conservatively
-projects it away with `projectPreTernConfig`, composed with `projectPreFleetConfig` when needed,
-after backing up the full authored document to private `config.pre-rollback.json` and refusing
-to overwrite that backup. Preserve the private ledger; older runtimes ignore it. Re-enabling
-creation requires explicit operator restoration, and rollback/uninstall never imply process
-termination. See [Operations](OPERATIONS.md#opt-in-tern-session-creation),
-[Protocol](PROTOCOL.md#session-creation-state-machine), and
-[Upgrade and rollback](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
+**Consequences:**
 
-Native **Open in Tern** handoff is not implemented on any platform: Android Tern 0.9.5 is
-**upstream-blocked** by the missing browser-invocable intent filter
-([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)); desktop handoff is deferred.
-The Tern plugin, desk-handoff queue, and unified notifications are later work. The implementation
-and the read-only Pixel package inventory do not establish physical creation qualification;
-existing Tested / Supported / Qualified claims and upstream pins remain unchanged.
+- **Trust change:** Enabling `tern` on a target host grants every origin in `http.trustedDashboardOrigins` permission to start approved OMP profiles under the caller's allowlisted Tailscale identity. Removing a dashboard origin blocks further cross-origin API requests immediately, but does not stop an accepted creation, kill a running OMP process, or revoke an already-issued relay capability.
+- **Limitations:** `tern new tab` targets Tern's first window and uses `--keep-open` so failed commands remain inspectable in Tern. `profile.env` supplies only the Tern CLI child's environment and is not assumed to cross Tern's GUI-server RPC boundary into the pane; the Tern pane's OMP environment must already publish into the directory configured in `omp.discoveryDir` with `collab.autoStart = control`. Absent `tern` preserves zero Tern dependency (18 base `doctor` checks); when `tern` is authored, `doctor` adds `ternAvailable` to verify runtime paths, `inspect --json`, and ledger readability without starting OMP. Native **Open in Tern** handoff remains out of scope: Android Tern `0.9.5` is upstream-blocked ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)) and desktop handoff is deferred. Existing Tested / Supported / Qualified claims and upstream pins remain unchanged.
+- **Upgrade and rollback:** `omp-gateway install` preserves authored `tern` verbatim. Every managed `rollback` or `rollback --to` conservatively disables creation via `projectPreTernConfig` (composed with `projectPreFleetConfig` for targets `< 0.8.0`), saving the full authored config to private `<configDir>/config.pre-rollback.json` first (refusing overwrite if that backup exists) while preserving `<stateDir>/session-creations.json` and leaving running Tern tabs and OMP processes untouched. Re-enabling creation requires explicit operator restoration on a compatible runtime. See [Operations](OPERATIONS.md#opt-in-tern-session-creation), [Protocol](PROTOCOL.md#session-creation-state-machine), and [Upgrade and rollback](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
