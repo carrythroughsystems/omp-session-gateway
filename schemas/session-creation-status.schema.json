@@ -1,60 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://omp-session-gateway.local/schemas/session-creation-status.schema.json",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "operationId",
-    "state",
-    "updatedAt"
-  ],
-  "properties": {
-    "operationId": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "state": {
-      "enum": [
-        "accepted",
-        "launching",
-        "awaiting_omp",
-        "ready",
-        "started_unavailable",
-        "failed",
-        "outcome_unknown"
-      ]
-    },
-    "updatedAt": {
-      "type": "string",
-      "format": "date-time",
-      "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$"
-    },
-    "session": {
+  "oneOf": [
+    {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "instanceId",
-        "generation"
+        "operationId",
+        "updatedAt",
+        "state"
       ],
       "properties": {
-        "instanceId": {
+        "operationId": {
           "type": "string",
-          "pattern": "^[a-z0-9-]{8,64}$"
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         },
-        "generation": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
-        }
-      }
-    },
-    "error": {
-      "type": "string"
-    }
-  },
-  "oneOf": [
-    {
-      "properties": {
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$"
+        },
         "state": {
           "enum": [
             "accepted",
@@ -62,39 +27,70 @@
             "awaiting_omp"
           ]
         }
-      },
-      "not": {
-        "anyOf": [
-          {
-            "required": [
-              "session"
-            ]
-          },
-          {
-            "required": [
-              "error"
-            ]
-          }
-        ]
       }
     },
     {
-      "properties": {
-        "state": {
-          "const": "ready"
-        }
-      },
+      "type": "object",
+      "additionalProperties": false,
       "required": [
+        "operationId",
+        "updatedAt",
+        "state",
         "session"
       ],
-      "not": {
-        "required": [
-          "error"
-        ]
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$"
+        },
+        "state": {
+          "const": "ready"
+        },
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "instanceId",
+            "generation"
+          ],
+          "properties": {
+            "instanceId": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]{8,64}$"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        }
       }
     },
     {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "updatedAt",
+        "state",
+        "error"
+      ],
       "properties": {
+        "operationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$"
+        },
         "state": {
           "const": "failed"
         },
@@ -105,18 +101,27 @@
             "interrupted"
           ]
         }
-      },
-      "required": [
-        "error"
-      ],
-      "not": {
-        "required": [
-          "session"
-        ]
       }
     },
     {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "updatedAt",
+        "state",
+        "error"
+      ],
       "properties": {
+        "operationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$"
+        },
         "state": {
           "const": "started_unavailable"
         },
@@ -128,18 +133,27 @@
             "interrupted"
           ]
         }
-      },
-      "required": [
-        "error"
-      ],
-      "not": {
-        "required": [
-          "session"
-        ]
       }
     },
     {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "updatedAt",
+        "state",
+        "error"
+      ],
       "properties": {
+        "operationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$"
+        },
         "state": {
           "const": "outcome_unknown"
         },
@@ -149,14 +163,6 @@
             "interrupted"
           ]
         }
-      },
-      "required": [
-        "error"
-      ],
-      "not": {
-        "required": [
-          "session"
-        ]
       }
     }
   ]

@@ -13,7 +13,7 @@ const choice = { id: "local", label: "Example" };
 const options = { version: 1, revision: uuid, available: true,
   projects: [{ ...choice, workingCopies: [choice] }], profiles: [choice] };
 const status = { operationId: uuid, state: "accepted", updatedAt: "2026-10-24T00:00:00.000Z" };
-const ajv = new Ajv2020({ strict: true, allErrors: true, strictRequired: false, strictTypes: false });
+const ajv = new Ajv2020({ strict: true, allErrors: true });
 addFormats(ajv);
 const schemas = await Promise.all(["options", "request", "status"].map(async (name) =>
   ajv.compile(await Bun.file(new URL(`../../../schemas/session-creation-${name}.schema.json`, import.meta.url)).json())));
