@@ -10,7 +10,14 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const inspect = (id = "317827580031", extra = ""): string => `{"sessions":[{"tabs":[{"blocks":[{"id":${id},"command":"SYNTHETIC_COMMAND_SECRET"}]}]}],"panes":[{"pane":${id},"omp_session_file":"/SYNTHETIC_PATH_SECRET/2026-10-24T00-00-00-000Z_session-one.jsonl"}]${extra}}`;
-async function fake(mode = "success") {
+// Verbatim receipt observed from Tern 0.9.5 on the execution host.
+const realReceipt = `{
+  "session": 4,
+  "tab": 515396075521,
+  "block": 515396075522
+}
+`;
+async function fake(mode = "success", receipt = realReceipt) {
   const root = await mkdtemp(join(tmpdir(), "tern-boundary-")); roots.push(root);
   const executable = join(root, "tern");
   await writeFile(executable, `#!${process.execPath}\nimport * as fs from 'node:fs/promises';
@@ -24,7 +31,7 @@ else if(mode === 'malformed') console.log('{');
 else if(mode === 'duplicate') console.log('{"block":1,"block":2}');
 else if(mode === 'remote') console.log('{"block":72057594037927936}');
 else if(process.argv[2] === 'inspect') console.log(${JSON.stringify(inspect())});
-else console.log('{"block":317827580031}');\n`);
+else process.stdout.write(${JSON.stringify(receipt)});\n`);
   await chmod(executable, 0o700);
   const profile: TernProfile = { id: "omp", label: "Synthetic profile", argv: [process.execPath, "$(SYNTHETIC_ARG_SECRET)", "literal;argument"],
     env: { HOME: root, PATH: dirname(process.execPath), MODE: mode } };
@@ -72,7 +79,7 @@ describe("bounded Tern subprocess", () => {
   test("uses literal argv, keep-open, canonical executable and only the configured environment", async () => {
     const fixture = await fake();
     const cli = new TernCli(fixture.executable);
-    expect(await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal)).toEqual({ kind: "started", blockId: "317827580031" });
+    expect(await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal)).toEqual({ kind: "started", blockId: "515396075522" });
     const received = JSON.parse(await readFile(join(fixture.root, "received"), "utf8"));
     expect(received.argv).toEqual(["new", "tab", "--json", "--keep-open", "--cwd", fixture.copy.path, "--",
       await realpath(process.execPath), "$(SYNTHETIC_ARG_SECRET)", "literal;argument"]);
@@ -82,6 +89,35 @@ describe("bounded Tern subprocess", () => {
     expect(await cli.inspect(fixture.profile, new AbortController().signal)).toEqual(parseTernInspection(bytes(inspect())));
     expect(await validateTernRuntime({ executable: fixture.executable,
       projects: [{ id: "main", label: "Main", workingCopies: [fixture.copy] }], profiles: [fixture.profile] })).toBe(true);
+  });
+  test("accepts the verbatim pretty-printed three-key Tern 0.9.5 receipt", async () => {
+    const fixture = await fake();
+    expect(await new TernCli(fixture.executable).createTab(fixture.copy, fixture.profile, new AbortController().signal))
+      .toEqual({ kind: "started", blockId: "515396075522" });
+  });
+  test("discards bounded additive receipt metadata while preserving a lossless local block", async () => {
+    for (const receipt of [
+      '{"block":9007199254740993}',
+      '{"session":18446744073709551615,"tab":9007199254740995,"block":9007199254740993,"extra":{"nested":["TERN_RECEIPT_PRIVATE_CANARY",1e30]}}',
+    ]) {
+      const fixture = await fake("success", receipt);
+      const result = await new TernCli(fixture.executable).createTab(fixture.copy, fixture.profile, new AbortController().signal);
+      expect(result).toEqual({ kind: "started", blockId: "9007199254740993" });
+      expect(JSON.stringify(result)).not.toContain("TERN_RECEIPT_PRIVATE_CANARY");
+    }
+  });
+  test("requires block and validates optional session/tab unsigned integer lexemes without weakening unknown outcomes", async () => {
+    const invalid = ['{"session":4,"tab":515396075521}', '{"block":1,"extra":"x","extra":"y"}'];
+    for (const key of ["session", "tab", "block"]) {
+      for (const value of ['null', '"4"', '-1', '1.0', '1e3', '18446744073709551616']) {
+        invalid.push(`{"${key}":${value}${key === "block" ? "" : ',"block":515396075522'}}`);
+      }
+    }
+    for (const receipt of invalid) {
+      const fixture = await fake("success", receipt);
+      expect(await new TernCli(fixture.executable).createTab(fixture.copy, fixture.profile, new AbortController().signal))
+        .toEqual({ kind: "unknown" });
+    }
   });
   test("classifies malformed, oversized, duplicate, nonzero and remote results as uncertain, never retrying", async () => {
     for (const mode of ["malformed", "overflow", "duplicate", "nonzero", "remote"]) {
@@ -113,6 +149,6 @@ describe("bounded Tern subprocess", () => {
     controller.abort();
     expect(await pending).toEqual({ kind: "unknown" });
     expect(await cli.createTab(fixture.copy, { ...fixture.profile, env: { ...fixture.profile.env, MODE: "success" } }, new AbortController().signal))
-      .toEqual({ kind: "started", blockId: "317827580031" });
+      .toEqual({ kind: "started", blockId: "515396075522" });
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { GatewayConfig } from "../src/config.ts";
 import type { AdoptionObservation, AdoptionRefresh } from "../src/omp-registry.ts";
 import { SessionCreationService, SessionCreationProblem, validateCreationLedger, type CreationLedger } from "../src/tern-creation.ts";
-import type { TernCreateResult, TernInspection } from "../src/tern-cli.ts";
+import { parseTernInspection, type TernCreateResult, type TernInspection } from "../src/tern-cli.ts";
 import type { SessionCreationRequest } from "@omp-session-gateway/protocol";
 const revision = "11111111-1111-4111-8111-111111111111";
 const operationId = "22222222-2222-4222-8222-222222222222";
@@ -89,7 +89,11 @@ async function fixture(options: FixtureOptions = {}) {
       async inspect() {
         inspections++;
         if (inspections <= 2) return options.baselineInspection ?? empty; // availability, then preflight
-        if (options.lateMetadata && inspections === 3) return { blocks: ["42"], panes: [{ paneId: "42" }] };
+        if (options.lateMetadata && inspections >= 3 && inspections <= 5) {
+          return parseTernInspection(new TextEncoder().encode(
+            '{"sessions":[{"tabs":[{"blocks":[{"id":42}]}]}],"panes":[{"pane":42,"omp_session_file":null}]}',
+          ));
+        }
         return options.inspection ?? target;
       },
       async createTab(_copy, _profile, signal) {
@@ -172,10 +176,11 @@ describe("durable session creation transitions", () => {
     const f = await fixture({ hosts: [host, host] }); await f.service.accept("owner", request, () => true); await f.finish();
     expect(f.service.status("owner", operationId)?.state).toBe("ready");
   });
-  test("retains fresh observations when file metadata appears after the immediate discovery poll", async () => {
+  test("keeps inspecting null session-file metadata until it appears after the immediate discovery poll", async () => {
     const f = await fixture({ lateMetadata: true }); await f.service.accept("owner", request, () => true); await f.finish();
     expect(f.service.status("owner", operationId)?.state).toBe("ready");
-    expect(f.inspections).toBe(4);
+    expect(f.inspections).toBe(6);
+    expect(f.writes.map(text => JSON.parse(text).operations[0].status.state)).toEqual(["accepted", "launching", "awaiting_omp", "ready"]);
   });
   for (const [option, state] of [["heldSpawn", "outcome_unknown"], ["heldAdoption", "started_unavailable"]] as const) {
     test(`shutdown durably classifies ${option} and removes its subscription`, async () => {

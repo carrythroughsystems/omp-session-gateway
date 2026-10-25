@@ -77,10 +77,15 @@ function array(value: Json | undefined, maximum: number): Json[] {
   if (!Array.isArray(value) || value.length > maximum) return invalid();
   return value;
 }
-export function localTernId(value: Json | undefined): string {
+function unsignedTernId(value: Json | undefined): bigint {
   if (!(value instanceof NumericLexeme) || !/^(?:0|[1-9][0-9]*)$/u.test(value.value)) return invalid();
   const id = BigInt(value.value);
-  if (id > 0xffffffffffffffffn || id >> 56n !== 0n) return invalid();
+  if (id > 0xffffffffffffffffn) return invalid();
+  return id;
+}
+export function localTernId(value: Json | undefined): string {
+  const id = unsignedTernId(value);
+  if (id >> 56n !== 0n) return invalid();
   return id.toString();
 }
 export interface TernInspection {
@@ -208,7 +213,10 @@ export class TernCli implements TernCliBoundary {
     if (result.kind !== "output") return result;
     try {
       const receipt = object(parseTernJson(result.bytes));
-      if (Object.keys(receipt).length !== 1) return { kind: "unknown" };
+      // Tern includes session/tab locators and may add bounded metadata; only the local block is adopted.
+      for (const key of ["session", "tab"]) {
+        if (Object.hasOwn(receipt, key)) unsignedTernId(receipt[key]);
+      }
       return { kind: "started", blockId: localTernId(receipt.block) };
     } catch { return { kind: "unknown" }; }
   }
