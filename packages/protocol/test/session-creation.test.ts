@@ -24,7 +24,7 @@ describe("session creation public contract", () => {
     expect(schemas[1]!(request)).toBe(true);
     for (const value of [options, ...["not_configured", "tern_unavailable", "configuration_unavailable", "ledger_unavailable"]
       .map((reason) => ({ version: 1, revision: uuid, available: false, reason, projects: [], profiles: [] }))]) {
-      expect(parseSessionCreationOptions(value)).toEqual(value);
+      expect<unknown>(parseSessionCreationOptions(value)).toEqual(value);
       expect(schemas[0]!(value)).toBe(true);
     }
     for (const state of SESSION_CREATION_STATES) {
@@ -33,7 +33,7 @@ describe("session creation public contract", () => {
       for (const error of errors ?? [undefined]) {
         const value = { ...status, state, ...(error === undefined ? {} : { error }),
           ...(state === "ready" ? { session: { instanceId: "instance-test", generation: 1 } } : {}) };
-        expect(parseSessionCreationStatus(value)).toEqual(value);
+        expect<unknown>(parseSessionCreationStatus(value)).toEqual(value);
         expect(schemas[2]!(value)).toBe(true);
       }
     }
