@@ -13,7 +13,7 @@ requires Bun `1.4.0`, TUN-mode Tailscale Serve, an exact login allowlist, and th
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
 | Engineering host baseline | `v18.12.5` (`d5cd750e41fede277f9eb933455da92a0738915e`) | Exact OMP source and tree (`1d19bf65af4446fa9bfda4ed0a7d09315b02d9c8`) in `UPSTREAM.lock.json` |
-| Embedded browser client | `v18.4.2` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.4.2`) | Independent browser-client provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); it does not import the `collab-web` Markdown-rendering changes upstream shipped in v18.4.12, the render-coalescing changes in v18.8.0 ([can1357/oh-my-pi#14728](https://github.com/can1357/oh-my-pi/pull/14728)), or the eval-output rendering changes in v18.12.3 ([can1357/oh-my-pi#12730](https://github.com/can1357/oh-my-pi/pull/12730)) |
+| Embedded browser client | `v18.12.6` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.12.6`) | Independent provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); includes upstream render coalescing and streaming-tail Markdown ([#14728](https://github.com/can1357/oh-my-pi/pull/14728)), linear-time Markdown/math lexing ([#13961](https://github.com/can1357/oh-my-pi/pull/13961), [#14667](https://github.com/can1357/oh-my-pi/pull/14667)), idle agent-drawer polling shutdown, and eval-output rendering. Only pure TypeScript parser sources are vendored, without pi-utils/pi-natives packages. |
 | Gateway runtime | Bun `1.4.0` | Required runtime for the CLI, daemon, and release archives |
 
 For the current published release and its qualified hardware matrix, see
@@ -289,7 +289,7 @@ Tern is a terminal execution environment, not a gateway integration target ([ADR
 - **Identity and mirroring:** gateway session identity remains OMP's `instanceId` and `generation`. Tern pane, tab, or window identifiers are never read by the gateway. Multiple Tern windows or panes mirroring a single `omp` process correspond to one OMP discovery entry and therefore render one session row in **OMP Sessions**.
 - **Remote Tern panes:** an `omp` process running inside a Tern pane on a remote machine is discovered by the gateway running on that execution host (and surfaced either on that host's PWA or through browser-direct federation under [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)), never by inspecting local terminal windows on the viewing workstation.
 - **Browser launch semantics:** tapping **View** or **Control** in **OMP Sessions** always mounts the embedded OMP `collab-web` client in the browser; it never focuses, attaches to, or sends keystrokes to a native Tern pane.
-- **No Tern dependency or pin change:** the gateway ships no Tern adapter, calls no Tern API, and consumes no `tsp.ts` wire frames. Absence of Tern never impairs `omp-gateway install`, `doctor`, discovery polling, or launches, and the engineering host baseline (`v18.12.5`) and embedded browser client pin (`v18.4.2`) are unchanged.
+- **No Tern dependency:** the gateway ships no Tern adapter, calls no Tern API, and consumes no `tsp.ts` wire frames. Absence of Tern never impairs `omp-gateway install`, `doctor`, discovery polling, or launches. The engineering host baseline remains `v18.12.5`; the independent embedded browser client refresh to `v18.12.6` does not add a Tern integration.
 
 ### Developer-workstation smoke (2026-10-22)
 

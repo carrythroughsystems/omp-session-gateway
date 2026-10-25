@@ -96,7 +96,13 @@
 	overflow-y: auto;
 }
 
+/* Always in the tree so React never remounts the transcript window or the composer draft when an
+   Ask starts or ends; it only takes layout while an Ask is active. */
 .sh-embedded-body {
+	display: contents;
+}
+
+.sh-panel[data-embedded-ask="true"] .sh-embedded-body {
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -107,7 +113,7 @@
 	padding: 16px;
 }
 
-.sh-embedded-body > .sh-transcript {
+.sh-panel[data-embedded-ask="true"] .sh-embedded-body > .sh-transcript {
 	flex: none;
 	height: auto;
 	max-height: min(28dvh, 13rem);
@@ -115,7 +121,7 @@
 	overflow: hidden;
 }
 
-.sh-embedded-body > .sh-transcript .tr-root {
+.sh-panel[data-embedded-ask="true"] .sh-embedded-body > .sh-transcript .tr-root {
 	height: auto;
 	max-height: min(28dvh, 13rem);
 }

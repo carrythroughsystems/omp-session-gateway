@@ -130,6 +130,11 @@ document synchronously scrubs to `/`, remains only for activations by earlier wo
 
 Reuse a pinned OMP `packages/collab-web` revision. Do not independently implement the transcript, tool cards, subagent controls, relay protocol, or cryptography.
 
+The embedded source and npm wire pin are `v18.12.6`, independently of the `v18.12.5` host baseline.
+The client vendors only the pure TypeScript pi-utils marked fork and math/list grammar, avoiding
+the pi-utils/native package closure. Upstream coalesces streaming commits per animation frame
+and parses only unfrozen Markdown tails; gateway windowing and memory-only bootstrap remain.
+
 Preferred integration:
 
 1. expose a small upstreamable client bootstrap such as `startWithCapability(capability)` or a component prop;

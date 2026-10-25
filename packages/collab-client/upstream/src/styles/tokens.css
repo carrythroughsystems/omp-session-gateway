@@ -46,9 +46,9 @@
 	--ring: #5ad8e6;
 	--ring-soft: rgba(90, 216, 230, 0.18);
 
-	/* type — system stacks only */
-	--font-ui: "Inter var", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-	--font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+	/* System text; the gateway's unicode-range-limited face supplies PUA symbols only. */
+	--font-ui: "Inter var", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Symbols Nerd Font Mono", sans-serif;
+	--font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "Symbols Nerd Font Mono", monospace;
 
 	/* radii by role: chip · control · card · panel */
 	--radius-sm: 6px;

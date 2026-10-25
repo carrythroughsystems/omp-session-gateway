@@ -19,6 +19,15 @@ The format is based on Keep a Changelog and Semantic Versioning.
   the host picker becomes one compact scope control, `Hide` becomes an icon-only control with the
   same accessible name, and incomplete host coverage shows an amber dot.
 
+### Changed
+
+- Refresh the embedded OMP client and wire pin to v18.12.6: coalesce streaming renders and parse
+  only Markdown tails (#14728), take linear-time Markdown/math lexing (#13961, #14667), stop idle
+  agent-drawer polling, and adopt the eval renderer rework. Vendor the pure-JavaScript marked fork
+  without native dependencies; retain gateway capability, Ask/photo/speech, recovery, artwork,
+  and Show earlier behavior, including coalescing-safe return-to-tail. Transcript PUA symbols
+  use the gateway's self-hosted Nerd Font fallback; the host baseline remains v18.12.5.
+
 ### Fixed
 
 - Render Nerd Font Private Use Area symbols in session titles with a self-hosted Symbols Nerd

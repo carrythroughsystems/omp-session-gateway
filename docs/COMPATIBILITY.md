@@ -82,7 +82,8 @@ Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi
 `4999b98bd5`) is the minimum supported host version: set `collab.autoStart`
 ([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
 plain `omp`. The current engineering baseline is `v18.12.5` (`UPSTREAM.lock.json`) and the
-qualified host baseline is `v18.10.2`, while the embedded browser client pin remains `v18.4.2`.
+qualified host baseline is recorded in the release-generated matrix below, while the independent
+embedded browser client pin is `v18.12.6`.
 Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
 fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
 gateway update.
@@ -102,8 +103,11 @@ are byte-identical between those tags.
 reads and the embedded client does not consume;
 [can1357/oh-my-pi#15467](https://github.com/can1357/oh-my-pi/pull/15467) changes only a CLI
 guest's prompt-cache key; and the remaining changes touch the TUI approval dialog, extension
-plan-review hooks, and a `collab-web` eval renderer the embedded client does not import. The
-gateway neither reads nor sends any of them. Since v18.10.2, upstream
+plan-review hooks, and a `collab-web` eval renderer now included by the independent v18.12.6 client
+refresh. That refresh also takes render coalescing, streaming-tail Markdown, linear-time
+Markdown/math lexing, and idle agent-drawer polling shutdown. The discovery/query contract is
+unchanged; browser source tests and synthetic smoke do not qualify a new signed artifact.
+Since v18.10.2, upstream
 [`a608a9ca07`](https://github.com/can1357/oh-my-pi/commit/a608a9ca07c9443634e80d877d61c602099dab91)
 serves the registry over native IPC with the same one-line JSON request and response, a 0600
 socket, overlong paths relocated under the owner-only `/tmp/omp-<euid>`, and same-user peers

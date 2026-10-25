@@ -1,47 +1,85 @@
 {
   "repository": "https://github.com/can1357/oh-my-pi",
-  "commit": "4620bb8338e0ecace7ea237da9d5088d16068617",
-  "tag": "v18.4.2",
+  "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+  "tag": "v18.12.6",
   "package": "@oh-my-pi/collab-web",
   "packageVersion": "16.3.6",
   "sourcePath": "packages/collab-web",
   "additionalSources": [
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.3.0",
-      "sourcePath": "packages/utils/src/math-delimiters.ts"
+      "packageVersion": "18.12.6",
+      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "sourcePath": "packages/utils/src/marked.ts",
+      "vendoredPath": "src/vendor/pi-utils/marked.ts"
+    },
+    {
+      "package": "@oh-my-pi/pi-utils",
+      "packageVersion": "18.12.6",
+      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "sourcePath": "packages/utils/src/marked/core.ts",
+      "vendoredPath": "src/vendor/pi-utils/marked/core.ts"
+    },
+    {
+      "package": "@oh-my-pi/pi-utils",
+      "packageVersion": "18.12.6",
+      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "sourcePath": "packages/utils/src/marked/inline-closers.ts",
+      "vendoredPath": "src/vendor/pi-utils/marked/inline-closers.ts"
+    },
+    {
+      "package": "@oh-my-pi/pi-utils",
+      "packageVersion": "18.12.6",
+      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "sourcePath": "packages/utils/src/marked/inline-text.ts",
+      "vendoredPath": "src/vendor/pi-utils/marked/inline-text.ts"
+    },
+    {
+      "package": "@oh-my-pi/pi-utils",
+      "packageVersion": "18.12.6",
+      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "sourcePath": "packages/utils/src/marked-list.ts",
+      "vendoredPath": "src/vendor/pi-utils/marked-list.ts"
+    },
+    {
+      "package": "@oh-my-pi/pi-utils",
+      "packageVersion": "18.12.6",
+      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "sourcePath": "packages/utils/src/math-delimiters.ts",
+      "vendoredPath": "src/vendor/pi-utils/math-delimiters.ts"
     }
   ],
-  "observedAt": "2026-09-29",
+  "observedAt": "2026-10-24",
   "bunVersion": "1.4.0",
   "localPatches": [
-    "Validate Markdown link schemes through the browser URL parser, including control-character normalization",
+    "Validate Markdown link schemes through the browser URL parser; decode href entities and normalize scheme whitespace expanded from source tabs by the fork, preserving one-shot and streaming rejection of obfuscated unsafe schemes",
     "Direct in-memory App capability prop; no capability URL/hash writes",
     "Installed-PWA same-document mount through a reusable in-memory bootstrap",
     "Return to the gateway directory on leave or reload",
     "Force a fresh relay transport after mobile foreground and online transitions",
-    "Recover established guests across bounded relay room replacement instead of adopting upstream's unbounded guest room-recovery retry",
-    "Keep the hub, irc, job, await, poll, and cancel_job renderers upstream removed in v18.3.0, because older supported OMP releases still emit those tools",
-    "Use a metadata-free same-origin gateway health probe to replace relay transport once after an observed outage recovers",
-    "Preserve strict exact-optional typing for view links without a write token",
+    "Recover established guests across bounded relay room replacement instead of adopting upstream's unbounded guest room-recovery retry; retain hello-gated generation-bound send queues and per-attempt connection deadlines",
+    "Keep the hub renderer and re-register upstream irc/job plus await, poll, and cancel_job aliases, because older supported OMP releases still emit those tools",
+    "Use a metadata-free same-origin gateway health probe to replace relay transport once after an observed outage recovers; retain relay health ping/pong frames, codec object sealing, pending-response acknowledgements, and welcome timer extraction",
+    "Preserve strict exact-optional typing for view links without a write token and optional agent-command text or tool intent",
     "Redact invalid capability input from collaboration-link errors",
     "Correlate active Ask requests with explicit tool-call recommendation metadata",
     "Embed under gateway chrome without a competing client header, rail, or lifecycle overlay, retaining the gateway primary-action palette",
-    "Present an embedded active Ask in the client's sole composer without a duplicate transcript card",
+    "Present an embedded active Ask in the client's sole composer without a duplicate transcript card, keeping the transcript and composer at one tree position so an Ask starting or ending never remounts them (drafts, photos, and the Show earlier window survive)",
     "Capture, metadata-strip, bound, preview, and send phone photos through the existing encrypted image-prompt frame",
     "Offer separate rear-camera capture and existing-photo inputs behind one accessible Photo source panel",
     "Reject oversized decoded image dimensions before browser decode and use CSP-compatible data previews",
     "Retain photo drafts until the host transcript acknowledges delivery and expose bounded retry",
     "Enforce view-link read-only state inside every mutating guest-client method",
     "Capture active composer pointers so status-row layout changes cannot cancel mobile actions",
-    "Keep the npm marked dependency instead of @oh-my-pi/pi-utils/marked so the bundled runtime closure stays pure JavaScript",
-    "Vendor the pure math delimiter grammar instead of adding @oh-my-pi/pi-utils and its native dependency closure",
-    "Render upstream LaTeX delimiters through CSP-safe native MathML without KaTeX stylesheet or font assets",
-    "Preserve upstream rejected-currency and half-streamed delimiter semantics across the retained npm marked parser",
-    "Force the transcript to its tail when an initial or recovered connection becomes live without discarding transcript windowing",
+    "Superseded npm marked adapter: vendor the pure-JavaScript pi-utils marked fork from v18.12.6 for source-context and startFrom hooks; do not install pi-utils or pi-natives; remove the replaced npm marked dependency",
+    "Vendor exact v18.12.6 pure math delimiter, marked-list, and marked fork sources without adding pi-utils or its native dependency closure",
+    "Retired source adapter: upstream-provided since v18.3.0, LaTeX renders as CSP-safe native MathML with trust:false and no KaTeX stylesheet or font assets; retain regression tests",
+    "Retired npm-parser adapter: rejected-currency and half-streamed delimiter semantics are upstream-provided by the v18.12.6 marked fork and math grammar; retain explicit one-shot and chunked-stream regression tests",
+    "Force the transcript to its tail once per initial or recovered live transition without discarding windowing; publish a monotonic liveEpoch so coalesced React renders cannot lose a transition",
     "Retain explicit Show earlier expansion, oldest-entry ID anchoring, and full-history tool-result pairing because gateway tests encode phone reading behavior across live appends and reconnects; combine upstream row-based prepend anchoring",
     "Exclude OMP's pi artwork: omit OmpMark.tsx and its HeaderBar/ConnectScreen imports and rendering",
     "Provide keyboard-dictation guidance and opt-in bounded browser speech for live Control drafts, with destination-bound cancellation and explicit review, Use text, and Send separation",
-    "Probe the launching gateway through an injected selected-source callback and treat a readable authorization loss as terminal for automatic recovery, allowing a fresh probe only on foreground, pageshow, or online transitions"
+    "Probe the launching gateway through an injected selected-source callback and treat a readable authorization loss as terminal for automatic recovery, allowing a fresh probe only on foreground, pageshow, or online transitions",
+    "Draw Nerd Font Private Use Area glyphs in transcript text through the gateway's self-hosted symbol face; the client itself loads no fonts"
   ]
 }

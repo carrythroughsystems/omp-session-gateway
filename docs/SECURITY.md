@@ -264,6 +264,11 @@ Mandatory rules:
 - disable third-party runtime scripts, analytics, telemetry, remote fonts, and source-map upload services;
 - use generated canary capabilities for tests, never real user links.
 
+The embedded `v18.12.6` client keeps the same capability boundary across coalesced renders.
+Both one-shot and streaming-tail Markdown route links through the same browser-URL scheme
+sanitizer; raw HTML stays escaped and KaTeX emits MathML with `trust: false`. Only pure
+TypeScript parser sources are vendored, with no pi-utils/pi-natives runtime dependency.
+
 `inputRequired` and optional boolean `busy` are the accepted host attention/activity signals.
 Missing/null activity is unknown, never idle or completion. The gateway may
 derive an opaque random request ID and receipt timestamp in memory for each false-to-true

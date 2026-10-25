@@ -1,7 +1,9 @@
 import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
 import { act, createElement } from "react";
-import type { GuestClient, GuestSnapshot } from "../upstream/src/lib/client";
+import { GuestClient, type GuestSnapshot } from "../upstream/src/lib/client";
+import { COLLAB_PROTO, encodeBase64Url } from "../upstream/src/lib/link";
+import { CollabSocket } from "../upstream/src/lib/socket";
 import type { TranscriptProps } from "../upstream/src/components/transcript/Transcript";
 import {
   type MiniElement,
@@ -263,6 +265,7 @@ class FakeGuest {
 function guestSnapshot(overrides: Partial<GuestSnapshot> = {}): GuestSnapshot {
   return {
     phase: "connecting",
+    liveEpoch: 0,
     endedReason: null,
     header: null,
     entries: [],
@@ -291,7 +294,15 @@ describe("photo source chooser", () => {
     const tree = await mount(
       createElement(Composer, {
         client: guest.client,
-        snapshot: guest.getSnapshot(),
+        phase: "live",
+        readOnly: false,
+        uiRequest: null,
+        working: false,
+        queuedMessageCount: 0,
+        uiResponsePending: false,
+        relayReady: true,
+        entries: guest.getSnapshot().entries,
+        recommendedIndex: undefined,
         embedded: true,
       }),
     );
@@ -335,6 +346,64 @@ describe("photo source chooser", () => {
 });
 
 describe("embedded session first paint", () => {
+  test("returns to tail once when reconnect and live are batched before the first coalesced observer", async () => {
+    const reconnect = spyOn(CollabSocket.prototype, "reconnect").mockImplementation(function (this: CollabSocket) {
+      this.onClose?.("synthetic transport replacement", true);
+    });
+    const client = new GuestClient(`roomroomroom1234#${encodeBase64Url(new Uint8Array(32))}`, "tester");
+    const state = { isStreaming: false, queuedMessageCount: 0, cwd: "/work", participants: [] };
+    const welcome = {
+      t: "welcome" as const, proto: COLLAB_PROTO,
+      header: { type: "session" as const, id: "test", timestamp: "2026-10-24T00:00:00Z", cwd: "/work" },
+      state, agents: [], entryCount: 460,
+    };
+    client.applyFrameForTest(welcome);
+    client.applyFrameForTest({ t: "snapshot-chunk", entries: userEntries(460), final: true });
+    const tree = await mount(createElement(Session, {
+      client, onLeave: () => {}, onRejoin: () => {}, embedOptions: { shellOwnsLifecycle: true },
+    }));
+    const root = query(tree.container, "tr-root") as MiniElement;
+    await click(query(root, "tr-earlier") as MiniElement);
+    expect(rowTexts(root).length).toBe(450);
+    const unlock = async () => {
+      root.scrollTop = 0;
+      await act(async () => {
+        for (const listener of root.listeners.get("scroll") ?? []) listener({ type: "scroll", target: root });
+      });
+    };
+    await unlock();
+    const epoch = client.getSnapshot().liveEpoch;
+    const message: AssistantMessage = {
+      role: "assistant", content: [{ type: "text", text: "**streamed** tail" }],
+      model: "test/model", usage: USAGE, stopReason: "stop", timestamp: 1,
+    };
+    try {
+      await act(async () => {
+        client.refreshConnection();
+        client.applyFrameForTest(welcome);
+        client.applyFrameForTest({ t: "snapshot-chunk", entries: userEntries(460), final: true });
+        client.applyFrameForTest({ t: "event", event: { type: "message_update", message } }, { flush: false });
+        await new Promise(resolve => setTimeout(resolve, 25));
+      });
+      expect(client.getSnapshot().liveEpoch).toBe(epoch + 1);
+      expect(root.scrollTop).toBe(root.scrollHeight);
+      expect(rowTexts(root).length).toBe(451);
+      expect(query(root, "tr-earlier")?.textContent).toBe("Show earlier · 10 more");
+      await unlock();
+      await act(async () => {
+        client.applyFrameForTest({ t: "event", event: {
+          type: "message_update", message: { ...message, content: [{ type: "text", text: "**streamed** tail continued" }] },
+        } }, { flush: false });
+        await new Promise(resolve => setTimeout(resolve, 25));
+      });
+      expect(client.getSnapshot().liveEpoch).toBe(epoch + 1);
+      expect(root.scrollTop).toBe(0);
+    } finally {
+      client.close();
+      reconnect.mockRestore();
+    }
+  });
+
   test("returns a reader to the transcript tail when a recovered connection becomes live", async () => {
     const guest = new FakeGuest(guestSnapshot({ phase: "live", entries: userEntries(200) }));
     const tree = await mount(

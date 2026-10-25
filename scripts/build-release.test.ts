@@ -19,7 +19,7 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const expectedRuntimeDependencies = [
-  "@oh-my-pi/pi-wire@18.4.2",
+  "@oh-my-pi/pi-wire@18.12.6",
   "agent-base@7.1.4",
   "asn1.js@5.4.1",
   "bn.js@4.12.5",
@@ -34,7 +34,6 @@ const expectedRuntimeDependencies = [
   "jws@4.0.1",
   "katex@0.18.5",
   "lucide-react@1.31.0",
-  "marked@18.0.9",
   "minimalistic-assert@1.0.1",
   "minimist@1.2.8",
   "ms@2.1.3",
@@ -135,11 +134,23 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
   expect(document.packages.map(pkg => `${pkg.name}@${pkg.versionInfo}`)).toEqual([
     `omp-session-gateway@${PRODUCT_VERSION}`,
     "@oh-my-pi/collab-web@16.3.6",
+    "@oh-my-pi/pi-utils (vendored Markdown sources)@18.12.6",
     "Symbols Nerd Font Mono@v3.5.1",
     ...expectedRuntimeDependencies,
   ]);
   expect(document.packages[0]?.sourceInfo).toContain(lockSha256);
   expect(document.packages.find(pkg => pkg.name === "@oh-my-pi/collab-web")?.sourceInfo).toContain(client.commit);
+  const parser = document.packages.find(pkg => pkg.name === "@oh-my-pi/pi-utils (vendored Markdown sources)");
+  expect(parser?.sourceInfo).toContain(client.commit);
+  expect(client.additionalSources.map(source => source.sourcePath)).toEqual([
+    "packages/utils/src/marked.ts",
+    "packages/utils/src/marked/core.ts",
+    "packages/utils/src/marked/inline-closers.ts",
+    "packages/utils/src/marked/inline-text.ts",
+    "packages/utils/src/marked-list.ts",
+    "packages/utils/src/math-delimiters.ts",
+  ]);
+  for (const source of client.additionalSources) expect(parser?.sourceInfo).toContain(source.sourcePath);
   expect(document.packages.find(pkg => pkg.name === "lucide-react")?.licenseDeclared).toBe("ISC");
   expect(document.packages.find(pkg => pkg.name === "react")?.licenseDeclared).toBe("MIT");
   const font = document.packages.find(pkg => pkg.name === "Symbols Nerd Font Mono");
@@ -175,6 +186,9 @@ test(
         "No production dependencies",
       );
       expect(entries.has(`${archivePrefix}licenses/collab-web/LICENSE`)).toBe(true);
+      expect(entries.has(`${archivePrefix}licenses/pi-utils-marked/LICENSE`)).toBe(true);
+      expect(entries.get(`${archivePrefix}licenses/pi-utils-marked/LICENSE`)?.toString("utf8")).toContain("MarkedJS");
+      expect(entries.has(`${archivePrefix}licenses/runtime/marked/LICENSE`)).toBe(false);
       expect(entries.has(`${archivePrefix}licenses/oh-my-pi/LICENSE`)).toBe(true);
       expect(entries.has(`${archivePrefix}bun.lock`)).toBe(true);
       expect([...entries.keys()].some(path => path.startsWith(`${archivePrefix}patches/`))).toBe(false);

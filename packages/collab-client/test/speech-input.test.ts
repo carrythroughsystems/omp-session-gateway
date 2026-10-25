@@ -23,7 +23,7 @@ class FakeRecognition implements NativeSpeechRecognition {
 
 function snapshot(overrides: Partial<GuestSnapshot> = {}): GuestSnapshot {
 	return {
-		phase: "live", endedReason: null, header: null, entries: [], state: null, agents: [],
+		phase: "live", liveEpoch: 1, endedReason: null, header: null, entries: [], state: null, agents: [],
 		progress: new Map(), lifecycle: new Map(), stream: null, streamDone: false, activeTools: new Map(),
 		working: false, readOnly: false, uiRequest: null, uiResponsePending: false,
 		gatewayHealth: { state: "healthy", rttMs: 20, lastSuccessAt: 0, failureSince: null, retryAt: null },
@@ -42,7 +42,12 @@ function harness(initial = snapshot(), enabled = true) {
 	} as unknown as GuestClient;
 	return {
 		prompts, responses,
-		node: (next = initial, flag = enabled) => createElement(Composer, { client, snapshot: next, browserRecognitionEnabled: flag, embedded: true }),
+		node: (next = initial, flag = enabled) => createElement(Composer, {
+			client, phase: next.phase, readOnly: next.readOnly, uiRequest: next.uiRequest,
+			working: next.working, queuedMessageCount: next.state?.queuedMessageCount ?? 0,
+			uiResponsePending: next.uiResponsePending, relayReady: next.relayHealth.state === "healthy",
+			entries: next.entries, recommendedIndex: undefined, browserRecognitionEnabled: flag, embedded: true,
+		}),
 	};
 }
 

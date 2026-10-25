@@ -1,22 +1,32 @@
-import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type SessionEntry } from "@oh-my-pi/pi-wire";
+import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabUiRequest, type ImageContent, type SessionEntry } from "@oh-my-pi/pi-wire";
 import { Camera, ImagePlus, Images, SendHorizontal, Square, X } from "lucide-react";
 import type { ChangeEvent, KeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject } from "react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { GuestClient, GuestSnapshot } from "../../lib/client";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { ConnectionPhase, GuestClient } from "../../lib/client";
 import {
 	MAX_PHOTO_ATTACHMENTS,
 	PhotoAttachmentError,
 	preparePhotoAttachment,
 	type PreparedPhoto,
 } from "../../lib/photo-attachment";
-import { recommendedOptionIndex } from "./ask-recommendation";
 import { SpeechInput, useSpeechInput } from "./SpeechInput";
 
 export interface ComposerProps {
 	client: GuestClient;
-	snapshot: GuestSnapshot;
 	embedded?: boolean;
 	browserRecognitionEnabled?: boolean;
+	phase: ConnectionPhase;
+	readOnly: boolean;
+	/** Pending host-side UI request this guest can answer. */
+	uiRequest: CollabUiRequest | null;
+	/** Host agent turn in flight. */
+	working: boolean;
+	/** Prompts queued behind the running turn. */
+	queuedMessageCount: number;
+	uiResponsePending: boolean;
+	relayReady: boolean;
+	entries: readonly SessionEntry[];
+	recommendedIndex: number | undefined;
 }
 
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with shell.css). */
@@ -128,7 +138,7 @@ interface AskEditorProps {
 	sending: boolean;
 	onSubmit(value: string): void;
 	submitLabel?: string;
-	snapshot: GuestSnapshot;
+	request: CollabUiRequest;
 	browserRecognitionEnabled: boolean;
 }
 
@@ -137,13 +147,13 @@ interface AskEditorProps {
  * draft seeded from `prefill`, while re-sends of the same request never clobber a half-typed
  * draft. Submits verbatim — whitespace-only responses are intentional.
  */
-function AskEditor({ disabled, prefill, sending, onSubmit, submitLabel = "Submit", snapshot, browserRecognitionEnabled }: AskEditorProps): ReactNode {
+function AskEditor({ disabled, prefill, sending, onSubmit, submitLabel = "Submit", request, browserRecognitionEnabled }: AskEditorProps): ReactNode {
 	const [draft, setDraft] = useState(prefill ?? "");
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 	const speech = useSpeechInput({
-		enabled: browserRecognitionEnabled && !disabled && !snapshot.readOnly,
-		binding: { destination: "ask", requestId: snapshot.uiRequest?.reqId, requestKind: snapshot.uiRequest?.kind },
+		enabled: browserRecognitionEnabled && !disabled,
+		binding: { destination: "ask", requestId: request.reqId, requestKind: request.kind },
 		destination: taRef,
 		setDraft,
 	});
@@ -192,7 +202,7 @@ function AskEditor({ disabled, prefill, sending, onSubmit, submitLabel = "Submit
 		</>
 	);
 }
-type SelectRequest = Extract<NonNullable<GuestSnapshot["uiRequest"]>, { kind: "select" }>;
+type SelectRequest = Extract<CollabUiRequest, { kind: "select" }>;
 
 interface SelectAskProps {
 	client: GuestClient;
@@ -279,7 +289,21 @@ function SelectAsk({ client, disabled, embedded, recommendedIndex, request, send
 	);
 }
 
-export function Composer({ client, snapshot, embedded = false, browserRecognitionEnabled = false }: ComposerProps): ReactNode {
+/** Memoized on its snapshot fields, so streaming frames that leave them untouched skip it. */
+export const Composer = memo(function Composer({
+	client,
+	phase,
+	readOnly,
+	uiRequest,
+	working,
+	queuedMessageCount,
+	uiResponsePending: sendingResponse,
+	relayReady,
+	entries,
+	recommendedIndex,
+	embedded = false,
+	browserRecognitionEnabled = false,
+}: ComposerProps): ReactNode {
 	const [text, setText] = useState("");
 	const [photos, setPhotos] = useState<readonly PreparedPhoto[]>([]);
 	const [preparingPhoto, setPreparingPhoto] = useState(false);
@@ -295,14 +319,10 @@ export function Composer({ client, snapshot, embedded = false, browserRecognitio
 	const mountedRef = useRef(true);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 
-	const live = snapshot.phase === "live";
-	const readOnly = snapshot.readOnly;
-	const uiRequest = snapshot.uiRequest;
-	const sendingResponse = snapshot.uiResponsePending;
+	const live = phase === "live";
 	const canPrompt = live && !readOnly;
-	const busy = snapshot.working;
-	const queued = snapshot.state?.queuedMessageCount ?? 0;
-	const relayReady = snapshot.relayHealth.state === "healthy";
+	const busy = working;
+	const queued = queuedMessageCount;
 	const retryReady = pendingPhotoPrompt !== null && photoConfirmationExpired && relayReady;
 	const hasDraft = text.trim().length > 0 || photos.length > 0;
 	const speech = useSpeechInput({
@@ -333,10 +353,6 @@ export function Composer({ client, snapshot, embedded = false, browserRecognitio
 				: !relayReady
 					? "Waiting for relay…"
 					: "Photo not confirmed. Tap Send to retry.";
-	const recommendedIndex = useMemo(
-		() => recommendedOptionIndex(snapshot),
-		[uiRequest, snapshot.entries, snapshot.stream, snapshot.activeTools],
-	);
 
 	useLayoutEffect(() => {
 		autosize(taRef.current);
@@ -351,14 +367,14 @@ export function Composer({ client, snapshot, embedded = false, browserRecognitio
 	}, []);
 
 	useEffect(() => {
-		if (pendingPhotoPrompt === null || !photoPromptAcknowledged(snapshot.entries, pendingPhotoPrompt)) return;
+		if (pendingPhotoPrompt === null || !photoPromptAcknowledged(entries, pendingPhotoPrompt)) return;
 		setPendingPhotoPrompt(null);
 		setPhotoConfirmationExpired(false);
 		setText("");
 		photosRef.current = [];
 		setPhotos([]);
 		setPhotoError(null);
-	}, [pendingPhotoPrompt, snapshot.entries]);
+	}, [pendingPhotoPrompt, entries]);
 
 	useEffect(() => {
 		if (pendingPhotoPrompt === null) return;
@@ -440,10 +456,10 @@ export function Composer({ client, snapshot, embedded = false, browserRecognitio
 		}
 		if (!relayReady) return;
 		const images = selectedPhotos.map(photo => photo.content);
-		setPendingPhotoPrompt({ text: prompt, images, afterEntryId: snapshot.entries.at(-1)?.id ?? null });
+		setPendingPhotoPrompt({ text: prompt, images, afterEntryId: entries.at(-1)?.id ?? null });
 		setPhotoConfirmationExpired(false);
 		client.sendPrompt(prompt, images);
-	}, [client, live, pendingPhotoPrompt, preparingPhoto, readOnly, relayReady, retryReady, snapshot.entries, text, speech.isBusy]);
+	}, [client, live, pendingPhotoPrompt, preparingPhoto, readOnly, relayReady, retryReady, entries, text, speech.isBusy]);
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
 		if (speech.isBusy()) return;
@@ -485,7 +501,7 @@ export function Composer({ client, snapshot, embedded = false, browserRecognitio
 						onSubmit={value => client.sendUiResponse(uiRequest.reqId, value)}
 						submitLabel={embedded ? "Send" : "Submit"}
 						sending={sendingResponse}
-						snapshot={snapshot}
+						request={uiRequest}
 						browserRecognitionEnabled={browserRecognitionEnabled && !preparingPhoto && pendingPhotoPrompt === null}
 					/>
 				)}
@@ -706,4 +722,4 @@ export function Composer({ client, snapshot, embedded = false, browserRecognitio
 			{!readOnly && <SpeechInput speech={speech} />}
 		</div>
 	);
-}
+});
