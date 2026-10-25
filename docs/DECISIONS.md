@@ -1811,3 +1811,53 @@ stay in context, with deliberate expansion for longer work. The module never own
 CSP, protocol, client embed contract, local record formats and dependencies remain unchanged.
 Browser tests exercise root/socket/draft identity, native cancel, nested focus/inertness, transient
 timing, recovery and capability sinks; the 18-state visual harness serializes the same native host.
+
+---
+
+## ADR-042 — First-run trays and one all-clear arrival
+
+**Status:** Accepted
+
+**Date:** 2026-10-24
+
+**Context:** A fresh device needs to understand the connection, optional background alerts, and
+the difference between watching and controlling without learning a new navigation surface.
+Answering the last request deserves one quiet acknowledgement, not decoration on every refresh.
+ADR-040 already owns motion gating and tokens; ADR-041 already owns native tray anatomy.
+
+**Decision:**
+
+- Introduce three neutral trays on the existing host: **Connected**, **Background alerts**,
+  **View or Control**. Connected reuses the 32px masthead mark and current host/session facts,
+  plus the capability-on-explicit-action promise. Alerts moves the existing `#alerts-panel`,
+  never duplicates the toggle or notification state machine. Not now advances without enabling.
+  The final step explains View's read-only boundary and Control's explicit-tap launch.
+- Start only after the first authoritative directory render on a visible `/` entry with no
+  active tray or launch. Never start on `/client/`, while loading, or over another surface.
+  Next/Done and leading Skip/Back controls have 48px targets. Distinct content heights, grip,
+  neutral tone, native close requests and heading focus use ADR-041 unchanged. Resume preloads
+  detached Back destinations; native Back/Esc pops, or skips at Connected, without history entries.
+  If consecutive platform requests become non-cancelable, the host preserves the popped stack
+  and restores native modality after the browser's forced close instead of skipping the flow.
+- Persist only `{ version: 1, step: "alerts" | "modes" | "done", updatedAt: ISO }` at
+  `omp.sessions.first-run.v1`, bounded to 128 characters and containing no identifiers.
+  Missing starts Connected; Back to Connected removes the record. Done and skip both write done.
+  Corrupt, oversized, unsupported or inaccessible records count as done. Storage failure never
+  blocks use; the current document still remembers that it started the flow.
+- Only a same-scope signature change from a nonempty waiting/held queue to zero attention, with
+  complete host coverage and ADR-040's `motionAllowed()` gate, marks `.all-clear-summary` with
+  `data-arrived="true"` inside the list transition. The emerald ring expands from zero to 2.5×
+  and fades over the long token; the title rises 4px and fades over medium; copy follows 60ms
+  later, all with emphasized deceleration. No fresh-load, scope-change or routine-refresh
+  arrival. Returning from a session compares the cached signature, so only clearance while away
+  arrives; cached rows lose prior arrival markers before detaching.
+- The session shell mirrors this acknowledgement once when its triage bar switches to
+  **Answered — all clear**: a leading inline SVG check draws with stroke-dashoffset over medium.
+  Neither effect loops. Reduced motion is instant; fresh visual states have no running arrivals.
+
+**Consequences:** New users get a short, resumable explanation without new permission behavior,
+navigation machinery, assets or telemetry. The only new persisted state is a bounded step and
+timestamp. Capabilities remain memory-only; CSP, daemon, protocol, pinned client and fonts do not
+change. Unit/browser tests cover record bounds, native close/resume, the real alerts control,
+scope/signature arrival gates and capability sinks. Existing visual zero-animation guards stay
+unchanged.

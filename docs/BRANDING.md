@@ -177,6 +177,18 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
   line), without repeating live counts already present in the masthead; `Host
   coverage incomplete` turns the dot amber. Alert state appears only while
   background alerts are enabled; otherwise a pill chip routes to Settings.
+  Its sole delight moment is a same-scope queue → all-clear arrival: the emerald
+  ring expands to 2.5× and fades over the long token, the title rises 4px over
+  medium, and the copy follows 60ms later. The shell's answered/all-clear check
+  draws once over medium. No arrival on load, scope change, or routine refresh;
+  reduced motion shows only the final state (ADR-042).
+- First run (ADR-042): three neutral trays — `Connected`, `Background alerts`,
+  `View or Control` — after the first authoritative directory render, never over
+  another tray. Reuse the 32px gateway mark and existing notification control;
+  show only current host/session facts and the explicit-action capability promise.
+  Each step has one topic, a distinct height, a primary Next/Done action, heading
+  focus and a 48px Close/Back control. Skip and Not now are real exits/advances,
+  not permission prompts. Resume the last step; completing or skipping stays done.
 - Settings trays: `Background alerts` contains the seven-state toggle and mono build line;
   enabled alerts expose `Alert detail · <level>`, opening a child with the three radios.
 - Trays (ADR-041): one native host for secondary surfaces, one topic/action per panel,

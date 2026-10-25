@@ -976,6 +976,7 @@ h1 {
 }
 
 .all-clear-dot {
+  position: relative;
   width: 8px;
   height: 8px;
   margin-top: 0.42rem;
@@ -1283,9 +1284,20 @@ body.collab-shell-active {
   line-height: 1.35;
 }
 
-.triage-bar[data-kind="next"] .triage-copy::first-letter,
-.triage-bar[data-kind="clear"] .triage-copy::first-letter {
+.triage-bar[data-kind="next"] .triage-copy::first-letter {
   color: var(--live);
+}
+
+.triage-check {
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-right: 0.35rem;
+  vertical-align: -0.2rem;
+  fill: none;
+  stroke: var(--live);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .triage-bar[data-kind="hold"] {
@@ -1473,6 +1485,27 @@ body.collab-shell-active {
   cursor: pointer;
 }
 .tray [hidden] { display: none; }
+.first-run-body { padding-block: 1rem; }
+.first-run-connected { min-height: 176px; }
+.first-run-alerts { min-height: 288px; }
+.first-run-modes { min-height: 224px; display: grid; align-content: center; gap: 1.5rem; }
+.first-run-copy { margin: 0.75rem 0; color: var(--body); font-size: 0.9rem; line-height: 1.5; }
+.first-run-note { margin: 0; color: var(--muted); font: 0.7rem/1.5 var(--font-mono); }
+.first-run-next, .first-run-not-now {
+  min-width: 3rem;
+  min-height: 3rem;
+  border: 0;
+  border-radius: 0.75rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.first-run-next { padding-inline: 1rem; background: var(--live); color: var(--ground); font-weight: 650; }
+.first-run-not-now { display: block; margin-top: 0.5rem; padding-inline: 0.75rem; background: transparent; color: var(--muted); }
+.first-run-mode { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 0.75rem; align-items: start; }
+.first-run-glyph { display: grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid var(--border); border-radius: 0.5rem; color: var(--live); background: var(--raised); }
+.first-run-mode h3 { margin: 0 0 0.3rem; font-size: 0.9rem; font-weight: 650; }
+.first-run-mode p { margin: 0; color: var(--muted); font-size: 0.82rem; line-height: 1.5; }
 .tray[data-layout="expanded"] .tray-panel,
 .tray[data-layout="full"] .tray-panel { height: 100%; }
 .tray[data-layout] .tray-body { flex: 1; padding: 0; overflow: hidden; }
@@ -1881,6 +1914,40 @@ html:active-view-transition-type(list) .directory-heading {
 dialog:focus-visible {
   /* The sheet itself takes initial modal focus; the backdrop already marks modality. */
   outline: none;
+}
+
+@keyframes all-clear-ring {
+  from { transform: scale(0); opacity: 0.65; }
+  to { transform: scale(2.5); opacity: 0; }
+}
+@keyframes all-clear-rise {
+  from { transform: translateY(4px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@keyframes all-clear-check {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .all-clear-summary[data-arrived="true"] .all-clear-dot::after {
+    content: "";
+    position: absolute;
+    inset: -5px;
+    border: 1px solid var(--live);
+    border-radius: 50%;
+    opacity: 0;
+    animation: all-clear-ring var(--motion-long) var(--ease-emphasized-decelerate);
+  }
+  .all-clear-summary[data-arrived="true"] .all-clear-title {
+    animation: all-clear-rise var(--motion-medium) var(--ease-emphasized-decelerate) backwards;
+  }
+  .all-clear-summary[data-arrived="true"] .all-clear-copy {
+    animation: all-clear-rise var(--motion-medium) var(--ease-emphasized-decelerate) 60ms backwards;
+  }
+  .triage-check[data-arrived="true"] path {
+    stroke-dasharray: 1;
+    animation: all-clear-check var(--motion-medium) var(--ease-emphasized-decelerate);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

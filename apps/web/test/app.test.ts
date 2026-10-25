@@ -135,6 +135,21 @@ class FakeElement extends EventTarget {
     this.append(...children);
   }
 
+  prepend(...children: FakeElement[]): void {
+    for (const child of [...children].reverse()) {
+      child.remove();
+      this.children.unshift(child);
+      child.parent = this;
+    }
+  }
+
+  cloneNode(deep = false): FakeElement {
+    const clone = new FakeElement(this.tagName, this.ownText);
+    for (const [key, value] of this.attributes) clone.setAttribute(key, value);
+    if (deep) clone.append(...this.children.map(child => child.cloneNode(true)));
+    return clone;
+  }
+
   remove(): void {
     const index = this.parent?.children.indexOf(this) ?? -1;
     if (index >= 0) this.parent?.children.splice(index, 1);
@@ -492,6 +507,7 @@ async function bootApp(options: {
   readonly pathname?: string;
   readonly search?: string;
   readonly storage?: FakeStorage;
+  readonly firstRun?: boolean;
   readonly clientConfig?: unknown;
   readonly clientConfigStatus?: number;
   readonly remoteSessions?: readonly SessionMetadata[];
@@ -551,10 +567,14 @@ async function bootApp(options: {
     "#settings": settingsButton,
     "#notification-detail-options": notificationDetailOptions,
     "#recovery-panel": new FakeElement("section"),
+    "#gateway-mark": new FakeElement("svg"),
   };
   const document = new FakeDocument(bySelector, notificationDetailInputs);
   const window = new FakeWindow();
   const localStorage = options.storage ?? new FakeStorage();
+  if (!options.firstRun) localStorage.setItem("omp.sessions.first-run.v1", JSON.stringify({
+    version: 1, step: "done", updatedAt: "2026-10-24T00:00:00.000Z",
+  }));
   const reloads = { count: 0 };
   const location = {
     origin: "https://sessions.example",
@@ -880,6 +900,143 @@ afterAll(() => {
 });
 
 describe("dashboard attention and notifications", () => {
+  test("first-run writes only bounded step/timestamp records, resumes, and persists native Back and skip", async () => {
+    const storage = new FakeStorage();
+    const options = { permission: "denied" as const, firstRun: true, storage, initialSessions: [session("intro-session-0001")] };
+    const first = await bootApp({ ...options, suffix: "first-run-fresh" });
+    const host = first.elements.trayHost;
+    expect(host.dataset.panel).toBe("first-run-connected");
+    expect(host.querySelector(".first-run-copy")?.textContent).toBe("This phone is on your tailnet. This host is publishing 1 live session.");
+    expect(host.querySelector(".tray-leading")?.getAttribute("aria-label")).toBe("Skip introduction");
+    expect(first.permissionRequests.count).toBe(0);
+    expect(first.launchRequests).toEqual([]);
+    host.querySelector(".first-run-next")?.dispatchEvent(new Event("click"));
+    expect(host.dataset.panel).toBe("first-run-alerts");
+    const record = JSON.parse(storage.getItem("omp.sessions.first-run.v1")!);
+    expect(record).toEqual({ version: 1, step: "alerts", updatedAt: expect.any(String) });
+    expect(new Date(record.updatedAt).toISOString()).toBe(record.updatedAt);
+    expect(storage.getItem("omp.sessions.first-run.v1")!.length).toBeLessThanOrEqual(128);
+
+    const resumed = await bootApp({ ...options, suffix: "first-run-resumed" });
+    expect(resumed.elements.trayHost.dataset.panel).toBe("first-run-alerts");
+    resumed.elements.trayHost.querySelector(".first-run-not-now")?.dispatchEvent(new Event("click"));
+    expect(JSON.parse(storage.getItem("omp.sessions.first-run.v1")!).step).toBe("modes");
+    resumed.elements.trayHost.dispatchEvent(new Event("cancel", { cancelable: true }));
+    expect(resumed.elements.trayHost.dataset.panel).toBe("first-run-alerts");
+    expect(JSON.parse(storage.getItem("omp.sessions.first-run.v1")!).step).toBe("alerts");
+    resumed.elements.trayHost.dispatchEvent(new Event("cancel", { cancelable: true }));
+    expect(resumed.elements.trayHost.dataset.panel).toBe("first-run-connected");
+    expect(storage.getItem("omp.sessions.first-run.v1")).toBeNull();
+    resumed.elements.trayHost.dispatchEvent(new Event("cancel", { cancelable: true }));
+    expect(JSON.parse(storage.getItem("omp.sessions.first-run.v1")!).step).toBe("done");
+    resumed.window.runTimersWithDelay(350);
+    const done = await bootApp({ ...options, suffix: "first-run-done" });
+    expect(done.elements.trayHost.open).toBeFalse();
+  });
+
+  test("first-run treats corrupt, oversized, unsupported and extra-field records as done", async () => {
+    for (const [index, value] of [
+      "{", "null", "[]", "x".repeat(129),
+      JSON.stringify({ version: 2, step: "alerts", updatedAt: "2026-10-24T00:00:00.000Z" }),
+      JSON.stringify({ version: 1, step: "connected", updatedAt: "2026-10-24T00:00:00.000Z" }),
+      JSON.stringify({ version: 1, step: ["alerts"], updatedAt: "2026-10-24T00:00:00.000Z" }),
+      JSON.stringify({ version: 1, step: "alerts", updatedAt: "invalid" }),
+      JSON.stringify({ version: 1, step: "alerts", updatedAt: "2026-02-30T00:00:00.000Z" }),
+      JSON.stringify({ version: 1, step: "alerts", updatedAt: "2026-10-24T00:00:00.000Z", instanceId: "not-allowed" }),
+    ].entries()) {
+      const storage = new FakeStorage();
+      storage.setItem("omp.sessions.first-run.v1", value);
+      const harness = await bootApp({ permission: "denied", firstRun: true, storage, initialSessions: [], suffix: `first-run-corrupt-${index}` });
+      expect(harness.elements.trayHost.open).toBeFalse();
+      expect(storage.getItem("omp.sessions.first-run.v1")).toBe(value);
+    }
+  });
+
+  test("all-clear arrival is consumed once for same-scope queue clearance, including held and ended requests", async () => {
+    const waiting = session("arrival-session-0001", { inputRequired: true });
+    const working = session(waiting.instanceId);
+    const harness = await bootApp({ permission: "denied", initialSessions: [working], suffix: "arrival-gate",
+      clientConfig: { version: 1, local: { id: "local", label: "Home", origin: "https://sessions.example" }, targets: [], speech: { browserRecognition: false } },
+    });
+    const arrived = (): string | undefined => harness.elements.sessionList.querySelector(".all-clear-summary")?.dataset.arrived;
+    expect(arrived()).toBeUndefined();
+    const fakeDocument = globalThis.document as unknown as Record<string, unknown>;
+    class FakeViewTransition { get types(): Set<string> { return new Set(); } }
+    Object.defineProperty(globalThis, "ViewTransition", { configurable: true, value: FakeViewTransition });
+    fakeDocument.startViewTransition = (options: { update: () => void }) => {
+      options.update();
+      return { ready: Promise.resolve(), finished: Promise.resolve(), updateCallbackDone: Promise.resolve() };
+    };
+    let revision = 1;
+    const upsert = (value: SessionMetadata): void => harness.emit("session_upsert", { type: "session_upsert", revision: ++revision, session: value });
+    try {
+      upsert(waiting);
+      upsert(working);
+      expect(arrived()).toBe("true");
+      upsert({ ...working, lastSeenAt: "2026-07-21T10:06:00.000Z" });
+      expect(arrived()).toBeUndefined();
+      upsert(waiting);
+      openHeroOptions(harness)?.dispatchEvent(new Event("click"));
+      harness.window.runTimersWithDelay(350);
+      expect(harness.elements.sessionList.querySelector(".held-row")).not.toBeNull();
+      upsert(working);
+      expect(arrived()).toBe("true");
+      // Changing scope while the queue disappears is not an answered-request arrival.
+      upsert(waiting);
+      harness.elements.hostPicker.value = "local\0https://sessions.example";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      expect(arrived()).toBeUndefined();
+      upsert(working);
+      expect(arrived()).toBe("true");
+      harness.elements.hostPicker.value = "all";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      expect(arrived()).toBeUndefined();
+      upsert(waiting);
+      harness.emit("session_remove", { type: "session_remove", revision: ++revision, instanceId: waiting.instanceId, generation: 1 });
+      expect(arrived()).toBe("true");
+      upsert(waiting);
+      harness.setVisibility("hidden");
+      upsert(working);
+      expect(arrived()).toBeUndefined();
+    } finally {
+      delete fakeDocument.startViewTransition;
+      delete (globalThis as Record<string, unknown>).ViewTransition;
+    }
+  });
+
+  test("switching from an all-hosts queue to an already-clear host never arrives", async () => {
+    const harness = await bootApp({
+      permission: "denied", suffix: "arrival-scope",
+      initialSessions: [session("arrival-local-0001")],
+      remoteSessions: [session("arrival-remote-0001", { inputRequired: true })],
+      clientConfig: {
+        version: 1, local: { id: "local", label: "Home", origin: "https://sessions.example" },
+        targets: [{ id: "remote", label: "Remote", origin: "https://remote.example" }],
+        speech: { browserRecognition: false },
+      },
+    });
+    await settleUntil(() => harness.elements.sessionList.querySelector(".queue-hero") !== null, 100);
+    const fakeDocument = globalThis.document as unknown as Record<string, unknown>;
+    class FakeViewTransition { get types(): Set<string> { return new Set(); } }
+    Object.defineProperty(globalThis, "ViewTransition", { configurable: true, value: FakeViewTransition });
+    const calls: string[] = [];
+    fakeDocument.startViewTransition = (options: { update: () => void; types: string[] }) => {
+      calls.push(...options.types);
+      options.update();
+      return { ready: Promise.resolve(), finished: Promise.resolve(), updateCallbackDone: Promise.resolve() };
+    };
+    try {
+      harness.elements.hostPicker.value = "local\0https://sessions.example";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      expect(calls).toEqual(["list"]);
+      expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("All clear");
+      expect(harness.elements.sessionList.querySelector(".all-clear-summary")?.dataset.arrived).toBeUndefined();
+    } finally {
+      delete fakeDocument.startViewTransition;
+      delete (globalThis as Record<string, unknown>).ViewTransition;
+    }
+  });
+
   test("renders the boolean-only triage queue without prompting or notifying on the initial list", async () => {
     const harness = await bootApp({
       permission: "default",

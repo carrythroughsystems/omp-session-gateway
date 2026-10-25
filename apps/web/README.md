@@ -15,6 +15,9 @@ Implemented states:
 - explicit Settings-based Push v2 opt-in with Private/Session/Preview detail and exact-request routing;
 - one native tray system for Background alerts, Alert detail, Troubleshooting, request Options,
   paused-on-interaction Undo, and requests that expand into the same live session;
+- resumable, skippable first-run trays: Connected, Background alerts, View or Control;
+- one-shot all-clear arrival when the last queued/held request clears or ends, with an
+  answered/all-clear check draw-in inside the session shell;
 - privacy/security guidance.
 
 Background alerts (Web Push) are opt-in per device from the Settings tray; see
@@ -54,6 +57,14 @@ navigation wait for it. Every commit is the same with or without motion: an unsu
 a hidden page, an open dialog, or `prefers-reduced-motion` skips the transition and applies the
 DOM directly. `e2e/motion.e2e.ts` pins which changes animate; the visual lane keeps reduced motion.
 
+ADR-042 adds one deliberate arrival inside a genuine same-scope `list` transition:
+`data-arrived="true"` expands/fades the emerald ring over `--motion-long`, raises the title
+4px over `--motion-medium`, and settles the copy 60ms later. The prior signature includes the
+scope and both waiting/held groups; a fresh load, scope change, or unchanged return never plays it.
+A queue emptied while a session was open does play on return. Cached rows lose the arrival
+attribute before detaching, preventing replay. The shell's **Answered — all clear** check is an
+inline SVG stroke drawn once over medium. Reduced motion removes both effects.
+
 ## Trays
 
 `src/tray.ts` owns one native `#tray` dialog and a maximum-three-panel stack (ADR-041).
@@ -86,6 +97,16 @@ bfcache resume revalidates and reacquires it with the original full/tray present
 View Transition runs while the dialog is open. `e2e/trays.e2e.ts` covers these transitions and
 capability non-persistence; optional `OMP_TRAY_SCREENSHOTS` writes synthetic smoke screenshots.
 
+The first-run introduction uses the same host after an authoritative render on a visible `/`
+entry, never during loading, a session, a routed launch, or another open tray. Connected uses
+the masthead mark and the current host label/session count. Background alerts moves the single
+`#alerts-panel` (and its real seven-state `#notify` control); **Not now** advances without enabling.
+View or Control explains the two explicit actions. **Next**/**Done**, native Back/Esc, and the
+leading controls share the stack; resume preloads Back destinations without showing intermediate
+steps. The root control is named **Skip introduction**. Every step focuses its heading and has
+a different height on phone and desktop. `e2e/first-run.e2e.ts` covers persistence, notifications,
+arrival gates, privacy, and optional synthetic screenshots via `OMP_FIRST_RUN_SCREENSHOTS`.
+
 ## Multiple configured hosts
 
 `GET /api/v1/client-config` is loaded once per document, bounded to 32 KiB with a four-second
@@ -116,6 +137,13 @@ V1 records migrate to the local source; the old key is removed only after the v2
 Removed or rebound source records are discarded. Transport failures never prune these decisions.
 Push and notification intents always address the home host, even when remote instance IDs collide.
 Remote Hold never enumerates home notifications. Alerts for other hosts require their own PWA install.
+
+The separate `localStorage` key `omp.sessions.first-run.v1` stores only
+`{ "version": 1, "step": "alerts" | "modes" | "done", "updatedAt": "<ISO timestamp>" }`,
+bounded to 128 characters. A missing record starts Connected; Back to Connected removes the
+record; advancing records the current step; Done or skip records `done`. Corrupt/unsupported
+records and inaccessible storage count as done. No identifiers, permission state, or capabilities
+are stored by the introduction.
 
 The embedded client receives a bounded source-bound sessions probe and the home configuration's
 `speech.browserRecognition` opt-in. Keyboard dictation remains the baseline. In-page recognition,
