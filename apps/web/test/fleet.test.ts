@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { FleetSource } from "@omp-session-gateway/protocol";
+import type { FleetSource, SessionCreationOptions } from "@omp-session-gateway/protocol";
 import {
   FleetTransport, sourceKey, sessionKey, readSourceRecords, HELD_KEY, DISMISSED_KEY, boundedJson,
   SessionCreationTransport, CreationTransportError, readCreationPreferences, writeCreationPreferences, CREATION_PREFERENCES_KEY,
@@ -41,7 +41,7 @@ const flush = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Pr
 const revision = "6e32a064-7baf-4f50-a903-09e04f882011";
 const operationId = "6e32a064-7baf-4f50-a903-09e04f882012";
 const creationRequest = { clientOperationId: operationId, revision, projectId: "project", workingCopyId: "main", profileId: "omp" };
-const creationOptions = { version: 1, revision, available: true, projects: [
+const creationOptions: SessionCreationOptions = { version: 1, revision, available: true, projects: [
   { id: "project", label: "Project", workingCopies: [{ id: "main", label: "Main" }] },
 ], profiles: [{ id: "omp", label: "OMP" }] };
 
