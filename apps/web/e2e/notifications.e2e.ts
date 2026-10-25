@@ -349,7 +349,10 @@ test("attention cards and explicit background alert settings stay metadata-only"
       const updated = busy === undefined ? metadata : { ...metadata, busy };
       fixture.upsert(updated);
       await expect(page.locator(".session-activity")).toHaveText(
-        busy === true ? "· Working" : busy === false ? "· Idle" : "· Activity unknown",
+        busy === true ? "Working" : busy === false ? "Idle" : "Activity unknown",
+      );
+      await expect(page.locator(".working-row .session-tile")).toHaveAttribute(
+        "data-state", busy === true ? "working" : busy === false ? "idle" : "unknown",
       );
       expect(await page.locator(".session-activity").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

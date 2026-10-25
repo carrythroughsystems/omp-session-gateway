@@ -12,9 +12,18 @@ The format is based on Keep a Changelog and Semantic Versioning.
   18.12.5→18.12.6 collaboration contract; extend the local lifecycle proof with native-executable
   publication, real View/Control attach, restart and OMP-owned revocation checks, without changing
   the engineering baseline lock.
+- Give every session the identity Tern shows for it: a light tile holding the title's leading
+  Nerd Font icon (or a monogram) with the session state as a corner badge, two-line titles, and a
+  metadata line of whole facts (project · state · uptime with day units · model) that wraps
+  between facts instead of truncating each one; hosts appear only while several are in view,
+  the host picker becomes one compact scope control, `Hide` becomes an icon-only control with the
+  same accessible name, and incomplete host coverage shows an amber dot.
 
 ### Fixed
 
+- Render Nerd Font Private Use Area symbols in session titles with a self-hosted Symbols Nerd
+  Font Mono subset, split into immutable, content-hashed WOFF2 chunks loaded and cached only on
+  first use; keep ordinary text on system fonts and make no remote font requests.
 - Refuse a missing Pixel Tailscale/DNS path to the configured gateway before Android acceptance
   navigation, with named reachability/adb diagnostics and a read-only parent admission gate that
   does not poison the shared Pixel lease before a mutating child has run (#430).

@@ -1,0 +1,178 @@
+{
+  "family": "Symbols Nerd Font Mono",
+  "source": {
+    "project": "ryanoasis/nerd-fonts",
+    "version": "v3.5.1",
+    "archive": "NerdFontsSymbolsOnly.zip",
+    "sha256": "fdca3682534f6f65e1ccb2345b0362ccf67d9b8eca7c8025330946e93e2473bc",
+    "face": "SymbolsNerdFontMono-Regular.ttf",
+    "license": "MIT"
+  },
+  "chunks": [
+    {
+      "file": "bmp-01.woff2",
+      "unicodeRange": "U+E000-E26C",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-02.woff2",
+      "unicodeRange": "U+E26D-E362",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-03.woff2",
+      "unicodeRange": "U+E363-E618",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-04.woff2",
+      "unicodeRange": "U+E619-E6B8",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-05.woff2",
+      "unicodeRange": "U+E6B9-E79C",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-06.woff2",
+      "unicodeRange": "U+E79D-E83C",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-07.woff2",
+      "unicodeRange": "U+E83D-E8DC",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-08.woff2",
+      "unicodeRange": "U+E8DD-EA83",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-09.woff2",
+      "unicodeRange": "U+EA84-EB2A",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-10.woff2",
+      "unicodeRange": "U+EB2B-EBCB",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-11.woff2",
+      "unicodeRange": "U+EBCC-EC6C",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-12.woff2",
+      "unicodeRange": "U+EC6D-ED87",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-13.woff2",
+      "unicodeRange": "U+ED88-EE27",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-14.woff2",
+      "unicodeRange": "U+EE28-EEC7",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-15.woff2",
+      "unicodeRange": "U+EEC8-EF67",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-16.woff2",
+      "unicodeRange": "U+EF68-F037",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-17.woff2",
+      "unicodeRange": "U+F038-F0D7",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-18.woff2",
+      "unicodeRange": "U+F0D8-F177",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-19.woff2",
+      "unicodeRange": "U+F178-F217",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-20.woff2",
+      "unicodeRange": "U+F218-F2B7",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-21.woff2",
+      "unicodeRange": "U+F2B8-F357",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-22.woff2",
+      "unicodeRange": "U+F358-F471",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-23.woff2",
+      "unicodeRange": "U+F472-F511",
+      "glyphs": 160
+    },
+    {
+      "file": "bmp-24.woff2",
+      "unicodeRange": "U+F512-F533",
+      "glyphs": 34
+    },
+    {
+      "file": "md-01.woff2",
+      "unicodeRange": "U+F0001-F0300",
+      "glyphs": 768
+    },
+    {
+      "file": "md-02.woff2",
+      "unicodeRange": "U+F0301-F0600",
+      "glyphs": 768
+    },
+    {
+      "file": "md-03.woff2",
+      "unicodeRange": "U+F0601-F0900",
+      "glyphs": 768
+    },
+    {
+      "file": "md-04.woff2",
+      "unicodeRange": "U+F0901-F0C00",
+      "glyphs": 768
+    },
+    {
+      "file": "md-05.woff2",
+      "unicodeRange": "U+F0C01-F0F00",
+      "glyphs": 768
+    },
+    {
+      "file": "md-06.woff2",
+      "unicodeRange": "U+F0F01-F1200",
+      "glyphs": 768
+    },
+    {
+      "file": "md-07.woff2",
+      "unicodeRange": "U+F1201-F1500",
+      "glyphs": 768
+    },
+    {
+      "file": "md-08.woff2",
+      "unicodeRange": "U+F1501-F1800",
+      "glyphs": 768
+    },
+    {
+      "file": "md-09.woff2",
+      "unicodeRange": "U+F1801-F1AF0",
+      "glyphs": 752
+    }
+  ]
+}

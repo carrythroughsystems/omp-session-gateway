@@ -114,6 +114,7 @@ export const ROUTINE_IMPLEMENTATION_PATHS: Readonly<Record<string, string>> = {
   "scripts/testingbot.ts": "Runs TestingBot lane operations and cleanup.",
   "scripts/upstream-canary.ts": "Exercises stock upstream compatibility.",
   "scripts/upstream-pins.ts": "Generates order-scoped upstream baseline pins.",
+  "scripts/vendor-nerd-symbols.ts": "Regenerates the vendored symbol-font subset from a pinned upstream archive.",
   "scripts/vultr-target.ts": "Selects qualification cloud targets.",
   "scripts/windows-qualification-guest.ps1": "Executes Windows guest qualification.",
   "scripts/windows-qualification-pins.json": "Pins order-scoped Windows qualification tools.",

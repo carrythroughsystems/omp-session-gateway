@@ -74,22 +74,33 @@ class FakeElement extends EventTarget {
   hidden = false;
   id = "";
   open = false;
-  textContent: string | null = "";
   type = "";
   value = "";
   parent: FakeElement | undefined;
 
-  constructor(readonly tagName: string) {
+  constructor(readonly tagName: string, private ownText = "") {
     super();
   }
 
-  get childElementCount(): number {
-    return this.children.length;
+  /** Text lives in `#text` children, as in the DOM, so mixed text and element children read back whole. */
+  get textContent(): string | null {
+    if (this.tagName === "#text") return this.ownText;
+    return this.children.map(child => child.textContent ?? "").join("");
   }
 
-  append(...children: FakeElement[]): void {
-    this.children.push(...children);
-    for (const child of children) {
+  set textContent(value: string | null) {
+    this.children.splice(0, this.children.length);
+    if (value !== null && value !== "") this.append(value);
+  }
+
+  get childElementCount(): number {
+    return this.children.filter(child => child.tagName !== "#text").length;
+  }
+
+  append(...nodes: (FakeElement | string)[]): void {
+    for (const node of nodes) {
+      const child = typeof node === "string" ? new FakeElement("#text", node) : node;
+      this.children.push(child);
       child.parent = this;
       if (child.tagName === "link") queueMicrotask(() => child.dispatchEvent(new Event("load")));
     }
@@ -269,6 +280,10 @@ class FakeDocument extends EventTarget {
   }
 
   createElement(tagName: string): FakeElement {
+    return new FakeElement(tagName);
+  }
+
+  createElementNS(_namespace: string, tagName: string): FakeElement {
     return new FakeElement(tagName);
   }
 
@@ -884,12 +899,74 @@ describe("dashboard attention and notifications", () => {
         .map(row => row.querySelector(".row-title")?.textContent),
     ).toEqual(["working-session-0002", "working-session-0001"]);
     const firstWorking = harness.elements.sessionList.querySelector(".working-row");
-    expect(firstWorking?.querySelector(".row-time")).not.toBeNull();
-    expect(firstWorking?.querySelector(".working-context")?.textContent).toBe("· project");
-    expect(firstWorking?.querySelector(".working-model")?.textContent).toBe("· model");
+    expect(firstWorking?.querySelector(".session-tile")?.dataset.state).toBe("unknown");
+    expect(firstWorking?.querySelector(".tile-monogram")?.textContent).toBe("W");
+    expect(
+      firstWorking?.querySelector(".row-meta")?.querySelectorAll(".fact").map(fact => [fact.className, fact.textContent]),
+    ).toEqual([
+      ["fact working-context", "project"],
+      ["fact session-activity", "Activity unknown"],
+      ["fact row-time", expect.stringMatching(/^up \d+d/u)],
+      ["fact working-model", "model"],
+    ]);
     const hide = harness.elements.sessionList.querySelector(".dismiss-session");
-    expect(hide?.textContent).toBe("Hide");
+    expect(hide?.querySelector("svg")).not.toBeNull();
+    expect(hide?.textContent).toBe("");
     expect(hide?.getAttribute("aria-label")).toBe("Hide working-session-0002 on this device");
+  });
+
+  test("lifts a leading Nerd Font icon into the tile and keeps icons out of spoken names", async () => {
+    const iconTitle = "\u{F04E6} SYNC: fix the \u{E0B0} catalogue parsing";
+    const minutesAgo = (minutes: number): string => new Date(Date.now() - minutes * 60_000).toISOString();
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "tile-icons",
+      initialSessions: [
+        session("tile-icons-0001", { title: iconTitle, busy: true, startedAt: minutesAgo(5) }),
+        session("tile-icons-0002", { title: "omp-session-gateway", cwdLabel: "omp-session-gateway", busy: false, startedAt: minutesAgo((3 * 24 + 4) * 60 + 7) }),
+      ],
+    });
+    const [iconRow, plainRow] = harness.elements.sessionList.querySelectorAll(".working-row");
+    const iconTile = iconRow?.querySelector(".session-tile");
+    expect(iconTile?.querySelector(".glyph")?.textContent).toBe("\u{F04E6}");
+    expect(iconTile?.getAttribute("aria-hidden")).toBe("true");
+    expect(iconTile?.dataset.state).toBe("working");
+    const title = iconRow?.querySelector(".row-title");
+    expect(title?.textContent).toBe("SYNC: fix the \u{E0B0}catalogue parsing");
+    expect(title?.querySelector(".glyph")?.textContent).toBe("\u{E0B0}");
+    expect(iconRow?.getAttribute("aria-label")).toBe("View SYNC: fix the catalogue parsing");
+    expect(harness.elements.sessionList.querySelector(".dismiss-session")?.getAttribute("aria-label")).toBe(
+      "Hide SYNC: fix the catalogue parsing on this device",
+    );
+    expect(iconRow?.querySelector(".row-meta")?.querySelectorAll(".fact").map(fact => fact.textContent)).toEqual(["project", "Working", "up 5m", "model"]);
+    // A title that already names the project does not repeat it; days replace long hour counts.
+    expect(plainRow?.querySelector(".tile-monogram")?.textContent).toBe("O");
+    expect(plainRow?.querySelector(".session-tile")?.dataset.state).toBe("idle");
+    expect(plainRow?.querySelector(".row-meta")?.querySelectorAll(".fact").map(fact => fact.textContent)).toEqual(["Idle", "up 3d 4h", "model"]);
+  });
+
+  test("shows host facts only while several hosts are in view", async () => {
+    const single = await bootApp({
+      permission: "denied",
+      suffix: "host-facts-single",
+      initialSessions: [session("host-facts-0001")],
+    });
+    expect(single.elements.sessionList.querySelector(".host-label")).toBeNull();
+    const fleet = await bootApp({
+      permission: "denied",
+      suffix: "host-facts-fleet",
+      initialSessions: [session("host-facts-0002")],
+      clientConfig: {
+        version: 1,
+        local: { id: "local", label: "Home", origin: "https://sessions.example" },
+        targets: [{ id: "remote", label: "Remote", origin: "https://remote.example" }],
+        speech: { browserRecognition: false },
+      },
+    });
+    await settleUntil(() => fleet.elements.sessionList.querySelector(".host-label") !== null, 100);
+    const facts = fleet.elements.sessionList.querySelector(".row-meta")?.querySelectorAll(".fact").map(fact => fact.textContent);
+    expect(facts).toEqual(["Home", "project", "Activity unknown", expect.stringMatching(/^up /u), "model"]);
+    fleet.setVisibility("hidden");
   });
 
   test("shows the empty state instead of a zero-count all-clear when nothing is live", async () => {
@@ -1800,7 +1877,7 @@ describe("fleet directory bindings", () => {
     ].entries()) {
       const harness = await bootApp({ permission: "denied", initialSessions: [local], clientConfig, suffix: `bootstrap-invalid-${index}` });
       expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
-      expect(harness.elements.fleetStatus.children[0]?.textContent).toBe("Fleet configuration unavailable — reload this app");
+      expect(harness.elements.fleetStatus.children[0]?.textContent).toStartWith("Fleet configuration unavailable — reload this app");
       harness.elements.fleetStatus.querySelector("button")?.dispatchEvent(new Event("click"));
       expect(harness.reloads.count).toBe(1);
       expect(harness.fetchPaths.some(path => path.startsWith("https://remote.example"))).toBeFalse();

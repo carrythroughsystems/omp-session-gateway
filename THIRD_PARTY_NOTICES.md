@@ -215,5 +215,26 @@ OMP itself is a separately installed mainline prerequisite, not a bundled or loc
 runtime component of this archive. The upstream OMP license text is retained at
 `licenses/oh-my-pi/LICENSE`; the client and runtime attributions above remain applicable.
 
+## Vendored font subset
+
+### Symbols Nerd Font Mono (Nerd Fonts v3.5.1)
+
+- Source: <https://github.com/ryanoasis/nerd-fonts/tree/v3.5.1>
+- Source archive: <https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/NerdFontsSymbolsOnly.zip>
+- License: MIT
+- Copyright: Copyright (c) 2014 Ryan L McIntyre
+- License text: `licenses/fonts/nerd-fonts/LICENSE`
+- Distributed code: `apps/web/dist/assets/nerd-symbols-<chunk>.<content-hash>.woff2`
+- Local modifications: Private Use Area-only subset split by unicode-range, hinting dropped,
+  and converted to WOFF2 by `scripts/vendor-nerd-symbols.ts`.
+- Icon-set licenses and upstream source/version table: `licenses/fonts/nerd-fonts/ICON_SETS.md`
+  reproduces the release README's table verbatim; individual icon-set terms remain applicable.
+- Font Awesome 6.5.1 attribution: Fonticons, Inc. (<https://fontawesome.com>),
+  <https://github.com/FortAwesome/Font-Awesome/tree/6.5.1>,
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); modified as described above.
+- Codicons 0.0.45 attribution: Microsoft and contributors,
+  <https://github.com/microsoft/vscode-codicons>,
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); modified as described above.
+
 The top-level `LICENSE` covers OMP Session Gateway itself. `NOTICE.md` describes the project's
 independent relationship to Oh My Pi; it does not replace any license text listed above.

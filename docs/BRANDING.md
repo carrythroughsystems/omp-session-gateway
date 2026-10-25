@@ -49,9 +49,11 @@ accent.
 
 ## Type
 
-- **Runtime PWA and public site:** system/local font stacks only —
-  `system-ui, sans-serif` / `ui-monospace, monospace`. Runtime assets must remain
-  first-party; no remote fonts, Google Fonts requests, third-party scripts, or CDNs.
+- **Runtime PWA and public site:** system/local font stacks for text —
+  `system-ui, sans-serif` / `ui-monospace, monospace`. The PWA additionally uses one
+  self-hosted, lazily loaded Symbols Nerd Font Mono subset for Private Use Area
+  glyphs, served as first-party assets. Runtime assets must remain first-party;
+  no remote fonts, Google Fonts requests, third-party scripts, or CDNs.
   This is a privacy requirement, not an optional offline optimization.
 - **Exported artwork:** `assets/banner.html` uses Space Grotesk 500/600 and
   JetBrains Mono 400/500 from Google Fonts to render static assets. That artwork
@@ -127,32 +129,54 @@ emerald = live, amber = needs-you/privileged, red = unauthorized.
 
 - Layout: the directory is one couch-first triage column, `min(100% − 2rem, 35rem)`
   at every viewport; open sessions widen separately (see Collaboration shell).
-  Spacing on a 4px grid. System font stacks only in the app (Space
+  Spacing on a 4px grid. System font stacks for text in the app; only Private Use
+  Area symbols use the self-hosted, lazily loaded Nerd Font subset (Space
   Grotesk/JetBrains Mono webfonts remain README/banner-only).
-- Radii: ~10px rows/cards, 12px hero, 999px pills. Borders 1px `border`;
+- Radii: 12px rows/cards and hero, 999px pills. Borders 1px `border`;
   shadows only on overlays (toast, sheets) — hierarchy comes from surface
   steps, not elevation.
 - Masthead: brand row (mark 20px + mono eyebrow `PRIVATE TAILNET DIRECTORY` in
   live color + trailing 44px Settings control), then H1 `Sessions`/`Needs you`
-  beside the state pill (`Live · N` emerald / `N waiting` amber).
-- Needs-you queue: one amber `Up next` hero (title, mono project/model
-  summary, sentence-case ask preview with a 2px amber rule, block
-  `Open request`, quiet `Hold for desk`/`Transcript` alternates), `Then` rows
-  with chevrons, dashed `On hold` rows with `Requeue`, then working rows.
-- Working rows: one bordered frame per session — whole-row View button with a
-  live dot, full-width title, then one compact mono detail line ordered uptime,
-  project, model slug. Project and model consume only their content and available
-  space; uptime remains visible. The quiet inset `Hide` control retains a 44px
-  target and explicit `Hide … on this device` label without looking destructive.
-- Collaboration shell: one centered header row on wide screens. Phone widths
-  put Back and Control/connection state on the first row and give the session
-  title a full-width second row, so long titles never collide with controls.
-  From 37rem up, the session, its header row, and its triage bar share one
-  centered column, `min(100% − 2rem, 60rem)`: wide enough for the client's
-  900px transcript, with no empty frame around it.
+  beside the state pill (`Live · N` emerald / `N waiting` amber). With several
+  hosts configured, one compact native `select` (`All hosts` / host names,
+  `aria-label` only) scopes the directory under the heading.
+- Session identity (every row, the hero, and the collaboration shell header)
+  mirrors Tern's: a 40px light tile (`ink` on `raised`, 10px radius) holds the
+  title's leading Nerd Font icon from the self-hosted symbol face, or the
+  title's first letter as a monogram, with the session state as a 10px badge
+  on the tile's corner — filled emerald working, emerald ring idle, muted
+  unknown, amber waiting, amber ring held. The icon leaves the title text,
+  spoken names (`aria-label`, document title, push bodies) drop icons, and an
+  icon inside a title draws as a 1em cell with a fixed gap.
+- Titles: 2-line clamp at weight 600 (`overflow-wrap: anywhere`), never a
+  single-line ellipsis on phones; the shell header keeps one line.
+- Metadata line (`.row-meta`): discrete mono facts at 11.5px that wrap between
+  facts, never inside one; each fact carries its own trailing `·` separator,
+  and only a fact wider than the row truncates. Working rows order project ·
+  state (`Working`/`Idle`/`Activity unknown`) · `up <elapsed>` (`m`, `h m`,
+  `d h`) · model slug; the project is omitted when the title already is the
+  project, and the host appears first only while more than one host is in view
+  (several sources and `All hosts` scope). Waiting and held rows show project
+  (and host); the hero shows project · model (and host).
+- Needs-you queue: one amber `Up next` hero (tile + title + summary, sentence-case
+  ask preview with a 2px amber rule, block `Open request`, quiet `Hold for
+  desk`/`Transcript` alternates), `Then` rows with chevrons, dashed `On hold`
+  rows with `Requeue`, then working rows.
+- Working rows: one bordered frame per session — whole-row View button (tile,
+  title, metadata line) and a quiet trailing 44px icon-only `Hide` control
+  (eye-off, `faint` → `ink` on hover) with the explicit `Hide … on this device`
+  accessible name.
+- Collaboration shell: one centered header row on wide screens (small 28px tile
+  before the one-line title, capped so Back and the actions never move). Phone
+  widths put Back and Control/connection state on the first row and give the
+  tile and title a full-width second row, so long titles never collide with
+  controls. From 37rem up, the session, its header row, and its triage bar
+  share one centered column, `min(100% − 2rem, 60rem)`: wide enough for the
+  client's 900px transcript, with no empty frame around it.
 - All clear: compact left-aligned status (ringed live dot, `All clear`, one muted
-  line), without repeating live counts already present in the masthead. Alert state appears only while background alerts are
-  enabled; otherwise a pill chip routes to Settings.
+  line), without repeating live counts already present in the masthead; `Host
+  coverage incomplete` turns the dot amber. Alert state appears only while
+  background alerts are enabled; otherwise a pill chip routes to Settings.
 - Settings sheet: bottom sheet with mono section kickers, the seven-state
   alert toggle, detail options (only while enabled), and a mono build line.
 - Status banner: full-width `surface` strip with a leading status dot

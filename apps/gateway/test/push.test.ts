@@ -64,7 +64,7 @@ function observedSession(inputRequired: boolean, generation = 1): ObservedSessio
     generation,
     pid: 1234,
     sessionId: `session-${generation}`,
-    title: "PROMPT_CONTENT_CANARY",
+    title: "\u{F04E6} PROMPT_CONTENT_CANARY",
     cwdLabel: "OPTION_CONTENT_CANARY",
     model: "provider/model",
     startedAt: "2026-07-24T00:00:00.000Z",

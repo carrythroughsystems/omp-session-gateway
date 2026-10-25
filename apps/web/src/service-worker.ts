@@ -7,9 +7,10 @@ import {
 } from "@omp-session-gateway/protocol";
 
 declare const __SHELL_ASSETS__: readonly string[];
+declare const __LAZY_ASSETS__: readonly string[];
 declare const __CACHE_NAME__: string;
 
-const shellAssets = new Set(__SHELL_ASSETS__);
+const cacheableAssets = new Set([...__SHELL_ASSETS__, ...__LAZY_ASSETS__]);
 const worker = globalThis as unknown as ServiceWorkerGlobalScope;
 const SHELL_CACHE_PREFIX = "omp-sessions-shell-";
 
@@ -232,7 +233,7 @@ worker.addEventListener("fetch", event => {
     url.pathname.startsWith("/client/") ||
     url.pathname.startsWith("/collab/") ||
     url.pathname.startsWith("/internal/") ||
-    !shellAssets.has(url.pathname)
+    !cacheableAssets.has(url.pathname)
   ) {
     return;
   }

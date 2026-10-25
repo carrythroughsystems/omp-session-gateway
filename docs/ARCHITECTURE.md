@@ -114,8 +114,11 @@ notification tag and displayed-attention priority are specified in [ATTENTION_SP
 PWA upgrades activate immediately after the new content-hashed shell is cached. The shell includes
 the pinned collaboration-client module and stylesheet, and an idle directory warms the module
 import so a launch pays only for its capability request and relay connect; launch-time loading
-remains the fallback. Activation retires prior shell caches and claims clients but never navigates
-one: Chromium reports a client's creation URL, not the route the page later reached through the
+remains the fallback. Session-title Private Use Area symbols use a first-party-served Symbols Nerd
+Font Mono subset, split into content-hashed WOFF2 chunks by `unicode-range`; chunks are excluded
+from install precaching, downloaded only when a rendered glyph needs them, and served cache-first
+from the shell cache after their first successful fetch. Activation retires prior shell caches and
+claims clients but never navigates one: Chromium reports a client's creation URL, not the route the page later reached through the
 history API, so the worker cannot tell an idle directory from a pending launch or a live `/client/`
 collaboration (ADR-018 amendment). The page observes the controller change and reloads itself after
 one second only while no launch is pending, no routed notification awaits its snapshot, and no
