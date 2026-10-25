@@ -506,15 +506,17 @@ export function createSpdxSbom(
       "Copyright (c) 2025 Mario Zechner\nCopyright (c) 2025-2026 Can Bölük\nCopyright (c) 2026 Stencil Labs, Inc.",
     sourceInfo: `Vendored from ${client.commit} (${client.tag}) with local modifications documented in THIRD_PARTY_NOTICES.md`,
   };
+  // The font file is MIT, but its glyph sets carry their own terms (licenses/fonts/nerd-fonts/ICON_SETS.md):
+  // the concluded expression names every one of them, so the machine-readable SBOM says what the notices say.
   const nerdFontPackage = {
     name: nerdSymbols.family,
     SPDXID: "SPDXRef-Vendored-Nerd-Font-Symbols",
     versionInfo: nerdSymbols.source.version,
     downloadLocation: `https://github.com/${nerdSymbols.source.project}/releases/download/${nerdSymbols.source.version}/${nerdSymbols.source.archive}`,
     filesAnalyzed: false,
-    licenseConcluded: nerdSymbols.source.license,
+    licenseConcluded: `${nerdSymbols.source.license} AND Apache-2.0 AND CC-BY-4.0 AND OFL-1.1 AND OFL-1.1-RFN AND Unlicense`,
     licenseDeclared: nerdSymbols.source.license,
-    licenseComments: `License text: ${NERD_FONT_LICENSE_PATH}; icon-set licenses and CC BY 4.0 attributions: ${NERD_FONT_ICON_SETS_PATH}`,
+    licenseComments: `License text: ${NERD_FONT_LICENSE_PATH}; icon-set licenses (Codicons and Font Awesome CC BY 4.0, Material Design Icons Apache-2.0, Weather Icons OFL-1.1, Pomicons OFL-1.1-RFN, Font Logos Unlicense, remaining sets MIT) with CC BY 4.0 attributions: ${NERD_FONT_ICON_SETS_PATH}`,
     copyrightText: "Copyright (c) 2014 Ryan L McIntyre",
     checksums: [{ algorithm: "SHA256", checksumValue: nerdSymbols.source.sha256.toUpperCase() }],
     sourceInfo: `PUA-only WOFF2 subsets of ${nerdSymbols.source.face}; local modifications documented in THIRD_PARTY_NOTICES.md`,

@@ -221,7 +221,10 @@ runtime component of this archive. The upstream OMP license text is retained at
 
 - Source: <https://github.com/ryanoasis/nerd-fonts/tree/v3.5.1>
 - Source archive: <https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/NerdFontsSymbolsOnly.zip>
-- License: MIT
+- License: MIT (font file); glyph sets additionally under Apache-2.0 (Material Design Icons),
+  CC BY 4.0 (Codicons, Font Awesome), OFL-1.1 (Weather Icons), OFL-1.1-RFN (Pomicons), and
+  Unlicense (Font Logos, listed as "unlicensed" upstream); the release SBOM concludes
+  `MIT AND Apache-2.0 AND CC-BY-4.0 AND OFL-1.1 AND OFL-1.1-RFN AND Unlicense`
 - Copyright: Copyright (c) 2014 Ryan L McIntyre
 - License text: `licenses/fonts/nerd-fonts/LICENSE`
 - Distributed code: `apps/web/dist/assets/nerd-symbols-<chunk>.<content-hash>.woff2`

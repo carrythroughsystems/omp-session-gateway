@@ -740,16 +740,22 @@ const LEADING_GLYPH_PATTERN = /^[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFD}\u{100000}-
 
 type SessionTileState = "working" | "idle" | "unknown" | "waiting" | "held";
 
+/** Text with every icon run spoken as a space; empty when the label was icons only. */
+function spokenText(value: string): string {
+  return value.replace(GLYPH_RUN_PATTERN, " ").replace(/\s+/gu, " ").trim();
+}
+
 /** The title text after its leading icon; the icon belongs to the tile. */
 function titleText(session: SessionMetadata): string {
-  return sessionTitle(session).replace(LEADING_GLYPH_PATTERN, "") || session.cwdLabel || "OMP session";
+  return sessionTitle(session).replace(LEADING_GLYPH_PATTERN, "") || spokenText(session.cwdLabel ?? "") || "OMP session";
 }
 
 /** Icon tile: the title's leading Nerd Font icon, else a monogram, with the session's state as a badge. */
 function createSessionTile(session: SessionMetadata, state?: SessionTileState): HTMLElement {
   const tile = createTextElement("span", "session-tile", "");
   tile.setAttribute("aria-hidden", "true");
-  const icon = LEADING_GLYPH_PATTERN.exec(sessionTitle(session))?.[0].trimEnd();
+  // One icon cell only: a host-controlled run of icons never grows past the tile.
+  const icon = [...(LEADING_GLYPH_PATTERN.exec(sessionTitle(session))?.[0] ?? "")][0];
   tile.append(icon === undefined
     ? createTextElement("span", "tile-monogram", [...titleText(session)][0]?.toLocaleUpperCase() ?? "")
     : createTextElement("span", "glyph", icon));
@@ -776,7 +782,7 @@ function createTitleElement(tagName: string, className: string, session: Session
 
 /** The title for accessible names, the document title, and other surfaces that cannot draw icon cells. */
 function spokenTitle(session: SessionMetadata): string {
-  return sessionTitle(session).replace(GLYPH_RUN_PATTERN, " ").replace(/\s+/gu, " ").trim() || session.cwdLabel || "OMP session";
+  return spokenText(sessionTitle(session)) || spokenText(session.cwdLabel ?? "") || "OMP session";
 }
 
 function activityState(session: SessionMetadata): SessionTileState {

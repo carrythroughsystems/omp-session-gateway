@@ -945,6 +945,26 @@ describe("dashboard attention and notifications", () => {
     expect(plainRow?.querySelector(".row-meta")?.querySelectorAll(".fact").map(fact => fact.textContent)).toEqual(["Idle", "up 3d 4h", "model"]);
   });
 
+  test("bounds a host-controlled icon run to one tile cell and keeps icon-only labels out of spoken names", async () => {
+    const run = "\u{F04E6}".repeat(64);
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "icon-runs",
+      initialSessions: [
+        session("icon-runs-0001", { title: `${run} Flooded`, startedAt: "2026-07-21T12:00:00.000Z" }),
+        session("icon-runs-0002", { title: "\u{F011C}", cwdLabel: "\u{F0493} tools", startedAt: "2026-07-21T11:00:00.000Z" }),
+      ],
+    });
+    const [flooded, iconsOnly] = harness.elements.sessionList.querySelectorAll(".working-row");
+    expect(flooded?.querySelector(".session-tile")?.querySelector(".glyph")?.textContent).toBe("\u{F04E6}");
+    expect(flooded?.querySelector(".row-title")?.textContent).toBe("Flooded");
+    expect(flooded?.getAttribute("aria-label")).toBe("View Flooded");
+    expect(iconsOnly?.querySelector(".session-tile")?.querySelector(".glyph")?.textContent).toBe("\u{F011C}");
+    expect(iconsOnly?.querySelector(".row-title")?.textContent).toBe("tools");
+    expect(iconsOnly?.getAttribute("aria-label")).toBe("View tools");
+    expect(harness.elements.sessionList.querySelectorAll(".dismiss-session")[1]?.getAttribute("aria-label")).toBe("Hide tools on this device");
+  });
+
   test("shows host facts only while several hosts are in view", async () => {
     const single = await bootApp({
       permission: "denied",
