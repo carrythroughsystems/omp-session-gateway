@@ -289,7 +289,7 @@ export class SessionCreationService {
     const spawnedAt = this.#clock.monotonic();
     let latest: AdoptionObservation | undefined;
     const unsubscribe = this.#dependencies.poller.subscribeObservations(observation => {
-      if (observation.startedAt >= spawnedAt && observation.round > baseline.observation.round) latest = observation;
+      if (observation.startedAt > spawnedAt && observation.round > baseline.observation.round) latest = observation;
     });
     try {
       const result = await this.#cli.createTab(copy, profile, signal);
@@ -302,7 +302,7 @@ export class SessionCreationService {
       let viewOnly = false;
       while (!signal.aborted && this.#clock.monotonic() < deadline) {
         const refresh = await this.#dependencies.poller.refreshForAdoption({ signal, timeoutMs: Math.min(5000, deadline - this.#clock.monotonic()) });
-        if (refresh.status === "ok" && refresh.observation.startedAt >= spawnedAt && refresh.observation.round > baseline.observation.round) latest = refresh.observation;
+        if (refresh.status === "ok" && refresh.observation.startedAt > spawnedAt && refresh.observation.round > baseline.observation.round) latest = refresh.observation;
         const current = await this.#cli.inspect(profile, signal);
         if (signal.aborted) return;
         const file = current && matchingTernBasename(current, result.blockId);

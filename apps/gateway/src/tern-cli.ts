@@ -123,8 +123,9 @@ export function matchingTernBasename(inspection: TernInspection, blockId: string
   return panes.length === 1 ? panes[0]!.sessionBasename : undefined;
 }
 export function sessionBasenameMatches(basename: string, sessionId: string): boolean {
+  const tokens: readonly string[] = basename.slice(0, -6).match(/[A-Za-z0-9-]+/gu) ?? [];
   return basename.endsWith(".jsonl") && /^[A-Za-z0-9-]+$/u.test(sessionId) &&
-    (basename.slice(0, -6).match(/[A-Za-z0-9-]+/gu) ?? []).includes(sessionId);
+    tokens.includes(sessionId);
 }
 export type TernCreateResult = { readonly kind: "not_started" } | { readonly kind: "unknown" } |
   { readonly kind: "started"; readonly blockId: string };

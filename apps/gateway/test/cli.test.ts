@@ -1200,6 +1200,7 @@ async function runFleetRollback(
   version: string,
   mode: "success" | "existing-backup" | "failed-start" = "success",
   authored: "all" | "defaults" | "none" = "all",
+  tern = false,
 ): Promise<SandboxRun> {
   return runInSandbox(async root => {
     const entry = join(root, "rollback-fixture.ts");
@@ -1218,6 +1219,7 @@ let config = await writeGatewayConfigFile({
   publicOrigin: "https://studio.example.ts.net", allowedLogins: ["user@example.com"],
 });
 const document = JSON.parse(await readFile(config.paths.configPath, "utf8"));
+if (${JSON.stringify(tern)}) document.tern = {};
 if (authored !== "none") {
   document.http.trustedDashboardOrigins = authored === "all" ? ["https://dashboard.example.ts.net"] : [];
   document.fleet = authored === "all" ? {
@@ -1274,6 +1276,18 @@ console.log(JSON.stringify({
 }
 
 describe("rollback fleet configuration projection", () => {
+  test("every managed rollback projects authored Tern away while preserving newer fleet settings and full backup", async () => {
+    for (const version of ["0.7.8", "0.8.0", "0.9.0"]) {
+      const run = await runFleetRollback(version, "success", "all", true);
+      const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+      expect(state.failure).toBe("");
+      expect(state.backup).toBe(state.before);
+      expect(JSON.parse(state.after).tern).toBeUndefined();
+      if (version !== "0.7.8") expect(JSON.parse(state.after).fleet).toEqual(JSON.parse(state.before).fleet);
+      expect(state.installed[0].document.tern).toBeUndefined();
+      expect(run.stdout).toContain("Tern creation requires explicit re-enablement");
+    }
+  });
   test("backs up full authored bytes before older runtime activation and explains restoration", async () => {
     const run = await runFleetRollback("0.7.8");
     expect(run.exitCode).toBe(0);

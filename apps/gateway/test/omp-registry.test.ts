@@ -75,7 +75,11 @@ describe("fresh adoption observation ordering", () => {
     const a = f.poller.refreshForAdoption({ signal: new AbortController().signal, timeoutMs: 5000 });
     const b = f.poller.refreshForAdoption({ signal: new AbortController().signal, timeoutMs: 5000 });
     const published: number[] = [];
+    let reconciled = 0;
+    const reconcile = f.registry.reconcile.bind(f.registry);
+    f.registry.reconcile = input => { reconciled++; return reconcile(input); };
     const unsubscribe = f.poller.subscribeObservations(batch => {
+      expect(reconciled).toBe(batch.round);
       published.push(batch.round);
       expect(batch.knownInstanceIds).toEqual(["retained-instance"]);
       expect(JSON.stringify(batch)).not.toMatch(/token|endpoint|cwd|capability/u);

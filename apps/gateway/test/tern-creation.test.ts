@@ -72,7 +72,7 @@ async function fixture(options: FixtureOptions = {}) {
     poller: {
       subscribeObservations(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
       async refreshForAdoption({ signal }): Promise<AdoptionRefresh> {
-        polls++;
+        polls++; monotonic++;
         if ((polls === 1 && options.heldPreflight) || (polls > 1 && options.heldAdoption)) {
           await held(signal); return { status: "aborted" };
         }
@@ -92,7 +92,7 @@ async function fixture(options: FixtureOptions = {}) {
         creates++;
         expect(JSON.parse(contents!).operations[0].status.state).toBe("launching");
         if (options.earlyObservation) {
-          polls++;
+          polls++; monotonic++;
           for (const listener of listeners) listener(batch(options.hosts ?? [host]));
         }
         if (options.heldSpawn) await held(signal);
