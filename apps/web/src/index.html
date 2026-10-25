@@ -39,10 +39,16 @@
           <h1 id="directory-title" tabindex="-1">Sessions</h1>
           <p id="directory-count" class="count-pill" hidden></p>
         </div>
-        <button id="new-session" class="new-session" type="button" aria-haspopup="dialog">New session</button>
-        <label id="host-picker-label" class="host-picker" hidden>
-          <select id="host-picker" aria-label="Host"></select>
-        </label>
+        <div class="directory-tools">
+          <label id="host-picker-label" class="host-picker" hidden>
+            <select id="host-picker" aria-label="Host"></select>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6.5l4 4 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          </label>
+          <button id="new-session" class="new-session" type="button" aria-haspopup="dialog">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+            New session
+          </button>
+        </div>
       </header>
       <div id="status-banner" class="status" data-kind="loading" role="status">Loading sessions…</div>
       <section id="fleet-status" aria-label="Host availability" aria-live="polite" hidden></section>
@@ -56,7 +62,10 @@
         <p class="empty-kicker">No live sessions</p>
         <h2>Start an interactive OMP process.</h2>
         <p>With <code>collab.autoStart</code> configured it appears here automatically — no link copy or <code>/collab</code> command is needed.</p>
-        <button id="empty-new-session" class="new-session" type="button" aria-haspopup="dialog">New session</button>
+        <button id="empty-new-session" class="new-session" type="button" aria-haspopup="dialog">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+          New session
+        </button>
       </section>
       <section id="session-list" class="session-list" aria-label="Live OMP sessions"></section>
     </main>
