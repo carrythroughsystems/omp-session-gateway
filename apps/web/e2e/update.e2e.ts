@@ -154,7 +154,7 @@ test("an updated PWA preserves active collaboration until the user leaves", asyn
     );
     await page.locator(".shell-control").click();
     await expect(page.locator(".triage-copy")).toHaveText(
-      "The session could not be opened. Try again.",
+      "This host: The session could not be opened. Try again.",
     );
     await page.waitForTimeout(100);
     expect(await page.evaluate(() => ({
