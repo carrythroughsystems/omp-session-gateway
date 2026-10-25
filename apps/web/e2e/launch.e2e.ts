@@ -686,10 +686,10 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "reconnecting");
     await expect(page.locator(".conn-chip")).toHaveText("Reconnecting…");
     await expect(page.locator(".triage-bar")).toBeHidden();
-    await expect(page.locator(".conn-chip")).toHaveText("Connected");
+    await expect(page.locator(".conn-chip")).toHaveText("Reconnecting… 0%");
     await page.waitForTimeout(3_200);
-    await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "connected");
-    await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "hold");
+    await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "reconnecting");
+    await expect(page.locator(".triage-bar")).toBeHidden();
     await page.evaluate(() => {
       const socket = (globalThis as typeof globalThis & {
         __askSocket?: { releaseSnapshot(): void };
@@ -698,6 +698,9 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
       socket.releaseSnapshot();
     });
     await expect(page.locator(".sh-ask-option").first()).toBeVisible();
+    await expect(page.locator(".conn-chip")).toHaveText("Connected");
+    await expect(page.locator(".conn-chip")).toHaveAttribute("data-state", "connected");
+    await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "hold");
     await expect(page.locator(".conn-chip")).toHaveAttribute("data-compact", "true");
 
     await page.evaluate(() => {
