@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { FleetSource } from "@omp-session-gateway/protocol";
-import { FleetTransport, sourceKey, sessionKey, readSourceRecords, HELD_KEY, DISMISSED_KEY, boundedJson } from "../src/fleet";
+import type { FleetSource, SessionCreationOptions } from "@omp-session-gateway/protocol";
+import {
+  FleetTransport, sourceKey, sessionKey, readSourceRecords, HELD_KEY, DISMISSED_KEY, boundedJson,
+  SessionCreationTransport, CreationTransportError, readCreationPreferences, writeCreationPreferences, CREATION_PREFERENCES_KEY,
+} from "../src/fleet";
 
 const local: FleetSource = { id: "local", label: "Home", origin: "https://home.example" };
 const remote: FleetSource = { id: "remote", label: "Remote", origin: "https://remote.example" };
@@ -34,6 +37,142 @@ class Storage {
   removeItem(key: string): void { this.items.delete(key); }
 }
 const flush = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+
+const revision = "6e32a064-7baf-4f50-a903-09e04f882011";
+const operationId = "6e32a064-7baf-4f50-a903-09e04f882012";
+const creationRequest = { clientOperationId: operationId, revision, projectId: "project", workingCopyId: "main", profileId: "omp" };
+const creationOptions: SessionCreationOptions = { version: 1, revision, available: true, projects: [
+  { id: "project", label: "Project", workingCopies: [{ id: "main", label: "Main" }] },
+], profiles: [{ id: "omp", label: "OMP" }] };
+
+describe("session creation transport", () => {
+  test("uses same-origin locally and exact credential-free CORS remotely for every route", async () => {
+    for (const source of [local, remote]) {
+      const requests: { url: string; init: RequestInit }[] = [];
+      const transport = new SessionCreationTransport(source, () => {}, (async (url, init) => {
+        requests.push({ url: String(url), init: init! });
+        return Response.json(String(url).endsWith("options") ? creationOptions
+          : init!.method === "POST" ? { operationId, state: "accepted" }
+            : { operationId, state: "awaiting_omp", updatedAt: "2026-10-24T00:00:00.000Z" });
+      }) as typeof fetch, new Clock());
+      const signal = new AbortController().signal;
+      expect(await transport.options(signal)).toEqual(creationOptions);
+      expect(await transport.create(creationRequest, signal)).toEqual({ operationId, state: "accepted" });
+      expect((await transport.status(operationId, signal)).state).toBe("awaiting_omp");
+      expect(requests.map(request => request.url)).toEqual([
+        "/api/v1/session-creation-options", "/api/v1/session-creations", `/api/v1/session-creations/${operationId}`,
+      ].map(path => source === local ? path : `${source.origin}${path}`));
+      for (const { init } of requests) {
+        expect(init.credentials).toBe(source === local ? "same-origin" : "omit");
+        expect(init.mode).toBe(source === local ? undefined : "cors");
+        expect(init.redirect).toBe("error");
+        expect(init.cache).toBe("no-store");
+      }
+      expect(JSON.parse(String(requests[1]!.init.body))).toEqual(creationRequest);
+    }
+  });
+
+  test("deadlines are 4/10/4 seconds and a failed POST is never retried", async () => {
+    for (const method of ["options", "create", "status"] as const) {
+      const time = new Clock();
+      let calls = 0;
+      const transport = new SessionCreationTransport(local, () => {}, (async (_url, init) => {
+        calls++;
+        return await new Promise<Response>((_resolve, reject) => {
+          init!.signal!.addEventListener("abort", () => reject(new Error("synthetic response lost")), { once: true });
+        });
+      }) as typeof fetch, time);
+      const signal = new AbortController().signal;
+      const pending = method === "options" ? transport.options(signal) : method === "create"
+        ? transport.create(creationRequest, signal) : transport.status(operationId, signal);
+      expect([...time.timers.values()].map(timer => timer.at)).toEqual([method === "create" ? 10_000 : 4_000]);
+      time.advance(method === "create" ? 10_000 : 4_000);
+      await expect(pending).rejects.toMatchObject({ code: "unavailable" });
+      time.advance(60_000);
+      expect(calls).toBe(1);
+      expect(time.timers.size).toBe(0);
+    }
+  });
+
+  test("readable 403 follows source-forbidden while old options 404 is unavailable", async () => {
+    let denied: FleetSource | undefined;
+    const missing = new SessionCreationTransport(local, () => {}, (async () => new Response(null, { status: 404 })) as unknown as typeof fetch, new Clock());
+    expect(await missing.options(new AbortController().signal)).toBeUndefined();
+    await expect(missing.status(operationId, new AbortController().signal)).rejects.toMatchObject({ code: "not_found" });
+    const forbidden = new SessionCreationTransport(remote, source => { denied = source; }, (async () => new Response(null, { status: 403 })) as unknown as typeof fetch, new Clock());
+    await expect(forbidden.options(new AbortController().signal)).rejects.toMatchObject({ code: "forbidden" });
+    expect(denied).toBe(remote);
+  });
+
+  test("rejects duplicate keys, state combinations, unknown fields and oversized streamed bodies", async () => {
+    for (const body of [
+      JSON.stringify(creationOptions).replace('"version":1', '"version":1,"version":1'),
+      JSON.stringify({ ...creationOptions, path: "/synthetic-secret-must-not-cross" }),
+      " ".repeat(64 * 1024 + 1),
+      '{"available":true}',
+    ]) {
+      const transport = new SessionCreationTransport(local, () => {}, (async () => new Response(body)) as unknown as typeof fetch, new Clock());
+      await expect(transport.options(new AbortController().signal)).rejects.toBeInstanceOf(CreationTransportError);
+    }
+    const transport = new SessionCreationTransport(local, () => {}, (async () => Response.json({
+      operationId, state: "ready", updatedAt: "2026-10-24T00:00:00.000Z",
+    })) as unknown as typeof fetch, new Clock());
+    await expect(transport.status(operationId, new AbortController().signal)).rejects.toMatchObject({ code: "unavailable" });
+  });
+
+  test("errors retain closed codes, not arbitrary response text; caller abort blocks late success", async () => {
+    const canary = ["SYNTHETIC", "CREATION", "SECRET"].join("_");
+    for (const code of ["revision_mismatch", "operation_conflict", "creation_busy", "ledger_unavailable"]) {
+      const transport = new SessionCreationTransport(local, () => {}, (async () => Response.json({ code, message: canary }, { status: 409 })) as unknown as typeof fetch, new Clock());
+      try { await transport.create(creationRequest, new AbortController().signal); throw new Error("expected rejection"); }
+      catch (error) {
+        expect(error).toMatchObject({ code });
+        expect(String(error)).not.toContain(canary);
+      }
+    }
+    const deferred = Promise.withResolvers<Response>();
+    const controller = new AbortController();
+    const time = new Clock();
+    const transport = new SessionCreationTransport(local, () => {}, (async () => deferred.promise) as unknown as typeof fetch, time);
+    const pending = transport.options(controller.signal);
+    controller.abort();
+    deferred.resolve(Response.json(creationOptions));
+    await expect(pending).rejects.toMatchObject({ code: "unavailable" });
+    expect(time.timers.size).toBe(0);
+  });
+});
+
+describe("creation preferences", () => {
+  const choice = { sourceId: "local", sourceOrigin: local.origin, projectId: "project", workingCopyId: "main", profileId: "omp", updatedAt: "2026-10-24T00:00:00.000Z" };
+  test("round-trips only IDs and prunes removed or rebound sources only after authoritative bootstrap", () => {
+    const storage = new Storage();
+    writeCreationPreferences(storage, [choice, { ...choice, sourceId: "remote", sourceOrigin: remote.origin }]);
+    expect(readCreationPreferences(storage, [local, remote], true).size).toBe(2);
+    const bytes = storage.getItem(CREATION_PREFERENCES_KEY);
+    expect(readCreationPreferences(storage, [local], false).size).toBe(2);
+    expect(storage.getItem(CREATION_PREFERENCES_KEY)).toBe(bytes);
+    expect(readCreationPreferences(storage, [local, { ...remote, origin: "https://rebound.example" }], true).size).toBe(1);
+    expect([...readCreationPreferences(storage, [local], true).values()]).toEqual([choice]);
+  });
+  test("rejects labels, drafts, duplicate sources, invalid timestamps, oversized and unsupported records", () => {
+    const storage = new Storage();
+    for (const extra of [{ draft: "SYNTHETIC_DRAFT_CANARY" }, { label: "Never store" }, { operationId }, { sourceOrigin: "https://home.example/path" }, { updatedAt: "yesterday" }]) {
+      storage.setItem(CREATION_PREFERENCES_KEY, JSON.stringify({ version: 1, choices: [{ ...choice, ...extra }] }));
+      expect(readCreationPreferences(storage, [local], true).size).toBe(0);
+    }
+    for (const record of [{ version: 2, choices: [choice] }, { version: 1, choices: Array.from({ length: 9 }, () => choice) }]) {
+      storage.setItem(CREATION_PREFERENCES_KEY, JSON.stringify(record));
+      expect(readCreationPreferences(storage, [local], true).size).toBe(0);
+    }
+    storage.setItem(CREATION_PREFERENCES_KEY, " ".repeat(16 * 1024 + 1));
+    expect(readCreationPreferences(storage, [local], true).size).toBe(0);
+    storage.setItem(CREATION_PREFERENCES_KEY, JSON.stringify({ version: 1, choices: [choice, choice] }));
+    expect(readCreationPreferences(storage, [local], true).size).toBe(1);
+    storage.fail = true;
+    expect(() => writeCreationPreferences(storage, [choice])).not.toThrow();
+    expect(readCreationPreferences(storage, [local], true).size).toBe(1);
+  });
+});
 
 describe("fleet transport", () => {
   test("coalesces requests, binds CORS options, and accepts lower revisions after a restart", async () => {

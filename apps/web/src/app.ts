@@ -28,6 +28,7 @@ import {
   type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
 } from "./fleet";
 import { createTray, type TrayPanel } from "./tray";
+import { SessionCreationController } from "./session-creation";
 
 type SessionMetadata = Metadata & { readonly sourceKey: SourceKey };
 
@@ -138,6 +139,7 @@ interface LaunchAttempt {
   readonly ref: SessionRef;
   readonly mode: LaunchMode;
   readonly presentation: LaunchPresentation;
+  readonly creationHandoff: boolean;
   readonly scope: SourceKey | "all";
   readonly sourceEpoch: number | undefined;
   readonly controller: AbortController;
@@ -227,6 +229,48 @@ let collabShellDisposedOnPageHide = false;
 let disposedShellResume: DisposedShellResume | undefined;
 let currentNotificationDetail: PushDetailLevel = "session";
 
+let initialPromptDraft: { ref: SessionRef; text: string } | undefined;
+const sameBinding = (left: SessionRef, right: SessionRef): boolean =>
+  left.sourceKey === right.sourceKey && left.instanceId === right.instanceId && left.generation === right.generation;
+function clearCreationDraft(key?: SourceKey): void {
+  if (key === undefined || initialPromptDraft?.ref.sourceKey === key) initialPromptDraft = undefined;
+}
+const creation = new SessionCreationController({
+  tray,
+  sources: () => [...sources.values()],
+  scope: () => selectedScope,
+  epoch: () => selectionEpoch,
+  authoritative: () => !fleetBootstrapFailed,
+  discardDraft: () => clearCreationDraft(),
+  cancelOpening: () => cancelLaunch(),
+  forbidden: source => {
+    const key = sourceKey(source);
+    clearCreationDraft(key);
+    if (key !== localKey) { remotes.get(key)?.forbid(); return; }
+    authorizationDenied = true;
+    localFresh = false;
+    directoryLoaded = false;
+    replaceSessionSnapshot([], localKey, false);
+    cancelLaunch(localKey);
+    if (activeCollabShell?.sourceKey === localKey) returnToDirectory();
+    render();
+    setStatus("unauthorized", "This tailnet identity is not authorized.");
+  },
+  refresh: source => sourceKey(source) === localKey ? refreshAndConnect() : remotes.get(sourceKey(source))!.refresh(true),
+  openReady: async (source, binding, draft, current) => {
+    const key = sourceKey(source);
+    if (!current() || sources.get(key) !== source || activeCollabShell !== undefined || pendingLaunch !== undefined) return false;
+    const ref: SessionRef = { sourceKey: key, ...binding };
+    if (initialPromptDraft !== undefined && !sameBinding(initialPromptDraft.ref, ref)) clearCreationDraft();
+    const refreshed = key === localKey ? await refreshAndConnect() : await remotes.get(key)?.refresh(true) === "healthy";
+    if (!refreshed || !current() || sources.get(key) !== source || activeCollabShell !== undefined || pendingLaunch !== undefined) return false;
+    const session = sessions.get(sessionKey(ref));
+    if (session === undefined || session.generation !== binding.generation || !session.canControl || !sourceFresh(key)) return false;
+    if (draft !== "") initialPromptDraft = { ref, text: draft };
+    return await launch(session, "control", undefined, undefined, selectedScope, "full", true);
+  },
+});
+
 const notificationLabels: Readonly<Record<NotificationControlState, string>> = {
   checking: "Checking background alerts…",
   idle: "Enable background alerts",
@@ -263,6 +307,8 @@ function setNotificationControl(state: NotificationControlState): void {
 }
 
 function openAlerts(): void {
+  if (creation.isActive) cancelLaunch();
+  creation.cancel("competing");
   tray.open({ id: "alerts", title: "Background alerts", tone: "neutral", body: alertsPanel });
 }
 
@@ -434,6 +480,7 @@ function applyActivatedWorkerUpdate(): void {
   clearUpdateReloadTimeout();
   if (
     !workerUpdatePending ||
+    creation.isActive ||
     pendingLaunch !== undefined ||
     pendingNotificationRoute ||
     activeCollabShell !== undefined ||
@@ -470,6 +517,8 @@ function acceptNotificationRoute(event: MessageEvent): void {
   if (intent === undefined) return;
   event.ports[0]?.postMessage({ type: "omp-notification-route-accepted", version: PUSH_API_VERSION });
   selectionEpoch += 1;
+  creation.cancel("competing");
+  clearCreationDraft();
   cancelLaunch();
   pendingNotificationLaunch = intent;
   pendingNotificationRoute = true;
@@ -764,9 +813,11 @@ function showTransportFailure(kind: TransportFailureKind): void {
       troubleshooting.type = "button";
       troubleshooting.className = "status-action";
       troubleshooting.textContent = "Troubleshooting";
-      troubleshooting.addEventListener("click", () => tray.open({
-        id: "recovery", title: "Troubleshooting", tone: "neutral", body: recoveryPanel,
-      }));
+      troubleshooting.addEventListener("click", () => {
+        if (creation.isActive) cancelLaunch();
+        creation.cancel("competing");
+        tray.open({ id: "recovery", title: "Troubleshooting", tone: "neutral", body: recoveryPanel });
+      });
       actions.append(troubleshooting);
     }
     statusBanner.append(actions);
@@ -1063,11 +1114,14 @@ function cancelLaunch(source?: SourceKey): void {
     tray.close(true, true);
     if (statusBanner.dataset.kind === "loading" && directoryLoaded && localFresh) setStatus("ready", "");
   }
+  if (cancelled.creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
 }
 
 function remoteChanged(remote: FleetTransport): void {
   replaceSessionSnapshot(remote.snapshot?.sessions ?? [], remote.key, remote.status === "fresh");
   if (remote.status === "forbidden") {
+    creation.cancel("forbidden", remote.key);
+    clearCreationDraft(remote.key);
     cancelLaunch(remote.key);
     if (activeCollabShell?.sourceKey === remote.key) returnToDirectory();
   }
@@ -1353,6 +1407,8 @@ function showDismissUndo(session: SessionMetadata): void {
     generation: session.generation,
   };
   pendingDismissUndo = pending;
+  if (creation.isActive) cancelLaunch();
+  creation.cancel("competing");
   tray.open({ id: "undo", title: "Hidden on this device", tone: "neutral", body: undoPanel }, {
     transientMs: LOCAL_ACTION_UNDO_MS,
     onClose: () => { if (pendingDismissUndo === pending) pendingDismissUndo = undefined; },
@@ -1642,6 +1698,8 @@ function renderWaitingQueue(
         });
         choices.append(transcript);
       }
+      if (creation.isActive) cancelLaunch();
+      creation.cancel("competing");
       tray.open({ id: "options", title: "This request", tone: "attention", body: choices });
     });
     article.append(options);
@@ -2252,6 +2310,10 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
 }
 
 function reconcileActiveCollabShell(): void {
+  if (initialPromptDraft !== undefined) {
+    const current = sessions.get(sessionKey(initialPromptDraft.ref));
+    if (current === undefined || !sameBinding(current, initialPromptDraft.ref)) clearCreationDraft();
+  }
   const shell = activeCollabShell;
   if (
     shell === undefined ||
@@ -2522,7 +2584,7 @@ function enterCollabClient(
       document.title = `${spokenTitle(session)} · OMP Sessions`;
       return;
     }
-    tray.close(true, tray.id === "request");
+    tray.close(true, tray.id === "request" || tray.id?.startsWith("creation-") === true);
     if (commitHistory) {
       history.replaceState({ ompDirectory: snapshot.historyState }, "", "/");
       history.pushState({ ompCollab: true }, "", "/client/");
@@ -2572,6 +2634,7 @@ function enterCollabClient(
     window.removeEventListener("popstate", handlePopState);
   };
   const dispose = (): void => {
+    if (initialPromptDraft !== undefined && sameBinding(initialPromptDraft.ref, shellState)) clearCreationDraft();
     hideTriageBar(shellState, false);
     clearConnectionTimers(shellState);
     removeLifecycleListeners();
@@ -2613,6 +2676,12 @@ function enterCollabClient(
         shellOwnsLifecycle: true,
         onStateChange: updateConnection,
         browserRecognitionEnabled,
+        takeInitialPromptDraft: () => {
+          const holder = initialPromptDraft;
+          if (holder === undefined || !sameBinding(holder.ref, shellState)) return undefined;
+          clearCreationDraft();
+          return holder.text;
+        },
         probeGateway: signal => probeSource(session.sourceKey, signal),
       },
     );
@@ -2631,7 +2700,15 @@ async function launch(
   requestId?: string,
   scope = selectedScope,
   presentation: LaunchPresentation = activeCollabShell?.presentation ?? "full",
+  creationHandoff = false,
 ): Promise<boolean> {
+  if (!creationHandoff) {
+    const retryDraft = initialPromptDraft !== undefined && sameBinding(initialPromptDraft.ref, session) && mode === "control"
+      ? initialPromptDraft : undefined;
+    creation.cancel("competing");
+    initialPromptDraft = retryDraft;
+  }
+  if (initialPromptDraft !== undefined && (!sameBinding(initialPromptDraft.ref, session) || mode !== "control")) clearCreationDraft();
   if (!sourceFresh(session.sourceKey)) return false;
   const source = sources.get(session.sourceKey);
   if (source === undefined) return false;
@@ -2664,7 +2741,7 @@ async function launch(
     id: ++launchSequence, epoch: selectionEpoch,
     ref: { sourceKey: session.sourceKey, instanceId: session.instanceId, generation: session.generation,
       ...(requestId === undefined ? {} : { requestId }) },
-    mode, presentation, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
+    mode, presentation, creationHandoff, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
     controller: new AbortController(), settled: false,
   };
   pendingLaunch = attempt;
@@ -2713,6 +2790,7 @@ async function launch(
     const owned = pendingLaunch === attempt;
     settle();
     resetButton();
+    if (owned && creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
     if (owned && requestStatus !== undefined && tray.id === "request") {
       requestStatus.textContent = "That session changed or expired. Try again from the directory.";
       tray.refresh();
@@ -2799,6 +2877,8 @@ async function launch(
     if (response.status === 403) {
       if (session.sourceKey === localKey) {
         authorizationDenied = true;
+        creation.cancel("forbidden", localKey);
+        clearCreationDraft(localKey);
         fail("unauthorized", "This tailnet identity is not authorized.");
       } else {
         fail("unauthorized", `Access withdrawn on ${source.label}. Choose another session.`);
@@ -2905,6 +2985,8 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     if (epoch !== directoryEpoch) return false;
     if (response.status === 403) {
       authorizationDenied = true;
+      creation.cancel("forbidden", localKey);
+      clearCreationDraft(localKey);
       directoryLoaded = false;
       localFresh = false;
       replaceSessionSnapshot([], localKey, false);
@@ -3055,6 +3137,8 @@ async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
   return false;
 }
 hostPicker.addEventListener("change", () => {
+  creation.cancel("selection");
+  clearCreationDraft();
   selectedScope = sources.has(hostPicker.value) ? hostPicker.value : "all";
   selectionEpoch += 1;
   cancelLaunch();
@@ -3064,6 +3148,13 @@ hostPicker.addEventListener("change", () => {
   render();
   applyActivatedWorkerUpdate();
 });
+for (const id of ["#new-session", "#empty-new-session"]) {
+  requiredElement<HTMLButtonElement>(id).addEventListener("click", () => {
+    cancelLaunch();
+    clearCreationDraft();
+    creation.open();
+  });
+}
 settingsButton.addEventListener("click", openAlerts);
 trayHost.addEventListener("close", maybeStartFirstRun);
 notificationButton.addEventListener("click", () => void toggleBackgroundNotifications());
@@ -3101,6 +3192,8 @@ window.addEventListener("online", () => {
   void refreshAndConnect();
 });
 window.addEventListener("pagehide", () => {
+  creation.cancel("pagehide");
+  clearCreationDraft();
   const attempt = pendingLaunch;
   if (attempt?.presentation === "request-tray" && activeCollabShell === undefined) {
     disposedShellResume = {
@@ -3113,6 +3206,8 @@ window.addEventListener("pagehide", () => {
   for (const remote of remotes.values()) remote.setVisible(false);
 });
 window.addEventListener("popstate", () => {
+  creation.cancel("selection");
+  clearCreationDraft();
   selectionEpoch += 1;
   cancelLaunch();
 });
@@ -3146,6 +3241,8 @@ window.addEventListener("offline", () => {
  * failure or a retry: nothing failed, and becoming visible rebuilds it from a fresh snapshot.
  */
 document.addEventListener("freeze", () => {
+  if (creation.isActive) cancelLaunch();
+  creation.cancel("background");
   localFresh = false;
   for (const remote of remotes.values()) remote.setVisible(false);
   directoryEpoch += 1;
@@ -3171,6 +3268,8 @@ document.addEventListener("freeze", () => {
 document.addEventListener("visibilitychange", () => {
   for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
   if (document.visibilityState !== "visible") {
+    if (creation.isActive) cancelLaunch();
+    creation.cancel("background");
     clearTransportFailureTracking();
     return;
   }

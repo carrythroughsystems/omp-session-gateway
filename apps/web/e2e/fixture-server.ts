@@ -1,12 +1,16 @@
 import { once } from "node:events";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
 import { createConnection } from "node:net";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
-import { parseNotificationRoute, type FleetSource, type SessionEvent, type SessionMetadata } from "@omp-session-gateway/protocol";
+import {
+  parseNotificationRoute, parseJsonFrame, parseSessionCreationRequest, parseSessionCreationStatus,
+  SESSION_CREATION_UUID_PATTERN, type FleetSource, type SessionEvent, type SessionMetadata,
+  type SessionCreationOptions, type SessionCreationRequest, type SessionCreationState, type SessionCreationError,
+} from "@omp-session-gateway/protocol";
 
 const MIME_TYPES: Readonly<Record<string, string>> = {
   ".css": "text/css; charset=utf-8",
@@ -82,6 +86,8 @@ export interface DashboardFixture {
   readonly requests: readonly string[];
   readonly launchRequests: readonly FixtureLaunchRequest[];
   readonly requestLog: readonly FixtureRequestLog[];
+  readonly creationRequests: readonly SessionCreationRequest[];
+  configureCreation(config: CreationFixtureConfig): void;
   configureFleet(label: string, targets: readonly FleetSource[], trustedOrigins: readonly string[]): void;
   setListFailure(failure: "forbidden" | "timeout" | "malformed" | undefined): void;
   assertNoCapabilityMaterial(text: string): void;
@@ -92,6 +98,23 @@ export interface DashboardFixture {
   upsert(session: SessionMetadata): void;
   upgradeServiceWorker(): void;
 }
+
+export interface CreationFixtureConfig {
+  readonly options?: SessionCreationOptions | 404;
+  readonly states?: readonly { state: SessionCreationState; error?: SessionCreationError }[];
+  readonly readySession?: SessionMetadata;
+  readonly delayMs?: { options?: number; create?: number; status?: number };
+  readonly lostAcknowledgement?: boolean;
+  readonly revisionMismatchOnce?: boolean;
+  readonly postProblem?: { status: number; code: string };
+}
+export const creationFixtureOptions: SessionCreationOptions = {
+  version: 1, revision: "3a7ad103-71aa-42cb-8c29-c93ebc0bed01", available: true,
+  projects: [{ id: "synthetic-project", label: "Synthetic project", workingCopies: [
+    { id: "main", label: "Main" }, { id: "review", label: "Review" },
+  ] }],
+  profiles: [{ id: "omp", label: "OMP" }, { id: "careful", label: "Careful OMP" }],
+};
 
 export interface FixtureRequestLog {
   readonly method: string;
@@ -110,6 +133,11 @@ export async function startDashboardFixture(
   const requests: string[] = [];
   const launchRequests: FixtureLaunchRequest[] = [];
   const requestLog: FixtureRequestLog[] = [];
+  const creationRequests: SessionCreationRequest[] = [];
+  let creationConfig: CreationFixtureConfig = { options: 404 };
+  let lostCreationAcknowledgement = false;
+  let mismatchedCreationRevision = false;
+  const creations = new Map<string, { request: SessionCreationRequest; operationId: string; cursor: number }>();
   let label = "This host";
   let targets: readonly FleetSource[] = [];
   let trustedOrigins: readonly string[] = [];
@@ -177,7 +205,12 @@ export async function startDashboardFixture(
       response.setHeader("X-Frame-Options", "DENY");
       response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()");
       const launchPath = /^\/api\/v1\/sessions\/[^/]+\/launch$/u.test(url.pathname);
-      const routeMethod = url.pathname === "/api/v1/sessions" ? "GET" : launchPath ? "POST" : undefined;
+      const creationOptionsPath = url.pathname === "/api/v1/session-creation-options";
+      const creationPostPath = url.pathname === "/api/v1/session-creations";
+      const creationStatusId = url.pathname.startsWith("/api/v1/session-creations/") ? url.pathname.slice("/api/v1/session-creations/".length) : "";
+      const creationStatusPath = SESSION_CREATION_UUID_PATTERN.test(creationStatusId);
+      const routeMethod = url.pathname === "/api/v1/sessions" || creationOptionsPath || creationStatusPath ? "GET"
+        : launchPath || creationPostPath ? "POST" : undefined;
       const admitted = requestOrigin !== undefined && trustedOrigins.includes(requestOrigin) &&
         routeMethod !== undefined && (method === routeMethod || method === "OPTIONS");
       if (url.pathname.startsWith("/api/")) {
@@ -205,6 +238,87 @@ export async function startDashboardFixture(
       if (admitted) {
         response.setHeader("Access-Control-Allow-Origin", requestOrigin!);
         response.setHeader("Vary", "Origin");
+      }
+      if ((creationOptionsPath || creationPostPath || creationStatusPath) && method === routeMethod) {
+        if (url.search !== "") { response.writeHead(400).end(); return; }
+        const fetchSite = request.headers["sec-fetch-site"];
+        const contextValid = (method !== "POST" || request.headers["content-type"] === "application/json") && (
+          admitted ? fetchSite === undefined || fetchSite === "same-site" || fetchSite === "cross-site"
+            : (requestOrigin === origin || (method === "GET" && requestOrigin === undefined)) &&
+              (fetchSite === undefined || fetchSite === "same-origin")
+        );
+        if (!contextValid) { response.writeHead(403).end('{"code":"forbidden"}'); return; }
+        response.setHeader("Content-Type", "application/json");
+        const delay = creationConfig.delayMs?.[creationOptionsPath ? "options" : creationPostPath ? "create" : "status"] ?? 0;
+        if (delay > 0) await new Promise(resolveDelay => setTimeout(resolveDelay, delay));
+        const configuredOptions = creationConfig.options ?? creationFixtureOptions;
+        if (creationOptionsPath) {
+          if (configuredOptions === 404) response.writeHead(404).end();
+          else response.end(JSON.stringify(configuredOptions));
+          return;
+        }
+        if (creationPostPath) {
+          let bytes = Buffer.alloc(0);
+          for await (const chunk of request) {
+            bytes = Buffer.concat([bytes, Buffer.from(chunk)]);
+            if (bytes.byteLength > 4_096) { response.writeHead(400).end(); return; }
+          }
+          let parsed: SessionCreationRequest;
+          try { parsed = parseSessionCreationRequest(parseJsonFrame(bytes)); }
+          catch { response.writeHead(400).end('{"code":"malformed_request"}'); return; }
+          creationRequests.push(parsed);
+          const previous = creations.get(parsed.clientOperationId);
+          if (previous !== undefined) {
+            if (JSON.stringify(previous.request) !== JSON.stringify(parsed)) {
+              response.writeHead(409).end('{"code":"operation_conflict"}');
+            } else {
+              const states = creationConfig.states ?? [{ state: "accepted" }, { state: "launching" }, { state: "awaiting_omp" }, { state: "ready" }];
+              response.end(JSON.stringify({ operationId: previous.operationId, state: states[Math.min(previous.cursor, states.length - 1)]!.state }));
+            }
+            return;
+          }
+          if ((creationConfig.revisionMismatchOnce && !mismatchedCreationRevision) ||
+            (configuredOptions !== 404 && parsed.revision !== configuredOptions.revision)) {
+            mismatchedCreationRevision = true;
+            response.writeHead(409).end('{"code":"revision_mismatch"}');
+            return;
+          }
+          if (creationConfig.postProblem !== undefined) {
+            response.writeHead(creationConfig.postProblem.status).end(JSON.stringify({ code: creationConfig.postProblem.code }));
+            return;
+          }
+          if (configuredOptions === 404 || !configuredOptions.available ||
+            !configuredOptions.projects.some(project => project.id === parsed.projectId && project.workingCopies.some(copy => copy.id === parsed.workingCopyId)) ||
+            !configuredOptions.profiles.some(profile => profile.id === parsed.profileId)) {
+            response.writeHead(400).end('{"code":"malformed_request"}');
+            return;
+          }
+          const operation = { request: parsed, operationId: randomUUID(), cursor: 0 };
+          creations.set(parsed.clientOperationId, operation);
+          if (creationConfig.lostAcknowledgement && !lostCreationAcknowledgement) {
+            lostCreationAcknowledgement = true;
+            // A truncated acknowledgement after HTTP admission is ambiguous to the caller.
+            // Resetting a reused TCP socket instead lets Chromium transparently retry the POST.
+            response.writeHead(202).end('{"operationId":');
+          } else response.writeHead(202).end(JSON.stringify({ operationId: operation.operationId, state: "accepted" }));
+          return;
+        }
+        const operation = [...creations.values()].find(value => value.operationId === creationStatusId);
+        if (operation === undefined) { response.writeHead(404).end(); return; }
+        const states = creationConfig.states ?? [{ state: "accepted" }, { state: "launching" }, { state: "awaiting_omp" }, { state: "ready" }];
+        const state = states[Math.min(operation.cursor++, states.length - 1)]!;
+        const ready = creationConfig.readySession;
+        if (state.state === "ready" && ready !== undefined) {
+          sessions.set(ready.instanceId, ready);
+          revision += 1;
+          broadcast({ type: "session_upsert", revision, session: ready });
+        }
+        const status = parseSessionCreationStatus({
+          operationId: operation.operationId, updatedAt: new Date().toISOString(), ...state,
+          ...(state.state === "ready" && ready !== undefined ? { session: { instanceId: ready.instanceId, generation: ready.generation } } : {}),
+        });
+        response.end(JSON.stringify(status));
+        return;
       }
       if (method === "GET" && url.pathname === "/api/v1/client-config") {
         if (url.search !== "") { response.writeHead(400).end(); return; }
@@ -399,6 +513,14 @@ export async function startDashboardFixture(
     requests,
     launchRequests,
     requestLog,
+    creationRequests,
+    configureCreation(config): void {
+      creationConfig = config;
+      lostCreationAcknowledgement = false;
+      mismatchedCreationRevision = false;
+      creations.clear();
+      creationRequests.length = 0;
+    },
     configureFleet(nextLabel, nextTargets, nextTrusted): void {
       label = nextLabel;
       targets = nextTargets;
