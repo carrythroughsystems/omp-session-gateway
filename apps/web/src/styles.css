@@ -1501,7 +1501,7 @@ body.collab-shell-active {
   cursor: pointer;
 }
 .new-session:hover { background: var(--surface-press); }
-.creation-body { display: grid; gap: 0.75rem; padding-block: 0.75rem 1rem; }
+.creation-body { display: grid; align-content: start; gap: 0.75rem; padding-block: 0.75rem 1rem; }
 .creation-body p { margin: 0; color: var(--muted); font-size: 0.9rem; line-height: 1.5; }
 .creation-body .tray-choice { margin: 0; overflow-wrap: anywhere; }
 .creation-body .tray-choice[aria-pressed="true"] { border-color: var(--live); color: var(--live); }

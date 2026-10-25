@@ -306,6 +306,8 @@ function setNotificationControl(state: NotificationControlState): void {
 }
 
 function openAlerts(): void {
+  if (creation.isActive) cancelLaunch();
+  creation.cancel("competing");
   tray.open({ id: "alerts", title: "Background alerts", tone: "neutral", body: alertsPanel });
 }
 
@@ -810,9 +812,11 @@ function showTransportFailure(kind: TransportFailureKind): void {
       troubleshooting.type = "button";
       troubleshooting.className = "status-action";
       troubleshooting.textContent = "Troubleshooting";
-      troubleshooting.addEventListener("click", () => tray.open({
-        id: "recovery", title: "Troubleshooting", tone: "neutral", body: recoveryPanel,
-      }));
+      troubleshooting.addEventListener("click", () => {
+        if (creation.isActive) cancelLaunch();
+        creation.cancel("competing");
+        tray.open({ id: "recovery", title: "Troubleshooting", tone: "neutral", body: recoveryPanel });
+      });
       actions.append(troubleshooting);
     }
     statusBanner.append(actions);
@@ -1401,6 +1405,8 @@ function showDismissUndo(session: SessionMetadata): void {
     generation: session.generation,
   };
   pendingDismissUndo = pending;
+  if (creation.isActive) cancelLaunch();
+  creation.cancel("competing");
   tray.open({ id: "undo", title: "Hidden on this device", tone: "neutral", body: undoPanel }, {
     transientMs: LOCAL_ACTION_UNDO_MS,
     onClose: () => { if (pendingDismissUndo === pending) pendingDismissUndo = undefined; },
@@ -1690,6 +1696,8 @@ function renderWaitingQueue(
         });
         choices.append(transcript);
       }
+      if (creation.isActive) cancelLaunch();
+      creation.cancel("competing");
       tray.open({ id: "options", title: "This request", tone: "attention", body: choices });
     });
     article.append(options);
@@ -2300,6 +2308,10 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
 }
 
 function reconcileActiveCollabShell(): void {
+  if (initialPromptDraft !== undefined) {
+    const current = sessions.get(sessionKey(initialPromptDraft.ref));
+    if (current === undefined || !sameBinding(current, initialPromptDraft.ref)) clearCreationDraft();
+  }
   const shell = activeCollabShell;
   if (
     shell === undefined ||

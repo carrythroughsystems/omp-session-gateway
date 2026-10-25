@@ -297,7 +297,9 @@ export async function startDashboardFixture(
           creations.set(parsed.clientOperationId, operation);
           if (creationConfig.lostAcknowledgement && !lostCreationAcknowledgement) {
             lostCreationAcknowledgement = true;
-            response.destroy();
+            // A truncated acknowledgement after HTTP admission is ambiguous to the caller.
+            // Resetting a reused TCP socket instead lets Chromium transparently retry the POST.
+            response.writeHead(202).end('{"operationId":');
           } else response.writeHead(202).end(JSON.stringify({ operationId: operation.operationId, state: "accepted" }));
           return;
         }
