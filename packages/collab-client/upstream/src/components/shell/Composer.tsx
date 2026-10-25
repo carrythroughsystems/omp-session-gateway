@@ -15,6 +15,7 @@ export interface ComposerProps {
 	client: GuestClient;
 	embedded?: boolean;
 	browserRecognitionEnabled?: boolean;
+	takeInitialPromptDraft?: (() => string | undefined) | undefined;
 	phase: ConnectionPhase;
 	readOnly: boolean;
 	/** Pending host-side UI request this guest can answer. */
@@ -303,6 +304,7 @@ export const Composer = memo(function Composer({
 	recommendedIndex,
 	embedded = false,
 	browserRecognitionEnabled = false,
+	takeInitialPromptDraft,
 }: ComposerProps): ReactNode {
 	const [text, setText] = useState("");
 	const [photos, setPhotos] = useState<readonly PreparedPhoto[]>([]);
@@ -317,6 +319,7 @@ export const Composer = memo(function Composer({
 	const photoTriggerRef = useRef<HTMLButtonElement | null>(null);
 	const photosRef = useRef<readonly PreparedPhoto[]>([]);
 	const mountedRef = useRef(true);
+	const initialPromptDraftTakenRef = useRef(false);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 
 	const live = phase === "live";
@@ -353,6 +356,25 @@ export const Composer = memo(function Composer({
 				: !relayReady
 					? "Waiting for relay…"
 					: "Photo not confirmed. Tap Send to retry.";
+
+	useEffect(() => {
+		if (
+			initialPromptDraftTakenRef.current ||
+			takeInitialPromptDraft === undefined ||
+			!canPrompt ||
+			!relayReady ||
+			uiRequest !== null ||
+			text.length !== 0 ||
+			preparingPhoto ||
+			photos.length !== 0 ||
+			pendingPhotoPrompt !== null
+		) {
+			return;
+		}
+		initialPromptDraftTakenRef.current = true;
+		const draft = takeInitialPromptDraft();
+		if (draft !== undefined) setText(draft);
+	}, [canPrompt, relayReady, uiRequest, text, preparingPhoto, photos.length, pendingPhotoPrompt, takeInitialPromptDraft]);
 
 	useLayoutEffect(() => {
 		autosize(taRef.current);

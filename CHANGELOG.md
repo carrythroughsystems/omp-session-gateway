@@ -8,6 +8,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Show embedded snapshot progress in the gateway's sole joining/reconnecting chip without
+  repeated live-region announcements, and accept a memory-only first-task draft once into an
+  empty, healthy, live Control composer without sending or replacing an existing draft.
 - Resumable, skippable first-run trays for connection facts, optional background alerts, and
   View versus Control, reusing the existing tray and notification control. The bounded
   `omp.sessions.first-run.v1` record stores only step and timestamp. A same-scope queue clearance

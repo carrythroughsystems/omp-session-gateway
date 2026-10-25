@@ -106,10 +106,14 @@ export async function installSyntheticProductFixture(
     readonly historyEntryCount?: number;
     readonly streamedTranscript?: string;
     readonly answerRequests?: boolean;
+    /** Leave the snapshot open so a test can deliver chunks through the live socket. */
+    readonly manualSnapshot?: boolean;
+    /** Ordinary Control composer without the canonical Ask, for draft-only flows. */
+    readonly activeAsk?: boolean;
   } = {},
 ): Promise<void> {
   await context.addInitScript(
-    ({ fixedNow, keyBytes, readOnly, transcript, randomSeed, historyEntryCount, streamedTranscript, answerRequests }) => {
+    ({ fixedNow, keyBytes, readOnly, transcript, randomSeed, historyEntryCount, streamedTranscript, answerRequests, manualSnapshot, activeAsk }) => {
       const fixedEpoch = new Date(fixedNow).getTime();
       const NativeDate = Date;
       class FixedDate extends NativeDate {
@@ -226,6 +230,8 @@ export async function installSyntheticProductFixture(
         ["encrypt", "decrypt"],
       );
       const encoder = new TextEncoder();
+      const guestFrameCounts = { prompts: 0, responses: 0 };
+      Object.defineProperty(globalThis, "__ompSyntheticGuestCounts", { configurable: true, value: guestFrameCounts });
 
       class AskWebSocket {
         static readonly CONNECTING = 0;
@@ -240,6 +246,8 @@ export async function installSyntheticProductFixture(
         onerror: ((event: Event) => void) | null = null;
         onclose: ((event: CloseEvent) => void) | null = null;
         sentWelcome = false;
+        snapshotEntries: unknown[] = [];
+        snapshotOffset = 0;
 
         constructor(url: string) {
           this.url = url;
@@ -257,9 +265,20 @@ export async function installSyntheticProductFixture(
           this.readyState = AskWebSocket.CLOSED;
         }
 
+        disconnect(): void {
+          this.readyState = AskWebSocket.CLOSED;
+          this.onclose?.(new CloseEvent("close", { code: 1006 }));
+        }
+
+        async sendSnapshotChunk(count: number, final = false): Promise<void> {
+          const entries = this.snapshotEntries.slice(this.snapshotOffset, this.snapshotOffset + count);
+          this.snapshotOffset += entries.length;
+          await this.sendHostFrame({ t: "snapshot-chunk", entries, final });
+        }
+
         send(data: ArrayBuffer | ArrayBufferView): void {
           if (this.sentWelcome) {
-            if (answerRequests) void this.receiveGuestFrame(data);
+            void this.receiveGuestFrame(data);
             return;
           }
           this.sentWelcome = true;
@@ -274,7 +293,13 @@ export async function installSyntheticProductFixture(
             { name: "AES-GCM", iv: bytes.slice(4, 16) }, await encryptionKey, bytes.slice(16),
           );
           const frame = JSON.parse(new TextDecoder().decode(plaintext));
-          if (frame.t !== "ui-response" || frame.reqId !== 7 || readOnly) return;
+          if (frame.t === "prompt") {
+            guestFrameCounts.prompts += 1;
+          }
+          if (frame.t === "ui-response") {
+            guestFrameCounts.responses += 1;
+          }
+          if (!answerRequests || frame.t !== "ui-response" || frame.reqId !== 7 || readOnly) return;
           await this.sendHostFrame({ t: "ui-request-end", reqId: 7 });
           await this.sendHostFrame({
             t: "event",
@@ -338,7 +363,7 @@ export async function installSyntheticProductFixture(
                 stopReason: "stop",
               },
             },
-            ...(readOnly ? [] : [assistantEntry]),
+            ...(readOnly || !activeAsk ? [] : [assistantEntry]),
           ];
           entries.unshift(...Array.from({ length: historyEntryCount }, (_, index) => ({
             ...assistantEntry,
@@ -349,6 +374,7 @@ export async function installSyntheticProductFixture(
               stopReason: "stop",
             },
           })));
+          this.snapshotEntries = entries;
           const frames = [
             {
               t: "welcome",
@@ -370,7 +396,7 @@ export async function installSyntheticProductFixture(
               entryCount: entries.length,
               readOnly,
             },
-            { t: "snapshot-chunk", entries, final: true },
+            ...(manualSnapshot ? [] : [{ t: "snapshot-chunk", entries, final: true }]),
             { t: "gateway-health-pong", seq: 0 },
             {
               t: "event",
@@ -393,7 +419,8 @@ export async function installSyntheticProductFixture(
               },
             },
           ];
-          for (const frame of readOnly ? frames.slice(0, 3) : frames) await this.sendHostFrame(frame);
+          const initialFrameCount = manualSnapshot ? 2 : 3;
+          for (const frame of readOnly || !activeAsk ? frames.slice(0, initialFrameCount) : frames) await this.sendHostFrame(frame);
           if (streamedTranscript !== undefined) {
             for (let end = 1; end <= streamedTranscript.length; end += 7) {
               await this.sendHostFrame({
@@ -422,6 +449,7 @@ export async function installSyntheticProductFixture(
       transcript: options.transcript, randomSeed: options.randomSeed,
       historyEntryCount: options.historyEntryCount ?? 0, streamedTranscript: options.streamedTranscript,
       answerRequests: options.answerRequests ?? false,
+      manualSnapshot: options.manualSnapshot ?? false, activeAsk: options.activeAsk ?? true,
     },
   );
 }

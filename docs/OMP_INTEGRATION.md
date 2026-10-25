@@ -274,6 +274,11 @@ is absent or safely readable (`discoveryReadable`), and reports `sessionHealth`.
 The gateway embeds the pinned OMP `collab-web` integration with in-memory capability bootstrap. The
 photo composer uses existing encrypted v3 image prompts; it does not add a gateway media endpoint
 or alter the discovery/query contract.
+Its embed contract publishes only `loading: { received, total } | null` snapshot counters for
+the gateway's joining/reconnecting chip. An optional `takeInitialPromptDraft()` drains a
+memory-only first-task draft once into the empty ordinary composer, only in live writable
+Control with a healthy relay, no active Ask and no photo draft or pending send. It never seeds
+Ask input, overwrites text, or submits; reconnects and rerenders do not reapply it.
 
 Behavioral coverage for the registry reader and broker lives in
 `apps/gateway/test/omp-registry.test.ts`. Release qualification exercises the stock OMP binary,

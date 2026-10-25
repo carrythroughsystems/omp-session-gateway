@@ -21,6 +21,8 @@ export interface CollabEmbedState {
 	endedReason: string | null;
 	requestPending: boolean;
 	responsePending: boolean;
+	/** Snapshot counters only; null before a client exists or outside a snapshot download. */
+	loading: { received: number; total: number } | null;
 	gatewayHealth: PathHealth;
 	relayHealth: PathHealth;
 }
@@ -29,6 +31,8 @@ export interface CollabEmbedOptions {
 	focusPendingRequest?: boolean;
 	shellOwnsLifecycle?: boolean;
 	onStateChange?(state: CollabEmbedState): void;
+	/** Drains a volatile ordinary prompt draft once, only when Composer can safely accept it. */
+	takeInitialPromptDraft?: () => string | undefined;
 	/**
 	 * Reachability probe for the gateway this session was launched from. The host shell supplies
 	 * it for every embed, pointing at the selected source's authenticated metadata GET; absent, the

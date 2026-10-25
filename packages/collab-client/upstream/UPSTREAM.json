@@ -80,6 +80,8 @@
     "Exclude OMP's pi artwork: omit OmpMark.tsx and its HeaderBar/ConnectScreen imports and rendering",
     "Provide keyboard-dictation guidance and opt-in bounded browser speech for live Control drafts, with destination-bound cancellation and explicit review, Use text, and Send separation",
     "Probe the launching gateway through an injected selected-source callback and treat a readable authorization loss as terminal for automatic recovery, allowing a fresh probe only on foreground, pageshow, or online transitions",
+    "Publish snapshot loading counters only through the embed contract so the gateway's sole connection chip can distinguish joining from reconnecting without exposing transcript content or adding a second client banner",
+    "Drain an optional memory-only first-task draft into the ordinary composer once, only in live writable Control with healthy relay, no active Ask and no existing text or photo draft/pending send; never submit or reseed on reconnect",
     "Draw Nerd Font Private Use Area glyphs in transcript text through the gateway's self-hosted symbol face; the client itself loads no fonts"
   ]
 }
