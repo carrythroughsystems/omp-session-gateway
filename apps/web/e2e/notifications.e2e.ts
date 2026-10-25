@@ -409,10 +409,10 @@ test("attention cards and explicit background alert settings stay metadata-only"
     expect(allClearDot.shadow).not.toBe("none");
 
     await page.evaluate(async () => navigator.serviceWorker.ready);
-    // Registration's reload update check is asynchronous; it is not a request made by Hide.
-    const workerUpdate = page.waitForResponse(response => new URL(response.url()).pathname === "/service-worker.js");
     await page.reload();
-    await workerUpdate;
+    // Worker script fetches are not page response events. Await the update job itself before
+    // taking a request-count baseline; its asynchronous reload check is not a request by Hide.
+    await page.evaluate(async () => { await (await navigator.serviceWorker.ready).update(); });
     await page.locator("#settings").click();
     await expect(page.locator("#notify")).toHaveText("Enable background alerts");
     await expect(page.locator("#notify-note")).toBeVisible();
