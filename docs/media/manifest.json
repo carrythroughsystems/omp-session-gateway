@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceRevision": "688807ef8af5fc50d3a27baab20e9720e737db05",
+  "sourceRevision": "b22b3b7637c345aeee0af5d517ae42c53e66335a",
   "upstreamClient": {
     "tag": "v18.12.6",
     "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
@@ -12,7 +12,7 @@
     "typescript": "7.0.2",
     "playwright": "1.62.1",
     "chromium": "151.0.7922.34",
-    "ffmpeg": "9.0.2",
+    "ffmpeg": "9.0",
     "ffprobe": "9.0.2"
   },
   "capture": {
@@ -33,8 +33,8 @@
   },
   "assets": {
     "omp-session-gateway-demo.gif": {
-      "bytes": 409413,
-      "sha256": "7378313817b25c84e500493ad9796be207917b1a1857efcdc9f0f364354bfebf",
+      "bytes": 422556,
+      "sha256": "44e9b724b765bf54f18e9998e3f348c5688d7d4647d19956ecede41fe53f9e30",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
@@ -45,19 +45,19 @@
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "c0bc37237b541401ce4cdfb60fc15754a308115e0d1a0f5ea612a0f151f408dd"
+          "sha256": "04d513adca1fb97071005c48fc36344f428db3b5ad1cf8fd2c9b3d96ce60d975"
         },
         {
           "id": "runtime:discovered-live-five",
-          "sha256": "2e0ed129d0b468e74b61cb8cf5d45667833aaa181f1290ec3c8e83ac2234030b"
+          "sha256": "8adc1c6ba148c5a3e41197377aefac72a3fd77f6f1579474901929538c313388"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "583caad084a1d5cc2802575e6e4a2f6697a1e39e8f9fb52c661dd4177ef60b3e"
+          "sha256": "36ca60e7f980ab6639246f5e4ad0b04fcea897f2ba19646f607eea4781d0327b"
         },
         {
           "id": "runtime:03-open-request.png",
-          "sha256": "cb18f4743525b12f839293f7537d3392cb918271582d432cbfb65655c4325079"
+          "sha256": "41ca45ecba86c88b643b3ccf72fe019999b71bd4f82cb7d828bc802220f29f9d"
         },
         {
           "id": "brand:assets/logo.svg",
@@ -66,8 +66,8 @@
       ]
     },
     "omp-session-gateway-demo.mp4": {
-      "bytes": 421669,
-      "sha256": "3d34a5e0b61b08972ecc09eff726d8e0d6fb23cb8bc84aaf02926c7c39331889",
+      "bytes": 430075,
+      "sha256": "34656ebe67a1270e21d273e156c87ca88757f1c170dc9e2ea19fcd7c37c1e179",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
@@ -79,19 +79,19 @@
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "c0bc37237b541401ce4cdfb60fc15754a308115e0d1a0f5ea612a0f151f408dd"
+          "sha256": "04d513adca1fb97071005c48fc36344f428db3b5ad1cf8fd2c9b3d96ce60d975"
         },
         {
           "id": "runtime:discovered-live-five",
-          "sha256": "2e0ed129d0b468e74b61cb8cf5d45667833aaa181f1290ec3c8e83ac2234030b"
+          "sha256": "8adc1c6ba148c5a3e41197377aefac72a3fd77f6f1579474901929538c313388"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "583caad084a1d5cc2802575e6e4a2f6697a1e39e8f9fb52c661dd4177ef60b3e"
+          "sha256": "36ca60e7f980ab6639246f5e4ad0b04fcea897f2ba19646f607eea4781d0327b"
         },
         {
           "id": "runtime:03-open-request.png",
-          "sha256": "cb18f4743525b12f839293f7537d3392cb918271582d432cbfb65655c4325079"
+          "sha256": "41ca45ecba86c88b643b3ccf72fe019999b71bd4f82cb7d828bc802220f29f9d"
         },
         {
           "id": "brand:assets/logo.svg",
@@ -100,15 +100,15 @@
       ]
     },
     "omp-session-gateway-demo-poster.png": {
-      "bytes": 78503,
-      "sha256": "4eea703bf0a42488997a65bc2af973b9c1d0a42dfcc798d795dfd5dd33378374",
+      "bytes": 77856,
+      "sha256": "2cd3e8dd793bcbe53dfb70630d7c4989dd44f1de6a41064edf2559905e15ab09",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
       "compositeInputs": [
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "583caad084a1d5cc2802575e6e4a2f6697a1e39e8f9fb52c661dd4177ef60b3e"
+          "sha256": "36ca60e7f980ab6639246f5e4ad0b04fcea897f2ba19646f607eea4781d0327b"
         },
         {
           "id": "brand:assets/logo.svg",
@@ -118,23 +118,23 @@
       "sourceFrame": 60
     },
     "omp-session-gateway-product-flow.png": {
-      "bytes": 193077,
-      "sha256": "cbf08cb5af325c114f6aa999c4dc9d13738222caa18851bf43219b0c31536708",
+      "bytes": 202937,
+      "sha256": "233fbe6fcba3624c848ab3d10b3132b3975a9055f1d5cc8acc3f4d189a0634a0",
       "width": 1600,
       "height": 980,
       "provenance": "capture-only-presentation-composite",
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "c0bc37237b541401ce4cdfb60fc15754a308115e0d1a0f5ea612a0f151f408dd"
+          "sha256": "04d513adca1fb97071005c48fc36344f428db3b5ad1cf8fd2c9b3d96ce60d975"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "583caad084a1d5cc2802575e6e4a2f6697a1e39e8f9fb52c661dd4177ef60b3e"
+          "sha256": "36ca60e7f980ab6639246f5e4ad0b04fcea897f2ba19646f607eea4781d0327b"
         },
         {
           "id": "runtime:03-open-request.png",
-          "sha256": "cb18f4743525b12f839293f7537d3392cb918271582d432cbfb65655c4325079"
+          "sha256": "41ca45ecba86c88b643b3ccf72fe019999b71bd4f82cb7d828bc802220f29f9d"
         },
         {
           "id": "brand:assets/logo.svg",
@@ -143,29 +143,29 @@
       ]
     },
     "01-all-clear.png": {
-      "bytes": 117884,
-      "sha256": "c0bc37237b541401ce4cdfb60fc15754a308115e0d1a0f5ea612a0f151f408dd",
+      "bytes": 117965,
+      "sha256": "04d513adca1fb97071005c48fc36344f428db3b5ad1cf8fd2c9b3d96ce60d975",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"
     },
     "02-needs-you.png": {
-      "bytes": 150188,
-      "sha256": "583caad084a1d5cc2802575e6e4a2f6697a1e39e8f9fb52c661dd4177ef60b3e",
+      "bytes": 148007,
+      "sha256": "36ca60e7f980ab6639246f5e4ad0b04fcea897f2ba19646f607eea4781d0327b",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"
     },
     "03-open-request.png": {
-      "bytes": 84171,
-      "sha256": "cb18f4743525b12f839293f7537d3392cb918271582d432cbfb65655c4325079",
+      "bytes": 138068,
+      "sha256": "41ca45ecba86c88b643b3ccf72fe019999b71bd4f82cb7d828bc802220f29f9d",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime-with-pinned-collab-client"
     },
     "04-notification-settings.png": {
-      "bytes": 158489,
-      "sha256": "364c06012c02fdf36a367dc7d6453d897214be83f33dc493402862148a6f239a",
+      "bytes": 160233,
+      "sha256": "3eb6f2bed6f8128911484bc59dafd5948845049647874f4214f1a18995e3f581",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"
