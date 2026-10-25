@@ -451,7 +451,9 @@ test("attention cards and explicit background alert settings stay metadata-only"
       };
     });
     expect(restoreSurface).toEqual({ actionHeight: 44, overflowFree: true });
-    expect(fixture.requests).toHaveLength(requestsBeforeDismiss);
+    // Hide, Undo and the timeout are device-local. The browser's own deferred service-worker update
+    // check after the reload above is the only request allowed to land here.
+    expect(fixture.requests.slice(requestsBeforeDismiss).filter(request => request !== "GET /service-worker.js")).toEqual([]);
     await page.locator(".dismissed-control").getByRole("button", { name: "Show all" }).click();
     await expect(page.locator(".working-row")).toHaveCount(1);
     expect(await page.evaluate(() => localStorage.getItem("omp.sessions.dismissed.v2"))).toBe("[]");
