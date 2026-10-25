@@ -7,7 +7,7 @@
 
 - Planned qualification: Debian 13 x86-64; macOS 27.0 (26A428) arm64 in a Virtualization.framework guest (VirtualMac2,1, ADR-033); a disposable Windows Server 2025 host (the Administrator lifecycle and a fresh standard-user install); Chrome on the physical Pixel 10 Pro, including its background-Push lane; and real iPhone, iPad, and Galaxy devices in TestingBot's cloud. Every lane must pass against these exact signed bytes before stable promotion; the plan is not evidence.
 
-Published v0.8.0 remains the predecessor and current stable. The planned candidate tag is `v0.9.0-prealpha.2`; no qualification or publication is claimed. The stable lock stays unchanged until approval.
+Published v0.8.0 remains the predecessor and current stable. The planned candidate tag is `v0.9.0-prealpha.3`; no qualification or publication is claimed. The stable lock stays unchanged until approval.
 <!-- release-generate:current:end -->
 
 ## Mainline v0.8.0 — published stable
