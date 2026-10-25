@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 import nerdSymbols from "../apps/web/src/fonts/nerd-symbols/manifest.json";
 
-export const PRODUCT_VERSION = "0.8.0";
+export const PRODUCT_VERSION = "0.9.0";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultReleaseRoot = join(root, "dist", "release");
 const archiveBase = `omp-session-gateway-${PRODUCT_VERSION}-bun`;
