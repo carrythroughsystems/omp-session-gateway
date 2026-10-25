@@ -61,9 +61,9 @@ test("counterexample: first snapshot failure stays named throughout a pending sc
   });
   try {
     await page.clock.install({ time: new Date("2026-10-25T01:30:00Z") });
+    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
     await page.goto(fixture.origin);
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
-    await page.clock.pauseAt(new Date("2026-10-25T01:30:01Z"));
     await page.clock.runFor(4_000);
     await pending.promise;
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "desktop");
