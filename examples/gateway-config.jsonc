@@ -50,7 +50,7 @@
   //     "label": "OMP",
   //     "argv": ["/usr/local/bin/omp"],
   //     "env": {
-  //       "HOME": "/home/omp-demo",
+  //       "HOME": "/home/user",
   //       "PATH": "/usr/local/bin:/usr/bin:/bin"
   //     }
   //   }]

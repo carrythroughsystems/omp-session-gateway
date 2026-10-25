@@ -175,7 +175,7 @@ Add a section such as this to the private `config.json`; all paths below are syn
       "label": "OMP",
       "argv": ["/usr/local/bin/omp"],
       "env": {
-        "HOME": "/home/omp-demo",
+        "HOME": "/home/user",
         "PATH": "/usr/local/bin:/usr/bin:/bin"
       }
     }]
