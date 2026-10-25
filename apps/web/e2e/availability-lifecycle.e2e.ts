@@ -320,7 +320,7 @@ for (const failure of [404, 409, 503, "network"] as const) {
     try {
       await page.goto(home.origin);
       await expect(page.locator("#directory-count")).toHaveText("2 waiting");
-      await page.locator(".queue-hero").filter({ has: page.getByRole("heading", { name: GATEWAY_WAITING.title, exact: true }) })
+      await page.locator(".queue-hero").filter({ has: page.getByRole("heading", { name: GATEWAY_WAITING.title!, exact: true }) })
         .locator(".action-request").or(page.getByRole("button", { name: `Open request in ${GATEWAY_WAITING.title}`, exact: true })).click();
       await expect(page.locator(".triage-action")).toHaveText("Hold → next");
       home.upsert(GATEWAY_WORKING);
