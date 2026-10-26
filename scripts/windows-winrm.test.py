@@ -34,6 +34,7 @@ def modules():
     protocol.Protocol = Transport
     requests = types.ModuleType('requests.exceptions')
     requests.ConnectTimeout, requests.ReadTimeout = ConnectTimeout, ReadTimeout
+    requests.ConnectionError = ConnectionError
     exceptions = types.ModuleType('winrm.exceptions')
     exceptions.InvalidCredentialsError, exceptions.WinRMTransportError = InvalidCredentialsError, WinRMTransportError
     return {'winrm.protocol': protocol, 'requests.exceptions': requests, 'winrm.exceptions': exceptions}
@@ -333,6 +334,22 @@ class WinrmFramingTests(unittest.TestCase):
             result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
                                          'password': 'synthetic-only', 'script': 'synthetic'})
         self.assertEqual(result['failure']['condition'], 'connection_reset')
+
+    def test_r1_sigterm_in_command_teardown_still_closes_shell_and_reports_real_fields(self):
+        with patch.object(Transport, 'cleanup_command', side_effect=SystemExit(143)):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic'}, expected_exit=143)
+        self.assertTrue(Transport.closed)
+        self.assertEqual(result['teardown'], {'commandAttempted': True, 'commandStopped': False,
+                                            'shellAttempted': True, 'shellClosed': True})
+
+    def test_r1_arbitrary_outer_error_cannot_borrow_a_nested_socket_reset(self):
+        error = LookupError('synthetic codec', ConnectionResetError())
+        error.__cause__ = ConnectionResetError()
+        with patch.object(Transport, 'open_shell', side_effect=error):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic'})
+        self.assertEqual(result['failure']['kind'], 'helper')
 
 
 if __name__ == '__main__':

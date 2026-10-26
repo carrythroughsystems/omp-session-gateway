@@ -92,6 +92,7 @@ export interface WindowsRuntime {
   admit(input: WindowsPreflightInput): Promise<WindowsAdmission>;
   saveAccess(epoch: string, instance: WindowsInstance): Promise<void>;
   removeAccess(epoch: string): Promise<void>;
+  hasAccess?(epoch: string): Promise<boolean>;
   /** Refetch the vault-bound ID even if the provider changed its label. */
   cleanupInstance?(epoch: string): Promise<WindowsInstance | undefined>;
   cleanupFirewall?(epoch: string): Promise<WindowsFirewall | undefined>;
@@ -313,7 +314,8 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     catch (error) {
       if (error instanceof QualificationFailure) {
         const failure = new QualificationFailure(parseLaneFailure({ ...error.evidence, id: input.execution?.nextFailureId() ?? error.evidence.id,
-          ...(error.evidence.lane === "windows" ? { step: phase } : {}), elapsedMs: runtime.now() - start }));
+          ...(error.evidence.lane === "windows" ? { step: phase } : {}), elapsedMs: runtime.now() - start }),
+          error.cause === undefined ? undefined : { cause: error.cause });
         failure.message = error.message; throw failure;
       }
       if (error instanceof AggregateError) throw error;
@@ -494,6 +496,10 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
     }
   };
   if (progress.cleanupRequired) {
+    if (runtime.hasAccess && (PHASES.indexOf(progress.phase) > PHASES.indexOf("instance_created") ||
+      (progress.phase === "instance_created" && progress.settled))) {
+      await attempt("vaultState", async () => { requireFact(await runtime.hasAccess!(progress.epoch), "uncommitted cleanup lacks recovery vault"); });
+    }
     const owned = new Map<string, WindowsInstance>();
     let inventoryVerified = false;
     await attempt("guestInventory", async () => {
@@ -525,8 +531,9 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
       const handedOver = PHASES.indexOf(progress.phase) > PHASES.indexOf("standard_tailnet_released") ||
         (progress.phase === "standard_tailnet_released" && progress.settled);
       const owner: WindowsPrincipal = handedOver ? "standard" : "administrator";
-      await guestAttempt("stopOmp");
-      for (const action of ["uninstall", "resetServe", "logout"] as const) await guestAttempt(action, owner);
+      for (const action of ["stopOmp", "uninstall", "resetServe", "logout"] as const) {
+        if (!await guestAttempt(action, action === "stopOmp" ? undefined : owner)) { guestCommandsSkipped = true; break; }
+      }
     }
     await attempt("tailnetDelete", () => runtime.deleteTailnet(context));
     await attempt("instances", async () => {
@@ -564,21 +571,21 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
     if (PHASES.indexOf(progress.phase) >= PHASES.indexOf("pixel_verified")) {
       await attempt("pixelRestore", () => input.pixel("windows-cleanup", () => runtime.restorePixel(context)));
     }
-    await attempt("vault", async () => {
-      requireFact(!failures.includes("pixelRestore"), "Pixel recovery state must be retained");
-      requireFact(instanceAbsent && failures.length === 0, "resource recovery state must be retained");
-      requireFact(!(await runtime.provider.instances()).some(item => item.label === label), "instance still exists");
-      await runtime.removeAccess(progress.epoch);
-    });
   } else {
     await attempt("tailnetDelete", () => runtime.deleteTailnet(context));
-    await attempt("vault", () => runtime.removeAccess(progress.epoch));
   }
   await attempt("instanceResidue", async () => { requireFact(!(await runtime.provider.instances()).some(item => item.label?.startsWith(QUAL_LABEL_PREFIX)), "instance residue"); });
   await attempt("firewallResidue", async () => { requireFact(!(await runtime.provider.firewalls()).some(item => item.description?.startsWith(QUAL_LABEL_PREFIX)), "firewall residue"); });
   if (guestFailures > 0 && !instanceAbsent) failed("guestContainment", undefined);
   progress.cleanupRequired = failures.length > 0; await save();
   if (failures.length) { progress.cleanupRequired = true; throw new AggregateError(causes, `Windows cleanup failed: ${failures.join(", ")}`); }
+  // Completion is durable before deleting the last recovery state. If unlink fails or the
+  // controller dies afterward, the committed false checkpoint lets cleanup finish without
+  // attempting Pixel restoration from a vault that may already be absent.
+  try { await runtime.removeAccess(progress.epoch); }
+  catch { throw new QualificationFailure(parseLaneFailure({ id: input.execution?.nextFailureId() ?? ++standaloneFailureId,
+    lane: "windowsCleanup", step: "vault", reason: "containment_unproven", class: "harness",
+    elapsedMs: 0, operation: "unknown", observations: {} })); }
   return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,
     guestCleanupFailures: guestFailures, guestCommandsSkipped };
 }

@@ -143,10 +143,15 @@ mandatory on expiry. Cleanup uses this reconnect path, never another 12-minute a
 Mutating guest actions and upload streams are never replayed.
 
 An interrupted upload is reconciled by existence and SHA-256 after read-only connection recovery.
+Only a recognized helper-reported transport interruption permits that reconciliation; a raw process
+exit, controller kill, or otherwise unknown termination remains terminal even if matching bytes exist.
 The inspector must exclusively open the file, proving that its writer no longer owns it, before
 hashing or permitting removal. Complete matching bytes are reused; a partial file is removed only
 after that proof, and the failed upload remains terminal rather than starting another stream.
 Unknown writer disposition, authentication, or helper faults do not become successful recovery.
+Each upload records a private durable `started` claim before work and a `complete` checkpoint only
+after success. An incomplete claim refuses development re-entry in the same epoch; it cannot stream
+the upload again. A completed upload is reused only after checking its bytes again.
 Private helper diagnostics retain only the existing redacted, source-free exception context;
 typed failures contain closed codes and numeric/boolean observations, not that diagnostic text.
 
@@ -251,6 +256,11 @@ Instance and firewall IDs are retained privately so a changed ownership label ca
 absence. Changed/protected owners, missing Pixel recovery state, and unresolved absence remain
 blocking, retain recovery state, and prohibit automatic campaign retry. Paid infrastructure cleanup
 does not wait behind another lane's Pixel lease.
+Final instance/firewall inventories and every containment proof precede the durable cleanup-complete
+checkpoint, which precedes vault removal. A crash after unlink can therefore resume from committed
+completion without missing Pixel recovery state; a missing vault without that completion stays
+blocked. A failed guest command after reconnect skips the remaining guest mutations and proceeds
+directly to independent containment.
 Provider reads retry a transient 5xx. A lookup that answers missing, or a Vultr listing without its
 array, is final only when a second read five seconds later agrees: on 2026-09-29 one listing did so
 while the lane polled for allocation, failing an attempt whose VM was still booting.
