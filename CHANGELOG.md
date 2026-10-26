@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.9.0] — 2026-10-26
 
-This release uses stock OMP v18.12.5 as its engineering baseline. The 55 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.12.5 as its engineering baseline. The 56 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.
 
 ### Added
 
@@ -85,6 +85,8 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 55 changel
 
 ### Fixed
 
+- Retain redacted qualification cause chains and stacks on private CLI stderr, plus an exclusive
+  private readiness browser-substep diagnostic with the CDP method, without changing receipts.
 - Accept fully acknowledged Push fan-out for one request alias, retain bounded recipient/send/ack
   counts, and refuse stale retained-rig subscriptions before the readiness ask. Attribute browser
   baseline failures to closed browser/CDP substeps while preserving restoration and operator-only

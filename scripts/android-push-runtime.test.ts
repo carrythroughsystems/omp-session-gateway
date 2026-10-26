@@ -61,14 +61,32 @@ test.each(["browser_wake", "browser_webapk", "browser_forward", "browser_target"
       return run(driver);
     }) as typeof withAndroidChrome);
     try {
-      const runtime = createAndroidPushRuntime(identity);
+      let diagnostic: unknown;
+      const runtime = createAndroidPushRuntime(identity, { browserFailure: async (substep, error, elapsedMs) => {
+        diagnostic = { substep, error, elapsedMs };
+      } });
       runtime.beforeEffect = async () => {};
       let error: unknown;
       try { await runtime.browser(); } catch (caught) { error = caught; }
       expect(error).toMatchObject({ evidence: { lane: "androidPush", step, reason: "browser_baseline_failed", class: "harness" } });
       expect(JSON.stringify(normalizeQualificationFailures(error))).not.toContain(failure.message);
+      expect(diagnostic).toMatchObject({ substep: step, error: failure, elapsedMs: expect.any(Number) });
     } finally { chrome.mockRestore(); for (const spy of spies) spy.mockRestore(); }
   });
+
+test("private browser diagnostic retention failure preserves the original CDP cause", async () => {
+  const original = new Error("CDP Runtime.evaluate: synthetic context failure"), retention = new Error("private diagnostic disk failure");
+  const wake = spyOn(deviceOperations, "wakeAndroidDisplay").mockRejectedValue(original);
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  try {
+    const runtime = createAndroidPushRuntime(identity, { browserFailure: async () => { throw retention; } });
+    runtime.beforeEffect = async () => {};
+    const error = await runtime.browser().catch(error => error);
+    expect(error).toMatchObject({ evidence: { reason: "browser_baseline_failed" } });
+    expect(error.cause).toBeInstanceOf(AggregateError);
+    expect(error.cause.errors).toEqual([original, retention]);
+  } finally { select.mockRestore(); wake.mockRestore(); }
+});
 
 test.each([0, 1, 2, 8])("readiness reads eligible subscription count %s through the authenticated config path", async subscriptionCount => {
   const fetch = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({

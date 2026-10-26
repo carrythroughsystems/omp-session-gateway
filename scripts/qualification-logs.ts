@@ -2,12 +2,13 @@ import { constants, closeSync, fstatSync, fsyncSync, openSync, readFileSync, wri
 import { join } from "node:path";
 import { assertQualificationLogDirectory, parseQualificationLogFiles, parseQualificationLogHealth, type QualificationLogEvent } from "../apps/gateway/src/logger.ts";
 import type { FixtureExecutor } from "./push-qualification-fixture.ts";
-import { FAILURE_STEPS, type QualificationFailureLane } from "./qualification-failure.ts";
+import { FAILURE_STEPS, PUSH_BROWSER_STEPS, privateQualificationFailureDiagnostic, type PushBrowserStep, type QualificationFailureLane } from "./qualification-failure.ts";
 
 export interface QualificationLogWindow { readonly lane: QualificationFailureLane; readonly phase: string; readonly after: number; readonly ordinal: number }
 export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly subscriptionCount: number; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number; readonly clearAcknowledged?: boolean; readonly requestAlias?: number }
 export interface QualificationLogs {
   prepare(): Promise<void>;
+  browserFailure(substep: PushBrowserStep, error: unknown, elapsedMs: number): Promise<void>;
   begin(lane: QualificationLogWindow["lane"], phase: string): Promise<QualificationLogWindow>;
   end(window: QualificationLogWindow): Promise<PushDeliveryTelemetry>;
   healthy(): Promise<boolean>;
@@ -179,10 +180,9 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
     return { events, health: value.health };
   };
   const read = async () => (await readState()).events;
-  const persist = (name: string, events: readonly QualificationLogEvent[]) => {
+  const persist = (name: string, bytes: string) => {
     assertQualificationLogDirectory(options.jobDirectory);
     const path = join(options.jobDirectory, name);
-    const bytes = events.map(event => JSON.stringify(event)).join("\n") + (events.length === 0 ? "" : "\n");
     const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
     try {
       if (writeSync(fd, bytes) !== Buffer.byteLength(bytes) || fstatSync(fd).nlink !== 1) throw new Error("qualification log retention failed");
@@ -193,6 +193,16 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
   };
   return {
     async prepare() { await remote("prepare"); },
+    async browserFailure(substep, error, elapsedMs) {
+      if (!PUSH_BROWSER_STEPS.includes(substep) || !Number.isSafeInteger(elapsedMs) || elapsedMs < 0) throw new Error("invalid private browser diagnostic");
+      const chain = privateQualificationFailureDiagnostic(error);
+      const method = /^CDP (?:timeout: )?([A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*)(?::|$)/u;
+      const cause = chain.find(entry => method.test(entry.message)) ?? chain[0]!;
+      persist("browser-substep.json", JSON.stringify({ substep, message: cause.message,
+        cdpMethod: method.exec(cause.message)?.[1] ?? null, elapsedMs }) + "\n");
+      const directory = openSync(options.jobDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(directory); } finally { closeSync(directory); }
+    },
     async begin(lane, phase) {
       if (!Object.hasOwn(FAILURE_STEPS, lane) || (!(FAILURE_STEPS[lane] as readonly string[]).includes(phase) &&
         !(lane === "rigReadiness" && phase === "readiness")) || ordinal >= 256) throw new Error("invalid qualification capture window");
@@ -224,8 +234,9 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
         return { files: 0, events: 0 };
       }
       const { events, health } = await readState(true);
-      persist("gateway-structured.jsonl", events);
-      for (const [window, slice] of windows) persist(`gateway-${window.lane}-${window.phase}-${window.ordinal}.jsonl`, slice);
+      const lines = (events: readonly QualificationLogEvent[]) => events.map(event => JSON.stringify(event)).join("\n") + (events.length === 0 ? "" : "\n");
+      persist("gateway-structured.jsonl", lines(events));
+      for (const [window, slice] of windows) persist(`gateway-${window.lane}-${window.phase}-${window.ordinal}.jsonl`, lines(slice));
       const directory = openSync(options.jobDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
       try { fsyncSync(directory); } finally { closeSync(directory); }
       await remote("remove", health);

@@ -3,7 +3,8 @@
  * - LaneFailure is a lane/reason/class-discriminated, capability-free record. IDs are unique
  *   within one campaign attempt; callers allocate them across lanes, not per lane.
  * - QualificationFailure validates a record; only its evidence is JSON-serializable. Causes
- *   remain in memory. Ordinary Error.cause and structural lookalikes are never classification.
+ *   remain outside receipts; the private CLI diagnostic traverses them separately. Ordinary
+ *   Error.cause and structural lookalikes are never classification.
  * - normalizeQualificationFailures traverses AggregateError and the two explicit typed errors.
  *   Unknown/malformed leaves become harness failures. Bounds overflow stops as harness.
  * - parseLaneFailures checks the complete attempt graph; parseLaneFailure checks one leaf.
@@ -24,6 +25,8 @@
  *   errors, host/device identities, notification metadata or provider bodies belong here.
  */
 import { DeviceCloudAvailabilityHold, parseDeviceCloudHold } from "./device-cloud-availability.ts";
+import { findCapabilityLeaks } from "./capability-leak-rules.ts";
+import { findIdentifierLeaks } from "./identifier-leak-rules.ts";
 
 export type LaneFailureClass = "product" | "infra_transient" | "harness" | "collateral";
 export type OperationDisposition = "not_started" | "read_only" | "confirmed" | "unknown";
@@ -244,6 +247,45 @@ export class QualificationFailure extends Error {
     this.evidence = safe;
   }
   toJSON(): LaneFailure { return parseLaneFailure(this.evidence); }
+}
+
+/** Private operator diagnostics only; never use these strings as receipt or retry evidence. */
+export function privateQualificationFailureDiagnostic(error: unknown): readonly { path: string; message: string; stack: string }[] {
+  const entries: { path: string; message: string; stack: string }[] = [], seen = new Set<Error>();
+  let exhausted = false;
+  const redact = (text: string): string => text.split("\n").map(line => {
+    if (findCapabilityLeaks(line).length > 0) return "[capability-bearing diagnostic withheld]";
+    // Source-scanner opt-outs cannot waive redaction of a runtime exception.
+    for (const finding of findIdentifierLeaks(line.replaceAll("identifier-leak-allow", ""))) {
+      line = line.replaceAll(finding.match, `[redacted ${finding.label}]`);
+    }
+    return line;
+  }).join("\n");
+  const visit = (current: unknown, path: string, depth: number): void => {
+    if (exhausted) return;
+    if (entries.length >= FAILURE_LIMITS.nodes || depth > FAILURE_LIMITS.depth) {
+      entries.push({ path, message: "private diagnostic traversal limit reached", stack: "" });
+      exhausted = true;
+      return;
+    }
+    if (!(current instanceof Error) || seen.has(current)) {
+      entries.push({ path, message: current instanceof Error ? "already reported error" : "non-Error cause withheld", stack: "" });
+      return;
+    }
+    seen.add(current);
+    const message = typeof current.message === "string" ? redact(current.message) : "non-string Error message withheld";
+    entries.push({ path, message, stack: typeof current.stack === "string" ? redact(current.stack) : message });
+    if (current.cause !== undefined) visit(current.cause, `${path}.cause`, depth + 1);
+    if (current instanceof AggregateError) {
+      if (!Array.isArray(current.errors)) visit(current.errors, `${path}.errors`, depth + 1);
+      else for (const [index, child] of current.errors.entries()) {
+        visit(child, `${path}.errors[${index}]`, depth + 1);
+        if (exhausted) break;
+      }
+    }
+  };
+  visit(error, "error", 0);
+  return entries;
 }
 
 function unclassified(id: number, reason: "unclassified_failure" | "normalization_limit_exceeded" = "unclassified_failure"): LaneFailure {

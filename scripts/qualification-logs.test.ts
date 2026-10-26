@@ -12,6 +12,37 @@ const flags = { request_alias: 1, attention: true, clear: false, activity_stop: 
 const send = [event(1, "push.queue_accepted", { sequence: 1, ...flags }), event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 1 }),
   event(3, "push.send_failed", { sequence: 1, elapsed_ms: 1, status: 503 })];
 
+test.skipIf(process.platform === "win32")("private browser diagnostic preserves CDP failure without changing telemetry", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-browser-")); chmodSync(root, 0o700);
+  const logs = createQualificationLogs({ execute: async () => { throw new Error("diagnostic must stay local"); },
+    remoteDirectory: qualificationLogDirectory(root, randomUUID()), jobDirectory: root });
+  const cause = new Error("CDP Runtime.evaluate: Cannot find default execution context");
+  try {
+    await logs.browserFailure("browser_context", new Error("browser wrapper", { cause }), 2606);
+    const path = join(root, "browser-substep.json");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+      substep: "browser_context", message: cause.message, cdpMethod: "Runtime.evaluate", elapsedMs: 2606,
+    });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    await expect(logs.browserFailure("browser_context", cause, 1)).rejects.toThrow();
+    expect(readdirSync(root)).toEqual(["browser-substep.json"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32").each(["symlink", "public-directory"] as const)(
+  "private browser diagnostic refuses %s destinations", async variant => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-browser-refuse-")); chmodSync(root, 0o700);
+    const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory: qualificationLogDirectory(root, randomUUID()), jobDirectory: root });
+    const outside = join(root, "untouched");
+    writeFileSync(outside, "preserved", { mode: 0o600 });
+    if (variant === "symlink") symlinkSync(outside, join(root, "browser-substep.json"));
+    else chmodSync(root, 0o755);
+    try {
+      await expect(logs.browserFailure("browser_context", new Error("CDP timeout: Runtime.evaluate"), 1)).rejects.toThrow();
+      expect(readFileSync(outside, "utf8")).toBe("preserved");
+    } finally { chmodSync(root, 0o700); rmSync(root, { recursive: true, force: true }); }
+  });
+
 test.each(["reversed-queues", "interleaved-completion"] as const)("506 council telemetry rejects %s ordering", variant => {
   const events = variant === "reversed-queues" ? [
     event(1, "push.queue_accepted", { sequence: 2, ...flags }),

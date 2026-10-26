@@ -1066,6 +1066,13 @@ typed `browser_baseline_failed` with a bounded browser substep (wake, WebAPK, CD
 target inventory, attachment, execution context, navigation or notification-state read), rather than
 an unclassified raw CDP error. Cleanup/containment failures retain their stronger disposition.
 Expired execution deadlines retain deadline attribution rather than becoming browser baseline errors.
+The stable CLI now writes the cause/AggregateError chain and stacks to its private stderr, retained
+by the release driver as `qualification-err.log`. Readiness also writes an exclusive mode-0600
+`rig-readiness-logs/browser-substep.json` containing the failed substep, error message, CDP method
+(or null) and elapsed milliseconds before restoration. These are operator diagnostics only:
+identifier/capability redaction applies, arbitrary error properties are excluded, and neither file
+is receipt evidence or a public release artifact. Inspect both when the receipt names only a typed
+browser failure; a diagnostic write failure preserves the original error rather than replacing it.
 
 Windows readiness reuses credential, inventory, image, plan and toolchain admission and requires
 remaining per-tag creation allowance with no unreconciled qualification resources. Unsupported

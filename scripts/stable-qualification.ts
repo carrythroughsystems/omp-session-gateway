@@ -19,7 +19,7 @@ import { parseDeviceCloudHoldSet, recognizedDeviceCloudOutcome, writeDeviceCloud
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { abortablePause } from "./provider-read.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
-import { FAILURE_LIMITS, FAILURE_STEPS, FAILURE_REASONS, QualificationFailure, normalizeQualificationFailures, qualificationRetryEligible, qualificationContainmentUnproven, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, type QualificationFailureLane, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
+import { FAILURE_LIMITS, FAILURE_STEPS, FAILURE_REASONS, QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, qualificationRetryEligible, qualificationContainmentUnproven, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, type QualificationFailureLane, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
 import { parseQualificationExecution, qualificationExecutionsMatch, parseRigReadinessReceipt, writeQualificationOutcomeFile, readQualificationOutcomeFile, qualificationOutcomeExitCode, type QualificationExecution, type RigReadinessReceipt } from "./qualification-outcome.ts";
 
 /** Candidate-source rollout marker: contract modules alone do not enable new worker arguments. */
@@ -3595,6 +3595,7 @@ if (import.meta.main) {
     const hold = recognizedDeviceCloudOutcome(error);
     if (hold !== undefined) console.error("stable qualification held: pinned device-cloud pools are busy; explicit operator retry required");
     else console.error("stable qualification failed; inspect the private receipt and outcome");
+    console.error(JSON.stringify({ privateQualificationFailure: privateQualificationFailureDiagnostic(error) }, null, 2));
     process.exitCode = hold === undefined ? 1 : 75;
     try {
       const options = parseStableQualificationArgs(Bun.argv.slice(2));

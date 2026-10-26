@@ -25,6 +25,7 @@ export interface AndroidPushRuntimeOptions {
   readonly executeWithContext?: (argv: readonly string[], execution: PushExecution | undefined) => ReturnType<FixtureExecutor>;
   readonly gatewayLogsDiscarded?: () => Promise<boolean>;
   readonly qualificationLogs?: Pick<QualificationLogs, "begin" | "end" | "healthy">;
+  readonly browserFailure?: QualificationLogs["browserFailure"];
   readonly execution?: PushExecution;
 }
 
@@ -444,6 +445,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         return result;
       }
       catch (error) {
+        try { await options.browserFailure?.(baseline.step, error, Math.round(runtime.now() - started)); }
+        catch (retentionError) { error = new AggregateError([error, retentionError], "Push browser diagnostic retention failed"); }
         rethrowPushSafetyFailure(error);
         checkExecution();
         throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: baseline.step,

@@ -18,7 +18,7 @@ import {
   type AndroidPushIdentity,
 } from "./android-push-qualification.ts";
 import { createAndroidPushRuntime } from "./android-push-runtime.ts";
-import { createQualificationLogs, qualificationLogDirectory } from "./qualification-logs.ts";
+import { createQualificationLogs, qualificationLogDirectory, type QualificationLogs } from "./qualification-logs.ts";
 import { cleanupDeviceCloud, deviceCloudNeedsCleanup, runDeviceCloud } from "./device-cloud-qualification.ts";
 import { admitDeviceCloud, createDeviceCloudRuntime } from "./device-cloud-runtime.ts";
 import type { FixtureExecutor } from "./push-qualification-fixture.ts";
@@ -123,7 +123,8 @@ async function stageRetainedMacFixture(context: ExternalLaneContext & RetainedMa
   };
 }
 
-async function retainedMacPushRuntime(context: ExternalLaneContext & RetainedMacLaneContext) {
+async function retainedMacPushRuntime(context: ExternalLaneContext & RetainedMacLaneContext,
+  browserFailure?: QualificationLogs["browserFailure"]) {
   const fixture = await stageRetainedMacFixture(context, "push");
   return createAndroidPushRuntime(liveIdentity(context), {
     execute: fixture.execute,
@@ -138,6 +139,7 @@ async function retainedMacPushRuntime(context: ExternalLaneContext & RetainedMac
     gatewayLogsDiscarded: () => gatewayStreamsDiscarded(context.mac),
     ...(context.execution === undefined ? {} : { execution: context.execution }),
     ...(context.qualificationLogs === undefined ? {} : { qualificationLogs: context.qualificationLogs }),
+    ...(browserFailure === undefined ? {} : { browserFailure }),
   });
 }
 
@@ -263,7 +265,7 @@ export const defaultLaneModules: StableQualificationLaneModules = {
     },
     push: async context => runAndroidPushReadiness({
       identity: liveIdentity(context), progress: context.progress, checkpoint: context.checkpoint, pixel: context.pixel,
-      runtime: await retainedMacPushRuntime(context), ...executionOptions(context.execution),
+      runtime: await retainedMacPushRuntime(context, context.qualificationLogs?.browserFailure), ...executionOptions(context.execution),
     }),
   },
 };

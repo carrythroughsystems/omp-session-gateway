@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DeviceCloudAvailabilityHold } from "./device-cloud-availability.ts";
 import {
-  FAILURE_LIMITS, QualificationFailure, normalizeQualificationFailures, parseLaneFailure,
+  FAILURE_LIMITS, QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailure,
   parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible, qualificationPreflightFailuresEffectFree,
   type LaneFailure, type QualificationFailureSummary,
 } from "./qualification-failure.ts";
@@ -13,6 +13,41 @@ const collateral = (): LaneFailure => ({ id: 2, lane: "ompPublication", step: "c
 const summary = (): QualificationFailureSummary => ({ failures: [root(), collateral()], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
   containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } });
 const secret = "SYNTHETIC_PRIVATE_FAILURE_SENTINEL";
+
+test("private diagnostics retain typed causes and aggregate stacks without changing receipt evidence", () => {
+  const cause = new Error("CDP Runtime.evaluate: Cannot find default execution context");
+  cause.stack = `${cause.name}: ${cause.message}\n    at browserContext (scripts/android-push-runtime.ts:343:35)`;
+  const typed = new QualificationFailure(root(), { cause });
+  const cleanup = new Error("independent browser cleanup failed");
+  const chain = privateQualificationFailureDiagnostic(new AggregateError([typed, cleanup], "attempt failed"));
+  expect(chain.map(entry => entry.message)).toEqual(["attempt failed", typed.message, cause.message, cleanup.message]);
+  expect(chain[2]).toMatchObject({ path: "error.errors[0].cause", stack: cause.stack });
+  expect(normalizeQualificationFailures(typed)).toEqual([root()]);
+  expect(JSON.stringify(typed)).not.toContain(cause.message);
+});
+
+test("private diagnostics redact identifiers and capabilities and never serialize arbitrary properties", () => {
+  const host = ["synthetic-private", "synthetic-net", "ts", "net"].join(".");
+  const home = "/" + ["Users", "syntheticoperator"].join("/");
+  const capability = "https://relay.invalid/#synthetic-room." + "s".repeat(43);
+  const error = Object.assign(new Error(`CDP Runtime.evaluate: cannot reach ${host}\nsource ${home}/script.ts\n${capability}`),
+    { responseBody: secret, headers: secret, token: secret });
+  const text = JSON.stringify(privateQualificationFailureDiagnostic(error));
+  for (const value of [host, home, capability, secret]) expect(text).not.toContain(value);
+  expect(text).toContain("redacted tailnet hostname");
+  expect(text).toContain("redacted absolute home path");
+  expect(text).toContain("capability-bearing diagnostic withheld");
+});
+
+test("private diagnostic cycles and non-Error causes cannot hide real typed causes or stringify arbitrary values", () => {
+  const error = new Error("cycle");
+  error.cause = error;
+  expect(privateQualificationFailureDiagnostic(error).at(-1)?.message).toBe("already reported error");
+  expect(privateQualificationFailureDiagnostic({ message: secret, toString: () => secret })[0]?.message).toBe("non-Error cause withheld");
+  const malformed = new AggregateError([], "malformed aggregate");
+  malformed.errors = { body: secret } as unknown as unknown[];
+  expect(privateQualificationFailureDiagnostic(malformed).at(-1)?.message).toBe("non-Error cause withheld");
+});
 
 describe("closed qualification failure contracts", () => {
   test("council498r1 persistence failure cannot acquire retry authority from a contradictory summary", () => {

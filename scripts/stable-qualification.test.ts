@@ -79,6 +79,17 @@ const COMMIT = "a".repeat(40);
 const MAC_ENV = { OMP_STABLE_MAC_HOST: "gwqual@fixture.invalid", OMP_STABLE_MAC_MODEL: "Mac17,14" };
 const REPOSITORY_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
+test("private CLI diagnostic retains the failure message and stack on stderr", async () => {
+  const child = Bun.spawn([process.execPath, "scripts/stable-qualification.ts", "--unknown-private-diagnostic"], {
+    cwd: REPOSITORY_ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  expect(code).toBe(1);
+  expect(stdout).toBe("");
+  expect(stderr).toContain("unknown argument: --unknown-private-diagnostic");
+  expect(stderr).toContain("parseCandidateTagArgs");
+});
+
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
