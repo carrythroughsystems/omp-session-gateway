@@ -774,7 +774,7 @@ describe("automatic same-candidate campaign retry state machine", () => {
     fake.repo.approve!.checksPassed = false;
     expect((await tick(fake, config)).holdReason).toBe("required-checks-missing");
     fake.repo.approve!.checksPassed = true;
-    for (const operation of ["merge-approve", "tag-stable", "observe-stable", "verify-stable", "start-smoke", "finish-smoke", "open-record", "merge-record", "close"]) {
+    for (const operation of ["merge-approve", "tag-stable", "observe-stable", "verify-stable", "start-smoke", "finish-smoke", "open-record", "merge-record", "close"] as const) {
       expect((await tick(fake, config)).operation).toBe(operation);
     }
   });

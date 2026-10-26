@@ -47,7 +47,7 @@ describe.skipIf(process.platform === "win32")("cross-process release-host owners
       }
       expect(await withReleaseHostLease(owner, async () => "attempt 2 passed", root)).toBe("attempt 2 passed");
       expect(recordedOwner()).toBeUndefined();
-      expect((await stat(path)).ino).toBe(inode);
+      expect((await stat(path)).ino).toBe(inode!);
       await withReleaseHostLease("next-candidate", async () => {}, root);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
