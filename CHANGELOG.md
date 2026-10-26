@@ -53,9 +53,23 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Check allocation expiry immediately before creation POSTs, settle firewall-only recovery vaults
   without false ownership vetoes, contain cancelled development attempts, and reject late poll
   success. FreeRDP input failures reap their child; resumed admission retains stability evidence.
+  Retained-state refusals and preflight failures enter independent containment; expired local
+  budgets carry typed controller-deadline evidence. Completed admission resumes under reconnect
+  bounds, and expired creation authority cannot consume the private creation counter.
 
 ### Fixed
 
+- Re-enter only the current process's retained development Pixel lease during automatic cleanup,
+  bounded by its fresh cleanup deadline; preserve foreign or changed ownership. Attribute
+  execution-clipped helper timers to controller expiry, recheck rejected mutations, and guard the
+  resource lifetime at final guest dispatch. Parse complete Windows fetch options and the same
+  dispatcher's GET-only gate; reject overriding options and legacy unguarded callbacks.
+- Retain an initial Windows development guest only for a typed, known-disposition product assertion;
+  contain infrastructure, authentication, harness, unknown, and expired attempts. Guard firewall-rule
+  POSTs after refetch, helper spawns after checkpoints, and every owned effect boundary; reject late
+  successful or failed observations with one positive-budget guard instead of launching 1-ms probes.
+  Arm subprocess cancellation before work and switch provider/guest/Pixel dispatch to the cleanup owner.
+  Admit only reviewed guarded Windows fetch forms in repository policy while preserving GET-only retries.
 - Contain browser CI flakes with one CI-only retry across both mobile Chromium and cross-engine
   core suites, closed privacy-safe attempt reports and summaries retained for 14 days, and a
   weekly/manual seven-day flake budget with fail-closed evidence coverage. Local runs keep zero
