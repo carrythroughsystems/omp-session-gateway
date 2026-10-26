@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.9.0] — 2026-10-26
+
+This release uses stock OMP v18.12.5 as its engineering baseline. The 53 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.
+
 ### Added
 
 - Qualification-only private rotating structured gateway logs and bounded Push send/ack evidence.
@@ -108,10 +112,6 @@ The format is based on Keep a Changelog and Semantic Versioning.
   fleet targets separately from workflow heads; version-2 cohorts exclude pre-contract reports.
   The delayed-resume regression also waits for remote generation reconciliation before asserting
   that the mounted foreground shell was not superseded.
-
-## [v0.9.0] — 2026-10-25
-
-This release uses stock OMP v18.12.5 as its engineering baseline. The 44 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.
 
 ### Added
 
