@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DeviceCloudAvailabilityHold } from "./device-cloud-availability.ts";
 import {
   FAILURE_LIMITS, QualificationFailure, normalizeQualificationFailures, parseLaneFailure,
-  parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible,
+  parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible, qualificationPreflightFailuresEffectFree,
   type LaneFailure, type QualificationFailureSummary,
 } from "./qualification-failure.ts";
 
@@ -15,6 +15,29 @@ const summary = (): QualificationFailureSummary => ({ failures: [root(), collate
 const secret = "SYNTHETIC_PRIVATE_FAILURE_SENTINEL";
 
 describe("closed qualification failure contracts", () => {
+  test("council498r1 persistence failure cannot acquire retry authority from a contradictory summary", () => {
+    expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(),
+      observations: { ...root().observations, persistenceFailed: true } }] }, true)).toBe(false);
+  });
+  test.each(["preflight", "connection", "output"] as const)("council498r1 Windows admission accepts its actual %s producer step", step => {
+    expect(qualificationPreflightFailuresEffectFree([parseLaneFailure({ ...root(), step,
+      reason: "retryable_service_failure", observations: { httpStatus: 503 } })])).toBe(true);
+  });
+  test.each(["transport_ready", "pixel_verified", "upload"] as const)("council498r1 preflight refuses post-allocation %s evidence", step => {
+    expect(qualificationPreflightFailuresEffectFree([parseLaneFailure({ ...root(), step })])).toBe(false);
+  });
+  test("council498 campaign teardown remains a direct non-retryable harness failure", () => {
+    const failure = parseLaneFailure({ ...root(), lane: "campaign", step: "teardown",
+      reason: "unclassified_failure", class: "harness", operation: "unknown" });
+    expect(qualificationRetryEligible({ ...summary(), failures: [failure] }, true)).toBe(false);
+    expect(() => parseLaneFailure({ ...failure, class: "collateral" })).toThrow();
+  });
+  test("council498 remote-unsettled cleanup requires an authored origin in the same graph", () => {
+    const failure = parseLaneFailure({ ...collateral(), lane: "cleanup", step: "containment", reason: "remote_unsettled" });
+    expect(parseLaneFailures([root(), failure])).toEqual([root(), failure]);
+    expect(() => parseLaneFailures([failure])).toThrow();
+    expect(() => parseLaneFailure({ ...failure, class: "infra_transient" })).toThrow();
+  });
   test("council R1 collateral cannot bind a generated availability ID", () => {
     const hold = new DeviceCloudAvailabilityHold({ kind: "device-cloud-availability", stage: "preflight", target: "iphone",
       vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0 });
@@ -29,6 +52,11 @@ describe("closed qualification failure contracts", () => {
       expect(() => parseLaneFailure({ ...root(), lane, step: "containment" })).toThrow();
     }
   });
+  test.each(["rigReadiness", "ompPublication", "relay", "android"] as const)(
+    "council P2 ordinary %s cleanup transport is never retry authority", lane => {
+      expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(), lane, step: "cleanup" }] }, true)).toBe(false);
+    },
+  );
   test("council R4 negative containment and reconciliation observations block retry", () => {
     for (const observations of [{ cleanupVerified: false }, { mutationReconciled: false }, { remainingResources: 1 }]) {
       expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(), observations: { ...root().observations, ...observations } }] }, true)).toBe(false);

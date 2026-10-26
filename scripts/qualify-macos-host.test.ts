@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,19 +44,22 @@ async function runHarness(
   args: readonly string[],
   env: Record<string, string | undefined>,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn(["/bin/bash", "-c", harness, "test", scriptPath, ...args], {
-    cwd: repositoryRoot,
-    env,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  const journalRoot = await mkdtemp(join(tmpdir(), "mac-harness-journal-"));
+  try {
+    const child = Bun.spawn(["/bin/bash", "-c", harness, "test", scriptPath, ...args], {
+      cwd: repositoryRoot,
+      env: { ...env, TMPDIR: journalRoot },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr };
+  } finally { await rm(journalRoot, { recursive: true, force: true }); }
 }
 
 const cleanupVersion = "18.1.20";
@@ -300,7 +303,7 @@ export -f bun omp tailscale ifconfig sudo sysctl
 ssh() { /bin/bash -c "\${!#}"; }
 main persistence
 `, [], { ...environment("a".repeat(64)), HOME: root, REAL_BUN: process.execPath, SHUTDOWN_MARKER: shutdown });
-    expect(result.exitCode).toBe(99);
+    expect(result.exitCode).toBe(125); // no changed boot identity: the detached owner remains unresolved
     expect(result.stdout).toContain("reboot issued");
     expect(Date.now() - started).toBeLessThan(20_000);
     // The shutdown runs in a detached OS process the lane deliberately does not wait for (that is the
@@ -308,6 +311,16 @@ main persistence
     const deadline = Date.now() + 10_000;
     while (!(await pathEntryExists(shutdown)) && Date.now() < deadline) await Bun.sleep(100);
     expect(await pathEntryExists(shutdown)).toBe(true);
+    const owners = join(root, ".local/state/omp-qualification/command-owners");
+    const pending = await readdir(owners);
+    expect(pending.length).toBe(1);
+    const pgid = Number((await readFile(join(owners, pending[0]!, "pgid"), "utf8")).trim());
+    expect(Number.isSafeInteger(pgid) && pgid > 1).toBe(true);
+    process.kill(-pgid, "SIGTERM");
+    const stopped = await Bun.spawn(["/bin/bash", "-c",
+      'for ((i=0; i<100; i++)); do kill -0 -- -"$1" 2>/dev/null || exit 0; sleep .05; done; exit 1', "--", String(pgid)],
+    { stdout: "ignore", stderr: "ignore" }).exited;
+    expect(stopped).toBe(0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -321,8 +334,8 @@ test.skipIf(!POSIX)("Mac reboot keeps the sudo password in NUL-framed SSH stdin"
 set -euo pipefail
 source "$1"
 ssh() {
-  printf '%s\n' "$*" >"$ARGV_CAPTURE"
-  cat >"$STDIN_CAPTURE"
+  printf '%s\n' "$*" >>"$ARGV_CAPTURE"
+  cat >>"$STDIN_CAPTURE"
 }
 issue_reboot
 `;
@@ -363,11 +376,12 @@ export -f sudo
 ssh() { /bin/bash -c "\${!#}"; }
 issue_reboot
 `, [], { ...environment("a".repeat(64)), HOME: temporaryRoot, OMP_MAC_SUDO_PW: target.sudoPassword, SUDO_CAPTURE: capture });
-    expect(result).toEqual({ exitCode: 0, stdout: "", stderr: "" });
+    expect(result).toEqual({ exitCode: 125, stdout: "", stderr: "" });
     // The shutdown is detached from the session on purpose; its argv capture lands shortly after.
     const deadline = Date.now() + 10_000;
     while (!(await pathEntryExists(capture)) && Date.now() < deadline) await Bun.sleep(100);
     expect((await readFile(capture, "utf8")).trim().split("\n")).toEqual(["-n", "shutdown", "-r", "now"]);
+    expect((await readdir(join(temporaryRoot, ".local/state/omp-qualification/command-owners"))).length).toBe(1);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }

@@ -8,7 +8,8 @@ import {
   readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution, type QualificationOutcome,
 } from "./qualification-outcome.ts";
 import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
-import { FAILURE_STEPS } from "./qualification-failure.ts";
+import { FAILURE_STEPS, QualificationFailure } from "./qualification-failure.ts";
+import { request } from "./windows-qualification-runtime.ts";
 const privateTmpdir = realpathSync(tmpdir());
 
 const execution = (): QualificationExecution => ({ formatVersion: 1, campaignAttempt: 0, binding: {
@@ -22,6 +23,32 @@ const outcome = (): QualificationOutcome => ({ formatVersion: 1, outcome: "quali
   receipt: { sha256: "f".repeat(64), cleanupDisposition: "restored" } });
 
 describe("general qualification machine outcome", () => {
+  test.skipIf(process.platform === "win32")("council498r1 actual Windows admission GET503 produces receiptless retry evidence", async () => {
+    const root = await mkdtemp(join(privateTmpdir, "windows-admission-outcome-"));
+    const transport = spyOn(globalThis, "fetch").mockImplementation(Object.assign(
+      async () => Response.json({ synthetic: true }, { status: 503 }), { preconnect: () => {} }));
+    try {
+      const failure = await request("https://synthetic.invalid", {}, "GET", undefined,
+        { signal: new AbortController().signal, deadline: performance.now() + 40_000, nextFailureId: () => 1 }).catch(error => error);
+      expect(failure).toBeInstanceOf(QualificationFailure);
+      if (!(failure instanceof QualificationFailure)) throw new Error("expected typed Windows admission failure");
+      expect(failure.evidence).toMatchObject({ step: "connection", reason: "retryable_service_failure", operation: "read_only" });
+      const { receipt: _receipt, ...without } = outcome();
+      const value = { ...without, scope: "preflight" as const,
+        failureSummary: { ...without.failureSummary, failures: [failure.evidence] } };
+      const path = join(root, "preflight-outcome.json");
+      await writeQualificationOutcomeFile(path, value);
+      const saved = await readQualificationOutcomeFile(path, execution());
+      expect(saved.receipt).toBeUndefined();
+      expect(qualificationOutcomeExitCode(saved, execution())).toBe(75);
+    } finally { transport.mockRestore(); await rm(root, { recursive: true, force: true }); }
+  }, 45_000);
+  test.each([
+    ["restored", false], ["restored", undefined], ["unresolved", true], ["not_required", false],
+  ] as const)("council P2 readiness %s cannot contradict baseline %s", (cleanupDisposition, baselineRestored) => {
+    expect(() => parseRigReadinessReceipt({ status: "failed", campaignAttempt: 0, observations:
+      baselineRestored === undefined ? {} : { baselineRestored }, timings: {}, cleanupDisposition })).toThrow();
+  });
   test("council P2 preflight scope cannot launder post-allocation observations", () => {
     const value = outcome();
     for (const step of ["instance_created", "transport_ready", "candidate_upgraded"]) {
@@ -39,7 +66,7 @@ describe("general qualification machine outcome", () => {
   });
   test("council P2 readiness quota and creation allowances are integer counts", () => {
     for (const observations of [{ quotaObservable: true, quotaAvailable: 1.5 }, { creationAllowance: 1.5 }]) {
-      expect(() => parseRigReadinessReceipt({ status: "failed", campaignAttempt: 0, observations,
+      expect(() => parseRigReadinessReceipt({ status: "failed", campaignAttempt: 0, observations: { baselineRestored: true, ...observations },
         timings: {}, cleanupDisposition: "restored" })).toThrow();
     }
   });

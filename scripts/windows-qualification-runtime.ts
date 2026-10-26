@@ -14,6 +14,7 @@ import { runAndroidCollabSmoke } from "./android-collab-smoke.ts";
 import { releaseVersion } from "./release-policy.ts";
 import { firewallEligibility, instanceEligibility, QUAL_LABEL_PREFIX } from "./vultr-target.ts";
 import { confirmAbsence, readProvider } from "./provider-read.ts";
+import { pixelUnrestored } from "./restoration.ts";
 
 const root = resolve(import.meta.dir, "..");
 const privateRoot = join(homedir(), ".local/share/omp-session-gateway/qualification");
@@ -228,38 +229,50 @@ async function existingAccess(epoch: string): Promise<Access | undefined> {
 }
 
 /** Failure text is independent of HTTP bodies, which can contain credentials and identifiers. */
-async function request<T>(url: string, headers: Record<string, string>, method = "GET", body?: unknown, execution?: WindowsExecutionContext, deadline?: number): Promise<T | undefined> {
+export async function request<T>(url: string, headers: Record<string, string>, method = "GET", body?: unknown,
+  execution?: WindowsExecutionContext, deadline?: number): Promise<T | undefined> {
   const started = performance.now();
-  const send = () => {
+  assertWindowsExecution(execution);
+  const operationDeadline = Math.min(execution?.deadline ?? Infinity, deadline ?? Infinity);
+  if (operationDeadline <= performance.now()) throw windowsFailure("deadline_exceeded", "connection", "not_started", {}, execution);
+  const owner = new AbortController();
+  const signal = execution === undefined ? owner.signal : AbortSignal.any([owner.signal, execution.signal]);
+  const timer = Number.isFinite(operationDeadline) ? setTimeout(() => owner.abort(), Math.max(0, operationDeadline - performance.now())) : undefined;
+  const send = (readSignal: AbortSignal = signal) => {
     assertWindowsExecution(execution);
     if (deadline !== undefined) windowsRemaining(started, deadline, performance.now(), execution, "not_started");
-    return fetch(url, { method, headers: { ...headers, "content-type": "application/json" }, body: body === undefined ? null : JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
+    return fetch(url, { method, headers: { ...headers, "content-type": "application/json" },
+      body: body === undefined ? null : JSON.stringify(body), signal: AbortSignal.any([readSignal, AbortSignal.timeout(60_000)]) });
   };
   try {
-    const response = method === "GET" ? await readProvider(send) : await send();
-    if (response.status === 404) return undefined;
+    const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();
+    if (response.status === 404) { await response.body?.cancel(); return undefined; }
     if (!response.ok) {
       await response.body?.cancel();
       if (method === "GET" && (response.status === 429 || response.status >= 500)) {
-        throw windowsFailure("retryable_service_failure", "connection", "read_only", { httpStatus: response.status });
+        throw windowsFailure("retryable_service_failure", "connection", "read_only", { httpStatus: response.status }, execution);
       }
       throw windowsFailure(response.status === 401 || response.status === 403 ? "authentication_failed" : "helper_failed",
-        "connection", method === "GET" ? "read_only" : "unknown", { httpStatus: response.status });
+        "connection", method === "GET" ? "read_only" : "unknown", { httpStatus: response.status }, execution);
     }
     const text = response.status === 204 ? "" : await response.text();
+    signal.throwIfAborted();
     try { return text === "" ? undefined : JSON.parse(text) as T; }
-    catch { throw windowsFailure("helper_failed", "output", method === "GET" ? "read_only" : "unknown"); }
+    catch { throw windowsFailure("helper_failed", "output", method === "GET" ? "read_only" : "unknown", {}, execution); }
   }
   catch (error) {
+    if (signal.aborted || performance.now() >= operationDeadline) {
+      throw windowsFailure("deadline_exceeded", "connection", method === "GET" ? "read_only" : "unknown", {}, execution);
+    }
     if (error instanceof QualificationFailure) throw error;
     const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
     if (method === "GET") {
-      if (code === "ECONNRESET") throw windowsFailure("connection_reset", "connection", "read_only", { transportFailure: true });
-      if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") throw windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true });
-      if (error instanceof DOMException && error.name === "TimeoutError") throw windowsFailure("read_timeout", "connection", "read_only", { transportFailure: true });
+      if (code === "ECONNRESET") throw windowsFailure("connection_reset", "connection", "read_only", { transportFailure: true }, execution);
+      if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") throw windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true }, execution);
+      if (error instanceof DOMException && error.name === "TimeoutError") throw windowsFailure("read_timeout", "connection", "read_only", { transportFailure: true }, execution);
     }
-    throw windowsFailure(method === "GET" ? "helper_failed" : "mutation_unconfirmed", "connection", method === "GET" ? "read_only" : "unknown");
-  }
+    throw windowsFailure(method === "GET" ? "helper_failed" : "mutation_unconfirmed", "connection", method === "GET" ? "read_only" : "unknown", {}, execution);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
 /** Same launch predicates as the shared verifier, with typed Windows assertion boundaries. */
@@ -607,12 +620,31 @@ export async function windowsUploadStep<T>(step: WindowsUploadStep, action: (ste
   }
 }
 
+/** Resolve the current owner at dispatch; cleanup replaces the cancelled primary execution. */
+export function windowsAndroidCommands(owner: () => WindowsExecutionContext | undefined) {
+  const runAdb: typeof androidAdb = (serial, args, settings = {}) => {
+    const execution = owner();
+    assertWindowsExecution(execution);
+    if (execution === undefined) return androidAdb(serial, args, settings);
+    const remaining = execution.deadline - performance.now();
+    if (remaining <= 0) throw windowsFailure("deadline_exceeded", "pixel_verified", "not_started", {}, execution);
+    return androidAdb(serial, args, { ...settings,
+      signal: settings.signal === undefined ? execution.signal : AbortSignal.any([execution.signal, settings.signal]),
+      timeoutMs: Math.min(settings.timeoutMs ?? Infinity, Math.ceil(remaining)),
+    });
+  };
+  const requireSingleDevice: typeof androidDevice = command => {
+    assertWindowsExecution(owner());
+    return androidDevice(command ?? ((...args) => runAdb(undefined, args)));
+  };
+  return { runAdb, requireSingleDevice };
+}
+
 export async function createWindowsRuntime(options: { development?: boolean; execution?: WindowsExecutionContext } = {}): Promise<WindowsRuntime> {
   let execution = options.execution;
   const hostCommand = (argv: readonly string[], settings: Parameters<typeof command>[1] = {}) =>
     command(argv, { ...settings, ...(execution === undefined ? {} : { execution }) });
-  const runAdb: typeof androidAdb = (...args) => { assertWindowsExecution(execution); return androidAdb(...args); };
-  const requireSingleDevice: typeof androidDevice = (...args) => { assertWindowsExecution(execution); return androidDevice(...args); };
+  const { runAdb, requireSingleDevice } = windowsAndroidCommands(() => execution);
   const environment: Record<string, string | undefined> = { ...process.env };
   const vultrKey = (await privateFile(join(homedir(), ".vultr-apikey"))).trim();
   let joinValue = ""; let apiValue = "";
@@ -637,7 +669,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       const page = await confirmAbsence(async () => {
         const read = await api<Record<string, unknown>>(url);
         return read !== undefined && Array.isArray(read[key]) ? read : undefined;
-      });
+      }, execution ?? {});
       if (!page) throw new Error("invalid provider listing");
       items.push(...page[key] as T[]);
       cursor = ((page.meta as { links?: { next?: string } } | undefined)?.links?.next ?? "");
@@ -649,25 +681,30 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
   const provider = {
     instances: () => list<WindowsInstance>("instances", "instances"),
     firewalls: () => list<WindowsFirewall>("firewalls", "firewall_groups"),
-    instance: (id: string) => confirmAbsence(async () => (await api<{ instance: WindowsInstance }>(`instances/${encodeURIComponent(id)}`))?.instance),
-    firewall: (id: string) => confirmAbsence(async () => (await api<{ firewall_group: WindowsFirewall }>(`firewalls/${encodeURIComponent(id)}`))?.firewall_group),
+    instance: (id: string) => confirmAbsence(async () => (await api<{ instance: WindowsInstance }>(`instances/${encodeURIComponent(id)}`))?.instance, execution ?? {}),
+    firewall: (id: string, owner = execution, deadline?: number) => confirmAbsence(async () =>
+      (await api<{ firewall_group: WindowsFirewall }>(`firewalls/${encodeURIComponent(id)}`, "GET", undefined, owner, deadline))?.firewall_group,
+      { ...owner, deadline: Math.min(owner?.deadline ?? Infinity, deadline ?? Infinity) }),
     async createFirewall(label: string, owner = execution, allocationDeadline?: number) {
       if (!egress) throw new Error("Windows preflight was not performed");
+      const deadline = allocationDeadline === undefined ? undefined : performance.now() + Math.max(0, allocationDeadline - Date.now());
       assertWindowsAllocation(owner, allocationDeadline);
-      const item = await api<{ firewall_group: WindowsFirewall }>("firewalls", "POST", { description: label }, owner);
+      const item = await api<{ firewall_group: WindowsFirewall }>("firewalls", "POST", { description: label }, owner, deadline);
       if (!item) throw new Error("firewall create response lost");
       // Preserve the exact ID before configuring it; a later label change must not become absence.
       await atomicPrivate(vaultPath(label.slice(QUAL_LABEL_PREFIX.length)), { firewall: item.firewall_group.id });
       return item.firewall_group;
     },
     async configureFirewall(id: string, label: string, owner = execution, allocationDeadline?: number) {
+      const deadline = allocationDeadline === undefined ? undefined : performance.now() + Math.max(0, allocationDeadline - Date.now());
       await configureWindowsFirewallRules({ id, label, environment, execution: owner, allocationDeadline,
-        read: () => provider.firewall(id),
-        post: async port => { await api(`firewalls/${id}/rules`, "POST", { ip_type: "v4", protocol: "tcp", subnet: egress, subnet_size: 32, port, notes: "qualification operator" }, owner); },
+        read: () => provider.firewall(id, owner, deadline),
+        post: async port => { await api(`firewalls/${id}/rules`, "POST", { ip_type: "v4", protocol: "tcp", subnet: egress, subnet_size: 32, port, notes: "qualification operator" }, owner, deadline); },
       });
     },
     async createInstance(label: string, firewall: string, owner = execution, allocationDeadline?: number) {
-      const group = await provider.firewall(firewall);
+      const deadline = allocationDeadline === undefined ? undefined : performance.now() + Math.max(0, allocationDeadline - Date.now());
+      const group = await provider.firewall(firewall, owner, deadline);
       if (!group || group.description !== label || !firewallEligibility(group.id, group.description, environment).eligible) throw new Error("attached firewall ownership changed");
       const counterPath = join(devRoot, `creations-${activeTag}.json`);
       let creations = 0;
@@ -676,7 +713,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       windowsCreationAllowance(creations, creationLimit, owner);
       await windowsCreationClaim(counterPath, creations, owner, allocationDeadline);
       assertWindowsAllocation(owner, allocationDeadline);
-      const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false }, owner);
+      const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false }, owner, deadline);
       if (!item) throw new Error("instance create response lost"); return item.instance;
     },
     async destroyInstance(id: string, label: string) {
@@ -799,6 +836,7 @@ if ($exists) {
     }, context.execution ?? execution);
   };
   const restorePixel = async (context: WindowsContext) => {
+    const owner = context.execution ?? execution;
     const access = await existingAccess(context.epoch);
     const baseline = access?.pixelState;
     if (!access) throw Object.assign(new Error("Windows Pixel recovery state is missing"), { pixelUnrestored: true });
@@ -815,7 +853,7 @@ if ($exists) {
           assertWindowsExecution(context.execution ?? execution); await driver.send("Target.closeTarget", { targetId: target.targetId });
         }
       }
-    });
+    }, owner === undefined ? {} : { execution: owner });
     await context.beforeEffect();
     await runAdb(serial, ["shell", "monkey", "-p", baseline.launcherPackage, "-c", baseline.launcherCategory, "1"], { timeoutMs: 30_000 });
     if (baseline.keyguard || baseline.wakefulness !== "Awake") {
@@ -833,7 +871,8 @@ if ($exists) {
     if (component !== baseline.component) throw new Error("Pixel foreground baseline restoration failed");
     delete access.pixelState; await atomicPrivate(vaultPath(context.epoch), access);
     } catch (error) {
-      throw Object.assign(new Error("Windows Pixel baseline restoration failed", { cause: error }), { pixelUnrestored: true });
+      throw Object.assign(error instanceof QualificationFailure || error instanceof AggregateError ? error :
+        new Error("Windows Pixel baseline restoration failed", { cause: error }), { pixelUnrestored: true });
     }
   };
   return {
@@ -842,10 +881,10 @@ if ($exists) {
     async admit(input: WindowsPreflightInput): Promise<WindowsAdmission> {
       if (process.platform !== "darwin" || Bun.version !== pins.bunVersion) throw new Error("Windows controller requires macOS and pinned Bun");
       activeTag = input.identity?.tag ?? "preflight";
-      const external = await readProvider(() => {
+      const external = await readProvider((signal) => {
         assertWindowsExecution(execution);
-        return fetch("https://api.ipify.org", { signal: AbortSignal.timeout(15_000) });
-      });
+        return fetch("https://api.ipify.org", { signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
+      }, execution ?? {});
       egress = (await external.text()).trim();
       if (!/^(?:\d{1,3}\.){3}\d{1,3}$/u.test(egress) || egress.split(".").some(part => Number(part) > 255)) throw new Error("operator IPv4 egress unavailable");
       if (environment.OMP_STABLE_WINDOWS_OPERATOR_CIDR && environment.OMP_STABLE_WINDOWS_OPERATOR_CIDR !== `${egress}/32`) throw new Error("operator egress no longer matches admitted /32");
@@ -1049,12 +1088,14 @@ if ($exists) {
       let primary: unknown;
       try {
         assertWindowsExecution(context.execution ?? execution);
-        const smoke = await runAndroidCollabSmoke({ origin: String(access.origin), label: sessionLabel, allowDisposableTarget: true });
+        const owner = context.execution ?? execution;
+        const smoke = await runAndroidCollabSmoke({ origin: String(access.origin), label: sessionLabel, allowDisposableTarget: true,
+          ...(owner === undefined ? {} : { execution: owner }) });
         // Serve must supply the user identity for this exact-login, production-mode gateway.
         result = { pixelIdentityAccepted: true, viewReadOnly: smoke.viewReadOnly, controlWritable: smoke.controlWritable, promptAccepted: smoke.promptAccepted, returnedToDirectory: smoke.returnedToDirectory };
       } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown failure";
-        primary = new Error(`Windows Pixel: ${message.replaceAll(String(access.origin), "[origin]").replaceAll(serial, "[device]")}`);
+        primary = error instanceof QualificationFailure || error instanceof AggregateError || pixelUnrestored(error) ? error :
+          new Error("Windows physical client failed", { cause: error });
       }
       try { await restorePixel(context); }
       catch (error) {
@@ -1072,7 +1113,7 @@ if ($exists) {
       if (!listing) throw new Error("tailnet listing failed");
       const matches = listing.devices.filter(item => item.hostname === windowsCampaignLabel(context.epoch));
       for (const match of matches) {
-        const fresh = await confirmAbsence(() => request<{ id: string; hostname: string }>(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "GET", undefined, owner));
+        const fresh = await confirmAbsence(() => request<{ id: string; hostname: string }>(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "GET", undefined, owner), owner ?? {});
         if (!fresh) continue;
         if (fresh.hostname !== windowsCampaignLabel(context.epoch)) throw new Error("tailnet ownership changed");
         await context.beforeEffect(); await request(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "DELETE", undefined, owner);

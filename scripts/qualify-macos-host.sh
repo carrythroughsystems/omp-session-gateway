@@ -228,18 +228,64 @@ check_reboot_guard() {
   fi
 }
 
-remote() {
-  local script bootstrap helpers
+REMOTE_OWNER_SCRIPT="$(cat "$REPO_ROOT/scripts/qualification-remote-owner.sh")"
+REMOTE_OWNER_DIRECTORY="${OMP_MAC_OWNER_DIRECTORY:-}"
+if [ -z "$REMOTE_OWNER_DIRECTORY" ]; then
+  REMOTE_OWNER_DIRECTORY="$(mktemp -d "${TMPDIR:-/tmp}/omp-mac-command-owners.XXXXXXXX")" || exit 125
+  # Standalone use owns the same journal; an orchestrator instead consumes it after reaping this shell.
+  settle_remote_journal() {
+    local status=$? owner file
+    for file in "$REMOTE_OWNER_DIRECTORY"/*; do
+      [ -f "$file" ] || continue
+      owner="${file##*/}"
+      if remote_settle "$owner"; then rm -f "$file"; else status=125; fi
+    done
+    rmdir "$REMOTE_OWNER_DIRECTORY" 2>/dev/null || :
+    exit "$status"
+  }
+  trap settle_remote_journal EXIT
+fi
+
+remote_settle() {
+  local command
+  printf -v command '/bin/bash -c %q -- settle %q' "$REMOTE_OWNER_SCRIPT" "$1"
+  ssh "${SSH_OPTS[@]}" -q "$HOST" "$command"
+}
+
+remote_dispatch() {
+  local script="$1" payload="${2:-}" mode="${3:-run}" bootstrap helpers owner command status=0
   helpers="$(declare -f count_file_occurrences count_environment_occurrences create_doctor_bundle check_reboot_guard)"
-  script="${helpers}"$'\n'"$(cat)"
-  printf -v bootstrap '/bin/bash -c %q' \
-    'IFS= read -r -d "" PW || exit; IFS= read -r -d "" PORT || exit; IFS= read -r -d "" LOGIN || exit; IFS= read -r -d "" TAG || exit; IFS= read -r -d "" PREVIOUS_TAG || exit; IFS= read -r -d "" OMP_SOURCE_COMMIT || exit; IFS= read -r -d "" OMP_SOURCE_TREE || exit; IFS= read -r -d "" OMP_VERSION || exit; IFS= read -r -d "" BUN_VERSION || exit; IFS= read -r -d "" OMP_NATIVE_TARBALL_SHA256 || exit; IFS= read -r -d "" OMP_NATIVE_BINARY_SHA256 || exit; IFS= read -r -d "" SESSION_LABEL || exit; IFS= read -r -d "" SCRIPT || exit; export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin"; eval "$SCRIPT"'
+  script="${helpers}"$'\n'"$script"
+  bootstrap='IFS= read -r -d "" PW || exit; IFS= read -r -d "" PORT || exit; IFS= read -r -d "" LOGIN || exit; IFS= read -r -d "" TAG || exit; IFS= read -r -d "" PREVIOUS_TAG || exit; IFS= read -r -d "" OMP_SOURCE_COMMIT || exit; IFS= read -r -d "" OMP_SOURCE_TREE || exit; IFS= read -r -d "" OMP_VERSION || exit; IFS= read -r -d "" BUN_VERSION || exit; IFS= read -r -d "" OMP_NATIVE_TARBALL_SHA256 || exit; IFS= read -r -d "" OMP_NATIVE_BINARY_SHA256 || exit; IFS= read -r -d "" SESSION_LABEL || exit; IFS= read -r -d "" SCRIPT || exit; export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin"; eval "$SCRIPT"'
+  owner="$(python3 -c 'import uuid; print(uuid.uuid4())')" || return 125
+  # Record before SSH dispatch; the parent can reconcile even if this local shell is killed.
+  (umask 077; : > "$REMOTE_OWNER_DIRECTORY/$owner") || return 125
+  printf -v command '/bin/bash -c %q -- %q %q /bin/bash -c %q' "$REMOTE_OWNER_SCRIPT" "$mode" "$owner" "$bootstrap"
   {
     local value
     for value in "${OMP_MAC_SUDO_PW:-}" "$GATEWAY_PORT" "$LOGIN" "$TAG" "$PREVIOUS_TAG" "$OMP_SOURCE_COMMIT" "$OMP_SOURCE_TREE" "$OMP_VERSION" "$BUN_VERSION" "$OMP_NATIVE_TARBALL_SHA256" "$OMP_NATIVE_BINARY_SHA256" "$SESSION_LABEL" "$script"; do
       printf '%s\0' "$value"
     done
-  } | ssh "${SSH_OPTS[@]}" -q "$HOST" "$bootstrap"
+    [ -z "$payload" ] || cat "$payload"
+  } | ssh "${SSH_OPTS[@]}" -q "$HOST" "$command" || status=$?
+  # The reboot's detached child stays owned until the caller observes a different boot identity.
+  if [ "$mode" != run-reboot ]; then
+    if remote_settle "$owner"; then rm -f "$REMOTE_OWNER_DIRECTORY/$owner"; else return 125; fi
+  fi
+  return "$status"
+}
+
+remote() {
+  remote_dispatch "$(cat)" "" "${1:-run}"
+}
+
+remote_upload() {
+  local script
+  case "$2" in
+    /*) printf -v script 'umask 077; cat > %q' "$2" ;;
+    *) printf -v script 'umask 077; cat > "$HOME"/%q' "$2" ;;
+  esac
+  remote_dispatch "$script" "$1"
 }
 
 need_command() {
@@ -262,7 +308,6 @@ preflight() {
   need_command gh
   need_command cosign
   need_command shasum
-  need_command scp
 
   remote <<'REMOTE' || die "Mac host prerequisite probe failed; no lane was run."
 check_reboot_guard || exit 1
@@ -367,7 +412,7 @@ lane_artifact() {
   measure "github attestations" "verified against signed-release.yml and refs/tags/$TAG"
   measure "cosign bundles" "2/2 verified against the exact tag identity"
 
-  scp "${SSH_OPTS[@]}" -q "$dir/$archive" "$HOST:/tmp/$archive" || die "could not copy the archive to the host."
+  remote_upload "$dir/$archive" "/tmp/$archive" || die "could not copy the archive to the host."
   remote <<REMOTE
 show() { printf '   %-38s %s\n' "\$1:" "\$2"; }
 rm -rf ~/qual && mkdir -p ~/qual && tar -xf "/tmp/$archive" -C ~/qual
@@ -499,7 +544,7 @@ backend_answer() {
 
 issue_reboot() {
   local output status=0
-  output="$(remote <<'REMOTE' 2>&1
+  output="$(remote run-reboot <<'REMOTE' 2>&1
 check_reboot_guard || exit 97
 # Return before the reboot tears this session down; the caller measures the new boot identity.
 # A sudo password, when there is one, travels over the detached shell stdin, never its argv.
@@ -538,7 +583,10 @@ REMOTE
   note "reboot issued; waiting for SSH on a new boot, then for the gateway to bind its listener"
   for _ in $(seq 1 36); do
     sleep 10
-    if after_boot="$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=8 -q "$HOST" 'export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin"; sysctl -n kern.bootsessionuuid' 2>/dev/null)" &&
+    if after_boot="$(remote <<'REMOTE' 2>/dev/null
+sysctl -n kern.bootsessionuuid
+REMOTE
+)" &&
       [ -n "$after_boot" ] && [ "$after_boot" != "$before_boot" ]; then
       reboot_changed="yes"
       break
@@ -642,11 +690,15 @@ mkdir -p "$HOME/qual-tools/rollback-assets/$PREVIOUS_TAG" "$HOME/qual-tools/roll
 chmod 700 "$HOME/qual-tools" "$HOME/qual-tools/rollback-assets" \
   "$HOME/qual-tools/rollback-assets/$PREVIOUS_TAG" "$HOME/qual-tools/rollback-assets/$TAG"
 REMOTE
-  scp "${SSH_OPTS[@]}" -q "$cosign_bin" "$REPO_ROOT/scripts/qualify-rollback.sh" "$HOST:qual-tools/" ||
+  remote_upload "$cosign_bin" "qual-tools/cosign" &&
+    remote_upload "$REPO_ROOT/scripts/qualify-rollback.sh" "qual-tools/qualify-rollback.sh" ||
     die "could not stage the rollback harness and verification tool on the Mac."
   for tag in "$PREVIOUS_TAG" "$TAG"; do
-    scp "${SSH_OPTS[@]}" -q "$root/$tag/"* "$HOST:qual-tools/rollback-assets/$tag/" ||
-      die "could not stage rollback assets for $tag on the Mac"
+    local asset
+    for asset in "$root/$tag/"*; do
+      remote_upload "$asset" "qual-tools/rollback-assets/$tag/${asset##*/}" ||
+        die "could not stage rollback assets for $tag on the Mac"
+    done
   done
   remote <<'REMOTE'
 chmod 700 "$HOME/qual-tools/cosign" "$HOME/qual-tools/qualify-rollback.sh"
@@ -670,7 +722,7 @@ stage_remote_omp_helper() {
 mkdir -p "$HOME/qual-tools"
 chmod 700 "$HOME/qual-tools"
 REMOTE
-  scp "${SSH_OPTS[@]}" -q "$REPO_ROOT/scripts/qualify-macos-omp.sh" "$HOST:qual-tools/" ||
+  remote_upload "$REPO_ROOT/scripts/qualify-macos-omp.sh" "qual-tools/qualify-macos-omp.sh" ||
     die "could not stage the mainline OMP qualification helper on the Mac."
   remote <<'REMOTE'
 chmod 700 "$HOME/qual-tools/qualify-macos-omp.sh"

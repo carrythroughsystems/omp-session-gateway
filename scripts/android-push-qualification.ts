@@ -368,15 +368,31 @@ export async function preflightAndroidPush(input: AndroidPushPreflightInput, run
 async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: AndroidPushProgress, sampleLate?: () => Promise<void>): Promise<Record<string, unknown>> {
   const failures: string[] = [];
   const errors: unknown[] = [];
-  runtime.beforeEffect = async () => { await checkpointPushProgress(input, progress); };
+  const priorPhase = progress.phase;
+  let persistenceFailed = false;
+  // Persistence fences new mutations, not restoration of an already captured baseline.
+  runtime.beforeEffect = async () => {
+    try { await checkpointPushProgress(input, progress); }
+    catch { persistenceFailed = true; }
+  };
   for (const step of CLEANUP_STEPS) {
     try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch (error) { failures.push(step); errors.push(error); }
     if (["fixtureAsk", "doze", "network"].includes(step)) await sampleLate?.();
   }
-  if (failures.length > 0) throw Object.assign(new AggregateError(errors, `Android Push cleanup failed: ${failures.join(", ")}`), { pixelUnrestored: true });
-  progress.cleanupRequired = false;
-  progress.phase = "restored";
-  await checkpointPushProgress(input, progress);
+  if (failures.length === 0 && !persistenceFailed) {
+    progress.cleanupRequired = false;
+    progress.phase = "restored";
+  }
+  await runtime.beforeEffect();
+  if (persistenceFailed) {
+    progress.cleanupRequired = true;
+    progress.phase = priorPhase;
+  }
+  if (persistenceFailed) errors.push(new QualificationFailure({
+    id: input.execution?.nextFailureId() ?? 1, lane: "androidPushCleanup", step: "containment",
+    reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },
+  }));
+  if (errors.length > 0) throw Object.assign(new AggregateError(errors, "Android Push restoration or persistence failed"), { pixelUnrestored: true });
   return { epoch: progress.epoch, restored: true, deviceRestored: true, browserRestored: true, fixtureStopped: true };
 }
 

@@ -14,6 +14,9 @@
  *   Receipt absence, unknown operation disposition, or missing proof never imply safety.
  *   Cleanup transport failures remain harness evidence; negative containment/reconciliation
  *   observations and mutating infrastructure dispositions block eligibility.
+ * - qualificationContainmentUnproven shares monotonic negative cleanup/reconciliation,
+ *   persistence and resource facts across summary validation and campaign containment.
+ *   Later successful cleanup cannot erase a recorded failed cleanup owner.
  *   Push/readiness delivery metadata timeouts are harness evidence, not proof of an outage.
  * - qualificationPreflightFailuresEffectFree permits only read-only/not-started admission
  *   surfaces, not later resource observations mislabeled as preflight.
@@ -38,7 +41,11 @@ const cleanupReasons = { ...commonReasons, connection_timeout: "harness", connec
   retryable_service_failure: "harness", containment_unproven: "harness", ownership_changed: "harness" } as const;
 /** Reason-to-class mappings are authority, not caller-supplied labels. */
 export const FAILURE_REASONS = {
-  campaign: { ...commonReasons, binding_mismatch: "harness", outcome_persistence_failed: "harness" },
+  campaign: { ...commonReasons, ...transportReasons, binding_mismatch: "harness", outcome_persistence_failed: "harness",
+    prerequisite_failed: "harness", pinned_pool_busy: "infra_transient", assertion_failed: "product",
+    authentication_failed: "harness", helper_failed: "harness", mutation_unconfirmed: "harness", ownership_changed: "harness",
+    probe_deadline: "infra_transient", allocation_rejected: "infra_transient", privacy_failed: "product", delivery_timeout: "harness",
+    push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient" },
   preflight: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness" },
   rigReadiness: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness", assertion_failed: "product",
     push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient",
@@ -56,11 +63,12 @@ export const FAILURE_REASONS = {
     assertion_failed: "product", authentication_failed: "harness", helper_failed: "harness", mutation_unconfirmed: "harness", ownership_changed: "harness" },
   deviceCloud: { ...commonReasons, pinned_pool_busy: "infra_transient", journey_failed: "product", audit_failed: "product",
     identity_mismatch: "harness", allocation_unknown: "harness", containment_unproven: "harness" },
-  androidPushCleanup: cleanupReasons, windowsCleanup: cleanupReasons, deviceCloudCleanup: cleanupReasons, cleanup: cleanupReasons,
+  androidPushCleanup: cleanupReasons, windowsCleanup: cleanupReasons, deviceCloudCleanup: cleanupReasons,
+  cleanup: { ...cleanupReasons, remote_unsettled: "collateral" },
 } as const;
 export type QualificationFailureLane = keyof typeof FAILURE_REASONS;
 export const FAILURE_STEPS = {
-  campaign: ["execution", "finalization", "outcome"],
+  campaign: ["execution", "finalization", "outcome", "admission", "teardown"],
   preflight: ["admission", "tools", "pixel", "macos", "windows", "deviceCloud", "lease"],
   rigReadiness: ["lease", "artifacts", "fixture", "pixel_push", "tailnet", "windows", "quota", "macos", "cleanup"],
   artifacts: ["download", "signature", "digest"],
@@ -99,6 +107,7 @@ const observationBounds = {
   transportFailure: "boolean", controllerDeadline: "boolean", readOnlyProbe: "boolean", retryableStatus: "boolean",
   pushServiceFailure: "boolean", outageSpansWindow: "boolean", deviceUnavailable: "boolean", tailnetUnavailable: "boolean",
   allocationRejected: "boolean", noAllocation: "boolean", cleanupVerified: "boolean", mutationReconciled: "boolean",
+  persistenceFailed: "boolean",
 } as const;
 export type FailureObservations = { readonly [K in keyof typeof observationBounds]?: (typeof observationBounds)[K] extends "boolean" ? boolean : number };
 type FailureFor<L extends QualificationFailureLane> = {
@@ -151,6 +160,8 @@ export function parseLaneFailure(value: unknown): LaneFailure {
     if (!Array.isArray(item.originIds) || item.originIds.length < 1 || item.originIds.length > FAILURE_LIMITS.records ||
       item.originIds.some(id => !failureId(id) || id === item.id) || new Set(item.originIds).size !== item.originIds.length) invalid();
   }
+  if (lane === "campaign" && item.class !== "harness" &&
+    (item.step !== "admission" || !["not_started", "read_only"].includes(item.operation))) invalid();
   if (item.class === "infra_transient") {
     switch (item.reason) {
       case "connection_timeout": case "connection_reset": case "read_timeout":
@@ -173,8 +184,8 @@ export function parseLaneFailure(value: unknown): LaneFailure {
         if (observations.outageSpansWindow !== true || observations[item.reason === "device_outage" ? "deviceUnavailable" : "tailnetUnavailable"] !== true) invalid();
         break;
       case "pinned_pool_busy":
-        if (item.operation !== "not_started" || !["preflight", "allocation"].includes(item.step) ||
-          !bounded(observations.waitedMs, 600_000) || (item.step === "preflight" && observations.waitedMs !== 0)) invalid();
+        if (item.operation !== "not_started" || !["preflight", "allocation", ...(lane === "campaign" ? ["admission"] : [])].includes(item.step) ||
+          !bounded(observations.waitedMs, 600_000) || (["preflight", "admission"].includes(item.step) && observations.waitedMs !== 0)) invalid();
         break;
       default: invalid();
     }
@@ -207,7 +218,17 @@ export function parseQualificationFailureSummary(value: unknown): QualificationF
   keys(containment, ["proven", "cleanupComplete", "unresolvedMutation"]);
   if (!duration(timings.attemptMs) || !duration(timings.cleanupMs) || timings.cleanupMs > timings.attemptMs ||
     Object.values(containment).some(value => typeof value !== "boolean")) invalid();
-  return { failures: parseLaneFailures(summary.failures), timings: { ...timings }, containment: { ...containment } } as QualificationFailureSummary;
+  const failures = parseLaneFailures(summary.failures);
+  if (qualificationContainmentUnproven(failures) &&
+    (containment.proven || containment.cleanupComplete || !containment.unresolvedMutation)) invalid();
+  return { failures, timings: { ...timings }, containment: { ...containment } } as QualificationFailureSummary;
+}
+
+/** Negative cleanup facts are monotonic, including when a later physical cleanup succeeds. */
+export function qualificationContainmentUnproven(failures: readonly LaneFailure[]): boolean {
+  return failures.some(failure => failure.observations.cleanupVerified === false || failure.observations.mutationReconciled === false ||
+    failure.observations.persistenceFailed === true || (failure.observations.remainingResources ?? 0) > 0 ||
+    ["cleanup", "androidPushCleanup", "windowsCleanup", "deviceCloudCleanup"].includes(failure.lane));
 }
 
 export class QualificationFailure extends Error {
@@ -282,7 +303,8 @@ export function normalizeQualificationFailures(error: unknown): readonly LaneFai
 export function qualificationPreflightFailuresEffectFree(failures: readonly LaneFailure[]): boolean {
   return failures.every(item => (item.operation === "not_started" || item.operation === "read_only") &&
     (item.lane === "preflight" ||
-      ((item.lane === "windows" || item.lane === "deviceCloud") && item.step === "preflight") ||
+      (item.lane === "windows" && ["preflight", "connection", "output"].includes(item.step)) ||
+      (item.lane === "deviceCloud" && item.step === "preflight") ||
       (item.lane === "android" && item.step === "admission")));
 }
 
@@ -291,11 +313,11 @@ export function qualificationRetryEligible(value: unknown, bindingsMatch: boolea
   try {
     const summary = parseQualificationFailureSummary(value);
     return summary.containment.proven && summary.containment.cleanupComplete && !summary.containment.unresolvedMutation &&
+      !qualificationContainmentUnproven(summary.failures) &&
       summary.failures.some(item => item.class === "infra_transient") &&
       summary.failures.every(item =>
+        !(item.class === "infra_transient" && item.step === "cleanup") &&
         (item.class === "infra_transient" ? item.operation === "not_started" || item.operation === "read_only" :
-          item.class === "collateral" && item.operation !== "unknown") &&
-        item.observations.cleanupVerified !== false && item.observations.mutationReconciled !== false &&
-        (item.observations.remainingResources ?? 0) === 0);
+          item.class === "collateral" && item.operation !== "unknown"));
   } catch { return false; }
 }

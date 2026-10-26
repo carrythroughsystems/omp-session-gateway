@@ -53,6 +53,26 @@ test("failed BrowserStack ownership checkpoint ends the known session before any
   expect(methods).toEqual(["POST", "DELETE"]);
 });
 
+test("cancelling an in-flight allocation awaits transport settlement and never replays the write", async () => {
+  const controller = new AbortController();
+  let calls = 0, terminated = false;
+  const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    calls += 1;
+    const signal = init?.signal;
+    if (!signal) throw new Error("allocation must receive its owner's signal");
+    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    await Bun.sleep(5);
+    terminated = true;
+    throw signal.reason;
+  }, { preconnect: () => {} }));
+  restore = () => mock.mockRestore();
+  const allocation = WebDriverSession.create("testingbot", username, password, {}, async () => { throw new Error("unknown allocation cannot checkpoint"); }, controller.signal);
+  controller.abort(new DOMException("cancelled allocation", "AbortError"));
+  await expect(allocation).rejects.toThrow("cancelled allocation");
+  expect(calls).toBe(1);
+  expect(terminated).toBe(true);
+});
+
 // TestingBot's real iPhone hub (observed 2026-10-20, iPhone 16 and 17 Pro Max on iOS 26) answers
 // with a W3C `value` and also echoes the session id at the top level.
 const TESTINGBOT_ID = "tb-synthetic-session-0001";

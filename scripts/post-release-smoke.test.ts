@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isProtectedLabel } from "./acceptance-target.ts";
-import { parseAndroidCollabSmokeArgs } from "./android-collab-smoke.ts";
+import { parseAndroidCollabSmokeArgs, runAndroidCollabSmoke } from "./android-collab-smoke.ts";
 import { ANDROID_COLLAB_STAGES } from "./android-stages.ts";
 import { requireSingleDevice } from "./android-device.ts";
 import {
@@ -508,6 +508,27 @@ describe("physical Android release target", () => {
       expectedAppAsset: "/assets/app.abc123.js",
       allowDisposableTarget: true,
     });
+  });
+
+  test.each(["cancel", "deadline"] as const)("council498r1 physical-client preflight owns %s cancellation", async mode => {
+    const original = globalThis.fetch;
+    const controller = new AbortController();
+    let signal: AbortSignal | undefined;
+    globalThis.fetch = (async (_url, options) => {
+      signal = options?.signal ?? undefined;
+      return new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(Response.json({ sessions: [] })), 200);
+        signal?.addEventListener("abort", () => { clearTimeout(timer); reject(signal!.reason); }, { once: true });
+      });
+    }) as typeof fetch;
+    try {
+      const input = { origin: "https://synthetic.invalid", label: "synthetic-fixture", allowDisposableTarget: true,
+        execution: { signal: controller.signal, deadline: performance.now() + (mode === "deadline" ? 20 : 5_000) } };
+      const result = runAndroidCollabSmoke(input).catch(error => error);
+      if (mode === "cancel") setTimeout(() => controller.abort(), 20);
+      await result;
+      expect(signal?.aborted).toBe(true);
+    } finally { globalThis.fetch = original; }
   });
 
   test("rejects protected targets and non-origin URLs before touching the device", () => {

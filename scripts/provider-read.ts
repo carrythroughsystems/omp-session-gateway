@@ -1,5 +1,44 @@
 const PROVIDER_READ_ATTEMPTS = 5;
 
+export interface ProviderReadOptions {
+  readonly signal?: AbortSignal;
+  /** Monotonic absolute deadline, shared by reads, body inspection and backoff. */
+  readonly deadline?: number;
+  readonly budgetMs?: number;
+  readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  readonly beforeRetry?: (response: Response) => Promise<void>;
+}
+
+/** An owned timer, not a race which leaves a sleeping or reading operation behind. */
+export function abortablePause(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) return Bun.sleep(milliseconds);
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, milliseconds);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function withReadBudget<T>(options: ProviderReadOptions, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const deadline = Math.min(options.deadline ?? Infinity, performance.now() + (options.budgetMs ?? Infinity));
+  if (Number.isNaN(deadline) || (options.budgetMs !== undefined && (!Number.isFinite(options.budgetMs) || options.budgetMs < 0))) {
+    throw new Error("invalid provider read budget");
+  }
+  const signal = options.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, options.signal]);
+  const expire = () => controller.abort(new DOMException("provider read budget exhausted", "TimeoutError"));
+  const timer = Number.isFinite(deadline) ? setTimeout(expire, Math.max(0, deadline - performance.now())) : undefined;
+  if (deadline <= performance.now()) expire();
+  try {
+    signal.throwIfAborted();
+    // The callback must pass this signal to its owned read; await its actual termination.
+    const value = await run(signal);
+    signal.throwIfAborted();
+    return value;
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+
 const NETWORK_CODES = new Set([
   "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "EPIPE", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND",
   "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET", "ConnectionRefused",
@@ -31,24 +70,30 @@ function transientNetworkError(error: unknown): boolean {
  * Retained-surface callers may inspect a retry body before cancellation; a failed inspection is final.
  */
 export async function readProvider(
-  read: () => Promise<Response>,
-  options: { readonly sleep?: (milliseconds: number) => Promise<void>; readonly beforeRetry?: (response: Response) => Promise<void> } = {},
+  read: (signal: AbortSignal) => Promise<Response>,
+  options: ProviderReadOptions = {},
 ): Promise<Response> {
-  const sleep = options.sleep ?? (async (milliseconds: number) => void (await Bun.sleep(milliseconds)));
+  return withReadBudget(options, async signal => {
+  const sleep = options.sleep ?? abortablePause;
   for (let attempt = 1; ; attempt += 1) {
+    signal.throwIfAborted();
     let response: Response | undefined;
     try {
-      response = await read();
+      response = await read(signal);
     } catch (error) {
+      signal.throwIfAborted();
       if (attempt >= PROVIDER_READ_ATTEMPTS || !transientNetworkError(error)) throw error;
     }
     if (response !== undefined) {
+      if (signal.aborted) { await response.body?.cancel(); signal.throwIfAborted(); }
       if (response.status < 500 || attempt >= PROVIDER_READ_ATTEMPTS) return response;
-      if (options.beforeRetry !== undefined) await options.beforeRetry(response);
-      await response.body?.cancel();
+      try { if (options.beforeRetry !== undefined) await options.beforeRetry(response); }
+      finally { await response.body?.cancel(); }
     }
-    await sleep(2_000 * 2 ** (attempt - 1));
+    signal.throwIfAborted();
+    await sleep(2_000 * 2 ** (attempt - 1), signal);
   }
+  });
 }
 
 /**
@@ -58,11 +103,15 @@ export async function readProvider(
  * absent, so a caller waiting for one sees it a pause later.
  */
 export async function confirmAbsence<T>(
-  read: () => Promise<T | undefined>,
-  options: { readonly sleep?: (milliseconds: number) => Promise<void> } = {},
+  read: (signal: AbortSignal) => Promise<T | undefined>,
+  options: ProviderReadOptions = {},
 ): Promise<T | undefined> {
-  const first = await read();
+  return withReadBudget(options, async signal => {
+  const first = await read(signal);
+  signal.throwIfAborted();
   if (first !== undefined) return first;
-  await (options.sleep ?? (async (milliseconds: number) => void (await Bun.sleep(milliseconds))))(5_000);
-  return read();
+  await (options.sleep ?? abortablePause)(5_000, signal);
+  signal.throwIfAborted();
+  return read(signal);
+  });
 }

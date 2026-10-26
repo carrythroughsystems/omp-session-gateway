@@ -356,6 +356,85 @@ planted SDK-log canary. Percy uploads those redacted CLI logs with builds; the s
 upload is disabled. These renders are not functional browser tests or signed-candidate qualification.
 See [BrowserStack](BROWSERSTACK.md) and ADR-035 for vendor-role and access policy.
 
+## Qualification attempt ownership
+
+The stable orchestrator retains schema-3 receipts and existing lane owners rather than introducing
+a workflow engine. New driver-bound executions identify the exact candidate, predecessor,
+orchestrator, policy, retained Mac and attempt. A completed attempt's job and exact receipt snapshot
+are immutable; only the candidate's working receipt advances. Consuming a retry removes the old
+failure authorization durably before admission or setup. Passed product proofs remain unchanged,
+while failed resource-owning lanes start on fresh epochs after current cleanup proof.
+Fresh unbound effectful campaigns require attempt zero. Later ordinals require the exact terminal-failed
+receipt digest or an immutable effect-free prior preflight outcome and digest, never just an execution
+file. Both routes consume authority durably before admission. Renewed admission failures belong to `campaign/admission`,
+preserving typed classifications without attaching a failure to a pending or previously passed lane.
+Execution source must match HEAD before admission or outcome writes; standalone bound `--preflight`
+accepts only attempt zero. Verified artifact identities are checked against the execution before
+replacing receipt fields, so a rejected candidate cannot corrupt later terminal persistence.
+
+Consumer failure does not cancel healthy siblings. The shared OMP host and relay tunnel live until
+their consumers settle; the tunnel stops before the independent publication lifecycle runs.
+Publication failure has a terminal timestamp, never an invented pass. Every normally returned
+campaign failure finalizes all started lanes and the campaign. Hard process death or failed storage
+remains an interrupted attempt, not authority to relaunch.
+Relay-stop failure belongs to `campaign/teardown`, not an already-passed publication proof. Finalization
+reconciles every typed lane owner with its terminal verdict before validating the complete graph.
+
+Execution cancellation carries a monotonic deadline to owned reads, subprocesses and waits. The
+owner aborts and awaits termination before cleanup; no timed-out promise is abandoned. Cleanup
+serializes per resource owner, not globally: Pixel restoration stays under its lease, Windows
+destruction does not queue behind unrelated Pixel work, and retained-Mac destructive cleanup waits
+for Mac consumers and their fixture restoration. A poisoned Pixel refuses subsequent measurements
+with collateral references to its originating failures, but always admits restoration under the same
+lease. Failed persistence cannot skip owned cleanup; `persistenceFailed` blocks a clean verdict.
+Later successful cleanup does not erase an earlier cleanup failure, its identity, or Pixel poisoning.
+A shared containment predicate rejects negative cleanup/reconciliation facts, persistence failures
+and remaining resources; the final receipt also consumes unsettled remote owners even when setup
+failed before a lane recorded its resource. Cleanup, retry and retirement use that same conservative
+boundary. Failed cloud or Push restoration retains its Mac fixture and owner records; other owners,
+including Windows VM destruction, remain independent.
+All mutating/lifecycle remote commands use `qualification-remote-owner.sh`, shared by TypeScript
+executors and the Mac shell wrapper. Uploads stream through an owned command rather than unowned
+`scp`; OMP PTYs foreground the registered process group. Shell-wrapper owner IDs are journaled before
+dispatch so losing the local wrapper cannot lose the remote fence. Cancellation uses a fresh bounded
+SSH command to terminate the whole group and await absence, not merely kill the local SSH client.
+Leader exit or a completion marker never proves that descendants have stopped. A detached reboot
+owner remains unresolved until a changed boot identity proves the old group cannot survive.
+A private cancellation tombstone fences delayed admission; unproved termination refuses later
+effects on that host, including destructive cleanup and tunnel startup, with `remote_unsettled`
+collateral referencing the original teardown root. Ordinary nonzero exits are reconciled too.
+Only explicitly bounded read-only admission probes bypass ownership; they create no owner files.
+
+Read-only admission is distinct from effectful rig readiness. After lease acquisition and verified
+candidate/predecessor bytes, readiness stages a disposable candidate/stock-OMP fixture, measures
+the real push path, and restores it before any full matrix fan-out. Its private receipt epoch owns
+the Pixel baseline sidecar; structured observations contain only bounded numbers and booleans.
+Manual attempt-zero readiness is diagnostic evidence, not a synthesized policy binding or automatic
+retry authorization.
+Failed or unresolved readiness is a failure-graph owner, never a passing receipt: its terminal
+summary must represent it, and unresolved restoration cannot coexist with proven cleanup.
+`restored` requires an explicit `baselineRestored: true`; passing campaigns also require terminal
+passed readiness. Every receipt write validates the full schema, and restarting lanes clears
+not-started reasons as well as stale failure evidence. Restarting a root invalidates the
+entire prior standalone failure graph before persistence, including dependent collateral.
+The Push owner retains its transient baseline for restoration, but the orchestrator's sidecar mirror
+advances only after its private durable write. Restoration attempts every owner even if every
+checkpoint fails; typed `persistenceFailed` evidence, cleanup identities and Pixel poisoning survive
+both later cleanup and final receipt writes. Failed cleanup persistence cannot report a restored
+baseline or manufacture retry authority. Effect-free Windows admission service failures use the
+actual `preflight`, `connection` or `output` producer steps; post-allocation steps cannot authorize
+receiptless retries.
+Readiness restoration is **not a byte-identical installation-state baseline**: uninstall removes
+the disposable service/staging but retains the gateway token and runtime activation history/current
+pointer. Those private states are neither captured/digest-compared nor isolated by this gate.
+Consequently the subsequent full Mac lifecycle follows a readiness candidate activation, not a
+pristine pre-readiness install. Installation-state isolation/restoration remains an explicit deferred
+P2; `baselineRestored` covers the captured Pixel baseline, service/Serve containment and staging only.
+Transport failures at an ordinary lane's explicit `cleanup` step do not authorize automatic retry.
+Private receipt, readiness-baseline and outcome persistence belongs to the POSIX Studio driver:
+file data and parent directories are fsynced; Windows refuses those writes before filesystem
+effects. Pure receipt/graph parsing and in-memory state-machine tests remain portable.
+
 ## 4. Why not process scanning or terminal automation?
 
 Process enumeration can find PIDs but cannot safely attach OMP's browser collaboration protocol to an existing interactive context or recover a capability without reading process memory. Simulated keystrokes, terminal scraping, QR decoding, and clipboard monitoring are fragile and create additional secret channels.

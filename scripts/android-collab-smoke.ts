@@ -1,5 +1,5 @@
 import { isProtectedLabel, targetEligibility } from "./acceptance-target.ts";
-import { withAndroidChrome } from "./android-device.ts";
+import { withAndroidChrome, type AndroidExecution } from "./android-device.ts";
 import { ANDROID_COLLAB_STAGES, announceAndroidStage } from "./android-stages.ts";
 import { APP_ASSET_PATTERN, runCollaborationJourney } from "./browser-journey.ts";
 
@@ -10,6 +10,7 @@ export interface AndroidCollabSmokeOptions {
   readonly label: string;
   readonly expectedAppAsset?: string;
   readonly allowDisposableTarget: boolean;
+  readonly execution?: AndroidExecution;
 }
 
 export interface AndroidCollabSmokeResult {
@@ -74,10 +75,15 @@ export function parseAndroidCollabSmokeArgs(argv: readonly string[]): AndroidCol
 }
 
 async function assertEligibleTarget(options: AndroidCollabSmokeOptions): Promise<void> {
+  options.execution?.signal.throwIfAborted();
+  if (options.execution !== undefined && performance.now() >= options.execution.deadline) throw new Error("physical client deadline exceeded");
   const response = await fetch(`${options.origin}/api/v1/sessions`, {
     cache: "no-store",
     credentials: "omit",
     headers: { Accept: "application/json" },
+    ...(options.execution === undefined ? {} : {
+      signal: AbortSignal.any([options.execution.signal, AbortSignal.timeout(Math.max(1, Math.ceil(options.execution.deadline - performance.now())))]),
+    }),
   });
   if (!response.ok) throw new Error(`session-list preflight failed with HTTP ${response.status}`);
   const payload = (await response.json()) as { sessions?: SessionMetadata[] };
@@ -108,7 +114,7 @@ export async function runAndroidCollabSmoke(options: AndroidCollabSmokeOptions):
       androidPackageVersion: driver.androidPackageVersion,
       ...journeyResult,
     };
-  });
+  }, options.execution === undefined ? {} : { execution: options.execution });
 }
 
 if (import.meta.main) {

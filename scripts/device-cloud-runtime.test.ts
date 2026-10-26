@@ -7,6 +7,7 @@ import { DEVICE_WAIT_MS, admitDeviceCloud, deviceCloudVendor, freeDevice, instal
 import { TestingBotApi, TestingBotNativeSession } from "./testingbot.ts";
 import { WebDriverError, type WebDriverSession } from "./device-cloud-webdriver.ts";
 import type { CloudDevice } from "./device-cloud-common.ts";
+import { abortablePause } from "./provider-read.ts";
 
 const epoch = "11111111-2222-4333-8444-555555555555";
 const catalog: readonly CloudDevice[] = [
@@ -29,6 +30,19 @@ function clock() {
   const waits: number[] = [];
   return { now: () => time, pause: async (ms: number) => { waits.push(ms); time += ms; }, waits };
 }
+
+test("cloud availability backoff observes outer cancellation without another read", async () => {
+  const controller = new AbortController();
+  let reads = 0;
+  const waiting = freeDevice({ devices: async () => { reads += 1; return []; } },
+    "iphone", DEVICE_CLOUD_PROFILES.iphone, epoch, {
+      now: Date.now, pause: ms => abortablePause(ms, controller.signal),
+    });
+  await Bun.sleep(5);
+  controller.abort(new DOMException("outer cancelled", "AbortError"));
+  await expect(waiting).rejects.toThrow("outer cancelled");
+  expect(reads).toBe(1);
+});
 
 describe("pinned cloud pools", () => {
   test("pins every model, preference, OS floor and Samsung hardware mapping", () => {

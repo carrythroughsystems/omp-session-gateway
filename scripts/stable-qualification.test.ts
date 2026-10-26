@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,18 @@ import {
   assertMacLifecycleOutput,
   assertProtectedFilesUnchanged,
   assertDeviceCloudResumeEligible,
+  assertCampaignRetryEligible,
+  assertCampaignCleanupComplete,
+  assertRetainedMacCommandsSettled,
+  bindVerifiedReleaseIdentities,
+  cleanupMac,
+  restoreRigReadinessPixel,
+  cleanExternalLane,
+  preflightStableQualification,
+  withConsumedCampaignRetry,
+  withQualificationDeadline,
+  finalizeCampaignFailure,
+  runRigReadiness,
   createPixelLease,
   createReceiptPersister,
   createStableQualificationReceipt,
@@ -31,6 +43,8 @@ import {
   runAndroidAcceptance,
   runPixelRestoringChild,
   runStableQualification,
+  remoteExecutor,
+  waitForTunnelReady,
   receiptNeedsMacCleanup,
   validateStableQualificationReceipt,
   verifyLaunchContracts,
@@ -46,8 +60,11 @@ import {
 import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-qualification.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
-import type { QualificationExecution } from "./qualification-outcome.ts";
-import type { LaneFailure } from "./qualification-failure.ts";
+import { readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution } from "./qualification-outcome.ts";
+import { QualificationFailure, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
+import { pixelUnrestored } from "./restoration.ts";
+import { AndroidBrowserCleanupError } from "./android-device.ts";
+import { pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
 // Derived exactly as the orchestrator derives it, so this suite cannot pass against a predecessor
@@ -96,7 +113,7 @@ function admissionLanes(refuse?: "windows" | "androidPush" | "deviceCloud"): Sta
   };
 }
 
-test("campaign exclusion precedes source/receipt reads and admission", async () => {
+test("new campaigns admit read-only before authoritative lease acquisition", async () => {
   const root = await mkdtemp(join(tmpdir(), "stable-lease-boundary-"));
   try {
     const fixture = await preflightFixture(root);
@@ -108,7 +125,6 @@ test("campaign exclusion precedes source/receipt reads and admission", async () 
         acquired = true;
         throw new Error("release host is busy");
       },
-      output: async () => { throw new Error("must not read source or probe a host without the lease"); },
     };
     await expect(runStableQualification(["--tag", TAG], runtime, admissionLanes())).rejects.toThrow("release host is busy");
     expect(acquired).toBe(true);
@@ -284,7 +300,7 @@ function passedRelayReceipt(durationSeconds = 1_800) {
 }
 
 describe("resumed relay qualification proof", () => {
-  test.each([
+  test.skipIf(process.platform === "win32").each([
     ["historical sixty-second pass", (receipt: ReturnType<typeof passedRelayReceipt>) => {
       receipt.lanes.relay = passedRelayReceipt(60).lanes.relay;
     }],
@@ -321,7 +337,7 @@ describe("resumed relay qualification proof", () => {
       await expect(runStableQualification(["--tag", TAG], guarded, admissionLanes())).rejects.toThrow("relay evidence");
       const persisted = JSON.parse(await readFile(path, "utf8"));
       expect(persisted.status).toBe("failed");
-      expect(persisted.completedAt).toBeUndefined();
+      expect(persisted.completedAt).toBeDefined();
       expect(persisted.lanes.relay).toEqual(receipt.lanes.relay);
       expect(persisted.lanes.cleanup).toEqual(receipt.lanes.cleanup);
       expect(externalProbe).toBe(false);
@@ -330,7 +346,7 @@ describe("resumed relay qualification proof", () => {
     }
   });
 
-  test("binds resume to the requested duration without rejecting longer valid evidence", async () => {
+  test.skipIf(process.platform === "win32")("binds resume to the requested duration without rejecting longer valid evidence", async () => {
     const root = await mkdtemp(join(tmpdir(), "stable-relay-duration-"));
     try {
       const path = join(root, "stable-qualification.json");
@@ -382,7 +398,7 @@ describe("Mac receipt host ownership", () => {
     }
   });
 
-  test("persists the configured Mac host before the first effect and preserves schema 3", async () => {
+  test.skipIf(process.platform === "win32")("persists the configured Mac host before the first effect and preserves schema 3", async () => {
     const root = await mkdtemp(join(tmpdir(), "stable-mac-first-effect-"));
     try {
       const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
@@ -409,7 +425,7 @@ describe("Mac receipt host ownership", () => {
     }
   });
 
-  test.each([false, true])("model refusal never cleans a host with no recorded effects (resumed=%s)", async resumed => {
+  test.skipIf(process.platform === "win32").each([false, true])("model refusal never cleans a host with no recorded effects (resumed=%s)", async resumed => {
     const root = await mkdtemp(join(tmpdir(), "stable-mac-unowned-"));
     try {
       const path = join(root, "stable-qualification.json");
@@ -440,7 +456,13 @@ describe("Mac receipt host ownership", () => {
         windows: lane, androidPush: lane, deviceCloud: lane, createPixelLease: () => createPixelLease(() => {}),
       })).rejects.toThrow("Mac hardware mismatch: expected Mac17,14, measured Mac14,3");
       expect({ targetLoads, cleanupCalls, cleanupProbes, sshProbes }).toEqual({ targetLoads: 1, cleanupCalls: 0, cleanupProbes: 0, sshProbes: 1 });
-      if (resumed) expect(await readFile(path, "utf8")).toBe(original);
+      if (resumed) {
+        const refused = JSON.parse(await readFile(path, "utf8"));
+        expect(refused.status).toBe("failed");
+        expect(refused.completedAt).toBeDefined();
+        expect(Object.values(refused.lanes).every((lane: any) => lane.status === "pending" &&
+          lane.attempts === 0 && lane.notStartedReason === "admission_failed")).toBe(true);
+      }
       else expect(await readdir(root)).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -473,6 +495,7 @@ test.skipIf(process.platform === "win32")("same-host resume cleans bound Mac eff
     await writeFile(join(bin, "ssh"), [
       "#!/bin/sh",
       'case "$*" in',
+      `*" '--' 'settle' "*) exit 0;;`,
       '*"serve reset"*) /bin/rm "$FIXTURE_ROOT/effects/serve";;',
       '*"rm -rf"*) /bin/rm "$FIXTURE_ROOT/effects/artifacts";;',
       '*) exit 93;;',
@@ -990,7 +1013,7 @@ describe("explicit same-receipt cloud resumption", () => {
     expect(receipt.lanes.deviceCloudCleanup.attempts).toBe(2);
     expect(receipt.lanes.deviceCloud.evidence?.availabilityHold).toBeUndefined();
   });
-  test.each(["prepareMacFixture", "waitForPublishedSession", "verifyLaunchContracts", "startTunnel", "teardown", "protected-file guard"] as const)(
+  test.skipIf(process.platform === "win32").each(["prepareMacFixture", "waitForPublishedSession", "verifyLaunchContracts", "startTunnel", "teardown", "protected-file guard"] as const)(
     "%s failure after consuming a hold cannot retain same-receipt eligibility", async stage => {
       const receipt = availabilityReceipt();
       const publication = structuredClone(receipt.lanes.ompPublication);
@@ -1022,7 +1045,7 @@ describe("explicit same-receipt cloud resumption", () => {
       } finally { await rm(root, { recursive: true, force: true }); }
     },
   );
-  test.each([2, 3])("a fresh all-hold admission failure records all %i leaves on the same receipt", async count => {
+  test.skipIf(process.platform === "win32").each([2, 3])("a fresh all-hold admission failure records all %i leaves on the same receipt", async count => {
     const receipt = availabilityReceipt();
     const before = structuredClone(receipt.lanes);
     const holds = (["iphone", "ipad", "android"] as const).slice(3 - count).map(target => new DeviceCloudAvailabilityHold({
@@ -1041,7 +1064,7 @@ describe("explicit same-receipt cloud resumption", () => {
       for (const name of Object.keys(before) as (keyof typeof before)[]) if (name !== "deviceCloud") expect(receipt.lanes[name]).toEqual(before[name]);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
-  test.each(["ordinary", "two holds", "three holds"] as const)("the real resume entry consumes eligibility before %s admission", async kind => {
+  test.skipIf(process.platform === "win32").each(["ordinary", "two holds", "three holds"] as const)("the real resume entry consumes eligibility before %s admission", async kind => {
     const root = await mkdtemp(join(tmpdir(), "stable-cloud-resume-admission-"));
     const path = join(root, "stable-qualification.json");
     const receipt = availabilityReceipt(), publication = structuredClone(receipt.lanes.ompPublication);
@@ -1103,6 +1126,24 @@ describe("publication lifecycle receipt", () => {
     expect(deviceCloudHolds(failed)).toBeUndefined();
     expect(lane).toMatchObject({ status: "failed" });
   });
+  test("an unrelated consumer failure still finishes publication and healthy siblings", async () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const publication = receipt.lanes.ompPublication;
+    publication.status = "running";
+    const events: string[] = [];
+    const settled = await Promise.allSettled([
+      executeReceiptLane(receipt, "androidPush", async () => {}, async () => { throw new Error("consumer failed"); }),
+      executeReceiptLane(receipt, "relay", async () => {}, async () => { await Bun.sleep(5); events.push("relay finished"); return { passed: true }; }),
+    ]);
+    const failures = settled.flatMap(item => item.status === "rejected" ? [item.reason] : []);
+    await expect(finishLiveQualification(failures, receipt, async () => {},
+      async () => { events.push("relay stopped"); },
+      async () => { events.push("lifecycle"); return structuredClone(lifecycleEvidence); })).rejects.toThrow("consumers failed");
+    expect(events).toEqual(["relay finished", "relay stopped", "lifecycle"]);
+    expect(publication).toMatchObject({ status: "passed" });
+    expect(receipt.lanes.relay.status).toBe("passed");
+    expect(Object.values(receipt.lanes).some(lane => lane.status === "running")).toBe(false);
+  });
   test("cloud-only resume preserves passed publication evidence byte-for-byte", async () => {
     const receipt = availabilityReceipt();
     const lane = receipt.lanes.ompPublication;
@@ -1130,10 +1171,10 @@ describe("publication lifecycle receipt", () => {
     let interrupted: typeof lane | undefined;
     await expect(completeOmpPublicationLifecycle(receipt, async () => {
       if (lane.status === "running") interrupted = structuredClone(lane);
-    }, async () => { throw new Error("private terminal diagnostic"); })).rejects.toThrow("OMP publication lifecycle failed");
+    }, async () => { throw new Error("private terminal diagnostic"); })).rejects.toThrow("lifecycle_unconfirmed");
     expect(lane.status).toBe("failed");
     expect(lane.error).toBe("OMP publication lifecycle failed");
-    expect(lane.completedAt).toBeUndefined();
+    expect(lane.completedAt).toBeDefined();
     if (interrupted === undefined) throw new Error("missing interruption checkpoint");
     expect(interrupted.status).toBe("running");
     expect(interrupted.evidence).toEqual({ published: true });
@@ -1146,8 +1187,144 @@ describe("publication lifecycle receipt", () => {
     expect(JSON.stringify(lane)).not.toContain("private terminal diagnostic");
     // A runner failure names its fixed step, so the receipt says where the lifecycle stopped.
     await expect(completeOmpPublicationLifecycle(receipt, async () => {}, async () => { throw new OmpLifecycleFailure("fork"); }))
-      .rejects.toThrow("OMP lifecycle fork failed");
+      .rejects.toThrow("lifecycle_unconfirmed");
     expect(lane.error).toBe("OMP lifecycle fork failed");
+  });
+});
+
+describe("campaign terminal evidence and readiness", () => {
+  const transient = (): LaneFailure => ({
+    id: 101, lane: "windows", step: "transport_ready", reason: "connection_timeout", class: "infra_transient",
+    elapsedMs: 10, operation: "read_only", observations: { transportFailure: true },
+  });
+  function failedReceipt() {
+    const receipt = availabilityReceipt();
+    receipt.execution = receiptExecution();
+    receipt.lanes.deviceCloud.status = "passed";
+    receipt.lanes.deviceCloud.evidence = { progress: { epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: false, resources: [], results: {} }, result: { passed: true } };
+    receipt.lanes.windows.status = "failed";
+    receipt.lanes.windows.failure = [transient()];
+    return receipt;
+  }
+
+  test("finalization closes a started publication and keeps every other passed proof unchanged", async () => {
+    const receipt = failedReceipt();
+    receipt.lanes.ompPublication.status = "running";
+    const before = structuredClone(receipt.lanes.relay);
+    await finalizeCampaignFailure(receipt, new QualificationFailure(transient()), async () => {}, resumeModules);
+    expect(receipt.completedAt).toBeDefined();
+    expect(receipt.lanes.ompPublication).toMatchObject({ status: "failed", failure: [{ class: "collateral", originIds: [101] }] });
+    expect(Object.values(receipt.lanes).some(lane => lane.status === "running")).toBe(false);
+    expect(receipt.lanes.relay).toEqual(before);
+    expect(assertCampaignRetryEligible(receipt, receiptExecution(), resumeModules)).toEqual(["ompPublication", "windows"]);
+  });
+
+  test("cleanup failure blocks otherwise infrastructure-only eligibility", async () => {
+    const receipt = failedReceipt();
+    receipt.lanes.windowsCleanup.status = "failed";
+    await finalizeCampaignFailure(receipt, new QualificationFailure(transient()), async () => {}, resumeModules);
+    expect(receipt.failureSummary?.containment.cleanupComplete).toBe(false);
+    expect(() => assertCampaignRetryEligible(receipt, receiptExecution(), resumeModules)).toThrow();
+  });
+
+  test("poisoned Pixel consumers persist only closed graphs and finalize as collateral", async () => {
+    const receipt = failedReceipt();
+    receipt.lanes.windows.status = "pending";
+    delete receipt.lanes.windows.failure;
+    receipt.lanes.android.status = "pending";
+    let sequence = 200, ranQueued = false;
+    const pixel = createPixelLease(() => {}, () => ++sequence);
+    const persist = async () => { validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG); };
+    const settled = await Promise.allSettled([
+      executeReceiptLane(receipt, "windows", persist, () => pixel("windows", async () => {
+        throw Object.assign(new QualificationFailure(transient()), { pixelUnrestored: true });
+      })),
+      executeReceiptLane(receipt, "android", persist, () => pixel("android", async () => { ranQueued = true; return {}; })),
+    ]);
+    await finalizeCampaignFailure(receipt, new AggregateError(settled.flatMap(result =>
+      result.status === "rejected" ? [result.reason] : [])), persist, resumeModules);
+    expect(ranQueued).toBe(false);
+    expect(receipt.lanes.android.failure).toMatchObject([{ class: "collateral", originIds: [101] }]);
+    expect(Object.values(receipt.lanes).some(lane => lane.status === "running")).toBe(false);
+  });
+
+  test("retry consumption persists its ordinal before admission and leaves prior snapshot/passes immutable", async () => {
+    const receipt = failedReceipt();
+    await finalizeCampaignFailure(receipt, new QualificationFailure(transient()), async () => {}, resumeModules);
+    const snapshot = JSON.stringify(receipt), publication = structuredClone(receipt.lanes.ompPublication);
+    const next: QualificationExecution = { ...receiptExecution(), campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+    let durable = "";
+    await expect(withConsumedCampaignRetry(receipt, next, async () => { durable = JSON.stringify(receipt); }, async () => {
+      expect(JSON.parse(durable).execution).toEqual(next);
+      expect(JSON.parse(durable).failureSummary).toBeUndefined();
+      throw new Error("admission refused");
+    })).rejects.toThrow("admission refused");
+    expect(JSON.parse(snapshot).execution.campaignAttempt).toBe(0);
+    expect(receipt.lanes.ompPublication).toEqual(publication);
+    expect(() => assertCampaignRetryEligible(receipt, receiptExecution(), resumeModules)).toThrow();
+  });
+
+  test("a deadline waits for its cancelled owner to settle before cleanup can begin", async () => {
+    const events: string[] = [];
+    await expect(withQualificationDeadline("windows", 5, () => 1, async execution => {
+      await new Promise<void>(resolve => execution.signal.addEventListener("abort", () => resolve(), { once: true }));
+      events.push("aborted");
+      await Bun.sleep(5);
+      events.push("reaped");
+      execution.signal.throwIfAborted();
+    })).rejects.toThrow("deadline_exceeded");
+    events.push("cleanup");
+    expect(events).toEqual(["aborted", "reaped", "cleanup"]);
+  });
+
+  test.each(["prepare", "windows", "macos", "push"] as const)("readiness %s failure restores Pixel then Mac and never passes a qualification lane", async phase => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const events: string[] = [];
+    const action = async (name: string) => { events.push(name); if (name === phase) throw new Error("probe failure"); };
+    await expect(runRigReadiness(receipt, async () => {}, {
+      prepare: () => action("prepare"),
+      windows: async () => { await action("windows"); return {}; },
+      macos: async () => { await action("macos"); return {}; },
+      push: async () => { await action("push"); return {}; },
+      restorePixel: () => action("pixel restored"),
+      restoreMac: () => action("Mac restored"),
+    })).rejects.toThrow("rig readiness failed");
+    expect(events.slice(-2)).toEqual(["pixel restored", "Mac restored"]);
+    expect(receipt.rigReadiness).toMatchObject({ status: "failed", cleanupDisposition: "restored", observations: { baselineRestored: true } });
+    expect(Object.values(receipt.lanes).every(lane => lane.status === "pending")).toBe(true);
+  });
+
+  test("readiness restoration failure stays unresolved even when Mac cleanup succeeds", async () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    let macRestored = false;
+    await expect(runRigReadiness(receipt, async () => {}, {
+      prepare: async () => { throw new Error("setup failed"); }, windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+      restorePixel: async () => { throw new Error("baseline unavailable"); }, restoreMac: async () => { macRestored = true; },
+    })).rejects.toThrow();
+    expect(macRestored).toBe(true);
+    expect(receipt.rigReadiness).toMatchObject({ status: "failed", cleanupDisposition: "unresolved" });
+  });
+
+  test("a readiness cleanup checkpoint failure never skips either resource owner", async () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const restored: string[] = [];
+    await expect(runRigReadiness(receipt, async () => {
+      if (receipt.rigReadiness?.phase === "cleanup") throw new Error("persistence unavailable");
+    }, {
+      prepare: async () => { throw new Error("probe failed"); },
+      windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+      restorePixel: async () => { restored.push("Pixel"); }, restoreMac: async () => { restored.push("Mac"); },
+    })).rejects.toThrow("rig readiness failed");
+    expect(restored).toEqual(["Pixel", "Mac"]);
+    expect(receipt.rigReadiness?.status).toBe("failed");
+  });
+
+  test("manual readiness attempt zero is diagnostic only and cannot synthesize retry authority", () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    receipt.rigReadiness = { status: "failed", campaignAttempt: 0, observations: { baselineRestored: true }, timings: {}, cleanupDisposition: "restored" };
+    expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+    receipt.rigReadiness = { ...receipt.rigReadiness, campaignAttempt: 1 };
+    expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow("attempt is unbound");
   });
 });
 
@@ -1258,7 +1435,7 @@ async function macLifecycleFixture(model = MAC_ENV.OMP_STABLE_MAC_MODEL, version
   return { pins, candidate, output };
 }
 
-test.each([["Mac14,3", "26.6.1"], ["Mac17,14", "27.0.1"], ["VirtualMac2,1", "27.0.1"]])("Mac %s lifecycle persists measured schema-3 evidence and refuses failures", async (model, version) => {
+test.skipIf(process.platform === "win32").each([["Mac14,3", "26.6.1"], ["Mac17,14", "27.0.1"], ["VirtualMac2,1", "27.0.1"]])("Mac %s lifecycle persists measured schema-3 evidence and refuses failures", async (model, version) => {
   const { pins, candidate, output } = await macLifecycleFixture(model, version);
   const evidence = {
     hardware: model, doctor: "18/18", rollbackInvariants: "23/23", os: `macOS ${version} arm64`,
@@ -1329,14 +1506,14 @@ lane_persistence
 `, "test", join(REPOSITORY_ROOT, "scripts", "qualify-macos-host.sh")], {
       cwd: REPOSITORY_ROOT,
       env: {
-        ...process.env, HOME: root, BOOT_UUID: bootUuid,
+        ...process.env, HOME: root, TMPDIR: root, BOOT_UUID: bootUuid,
         OMP_MAC_HOST: MAC_ENV.OMP_STABLE_MAC_HOST, OMP_MAC_TAG: TAG, OMP_MAC_PREVIOUS_TAG: PREVIOUS_TAG,
         OMP_MAC_LOGIN: "synthetic@example.invalid", OMP_MAC_SUDO_PW: "", OMP_MAC_ARCHIVE_SHA256: candidate.archiveSha256,
       },
       stdout: "pipe", stderr: "pipe",
     });
     const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(125); // unchanged reboot identity retains its remote owner at shell exit
     expect(stdout).toMatch(/guest reboot changed:[ \t]+no/u);
     expect(stderr).toContain("a changed boot identity");
     expect(stdout + stderr).not.toContain(bootUuid);
@@ -1361,9 +1538,17 @@ lane_persistence
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 describe("resumable receipt lanes", () => {
+  test.skipIf(process.platform !== "win32")("Windows refuses private receipt persistence before filesystem effects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qualification-receipt-unsupported-"));
+    try {
+      await expect(createReceiptPersister(join(root, "job", "receipt.json"),
+        createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG))()).rejects.toThrow("requires a POSIX host");
+      expect(await readdir(root)).toEqual([]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   test("availability remains failed with additive closed schema-3 evidence", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     const hold = new DeviceCloudAvailabilityHold({
@@ -1417,7 +1602,7 @@ describe("resumable receipt lanes", () => {
       error: "lane execution failed; inspect the qualification process output",
     });
   });
-  test("serializes concurrent Android and relay receipt checkpoints", async () => {
+  test.skipIf(process.platform === "win32")("serializes concurrent Android and relay receipt checkpoints", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "omp-stable-receipt-concurrency-"));
     const receiptPath = join(temporaryRoot, "stable-qualification.json");
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
@@ -1482,6 +1667,503 @@ function summarizedReceipt() {
   return receipt;
 }
 
+test.each(["cleanupVerified", "mutationReconciled", "persistenceFailed", "pixel"] as const)(
+  "council498r1 containment consumes every negative %s fact", async fact => {
+    const receipt = summarizedReceipt();
+    Object.assign(receipt.lanes.deviceCloud.evidence!.progress as object, { resources: [] });
+    const error = Object.assign(new QualificationFailure({ id: 51, lane: "android", step: "cleanup",
+      class: "harness", reason: "unclassified_failure", operation: "read_only", elapsedMs: 0,
+      observations: fact === "pixel" ? {} : { [fact]: fact === "persistenceFailed" } }),
+    fact === "pixel" ? { pixelUnrestored: true } : {});
+    await finalizeCampaignFailure(receipt, error, async () => {}, resumeModules);
+    expect(receipt.failureSummary?.containment).toEqual({ proven: false, cleanupComplete: false, unresolvedMutation: true });
+    expect(() => assertCampaignCleanupComplete(receipt, receipt.execution!, resumeModules)).toThrow();
+  });
+
+test("council498r1 readiness cannot restore a remote owner lost before Mac effects were marked", async () => {
+  const receipt = summarizedReceipt();
+  const target = { sshDestination: "early-owner-loss.invalid", sudoPassword: "" };
+  receipt.macHost = target.sshDestination;
+  receipt.execution = { ...receiptExecution(), binding: { ...receiptExecution().binding, macHostSha256: digest(target.sshDestination) } };
+  const error = await runRigReadiness(receipt, async () => {}, {
+    prepare: async () => { await remoteExecutor(target, async () => ({ exitCode: 125, stdout: "", stderr: "" }))(["/bin/true"]); },
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    restorePixel: async () => {}, restoreMac: async () => {},
+  }).catch(error => error);
+  expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "unresolved", observations: { baselineRestored: false } });
+  await finalizeCampaignFailure(receipt, error, async () => {}, resumeModules);
+  expect(receipt.failureSummary?.containment.proven).toBe(false);
+});
+
+test("council498r1 readiness cleanup checkpoint failure cannot claim a restored baseline", async () => {
+  const receipt = summarizedReceipt();
+  const restored: string[] = [];
+  await runRigReadiness(receipt, async () => {
+    if (receipt.rigReadiness?.phase === "cleanup") throw new Error("synthetic disk failure");
+  }, {
+    prepare: async () => { throw new Error("synthetic readiness refusal"); },
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    restorePixel: async () => { restored.push("pixel"); }, restoreMac: async () => { restored.push("mac"); },
+  }).catch(() => {});
+  expect(restored).toEqual(["pixel", "mac"]);
+  expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "unresolved", observations: { baselineRestored: false } });
+});
+
+test.each(["windows", "androidPush", "deviceCloud"] as const)(
+  "council498r1 %s terminal persistence cannot replace an in-lane cleanup root", async name => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    receipt.execution = receiptExecution();
+    const root = Object.assign(new QualificationFailure({ id: 81, lane: `${name}Cleanup`, step: "containment",
+      reason: "containment_unproven", class: "harness", operation: "unknown", elapsedMs: 0,
+      observations: { cleanupVerified: false } }), { pixelUnrestored: true });
+    let writes = 0;
+    const error = await executeReceiptLane(receipt, name, async () => {
+      if (++writes === 2) throw new Error("synthetic terminal disk failure");
+    }, async () => { throw root; }).catch(error => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(normalizeQualificationFailures(error).some(failure => failure.id === 81)).toBe(true);
+    expect(normalizeQualificationFailures(error).some(failure => failure.observations.persistenceFailed === true)).toBe(true);
+  });
+
+test.each(["initial-write", "terminal-write", "cleanup"] as const)(
+  "council498r1 publication %s keeps terminal and containment evidence", async point => {
+    const receipt = summarizedReceipt();
+    let writes = 0, ran = false;
+    const error = await completeOmpPublicationLifecycle(receipt, async () => {
+      writes += 1;
+      if ((point === "initial-write" && writes === 1) || (point === "terminal-write" && writes === 2)) {
+        throw new Error("synthetic publication disk failure");
+      }
+    }, async () => { ran = true; throw new OmpLifecycleFailure("cleanup"); }).catch(error => error);
+    expect(receipt.lanes.ompPublication.status).toBe("failed");
+    expect(receipt.lanes.ompPublication.completedAt).toBeDefined();
+    const failures = normalizeQualificationFailures(error);
+    if (point !== "cleanup") expect(failures.some(failure => failure.observations.persistenceFailed === true)).toBe(true);
+    if (ran) expect(failures.some(failure => failure.reason === "lifecycle_unconfirmed" && failure.observations.cleanupVerified === false)).toBe(true);
+  });
+
+test.each(["sourceCommit", "archiveSha256", "tag"] as const)("council498 artifact %s mismatch never poisons the receipt", field => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.execution = receiptExecution();
+  const original = structuredClone(receipt);
+  const candidate = { tag: TAG, sourceCommit: COMMIT, archiveSha256: "b".repeat(64),
+    [field]: field === "tag" ? PREVIOUS_TAG : "e".repeat(field === "sourceCommit" ? 40 : 64) };
+  const predecessor = { tag: PREVIOUS_TAG, sourceCommit: COMMIT, archiveSha256: "c".repeat(64) };
+  expect(() => bindVerifiedReleaseIdentities(receipt, candidate, predecessor)).toThrow(QualificationFailure);
+  expect(receipt).toEqual(original);
+  validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+});
+
+test.each(["pending", "passed", "running"] as const)("council498 finalization reconciles a %s direct failure owner", status => {
+  const receipt = summarizedReceipt();
+  receipt.lanes.relay = { status, attempts: status === "pending" ? 0 : 1,
+    ...(status === "pending" ? { notStartedReason: "dependency_failed" as const } : {}) };
+  const error = new QualificationFailure({ id: 21, lane: "relay", step: "setup", reason: "deadline_exceeded",
+    class: "harness", elapsedMs: 90_000, operation: "unknown", observations: { controllerDeadline: true } });
+  return finalizeCampaignFailure(receipt, error, async () => {
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, resumeModules).then(() => {
+    expect(receipt.status).toBe("failed");
+    expect(receipt.lanes.relay.status).toBe("failed");
+    expect(receipt.lanes.relay.completedAt).toBeDefined();
+    expect(receipt.lanes.relay.notStartedReason).toBeUndefined();
+  });
+});
+
+test("council498 relay-stop failure preserves authorized publication proof", async () => {
+  const receipt = summarizedReceipt();
+  const publication = structuredClone(receipt.lanes.ompPublication);
+  const error = await finishLiveQualification([], receipt, async () => {},
+    async () => { throw new Error("synthetic relay stop failure"); },
+    async () => { throw new Error("preserved lifecycle must not rerun"); }, true).catch(error => error);
+  await finalizeCampaignFailure(receipt, error, async () => {
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, resumeModules);
+  expect(receipt.lanes.ompPublication).toEqual(publication);
+  expect(receipt.failureSummary?.failures.some(item => item.lane === "ompPublication")).toBe(false);
+});
+
+test.each([true, false])("council498 cleanup storage failure preserves typed evidence and Pixel poisoning (final write fails: %s)", async finalWriteFails => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  const primary = Object.assign(new QualificationFailure({ id: 41, lane: "cleanup", step: "containment",
+    reason: "containment_unproven", class: "harness", elapsedMs: 0, operation: "unknown", observations: {} }), { pixelUnrestored: true });
+  let writes = 0;
+  const error = await executeReceiptLane(receipt, "cleanup", async () => { if (++writes === 1 || finalWriteFails) throw new Error("synthetic disk failure"); },
+    async () => { throw primary; }).catch(error => error);
+  expect(pixelUnrestored(error)).toBe(true);
+  expect(normalizeQualificationFailures(error).some(item => item.observations.persistenceFailed === true)).toBe(true);
+  expect(receipt.lanes.cleanup.status).toBe("failed");
+});
+
+test("council498 unresolved remote ownership refuses every destructive Mac cleanup action", async () => {
+  const target = { sshDestination: "unsettled-mac-fixture.invalid", sudoPassword: "" };
+  let id = 50, dispatched = 0;
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => ++id };
+  const remote = remoteExecutor(target, async () => ({ exitCode: 125, stdout: "", stderr: "" }));
+  const root = await remote(["/bin/true"], { execution }).catch(error => error);
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  const proof = 'gateway pids:                          0\\nplist present:                         no\\ngui job:                               absent\\nlisteners:                             0\\n"liveOmpHosts":0,"binaryPresent":false,"sourcePresent":false';
+  const runtime = {
+    command: async () => { dispatched += 1; return { exitCode: 0, stdout: "", stderr: "" }; },
+    script: async () => { dispatched += 1; return proof.replaceAll("\\n", "\n"); },
+  };
+  const error = await executeReceiptLane(receipt, "cleanup", async () => {}, () =>
+    cleanupMac({ target, environment: { OMP_MAC_HOST: target.sshDestination } }, undefined, execution, runtime)).catch(error => error);
+  expect(dispatched).toBe(0);
+  expect(receipt.lanes.cleanup.status).toBe("failed");
+  const failures = normalizeQualificationFailures(new AggregateError([root, error]));
+  expect(failures.some(item => item.class === "collateral" && item.reason === "remote_unsettled")).toBe(true);
+});
+
+test.each(["deviceCloud", "androidPush"] as const)("council498r1 Mac cleanup preserves unresolved %s fixture ownership", async name => {
+  const receipt = summarizedReceipt();
+  const target = { sshDestination: "retained-fixture.invalid", sudoPassword: "" };
+  receipt.lanes[name].evidence = { progress: { epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: true } };
+  receipt.lanes[`${name}Cleanup`].status = "failed";
+  let commands = 0;
+  const context = { target, environment: { OMP_MAC_HOST: target.sshDestination }, receipt, lanes: resumeModules };
+  const error = await cleanupMac(context, undefined, undefined, {
+    command: async () => { commands += 1; return { exitCode: 0, stdout: "", stderr: "" }; },
+    script: async () => { commands += 1; return ""; },
+  }).catch(error => error);
+  expect(commands).toBe(0);
+  expect(receipt.lanes.cleanup.evidence).toMatchObject({ retainedFixtureOwners: 1 });
+  expect(normalizeQualificationFailures(error).some(failure => failure.observations.cleanupVerified === false)).toBe(true);
+});
+
+test("council498 readiness preserves the shared remote root while attempting all restoration owners", async () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  const target = { sshDestination: "qualifier@readiness-unsettled-fixture.invalid", sudoPassword: "" };
+  const binding = receiptExecution().binding;
+  receipt.execution = { ...receiptExecution(), binding: { ...binding, macHostSha256: digest(target.sshDestination) } };
+  receipt.macHost = target.sshDestination;
+  receipt.candidate = { tag: TAG, sourceCommit: COMMIT, archiveSha256: binding.archiveSha256 };
+  receipt.predecessor = availabilityReceipt().predecessor!;
+  let id = 60;
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => ++id };
+  const remote = remoteExecutor(target, async () => ({ exitCode: 125, stdout: "", stderr: "" }));
+  const owners: string[] = [];
+  const error = await runRigReadiness(receipt, async () => {}, {
+    prepare: async () => { await remote(["/bin/true"], { execution }); },
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    restorePixel: async () => { owners.push("pixel"); assertRetainedMacCommandsSettled(target.sshDestination); },
+    restoreMac: async () => { owners.push("mac"); await executeReceiptLane(receipt, "cleanup", async () => {}, async () => {
+      assertRetainedMacCommandsSettled(target.sshDestination); return { restored: true };
+    }); },
+  }).catch(error => error);
+  expect(owners).toEqual(["pixel", "mac"]);
+  const failures = normalizeQualificationFailures(error);
+  expect(failures.some(item => item.reason === "remote_unsettled")).toBe(true);
+  expect(failures.some(item => item.lane === "campaign" && item.step === "teardown")).toBe(true);
+  await finalizeCampaignFailure(receipt, error, async () => {
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, resumeModules);
+  expect(receipt.lanes.cleanup.status).toBe("failed");
+});
+
+test.skipIf(process.platform === "win32").each([
+  { mode: "preflight", fault: "source" }, { mode: "campaign", fault: "source" }, { mode: "preflight", fault: "ordinal" },
+] as const)("council498 %s refuses foreign execution before admission or outcome persistence", async ({ mode, fault }) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "preflight-execution-fence-")));
+  try {
+    const initial = receiptExecution();
+    const execution: QualificationExecution = fault === "source" ?
+      { ...initial, binding: { ...initial.binding, orchestratorCommit: "f".repeat(40) } } :
+      { ...initial, campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+    const path = join(root, "execution.json"), outcome = join(root, "outcome.json");
+    await writeFile(path, JSON.stringify(execution), { mode: 0o600 });
+    const fixture = await preflightFixture(root);
+    let admitted = false;
+    await expect(runStableQualification(["--tag", TAG, "--execution-file", path, ...(mode === "preflight" ? ["--preflight"] : [])], {
+      ...fixture, environment: { ...fixture.environment, OMP_STABLE_OUTCOME_FILE: outcome },
+      executable: () => { admitted = true; return null; },
+    }, admissionLanes())).rejects.toThrow();
+    expect(admitted).toBe(false);
+    expect(await Bun.file(outcome).exists()).toBe(false);
+    expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32").each([1, 2] as const)("council491 fresh campaign refuses attempt %i before admission", async campaignAttempt => {
+  const root = await mkdtemp(join(tmpdir(), "fresh-retry-authority-"));
+  try {
+    const execution = { ...receiptExecution(), campaignAttempt, retryPlanSha256: "d".repeat(64) };
+    const path = join(root, "execution.json");
+    await writeFile(path, JSON.stringify(execution), { mode: 0o600 });
+    const runtime = await preflightFixture(root);
+    let probed = false;
+    await expect(runStableQualification(["--tag", TAG, "--execution-file", path], {
+      ...runtime, executable: () => { probed = true; return null; },
+    }, admissionLanes())).rejects.toThrow("fresh campaign requires attempt zero");
+    expect(probed).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32").each(["valid", "digest", "binding", "ordinal", "product"] as const)(
+  "council491 receiptless preflight retry requires exact %s authority", async kind => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "preflight-retry-authority-")));
+  try {
+    const prior = receiptExecution();
+    const next: QualificationExecution = { ...prior, campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+    const executionPath = join(root, "execution.json"), outcomePath = join(root, "prior-outcome.json");
+    await writeFile(executionPath, JSON.stringify(next), { mode: 0o600 });
+    await writeQualificationOutcomeFile(outcomePath, {
+      formatVersion: 1, outcome: "qualification-failed", scope: "preflight",
+      execution: kind === "ordinal" ? next : kind === "binding" ? { ...prior, binding: { ...prior.binding, policySha256: "e".repeat(64) } } : prior,
+      failureSummary: { failures: [kind === "product" ?
+        { id: 1, lane: "windows", step: "preflight", class: "product", reason: "assertion_failed", operation: "read_only", elapsedMs: 1, observations: {} } :
+        { id: 1, lane: "preflight", step: "admission", class: "infra_transient", reason: "connection_timeout", operation: "read_only", elapsedMs: 1, observations: { transportFailure: true } }],
+        timings: { attemptMs: 1, cleanupMs: 0 }, containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } },
+    });
+    const priorDigest = digest(await readFile(outcomePath, "utf8"));
+    const runtime = await preflightFixture(root);
+    let admitted = false;
+    const error = await runStableQualification(["--tag", TAG, "--execution-file", executionPath,
+      "--retry-outcome-file", outcomePath, "--retry-outcome-sha256", kind === "digest" ? "f".repeat(64) : priorDigest], {
+      ...runtime, executable: () => {
+        admitted = true;
+        const consumed = JSON.parse(readFileSync(join(root, "stable-qualification.json"), "utf8"));
+        expect(consumed.execution).toEqual(next);
+        return null;
+      },
+    }, admissionLanes()).catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(admitted).toBe(kind === "valid");
+    expect(digest(await readFile(outcomePath, "utf8"))).toBe(priorDigest);
+    if (kind !== "valid") expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("council491 receipt persistence rejects stale not-started metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "invalid-receipt-write-"));
+  try {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    receipt.lanes.ompPublication.status = "running";
+    receipt.lanes.ompPublication.notStartedReason = "readiness_failed";
+    await expect(createReceiptPersister(join(root, "receipt.json"), receipt)()).rejects.toThrow("not-started");
+    expect(await readdir(root)).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("council491 publication restart clears its previous not-started reason", async () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.lanes.ompPublication.notStartedReason = "readiness_failed";
+  await completeOmpPublicationLifecycle(receipt, async () => {
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, async () => structuredClone(lifecycleEvidence));
+  expect(receipt.lanes.ompPublication.notStartedReason).toBeUndefined();
+});
+
+test("council491 poisoned Pixel still admits cleanup and preserves caller identity", async () => {
+  const pixel = createPixelLease(() => {});
+  const root = Object.assign(new DeviceCloudAvailabilityHold({
+    kind: "device-cloud-availability", stage: "preflight", target: "iphone", vendors: ["testingbot"],
+    reason: "pinned-pool-busy", waitedMs: 0,
+  }), { pixelUnrestored: true });
+  const first = await pixel("deviceCloud", async () => { throw root; }).catch(error => error);
+  let restored = false;
+  await pixel("deviceCloud-cleanup", async () => { restored = true; });
+  expect(restored).toBe(true);
+  const refused = await pixel("androidPush-readiness", async () => ({})).catch(error => error);
+  expect(refused).toBeInstanceOf(QualificationFailure);
+  expect(refused.evidence.lane).toBe("rigReadiness");
+  const evidence = normalizeQualificationFailures(new AggregateError([first, refused]));
+  expect(evidence.find(item => item.class === "collateral")?.originIds).not.toContain(refused.evidence.id);
+  expect(evidence.some(item => item.class === "harness")).toBe(false);
+});
+
+test.each(["initial", "progress", "final"] as const)("council491 cleanup survives a failed %s receipt write", async stage => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  let writes = 0, cleaned = false;
+  const module: ExternalLaneModule = {
+    preflight: async () => {}, run: async () => ({}), needsCleanup: () => false,
+    cleanup: async ({ checkpoint }) => {
+      if (stage === "progress") await checkpoint({ epoch: "11111111-2222-4333-8444-555555555555" });
+      cleaned = true; return { released: true };
+    },
+  };
+  const identity = { tag: TAG, previousTag: PREVIOUS_TAG, orchestratorCommit: COMMIT, receiptRoot: "/synthetic",
+    candidate: { tag: TAG, sourceCommit: COMMIT, archiveSha256: "b".repeat(64), archivePath: "/synthetic" },
+    predecessor: { tag: PREVIOUS_TAG, sourceCommit: COMMIT, archiveSha256: "c".repeat(64), archivePath: "/synthetic" },
+    omp: parseQualificationPins(await readFile(join(REPOSITORY_ROOT, "UPSTREAM.lock.json"), "utf8")) };
+  await expect(cleanExternalLane(receipt, "windows", async () => { if (++writes === (stage === "initial" ? 1 : 2)) throw new Error("persistence unavailable"); },
+    module, { identity, pixel: createPixelLease(() => {}) })).rejects.toThrow();
+  expect(cleaned).toBe(true);
+  expect(receipt.lanes.windowsCleanup.evidence?.persistenceFailed).toBe(true);
+});
+
+test("council491 a passing campaign refuses running readiness", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.status = "passed";
+  receipt.rigReadiness = { status: "running", campaignAttempt: 0, cleanupDisposition: "restored",
+    observations: { baselineRestored: true }, timings: {} };
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test("council491 preflight preserves typed admission classifications", async () => {
+  const root = await mkdtemp(join(tmpdir(), "typed-admission-"));
+  try {
+    const runtime = await preflightFixture(root);
+    const error = new QualificationFailure({ id: 1, lane: "windows", step: "preflight",
+      class: "infra_transient", reason: "connection_timeout", operation: "read_only", elapsedMs: 1,
+      observations: { transportFailure: true } });
+    const lanes = admissionLanes();
+    await expect(preflightStableQualification(parseStableQualificationArgs(["--tag", TAG], runtime.environment),
+      runtime, { ...lanes, windows: { ...lanes.windows, preflight: async () => { throw error; } } })).rejects.toBe(error);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("council491 tunnel cancellation settles its pending health read", async () => {
+  const controller = new AbortController();
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async () => {
+    await Bun.sleep(150); return Response.json({ healthy: true });
+  } });
+  try {
+    const result = waitForTunnelReady(server.port!, () => true,
+      { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 });
+    setTimeout(() => controller.abort(new Error("synthetic cancellation")), 20);
+    await expect(result).rejects.toThrow("synthetic cancellation");
+  } finally { server.stop(true); }
+});
+
+test("council491 SSH cancellation terminates its remote command group before returning", async () => {
+  const controller = new AbortController();
+  const commands: string[][] = [];
+  const execute: Parameters<typeof remoteExecutor>[1] = async (argv, options) => {
+    commands.push([...argv]);
+    if (options?.execution !== undefined) {
+      await new Promise<void>(resolve => options.execution!.signal.addEventListener("abort", () => resolve(), { once: true }));
+      throw options.execution.signal.reason;
+    }
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  const remote = remoteExecutor({ sshDestination: "synthetic.invalid" } as Parameters<typeof remoteExecutor>[0], execute);
+  const result = remote(["/bin/sh", "-c", "sleep 60"], {
+    execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 },
+  });
+  controller.abort(new Error("synthetic cancellation"));
+  await expect(result).rejects.toThrow("synthetic cancellation");
+  expect(commands).toHaveLength(2);
+  expect(commands[1]!.at(-1)).toContain("kill");
+  expect(commands[1]!.at(-1)).toContain("pgid");
+});
+
+test("council491 failed SSH transport also reconciles its remote command owner", async () => {
+  let calls = 0;
+  const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async () =>
+    ({ exitCode: ++calls === 1 ? 255 : 0, stdout: "", stderr: "" });
+  const remote = remoteExecutor({ sshDestination: "failed-transport.invalid" } as Parameters<typeof remoteExecutor>[0], execute);
+  expect((await remote(["/bin/true"])).exitCode).toBe(255);
+  expect(calls).toBe(2);
+});
+
+test.skipIf(process.platform === "win32")("council498r1 successful remote leader cannot abandon its live process group", async () => {
+  const root = await mkdtemp(join(tmpdir(), "remote-descendant-"));
+  const pidFile = join(root, "child");
+  const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async argv => {
+    const process = Bun.spawn(["/bin/bash", "-c", argv.at(-1)!], {
+      env: { ...globalThis.process.env, HOME: root }, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    });
+    return { exitCode: await process.exited, stdout: "", stderr: "" };
+  };
+  let pid = 0;
+  try {
+    await remoteExecutor({ sshDestination: "descendant-fixture.invalid", sudoPassword: "" }, execute)(
+      ["/bin/bash", "-c", 'sleep 120 </dev/null >/dev/null 2>&1 & printf "%s" "$!" > "$1"', "--", pidFile]);
+    pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  } finally {
+    if (!pid && await Bun.file(pidFile).exists()) pid = Number(await readFile(pidFile, "utf8"));
+    if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* Already settled. */ }
+    await rm(root, { recursive: true, force: true });
+  }
+}, 25_000);
+
+test.skipIf(process.platform === "win32").each([0, 7, "early-hup"] as const)(
+  "council498 remote owner survives exit %s until acknowledged settlement", async exit => {
+    const root = await mkdtemp(join(tmpdir(), "remote-owner-settlement-"));
+    const owners = join(root, ".local/state/omp-qualification/command-owners");
+    let calls = 0, published = false, done = false, ownerCount = 0;
+    const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async argv => {
+      calls += 1;
+      const primary = calls === 1;
+      const script = primary && exit === "early-hup" ? argv.at(-1)!.replace("set -m", () => "kill -HUP $$\nset -m") : argv.at(-1)!;
+      const child = Bun.spawn(["/bin/bash", "-c", script], {
+        env: { ...process.env, HOME: root }, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+      });
+      const exitCode = await child.exited;
+      if (primary) {
+        const directories = await readdir(owners);
+        ownerCount = directories.length;
+        if (directories[0] !== undefined) {
+          const owner = join(owners, directories[0]);
+          published = await Bun.file(join(owner, "pgid")).exists();
+          done = await Bun.file(join(owner, "done")).exists();
+        }
+      }
+      return { exitCode, stdout: "", stderr: "" };
+    };
+    try {
+      const remote = remoteExecutor({ sshDestination: `settlement-${exit}.invalid`, sudoPassword: "" }, execute);
+      const result = await remote(["/bin/bash", "-c", 'for owner in "$HOME"/.local/state/omp-qualification/command-owners/*; do [ -s "$owner/pgid" ] || exit 77; done; exit "$1"', "--",
+        String(exit === "early-hup" ? 0 : exit)]).catch(error => error);
+      expect(ownerCount).toBe(1);
+      expect(done).toBe(true);
+      expect(published).toBe(exit !== "early-hup");
+      expect(calls).toBe(2);
+      expect(result.exitCode).toBe(exit === "early-hup" ? 125 : exit);
+      expect(await readdir(owners)).toEqual([]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }, 20_000);
+
+test.skipIf(process.platform === "win32")("council491 remote cancellation reaps a real distinct process group", async () => {
+  const root = await mkdtemp(join(tmpdir(), "remote-command-owner-"));
+  const controller = new AbortController();
+  const ready = join(root, "ready");
+  const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async (argv, options) => {
+    const child = Bun.spawn(["/bin/bash", "-c", argv.at(-1)!], {
+      env: { ...process.env, HOME: root }, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    });
+    const stop = () => child.kill("SIGKILL"); // Local SSH disappearing does not stop its remote group.
+    options?.execution?.signal.addEventListener("abort", stop, { once: true });
+    try {
+      const exitCode = await child.exited;
+      options?.execution?.signal.throwIfAborted();
+      return { exitCode, stdout: "", stderr: "" };
+    } finally { options?.execution?.signal.removeEventListener("abort", stop); }
+  };
+  try {
+    const remote = remoteExecutor({ sshDestination: "local-process-group.invalid" } as Parameters<typeof remoteExecutor>[0], execute);
+    const result = remote(["/bin/bash", "-c", 'printf "%s" "$$" > "$1"; sleep 30', "--", ready],
+      { execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 } });
+    result.catch(() => {});
+    const deadline = performance.now() + 2_000;
+    while (!await Bun.file(ready).exists() && performance.now() < deadline) await Bun.sleep(10);
+    const pgid = Number(await readFile(ready, "utf8"));
+    controller.abort(new Error("synthetic remote cancellation"));
+    await expect(result).rejects.toThrow("synthetic remote cancellation");
+    expect(() => process.kill(-pgid, 0)).toThrow();
+  } finally { controller.abort(); await rm(root, { recursive: true, force: true }); }
+}, 25_000);
+
+test.skipIf(process.platform === "win32")("bound read-only preflight failure writes an effect-free outcome without creating a receipt", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "stable-bound-preflight-")));
+  try {
+    const execution = receiptExecution(), executionPath = join(root, "execution.json"), outcomePath = join(root, "outcome.json");
+    await writeFile(executionPath, JSON.stringify(execution), { mode: 0o600 });
+    const fixture = await preflightFixture(root);
+    const runtime = { ...fixture, environment: { ...fixture.environment, OMP_STABLE_OUTCOME_FILE: outcomePath },
+      executable: () => null };
+    await expect(runStableQualification(["--tag", TAG, "--preflight", "--execution-file", executionPath],
+      runtime, admissionLanes())).rejects.toThrow();
+    const outcome = await readQualificationOutcomeFile(outcomePath, execution);
+    expect(outcome).toMatchObject({ scope: "preflight", failureSummary: {
+      failures: [{ lane: "preflight", class: "harness", operation: "not_started" }],
+      containment: { proven: true, cleanupComplete: true, unresolvedMutation: false },
+    } });
+    expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 test.each(["missing lane record", "passed root owner", "unrepresented failed lane", "extra summary root"] as const)(
   "council R2 receipt graph rejects %s", variant => {
     const receipt = summarizedReceipt();
@@ -1513,12 +2195,42 @@ test("council R2 readiness roots require their failed readiness owner", () => {
     class: "harness", elapsedMs: 1, operation: "read_only", observations: {} }], timings: { attemptMs: 1, cleanupMs: 0 },
     containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
   expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
-  receipt.rigReadiness = { campaignAttempt: 0, status: "failed", cleanupDisposition: "restored", observations: {}, timings: {} };
+  receipt.rigReadiness = { campaignAttempt: 0, status: "failed", cleanupDisposition: "restored", observations: { baselineRestored: true }, timings: {} };
   expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
   receipt.rigReadiness = { ...receipt.rigReadiness, status: "passed" };
   expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
 });
 
+test.each(["failed owner omitted", "unresolved containment", "passed with failed owner"] as const)(
+  "council P2 readiness receipt rejects %s", variant => {
+    const receipt = summarizedReceipt();
+    receipt.rigReadiness = { status: "failed", campaignAttempt: 0, observations: { baselineRestored: true },
+      timings: {}, cleanupDisposition: "restored" };
+    if (variant === "unresolved containment") {
+      receipt.rigReadiness = { ...receipt.rigReadiness, cleanupDisposition: "unresolved", observations: { baselineRestored: false } };
+      receipt.failureSummary = { ...receipt.failureSummary!, failures: [...receipt.failureSummary!.failures,
+        { id: 2, lane: "rigReadiness", step: "cleanup", class: "collateral", reason: "dependency_failed",
+          elapsedMs: 0, operation: "not_started", observations: {}, originIds: [1] }] };
+    }
+    if (variant === "passed with failed owner") {
+      receipt.status = "passed"; delete receipt.failureSummary;
+      receipt.lanes.deviceCloud.status = "passed"; delete receipt.lanes.deviceCloud.failure;
+    }
+    expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  },
+);
+
+test("council P2 restarting a standalone root clears its dependent graph before persistence", async () => {
+  const receipt = summarizedReceipt();
+  delete receipt.failureSummary;
+  receipt.lanes.android.status = "failed";
+  receipt.lanes.android.failure = [{ id: 2, lane: "android", step: "admission", class: "collateral",
+    reason: "dependency_failed", elapsedMs: 0, operation: "not_started", observations: {}, originIds: [1] }];
+  await executeReceiptLane(receipt, "deviceCloud", async () => {
+    expect(receipt.lanes.android.failure).toBeUndefined();
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, async () => ({}));
+});
 test("council R2 campaign pseudo roots are terminal harness evidence only", () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   receipt.execution = receiptExecution(); receipt.status = "failed";
@@ -1587,28 +2299,50 @@ test("council R3 publication restart and reopened Mac cleanup invalidate prior a
   expect(validateStableQualificationReceipt(pending, TAG, COMMIT, PREVIOUS_TAG)).toBe(pending);
 });
 
-test("council R3 real cloud resume consumes summary before admission persists", async () => {
-  const root = await mkdtemp(join(tmpdir(), "stable-summary-resume-"));
+test.skipIf(process.platform === "win32").each(["unknown", "pool", "windows"] as const)("council491 bound retry owns renewed %s admission and terminal outcome", async kind => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "stable-summary-resume-")));
   const path = join(root, "stable-qualification.json"), receipt = summarizedReceipt();
   try {
+    receipt.completedAt = new Date().toISOString();
+    receipt.lanes.deviceCloud.evidence!.progress = { epoch: "11111111-2222-4333-8444-555555555555",
+      cleanupRequired: false, resources: [], results: {} };
     await createReceiptPersister(path, receipt)();
+    const priorDigest = digest(await readFile(path, "utf8"));
+    const executionPath = join(root, "execution.json");
+    const next: QualificationExecution = { ...receiptExecution(), campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+    await writeFile(executionPath, JSON.stringify(next), { mode: 0o600 });
     let admitted = false;
-    const runtime = await preflightFixture(root);
+    const fixture = await preflightFixture(root);
+    const outcomePath = join(root, "outcome.json");
+    const runtime = { ...fixture, environment: { ...fixture.environment, OMP_STABLE_OUTCOME_FILE: outcomePath } };
     const modules = { ...resumeModules, deviceCloud: { ...resumeModules.deviceCloud, preflight: async () => {
       const saved = JSON.parse(await readFile(path, "utf8"));
       expect(saved.failureSummary).toBeUndefined();
       expect(saved.lanes.deviceCloud.failure).toBeUndefined();
       admitted = true;
+      if (kind === "pool") throw new DeviceCloudAvailabilityHold({ kind: "device-cloud-availability", stage: "preflight",
+        target: "iphone", vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0 });
+      if (kind === "windows") throw new QualificationFailure({ id: 47, lane: "windows", step: "preflight",
+        class: "infra_transient", reason: "connection_timeout", operation: "read_only", elapsedMs: 1,
+        observations: { transportFailure: true } });
       throw new Error("synthetic admission stop");
     } } };
-    await expect(runStableQualification(["--tag", TAG, "--resume-device-cloud"], runtime, modules)).rejects.toThrow();
+    await expect(runStableQualification(["--tag", TAG, "--execution-file", executionPath,
+      "--retry-receipt-sha256", priorDigest], runtime, modules)).rejects.toThrow("campaign admission failed");
     expect(admitted).toBe(true);
     const saved = validateStableQualificationReceipt(JSON.parse(await readFile(path, "utf8")), TAG, COMMIT, PREVIOUS_TAG);
-    expect(saved.failureSummary).toBeUndefined();
+    expect(saved.execution).toEqual(next);
+    expect(saved.failureSummary?.failures).toMatchObject([{ lane: "campaign", step: "admission",
+      class: kind === "unknown" ? "harness" : "infra_transient",
+      reason: kind === "pool" ? "pinned_pool_busy" : kind === "windows" ? "connection_timeout" : "unclassified_failure" }]);
+    expect(saved.lanes.deviceCloud.failure).toBeUndefined();
+    expect(saved.lanes.windows.status).toBe("passed");
+    expect(await readQualificationOutcomeFile(outcomePath, next)).toMatchObject({ scope: "campaign",
+      receipt: { sha256: digest(await readFile(path, "utf8")) }, failureSummary: saved.failureSummary });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("schema-3 additive fields round trip without changing passed historical proofs", async () => {
+test.skipIf(process.platform === "win32")("schema-3 additive fields round trip without changing passed historical proofs", async () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   const failure: LaneFailure = { id: 1, lane: "windows", step: "transport_ready", class: "infra_transient",
     reason: "connection_timeout", elapsedMs: 90_000, operation: "read_only", observations: { transportFailure: true } };
@@ -1618,10 +2352,11 @@ test("schema-3 additive fields round trip without changing passed historical pro
   receipt.status = "failed";
   receipt.lanes.debian = { status: "passed", attempts: 1, evidence: { historicalProof: true } };
   receipt.lanes.windows = { status: "failed", attempts: 1, failure: [failure], timings: { transport_ready: 90_000 } };
-  receipt.failureSummary = { failures: [failure], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
+  receipt.failureSummary = { failures: [failure, { id: 2, lane: "rigReadiness", step: "windows", class: "collateral",
+    reason: "dependency_failed", elapsedMs: 0, operation: "not_started", observations: {}, originIds: [1] }], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
     containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
   receipt.rigReadiness = { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored",
-    observations: { quotaObservable: false }, timings: { cleanup: 100 },
+    observations: { quotaObservable: false, baselineRestored: true }, timings: { cleanup: 100 },
     epoch: "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b", phase: "cleanup" };
   const root = await mkdtemp(join(tmpdir(), "qualification-receipt-contract-"));
   try {
@@ -1668,12 +2403,14 @@ test("readiness fields and outcome evidence cannot persist identifiers or fabric
   const path = join(root, "receipt.json");
   try {
     for (const observations of [{ host: "SYNTHETIC_PRIVATE_HOST" }, { quotaObservable: false, quotaAvailable: 10 }]) {
-      Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored", observations, timings: {} } });
+      Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored",
+        observations: { baselineRestored: true, ...observations }, timings: {} } });
       expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
       await expect(createReceiptPersister(path, receipt)()).rejects.toThrow();
       expect(await readdir(root)).toEqual([]);
     }
-    Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 1, cleanupDisposition: "restored", observations: {}, timings: {} } });
+    Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 1, cleanupDisposition: "restored",
+      observations: { baselineRestored: true }, timings: {} } });
     expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow("unbound");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -1927,10 +2664,36 @@ test("a Pixel left unrestored refuses every later device lane", async () => {
     lease("windows", async () => { throw failure; }),
     lease("androidPush", async () => { later += 1; }),
   ]);
-  expect(holder).toMatchObject({ status: "rejected", reason: failure });
+  expect(holder?.status).toBe("rejected");
   if (waiter?.status !== "rejected") throw new Error("the waiting lane must be refused");
-  expect(String(waiter.reason)).toContain("left unrestored by windows");
+  expect(waiter.reason).toBeInstanceOf(QualificationFailure);
+  expect(waiter.reason.evidence).toMatchObject({ lane: "androidPush", class: "collateral", reason: "dependency_failed" });
+  if (holder?.status !== "rejected") throw new Error("missing originating failure");
+  const graph = normalizeQualificationFailures(new AggregateError([holder.reason, waiter.reason]));
+  expect(graph.at(-1)?.class).toBe("collateral");
   expect(later).toBe(0);
+});
+
+test.skipIf(process.platform === "win32")("cancellation terminates the owned child process group before returning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qualification-process-group-"));
+  const ready = join(root, "ready"), escaped = join(root, "escaped");
+  const controller = new AbortController();
+  const script = `const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(`await Bun.sleep(500); await Bun.write(${JSON.stringify(escaped)}, "alive");`)}],
+    {stdin:"ignore",stdout:"inherit",stderr:"inherit"});
+    await Bun.write(${JSON.stringify(ready)}, "ready"); await child.exited;`;
+  const owner = runPixelRestoringChild([process.execPath, "-e", script], {
+    timeoutMs: 5_000, execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 },
+  });
+  owner.catch(() => {});
+  try {
+    const until = performance.now() + 2_000;
+    while (!await Bun.file(ready).exists() && performance.now() < until) await Bun.sleep(5);
+    expect(await Bun.file(ready).exists()).toBe(true);
+    controller.abort(new DOMException("owned cancellation", "AbortError"));
+    await expect(owner).rejects.toThrow("owned cancellation");
+    await Bun.sleep(550);
+    expect(await Bun.file(escaped).exists()).toBe(false);
+  } finally { controller.abort(); await owner.catch(() => {}); await rm(root, { recursive: true, force: true }); }
 });
 
 test("a read-only Android origin refusal leaves the Pixel lease clean for the next admission", async () => {
@@ -1965,7 +2728,7 @@ test("a failed or timed-out Pixel-restoring child refuses every later device lan
     ]);
     expect(holder.status).toBe("rejected");
     if (waiter?.status !== "rejected") throw new Error("the waiting lane must be refused");
-    expect(String(waiter.reason)).toContain("left unrestored by android");
+    expect(waiter.reason.evidence).toMatchObject({ lane: "androidPush", class: "collateral", reason: "dependency_failed" });
     expect(later).toBe(0);
   }
 });
@@ -2027,6 +2790,83 @@ describe("resource-owning lanes", () => {
     };
     return { identity, pixel: createPixelLease(() => {}) };
   }
+
+  test("council498 readiness Pixel restore continues after every sidecar write fails", async () => {
+    const restored: number[] = [];
+    let progress: unknown = { cleanupRequired: true };
+    const module: ExternalLaneModule<import("./stable-qualification.ts").RetainedMacLaneContext> = {
+      preflight: async () => {}, run: async () => ({}),
+      needsCleanup: value => (value as { cleanupRequired: boolean }).cleanupRequired,
+      cleanup: async ({ checkpoint }) => {
+        for (let step = 0; step < 3; step += 1) { await checkpoint({ cleanupRequired: true, step }); restored.push(step); }
+        await checkpoint({ cleanupRequired: false }); return { restored: true };
+      },
+    };
+    const error = await restoreRigReadinessPixel(module, {
+      ...await laneContext(), progress, origin: "https://fixture.invalid", sessionLabel: "synthetic",
+      mac: async () => { throw new Error("unexpected remote effect"); },
+      execution: { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => 71 },
+      checkpoint: async value => { progress = value; throw new Error("synthetic sidecar failure"); },
+    }, () => progress).catch(error => error);
+    expect(restored).toEqual([0, 1, 2]);
+    expect(normalizeQualificationFailures(error).some(item => item.observations.persistenceFailed === true)).toBe(true);
+    expect(module.needsCleanup(progress)).toBe(false);
+  });
+
+  test("council498r1 successful later cleanup cannot erase an earlier cleanup failure", async () => {
+    const receipt = summarizedReceipt();
+    receipt.status = "running";
+    delete receipt.failureSummary;
+    for (const lane of Object.values(receipt.lanes)) delete lane.failure;
+    receipt.lanes.windows = { status: "pending", attempts: 0 };
+    const module: ExternalLaneModule = {
+      preflight: async () => {}, needsCleanup: () => false,
+      run: async ({ checkpoint }) => {
+        await checkpoint({ epoch: "11111111-2222-4333-8444-555555555555" });
+        throw new QualificationFailure({ id: 37, lane: "windowsCleanup", step: "containment", class: "harness",
+          reason: "containment_unproven", operation: "unknown", elapsedMs: 0, observations: {} });
+      },
+      cleanup: async () => ({ released: true }),
+    };
+    const error = await runExternalLane(receipt, "windows", async () => {}, module, await laneContext()).catch(error => error);
+    expect(receipt.lanes.windowsCleanup.status).toBe("passed");
+    expect(normalizeQualificationFailures(error).some(item => item.id === 37 && item.lane === "windowsCleanup")).toBe(true);
+    await finalizeCampaignFailure(receipt, error, async () => {
+      validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+    }, { ...resumeModules, windows: module });
+    const finalized = validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+    expect(finalized.failureSummary?.failures.some(item => item.lane === "windows")).toBe(true);
+    expect(finalized.failureSummary?.containment.proven).toBe(false);
+  });
+
+  test("council498r1 Push browser cleanup roots survive later cleanup and queued Pixel collateral", async () => {
+    const receipt = summarizedReceipt();
+    receipt.status = "running";
+    delete receipt.failureSummary;
+    receipt.lanes.androidPush = { status: "pending", attempts: 0 };
+    let id = 90, queued: Promise<unknown> | undefined;
+    const pixel = createPixelLease(() => {}, () => ++id);
+    const browserFailure = pushBrowserCleanupFailure(new AndroidBrowserCleanupError([], 1), () => ++id);
+    const origins = normalizeQualificationFailures(browserFailure).filter(failure => failure.class !== "collateral").map(failure => failure.id);
+    const module: ExternalLaneModule = {
+      preflight: async () => {}, needsCleanup: () => false, cleanup: async () => ({ restored: true }),
+      run: async ({ checkpoint }) => pixel("androidPush", async () => {
+        await checkpoint({ epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: false });
+        queued = pixel("android", async () => { throw new Error("poisoned measurement must not run"); }).catch(error => error);
+        throw browserFailure;
+      }),
+    };
+    const error = await runExternalLane(receipt, "androidPush", async () => {}, module, { ...await laneContext(), pixel }).catch(error => error);
+    expect(receipt.lanes.androidPushCleanup.status).toBe("passed");
+    await finalizeCampaignFailure(receipt, new AggregateError([error, await queued]), async () => {
+      validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+    }, { ...resumeModules, androidPush: module });
+    const finalized = validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+    expect(finalized.failureSummary!.failures.some(failure => origins.includes(failure.id))).toBe(true);
+    expect(finalized.failureSummary!.failures.some(failure => failure.lane === "android" && failure.class === "collateral" &&
+      origins.every(id => failure.originIds.includes(id)))).toBe(true);
+    expect(finalized.failureSummary?.containment.proven).toBe(false);
+  });
 
   test("passes only with a cleanup bound to the attempt it released", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
@@ -2173,7 +3013,7 @@ describe("resource-owning lanes", () => {
   });
 });
 
-test("a resumed campaign that fails admission still destroys the Windows VM it recorded", async () => {
+test.skipIf(process.platform === "win32")("a resumed campaign that fails admission still destroys the Windows VM it recorded", async () => {
   const root = await mkdtemp(join(tmpdir(), "stable-windows-orphan-"));
   try {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);

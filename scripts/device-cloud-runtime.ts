@@ -7,6 +7,8 @@
  * booleans and fixed names, because TestingBot keeps a log of every WebDriver command.
  */
 import { rm } from "node:fs/promises";
+import type { QualificationExecutionContext } from "./stable-qualification.ts";
+import { abortablePause } from "./provider-read.ts";
 import { basename, join } from "node:path";
 import { isRecord } from "../packages/collab-client/upstream/src/tool-render/util.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
@@ -54,7 +56,7 @@ import { WebDriverSession, endWebDriverSession } from "./device-cloud-webdriver.
 import { serviceAccountTokenFile, startAllowlistProxy, type AllowlistProxy, type CloudDevice, type DeviceCloudVendor } from "./device-cloud-common.ts";
 import {
   BrowserStackApi, BROWSERSTACK_LOCAL, BROWSERSTACK_LOCAL_BINARY, BROWSERSTACK_MODELS, browserStackCapabilities, browserStackEntitlement,
-  readBrowserStackCredentials, requireBrowserStackRosetta, prepareBrowserStackLocal, startBrowserStackLocal, stopBrowserStackLocal,
+  readBrowserStackCredentials, requireBrowserStackRosetta, prepareBrowserStackLocal, ensureBrowserStackLocal, startBrowserStackLocal, stopBrowserStackLocal,
   type BrowserStackCredentials,
 } from "./browserstack.ts";
 
@@ -77,11 +79,12 @@ export interface DeviceCloudFixture {
 }
 
 export interface DeviceCloudRuntimeOptions {
+  readonly execution?: QualificationExecutionContext;
   readonly identity: DeviceCloudIdentity;
   /** Local directory for each attempt's tunnel working directory. */
   readonly workspace: string;
   /** Invoked only inside the attempt's Pixel lease; construction stages nothing remotely. */
-  readonly fixture: () => Promise<DeviceCloudFixture>;
+  readonly fixture: (execution?: QualificationExecutionContext) => Promise<DeviceCloudFixture>;
   readonly environment: Environment;
   /** Only the isolated development runner sets this; stable production policy has no override. */
   readonly developmentForceFallback?: true;
@@ -102,8 +105,8 @@ export function tunnelIdentifier(epoch: string): string {
 export interface DeviceCloudAdmissionDependencies {
   javaRuns(environment: Environment): boolean;
   credentials(environment: Environment): Promise<TestingBotCredentials>;
-  api(credentials: TestingBotCredentials): Pick<TestingBotApi, "devices">;
-  fallbackReady(environment: Environment, target: "ipad" | "android"): Promise<void>;
+  api(credentials: TestingBotCredentials, signal?: AbortSignal): Pick<TestingBotApi, "devices">;
+  fallbackReady(environment: Environment, target: "ipad" | "android", signal?: AbortSignal): Promise<void>;
 }
 
 const admissionDependencies: DeviceCloudAdmissionDependencies = {
@@ -112,10 +115,10 @@ const admissionDependencies: DeviceCloudAdmissionDependencies = {
     catch { return false; }
   },
   credentials: environment => readTestingBotCredentials(serviceAccountTokenFile(environment)),
-  api: credentials => new TestingBotApi(credentials),
-  fallbackReady: async (environment, target) => {
+  api: (credentials, signal) => new TestingBotApi(credentials, signal),
+  fallbackReady: async (environment, target, signal) => {
     requireBrowserStackRosetta();
-    const api = new BrowserStackApi(await readBrowserStackCredentials(serviceAccountTokenFile(environment)));
+    const api = new BrowserStackApi(await readBrowserStackCredentials(serviceAccountTokenFile(environment)), signal);
     await api.plan();
     if ((await api.devices(target)).length === 0) throw new Error(`BrowserStack offers no pinned ${target} model`);
   },
@@ -125,7 +128,9 @@ export async function admitDeviceCloud(
   environment: Environment,
   mode: "catalog" | "free",
   dependencies: DeviceCloudAdmissionDependencies = admissionDependencies,
+  signal?: AbortSignal,
 ): Promise<TestingBotCredentials> {
+  signal?.throwIfAborted();
   let javaRuns = false;
   try {
     javaRuns = dependencies.javaRuns(environment);
@@ -134,7 +139,8 @@ export async function admitDeviceCloud(
   }
   if (!javaRuns) throw new Error("the TestingBot tunnel needs Java; install openjdk@17 or set OMP_STABLE_JAVA");
   const credentials = await dependencies.credentials(environment);
-  const api = dependencies.api(credentials);
+  signal?.throwIfAborted();
+  const api = dependencies.api(credentials, signal);
   const catalog = await api.devices("all");
   for (const target of DEVICE_CLOUD_TARGETS) {
     const profile = DEVICE_CLOUD_PROFILES[target];
@@ -148,7 +154,7 @@ export async function admitDeviceCloud(
     for (const target of DEVICE_CLOUD_TARGETS) {
       if (!free.some(device => eligibleDevice(DEVICE_CLOUD_PROFILES[target], device))) {
         if (target !== "iphone") {
-          try { await dependencies.fallbackReady(environment, target); }
+          try { await dependencies.fallbackReady(environment, target, signal); }
           catch (error) { failures.push(error); }
           continue;
         }
@@ -170,9 +176,17 @@ export function deviceCloudVendor(target: DeviceCloudTarget, available: readonly
 }
 
 /** The candidate's hashed web bundle, read from the verified archive's listing. */
-async function archiveAppAsset(archivePath: string): Promise<string> {
+async function archiveAppAsset(archivePath: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const child = Bun.spawn(["tar", "-tf", archivePath], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-  const [listing, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const abort = () => { child.kill("SIGTERM"); killTimer ??= setTimeout(() => child.kill("SIGKILL"), 10_000); };
+  signal?.addEventListener("abort", abort, { once: true });
+  const [listing, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]).finally(() => {
+    signal?.removeEventListener("abort", abort);
+    if (killTimer !== undefined) clearTimeout(killTimer);
+  });
+  signal?.throwIfAborted();
   if (exitCode !== 0) throw new Error("could not list the candidate archive");
   const assets = listing.split("\n").flatMap(entry => {
     const match = /^(?:\.\/)?[^/]+\/apps\/web\/dist\/assets\/(app\.[0-9a-f]+\.js)$/u.exec(entry);
@@ -220,8 +234,8 @@ export async function freeDevice(
  * to these; the proxy extends the same bound to everything else on the device. A source it cannot
  * pin to one host (a scheme, a wildcard, a keyword) fails closed.
  */
-async function connectAllowlist(origin: string): Promise<readonly string[]> {
-  const response = await fetch(`${origin}/`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+async function connectAllowlist(origin: string, signal?: AbortSignal): Promise<readonly string[]> {
+  const response = await fetch(`${origin}/`, { cache: "no-store", signal: signal === undefined ? AbortSignal.timeout(15_000) : AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
   await response.body?.cancel();
   const directive = (response.headers.get("content-security-policy") ?? "")
     .split(";")
@@ -246,13 +260,13 @@ async function connectAllowlist(origin: string): Promise<readonly string[]> {
   return allowed;
 }
 
-async function launchLink(origin: string, session: SessionMetadata, mode: "view" | "control"): Promise<string> {
+async function launchLink(origin: string, session: SessionMetadata, mode: "view" | "control", signal?: AbortSignal): Promise<string> {
   const response = await fetch(`${origin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
     method: "POST",
     headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
     body: JSON.stringify({ generation: session.generation, mode }),
     cache: "no-store",
-    signal: AbortSignal.timeout(30_000),
+    signal: signal === undefined ? AbortSignal.timeout(30_000) : AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
   });
   const payload: unknown = await response.json().catch(() => undefined);
   const link = isRecord(payload) ? payload.capability : undefined;
@@ -262,12 +276,13 @@ async function launchLink(origin: string, session: SessionMetadata, mode: "view"
   return link;
 }
 
-async function pollPage(session: JourneyPage, name: string, expression: string, timeoutMs: number): Promise<void> {
+async function pollPage(session: JourneyPage & { readonly signal?: AbortSignal | undefined }, name: string, expression: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    session.signal?.throwIfAborted();
     if (await session.evaluate<unknown>(expression).catch(() => false) === true) return;
     if (Date.now() >= deadline) throw new Error(`${name} did not happen within ${timeoutMs / 1_000} s`);
-    await Bun.sleep(1_000);
+    await abortablePause(1_000, session.signal);
   }
 }
 
@@ -276,7 +291,7 @@ async function pollNative(session: TestingBotNativeSession, predicate: string, t
   for (;;) {
     const element = await session.find(predicate);
     if (element !== undefined || Date.now() >= deadline) return element;
-    await Bun.sleep(1_000);
+    await abortablePause(1_000, session.signal);
   }
 }
 
@@ -331,11 +346,11 @@ export async function installHomeScreenApp(session: TestingBotNativeSession): Pr
   await pollNative(session, HOME_SCREEN_ICON, 15_000);
   // Let the Home Screen settle: a second icon would be another customer's leftover or an earlier
   // attempt's, and tapping either is a guess.
-  await Bun.sleep(2_000);
+  await abortablePause(2_000, session.signal);
   const icons = await session.findAll(HOME_SCREEN_ICON);
   if (icons.length !== 1) throw new Error(`expected exactly one OMP Home Screen icon, found ${icons.length}`);
   await session.click(icons[0]!);
-  await Bun.sleep(6_000);
+  await abortablePause(6_000, session.signal);
 }
 
 /** Selects the installed app's standalone web view on the candidate origin and returns its context. */
@@ -394,19 +409,19 @@ async function homeScreenAlerts(
 
   await session.context("NATIVE_APP");
   await session.pressHome();
-  await Bun.sleep(2_000);
+  await abortablePause(2_000, session.signal);
   const asked = Date.now();
   await ask();
   let banner = await pollNative(session, ATTENTION_BANNER, 60_000);
   if (banner === undefined) {
     await session.openNotificationCenter();
-    await Bun.sleep(2_000);
+    await abortablePause(2_000, session.signal);
     banner = await session.find(ATTENTION_BANNER);
   }
   if (banner === undefined) throw new Error("the attention alert was not delivered within 60 s");
   const deliveredMs = Date.now() - asked;
   await session.click(banner);
-  await Bun.sleep(4_000);
+  await abortablePause(4_000, session.signal);
   const tapped = (await session.contexts()).filter(context => context.startsWith("WEBVIEW")).at(-1);
   if (tapped === undefined) throw new Error("tapping the alert opened no web view");
   await session.context(tapped);
@@ -440,19 +455,28 @@ async function homeScreenAlerts(
 }
 
 export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOptions): Promise<DeviceCloudRuntime> {
+  let execution = options.execution;
+  execution?.signal.throwIfAborted();
   const { identity } = options;
   const { origin } = identity;
   const credentials = await readTestingBotCredentials(serviceAccountTokenFile(options.environment));
-  const api = new TestingBotApi(credentials);
+  const api = new TestingBotApi(credentials, execution?.signal);
   let fallbackCredentials: BrowserStackCredentials | undefined;
   let fallbackApi: BrowserStackApi | undefined;
   const browserStack = async () => {
     fallbackCredentials ??= await readBrowserStackCredentials(serviceAccountTokenFile(options.environment));
-    fallbackApi ??= new BrowserStackApi(fallbackCredentials);
+    fallbackApi ??= new BrowserStackApi(fallbackCredentials, execution?.signal);
     return { credentials: fallbackCredentials, api: fallbackApi };
   };
   let fixture: DeviceCloudFixture | undefined;
-  const prepareFixture = async () => fixture ??= await options.fixture();
+  let fixtureExecution = execution;
+  const prepareFixture = async () => {
+    if (fixture === undefined || fixtureExecution !== execution) {
+      fixture = await options.fixture(execution);
+      fixtureExecution = execution;
+    }
+    return fixture;
+  };
   const location = (epoch: string): PushFixtureLocation => {
     if (fixture === undefined) throw new Error("device-cloud fixture has not been staged under its lease");
     return { root: join(fixture.base, `omp-cloud-${epoch}`), epoch, bun: fixture.bun, binary: fixture.binary, scripts: fixture.scripts };
@@ -468,10 +492,11 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
   let localCleanupUnverified = false;
 
   const verify = async (target: DeviceCloudTarget, attempt: DeviceCloudTargetAttempt): Promise<Observations> => {
+    execution?.signal.throwIfAborted();
     const profile = DEVICE_CLOUD_PROFILES[target];
     const label = attempt.session.cwdLabel;
     if (label === undefined) throw new Error("the live OMP session published no label");
-    appAsset ??= await archiveAppAsset(identity.candidate.archivePath);
+    appAsset ??= await archiveAppAsset(identity.candidate.archivePath, execution?.signal);
     const available = target === "iphone" ? [] : await api.devices("available");
     const vendor = options.developmentForceFallback && target !== "iphone" ? "browserstack" : deviceCloudVendor(target, available);
     let device: CloudDevice;
@@ -479,7 +504,8 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     let password: string;
     let requestedCapabilities: Record<string, unknown>;
     if (vendor === "testingbot") {
-      device = target === "iphone" ? await freeDevice(api, target, profile, attempt.epoch) : available
+      device = target === "iphone" ? await freeDevice(api, target, profile, attempt.epoch,
+        { now: Date.now, pause: ms => abortablePause(ms, execution?.signal) }) : available
         .filter(device => eligibleDevice(profile, device))
         .sort((a, b) => profile.models.indexOf(a.name) - profile.models.indexOf(b.name) || versionOrder(b.version, a.version))[0]!;
       username = credentials.key;
@@ -507,10 +533,12 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
       password = fallback.credentials.accessKey;
       if (!localStarted) {
         if (proxy === undefined || allowed === undefined) throw new Error("BrowserStack requires the lane-owned CONNECT proxy");
-        const local = await prepareBrowserStackLocal(localIdentity(attempt.epoch), () => attempt.startingTunnel("browserstack"));
+        const local = await prepareBrowserStackLocal(localIdentity(attempt.epoch), () => attempt.startingTunnel("browserstack"),
+          () => ensureBrowserStackLocal(undefined, execution?.signal));
         localCleanupUnverified = true;
         await startBrowserStackLocal({
           ...local, localProxyPort: proxy.port,
+          ...(execution === undefined ? {} : { signal: execution.signal }),
           hosts: [...new Set(allowed.map(authority => authority.split(":")[0]!))],
         }, fallback.credentials);
         localStarted = true;
@@ -521,7 +549,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     const refusalsBefore = proxy?.refusals() ?? 0;
     await attempt.allocating(vendor);
     const { session, capabilities } = await WebDriverSession.create(vendor, username, password, requestedCapabilities,
-      sessionId => attempt.created({ vendor, target, sessionId }));
+      sessionId => attempt.created({ vendor, target, sessionId }), execution?.signal);
       // Attest on the directory page, before the first View or Control opens any capability.
       await session.navigate(`${origin}/`);
       const reported = await session.evaluate<BrowserAllocationReport>(ALLOCATION_REPORT_EXPRESSION);
@@ -538,7 +566,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
       });
       let journey: Awaited<ReturnType<typeof runCollaborationJourney>>;
       try { journey = await runCollaborationJourney(session, { origin, label, promptMarker: PROMPT_MARKER, expectedAppAsset: appAsset }); }
-      catch (error) { throw new DeviceCloudJourneyFailure("collaboration", error); }
+      catch (error) { execution?.signal.throwIfAborted(); throw new DeviceCloudJourneyFailure("collaboration", error); }
       await assertCleanSinks(session, label);
       const observations: Observations = {
         ...allocation,
@@ -555,7 +583,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
       if (profile.homeScreenAlerts) {
         try {
           Object.assign(observations, await homeScreenAlerts(new TestingBotNativeSession(session), origin, () => commandPushFixture(location(attempt.epoch), "ask", fixture!.execute)));
-        } catch (error) { throw new DeviceCloudJourneyFailure("home-screen", error); }
+        } catch (error) { execution?.signal.throwIfAborted(); throw new DeviceCloudJourneyFailure("home-screen", error); }
       }
       observations.tunnelRefusals = (proxy?.refusals() ?? 0) - refusalsBefore;
       observations.elapsedMs = Date.now() - started;
@@ -563,7 +591,8 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
   };
 
   const publishedSession = async (label: string): Promise<SessionMetadata | undefined> => {
-    const response = await fetch(`${origin}/api/v1/sessions`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    const response = await fetch(`${origin}/api/v1/sessions`, { cache: "no-store",
+      signal: execution === undefined ? AbortSignal.timeout(15_000) : AbortSignal.any([execution.signal, AbortSignal.timeout(15_000)]) });
     if (!response.ok) throw new Error(`the candidate gateway refused its session list with HTTP ${response.status}`);
     const matches = parseSessionListResponse(await response.json()).sessions.filter(session => session.cwdLabel === label);
     if (matches.length > 1) throw new Error("a device-cloud session label is published more than once");
@@ -571,10 +600,16 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
   };
 
   return {
+    setExecution: next => {
+      execution = next;
+      api.setSignal(next?.signal);
+      fallbackApi?.setSignal(next?.signal);
+      // prepareFixture rebinds execution without losing the owned fixture's location.
+    },
     now: Date.now,
-    pause: Bun.sleep,
+    pause: ms => abortablePause(ms, execution?.signal),
     admit: async () => {
-      await admitDeviceCloud(options.environment, "catalog");
+      await admitDeviceCloud(options.environment, "catalog", admissionDependencies, execution?.signal);
     },
     fixture: async (operation, epoch) => {
       const prepared = await prepareFixture();
@@ -596,28 +631,29 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
         return;
       }
       if (vendor !== "testingbot") throw new Error("BrowserStack Local starts lazily only for fallback allocation");
-      allowed = await connectAllowlist(origin);
+      allowed = await connectAllowlist(origin, execution?.signal);
       proxy = await startAllowlistProxy(allowed);
       await startTunnel({
         java: javaExecutable(options.environment),
-        jar: await ensureTunnelJar(),
+        jar: await ensureTunnelJar(undefined, execution?.signal),
         directory: join(options.workspace, epoch),
         identifier: tunnelIdentifier(epoch),
         localProxyPort: proxy.port,
+        ...(execution === undefined ? {} : { signal: execution.signal }),
       }, credentials);
     },
     verify,
     endSession: async reference => {
-      if (reference.vendor === "testingbot") return endWebDriverSession("testingbot", credentials.key, credentials.secret, reference.sessionId);
+      if (reference.vendor === "testingbot") return endWebDriverSession("testingbot", credentials.key, credentials.secret, reference.sessionId, execution?.signal);
       const fallback = await browserStack();
-      await endWebDriverSession("browserstack", fallback.credentials.username, fallback.credentials.accessKey, reference.sessionId);
+      await endWebDriverSession("browserstack", fallback.credentials.username, fallback.credentials.accessKey, reference.sessionId, execution?.signal);
     },
     record: async (reference, remember, inspect) => reference.vendor === "testingbot" ? api.testRecord(reference.sessionId) : (await browserStack()).api.testRecord(reference.sessionId, remember, inspect),
     removeRecord: async (reference, removal) => {
       if (reference.vendor === "testingbot") return;
       await (await browserStack()).api.deleteRecord(reference.sessionId, removal);
     },
-    launch: (session, mode) => launchLink(origin, session, mode),
+    launch: (session, mode) => launchLink(origin, session, mode, execution?.signal),
     removeWorkspace: async epoch => {
       // Local's exact cwd is part of crash-recovery ownership; never erase it while a child
       // might remain. The key config is still removed by stop's finally path.

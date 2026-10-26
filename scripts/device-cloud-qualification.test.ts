@@ -178,6 +178,36 @@ function input(test: Harness, progress: unknown = undefined): DeviceCloudLaneInp
   return { identity, sessionLabel: LIVE_LABEL, progress, checkpoint: test.checkpoint, pixel: test.pixel, runtime: test.runtime };
 }
 
+test("outer cancellation never retries a cloud journey and restores under a fresh owner signal", async () => {
+  const lane = harness();
+  const controller = new AbortController();
+  let active = controller.signal, calls = 0;
+  const runtime: DeviceCloudRuntime = {
+    ...lane.runtime,
+    setExecution: execution => { active = execution?.signal ?? controller.signal; },
+    verify: async (target, attempt) => {
+      calls += 1;
+      await lane.runtime.verify(target, attempt);
+      controller.abort(new DOMException("outer deadline", "AbortError"));
+      throw new DeviceCloudJourneyFailure("collaboration", controller.signal.reason);
+    },
+    endSession: async reference => {
+      expect(active.aborted).toBe(false);
+      await lane.runtime.endSession(reference);
+    },
+    fixture: async (operation, epoch) => {
+      if (operation === "stop") expect(active.aborted).toBe(false);
+      await lane.runtime.fixture(operation, epoch);
+    },
+  };
+  await expect(runDeviceCloud({ ...input(lane), runtime,
+    execution: { signal: controller.signal, deadline: performance.now() + 1_000, nextFailureId: () => 1 },
+  })).rejects.toThrow("outer deadline");
+  expect(calls).toBe(1);
+  expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).cleanupRequired).toBe(false);
+  expect(lane.effects.slice(-3)).toEqual(["tunnel stop", "fixture stop", "workspace remove"]);
+});
+
 async function failure(promise: Promise<unknown>): Promise<string> {
   try {
     await promise;
@@ -283,7 +313,7 @@ describe("device-cloud lane", () => {
     const error = await runDeviceCloud({ ...input(lane), pixel: lease, runtime }).catch((error: unknown) => error);
     expect(pixelUnrestored(error)).toBe(true);
     if (queued === undefined) throw new Error("the fake Android lane was not queued");
-    await expect(queued).rejects.toThrow("left unrestored by deviceCloud");
+    await expect(queued).rejects.toThrow("dependency_failed");
     expect(androidStarted).toBe(false);
     expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(true);
     const recovery = harness();

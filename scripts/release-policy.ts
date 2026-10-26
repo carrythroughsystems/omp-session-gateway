@@ -106,6 +106,7 @@ export const ROUTINE_IMPLEMENTATION_PATHS: Readonly<Record<string, string>> = {
   "scripts/provision-linux-qual.sh": "Provisions and tears down Linux qualification hosts.",
   "scripts/push-qualification-fixture.ts": "Runs synthetic Push scenarios.",
   "scripts/qualify-macos-host.sh": "Executes retained-Mac qualification and cleanup.",
+  "scripts/qualification-remote-owner.sh": "Owns and settles retained-Mac command process groups; never grants retry authority.",
   "scripts/qualify-macos-omp.sh": "Exercises stock OMP on the retained Mac.",
   "scripts/qualification-logs.ts": "Collects bounded privacy-safe qualification events; never grants release retry authority.",
   "scripts/qualify-rollback.sh": "Exercises the rollback lane.",

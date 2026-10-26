@@ -137,31 +137,34 @@ function reviewedWindowsGuardedFetch(rel: string, before: string, target: string
   if (!callback) return false;
   return callback[1] === "()"
     ? /^,\s*\{\s*signal:\s*AbortSignal\.timeout\(15_000\)\s*\}\s*\);\s*\}\s*\)/u.test(after)
-    : /^,\s*\{\s*signal:\s*AbortSignal\.any\(\[signal,\s*AbortSignal\.timeout\(15_000\)\]\)\s*\}\s*\);\s*\}\s*\)/u.test(after);
+    : /^,\s*\{\s*signal:\s*AbortSignal\.any\(\[signal,\s*AbortSignal\.timeout\(15_000\)\]\)\s*\}\s*\);\s*\}\s*(?:,\s*execution\s*\?\?\s*\{\s*\})?\s*\)/u.test(after);
 }
 
 export function checkProviderReads(rel: string, text: string): string[] {
   if (!/^scripts\/.+\.ts$/u.test(rel) || rel.endsWith(".test.ts")) return [];
   const failures: string[] = [];
+  // One optional signal parameter changes cancellation, not the read-only replay boundary.
+  const readCallback = /readProvider\(\s*(?:\(\s*(?:[A-Za-z_$][\w$]*)?\s*\)|[A-Za-z_$][\w$]*)\s*=>\s*$/u;
   for (const match of text.matchAll(/\b(?:globalThis\.)?fetch\s*\(\s*([^,\n]+)/gu)) {
     const target = match[1]?.trim().replace(/\);$/u, "");
     const before = text.slice(0, match.index);
     if (reviewedWindowsGuardedFetch(rel, before, target, text.slice(match.index! + match[0].length))) continue;
     if (rel === "scripts/browserstack.ts" && target === '`${API}/sessions/${sessionId}.json`') {
       const after = text.slice(match.index! + match[0].length);
-      if (!/readProvider\(\s*\(\)\s*=>\s*$/u.test(before) && /^,\s*\{\s*method:\s*"DELETE"/u.test(after)) continue;
+      if (!readCallback.test(before) && /^,\s*\{\s*method:\s*"DELETE"/u.test(after)) continue;
       failures.push(`${rel}:${before.split("\n").length}: BrowserStack record deletion must be a single unretried DELETE`);
       continue;
     }
     if (rel === "scripts/device-cloud-webdriver.ts" && target === '`${connection.endpoint}${path}`') {
       if (/const send = \(\) => $/u.test(before) &&
-        text.includes('const response = method === "GET" ? await readProvider(send) : await send();') &&
+        (text.includes('const response = method === "GET" ? await readProvider(send) : await send();') ||
+          text.includes('const response = method === "GET" ? await readProvider(send, signal === undefined ? {} : { signal }) : await send();')) &&
         text.includes('endpoint: "https://hub.testingbot.com/wd/hub"') &&
         text.includes('endpoint: "https://hub.browserstack.com/wd/hub"')) continue;
       failures.push(`${rel}:${before.split("\n").length}: cloud WebDriver dispatcher must pin endpoints and retry GET only`);
       continue;
     }
-    if (rel !== "scripts/windows-qualification-runtime.ts" && /readProvider\(\s*\(\)\s*=>\s*$/u.test(before)) continue;
+    if (rel !== "scripts/windows-qualification-runtime.ts" && readCallback.test(before)) continue;
     if (target !== undefined && nonProviderFetches[rel.slice("scripts/".length)]?.includes(target)) continue;
     failures.push(rel + ":" + (before.split("\n").length) + ": unreviewed direct fetch; use readProvider for idempotent provider reads or document the exact non-provider target");
   }

@@ -68,14 +68,15 @@ function basicAuthorization(credentials: TestingBotCredentials): string {
 export class TestingBotApi {
   readonly #authorization: string;
 
-  constructor(credentials: TestingBotCredentials) {
+  constructor(credentials: TestingBotCredentials, private signal?: AbortSignal) {
     this.#authorization = basicAuthorization(credentials);
   }
+  setSignal(signal: AbortSignal | undefined): void { this.signal = signal; }
 
   async #get(path: string, operation: string): Promise<Response | undefined> {
-    const response = await readProvider(() =>
-      fetch(`${API}${path}`, { headers: { authorization: this.#authorization }, signal: AbortSignal.timeout(30_000) }),
-    );
+    const response = await readProvider(signal =>
+      fetch(`${API}${path}`, { headers: { authorization: this.#authorization }, signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) }),
+      this.signal === undefined ? {} : { signal: this.signal });
     if (response.status === 404) {
       await response.body?.cancel();
       return undefined;
@@ -131,7 +132,8 @@ export class TestingBotApi {
     for (const reference of references) {
       const url = retainedLogUrl(reference);
       // Signed asset references are already authorized. Never forward the account's credentials.
-      const logResponse = await readProvider(() => fetch(url, { redirect: "error", signal: AbortSignal.timeout(30_000) }));
+      const logResponse = await readProvider(signal => fetch(url, { redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) }),
+        this.signal === undefined ? {} : { signal: this.signal });
       if (!logResponse.ok) {
         await logResponse.body?.cancel();
         throw new Error(`TestingBot retained log read failed with HTTP ${logResponse.status}`);
@@ -158,6 +160,7 @@ export class TestingBotApi {
 
 /** TestingBot-only native controls for the iPhone Home Screen and background Push proof. */
 export class TestingBotNativeSession {
+  get signal(): AbortSignal | undefined { return this.session.signal; }
   constructor(private readonly session: WebDriverSession) {
     if (session.vendor !== "testingbot") throw new Error("native iPhone journey requires TestingBot");
   }
@@ -218,10 +221,12 @@ async function fileSha256(path: string): Promise<string | undefined> {
 }
 
 /** The pinned tunnel jar, downloaded once into the user cache and verified before every use. */
-export async function ensureTunnelJar(directory = join(homedir(), ".cache", "omp-session-gateway", "testingbot")): Promise<string> {
+export async function ensureTunnelJar(directory = join(homedir(), ".cache", "omp-session-gateway", "testingbot"), signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const path = join(directory, `TestingBotTunnel-${TESTINGBOT_TUNNEL.version}.jar`);
   if (await fileSha256(path) === TESTINGBOT_TUNNEL.sha256) return path;
-  const response = await readProvider(() => fetch(TESTINGBOT_TUNNEL.url, { signal: AbortSignal.timeout(120_000) }));
+  const response = await readProvider(readSignal => fetch(TESTINGBOT_TUNNEL.url, { signal: AbortSignal.any([readSignal, AbortSignal.timeout(120_000)]) }),
+    signal === undefined ? {} : { signal });
   if (!response.ok) throw new Error(`the TestingBot tunnel download failed with HTTP ${response.status}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.byteLength !== TESTINGBOT_TUNNEL.bytes || createHash("sha256").update(bytes).digest("hex") !== TESTINGBOT_TUNNEL.sha256) {
@@ -235,6 +240,7 @@ export async function ensureTunnelJar(directory = join(homedir(), ".cache", "omp
 }
 
 export interface TunnelOptions {
+  readonly signal?: AbortSignal;
   readonly java: string;
   readonly jar: string;
   /** Private working directory: the tunnel writes its pid and ready files here. */
@@ -262,6 +268,7 @@ export async function startTunnel(
   timeoutMs = 120_000,
   listeners: (pid: number) => Promise<readonly string[]> = listeningAddresses,
 ): Promise<void> {
+  options.signal?.throwIfAborted();
   if (!TUNNEL_IDENTIFIER.test(options.identifier)) throw new Error("invalid TestingBot tunnel identifier");
   const ready = join(options.directory, "ready");
   await mkdir(options.directory, { recursive: true, mode: 0o700 });
@@ -282,6 +289,7 @@ export async function startTunnel(
   try {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      options.signal?.throwIfAborted();
       if (child.exitCode !== null) throw new Error("the TestingBot tunnel exited before it was ready");
       if (await Bun.file(ready).exists()) {
         requireLoopbackListeners(await listeners(child.pid), "testingbot");

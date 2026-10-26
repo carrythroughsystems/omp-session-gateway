@@ -12,6 +12,14 @@ test("cloud transport may retry only GET, and record DELETE is never replayed", 
   const deletion = 'const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE" });';
   expect(checkProviderReads("scripts/browserstack.ts", deletion)).toEqual([]);
   expect(checkProviderReads("scripts/browserstack.ts", deletion.replace("await fetch", "await readProvider(() => fetch"))).toHaveLength(1);
+  for (const callback of ["signal", "(signal)", "(readSignal)"]) {
+    expect(checkProviderReads("scripts/testingbot.ts", `await readProvider(${callback} => fetch(url, { signal }));`)).toEqual([]);
+    expect(checkProviderReads("scripts/browserstack.ts", deletion.replace("await fetch", `await readProvider(${callback} => fetch`))).toHaveLength(1);
+  }
+  const cancellable = source.replace("readProvider(send)", "readProvider(send, signal === undefined ? {} : { signal })");
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", cancellable)).toEqual([]);
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", cancellable.replace('method === "GET"', 'method !== "DELETE"'))).toHaveLength(1);
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", cancellable.replace(": await send()", ": await readProvider(send)"))).toHaveLength(1);
 });
 
 test.each(["plain", "signal"] as const)("Windows guarded %s dispatcher retains exact GET-only retry admission", shape => {
@@ -45,6 +53,11 @@ test.each(["plain", "signal"] as const)("Windows guarded %s egress callback admi
     return fetch("https://api.ipify.org", { signal: ${signal} });
   });`;
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toEqual([]);
+  if (shape === "signal") {
+    const bound = source.replace("  });", "  }, execution ?? {});");
+    expect(checkProviderReads("scripts/windows-qualification-runtime.ts", bound)).toEqual([]);
+    expect(checkProviderReads("scripts/windows-qualification-runtime.ts", bound.replace("{ signal:", '{ method: "POST", signal:'))).toHaveLength(1);
+  }
   for (const unsafe of [
     source.replace("assertWindowsExecution(execution);", ""),
     source.replace("assertWindowsExecution(execution);", "unknownGuard(execution);"),
@@ -284,6 +297,16 @@ test("document-context web sources schedule timers only through window or an inj
     expect(checkDocumentTimers(path, leaked)).toEqual([]);
   }
 });
+test("council491 Windows dispatcher forwards cancellation without permitting write replay", () => {
+  const source = 'const send = (readSignal: AbortSignal = signal) => {\nassertWindowsExecution(execution);\n' +
+    'return fetch(url, { method, headers: {}, signal: readSignal });\n};\ntry {\n' +
+    'const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();\n' +
+    '} finally { clearTimeout(timer); }';
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toEqual([]);
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace('method === "GET"', 'method !== "DELETE"'))).toHaveLength(1);
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace(': await send();', ': await readProvider(send);'))).toHaveLength(1);
+});
+
 
 test("e2e readiness forbids completion access, request-finished events and networkidle, including optional/computed access", () => {
   for (const source of [

@@ -156,6 +156,10 @@ completion nor relay endurance; it uses OMP’s public relay.
 
 Provider-read fault injection covers network recovery, mixed network/HTTP failures, bounded
 exhaustion with the last error, and immediate programming-error/cancellation propagation.
+Cancellation cases cover an owned read, backoff, and a shared total budget; the helper waits for
+transport settlement and never replays a mutating provider request. Cloud outer cancellation must
+not enter the journey retry path and must release sessions, tunnels and fixtures with a fresh
+cleanup signal while retaining the same epoch and mutation-reconciliation history.
 Repository admission requires direct TypeScript harness fetches to use the read helper or an
 exact reviewed target exemption. Gateway/session, browser and loopback probes remain single-shot
 observations (or keep their own observation deadline); capability POSTs and provider writes must
@@ -187,9 +191,33 @@ The stable-qualification suite also covers the 1,800-second relay floor, malform
 passed evidence, and resume rejection without new admission or dispatch. A rejected proof must
 still clean recorded pending Mac effects and must not reopen already completed cleanup.
 
+| Orchestration boundary | Required offline regression |
+| --- | --- |
+| Sibling settlement | One consumer fails while another passes; the healthy sibling finishes before tunnel stop and publication lifecycle |
+| Pixel ownership | An unrestored holder poisons queued measurements, never restoration; actual readiness/cleanup owners and one allocator preserve collateral references |
+| Terminal evidence | Ordinary failure leaves no started lane `running`; failed publication and campaign have completion timestamps |
+| Cleanup and retries | Dirty/stale/persistence-failed cleanup blocks eligibility; later cleanup cannot erase historical cleanup roots or poisoning; fresh attempts require zero; consuming exact receipt authority precedes admission |
+| Rig readiness | Failure at setup, Windows admission, Mac checks or Push still restores Pixel before Mac; restoration failure remains unresolved and cannot authorize retry |
+| Adapter cancellation | Pending health/provider reads and backoff abort; mutating requests never replay; real distinct remote process groups are reaped before cleanup; Windows physical-client ADB/CDP paths receive cancellation and a fresh restoration owner |
+| Restart admission | Cloud holds and typed Windows admission errors produce campaign-owned terminal summaries/outcomes without failing passed lanes; restarted publication clears not-started metadata |
+| Readiness finality | Passing receipts reject running readiness; failed log preparation does not publish a collectible owner; Windows admission uses the receipt failure allocator |
+| Manual compatibility | Historical schema-3 receipts remain readable; manual readiness attempt zero gains no automatic authority; unbound later attempts refuse |
+| Terminal owner reconciliation | Pending/passed/running direct failure owners finalize to valid failed receipts; relay-stop failure leaves an authorized preserved publication proof unchanged |
+| Execution and artifact binding | Foreign HEAD and later bound preflight ordinals refuse before admission/outcome writes; candidate tag/source/digest mismatch never overwrites receipt identity |
+| Remote ownership fence | Successful leader exit with live descendants still settles the group; actual shell-wrapper loss is reaped or fenced; PTY input reaches the foreground group; reboot ownership requires changed boot identity; admission exceptions are bounded/read-only |
+| Readiness persistence failure | Baseline, mutation and restoration write failures still run every Pixel restore; only durable sidecars advance the mirror; terminal write failures retain original roots and poisoning and cannot claim restoration |
+| Unified containment | Negative cleanup/reconciliation facts, remaining resources, persistence failures and pre-lane unsettled owners forbid proven containment, retry and retirement |
+| Fixture dependency retention | Unresolved cloud or Push restoration retains the whole shared Mac fixture/owner directory; independent Windows cleanup does not queue behind it |
+| Receiptless Windows admission | An actual bounded GET503 producer yields a private receiptless preflight outcome; post-allocation steps remain forbidden |
+| Publication persistence | Initial/terminal write failures leave a failed completed lane; cleanup failure and failed terminal persistence retain independent typed evidence |
+
+The offline gate does not prove byte-identical installation-state restoration by readiness: token
+and runtime activation history/current pointer persist across uninstall. Isolation/restoration of
+that private state remains an explicit deferred P2, not a live-rig acceptance claim.
+
 The retained-Mac `ompPublication` lane adds the shared
 [lifecycle runner](../scripts/omp-lifecycle-qualification.ts) after every live-session consumer
-settles successfully and the relay tunnel stops. It writes `/new` and `/fork` (after two
+settles and the relay tunnel stops, including after unrelated consumer failures. It writes `/new` and `/fork` (after two
 synthetic messages) to the existing `ssh -tt` stdin, then stops/revokes, relaunches with
 `--continue`, and stops/revokes again. Each rotation keeps the instance, increments generation by
 one, requires stale launch POST `409 generation_mismatch` without a capability, and requires
@@ -254,7 +282,7 @@ test reaches a VM, a phone, or a device cloud:
 - a crashed attempt resumes from its last checkpoint, and a cleanup that leaves recorded resources
   fails;
 - a resumed campaign that fails admission still destroys the Windows VM it recorded;
-- the Pixel lease runs one device action at a time and refuses every later one after a lane reports
+- the Pixel lease runs one device action at a time and refuses later measurements, but not restoration, after a lane reports
   the phone unrestored;
 - fake hotspot, USB/Bluetooth tethering, pending-upstream, malformed and failed adb probes refuse
   at orchestrator admission before provider lookup, lane admission or receipt creation;

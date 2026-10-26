@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { remoteCommandLine, type RemoteExecutor } from "./stable-qualification.ts";
-import { gatewayStreamsDiscarded, PUSH_FIXTURE_FILES, remoteHome, retainedMacCloudFixture, stageRemoteFile } from "./stable-lanes.ts";
+import { gatewayStreamsDiscarded, PUSH_FIXTURE_FILES, remoteHome, retainedMacCloudFixture, retainedMacLogs, stageRemoteFile } from "./stable-lanes.ts";
 import type { ExternalLaneContext, RetainedMacLaneContext } from "./stable-qualification.ts";
 
 const SCRIPTS = fileURLToPath(new URL(".", import.meta.url));
@@ -28,6 +28,15 @@ function shellWith(env: Record<string, string> = { PATH: "/usr/bin:/bin" }): Rem
 }
 const localShell = shellWith();
 
+test("council491 log ownership is not returned before remote preparation succeeds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qualification-log-owner-"));
+  let calls = 0;
+  const mac: RemoteExecutor = async () => ++calls === 1 ?
+    { exitCode: 0, stdout: "/fixture-home", stderr: "" } : { exitCode: 1, stdout: "", stderr: "" };
+  try { await expect(retainedMacLogs(mac, "11111111-2222-4333-8444-555555555555", root)).rejects.toThrow(); }
+  finally { await rm(root, { recursive: true, force: true }); }
+});
+
 async function relativeImports(file: string): Promise<string[]> {
   const source = await readFile(join(SCRIPTS, file), "utf8");
   return [...source.matchAll(/^import [^;]*? from "\.\/([^"]+)";/gmu)].map(match => {
@@ -41,6 +50,8 @@ describe("retained-Mac Push fixture staging", () => {
   test("device-cloud fixture construction stages nothing before lease ownership", async () => {
     let leased = false;
     const calls: string[] = [];
+    const executions: unknown[] = [];
+    const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
     const context: ExternalLaneContext & RetainedMacLaneContext = {
       identity: {
         tag: "v0.7.7-prealpha.1", previousTag: "v0.7.6", orchestratorCommit: "a".repeat(40), receiptRoot: "/fixture",
@@ -49,11 +60,13 @@ describe("retained-Mac Push fixture staging", () => {
         omp: { bunVersion: "1.4.0", sourceCommit: "e".repeat(40), sourceTree: "f".repeat(40), version: "18.12.3", nativeTarballSha256: "0".repeat(64), nativeBinarySha256: "1".repeat(64) },
       },
       progress: undefined, checkpoint: async () => {}, origin: "https://fixture.invalid", sessionLabel: "fixture",
+      execution,
       pixel: async (_owner, action) => { leased = true; try { return await action(); } finally { leased = false; } },
-      mac: async argv => {
+      mac: async (argv, options) => {
         expect(leased).toBe(true);
         calls.push(argv.join(" "));
-        return { exitCode: 0, stdout: calls.length === 1 ? "/Users/ompqual" : "", stderr: "" };
+        executions.push(options?.execution);
+        return { exitCode: 0, stdout: argv.includes('printf %s "$HOME"') ? "/Users/ompqual" : "", stderr: "" };
       },
     };
     const prepare = retainedMacCloudFixture(context);
@@ -61,6 +74,12 @@ describe("retained-Mac Push fixture staging", () => {
     const fixture = await context.pixel("deviceCloud", prepare);
     expect(fixture.base).toBe("/Users/ompqual/qual-tools/device-cloud/fixtures");
     expect(calls).toHaveLength(1 + PUSH_FIXTURE_FILES.length);
+    expect(executions.every(value => value === execution)).toBe(true);
+    const cleanup = { ...execution, signal: new AbortController().signal };
+    const restored = await context.pixel("deviceCloud-cleanup", () => prepare(cleanup));
+    await context.pixel("deviceCloud-cleanup", () => restored.execute(["fixture", "stop"]));
+    expect(executions.at(-1)).toBe(cleanup);
+    expect(restored.base).toBe(fixture.base);
   });
 
   test("stages exactly the Push fixture's import closure", async () => {
