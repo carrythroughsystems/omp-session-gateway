@@ -225,6 +225,89 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; li
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test("493 R2 allocation expiry during the firewall checkpoint prevents creation", async () => {
+    const f = fixture(); let expired = false;
+    await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, pixel: f.pixel,
+      checkpoint: async progress => {
+        await f.checkpoint(progress);
+        if (!expired && progress.phase === "firewall_created" && typeof progress.allocationDeadline === "number") {
+          expired = true; await f.runtime.sleep(720_001);
+        }
+      },
+    })).rejects.toThrow("deadline_exceeded");
+    expect(f.events).not.toContain("firewallCreated");
+  });
+  test("493 R2 allocation expiry during inventory prevents VM creation", async () => {
+    const f = fixture(); let expired = false;
+    f.runtime.provider.instances = async () => {
+      if (!expired && f.events.includes("firewallConfigured")) { expired = true; await f.runtime.sleep(720_001); }
+      return f.instances;
+    };
+    await expect(f.run()).rejects.toThrow("deadline_exceeded");
+    expect(f.events).not.toContain("instanceCreated");
+  });
+  test("493 R2 partial firewall vault cannot veto destruction of a VM whose create response was lost", async () => {
+    const f = fixture({ lostCreate: true });
+    f.runtime.hasAccess = async () => false;
+    f.runtime.cleanupInstance = async () => undefined;
+    f.runtime.guest = async () => { throw windowsFailure("ownership_changed", "connection", "not_started"); };
+    await expect(f.run()).rejects.toThrow("unclassified_failure");
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
+  });
+  test("493 R2 partial firewall vault without any VM still cleans its firewall", async () => {
+    const f = fixture();
+    f.runtime.provider.createInstance = async () => { throw new Error("synthetic create refused"); };
+    f.runtime.hasAccess = async () => false;
+    f.runtime.cleanupInstance = async () => undefined;
+    await expect(f.run()).rejects.toThrow("unclassified_failure");
+    expect(f.events).not.toContain("reconnect"); expect(f.events).toContain("firewallDestroyed");
+    expect(f.firewalls).toEqual([]); expect(windowsNeedsCleanup(f.progress)).toBe(false);
+  });
+  test("493 R2 durable stability observations survive an interrupted settled-phase checkpoint", async () => {
+    const f = fixture({ development: true }); const original = f.runtime.guest;
+    let admission: ReturnType<typeof windowsRuntime.windowsTransportStability>; let failed = false;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action !== "transport") return original(context, action, principal);
+      if (admission) return { windowsBuild: 26100, ...admission };
+      const result = await original(context, action, principal);
+      admission = windowsRuntime.windowsTransportStability(result);
+      return result;
+    };
+    await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, pixel: f.pixel,
+      checkpoint: async progress => {
+        if (!failed && progress.phase === "transport_ready" && progress.settled === true) {
+          failed = true; throw new Error("synthetic checkpoint interruption");
+        }
+        await f.checkpoint(progress);
+      },
+    })).rejects.toThrow("synthetic checkpoint interruption");
+    const result = await runWindows({ identity, progress: f.progress, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint });
+    expect(result.observations).toMatchObject({ transportStabilitySamples: 3, transportStabilityDurationMs: 60_000 });
+  });
+  test.each(["cancel", "expire"] as const)("493 R2 development %s cleans retained resources instead of offering repair", async kind => {
+    const f = fixture({ development: true }); const controller = new AbortController();
+    const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 };
+    const original = f.runtime.guest;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "stage") {
+        if (kind === "cancel") controller.abort(); else execution.deadline = performance.now() - 1;
+      }
+      return original(context, action, principal);
+    };
+    await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint, execution }))
+      .rejects.toThrow("deadline_exceeded");
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
+  });
+  test("493 R2 a late readiness success does not pass its local deadline", async () => {
+    const f = fixture(); const original = f.runtime.guest;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "ready") await f.runtime.sleep(180_000);
+      return original(context, action, principal);
+    };
+    await expect(f.run()).rejects.toThrow("automatic LogonTrigger startup timed out");
+  });
   test.each(["stage", "upgrade"] as const)("493 R1 completed uploads cannot authorize replaying an unsettled %s mutation", async action => {
     const f = fixture({ development: true, fail: action });
     await expect(f.run()).rejects.toThrow();
