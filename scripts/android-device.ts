@@ -806,7 +806,8 @@ export async function withAndroidChrome<T>(
     if (result.success !== true) throw new Error("Android browser target closure refused");
     targetId = undefined; sessionId = undefined; ownsTarget = false;
   };
-  let primaryFailure: unknown;
+  let primaryFailure: unknown, cleanupFailure: unknown, failed = false;
+  let result!: T;
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => finish(new Error("DevTools WebSocket open timeout")),
@@ -906,24 +907,24 @@ export async function withAndroidChrome<T>(
       send: (method, parameters) => send(method, parameters),
     };
 
-    return await run(driver);
+    result = await run(driver);
   } catch (error) {
-    primaryFailure = error;
-    throw error;
+    primaryFailure = error; failed = true;
   } finally {
     cleaning = true;
     clearTimeout(deadline);
     execution?.signal.removeEventListener("abort", cancelled);
-    let cleanupFailure: unknown;
     for (let attempt = 0; attempt < 2 && targetId !== undefined && ownsTarget; attempt++) {
       try { await closeTarget(true); cleanupFailure = undefined; }
       catch (error) { cleanupFailure = error; }
     }
     socket.close();
     await runAdb(serial, ["forward", "--remove", `tcp:${port}`], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
-    if (cleanupFailure !== undefined) throw Object.assign(new AggregateError(
-      primaryFailure === undefined ? [cleanupFailure] : [primaryFailure, cleanupFailure], "Android browser target cleanup failed"), { pixelUnrestored: true });
   }
+  if (cleanupFailure !== undefined) throw Object.assign(new AggregateError(
+    failed ? [primaryFailure, cleanupFailure] : [cleanupFailure], "Android browser target cleanup failed"), { pixelUnrestored: true });
+  if (failed) throw primaryFailure;
+  return result;
 }
 
 /** Device identity for an evidence record. */
