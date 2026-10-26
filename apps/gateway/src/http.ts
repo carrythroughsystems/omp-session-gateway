@@ -543,16 +543,30 @@ export function startHttpServer(options: {
   readonly endpointHealthy?: () => boolean;
 }): Bun.Server<undefined> {
   const handler = createHttpHandler(options);
+  let handlers = 0;
+  let drained: (() => void) | undefined;
+  let draining: Promise<void> | undefined;
   const server = Bun.serve({
     hostname: options.config.http.hostname,
     port: options.config.http.port,
     // Must exceed the five-second SSE keepalive interval or Bun repeatedly closes event streams.
     idleTimeout: 30,
-    fetch(request, bunServer) {
+    async fetch(request, bunServer) {
       const address = bunServer.requestIP(request)?.address;
-      return handler(request, address === undefined ? undefined : { address });
+      handlers++;
+      try { return await handler(request, address === undefined ? undefined : { address }); }
+      finally { if (--handlers === 0) drained?.(); }
     },
   });
+  const stop = server.stop.bind(server);
+  server.stop = async closeActiveConnections => {
+    try { await stop(closeActiveConnections); }
+    finally {
+      // Bun's forced connection close can resolve before an admitted async handler returns.
+      // That handler still owns its logger; socket closure alone is not a producer drain.
+      if (handlers > 0) await (draining ??= new Promise<void>(resolve => { drained = resolve; }));
+    }
+  };
   options.logger?.event("info", "http.listening", { port: server.port ?? options.config.http.port });
   return server;
 }

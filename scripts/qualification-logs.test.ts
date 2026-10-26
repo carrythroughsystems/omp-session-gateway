@@ -12,6 +12,57 @@ const flags = { request_alias: 1, attention: true, clear: false, activity_stop: 
 const send = [event(1, "push.queue_accepted", { sequence: 1, ...flags }), event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 1 }),
   event(3, "push.send_failed", { sequence: 1, elapsed_ms: 1, status: 503 })];
 
+test.skipIf(process.platform === "win32")("495 round2 collector excludes writer restart before retention and retires before unlink", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-claim-")); chmodSync(root, 0o700);
+  const job = mkdtempSync(join(root, "job-")); chmodSync(job, 0o700);
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory, jobDirectory: job });
+  const original = fs.fsyncSync;
+  let tested = false, restarted = false, syncing: ReturnType<typeof spyOn> | undefined;
+  try {
+    await logs.prepare(); new QualificationLogSink(remoteDirectory).close();
+    syncing = spyOn(fs, "fsyncSync").mockImplementation(fd => {
+      if (!tested) {
+        tested = true;
+        try { new QualificationLogSink(remoteDirectory).close(); restarted = true; } catch { /* Exclusive collection must win. */ }
+      }
+      original(fd);
+    });
+    await logs.collect();
+    expect(tested).toBe(true);
+    expect(restarted).toBe(false);
+    expect(existsSync(remoteDirectory)).toBe(false);
+  } finally { syncing?.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32").each([false, true])("495 round2 remote unlink requires permanent retirement (failure=%s)", async fail => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-retire-")); chmodSync(root, 0o700);
+  const job = mkdtempSync(join(root, "job-")); chmodSync(job, 0o700);
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  const logs = createQualificationLogs({ remoteDirectory, jobDirectory: job, execute: async argv => {
+    if (argv.at(-1) !== "remove") return executeFixture(argv);
+    const hook = `import os,sys
+original_unlink=os.unlink
+def checked_unlink(path,*args,**kwargs):
+ if os.path.exists(sys.argv[1]) or os.path.dirname(path)!=sys.argv[1]+'.retired': raise ValueError('unlink before retirement')
+ if ${fail ? "True" : "False"}: raise ValueError('synthetic unlink failure')
+ return original_unlink(path,*args,**kwargs)
+os.unlink=checked_unlink
+`;
+    return executeFixture([...argv.slice(0, 2), hook + argv[2], ...argv.slice(3)]);
+  } });
+  try {
+    await logs.prepare(); new QualificationLogSink(remoteDirectory).close();
+    if (fail) {
+      await expect(logs.collect()).rejects.toThrow();
+      expect(existsSync(join(remoteDirectory + ".retired", "health"))).toBe(true);
+      expect(() => new QualificationLogSink(remoteDirectory + ".retired")).toThrow();
+    } else await logs.collect();
+    expect(existsSync(remoteDirectory)).toBe(false);
+    expect(existsSync(join(job, "gateway-structured.jsonl"))).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("only an unambiguous single send's explicit retryable status authorizes recovery", () => {
   expect(pushDeliveryTelemetry(send)).toMatchObject({ sufficient: true, retryable: true, sends: 1, acknowledgements: 0 });
   expect(pushDeliveryTelemetry([...send, event(4, "push.queue_accepted", { sequence: 2, ...flags })]).sufficient).toBe(false);

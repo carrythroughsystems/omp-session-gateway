@@ -21,6 +21,13 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Unproven CDP target/forward cleanup blocks Pixel release; task restoration cannot reopen CDP.
   Re-arm rechecks generation before mutation, metadata timeouts retain late sampling, and post-evidence
   deadline checks plus bounded integer phase durations prevent stale delivery success.
+  Writer/collector exclusion and atomic log-directory retirement close retention races; forced HTTP
+  shutdown drains admitted handlers before releasing the durable writer claim. Readiness checks both
+  delivery and clear budgets after awaited evidence, every persisted duration is a bounded integer,
+  and network fallbacks preserve containment failures. Cleanup checks source-scoped v2 triage stores;
+  guarded fixture asks reject a changed acknowledged session at the extension boundary. Portable
+  fixture regressions prove Windows permission refusal without relaxing POSIX admission; bounded CLI
+  startup failures retain fixed diagnostic booleans without extending the two-second exit assertion.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
@@ -57,6 +64,17 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Re-enter only the current process's retained development Pixel lease during automatic cleanup,
+  bounded by its fresh cleanup deadline; preserve foreign or changed ownership. Attribute
+  execution-clipped helper timers to controller expiry, recheck rejected mutations, and guard the
+  resource lifetime at final guest dispatch. Parse complete Windows fetch options and the same
+  dispatcher's GET-only gate; reject overriding options and legacy unguarded callbacks.
+- Retain an initial Windows development guest only for a typed, known-disposition product assertion;
+  contain infrastructure, authentication, harness, unknown, and expired attempts. Guard firewall-rule
+  POSTs after refetch, helper spawns after checkpoints, and every owned effect boundary; reject late
+  successful or failed observations with one positive-budget guard instead of launching 1-ms probes.
+  Arm subprocess cancellation before work and switch provider/guest/Pixel dispatch to the cleanup owner.
+  Admit only reviewed guarded Windows fetch forms in repository policy while preserving GET-only retries.
 - Contain browser CI flakes with one CI-only retry across both mobile Chromium and cross-engine
   core suites, closed privacy-safe attempt reports and summaries retained for 14 days, and a
   weekly/manual seven-day flake budget with fail-closed evidence coverage. Local runs keep zero

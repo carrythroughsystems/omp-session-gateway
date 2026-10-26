@@ -1,11 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { classifyWindowsCommandFailure, command, reconnectWindowsTransport, reconcileWindowsUpload, windowsUploadStep, windowsWinrmDiagnostic, windowsWinrmResult } from "./windows-qualification-runtime";
 import { QualificationFailure } from "./qualification-failure";
 import type { WindowsTransportProbe } from "./windows-stable-qualification";
-import { assertWindowsAllocation, windowsFailure } from "./windows-stable-qualification";
+import { assertWindowsAllocation, windowsFailure, windowsRemaining } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
 
 test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructure retry authority", async method => {
@@ -110,6 +110,141 @@ test("external cancellation reaps the subprocess but cannot become a probe deadl
   const error = await stopped.catch(error => error);
   expect(error.controllerDeadline).toBe(false);
   expect(classifyWindowsCommandFailure(error, true, true).evidence.class).toBe("harness");
+});
+test.each([false, true])("499 R1 execution-clipped helper timer retains controller origin (readOnly=%s)", async readOnly => {
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 100, nextFailureId: () => 1 };
+  const probes: WindowsTransportProbe[] = [];
+  const failure = await command([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+    timeoutMs: 30_000, execution, transportProbe: async probe => { probes.push(probe); },
+  }).catch(error => error);
+  expect(failure.controllerDeadline).toBe(true);
+  expect(probes.at(-1)?.controllerDeadline).toBe(true);
+  expect(classifyWindowsCommandFailure(failure, readOnly, readOnly, execution).evidence).toMatchObject({
+    reason: "deadline_exceeded", class: "harness", operation: readOnly ? "read_only" : "unknown",
+    observations: { controllerDeadline: true, exitCode: failure.exitCode, signal: failure.signal },
+  });
+});
+test.each(["abort", "execution-expiry", "command-expiry"] as const)("496 R2 %s during the initial checkpoint refuses helper spawn", async kind => {
+  const controller = new AbortController();
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+  const spawn = spyOn(Bun, "spawn");
+  try {
+    const failure = await command([process.execPath, "-e", ""], {
+      execution, timeoutMs: kind === "command-expiry" ? 10 : 60_000,
+      transportProbe: async () => {
+        if (kind === "abort") controller.abort();
+        else if (kind === "execution-expiry") execution.deadline = performance.now() - 1;
+        else await Bun.sleep(20);
+      },
+    }).catch(error => error);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(failure).toBeInstanceOf(QualificationFailure);
+    expect(failure.evidence).toMatchObject({ reason: "deadline_exceeded", operation: "not_started" });
+  } finally { spawn.mockRestore(); }
+});
+test("496 R2 command owns cancellation before awaiting its first checkpoint", async () => {
+  const controller = new AbortController(), listen = spyOn(controller.signal, "addEventListener");
+  try {
+    await expect(command(["synthetic-must-not-spawn"], {
+      execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 },
+      transportProbe: async () => {
+        expect(listen.mock.calls.some(call => call[0] === "abort")).toBe(true);
+        controller.abort();
+      },
+    })).rejects.toThrow("deadline_exceeded");
+  } finally { listen.mockRestore(); }
+});
+test.each(["provider Windows allocation", "certificate-pinned interactive RDP"])("496 R2 rejected late %s observations report controller expiry", async name => {
+  let now = 0;
+  const failure = await winrmRuntime.pollWindows(async () => { now = 100; throw new Error("synthetic late refusal"); }, 100, name, undefined,
+    { now: () => now, sleep: async ms => { now += ms; } }).catch(error => error);
+  expect(failure).toBeInstanceOf(QualificationFailure);
+  expect(failure.evidence).toMatchObject({ reason: "deadline_exceeded", observations: { controllerDeadline: true, timeoutMs: 100, waitedMs: 100 } });
+});
+test("496 R2 a rejected in-budget observation preserves its original failure", async () => {
+  const failure = new Error("synthetic in-budget refusal");
+  await expect(winrmRuntime.pollWindows(async () => { throw failure; }, 100, "synthetic predicate", undefined,
+    { now: () => 0, sleep: async () => {} })).rejects.toBe(failure);
+});
+test("496 R2 fractional monotonic expiry preserves valid integer observations", () => {
+  let failure: unknown;
+  try { windowsRemaining(0.25, 10.75, 11.125); } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(QualificationFailure);
+  expect((failure as QualificationFailure).evidence).toMatchObject({
+    reason: "deadline_exceeded", elapsedMs: 10.875, observations: { controllerDeadline: true, timeoutMs: 10, waitedMs: 10 },
+  });
+});
+test("496 R2 creation-cap refusals use the current execution allocator without consuming allowed capacity", () => {
+  let next = 200;
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => ++next };
+  for (const [index, count] of [-1, 4, 5, Number.NaN, 1.5].entries()) {
+    let failure: unknown;
+    try { winrmRuntime.windowsCreationAllowance(count, 4, execution); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(QualificationFailure);
+    expect((failure as QualificationFailure).evidence).toMatchObject({ id: 201 + index, class: "harness", reason: "helper_failed", step: "preflight" });
+  }
+  expect(winrmRuntime.windowsCreationAllowance(3, 4, execution)).toBe(1);
+  expect(next).toBe(205);
+});
+test("496 R2 cancellation during an upload claim cannot start its stream", async () => {
+  const controller = new AbortController(), calls: string[] = [];
+  await expect(winrmRuntime.windowsUploadOnce({
+    allowFresh: true, state: async () => undefined, verify: async () => false,
+    checkpoint: async state => { calls.push(state); controller.abort(); },
+    upload: async () => { calls.push("stream"); },
+  }, { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 })).rejects.toThrow("deadline_exceeded");
+  expect(calls).toEqual(["started"]);
+});
+test("496 R2 upload reconciliation cannot remove a partial file after cancellation during inspection", async () => {
+  const controller = new AbortController(), calls: string[] = [];
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+  await expect(reconcileWindowsUpload({
+    stream: async () => windowsWinrmResult(transportResult(), false, execution, true),
+    inspect: async () => { controller.abort(); return { exists: true, matches: false, writerEnded: true }; },
+    remove: async () => { calls.push("remove"); },
+  }, execution)).rejects.toThrow("deadline_exceeded");
+  expect(calls).toEqual([]);
+});
+test.each(["live", "stale"] as const)("496 R2 cancellation between %s launch observations refuses the next POST", async kind => {
+  const controller = new AbortController();
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+  let posts = 0;
+  const fetcher = async () => {
+    posts += 1; controller.abort();
+    return new Response(JSON.stringify(kind === "live" ? { capability: "synthetic-never-real", mode: "view", generation: 1 } : { code: "generation_mismatch" }),
+      { status: kind === "live" ? 200 : 409, headers: { "cache-control": "no-store" } });
+  };
+  await expect((kind === "live" ? winrmRuntime.verifyWindowsLaunchContracts : winrmRuntime.verifyWindowsStaleLaunch)(
+    "https://synthetic.invalid", { instanceId: "synthetic-only", generation: 1 }, fetcher, execution)).rejects.toThrow("deadline_exceeded");
+  expect(posts).toBe(1);
+});
+test("496 R2 RDP cancellation during stdin owns teardown before any further work", async () => {
+  const controller = new AbortController(), calls: string[] = [];
+  let settle!: (code: number) => void;
+  const child = {
+    stdin: { write: () => { calls.push("write"); controller.abort(); }, end: () => { calls.push("end"); } },
+    exitCode: null as number | null,
+    kill: () => { calls.push("kill"); child.exitCode = 143; settle(143); },
+    exited: new Promise<number>(resolve => { settle = resolve; }).then(code => { calls.push("exit"); return code; }),
+  };
+  await expect(winrmRuntime.settleWindowsRdp(child, "synthetic-only", async () => { calls.push("observe"); },
+    { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 })).rejects.toThrow("deadline_exceeded");
+  expect(calls).toEqual(["write", "kill", "exit"]);
+});
+test.each(["abort", "allocation"] as const)("496 R2 firewall rule refetch %s cannot authorize another POST", async kind => {
+  const controller = new AbortController();
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+  let now = 0, reads = 0; const ports: string[] = [];
+  expect(typeof winrmRuntime.configureWindowsFirewallRules).toBe("function");
+  await expect(winrmRuntime.configureWindowsFirewallRules({
+    id: "synthetic-firewall", label: "omp-winqual-11111111-1111-4111-8111-111111111111", environment: {}, execution, allocationDeadline: 100, now: () => now,
+    read: async () => {
+      if (++reads === 2) { if (kind === "abort") controller.abort(); else now = 100; }
+      return { id: "synthetic-firewall", description: "omp-winqual-11111111-1111-4111-8111-111111111111" };
+    },
+    post: async port => { ports.push(port); },
+  })).rejects.toThrow("deadline_exceeded");
+  expect(ports).toEqual(["3389"]);
 });
 test("reconnect accounts for command time in its 90-second budget", async () => {
   let now = 0; const budgets: number[] = []; const sleeps: number[] = [];
@@ -235,7 +370,7 @@ test("an encoding/helper failure cannot be disguised as successful upload reconc
 });
 test("R1 unowned upload termination stays terminal even when inspection could find matching bytes", async () => {
   let inspected = false;
-  const failure = classifyWindowsCommandFailure(new winrmRuntime.WindowsCommandFailure(143, false, 0, 10, 100), false, false);
+  const failure = classifyWindowsCommandFailure(new winrmRuntime.WindowsCommandFailure(143, null, 0, 10, 100), false, false);
   await expect(reconcileWindowsUpload({
     stream: async () => { throw failure; },
     inspect: async () => { inspected = true; return { exists: true, matches: true, writerEnded: true }; },

@@ -65,6 +65,15 @@ while True:
  if os.path.dirname(q)==q: break
  q=os.path.dirname(q)
 if op=='prepare': print('{}');sys.exit(0)
+if op=='claim':
+ fd=os.open(os.path.join(p,'claim'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ try:
+  if os.write(fd,b'collector\\n')!=10: raise ValueError('claim write failed')
+  os.fsync(fd)
+ finally: os.close(fd)
+ fd=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ try: os.fsync(fd)
+ finally: os.close(fd)
 def read_private(n,limit):
  fd=os.open(os.path.join(p,n),os.O_RDONLY|os.O_NOFOLLOW)
  try:
@@ -79,7 +88,10 @@ except FileNotFoundError: before=None
 try: writer_before=read_private('writer',16)
 except FileNotFoundError: writer_before=None
 names=os.listdir(p)
-files=sorted(n for n in names if n not in ['health','writer'])
+try: claim=read_private('claim',16)
+except FileNotFoundError: claim=None
+if claim not in [None,'writer\\n','collector\\n']: raise ValueError('invalid claim')
+files=sorted(n for n in names if n not in ['health','writer','claim'])
 if len(files)>4 or files!=['events.%d.jsonl'%i for i in range(len(files))]: raise ValueError('rotation gap')
 texts=[read_private(n,262144) for n in reversed(files)]
 try: after=read_private('health',64)
@@ -88,10 +100,22 @@ try: writer_after=read_private('writer',16)
 except FileNotFoundError: writer_after=None
 stable=before==after and before is not None and before.startswith('[') and before.endswith('\\n') and writer_before==writer_after and writer_after in ['active\\n','closed\\n']
 if op=='remove':
- if names and (not stable or after!=expected or writer_after!='closed\\n'): raise ValueError('retained snapshot changed')
- for n in names: os.unlink(os.path.join(p,n))
+ if claim!='collector\\n': raise ValueError('collector claim missing')
+ if names!=['claim'] and (not stable or after!=expected or writer_after!='closed\\n'): raise ValueError('retained snapshot changed')
+ retired=p+'.retired'
+ try: os.lstat(retired)
+ except FileNotFoundError: pass
+ else: raise ValueError('retired destination exists')
+ os.rename(p,retired)
+ p=retired
+ fd=os.open(os.path.dirname(p),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ try: os.fsync(fd)
+ finally: os.close(fd)
+ for n in names:
+  if n!='claim': os.unlink(os.path.join(p,n))
+ os.unlink(os.path.join(p,'claim'))
  os.rmdir(p)
-print(json.dumps({'healthy':stable and 'events.0.jsonl' in names,'health':after,'writer':writer_after,'texts':texts,'empty':len(names)==0}))
+print(json.dumps({'healthy':stable and 'events.0.jsonl' in names,'health':after,'writer':writer_after,'texts':texts,'empty':not any(n!='claim' for n in names)}))
 `;
 
 export function createQualificationLogs(options: { execute: FixtureExecutor; remoteDirectory: string; jobDirectory: string }): QualificationLogs {
@@ -99,7 +123,7 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
   let ordinal = 0;
   const windows = new Map<QualificationLogWindow, QualificationLogEvent[]>();
   let retainedBytes = 0;
-  const remote = async (operation: "prepare" | "read" | "remove", expected = "") => {
+  const remote = async (operation: "prepare" | "read" | "claim" | "remove", expected = "") => {
     const result = await options.execute(["python3", "-c", remoteScript, options.remoteDirectory, expected, operation]);
     if (result.exitCode !== 0 || Buffer.byteLength(result.stdout) > 2 * 1024 * 1024) throw new Error("qualification log inspection failed");
     return JSON.parse(result.stdout) as unknown;
@@ -158,7 +182,9 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
     },
     async healthy() { try { await read(); return true; } catch { return false; } },
     async collect() {
-      const state = await remote("read");
+      // Claim before reading/copying; a writer cannot restart between retention and unlink.
+      // Any failed retention deliberately leaves the claim and all remote evidence intact.
+      const state = await remote("claim");
       if (typeof state === "object" && state !== null && "empty" in state && state.empty === true && windows.size === 0) {
         // A prepared destination whose daemon never started has no telemetry to claim or retain.
         await remote("remove");

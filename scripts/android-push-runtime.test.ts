@@ -1,11 +1,72 @@
 import { expect, spyOn, test } from "bun:test";
+import * as deviceOperations from "./android-device.ts";
+import * as webApkOperations from "./android-webapk.ts";
 import { AndroidBrowserCleanupError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
 import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { checkProviderReads } from "./check-repository.ts";
 import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qualification.ts";
 import { normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
+import { notificationTopicDigest } from "./android-notification.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
+
+test.each(["instance", "generation", "request", "alias"] as const)("495 round2 re-arm refuses a changed %s at its transport boundary", async variant => {
+  const expected: SessionMetadata = { instanceId: "fixture-instance-0001", generation: 1, canView: true, canControl: true, inputRequired: false,
+    startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z" };
+  const current = { ...expected, ...(variant === "instance" ? { instanceId: "fixture-instance-0002" } :
+    variant === "generation" ? { generation: 2 } : variant === "alias" ? { qualificationPushAlias: 2 } :
+    { inputRequired: true, ask: { requestId: "synthetic-request-0001", since: expected.startedAt } }), cwdLabel: "omp-push-synthetic" };
+  const fetch = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ revision: 1, sessions: [current] }));
+  let commands = 0;
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execute: async () => { commands++; return { exitCode: 0, stdout: "" }; } });
+    runtime.beforeEffect = async () => {};
+    await expect(runtime.fixture("ask", "synthetic", "primary", expected)).rejects.toThrow();
+    expect(commands).toBe(0);
+  } finally { fetch.mockRestore(); }
+});
+
+test.each(["network-cleanup", "triage-v2"] as const)("495 round2 runtime preserves %s evidence", async variant => {
+  const spies = [
+    spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+    spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+    spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+    spyOn(Bun, "sleep").mockResolvedValue(undefined),
+  ];
+  let cleared: unknown;
+  const driver = {
+    browserSend: async () => ({ targetInfos: [{ type: "page", targetId: "synthetic", url: identity.origin + "/" }] }),
+    attachTab: async () => {}, navigate: async () => {},
+    evaluate: async (expression: string) => {
+      if (expression.includes("omp.sessions.held-asks")) {
+        const record = { sourceId: "local", sourceOrigin: identity.origin, instanceId: "fixture-owned",
+          requestId: "synthetic-request", heldAt: "2026-01-01T00:00:00.000Z" };
+        cleared = await new Function("localStorage", `return ${expression}`)({
+          getItem: (key: string) => key === "omp.sessions.held-asks.v2" ? JSON.stringify([record]) : null,
+        });
+        throw new Error("synthetic stop");
+      }
+      if (expression.includes("getNotifications")) return undefined;
+      return expression.includes("document.readyState") ? "complete" : { href: identity.origin + "/", secure: true };
+    },
+  };
+  const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => {
+    if (variant === "network-cleanup") throw new AndroidBrowserCleanupError([], 1);
+    return run(driver);
+  }) as typeof withAndroidChrome);
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.beforeEffect = async () => {};
+    if (variant === "network-cleanup") await expect(runtime.network("wifi")).rejects.toMatchObject({ pixelUnrestored: true });
+    else {
+      await expect(runtime.cleanup("notifications", { epoch: "synthetic", notificationTopicDigest: notificationTopicDigest("omp-attention-fixture-owned"),
+        secondaryNotificationTopicDigest: null } as AndroidPushProgress)).rejects.toThrow("synthetic stop");
+      expect(cleared).toBe(false);
+    }
+  } finally { chrome.mockRestore(); for (const spy of spies) spy.mockRestore(); }
+});
 
 test("only the exact owned DevTools probe is classified as a non-provider fetch", () => {
   expect(checkProviderReads("scripts/android-device.ts", 'fetch("http://127.0.0.1:" + port + "/json/version", {signal})')).toEqual([]);

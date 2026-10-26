@@ -249,7 +249,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     clearInterval(loggingHealth);
     poller.stop();
     try {
-      http?.stop(true);
+      await http?.stop(true);
     } finally {
       try {
         await creationService.stop();
