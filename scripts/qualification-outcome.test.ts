@@ -7,6 +7,7 @@ import {
   OUTCOME_MAX_BYTES, parseQualificationExecution, parseQualificationOutcome, parseRigReadinessReceipt, qualificationOutcomeExitCode,
   readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution, type QualificationOutcome,
 } from "./qualification-outcome.ts";
+import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
 import { FAILURE_STEPS } from "./qualification-failure.ts";
 const privateTmpdir = realpathSync(tmpdir());
 
@@ -42,10 +43,11 @@ describe("general qualification machine outcome", () => {
         timings: {}, cleanupDisposition: "restored" })).toThrow();
     }
   });
-  test("council U1 complete outcomes reject duplicate and escaped-equivalent keys through file reads", async () => {
-    const root = await mkdtemp(join(privateTmpdir, "qualification-duplicate-")), path = join(root, "outcome.json");
+  test("council U1 complete outcomes reject duplicate and escaped-equivalent keys through portable parsing and POSIX file reads", async () => {
+    const root = process.platform === "win32" ? undefined : await mkdtemp(join(privateTmpdir, "qualification-duplicate-"));
     try {
       const valid = JSON.stringify(outcome());
+      expect(parseQualificationOutcome(parseRetainedVendorJson(valid), execution())).toEqual(outcome());
       for (const text of [
         valid.replace('"formatVersion":1', '"formatVersion":1,"formatVersion":1'),
         valid.replace('"formatVersion":1', '"formatVersion":1,"format\\u0056ersion":1'),
@@ -55,12 +57,17 @@ describe("general qualification machine outcome", () => {
       ]) {
         // Native decoding gives the exact valid fixture; only duplicate-member preservation differs.
         expect(JSON.parse(text)).toEqual(outcome());
-        await writeFile(path, text, { mode: 0o600 });
-        await expect(readQualificationOutcomeFile(path, execution())).rejects.toThrow();
+        expect(() => parseQualificationOutcome(parseRetainedVendorJson(text), execution())).toThrow();
+        if (root !== undefined) {
+          const path = join(root, "outcome.json");
+          await writeFile(path, text, { mode: 0o600 });
+          await expect(readQualificationOutcomeFile(path, execution())).rejects.toThrow();
+        }
       }
-    } finally { await rm(root, { recursive: true, force: true }); }
+    } finally { if (root !== undefined) await rm(root, { recursive: true, force: true }); }
   });
-  test("council P2 existing private leaves below symlinked ancestors are refused", async () => {
+  // Persistence belongs to the POSIX Studio driver; Windows exercises the explicit refusal below.
+  test.skipIf(process.platform === "win32")("council P2 existing private leaves below symlinked ancestors are refused", async () => {
     const root = await mkdtemp(join(privateTmpdir, "qualification-ancestor-"));
     const actual = join(root, "actual"), alias = join(root, "alias"), parent = join(actual, "job");
     try {
@@ -71,7 +78,7 @@ describe("general qualification machine outcome", () => {
       await expect(writeQualificationOutcomeFile(join(alias, "job", "outcome.json"), outcome())).rejects.toThrow();
     } finally { await rm(root, { recursive: true, force: true }); }
   });
-  test("council P2 a file that grows during bounded reading is refused", async () => {
+  test.skipIf(process.platform === "win32")("council P2 a file that grows during bounded reading is refused", async () => {
     const root = await mkdtemp(join(privateTmpdir, "qualification-size-change-")), path = join(root, "outcome.json");
     await writeQualificationOutcomeFile(path, outcome());
     const probe = await open(path, "r");
@@ -169,7 +176,8 @@ describe("general qualification machine outcome", () => {
       failures: [{ ...value.failureSummary.failures[0], class: "product", reason: "assertion_failed" }] } }, execution())).toBe(1);
     expect(qualificationOutcomeExitCode(value, undefined)).toBe(1);
   });
-  test("atomic private publication round trips, replaces safely, and leaves no temporary file", async () => {
+  // These filesystem assertions require POSIX ownership, modes, no-follow opens and directory sync.
+  test.skipIf(process.platform === "win32")("atomic private publication round trips, replaces safely, and leaves no temporary file", async () => {
     const root = await mkdtemp(join(privateTmpdir, "qualification-outcome-"));
     const path = join(root, "job", "outcome.json");
     try {
@@ -182,7 +190,7 @@ describe("general qualification machine outcome", () => {
       expect(JSON.parse(await readFile(path, "utf8"))).toEqual(outcome());
     } finally { await rm(root, { recursive: true, force: true }); }
   });
-  test("missing, oversized, duplicate-key and non-private files are refused", async () => {
+  test.skipIf(process.platform === "win32")("missing, oversized, duplicate-key and non-private files are refused", async () => {
     const root = await mkdtemp(join(privateTmpdir, "qualification-outcome-invalid-"));
     const path = join(root, "outcome.json");
     try {
@@ -200,7 +208,7 @@ describe("general qualification machine outcome", () => {
       expect(await readdir(root)).toEqual(["outcome.json"]);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
-  test("symlink destinations and non-private parents are not followed or repaired", async () => {
+  test.skipIf(process.platform === "win32")("symlink destinations and non-private parents are not followed or repaired", async () => {
     const root = await mkdtemp(join(privateTmpdir, "qualification-outcome-links-"));
     const target = join(root, "target.json"), path = join(root, "outcome.json");
     try {
@@ -217,7 +225,7 @@ describe("general qualification machine outcome", () => {
       await expect(writeQualificationOutcomeFile(join(alias, "job", "outcome.json"), outcome())).rejects.toThrow();
     } finally { await rm(root, { recursive: true, force: true }); }
   });
-  test("invalid writes preserve the previous outcome and withhold native path diagnostics", async () => {
+  test.skipIf(process.platform === "win32")("invalid writes preserve the previous outcome and withhold native path diagnostics", async () => {
     const root = await mkdtemp(join(privateTmpdir, "qualification-outcome-errors-"));
     const path = join(root, "outcome.json");
     try {
@@ -227,6 +235,16 @@ describe("general qualification machine outcome", () => {
       const error = await writeQualificationOutcomeFile(join(path, "child.json"), outcome()).catch((error: unknown) => error);
       expect(String(error)).not.toContain(root);
       expect(String(error)).toContain("qualification outcome file");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test.skipIf(process.platform !== "win32")("Windows refuses outcome persistence before filesystem effects", async () => {
+    const root = await mkdtemp(join(privateTmpdir, "qualification-outcome-unsupported-"));
+    const path = join(root, "job", "outcome.json");
+    try {
+      const message = "qualification outcome persistence requires a POSIX host";
+      await expect(writeQualificationOutcomeFile(path, outcome())).rejects.toThrow(message);
+      await expect(readQualificationOutcomeFile(path, execution())).rejects.toThrow(message);
+      expect(await readdir(root)).toEqual([]);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
