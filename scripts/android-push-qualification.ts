@@ -42,7 +42,8 @@ export async function waitForPushDelivery(options: {
     if (reason === "privacy_failed") throw new QualificationFailure({ ...common, reason, class: "product" });
     if (reason === "push_service_failure") throw new QualificationFailure({ ...common, reason, class: "infra_transient",
       observations: { ...common.observations, pushServiceFailure: true, retryableStatus: true, httpStatus: status } });
-    throw new QualificationFailure({ ...common, reason, class: "harness" });
+    if (reason === "invalid_evidence") throw new QualificationFailure({ ...common, reason, class: "harness" });
+    throw new QualificationFailure({ ...common, reason: "delivery_timeout", class: "harness" });
   };
   const checked = async (target: SessionMetadata) => {
     await runtime.assertNotificationOwnership();
@@ -79,9 +80,9 @@ export async function waitForPushDelivery(options: {
     options.onTimeout?.(late);
     // This post-deadline sample is evidence only, never a successful delivery.
     await late();
-    if (telemetry === undefined || !telemetry.sufficient) fail("delivery_timeout", elapsed);
+    if (telemetry === undefined || !telemetry.sufficient) return fail("delivery_timeout", elapsed);
     if (!telemetry.retryable) fail("delivery_timeout", elapsed);
-    if (metrics.deliveryRearmCount !== 0 || attempt !== 0 || options.rearm === undefined) fail("push_service_failure", elapsed, telemetry.httpStatus);
+    if (metrics.deliveryRearmCount !== 0 || attempt !== 0 || options.rearm === undefined) return fail("push_service_failure", elapsed, telemetry.httpStatus);
     metrics.deliveryRearmCount = 1; metrics.deliveryRearmReason = 1; // 1 = provider 429/retryable 5xx
     const fresh = await options.rearm(session, late);
     if (fresh.session.instanceId !== session.instanceId || fresh.session.generation !== session.generation ||
