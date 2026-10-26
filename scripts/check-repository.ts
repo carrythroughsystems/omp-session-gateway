@@ -81,14 +81,56 @@ const nonProviderFetches: Readonly<Record<string, readonly string[]>> = {
   "test-visual.ts": ['new URL("/percy/healthcheck"', 'new URL("/test/logs"'],
 };
 
+/** Consume the complete init object and the same dispatcher's immediately following GET gate. */
+function windowsReadDispatcher(after: string, signalOwned: boolean): boolean {
+  const tokens = sourceTokens(after, true);
+  let token = tokens.next().value as SourceToken | undefined;
+  const advance = () => { token = tokens.next().value as SourceToken | undefined; };
+  const take = (value: string): boolean => {
+    if (token?.value !== value) return false;
+    advance(); return true;
+  };
+  const sequence = (...values: string[]): boolean => values.every(take);
+  if (!sequence(",", "{")) return false;
+  const keys = new Set<string>();
+  while (token && token.value !== "}") {
+    const key = token.value;
+    if (!["method", "headers", "body", "signal"].includes(key) || keys.has(key)) return false;
+    keys.add(key); advance();
+    if (key === "method") {
+      if (take(":") && !take("method")) return false;
+    } else {
+      if (!take(":")) return false;
+      const closes: string[] = [];
+      let count = 0;
+      while (token) {
+        const value = token.value;
+        if (closes.length === 0 && (value === "," || value === "}")) break;
+        const close = ({ "(": ")", "[": "]", "{": "}" } as Record<string, string>)[value];
+        if (close !== undefined) closes.push(close);
+        else if ([")", "]", "}"].includes(value) && closes.pop() !== value) return false;
+        count++; advance();
+      }
+      if (count === 0 || closes.length !== 0) return false;
+    }
+    if (token?.value !== "}" && !take(",")) return false;
+  }
+  if (!keys.has("method") || !keys.has("headers") || !sequence("}", ")", ";", "}", ";")) return false;
+  if (take("try") && !take("{")) return false;
+  if (!sequence("const", "response", "=", "method", "=", "=", "=") || token?.literal !== "GET") return false;
+  advance();
+  if (!sequence("?", "await", "readProvider", "(", "send")) return false;
+  if (signalOwned && !sequence(",", "{", "signal", ",", "deadline", ":", "operationDeadline", "}")) return false;
+  return sequence(")", ":", "await", "send", "(", ")", ";");
+}
+
 /** Only these Windows callbacks may put a synchronous ownership guard before a provider fetch. */
-function reviewedWindowsGuardedFetch(rel: string, text: string, before: string, target: string | undefined, after: string): boolean {
+function reviewedWindowsGuardedFetch(rel: string, before: string, target: string | undefined, after: string): boolean {
   if (rel !== "scripts/windows-qualification-runtime.ts") return false;
   if (target === "url") {
     const send = /const send = (\(\)|\(readSignal: AbortSignal = signal\)) => \{\s*assertWindowsExecution\(execution\);\s*(if \(deadline !== undefined\) windowsRemaining\(started, deadline, performance\.now\(\), execution, "not_started"\);\s*)?return\s*$/u.exec(before);
-    if (!send || (send[1] === "()" && send[2] === undefined) || !/^,\s*\{\s*method,\s*headers:/u.test(after)) return false;
-    return text.includes('const response = method === "GET" ? await readProvider(send) : await send();') ||
-      text.includes('const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();');
+    if (!send || (send[1] === "()" && send[2] === undefined)) return false;
+    return windowsReadDispatcher(after, send[1] !== "()");
   }
   if (target !== '"https://api.ipify.org"') return false;
   const callback = /readProvider\(\s*(\(\)|\(signal\))\s*=>\s*\{\s*assertWindowsExecution\(execution\);\s*return\s*$/u.exec(before);
@@ -104,7 +146,7 @@ export function checkProviderReads(rel: string, text: string): string[] {
   for (const match of text.matchAll(/\b(?:globalThis\.)?fetch\s*\(\s*([^,\n]+)/gu)) {
     const target = match[1]?.trim().replace(/\);$/u, "");
     const before = text.slice(0, match.index);
-    if (reviewedWindowsGuardedFetch(rel, text, before, target, text.slice(match.index! + match[0].length))) continue;
+    if (reviewedWindowsGuardedFetch(rel, before, target, text.slice(match.index! + match[0].length))) continue;
     if (rel === "scripts/browserstack.ts" && target === '`${API}/sessions/${sessionId}.json`') {
       const after = text.slice(match.index! + match[0].length);
       if (!/readProvider\(\s*\(\)\s*=>\s*$/u.test(before) && /^,\s*\{\s*method:\s*"DELETE"/u.test(after)) continue;
@@ -119,13 +161,8 @@ export function checkProviderReads(rel: string, text: string): string[] {
       failures.push(`${rel}:${before.split("\n").length}: cloud WebDriver dispatcher must pin endpoints and retry GET only`);
       continue;
     }
-    if (/readProvider\(\s*\(\)\s*=>\s*$/u.test(before)) continue;
+    if (rel !== "scripts/windows-qualification-runtime.ts" && /readProvider\(\s*\(\)\s*=>\s*$/u.test(before)) continue;
     if (target !== undefined && nonProviderFetches[rel.slice("scripts/".length)]?.includes(target)) continue;
-    // This dispatcher shares a closure but replays it ONLY for GET. Match the gate as well
-    // as the target, so removing the read retry or retrying writes fails repository admission.
-    if ((rel === "scripts/windows-qualification-runtime.ts" && target === "url") &&
-      /const send = \(\) => $/u.test(before) &&
-      text.includes('const response = method === "GET" ? await readProvider(send) : await send();')) continue;
     failures.push(rel + ":" + (before.split("\n").length) + ": unreviewed direct fetch; use readProvider for idempotent provider reads or document the exact non-provider target");
   }
   return failures;

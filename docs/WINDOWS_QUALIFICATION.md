@@ -134,6 +134,9 @@ Cancellation and termination ownership are installed before the first asynchrono
 The execution and local command budget are checked again immediately before spawning, so cancellation
 or expiry during that checkpoint cannot start a helper. WinRM preparation, stability probes, and
 reconnects use one positive-remainder guard; an exhausted budget is never clamped to a 1-ms command.
+The final synchronous guest-dispatch guard also checks the resource lifetime after vault/provider
+reads and the last checkpoint, even when the provider returns an unchanged address. Cleanup uses
+its independent execution guard instead of the expired primary resource lifetime.
 
 ### Transport recovery and failure evidence
 
@@ -144,8 +147,11 @@ messages never do. Controller-authored product assertions remain `product`. Inva
 encoding/import failures, malformed guest JSON, arbitrary guest failures, and unexplained process
 exit 143 remain `harness`. A recognized connection/reset/read timeout or retryable HTTP status
 during a declared read-only operation is `infra_transient`. Only a controller-owned deadline
-while its read-only connection probe is pending produces `probe_deadline`; external cancellation
-cannot acquire that classification. These are lane failure records, not campaign retry authority.
+while its read-only connection probe is pending produces `probe_deadline`. A timer clipped by the
+execution deadline retains controller origin but produces `deadline_exceeded`, not a transient
+probe failure; numeric exit/signal/timeout observations survive projection. Rejected, already-started
+mutations recheck execution expiry and retain unknown disposition. External cancellation and raw
+exit 143 cannot acquire probe-deadline authority. These are lane failure records, not campaign retry authority.
 
 After the unchanged initial authenticated stability window, read-only operations share a reconnect
 helper with delays of **2, 4, 8, and 16 seconds**, at most five calls, inside a **90-second**
@@ -214,6 +220,12 @@ existing app's launcher intent, not a non-exported Chrome activity; cleanup clos
 ordinary Chrome pages and restores that baseline after a crash. A failed restore carries
 `pixelUnrestored: true` to fence the production lease. Development retains its exact-epoch lock
 until cleanup proves restoration; another lane's lock is never broken.
+Automatic development cleanup may inherit its own retained lease only after the original action
+settles and only when the in-memory claim, exact owner file, epoch and process still agree.
+Sharing a PID without that claim is not authority. A different live process remains excluded;
+explicit cleanup may recover the same epoch only after its previous process has exited. Acquisition
+and backoff use the fresh cleanup execution deadline, not a new independent one-hour wait. Release
+rechecks ownership after restoration proof, and an owner change blocks deletion.
 
 **Post-mutation status.** `install`, `rollback` and `rotate-readiness-token` return once the gateway
 proves readiness, but on this two-vCPU guest one immediate `status` read has still failed after them

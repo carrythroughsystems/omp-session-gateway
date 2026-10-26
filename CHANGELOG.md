@@ -54,6 +54,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Re-enter only the current process's retained development Pixel lease during automatic cleanup,
+  bounded by its fresh cleanup deadline; preserve foreign or changed ownership. Attribute
+  execution-clipped helper timers to controller expiry, recheck rejected mutations, and guard the
+  resource lifetime at final guest dispatch. Parse complete Windows fetch options and the same
+  dispatcher's GET-only gate; reject overriding options and legacy unguarded callbacks.
 - Retain an initial Windows development guest only for a typed, known-disposition product assertion;
   contain infrastructure, authentication, harness, unknown, and expired attempts. Guard firewall-rule
   POSTs after refetch, helper spawns after checkpoints, and every owned effect boundary; reject late

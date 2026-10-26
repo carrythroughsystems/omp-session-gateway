@@ -98,22 +98,28 @@ async function firstWinrmResponse(stream: ReadableStream<Uint8Array>, observed: 
     }
   } finally { reader.releaseLock(); }
 }
+type WindowsTermination = "command_deadline" | "execution_deadline" | "external";
 export class WindowsCommandFailure extends Error {
-  constructor(readonly exitCode: number, readonly controllerDeadline: boolean, readonly signal: number,
+  constructor(readonly exitCode: number, readonly termination: WindowsTermination | null, readonly signal: number,
     readonly elapsedMs: number, readonly timeoutMs: number) {
     super("Windows command failed; output withheld");
   }
+  get controllerDeadline(): boolean { return this.termination === "command_deadline" || this.termination === "execution_deadline"; }
 }
 export function classifyWindowsCommandFailure(error: WindowsCommandFailure, readOnly: boolean, connectionProbe: boolean,
   execution?: WindowsExecutionContext): QualificationFailure {
-  return windowsFailure(readOnly && connectionProbe && error.controllerDeadline ? "probe_deadline" : readOnly ? "helper_failed" : "mutation_unconfirmed",
+  const expired = execution !== undefined && performance.now() >= execution.deadline;
+  const stopped = error.termination === "execution_deadline" || expired || execution?.signal.aborted;
+  return windowsFailure(stopped ? "deadline_exceeded" : readOnly && connectionProbe && error.controllerDeadline ? "probe_deadline" : readOnly ? "helper_failed" : "mutation_unconfirmed",
     "command", readOnly ? "read_only" : "unknown",
-    { controllerDeadline: error.controllerDeadline, readOnlyProbe: readOnly && connectionProbe,
+    { controllerDeadline: error.controllerDeadline || expired, readOnlyProbe: readOnly && connectionProbe,
       exitCode: Math.max(0, Math.min(255, error.exitCode)), signal: error.signal, timeoutMs: error.timeoutMs }, execution, error.elapsedMs);
 }
 export async function command(argv: readonly string[], options: {
   cwd?: string; input?: string; timeoutMs?: number; allowedExitCodes?: readonly number[];
   transportProbe?: (probe: WindowsTransportProbe) => Promise<void>;
+  /** Synchronous final resource-lifetime admission, after the last awaited checkpoint. */
+  beforeSpawn?: () => void;
   execution?: WindowsExecutionContext;
   terminationGraceMs?: number;
 } = {}): Promise<string> {
@@ -121,9 +127,10 @@ export async function command(argv: readonly string[], options: {
   assertWindowsExecution(options.execution);
   const budgetDeadline = Math.min(started + timeoutMs, options.execution?.deadline ?? Infinity);
   const initialBudget = windowsRemaining(started, budgetDeadline, started, options.execution, "not_started");
-  let stopChild: ((owned: boolean) => void) | undefined;
-  const deadline = setTimeout(() => stopChild?.(!options.execution || started + timeoutMs < options.execution.deadline), initialBudget);
-  const abort = () => stopChild?.(false);
+  let stopChild: ((origin: WindowsTermination) => void) | undefined;
+  const origin = options.execution && options.execution.deadline <= started + timeoutMs ? "execution_deadline" : "command_deadline";
+  const deadline = setTimeout(() => stopChild?.(origin), initialBudget);
+  const abort = () => stopChild?.("external");
   options.execution?.signal.addEventListener("abort", abort, { once: true });
   try {
   let probe: WindowsTransportProbe | undefined = options.transportProbe === undefined ? undefined : {
@@ -140,16 +147,17 @@ export async function command(argv: readonly string[], options: {
     });
   };
   // The checkpoint owns an await: neither cancellation nor its elapsed budget permits spawn.
+  options.beforeSpawn?.();
   windowsRemaining(started, budgetDeadline, performance.now(), options.execution, "not_started");
   const proc = Bun.spawn([...argv], { cwd: options.cwd ?? root, stdin: options.input === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe" });
-  let controllerDeadline = false, sentSignal = 0, grace: ReturnType<typeof setTimeout> | undefined;
-  const terminate = (ownedDeadline: boolean) => {
+  let termination: WindowsTermination | null = null, sentSignal = 0, grace: ReturnType<typeof setTimeout> | undefined;
+  const terminate = (origin: WindowsTermination) => {
     if (proc.exitCode !== null) return;
     if (sentSignal !== 0) return;
-    controllerDeadline = ownedDeadline; sentSignal = 15;
+    termination = origin; sentSignal = 15;
     const signalAt = Date.now();
     proc.kill("SIGTERM");
-    record({ signalAt, controllerDeadline });
+    record({ signalAt, controllerDeadline: origin !== "external" });
     grace = setTimeout(() => {
       if (proc.exitCode !== null) return;
       sentSignal = 9; proc.kill("SIGKILL"); record({ killAt: Date.now() });
@@ -169,18 +177,18 @@ export async function command(argv: readonly string[], options: {
         if (proc.stdin === undefined || typeof proc.stdin === "number") throw new Error("subprocess input pipe unavailable");
         proc.stdin.write(options.input); proc.stdin.end();
       }
-    } catch { inputFailed = true; terminate(false); }
+    } catch { inputFailed = true; terminate("external"); }
     const [exit, out] = await drained;
     record({ exitedAt: exit.at, exitCode: exit.code });
     await updates;
     if (checkpointFailed) throw checkpointFailure;
     if (inputFailed || sentSignal !== 0 || !(options.allowedExitCodes ?? [0]).includes(exit.code)) {
-      throw new WindowsCommandFailure(exit.code, controllerDeadline, sentSignal, performance.now() - started, timeoutMs);
+      throw new WindowsCommandFailure(exit.code, termination, sentSignal, performance.now() - started, timeoutMs);
     }
-    assertWindowsExecution(options.execution);
+    assertWindowsExecution(options.execution, "unknown");
     return out.trim();
   } finally {
-    terminate(false);
+    terminate("external");
     await exited;
     await drained.catch(() => {});
     clearTimeout(deadline); clearTimeout(grace);
@@ -225,7 +233,7 @@ async function request<T>(url: string, headers: Record<string, string>, method =
   const send = () => {
     assertWindowsExecution(execution);
     if (deadline !== undefined) windowsRemaining(started, deadline, performance.now(), execution, "not_started");
-    return fetch(url, { method, headers: { ...headers, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60_000) });
+    return fetch(url, { method, headers: { ...headers, "content-type": "application/json" }, body: body === undefined ? null : JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
   };
   try {
     const response = method === "GET" ? await readProvider(send) : await send();
@@ -704,6 +712,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
     const credential = account(access, principal);
     try {
       const result: unknown = JSON.parse(await command([python, join(import.meta.dir, "windows-winrm.py")], {
+        beforeSpawn: context.assertEffect,
         input: JSON.stringify({ host: access.host, username: credential.account, password: credential.password, script, input, upload, uploadStep,
           readOnly: !mutation, observeTransport: transportProbe !== undefined }),
         timeoutMs: windowsRemaining(started, started + timeoutMs, performance.now(), owner, "not_started"), allowedExitCodes: [0, 1], ...(transportProbe === undefined ? {} : { transportProbe }),
@@ -711,10 +720,12 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       }));
       return windowsWinrmResult(result, !mutation, owner, upload !== undefined);
     } catch (error) {
-      if (error instanceof QualificationFailure) throw error;
       if (error instanceof WindowsCommandFailure) {
         throw classifyWindowsCommandFailure(error, !mutation, object(input) && input.action === "transport", owner);
       }
+      if (error instanceof QualificationFailure && ["deadline_exceeded", "ownership_changed"].includes(error.evidence.reason)) throw error;
+      assertWindowsExecution(owner, mutation ? "unknown" : "read_only");
+      if (error instanceof QualificationFailure) throw error;
       throw windowsFailure("helper_failed", "output", mutation ? "unknown" : "read_only", {}, owner);
     }
   };
@@ -1014,7 +1025,7 @@ if ($exists) {
       const cert = await ps(context, "fingerprint");
       if (typeof cert.fingerprint !== "string" || !SHA.test(cert.fingerprint)) throw new Error("RDP certificate SHA-256 unavailable");
       await context.beforeEffect();
-      assertWindowsExecution(context.execution ?? execution);
+      context.assertEffect();
       const child = Bun.spawn(["sdl-freerdp", `/v:${access.host}`, `/u:${credential.account}`, "/from-stdin:force", `/cert:fingerprint:sha256:${cert.fingerprint}`, "/size:800x600", "/log-level:OFF"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
       // A new account's first logon builds its profile before Explorer starts, which the provider's Administrator never waits for.
       const session = principal === "administrator" ? {} : { account: credential.account };
@@ -1088,6 +1099,66 @@ export async function retireWindowsDevelopmentEpoch(input: WindowsLaneInput): Pr
   await cleanupWindows(input);
 }
 
+/** Development lease custody, isolated from credential loading and physical-device operations. */
+export function createWindowsDevelopmentPixelLease(options: {
+  lock: string; epoch: () => string; recoverExitedOwner: boolean;
+  recoveryPending: (epoch: string) => Promise<boolean>;
+  clock?: Pick<WindowsRuntime, "now" | "sleep">;
+}): WindowsLaneInput["pixel"] {
+  const clock = options.clock ?? { now: Date.now, sleep: Bun.sleep };
+  let held: { epoch: string; claim: string } | undefined, active = false;
+  const releaseRestored = async (epoch: string, claim: string, execution?: WindowsExecutionContext) => {
+    if (await options.recoveryPending(epoch)) return;
+    if (await readFile(join(options.lock, "owner"), "utf8") !== claim) {
+      throw windowsFailure("ownership_changed", "command", "not_started", {}, execution);
+    }
+    await rm(options.lock, { recursive: true });
+    held = undefined;
+  };
+  return async <T>(caller: string, action: () => Promise<T>, execution?: WindowsExecutionContext): Promise<T> => {
+    if (active) throw windowsFailure("helper_failed", "command", "not_started", {}, execution);
+    active = true;
+    try {
+    const lock = options.lock, started = clock.now(), deadline = started + 60 * 60_000;
+    const epoch = options.epoch(), monotonicStarted = performance.now();
+    const remaining = () => Math.min(windowsRemaining(started, deadline, clock.now(), execution, "not_started"),
+      execution === undefined ? Infinity : windowsRemaining(monotonicStarted, execution.deadline, performance.now(), execution, "not_started"));
+    let previous: string | undefined, inherited = false;
+    while (true) {
+      remaining();
+      try { await mkdir(lock, { mode: 0o700 }); break; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const owner = await readFile(join(lock, "owner"), "utf8").catch(() => "");
+        if (caller === "windows-cleanup" && held?.epoch === epoch && held.claim === owner) {
+          previous = owner; inherited = true; break;
+        }
+        const fields = owner.trim().split(" ");
+        if (caller === "windows-cleanup" && options.recoverExitedOwner && fields[0] === "WindowsLane" && fields[2] === epoch && /^\d+$/u.test(fields[3] ?? "")) {
+          try { process.kill(Number(fields[3]), 0); }
+          catch (failure) { if ((failure as NodeJS.ErrnoException).code === "ESRCH") { previous = owner; break; } }
+        }
+        await clock.sleep(Math.min(5_000, remaining()));
+      }
+    }
+    if (previous !== undefined && await readFile(join(lock, "owner"), "utf8") !== previous) {
+      throw windowsFailure("ownership_changed", "command", "not_started", {}, execution);
+    }
+    const claim = inherited ? previous! : `WindowsLane ${new Date().toISOString()} ${epoch} ${process.pid}\n`;
+    if (!inherited) await writeFile(join(lock, "owner"), claim, { mode: 0o600 });
+    held = { epoch, claim };
+    try {
+      remaining();
+      const result = await action();
+      if (await options.recoveryPending(epoch)) throw new Error("Pixel restoration incomplete; owned lease retained for cleanup");
+      return result;
+    } finally {
+      await releaseRestored(epoch, claim, execution);
+    }
+    } finally { active = false; }
+  };
+}
+
 export async function windowsDevelopmentCli(args: readonly string[]): Promise<void> {
   const [mode = "", ...rest] = args;
   const usage = "usage: bun scripts/windows-stable-qualification.ts preflight|cleanup, or artifacts|run --tag vX.Y.Z-prealpha.N";
@@ -1100,6 +1171,10 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
   await mkdir(devRoot, { recursive: true, mode: 0o700 }); await chmod(devRoot, 0o700);
   const progressPath = join(devRoot, "progress.json"); const identityPath = join(devRoot, "identity.json");
   let progress: unknown;
+  const pixel = createWindowsDevelopmentPixelLease({
+    lock: "/tmp/omp-gw-pixel.lock", epoch: () => (progress as { epoch: string }).epoch, recoverExitedOwner: mode === "cleanup",
+    recoveryPending: async epoch => Boolean((await existingAccess(epoch))?.pixelState),
+  });
   try { progress = JSON.parse(await privateFile(progressPath)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   if (mode !== "cleanup" && progress !== undefined && !windowsNeedsCleanup(progress)) {
     const priorIdentity = JSON.parse(await privateFile(identityPath)) as WindowsIdentity;
@@ -1124,34 +1199,6 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
     return;
   }
   async function checkpoint(next: Record<string, unknown>): Promise<void> { progress = next; await atomicPrivate(progressPath, next); }
-  async function pixel<T>(_owner: string, action: () => Promise<T>): Promise<T> {
-    const lock = "/tmp/omp-gw-pixel.lock"; const started = Date.now(), deadline = started + 60 * 60_000;
-    const epoch = (progress as { epoch: string }).epoch;
-    while (true) {
-      windowsRemaining(started, deadline, Date.now(), undefined, "not_started");
-      try { await mkdir(lock, { mode: 0o700 }); break; }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const owner = await readFile(join(lock, "owner"), "utf8").catch(() => "");
-        const fields = owner.trim().split(" ");
-        if (mode === "cleanup" && fields[0] === "WindowsLane" && fields[2] === epoch && /^\d+$/u.test(fields[3] ?? "")) {
-          try { process.kill(Number(fields[3]), 0); }
-          catch (failure) { if ((failure as NodeJS.ErrnoException).code === "ESRCH") break; }
-        }
-        await Bun.sleep(Math.min(5_000, windowsRemaining(started, deadline, Date.now(), undefined, "not_started")));
-      }
-    }
-    try {
-      await writeFile(join(lock, "owner"), `WindowsLane ${new Date().toISOString()} ${epoch} ${process.pid}\n`, { mode: 0o600 });
-      const result = await action();
-      if ((await existingAccess(epoch))?.pixelState) throw new Error("Pixel restoration incomplete; owned lease retained for cleanup");
-      return result;
-    } finally {
-      // Never hand an unrestored phone to the other lane. Only cleanup may recover
-      // this exact epoch's lease after the owning controller process has exited.
-      if (!(await existingAccess(epoch))?.pixelState) await rm(lock, { recursive: true });
-    }
-  }
   if (mode === "cleanup") { console.log(JSON.stringify(await cleanupWindows({ identity, progress, checkpoint, pixel, runtime }))); return; }
   const result = await runWindows({ identity, progress, checkpoint, pixel, runtime });
   const cleanup = await cleanupWindows({ identity, progress, checkpoint, pixel, runtime });

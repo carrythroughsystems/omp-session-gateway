@@ -1,5 +1,7 @@
-import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { describe, expect, spyOn, test } from "bun:test";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { cleanupWindows, runWindows, verifyWindowsDoctor, windowsCampaignLabel, windowsFailure, windowsNeedsCleanup, assertWindowsPins } from "./windows-stable-qualification.ts";
 import pins from "./windows-qualification-pins.json";
 import type { WindowsContext, WindowsFirewall, WindowsGuestAction, WindowsIdentity, WindowsInstance, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
@@ -233,6 +235,118 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; pr
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test("499 R1 automatic cleanup inherits its in-process development Pixel lease for restoration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "windows-pixel-"));
+    const f = fixture({ development: true });
+    let pending = false, restorations = 0;
+    const pixel = windowsRuntime.createWindowsDevelopmentPixelLease({
+      lock: join(root, "lease"), epoch: () => epoch, recoverExitedOwner: false,
+      recoveryPending: async () => pending,
+      clock: { now: () => 0, sleep: async () => { throw new Error("same owner must not queue for its retained lease"); } },
+    });
+    f.runtime.restorePixel = async context => {
+      if (++restorations === 1) throw Object.assign(new Error("synthetic first restoration failure"), { pixelUnrestored: true });
+      expect(context.execution?.signal.aborted).toBe(false);
+      expect(context.execution!.deadline).toBeGreaterThan(performance.now());
+      pending = false;
+    };
+    f.runtime.pixel = async context => { pending = true; await f.runtime.restorePixel(context); return {}; };
+    try {
+      await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, checkpoint: f.checkpoint, pixel })).rejects.toThrow();
+      expect(restorations).toBe(2);
+      expect(pending).toBe(false);
+      expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+      expect(windowsNeedsCleanup(f.progress)).toBe(false);
+      expect(await Bun.file(join(root, "lease", "owner")).exists()).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["other-process", "same-pid-without-claim"] as const)("499 R1 development cleanup refuses %s lease custody within its execution budget", async kind => {
+    const root = await mkdtemp(join(tmpdir(), "windows-pixel-foreign-")), lock = join(root, "lease");
+    await mkdir(lock);
+    const child = kind === "other-process" ? Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdout: "ignore", stderr: "ignore" }) : undefined;
+    const owner = `WindowsLane 2026-10-26T00:00:00.000Z ${epoch} ${child?.pid ?? process.pid}\n`;
+    await writeFile(join(lock, "owner"), owner);
+    const waits: number[] = []; let actions = 0;
+    const pixel = windowsRuntime.createWindowsDevelopmentPixelLease({
+      lock, epoch: () => epoch, recoverExitedOwner: true, recoveryPending: async () => false,
+      clock: { now: () => 0, sleep: async ms => { waits.push(ms); throw new Error("synthetic blocked lease"); } },
+    });
+    try {
+      await expect(pixel("windows-cleanup", async () => { actions += 1; },
+        { signal: new AbortController().signal, deadline: performance.now() + 1_000, nextFailureId: () => 1 })).rejects.toThrow("synthetic blocked lease");
+      expect(actions).toBe(0); expect(waits).toHaveLength(1); expect(waits[0]).toBeLessThanOrEqual(1_000);
+      expect(await readFile(join(lock, "owner"), "utf8")).toBe(owner);
+    } finally {
+      child?.kill(); if (child) await child.exited;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  test("499 R1 restored development Pixel does not release a changed lease owner", async () => {
+    const root = await mkdtemp(join(tmpdir(), "windows-pixel-changed-")), lock = join(root, "lease");
+    const pixel = windowsRuntime.createWindowsDevelopmentPixelLease({
+      lock, epoch: () => epoch, recoverExitedOwner: false, recoveryPending: async () => false,
+    });
+    try {
+      const owner = "synthetic foreign owner\n";
+      await expect(pixel("windows", async () => { await writeFile(join(lock, "owner"), owner); })).rejects.toThrow("ownership_changed");
+      expect(await readFile(join(lock, "owner"), "utf8")).toBe(owner);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("499 R1 in-process Pixel cleanup cannot overlap its still-active action", async () => {
+    const root = await mkdtemp(join(tmpdir(), "windows-pixel-active-")), lock = join(root, "lease");
+    const pixel = windowsRuntime.createWindowsDevelopmentPixelLease({
+      lock, epoch: () => epoch, recoverExitedOwner: false, recoveryPending: async () => false,
+    });
+    const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+    const first = pixel("windows", async () => { entered.resolve(); await finish.promise; });
+    try {
+      await entered.promise;
+      let cleanupEntered = false;
+      await expect(pixel("windows-cleanup", async () => { cleanupEntered = true; })).rejects.toThrow("helper_failed");
+      expect(cleanupEntered).toBe(false);
+    } finally {
+      finish.resolve(); await first;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  test.each(["provider", "checkpoint"] as const)("499 R1 lifetime expiry during %s preparation refuses actual helper spawn", async boundary => {
+    const f = fixture({ development: true }), original = f.runtime.guest;
+    const spawn = spyOn(Bun, "spawn");
+    f.runtime.guest = async (context, action, principal) => {
+      if (action !== "stage") return original(context, action, principal);
+      const started = (f.progress as { startedAt: number }).startedAt;
+      await f.runtime.sleep(started + 3 * 60 * 60_000 - f.runtime.now() - 1);
+      if (boundary === "provider") {
+        const fresh = await f.runtime.provider.instance("synthetic-owned");
+        await f.runtime.sleep(2);
+        expect(fresh?.id).toBe("synthetic-owned"); // unchanged address/identity, not a refresh path
+      }
+      await windowsCommand([process.execPath, "-e", ""], {
+        beforeSpawn: context.assertEffect,
+        ...(boundary === "checkpoint" ? { transportProbe: async () => { await f.runtime.sleep(2); } } : {}),
+      });
+      return {};
+    };
+    try {
+      await expect(f.run()).rejects.toThrow("deadline_exceeded");
+      expect(spawn).not.toHaveBeenCalled();
+      expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+    } finally { spawn.mockRestore(); }
+  });
+  test("499 R1 a rejected already-started mutation checks execution expiry before projecting its failure", async () => {
+    const f = fixture({ development: true }), original = f.runtime.guest;
+    const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 };
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "stage") {
+        execution.deadline = performance.now() - 1;
+        throw windowsFailure("helper_failed", "command", "unknown");
+      }
+      return original(context, action, principal);
+    };
+    const failure = await runWindows({ identity, progress: undefined, runtime: f.runtime, checkpoint: f.checkpoint, pixel: f.pixel, execution }).catch(error => error);
+    expect(failure.evidence).toMatchObject({ reason: "deadline_exceeded", operation: "unknown", observations: { controllerDeadline: true } });
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+  });
   test.each([
     ["transport", () => windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true })],
     ["authentication", () => windowsFailure("authentication_failed", "connection", "read_only")],
