@@ -79,7 +79,7 @@ async function holdRoute(
   page: Page,
   url: string,
   finish: (route: Route) => Promise<void>,
-): Promise<{ readonly arrived: Promise<void>; readonly finished: Promise<void>; release(): void }> {
+): Promise<{ readonly arrived: Promise<void>; readonly settled: Promise<void>; release(): void }> {
   let release = (): void => undefined;
   const released = new Promise<void>(resolve => {
     release = resolve;
@@ -89,7 +89,7 @@ async function holdRoute(
     arrive = resolve;
   });
   let finishOne = (): void => undefined;
-  const finished = new Promise<void>(resolve => {
+  const settled = new Promise<void>(resolve => {
     finishOne = resolve;
   });
   await page.route(url, async route => {
@@ -98,7 +98,7 @@ async function holdRoute(
     await finish(route).catch(() => undefined);
     finishOne();
   });
-  return { arrived, finished, release: () => release() };
+  return { arrived, settled, release: () => release() };
 }
 
 
@@ -197,7 +197,7 @@ for (const order of ["the failure settles first", "a collaboration mounts first"
       if (order === "the failure settles first") {
         // The superseded failure is discarded; the latest intent still owns the deferred update.
         failingLaunch.release();
-        await failingLaunch.finished;
+        await failingLaunch.settled;
         await expect(page.locator("#status-banner")).not.toContainText("The session could not be opened.");
         await expect(page.locator(".gateway-shell")).toHaveCount(0);
         expect(fixture.launchRequests).toHaveLength(0);
@@ -210,7 +210,7 @@ for (const order of ["the failure settles first", "a collaboration mounts first"
         viewLaunch.release();
         await expect(page.locator(".conn-chip")).toBeVisible();
         failingLaunch.release();
-        await failingLaunch.finished;
+        await failingLaunch.settled;
         await page.waitForTimeout(250);
         await expect(page.locator(".conn-chip")).toBeVisible();
         await expect(page.locator("link[data-omp-collab-styles]")).toHaveCount(1);

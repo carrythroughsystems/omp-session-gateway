@@ -791,6 +791,7 @@ blocking a merge.
 | `portable-source` | `bun run check:portable` on Ubuntu, macOS, and Windows: repository check, typecheck, build, every test not bound to another host OS (`scripts/test-portable.ts` names each exclusion and its reason), and both leak scans | gating |
 | `browser-notifications` | `bun run test:browser`: the whole Playwright suite on two mobile viewports, not only the notification cases its historical name suggests | gating |
 | `browser-core` | `bun run test:browser:compat`: the `@core` Playwright tests on desktop Chromium, Firefox, and WebKit and on WebKit with iPhone-class emulation (`apps/web/playwright.compat.config.ts`) | gating |
+| `browser-flake-budget` | Weekly/manual `bun run check:browser-flakes`: preceding seven days of CI and Compatibility browser reports, including completed workflow attempts | maintenance, not a release/PR gate |
 | `windows-service-lifecycle` | Windows contracts and ACLs, install, readiness-token isolation and rotation, uninstall, and a standard (non-elevated) user's install, reinstall, daemon readiness, and uninstall | gating |
 | `linux-arm64-source-checkout` | Native aarch64 typecheck, build, `bun test`, and the pinned mainline OMP registry fixtures | advisory |
 | `coverage` | `bun run test:coverage` and the Codecov upload | advisory |
@@ -826,6 +827,64 @@ The browser lane gates because it holds the only executable proof of contracts t
 gateway/vendored-client boundary. `apps/web/e2e/software-keyboard.e2e.ts` is the worked example:
 the gateway chrome sizes itself from `--viewport-height`, a custom property published by the
 vendored collaboration client, and no other check fails if that property stops arriving.
+
+### Browser retries, evidence, and harness readiness
+
+Both non-visual Playwright configurations use one retry only when `CI` is exactly `"true"` or
+`"1"`; all other values keep zero retries. Projects, workers, assertions, and timing bounds are
+unchanged. A pass on retry is **flaky**, not a clean first pass; exhausted retries fail normally.
+Every prepare PR, including a version-only bump, executes required checks against its exact
+checkout. **Never reuse main's green results for a prepare head.** Dependency/browser caches
+may be reused, not check outcomes.
+
+`scripts/test-browser.ts` removes stale evidence, writes
+`test-results/browser-flakes/browser-flake-report.json`, and preserves Playwright's nonzero exit.
+Missing/invalid required CI evidence fails even an otherwise green run. Both jobs always append
+sanitized per-project counts and flaky/unexpected repository locations to the job summary and
+upload only that JSON with 14-day retention. The closed version-2 report contains run/attempt,
+tested SHA, lane/project, relative source location, location/project-derived identity (with a
+deterministic occurrence for parameterized declarations), expected status, attempt
+ordinals/status/duration and independently derived final outcome. Interruptions follow pinned
+Playwright's outcome rules; empty/all-unexecuted reports cannot satisfy coverage.
+It never copies titles, errors, stdout/stderr, attachments, source excerpts, URLs,
+or fixture values. Automatic traces, video, and screenshots are disabled in these two configs;
+the separate synthetic visual lane retains its own guarded policy.
+
+The weekly/manual budget counts each executed test once per workflow attempt, regardless of
+Playwright retries; skipped tests do not dilute the denominator. Flaky executions must be at most
+1% **per lane/project**, and no test/project may flake more than twice in seven days. Reports are
+bound to GitHub run/attempt and tested commit metadata (a PR merge must have exactly two parents,
+with the source head as its second parent). A fleet dispatch may instead test its explicit
+`dispatchTargetSha`: the workflow revision must pin checkout to `inputs.target_sha`, validate
+the bounded fleet dispatch, and verify that checkout; both validation steps must have actually
+succeeded in that attempt's browser job. An arbitrary dispatch/report target is never accepted.
+The `OMP_BROWSER_REPORT_VERSION: "2"` job marker at
+the run's source-head workflow revision defines the reporting cohort, not a date cutoff.
+Unreadable revisions, malformed/foreign artifacts, and missing reports for completed
+reporter-enabled browser jobs fail evidence coverage. Cancelled/non-completed jobs and
+selective reruns that did not execute that browser job have no new report obligation; attempt-specific
+job metadata is authoritative. Historical unmarked/version-1 revisions are pre-v2 evidence,
+not current coverage; unknown future versions fail closed. Executed workflow reruns are separate
+executions; duplicate observations of one attempt count only once.
+
+`check:repository` scans the entire e2e tree: no `.finished` access (including optional/computed
+literal access), request-finished readiness listeners/waits, or `networkidle` navigation/load
+waits. `waitForResponse()` is reserved for an explicit HTTP-contract assertion on that response
+binding in the same lexical scope (including Promise.all/destructured or awaited-promise forms), never proof that
+the UI applied a response. Observe an application-state transition instead; the delayed-bfcache
+tray regression changes a local synthetic row label while keeping its remote response held.
+After the foreground shell mounts, it waits for application-owned remote Hide reconciliation
+on a new generation before checking no stale-resume launch occurred; receipt of the response or
+a fixed animation-frame count is not sufficient.
+For **startup-retry** scenarios, install and freeze the clock **before navigation**, so setup
+cannot start a retry that freezing aborts. Repository regression tests pin that ordering in the
+startup availability/network cases. Intentional post-navigation clock advances that exercise
+an already-mounted lifecycle or timer remain post-navigation.
+
+Reporter, budget, workflow and lint regressions cover flaky/exhausted/expected-failure
+accounting, private-field exclusion, CI/local retry values including Firefox, safe failure
+uploads, the exact 1%/two-flake boundaries, duplicate attempts, missing evidence, optional/computed
+wait access, and the allowed explicit response-assertion shape.
 
 It is also the only place the background/restore contract of ADR-029 is executable. The three
 `bfcache restore` cases in `apps/web/e2e/launch.e2e.ts` drive a real `pagehide`/`pageshow` pair and

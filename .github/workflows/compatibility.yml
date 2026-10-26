@@ -45,9 +45,12 @@ jobs:
     # (browser-notifications in ci.yml) and physical device qualification stay separate.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      OMP_BROWSER_REPORT_VERSION: "2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -75,3 +78,14 @@ jobs:
           bunx playwright install --with-deps chromium firefox webkit
         timeout-minutes: 10
       - run: bun run test:browser:compat
+      - name: Summarize sanitized browser flakes
+        if: ${{ always() }}
+        run: bun scripts/test-browser.ts --summary-only --compat
+      - name: Retain sanitized browser flakes
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-flake-browser-core-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/browser-flakes/browser-flake-report.json
+          retention-days: 14
+          if-no-files-found: error

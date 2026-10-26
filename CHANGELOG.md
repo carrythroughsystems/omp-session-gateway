@@ -15,6 +15,21 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Unknown, mixed, unresolved or unbound failures remain non-retryable; this change does not
   enable automatic recovery or reinterpret historical failures.
 
+### Fixed
+
+- Contain browser CI flakes with one CI-only retry across both mobile Chromium and cross-engine
+  core suites, closed privacy-safe attempt reports and summaries retained for 14 days, and a
+  weekly/manual seven-day flake budget with fail-closed evidence coverage. Local runs keep zero
+  retries and prepare PRs still execute their own required checks. Reject response-completion,
+  request-finished and network-idle readiness waits in e2e; the delayed-resume tray race now waits
+  for an applied local row transition while its remote snapshot remains held.
+- Derive browser flake outcomes from attempt/expected-status evidence, bind HTTP-assertion lint
+  exemptions to the same lexical response, and assess coverage from actually executed browser
+  jobs so cancellation/selective reruns do not invent missing evidence. Validate explicitly pinned
+  fleet targets separately from workflow heads; version-2 cohorts exclude pre-contract reports.
+  The delayed-resume regression also waits for remote generation reconciliation before asserting
+  that the mounted foreground shell was not superseded.
+
 ## [v0.9.0] — 2026-10-25
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 44 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.

@@ -27,6 +27,18 @@ every listed lane stays green (on each change, and canaries daily) and bug repor
 [Current claim](#current-claim) and the [release ledger](RELEASE_STATUS.md), plus the retained
 macOS Virtualization.framework guest under ADR-033; see [Status vocabulary](#status-vocabulary).
 
+Browser **Tested** evidence distinguishes a clean first pass from a flaky retry pass. Both
+`browser-notifications` and `browser-core` allow one retry only for `CI=true`/`CI=1`, retain a
+sanitized per-attempt JSON report for 14 days, and summarize counts and repository test locations;
+local runs have zero retries. Weekly/manual `browser-flake-budget` maintenance enforces at most
+1% flaky logical executions per lane/project and no test/project flaky more than twice over seven
+days, with missing reporter-enabled browser-job evidence failing coverage. Cancelled jobs and
+selective reruns of only sibling jobs owe no new report; outcomes are derived from expected
+status and attempts rather than trusted labels. This containment changes no
+assertion, deadline, browser project, or physical/signed-candidate qualification claim. Prepare
+PRs execute required checks on their own exact checkout, even for a version-only bump; main's
+green results cannot be reused. See [browser evidence policy](TEST_PLAN.md#browser-retries-evidence-and-harness-readiness).
+
 - **Installing as a PWA.** Chromium browsers install from the browser menu on desktop and Android.
   Safari installs with Add to Home Screen on iPhone and iPad, and Add to Dock on macOS. Desktop
   Firefox has no web-app install; it works in a tab.
