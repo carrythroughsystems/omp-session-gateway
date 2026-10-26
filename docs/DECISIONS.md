@@ -1891,3 +1891,43 @@ unchanged.
 - **Trust change:** Enabling `tern` on a target host grants every origin in `http.trustedDashboardOrigins` permission to start approved OMP profiles under the caller's allowlisted Tailscale identity. Removing a dashboard origin blocks further cross-origin API requests immediately, but does not stop an accepted creation, kill a running OMP process, or revoke an already-issued relay capability.
 - **Limitations:** `tern new tab` targets Tern's first window and uses `--keep-open` so failed commands remain inspectable in Tern. `profile.env` supplies only the Tern CLI child's environment and is not assumed to cross Tern's GUI-server RPC boundary into the pane; the Tern pane's OMP environment must already publish into the directory configured in `omp.discoveryDir` with `collab.autoStart = control`. Absent `tern` preserves zero Tern dependency (18 base `doctor` checks); when `tern` is authored, `doctor` adds `ternAvailable` to verify runtime paths, `inspect --json`, and ledger readability without starting OMP. Native **Open in Tern** handoff remains out of scope: Android Tern `0.9.5` is upstream-blocked ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)) and desktop handoff is deferred. Existing Tested / Supported / Qualified claims and upstream pins remain unchanged.
 - **Upgrade and rollback:** `omp-gateway install` preserves authored `tern` verbatim. Every managed `rollback` or `rollback --to` conservatively disables creation via `projectPreTernConfig` (composed with `projectPreFleetConfig` for targets `< 0.8.0`), saving the full authored config to private `<configDir>/config.pre-rollback.json` first (refusing overwrite if that backup exists) while preserving `<stateDir>/session-creations.json` and leaving running Tern tabs and OMP processes untouched. Re-enabling creation requires explicit operator restoration on a compatible runtime. See [Operations](OPERATIONS.md#opt-in-tern-session-creation), [Protocol](PROTOCOL.md#session-creation-state-machine), and [Upgrade and rollback](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
+
+---
+
+## ADR-045 — CI-only browser retries with closed flake evidence
+
+**Status:** Accepted
+
+**Date:** 2026-10-25
+
+**Context:** Prepare PRs encountered unrelated browser harness races and an unreproduced Firefox
+navigation timeout. Bounded CI retries must not hide persistent regressions, weaken timing/product
+assertions, or turn unrestricted Playwright diagnostics into capability-bearing artifacts.
+
+**Decision:**
+
+- Both non-visual Playwright configurations retry once only when `CI` is exactly `"true"` or
+  `"1"`; all other values retain zero retries. Workers, projects, assertions and deadlines stay
+  unchanged. A retry pass is reported as flaky; exhausted retries still fail.
+- Alongside the line reporter, retain only a closed, versioned report of run/attempt, actual
+  tested SHA, lane/project, repository location, location/project-derived identity, attempt
+  ordinal/status/duration and final outcome. Never copy titles, errors, output, attachments,
+  source excerpts, URLs or fixture values. Disable automatic trace/video/screenshot capture.
+  Required reporting failure cannot produce a green CI run; existing test failure exits survive.
+- Both browser jobs always summarize counts/locations and upload only that JSON for 14 days.
+  Weekly/manual maintenance evaluates the preceding seven days: at most 1% flaky logical
+  executions per lane/project and no test/project flaky more than twice. Retries count as one
+  execution; skipped cases do not dilute it. Validate GitHub run/attempt and tested-subject
+  binding, identify the cohort by the workflow-revision reporter marker, and fail coverage on
+  missing or invalid reporter-enabled evidence rather than inventing zero flakes.
+- E2e readiness observes application state, not response `.finished`, request-finished events
+  or `networkidle`. `waitForResponse()` is reserved for explicit HTTP-contract assertions.
+  Startup-retry tests install/freeze their clock before navigation; intentional post-navigation
+  lifecycle advances remain in place.
+- Every prepare PR executes its own exact-subject required checks, including version-only bumps.
+  Reuse dependency/browser caches, never main's green outcomes.
+
+**Consequences:** Browser flakiness becomes visible and bounded without altering product behavior
+or signed-release gates. Maintenance is not a substitute for required PR checks or exact physical
+qualification. Clean and retried browser evidence remain distinct under ADR-030; no historical
+or emulated result acquires a new qualification claim.
