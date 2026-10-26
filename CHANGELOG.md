@@ -15,6 +15,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
   publication lifecycle proof, and retain typed collateral evidence for an unrestored Pixel.
   Add an effectful, fully restored rig-readiness gate before expensive fan-out, bounded owner
   cancellation, and exact-bound failed-attempt recovery without rewriting passed proofs.
+- Structured Windows transport failure evidence, bounded read-only reconnects, deadline-aware
+  subprocess reaping, and interrupted-upload reconciliation without write replay. Cleanup skips
+  confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,
+  while retaining independent firewall, tailnet, Pixel, and vault containment requirements.
 
 ## [v0.9.0] — 2026-10-25
 
