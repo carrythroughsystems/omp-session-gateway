@@ -490,18 +490,28 @@ enables daemon retention. Ordinary installations are unchanged. The sink accepts
 names/fields, finite numbers and booleans (plus the fixed envelope timestamp/level/name), and retains
 four files of at most 256 KiB. The existing absolute destination must be current-user-owned, mode
 0700, with no symlink components; files are single-link, current-user-owned 0600 regular files.
-Unsafe startup fails. A later write failure is sticky; a missing successful-write marker refuses
-restart. Raw daemon stdout/stderr remain discarded independently of structured retention.
+Unsafe startup fails. Each write durably invalidates the existing private health inode before
+touching log data; success commits the exact event index. Later failure is sticky even when the
+directory cannot unlink files. Restart and collection require that committed index to match all
+validated rotated records. Rate-limited IPC events use the same closed vocabulary. Raw daemon
+stdout/stderr remain discarded independently of structured retention, proven on the gateway's host.
+Install/rollback/repair only forward the logging option to runtimes advertising `structured-v1`;
+older installed runtimes omit it rather than receiving an unsupported command-line option.
 
 Push events retain only process-local numeric sequence, kind flags, subscription counts, durations,
 and HTTP status. Provider acknowledgement is acceptance, not phone presentation. Collector windows
 use event indices and require a unique queue/send; simultaneous sends, rotation gaps, missing or
 invalid telemetry never authorize recovery by time proximity. Request identities remain volatile.
+Subscription replays have a separate boolean kind and cannot authorize a fresh-ask retry. Radio
+restoration closes the original window before reopening the WebAPK; post-restoration observation
+uses a new window. Re-arm requires both phone clear and outbound clear acknowledgement.
 A late post cannot satisfy a fresh ask: the existing worker must attest its exact request and the
 authoritative snapshot must retain its generation.
 At most one evidence-backed fresh ask is allowed per phase, separate from overlap recovery; all
 privacy assertions and the 60/160-second bounds remain unchanged. The forbidden-sink proof requires
 both raw-stream discard and validated structured-log safety.
+Per-phase `deliveryTimings` retains ordered first/second millisecond pairs for each delivery,
+without overwriting earlier observations; the phase-wide one-re-arm budget remains independent.
 
 Logs live outside fixture-cleanup directories. After the daemon stops, collection validates bounded
 records into private, exclusively-created immutable job files and lane/phase slices, then removes

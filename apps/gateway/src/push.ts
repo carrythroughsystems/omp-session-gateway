@@ -399,6 +399,7 @@ export class PushService {
     const requestId = session.ask?.requestId;
     if (requestId === undefined) return;
     const pendingAskCount = this.#pendingAskCount();
+    const subscriptionReplay = subscriptions !== undefined;
     this.#queueDelivery(session.instanceId, "attention", async sequence => {
       await this.#deliver(
         sequence,
@@ -416,8 +417,9 @@ export class PushService {
           };
         },
         subscriptions,
+        subscriptionReplay,
       );
-    });
+    }, subscriptionReplay);
   }
 
   #queueActivityStop(event: SessionActivityStopEvent): void {
@@ -459,9 +461,9 @@ export class PushService {
     });
   }
 
-  #queueDelivery(instanceId: string, kind: AttentionPushMessage["type"], send: (sequence: number) => Promise<void>): void {
+  #queueDelivery(instanceId: string, kind: AttentionPushMessage["type"], send: (sequence: number) => Promise<void>, subscriptionReplay = false): void {
     const sequence = ++this.#deliverySequence;
-    this.#logger.event("info", "push.queue_accepted", { sequence, attention: kind === "attention", clear: kind === "clear", activity_stop: kind === "activity_stop" });
+    this.#logger.event("info", "push.queue_accepted", { sequence, attention: kind === "attention", clear: kind === "clear", activity_stop: kind === "activity_stop", subscription_replay: subscriptionReplay });
     const prior = this.#deliveryChains.get(instanceId) ?? Promise.resolve();
     const delivery = prior
       .then(() => send(sequence))
@@ -478,6 +480,7 @@ export class PushService {
     sequence: number,
     messageFor: (subscription: StoredPushSubscription) => AttentionPushMessage,
     selectedSubscriptions?: readonly StoredPushSubscription[],
+    subscriptionReplay = false,
   ): Promise<void> {
     const subscriptions = (selectedSubscriptions ?? this.#subscriptions).filter(subscription =>
       this.#identityAllowed(subscription.identityKey),
@@ -489,7 +492,7 @@ export class PushService {
         const message = messageFor(subscription);
         const start = performance.now();
         this.#logger.event("info", "push.send_started", { sequence, attention: message.type === "attention", clear: message.type === "clear",
-          activity_stop: message.type === "activity_stop", subscriptions: subscriptions.length });
+          activity_stop: message.type === "activity_stop", subscriptions: subscriptions.length, subscription_replay: subscriptionReplay });
         try {
           await this.#transport.send(subscription, JSON.stringify(message), {
             subject: VAPID_SUBJECT,

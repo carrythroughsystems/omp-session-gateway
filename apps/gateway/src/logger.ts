@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export type LogLevel = "info" | "warn" | "error";
@@ -16,8 +16,10 @@ const QUALIFICATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "http.request_failed": [], "registry.listener_failed": [], "registry.expired": ["removed"],
   "omp.entry_unreadable": [], "omp.discovery_unreadable": [], "omp.poll_failed": [],
   "omp.directory_changed": ["inserted", "removed", "hosts"],
-  "push.queue_accepted": ["sequence", "attention", "clear", "activity_stop"],
-  "push.send_started": ["sequence", "attention", "clear", "activity_stop", "subscriptions"],
+  "ipc.protocol_rejected": ["suppressed"], "ipc.authentication_denied": ["suppressed"],
+  "ipc.connection_timeout": ["suppressed"], "ipc.connection_error": ["suppressed"],
+  "push.queue_accepted": ["sequence", "attention", "clear", "activity_stop", "subscription_replay"],
+  "push.send_started": ["sequence", "attention", "clear", "activity_stop", "subscriptions", "subscription_replay"],
   "push.send_acknowledged": ["sequence", "elapsed_ms"],
   "push.send_failed": ["sequence", "elapsed_ms", "status"],
   "push.subscription_evicted": ["sequence", "count"],
@@ -39,7 +41,8 @@ export function parseQualificationLogEvent(value: unknown): QualificationLogEven
     if (["timestamp", "level", "event", "index"].includes(key)) continue;
     if (!fields.includes(key) || (typeof item !== "boolean" && !(typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= Number.MAX_SAFE_INTEGER))) throw new Error("unsafe qualification event");
   }
-  if (record.event !== "http.authorization_denied" && record.event !== "push.send_failed" && fields.some(key => record[key] === undefined)) throw new Error("incomplete qualification event");
+  if (record.event !== "http.authorization_denied" && record.event !== "push.send_failed" &&
+    fields.some(key => !["suppressed", "subscription_replay"].includes(key) && record[key] === undefined)) throw new Error("incomplete qualification event");
   if (record.event === "push.send_failed" && (record.sequence === undefined || record.elapsed_ms === undefined)) throw new Error("incomplete qualification event");
   return record as QualificationLogEvent;
 }
@@ -70,27 +73,43 @@ export class QualificationLogSink implements LogSink {
       for (const name of names) {
         const path = join(directory, name), stat = lstatSync(path);
         if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid!() || stat.nlink !== 1 ||
-          (stat.mode & 0o777) !== 0o600 || stat.size > QUALIFICATION_LOG_BYTES || name === "health" && stat.size !== 0) throw new Error("unsafe qualification log file");
+          (stat.mode & 0o777) !== 0o600 || stat.size > QUALIFICATION_LOG_BYTES || name === "health" && stat.size > 32) throw new Error("unsafe qualification log file");
       }
-      const text = readFileSync(join(directory, "events.0.jsonl"), "utf8");
-      if (text !== "" && !text.endsWith("\n")) throw new Error("qualification logging was interrupted");
-      for (const line of text.trimEnd().split("\n")) {
-        if (line === "") continue;
-        const event = parseQualificationLogEvent(JSON.parse(line));
-        if (event.index <= this.#index) throw new Error("invalid qualification log sequence");
-        this.#index = event.index;
+      for (const name of names.filter(name => name !== "health").sort().reverse()) {
+        const text = readFileSync(join(directory, name), "utf8");
+        if (text !== "" && !text.endsWith("\n")) throw new Error("qualification logging was interrupted");
+        for (const line of text.trimEnd().split("\n")) {
+          if (line === "") continue;
+          const event = parseQualificationLogEvent(JSON.parse(line));
+          if (Buffer.byteLength(line) > 2048 || JSON.stringify(event) !== line ||
+            this.#index !== 0 && event.index !== this.#index + 1) throw new Error("invalid qualification log sequence");
+          this.#index = event.index;
+        }
       }
+      if (readFileSync(join(directory, "health"), "utf8") !== `${this.#index}\n`) throw new Error("qualification logging was interrupted");
       return;
     }
     for (const name of ["events.0.jsonl", "health"]) {
       const fd = openSync(join(directory, name), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      closeSync(fd);
+      try { if (name === "health") writeSync(fd, "0\n"); fsyncSync(fd); } finally { closeSync(fd); }
     }
+  }
+  #state(value: string): void {
+    // Overwrite the existing private inode, not a directory entry: even lost directory-write
+    // permission cannot preserve an old success marker across a failed event.
+    const fd = openSync(join(this.#directory, "health"), constants.O_WRONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o600) throw new Error("unsafe qualification health");
+      if (writeSync(fd, value, 0, "utf8") !== Buffer.byteLength(value)) throw new Error("qualification health write failed");
+      ftruncateSync(fd, Buffer.byteLength(value)); fsyncSync(fd);
+    } finally { closeSync(fd); }
   }
   get healthy(): boolean { return this.#healthy; }
   write(line: string): void {
     if (!this.#healthy) throw new Error("qualification logging failed");
     try {
+      this.#state("!");
       assertQualificationLogDirectory(this.#directory);
       const event = parseQualificationLogEvent({ ...JSON.parse(line), index: ++this.#index });
       const bytes = Buffer.from(`${JSON.stringify(event)}\n`);
@@ -98,8 +117,7 @@ export class QualificationLogSink implements LogSink {
       const path = join(this.#directory, "events.0.jsonl");
       const current = lstatSync(path);
       if (!current.isFile() || current.isSymbolicLink() || current.uid !== process.getuid!() || current.nlink !== 1 || (current.mode & 0o777) !== 0o600) throw new Error("unsafe qualification log file");
-      // A crash, partial write, or exhausted disk leaves no successful-write marker.
-      unlinkSync(join(this.#directory, "health"));
+      // A crash or partial write leaves the durable write-ahead state unhealthy.
       if (current.size + bytes.length > QUALIFICATION_LOG_BYTES) {
         for (let index = QUALIFICATION_LOG_FILES - 1; index >= 0; index--) {
           const name = join(this.#directory, `events.${index}.jsonl`);
@@ -115,12 +133,12 @@ export class QualificationLogSink implements LogSink {
         const stat = fstatSync(fd);
         if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o600 ||
           stat.size + bytes.length > QUALIFICATION_LOG_BYTES || writeSync(fd, bytes) !== bytes.length) throw new Error("qualification log write failed");
+        fsyncSync(fd);
       } finally { closeSync(fd); }
-      const health = openSync(join(this.#directory, "health"), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      closeSync(health);
+      this.#state(`${this.#index}\n`);
     } catch {
       this.#healthy = false;
-      try { unlinkSync(join(this.#directory, "health")); } catch { /* Health is sticky in this process even when the filesystem is unavailable. */ }
+      try { this.#state("!"); } catch { /* Never repair missing or inaccessible failure evidence. */ }
       throw new Error("qualification logging failed");
     }
   }

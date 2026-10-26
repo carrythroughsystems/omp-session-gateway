@@ -377,7 +377,7 @@ async function runInstall(arguments_: ParsedArguments): Promise<void> {
     runtime = await stageRuntimePayload(config);
     serviceAttempted = true;
     const readinessInstance = randomBytes(32).toString("base64url");
-    const definition = await installUserService(config, activate, runtime.cliPath, readinessInstance, undefined, logDirectory);
+    const definition = await installUserService(config, activate, runtime.cliPath, readinessInstance, undefined, runtime.qualificationLogProtocol === "structured-v1" ? logDirectory : undefined);
     if (activate) await waitForGateway(config, readinessToken, readinessInstance);
     await activateRuntime(config, runtime);
     console.log(
@@ -404,7 +404,7 @@ async function runInstall(arguments_: ParsedArguments): Promise<void> {
           const priorToken = await loadReadinessToken(restoredConfig);
           const rollbackInstance =
             priorRuntime.readinessProtocol === "instance-v1" ? randomBytes(32).toString("base64url") : undefined;
-          await installUserService(restoredConfig, priorService.active, priorRuntime.cliPath, rollbackInstance, undefined, logDirectory);
+          await installUserService(restoredConfig, priorService.active, priorRuntime.cliPath, rollbackInstance, undefined, priorRuntime.qualificationLogProtocol === "structured-v1" ? logDirectory : undefined);
           if (priorService.active) {
             await waitForGateway(
               restoredConfig,
@@ -489,7 +489,7 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
     // only advances once the predecessor has proven readiness. See `activationState`.
     const readinessInstance =
       target.runtime.readinessProtocol === "instance-v1" ? randomBytes(32).toString("base64url") : undefined;
-    const definition = await installUserService(config, service.active, target.runtime.cliPath, readinessInstance, undefined, logDirectory);
+    const definition = await installUserService(config, service.active, target.runtime.cliPath, readinessInstance, undefined, target.runtime.qualificationLogProtocol === "structured-v1" ? logDirectory : undefined);
     if (service.active) {
       await waitForGateway(config, readinessToken, readinessInstance, target.runtime.readinessProtocol === "legacy");
     }
@@ -515,7 +515,7 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
       if (authoritative === undefined) throw new Error("current.json no longer names a verified installed runtime");
       const repairInstance =
         authoritative.readinessProtocol === "instance-v1" ? randomBytes(32).toString("base64url") : undefined;
-      await installUserService(config, service.active, authoritative.cliPath, repairInstance, undefined, logDirectory);
+      await installUserService(config, service.active, authoritative.cliPath, repairInstance, undefined, authoritative.qualificationLogProtocol === "structured-v1" ? logDirectory : undefined);
       if (service.active) {
         await waitForGateway(config, readinessToken, repairInstance, authoritative.readinessProtocol === "legacy");
       }
@@ -598,7 +598,7 @@ async function runRotateToken(arguments_: ParsedArguments): Promise<void> {
     const readinessInstance =
       runtime.readinessProtocol === "instance-v1" ? randomBytes(32).toString("base64url") : undefined;
     try {
-      await installUserService(config, true, runtime.cliPath, readinessInstance, undefined, logDirectory);
+      await installUserService(config, true, runtime.cliPath, readinessInstance, undefined, runtime.qualificationLogProtocol === "structured-v1" ? logDirectory : undefined);
       await waitForGateway(config, readinessToken, readinessInstance, runtime.readinessProtocol === "legacy");
     } catch (error) {
       try {

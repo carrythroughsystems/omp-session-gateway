@@ -10,7 +10,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 - Qualification-only private rotating structured gateway logs and bounded Push send/ack evidence.
   Push recovery permits one evidence-backed fresh ask per phase, preserves existing delivery bounds,
-  records late posts and phase timings, and stops unexplained timeouts without retry.
+  records late posts and per-delivery timings, and stops unexplained timeouts without retry. Durable
+  write-ahead log health, retained-host raw-stream proof, explicit runtime protocol negotiation,
+  outbound-clear acknowledgement, and drained cancellation preserve recovery evidence across failure.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and

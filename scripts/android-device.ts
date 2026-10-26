@@ -209,14 +209,16 @@ export async function runAdb(
     options.signal?.addEventListener("abort", cancel, { once: true });
     if (options.signal?.aborted) cancel();
     if (options.timeoutMs !== undefined) deadline = setTimeout(cancel, options.timeoutMs);
-    const [stdout, , code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).arrayBuffer(),
+    // A broken stream must not release the owner while its child can still mutate the device.
+    const [stdout, stderr, code] = await Promise.allSettled([
+      new Response(child.stdout).text().catch(error => { cancel!(); throw error; }),
+      new Response(child.stderr).arrayBuffer().catch(error => { cancel!(); throw error; }),
       child.exited,
     ]);
-    if (code !== 0) throw new AndroidAdbError(code);
+    if (code.status === "rejected" || stdout.status === "rejected" || stderr.status === "rejected") throw new AndroidAdbError();
+    if (code.value !== 0) throw new AndroidAdbError(code.value);
     options.signal?.throwIfAborted();
-    return stdout;
+    return stdout.value;
   } catch (error) {
     if (error instanceof AndroidAdbError) throw error;
     throw new AndroidAdbError();
@@ -718,7 +720,7 @@ export async function withAndroidChrome<T>(
   const socket = new WebSocket(webSocketDebuggerUrl);
   const pending = new Map<
     number,
-    { readonly method: string; resolve(value: Record<string, unknown>): void; reject(error: Error): void }
+    { readonly method: string; readonly cleanup: boolean; resolve(value: Record<string, unknown>): void; reject(error: Error): void }
   >();
   let nextId = 0;
   let sessionId: string | undefined;
@@ -726,9 +728,12 @@ export async function withAndroidChrome<T>(
   let ownsTarget = false;
   const eventListeners = new Set<(method: string, parameters: Record<string, unknown>) => void>();
   let cleaning = false;
+  let rejectOpening: ((error: Error) => void) | undefined;
   const cancelled = () => {
-    for (const entry of pending.values()) entry.reject(new Error("Android browser execution cancelled"));
-    pending.clear();
+    rejectOpening?.(new Error("Android browser execution cancelled"));
+    for (const [id, entry] of pending) if (!entry.cleanup) {
+      pending.delete(id); entry.reject(new Error("Android browser execution cancelled"));
+    }
   };
   execution?.signal.addEventListener("abort", cancelled, { once: true });
   const deadline = execution === undefined ? undefined : setTimeout(cancelled, Math.max(1, execution.deadline - performance.now()));
@@ -752,25 +757,33 @@ export async function withAndroidChrome<T>(
     else entry.resolve(message.result ?? {});
   };
 
-  const send = (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string) =>
+  const send = (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
-      if (!cleaning) check();
+      if (!cleanup) check();
       const id = (nextId += 1);
-      pending.set(id, { method, resolve, reject });
+      const timer = setTimeout(() => {
+        if (pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
+      }, cleanup ? 10_000 : CALL_TIMEOUT_MS);
+      pending.set(id, { method, cleanup, resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
       const frame: Record<string, unknown> = { id, method, params: parameters };
       const destination = explicitSession ?? (useSession ? sessionId : undefined);
       if (destination !== undefined) frame.sessionId = destination;
-      socket.send(JSON.stringify(frame));
-      setTimeout(() => {
-        if (pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
-      }, CALL_TIMEOUT_MS);
+      try { socket.send(JSON.stringify(frame)); }
+      catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
     });
 
   try {
     await new Promise<void>((resolve, reject) => {
-      socket.onopen = () => resolve();
-      socket.onerror = () => reject(new Error("DevTools WebSocket failed; is Chrome awake and adb forwarding?"));
-      setTimeout(() => reject(new Error("DevTools WebSocket open timeout")), OPEN_TIMEOUT_MS);
+      const timer = setTimeout(() => finish(new Error("DevTools WebSocket open timeout")),
+        execution === undefined ? OPEN_TIMEOUT_MS : Math.max(1, Math.min(OPEN_TIMEOUT_MS, execution.deadline - performance.now())));
+      const finish = (error?: Error) => {
+        clearTimeout(timer); rejectOpening = undefined;
+        if (error === undefined) resolve(); else reject(error);
+      };
+      rejectOpening = finish;
+      socket.onopen = () => finish();
+      socket.onerror = () => finish(new Error("DevTools WebSocket failed; is Chrome awake and adb forwarding?"));
+      try { check(); } catch { finish(new Error("Android browser execution cancelled")); }
     });
 
     const browserVersion = await send("Browser.getVersion", {}, false);
@@ -803,10 +816,10 @@ export async function withAndroidChrome<T>(
             return;
           } catch (error) {
             lastError = error;
-            const failedTarget = targetId;
             sessionId = undefined;
-            targetId = undefined;
-            await send("Target.closeTarget", { targetId: failedTarget }, false).catch(() => {});
+            // Retain ownership through the cleanup attempt; cancellation cannot suppress closure.
+            await send("Target.closeTarget", { targetId }, false, undefined, true);
+            targetId = undefined; ownsTarget = false;
             const retryable =
               error instanceof Error && error.message.includes("Session with given id not found");
             if (!retryable || attempt === 3) throw error;

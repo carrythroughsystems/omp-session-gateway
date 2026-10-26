@@ -28,6 +28,21 @@ export interface AndroidPushRuntimeOptions {
   readonly execution?: PushExecution;
 }
 
+export async function gatewayRawLogsDiscarded(execute: FixtureExecutor): Promise<boolean> {
+  const home = await execute(["python3", "-c", "import os; print(os.path.expanduser('~'))"]);
+  const directory = home.stdout.trim();
+  if (home.exitCode !== 0 || !/^\/[^\r\n\0]+$/u.test(directory) || directory.length > 4096) return false;
+  const plist = join(directory, "Library/LaunchAgents/omp-session-gateway.plist");
+  const stdout = await execute(["plutil", "-extract", "StandardOutPath", "raw", "-o", "-", plist]);
+  const stderr = await execute(["plutil", "-extract", "StandardErrorPath", "raw", "-o", "-", plist]);
+  return stdout.exitCode === 0 && stderr.exitCode === 0 && stdout.stdout.trim() === "/dev/null" && stderr.stdout.trim() === "/dev/null";
+}
+
+export function matchesPushDeliverySnapshot(session: SessionMetadata, candidates: readonly (SessionMetadata | undefined)[]): boolean {
+  return session.ask !== undefined && candidates.some(current => current?.instanceId === session.instanceId &&
+    current.generation === session.generation && current.ask?.requestId === session.ask?.requestId);
+}
+
 /** Reads only an existing worker; no page navigation or fabricated notification can satisfy this. */
 export async function observePushDeliveryRequest(driver: Pick<AndroidChromeDriver, "browserSend" | "sessionSend">,
   origin: string, session: SessionMetadata): Promise<boolean> {
@@ -215,6 +230,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   };
   const privacyFailure = () => new QualificationFailure({ id: execution?.nextFailureId() ?? 1, lane: "androidPush", step: phase,
     class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: 0, observations: {} });
+  const logEvidence = async <T>(read: () => Promise<T>): Promise<T> => {
+    try { return await read(); }
+    catch { throw new QualificationFailure({ id: execution?.nextFailureId() ?? 1, lane: "androidPush", step: phase,
+      class: "harness", reason: "invalid_evidence", operation: "read_only", elapsedMs: 0, observations: {} }); }
+  };
   // Neither root's label is a prefix of the other's: notification bodies carry the label.
   const location = (epoch: string, role: PushFixtureRole = "primary"): PushFixtureLocation => ({
     root: join(base, role === "primary" ? `omp-push-${epoch}` : `omp-push-b-${epoch}`), epoch,
@@ -391,13 +411,12 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     },
     ...(options.qualificationLogs === undefined ? {} : {
       beginDeliveryTelemetry: (phase: Parameters<NonNullable<AndroidPushRuntime["beginDeliveryTelemetry"]>>[0]) =>
-        options.qualificationLogs!.begin(phase === "readiness" ? "rigReadiness" : "androidPush", phase),
-      deliveryTelemetry: options.qualificationLogs.end,
+        logEvidence(() => options.qualificationLogs!.begin(phase === "readiness" ? "rigReadiness" : "androidPush", phase)),
+      deliveryTelemetry: (window: Parameters<QualificationLogs["end"]>[0]) => logEvidence(() => options.qualificationLogs!.end(window)),
     }),
     async deliveryRequestMatches(session) {
       if (currentEpoch === undefined) return false;
-      const current = await snapshot(currentEpoch);
-      if (current?.instanceId !== session.instanceId || current.generation !== session.generation || current.ask?.requestId !== session.ask?.requestId) return false;
+      if (!matchesPushDeliverySnapshot(session, [await snapshot(currentEpoch), await snapshot(currentEpoch, "secondary")])) return false;
       return withAndroidChrome(driver => observePushDeliveryRequest(driver, identity.origin, session),
         { port: 9238, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
     },
@@ -812,12 +831,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         await scanSinks(value=>typeof value==='string'&&needles.some(needle=>value.includes(needle)),sink=>hits.push(sink));
         return {detectable:required.every(sink=>found.has(sink)),clean:hits.length===0&&residual.length===0,sinks:required.length,findings:hits.length};
       })()`), true);
-      const gatewayLogsDiscarded = options.gatewayLogsDiscarded ?? (async () => {
-        const plist = join(homedir(), "Library/LaunchAgents/omp-session-gateway.plist");
-        const stdout = await executeFixture(["plutil", "-extract", "StandardOutPath", "raw", "-o", "-", plist]);
-        const stderr = await executeFixture(["plutil", "-extract", "StandardErrorPath", "raw", "-o", "-", plist]);
-        return stdout.exitCode === 0 && stderr.exitCode === 0 && stdout.stdout.trim() === "/dev/null" && stderr.stdout.trim() === "/dev/null";
-      });
+      const gatewayLogsDiscarded = options.gatewayLogsDiscarded ?? (() => gatewayRawLogsDiscarded(execute));
       return { ...result, gatewayLogsDiscarded: await gatewayLogsDiscarded(),
         gatewayStructuredLogsSafe: options.qualificationLogs === undefined ? false : await options.qualificationLogs.healthy() };
     },

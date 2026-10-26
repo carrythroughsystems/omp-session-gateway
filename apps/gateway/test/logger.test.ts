@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QualificationLogSink, SafeLogger } from "../src/logger.ts";
@@ -67,6 +67,32 @@ test("coalesces repetitive denial events into a bounded log rate", () => {
     event: "http.authorization_denied",
     suppressed: 2,
   });
+});
+
+test.skipIf(process.platform === "win32")("R1 write-ahead health survives a directory that cannot unlink the old success marker", () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "health-state-")); chmodSync(dir, 0o700);
+  try {
+    const logger = new SafeLogger(new QualificationLogSink(dir));
+    logger.event("info", "http.listening", { port: 4317 });
+    chmodSync(dir, 0o500);
+    expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
+    chmodSync(dir, 0o700);
+    expect(() => new QualificationLogSink(dir)).toThrow();
+  } finally { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("U1 restart validates every rotated event and all rate-limited IPC events remain safe", () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "health-vocabulary-")); chmodSync(dir, 0o700);
+  try {
+    let now = 0;
+    const logger = new SafeLogger(new QualificationLogSink(dir), () => now);
+    for (const event of ["ipc.protocol_rejected", "ipc.authentication_denied", "ipc.connection_timeout", "ipc.connection_error"]) {
+      logger.event("warn", event); logger.event("warn", event); now += 60_000; logger.event("warn", event);
+    }
+    expect(new QualificationLogSink(dir).healthy).toBe(true);
+    writeFileSync(join(dir, "events.1.jsonl"), '{"payload":"SYNTHETIC-SECRET"}\n', { mode: 0o600 });
+    expect(() => new QualificationLogSink(dir)).toThrow();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("does not suppress distinct lifecycle information", () => {

@@ -5,7 +5,7 @@ import type { FixtureExecutor } from "./push-qualification-fixture.ts";
 import { FAILURE_STEPS, type QualificationFailureLane } from "./qualification-failure.ts";
 
 export interface QualificationLogWindow { readonly lane: QualificationFailureLane; readonly phase: string; readonly after: number; readonly ordinal: number }
-export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number }
+export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number; readonly clearAcknowledged?: boolean }
 export interface QualificationLogs {
   prepare(): Promise<void>;
   begin(lane: QualificationLogWindow["lane"], phase: string): Promise<QualificationLogWindow>;
@@ -45,12 +45,15 @@ export function pushDeliveryTelemetry(events: readonly QualificationLogEvent[]):
   const acks = push.filter(event => event.event === "push.send_acknowledged");
   const failures = push.filter(event => event.event === "push.send_failed");
   const sequence = queues[0]?.sequence;
-  const sufficient = queues.length === 1 && queues[0]?.attention === true && sends.length === 1 && sends[0]?.subscriptions === 1 &&
-    sends[0]?.attention === true && push.every(event => event.sequence === sequence) && acks.length + failures.length === 1 &&
+  const unique = queues.length === 1 && sends.length === 1 && sends[0]?.subscriptions === 1 &&
+    push.every(event => event.sequence === sequence) && acks.length + failures.length === 1 &&
     sends[0]!.index > queues[0]!.index && (acks[0] ?? failures[0])!.index > sends[0]!.index;
+  const sufficient = unique && queues[0]?.attention === true && sends[0]?.attention === true &&
+    queues[0]?.subscription_replay !== true && sends[0]?.subscription_replay !== true;
   const status = typeof failures[0]?.status === "number" ? failures[0].status : 0;
   return { sufficient, sends: sends.length, acknowledgements: acks.length, failures: failures.length,
-    retryable: sufficient && failures.length === 1 && (status === 429 || status >= 500 && status <= 599), httpStatus: sufficient ? status : 0 };
+    retryable: sufficient && failures.length === 1 && (status === 429 || status >= 500 && status <= 599), httpStatus: sufficient ? status : 0,
+    clearAcknowledged: unique && queues[0]?.clear === true && sends[0]?.clear === true && acks.length === 1 };
 }
 
 // Filesystem inspection runs on the retained Mac, not on a Studio pathname with the same spelling.
@@ -78,6 +81,7 @@ names=os.listdir(p)
 allowed=['health']+['events.%d.jsonl'%i for i in range(4)]
 if any(n not in allowed for n in names): raise ValueError('unknown file')
 texts=[]
+health=None
 for n in sorted(names):
  fd=os.open(os.path.join(p,n),os.O_RDONLY|os.O_NOFOLLOW)
  try:
@@ -85,13 +89,26 @@ for n in sorted(names):
   if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.getuid() or stat.S_IMODE(s.st_mode)!=0o600 or s.st_nlink!=1 or s.st_size>262144: raise ValueError('unsafe file')
   data=os.read(fd,262145)
   if len(data)>262144: raise ValueError('oversized file')
-  if n=='health' and data!=b'': raise ValueError('invalid health')
-  if n!='health': texts.append(data.decode('utf-8'))
+  if n=='health':
+   if len(data)>32: raise ValueError('invalid health')
+   health=data.decode('ascii')
+  else: texts.append(data.decode('utf-8'))
  finally: os.close(fd)
 if op=='remove':
  for n in names: os.unlink(os.path.join(p,n))
  os.rmdir(p)
-print(json.dumps({'healthy':'health' in names and 'events.0.jsonl' in names,'texts':texts,'empty':len(names)==0}))
+stable=False
+if health is not None:
+ if op=='remove': stable=True
+ else:
+  fd=os.open(os.path.join(p,'health'),os.O_RDONLY|os.O_NOFOLLOW)
+  try:
+   s=os.fstat(fd)
+   if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.getuid() or stat.S_IMODE(s.st_mode)!=0o600 or s.st_nlink!=1: raise ValueError('unsafe health')
+   stable=health==os.read(fd,33).decode('ascii')
+  finally: os.close(fd)
+committed=int(health) if health is not None and health.endswith('\\n') and health[:-1].isdigit() else -1
+print(json.dumps({'healthy':stable and committed>=0 and 'events.0.jsonl' in names,'index':committed,'texts':texts,'empty':len(names)==0}))
 `;
 
 export function createQualificationLogs(options: { execute: FixtureExecutor; remoteDirectory: string; jobDirectory: string }): QualificationLogs {
@@ -106,7 +123,7 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
   };
   const read = async () => {
     let value = await remote("read");
-    // The synchronous writer temporarily removes health while committing one bounded event.
+    // The synchronous writer marks health pending while committing one bounded event.
     // Only that explicit in-progress marker is sampled again, never malformed/unsafe records.
     for (let attempt = 0; attempt < 2 && typeof value === "object" && value !== null && "healthy" in value && value.healthy === false; attempt++) {
       await Bun.sleep(50);
@@ -114,7 +131,9 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
     }
     if (typeof value !== "object" || value === null || !("healthy" in value) || value.healthy !== true || !("texts" in value) ||
       !Array.isArray(value.texts) || value.texts.some(text => typeof text !== "string")) throw new Error("qualification logging unhealthy");
-    return parseQualificationLogs(value.texts);
+    const events = parseQualificationLogs(value.texts);
+    if (!("index" in value) || value.index !== (events.at(-1)?.index ?? 0)) throw new Error("qualification health sequence differs");
+    return events;
   };
   const persist = (name: string, events: readonly QualificationLogEvent[]) => {
     assertQualificationLogDirectory(options.jobDirectory);
@@ -133,6 +152,7 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
       const events = await read();
       const window = { lane, phase, after: events.at(-1)?.index ?? 0, ordinal: ++ordinal };
       windows.set(window, []);
+      retainedBytes += 2;
       return window;
     },
     async end(window) {

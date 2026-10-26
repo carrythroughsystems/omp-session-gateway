@@ -19,6 +19,30 @@ test("only an unambiguous single send's explicit retryable status authorizes rec
   expect(pushDeliveryTelemetry([send[0]!, send[1]!, event(3, "push.send_failed", { sequence: 1, elapsed_ms: 1 })]).retryable).toBe(false);
 });
 
+test("R3 subscription replay is not an attributable fresh ask and R6 clear acknowledgement is explicit", () => {
+  expect(pushDeliveryTelemetry(send.map(item => ({ ...item, subscription_replay: true }))).sufficient).toBe(false);
+  const clear = [event(1, "push.queue_accepted", { sequence: 1, attention: false, clear: true, activity_stop: false }),
+    event(2, "push.send_started", { sequence: 1, attention: false, clear: true, activity_stop: false, subscriptions: 1 }),
+    event(3, "push.send_acknowledged", { sequence: 1, elapsed_ms: 1 })];
+  expect(pushDeliveryTelemetry(clear)).toMatchObject({ clearAcknowledged: true });
+  expect(pushDeliveryTelemetry(clear.slice(0, 2))).toMatchObject({ clearAcknowledged: false });
+});
+
+test.skipIf(process.platform === "win32")("R1 collector refuses stale success after an unremovable health-marker failure", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-health-")); chmodSync(root, 0o700);
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory, jobDirectory: root });
+  try {
+    await logs.prepare();
+    const logger = new SafeLogger(new QualificationLogSink(remoteDirectory));
+    logger.event("info", "http.listening", { port: 4317 });
+    chmodSync(remoteDirectory, 0o500);
+    expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
+    chmodSync(remoteDirectory, 0o700);
+    expect(await logs.healthy()).toBe(false);
+  } finally { chmodSync(remoteDirectory, 0o700); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("log parser rejects hidden payloads, invalid values, duplicate keys, gaps and excessive bytes", () => {
   const line = JSON.stringify(send[0]);
   for (const text of [line.replace('"index":1', '"payload":"SYNTHETIC-SECRET","index":1'), line.replace('"index":1', '"index":1,"index":1'),
