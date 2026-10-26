@@ -1607,6 +1607,7 @@ test("council R3 real cloud resume consumes summary before admission persists", 
     expect(saved.failureSummary).toBeUndefined();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
 test("schema-3 additive fields round trip without changing passed historical proofs", async () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   const failure: LaneFailure = { id: 1, lane: "windows", step: "transport_ready", class: "infra_transient",

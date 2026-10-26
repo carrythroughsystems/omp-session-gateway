@@ -33,7 +33,8 @@ test("raw 143 is not a controller deadline", async () => {
   expect(error.exitCode).toBe(143);
   expect(classifyWindowsCommandFailure(error, true, true).evidence).toMatchObject({ class: "harness", reason: "helper_failed" });
 });
-test("a stubborn subprocess gets SIGKILL after grace and both pipes drain before rejection", async () => {
+// Windows terminates the process directly; POSIX signal handlers and SIGKILL escalation do not apply.
+test.skipIf(process.platform === "win32")("a stubborn subprocess gets SIGKILL after grace and both pipes drain before rejection", async () => {
   const probes: WindowsTransportProbe[] = [];
   const error = await command([process.execPath, "-e",
     'process.on("SIGTERM", () => { process.stdout.write("synthetic-private-output"); }); setInterval(() => {}, 1000);'], {
@@ -46,6 +47,12 @@ test("a stubborn subprocess gets SIGKILL after grace and both pipes drain before
   expect(classifyWindowsCommandFailure(error, true, false).evidence.class).toBe("harness");
   expect(classifyWindowsCommandFailure(error, false, false).evidence.reason).toBe("mutation_unconfirmed");
   expect(JSON.stringify(error)).not.toContain("synthetic-private");
+});
+test.each([401, 403, 429, 503])("493 R1 contradictory HTTP %s plus reset evidence is harness, never transient", status => {
+  const value = transportResult("connection_reset");
+  let failure: unknown;
+  try { windowsWinrmResult({ ...value, failure: { ...value.failure, httpStatus: status } }, true); } catch (error) { failure = error; }
+  expect((failure as QualificationFailure).evidence).toMatchObject({ class: "harness", reason: "helper_failed" });
 });
 test("external cancellation reaps the subprocess but cannot become a probe deadline", async () => {
   const controller = new AbortController();

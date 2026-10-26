@@ -78,6 +78,10 @@ export interface WindowsContext {
   readonly epoch: string;
   readonly identity: WindowsIdentity;
   readonly beforeEffect: () => Promise<void>;
+  /** Durable single-shot claims for qualification; cleanup supplies its idempotent owner. */
+  readonly mutation: <T>(key: string, action: () => Promise<T>) => Promise<T>;
+  /** Epoch milliseconds in runtime.now()'s clock, shared by creation and admission. */
+  readonly allocationDeadline?: number | undefined;
   readonly transportProbe?: (probe: WindowsTransportProbe) => Promise<void>;
   readonly execution?: WindowsExecutionContext;
   /** True only when this invocation enters staging for the first time in this epoch. */
@@ -100,7 +104,6 @@ export interface WindowsRuntime {
   saveAccess(epoch: string, instance: WindowsInstance): Promise<void>;
   removeAccess(epoch: string): Promise<void>;
   hasAccess?(epoch: string): Promise<boolean>;
-  stagingUploadsComplete?(epoch: string): Promise<boolean>;
   /** Refetch the vault-bound ID even if the provider changed its label. */
   cleanupInstance?(epoch: string): Promise<WindowsInstance | undefined>;
   cleanupFirewall?(epoch: string): Promise<WindowsFirewall | undefined>;
@@ -118,6 +121,10 @@ const PHASES = ["intent_checkpointed", "firewall_created", "instance_created", "
   "standard_prelogin_verified", "standard_postlogin_ready", "standard_doctor_passed", "standard_readiness_rotated",
   "standard_candidate_uninstalled", "evidence_complete"] as const;
 type Phase = typeof PHASES[number];
+const READ_ONLY_PHASES: readonly Phase[] = ["transport_ready", "prelogin_verified", "doctor_passed", "standard_prelogin_verified", "standard_doctor_passed", "evidence_complete"];
+const GUEST_MUTATIONS: readonly WindowsGuestAction[] = ["stage", "installPredecessor", "upgrade", "reboot", "publish", "stopOmp",
+  "rotate", "rollback", "restore", "uninstall", "resetServe", "logout", "prepareStandardUser", "releaseTailnet", "join", "installFresh"];
+const MUTATION_ACTIONS: readonly string[] = [...GUEST_MUTATIONS, "createStandardUser", "unpack", "build", "startOmp", "logon"];
 const FACTS = ["preloginSamples", "preloginDurationMs", "automaticStartMs", "doctorChecks", "namedPipe", "generation",
   "viewStatus", "controlStatus", "staleViewStatus", "staleControlStatus", "noStore", "taggedNode", "tunMode", "funnelOff",
   "loopbackOnly", "pixelIdentityAccepted", "viewReadOnly", "controlWritable", "promptAccepted", "returnedToDirectory",
@@ -141,6 +148,9 @@ interface Progress extends Record<string, unknown> {
   facts: Partial<Record<typeof FACTS[number], number | boolean>>;
   /** Older immutable receipts predate this additive diagnostic field. */
   transportProbes?: WindowsTransportProbe[];
+  mutationClaims?: Record<string, "started" | "complete">;
+  allocationDeadline?: number;
+  retirementPending?: boolean;
 }
 export interface WindowsLaneInput {
   readonly identity: WindowsIdentity;
@@ -196,8 +206,8 @@ function binding(identity: WindowsIdentity): string {
 function parseProgress(value: unknown, expected?: string): Progress {
   requireFact(record(value), "invalid Windows progress");
   const keys = ["binding", "cleanupRequired", "epoch", "facts", "lane", "phase", "schemaVersion", "settled", "startedAt", "timings"];
-  if (Object.hasOwn(value, "transportProbes")) keys.push("transportProbes");
-  requireFact(JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys), "unknown Windows progress fields");
+  for (const key of ["transportProbes", "mutationClaims", "allocationDeadline", "retirementPending"]) if (Object.hasOwn(value, key)) keys.push(key);
+  requireFact(JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys.sort()), "unknown Windows progress fields");
   requireFact(value.schemaVersion === 1 && value.lane === "windows" && typeof value.epoch === "string" && UUID.test(value.epoch) &&
     typeof value.binding === "string" && SHA.test(value.binding) && (expected === undefined || value.binding === expected) &&
     PHASES.includes(value.phase as Phase) && typeof value.settled === "boolean" && typeof value.cleanupRequired === "boolean" &&
@@ -209,6 +219,17 @@ function parseProgress(value: unknown, expected?: string): Progress {
   requireFact(Object.keys(timings).length === observedPhases.length && observedPhases.every(phase => Object.hasOwn(timings, phase)), "incomplete Windows phase history");
   for (const [key, item] of Object.entries(value.timings)) requireFact(PHASES.includes(key as Phase) && typeof item === "number" && Number.isFinite(item) && item >= 0, "invalid Windows timing");
   for (const [key, item] of Object.entries(value.facts)) requireFact(FACTS.includes(key as typeof FACTS[number]) && (typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item) && item >= 0)), "invalid Windows observation");
+  if (value.allocationDeadline !== undefined) requireFact(Number.isSafeInteger(value.allocationDeadline) && Number(value.allocationDeadline) > Number(value.startedAt), "invalid Windows allocation deadline");
+  if (value.retirementPending !== undefined) requireFact(typeof value.retirementPending === "boolean" && value.cleanupRequired === false, "invalid Windows retirement state");
+  if (value.mutationClaims !== undefined) {
+    requireFact(record(value.mutationClaims), "invalid Windows mutation claims");
+    for (const [key, state] of Object.entries(value.mutationClaims)) {
+      const [phase, kind, principal, action, extra] = key.split(":");
+      requireFact(PHASES.includes(phase as Phase) && ["guest", "ps", "rdp"].includes(kind ?? "") &&
+        ["administrator", "standard"].includes(principal ?? "") && MUTATION_ACTIONS.includes(action ?? "") &&
+        extra === undefined && (state === "started" || state === "complete"), "invalid Windows mutation claim");
+    }
+  }
   if (value.transportProbes !== undefined) {
     requireFact(Array.isArray(value.transportProbes), "invalid Windows transport probes");
     for (const probe of value.transportProbes) {
@@ -276,10 +297,10 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   let resumed: Progress | undefined;
   if (input.progress !== undefined) {
     const prior = parseProgress(input.progress, digest);
-    if (prior.phase === "evidence_complete" && prior.settled) return evidence(prior, input.identity);
+    if (prior.phase === "evidence_complete" && prior.settled) { assertWindowsExecution(input.execution); return evidence(prior, input.identity); }
     if (runtime.development && prior.cleanupRequired && runtime.now() - prior.startedAt < 3 * 60 * 60_000) {
-      if (prior.phase === "toolchain_staged" && !prior.settled && await runtime.stagingUploadsComplete?.(prior.epoch) !== true) {
-        throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, input.execution);
+      if (!prior.settled && !READ_ONLY_PHASES.includes(prior.phase)) {
+        throw windowsFailure("mutation_unconfirmed", prior.phase, "unknown", {}, input.execution);
       }
       resumed = prior;
     }
@@ -293,8 +314,18 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   const progress: Progress = resumed ?? { schemaVersion: 1, lane: "windows", epoch: runtime.uuid(), binding: digest,
     phase: "intent_checkpointed", settled: true, cleanupRequired: true, startedAt: runtime.now(), timings: {}, facts: {}, transportProbes: [] };
   const save = async () => { parseProgress(progress, digest); await input.checkpoint(structuredClone(progress)); };
+  const assertAllocation = () => {
+    if (PHASES.indexOf(progress.phase) <= PHASES.indexOf("transport_ready") &&
+      progress.allocationDeadline !== undefined && runtime.now() >= progress.allocationDeadline) {
+      throw windowsFailure("deadline_exceeded", progress.phase, "unknown", {}, input.execution);
+    }
+  };
+  if (resumed && PHASES.indexOf(resumed.phase) <= PHASES.indexOf("transport_ready") && progress.allocationDeadline === undefined) {
+    throw windowsFailure("mutation_unconfirmed", resumed.phase, "unknown", {}, input.execution);
+  }
   const context: WindowsContext = { epoch: progress.epoch, identity: input.identity,
     freshStaging: resumed === undefined || PHASES.indexOf(resumed.phase) < PHASES.indexOf("toolchain_staged"),
+    get allocationDeadline() { return progress.allocationDeadline; },
     ...(input.execution === undefined ? {} : { execution: input.execution }),
     beforeEffect: async () => {
       if (input.execution?.signal.aborted || (input.execution && performance.now() >= input.execution.deadline)) {
@@ -303,6 +334,17 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       requireFact(runtime.now() - progress.startedAt < 3 * 60 * 60_000, "Windows resource lifetime bound reached");
       await save();
       assertWindowsExecution(input.execution);
+      assertAllocation();
+    },
+    mutation: async (key, action) => {
+      const claims = progress.mutationClaims ??= {};
+      const claim = `${progress.phase}:${key}`;
+      if (claims[claim] !== undefined) throw windowsFailure("mutation_unconfirmed", progress.phase, "unknown", {}, input.execution);
+      await context.beforeEffect();
+      claims[claim] = "started"; await save(); assertWindowsExecution(input.execution);
+      const result = await action();
+      claims[claim] = "complete"; await save(); assertWindowsExecution(input.execution);
+      return result;
     },
     transportProbe: async probe => {
       requireFact(!progress.settled, "transport observation outside active step");
@@ -325,7 +367,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     requireFact(runtime.now() - progress.startedAt < maximumAge, "Windows resource lifetime bound reached");
     progress.phase = phase; progress.settled = false; await save();
     const start = runtime.now();
-    try { assertWindowsExecution(input.execution); await action(); }
+    try { assertWindowsExecution(input.execution); assertAllocation(); await action(); }
     catch (error) {
       if (error instanceof QualificationFailure) {
         const failure = new QualificationFailure(parseLaneFailure({ ...error.evidence, id: input.execution?.nextFailureId() ?? error.evidence.id,
@@ -339,8 +381,12 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       throw failure;
     }
     progress.timings[phase] = runtime.now() - start; progress.settled = true; await save();
+    assertWindowsExecution(input.execution); assertAllocation();
   };
-  const guest = (action: WindowsGuestAction, principal?: WindowsPrincipal) => runtime.guest(context, action, principal);
+  const guest = (action: WindowsGuestAction, principal?: WindowsPrincipal) => GUEST_MUTATIONS.includes(action)
+    ? context.mutation(`guest:${principal ?? "administrator"}:${action}`, () => runtime.guest(context, action, principal))
+    : runtime.guest(context, action, principal);
+  const rdp = (principal: WindowsPrincipal = "administrator") => context.mutation(`rdp:${principal}:logon`, () => runtime.rdp(context, principal));
   const facts = (values: Record<string, unknown>) => {
     for (const key of FACTS) if (values[key] !== undefined) {
       const value = values[key];
@@ -360,7 +406,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     return { samples, durationMs: runtime.now() - start };
   };
   const postlogin = async (principal: WindowsPrincipal) => {
-    const start = runtime.now(); await runtime.rdp(context, principal);
+    const start = runtime.now(); await rdp(principal);
     let last: Record<string, unknown> = {};
     await waitFor(runtime, async () => (last = await guest("ready", principal)).ready === true, 180_000,
       `${principal === "standard" ? "standard " : ""}automatic LogonTrigger startup`, () => last);
@@ -369,6 +415,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   try {
     let firewall: WindowsFirewall | undefined = resumed ? (await runtime.provider.firewalls()).find(item => item.description === label) : undefined;
     await step("firewall_created", async () => {
+      progress.allocationDeadline = runtime.now() + 12 * 60_000; await save();
       assertWindowsExecution(input.execution);
       firewall = await runtime.provider.createFirewall(label, input.execution);
       const fresh = await runtime.provider.firewall(firewall.id);
@@ -391,7 +438,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
         typeof result.transportStabilityDurationMs === "number" && result.transportStabilityDurationMs >= 60_000, "authenticated WinRM stability window incomplete");
       facts(result);
     });
-    await step("toolchain_staged", async () => { await save(); await runtime.rdp(context); facts(await guest("stage")); });
+    await step("toolchain_staged", async () => { await save(); await rdp(); facts(await guest("stage")); });
     await step("predecessor_installed", async () => { requireProduct((await guest("installPredecessor")).ready === true, "predecessor did not become ready"); });
     await step("candidate_upgraded", async () => {
       const result = await guest("upgrade"); requireProduct(result.ready === true && result.configPreserved === true && result.readinessPreserved === true, "upgrade changed private state or readiness failed"); facts(result);
@@ -435,7 +482,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     });
     // The account acts; the Administrator observes its task, processes and listener, because WMI
     // refuses a standard account's network logon.
-    await step("standard_interactive_ready", async () => { await runtime.rdp(context, "standard"); });
+    await step("standard_interactive_ready", async () => { await rdp("standard"); });
     await step("standard_candidate_installed", async () => {
       const result = await guest("installFresh", "standard"); const state = await guest("state");
       requireProduct(result.ready === true && state.loopbackOnly === true, "standard fresh install did not become ready");
@@ -463,6 +510,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       facts({ standardUninstalled: true, standardConfigPreserved: true, standardReadinessPreserved: true });
     });
     await step("evidence_complete", async () => {});
+    assertWindowsExecution(input.execution);
     return evidence(progress, input.identity);
   } catch (error) {
     if (runtime.development && PHASES.indexOf(progress.phase) >= PHASES.indexOf("transport_ready") && runtime.now() - progress.startedAt < 3 * 60 * 60_000) throw error;
@@ -479,6 +527,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   if (input.progress === undefined) return { noAttempt: true };
   const progress = parseProgress(input.progress, binding(input.identity));
   const runtime = input.runtime ?? await createWindowsRuntime();
+  const containmentCommitted = !progress.cleanupRequired;
   const label = windowsCampaignLabel(progress.epoch);
   const failures: string[] = [];
   const causes: Error[] = [];
@@ -505,6 +554,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   // Teardown is idempotent and independently ownership-checked. A broken receipt
   // disk must be reported, but must not prevent destruction of the owned VM.
   const context: WindowsContext = { epoch: progress.epoch, identity: input.identity, beforeEffect: save,
+    mutation: async (_key, action) => { await save(); return action(); },
     ...(input.execution === undefined ? {} : { execution: input.execution }) };
   const attempt = async (name: string, action: () => Promise<void>) => {
     try { await save(); await action(); }
@@ -589,6 +639,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
       await attempt("pixelRestore", () => input.pixel("windows-cleanup", () => runtime.restorePixel(context)));
     }
   } else {
+    progress.retirementPending = true; await save();
     await attempt("tailnetDelete", () => runtime.deleteTailnet(context));
   }
   // Provider listings may lag accepted creates/deletes; final containment requires a new
@@ -597,8 +648,10 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   await attempt("instanceResidue", async () => { requireFact(!(await runtime.provider.instances()).some(item => item.label?.startsWith(QUAL_LABEL_PREFIX)), "instance residue"); });
   await attempt("firewallResidue", async () => { requireFact(!(await runtime.provider.firewalls()).some(item => item.description?.startsWith(QUAL_LABEL_PREFIX)), "firewall residue"); });
   if (guestFailures > 0 && !instanceAbsent) failed("guestContainment", undefined);
-  progress.cleanupRequired = failures.length > 0; await save();
-  if (failures.length) { progress.cleanupRequired = true; throw new AggregateError(causes, `Windows cleanup failed: ${failures.join(", ")}`); }
+  if (!containmentCommitted) progress.cleanupRequired = failures.length > 0;
+  if (!progress.cleanupRequired) progress.retirementPending = true;
+  await save();
+  if (failures.length) throw new AggregateError(causes, `Windows cleanup failed: ${failures.join(", ")}`);
   // Completion is durable before deleting the last recovery state. If unlink fails or the
   // controller dies afterward, the committed false checkpoint lets cleanup finish without
   // attempting Pixel restoration from a vault that may already be absent.
@@ -606,6 +659,8 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   catch { throw new QualificationFailure(parseLaneFailure({ id: input.execution?.nextFailureId() ?? ++standaloneFailureId,
     lane: "windowsCleanup", step: "vault", reason: "containment_unproven", class: "harness",
     elapsedMs: 0, operation: "unknown", observations: {} })); }
+  progress.retirementPending = false; await save();
+  if (failures.length) throw new AggregateError(causes, `Windows retirement failed: ${failures.join(", ")}`);
   return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,
     guestCleanupFailures: guestFailures, guestCommandsSkipped };
 }
