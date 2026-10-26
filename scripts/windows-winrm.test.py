@@ -12,6 +12,33 @@ import unittest
 from unittest.mock import patch
 
 
+class ConnectTimeout(Exception):
+    pass
+
+
+class ReadTimeout(Exception):
+    pass
+
+
+class InvalidCredentialsError(Exception):
+    pass
+
+
+class WinRMTransportError(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def modules():
+    protocol = types.ModuleType('winrm.protocol')
+    protocol.Protocol = Transport
+    requests = types.ModuleType('requests.exceptions')
+    requests.ConnectTimeout, requests.ReadTimeout = ConnectTimeout, ReadTimeout
+    exceptions = types.ModuleType('winrm.exceptions')
+    exceptions.InvalidCredentialsError, exceptions.WinRMTransportError = InvalidCredentialsError, WinRMTransportError
+    return {'winrm.protocol': protocol, 'requests.exceptions': requests, 'winrm.exceptions': exceptions}
+
+
 class Transport:
     frames = []
     arguments = []
@@ -49,9 +76,7 @@ class WinrmFramingTests(unittest.TestCase):
         Transport.options = {}
         Transport.response = (b'{"ready":true}', b'', 0)
         Transport.closed = False
-        module = types.ModuleType('winrm.protocol')
-        module.Protocol = Transport
-        with patch.dict(sys.modules, {'winrm.protocol': module}):
+        with patch.dict(sys.modules, modules()):
             self.adapter = runpy.run_path(str(Path(__file__).with_name('windows-winrm.py')))
 
     def run_request(self, **payload):
@@ -63,16 +88,14 @@ class WinrmFramingTests(unittest.TestCase):
             self.adapter['main']()
         return json.loads(output.getvalue())
 
-    def run_entrypoint(self, request):
-        module = types.ModuleType('winrm.protocol')
-        module.Protocol = Transport
+    def run_entrypoint(self, request, expected_exit=1):
         output = io.StringIO()
-        with patch.dict(sys.modules, {'winrm.protocol': module}), \
+        with patch.dict(sys.modules, modules()), \
                 patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))), \
                 contextlib.redirect_stdout(output):
             with self.assertRaises(SystemExit) as exited:
                 runpy.run_path(str(Path(__file__).with_name('windows-winrm.py')), run_name='__main__')
-        self.assertEqual(exited.exception.code, 1)
+        self.assertEqual(exited.exception.code, expected_exit)
         self.assertEqual(len(output.getvalue().splitlines()), 1)
         return json.loads(output.getvalue())
 
@@ -216,7 +239,10 @@ class WinrmFramingTests(unittest.TestCase):
     def test_failed_guest_does_not_echo_stdout_or_arbitrary_stderr(self):
         Transport.response = (b'synthetic-private-output', b'synthetic-private-error guest execution failed at line 42: RuntimeException', 1)
         result = self.run_request(script='synthetic')
-        self.assertEqual(result, {'exitCode': 1, 'stdout': '', 'diagnostic': 'guest execution failed at line 42: RuntimeException'})
+        self.assertEqual(result['exitCode'], 1)
+        self.assertEqual(result['stdout'], '')
+        self.assertEqual(result['diagnostic'], 'guest execution failed at line 42: RuntimeException')
+        self.assertEqual(result['failure']['kind'], 'guest')
 
     def test_status_mismatch_forwards_field_names_and_nothing_after_them(self):
         Transport.response = (b'', b'private guest execution failed at line 82: RuntimeException; status mismatch: ready,active synthetic-private-tail', 1)
@@ -238,10 +264,8 @@ class WinrmFramingTests(unittest.TestCase):
             raise ConnectionError('synthetic teardown refusal')
         output = io.StringIO()
         request = {'host': '192.0.2.10', 'username': 'Administrator', 'password': 'synthetic-transport-only', 'script': 'synthetic'}
-        module = types.ModuleType('winrm.protocol')
-        module.Protocol = Transport
         code = 0
-        with patch.object(Transport, 'cleanup_command', refuse), patch.dict(sys.modules, {'winrm.protocol': module}), \
+        with patch.object(Transport, 'cleanup_command', refuse), patch.dict(sys.modules, modules()), \
                 patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))), \
                 contextlib.redirect_stdout(output):
             try:
@@ -250,8 +274,65 @@ class WinrmFramingTests(unittest.TestCase):
                 code = exited.code
         lines = output.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
-        self.assertEqual(json.loads(lines[0]), {'exitCode': 0, 'stdout': '{"ready":true}', 'diagnostic': ''})
+        self.assertEqual(json.loads(lines[0])['stdout'], '{"ready":true}')
         self.assertEqual(code, 0)
+        self.assertTrue(Transport.closed, 'command cleanup failure must not skip shell closure')
+
+    def test_transport_classification_uses_types_not_message_text(self):
+        with patch.object(Transport, 'open_shell', side_effect=ConnectionResetError('synthetic')):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic', 'readOnly': True})
+        self.assertEqual(result['failure'], {'kind': 'transport', 'stage': 'connection',
+                                           'condition': 'connection_reset', 'httpStatus': None,
+                                           'disposition': 'not_started'})
+        with patch.object(Transport, 'open_shell', side_effect=LookupError('ConnectTimeout HTTP 503')):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic', 'readOnly': True})
+        self.assertEqual(result['failure']['kind'], 'helper')
+        self.assertEqual(result['failure']['condition'], 'helper_failure')
+
+    def test_known_timeout_http_and_authentication_conditions(self):
+        for error, condition in ((ConnectTimeout(), 'connection_timeout'), (ReadTimeout(), 'read_timeout'),
+                                 (WinRMTransportError(503), 'retryable_http'), (WinRMTransportError(429), 'retryable_http'),
+                                 (WinRMTransportError(401), 'authentication'), (InvalidCredentialsError(), 'authentication'),
+                                 (WinRMTransportError(400), 'helper_failure')):
+            with self.subTest(condition=condition), patch.object(Transport, 'open_shell', side_effect=error):
+                result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                             'password': 'synthetic-only', 'script': 'synthetic'})
+            self.assertEqual(result['failure']['condition'], condition)
+
+    def test_interrupted_output_attempts_both_teardowns(self):
+        with patch.object(Transport, 'get_command_output', side_effect=ConnectionResetError('synthetic')), \
+                patch.object(Transport, 'cleanup_command', side_effect=ConnectionResetError('synthetic')):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic'})
+        self.assertTrue(Transport.closed)
+        self.assertEqual(result['failure']['stage'], 'output')
+        self.assertEqual(result['failure']['disposition'], 'unknown')
+        self.assertEqual(result['teardown'], {'commandAttempted': True, 'commandStopped': False,
+                                            'shellAttempted': True, 'shellClosed': True})
+
+    def test_controller_sigterm_keeps_unknown_disposition_and_attempts_both_teardowns(self):
+        with patch.object(Transport, 'get_command_output', side_effect=SystemExit(143)):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic'}, expected_exit=143)
+        self.assertEqual(result['failure']['disposition'], 'unknown')
+        self.assertTrue(result['teardown']['commandStopped'])
+        self.assertTrue(result['teardown']['shellClosed'])
+
+    def test_output_decoding_failure_is_helper_not_transport(self):
+        Transport.response = (b'\xff', b'', 0)
+        result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                     'password': 'synthetic-only', 'script': 'synthetic'})
+        self.assertEqual(result['failure']['kind'], 'helper')
+        self.assertEqual(result['failure']['stage'], 'output')
+        self.assertEqual(result['failure']['disposition'], 'confirmed')
+
+    def test_wrapped_socket_reset_uses_exception_structure(self):
+        with patch.object(Transport, 'open_shell', side_effect=ConnectionError('synthetic', ConnectionResetError())):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic'})
+        self.assertEqual(result['failure']['condition'], 'connection_reset')
 
 
 if __name__ == '__main__':

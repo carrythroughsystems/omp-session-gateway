@@ -4,6 +4,18 @@ import pins from "./windows-qualification-pins.json";
 import upstream from "../UPSTREAM.lock.json";
 import type { OmpPins } from "./stable-qualification.ts";
 import { firewallEligibility, instanceEligibility, QUAL_LABEL_PREFIX } from "./vultr-target.ts";
+import { FAILURE_REASONS, parseLaneFailure, QualificationFailure } from "./qualification-failure.ts";
+import type { FailureObservations, LaneStep, OperationDisposition } from "./qualification-failure.ts";
+import { pixelUnrestored } from "./restoration.ts";
+
+/** Structurally shared with the orchestrator; cleanup receives its own fresh execution. */
+export interface WindowsExecutionContext { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
+let standaloneFailureId = 0;
+export function windowsFailure(reason: keyof typeof FAILURE_REASONS.windows, step: LaneStep<"windows">,
+  operation: OperationDisposition, observations: FailureObservations = {}, execution?: WindowsExecutionContext, elapsedMs = 0): QualificationFailure {
+  return new QualificationFailure(parseLaneFailure({ id: execution?.nextFailureId() ?? ++standaloneFailureId,
+    lane: "windows", step, reason, class: FAILURE_REASONS.windows[reason], operation, observations, elapsedMs }));
+}
 
 export interface WindowsArtifact {
   readonly tag: string;
@@ -43,6 +55,8 @@ export interface WindowsTransportProbe {
   readonly signalAt: number | null;
   readonly exitedAt: number | null;
   readonly exitCode: number | null;
+  readonly killAt?: number | null;
+  readonly controllerDeadline?: boolean;
 }
 export interface WindowsProvider {
   instances(): Promise<WindowsInstance[]>;
@@ -60,8 +74,9 @@ export interface WindowsContext {
   readonly identity: WindowsIdentity;
   readonly beforeEffect: () => Promise<void>;
   readonly transportProbe?: (probe: WindowsTransportProbe) => Promise<void>;
+  readonly execution?: WindowsExecutionContext;
 }
-export type WindowsGuestAction = "transport" | "stage" | "installPredecessor" | "upgrade" | "doctor" | "reboot" |
+export type WindowsGuestAction = "transport" | "reconnect" | "stage" | "installPredecessor" | "upgrade" | "doctor" | "reboot" |
   "prelogin" | "ready" | "publish" | "launch" | "stopOmp" | "revoked" | "rotate" | "rollback" | "restore" |
   "uninstall" | "resetServe" | "logout" | "prepareStandardUser" | "identity" | "releaseTailnet" | "join" | "installFresh" | "state";
 /** The Windows account a guest action or RDP logon runs as. */
@@ -77,6 +92,9 @@ export interface WindowsRuntime {
   admit(input: WindowsPreflightInput): Promise<WindowsAdmission>;
   saveAccess(epoch: string, instance: WindowsInstance): Promise<void>;
   removeAccess(epoch: string): Promise<void>;
+  /** Refetch the vault-bound ID even if the provider changed its label. */
+  cleanupInstance?(epoch: string): Promise<WindowsInstance | undefined>;
+  cleanupFirewall?(epoch: string): Promise<WindowsFirewall | undefined>;
   guest(context: WindowsContext, action: WindowsGuestAction, principal?: WindowsPrincipal): Promise<Record<string, unknown>>;
   rdp(context: WindowsContext, principal?: WindowsPrincipal): Promise<void>;
   pixel(context: WindowsContext): Promise<Record<string, unknown>>;
@@ -121,25 +139,32 @@ export interface WindowsLaneInput {
   readonly checkpoint: (progress: Record<string, unknown>) => Promise<void>;
   readonly pixel: <T>(owner: string, action: () => Promise<T>) => Promise<T>;
   readonly runtime?: WindowsRuntime;
+  readonly execution?: WindowsExecutionContext;
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA = /^[0-9a-f]{64}$/u;
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function requireFact(value: unknown, message: string): asserts value { if (!value) throw new Error(message); }
+function requireProduct(value: unknown, message: string): asserts value {
+  if (value) return;
+  const failure = windowsFailure("assertion_failed", "output", "confirmed");
+  // Assertion messages are controller-authored constants/closed check names, never guest output.
+  failure.message = message; throw failure;
+}
 export function verifyWindowsDoctor(result: Record<string, unknown>): Record<string, number | boolean> {
   const checks = result.checks;
   // A logon trigger without the installing account fires on anyone's logon, and needs an administrator to register (#294).
-  requireFact(record(checks) && result.loopbackOnly === true && result.logonTrigger === true && result.interactivePrincipal === true && result.logonTriggerScoped === true, "invalid Windows doctor/listener/task observation");
+  requireProduct(record(checks) && result.loopbackOnly === true && result.logonTrigger === true && result.interactivePrincipal === true && result.logonTriggerScoped === true, "invalid Windows doctor/listener/task observation");
   for (const name of ["assets", "compatibility", "config", "daemon", "discoveryReadable", "funnelDisabled",
     "listenerLoopbackOnly", "loopbackTrustSound", "permissions", "relay", "serveMapping", "serviceActive", "serviceInstalled", "tailscaleConnected"]) {
-    requireFact(checks[name] === true, `Windows doctor host check failed: ${name}`);
+    requireProduct(checks[name] === true, `Windows doctor host check failed: ${name}`);
   }
   const health = Object.hasOwn(checks, "sessionHealth") ? "sessionHealth" : "publisherHealth";
   const expectedFalse = new Set(["identityAllowed", "pwa", health]);
-  requireFact([...expectedFalse].every(name => checks[name] === false) && typeof checks.securityHeaders === "boolean", "Windows tagged-node denial checks differ");
+  requireProduct([...expectedFalse].every(name => checks[name] === false) && typeof checks.securityHeaders === "boolean", "Windows tagged-node denial checks differ");
   if (checks.securityHeaders === false) expectedFalse.add("securityHeaders");
   const entries = Object.entries(checks);
-  requireFact(entries.every(([name, value]) => typeof value === "boolean" && (value || expectedFalse.has(name))), "unexpected Windows doctor failure");
+  requireProduct(entries.every(([name, value]) => typeof value === "boolean" && (value || expectedFalse.has(name))), "unexpected Windows doctor failure");
   return { doctorChecks: entries.length, doctorTrue: entries.filter(([, value]) => value === true).length,
     doctorIdentityAllowed: false, doctorPwa: false, [health === "sessionHealth" ? "doctorSessionHealth" : "doctorPublisherHealth"]: false,
     doctorSecurityHeaders: checks.securityHeaders, loopbackOnly: true, logonTrigger: true, interactivePrincipal: true, logonTriggerScoped: true };
@@ -179,7 +204,8 @@ function parseProgress(value: unknown, expected?: string): Progress {
     requireFact(Array.isArray(value.transportProbes), "invalid Windows transport probes");
     for (const probe of value.transportProbes) {
       requireFact(record(probe) && JSON.stringify(Object.keys(probe).sort()) === JSON.stringify(
-        ["exitCode", "exitedAt", "firstResponseLatencyMs", "signalAt", "startedAt", "timeoutMs"]), "unknown Windows transport probe fields");
+        ["exitCode", "exitedAt", "firstResponseLatencyMs", "signalAt", "startedAt", "timeoutMs",
+          ...(Object.hasOwn(probe, "killAt") ? ["killAt"] : []), ...(Object.hasOwn(probe, "controllerDeadline") ? ["controllerDeadline"] : [])].sort()), "unknown Windows transport probe fields");
       const integer = (item: unknown): item is number => typeof item === "number" && Number.isSafeInteger(item);
       requireFact(integer(probe.startedAt) && probe.startedAt > 0 && integer(probe.timeoutMs) && probe.timeoutMs >= 1 && probe.timeoutMs <= 180_000,
         "invalid Windows transport probe start");
@@ -188,6 +214,9 @@ function parseProgress(value: unknown, expected?: string): Progress {
       requireFact(probe.firstResponseLatencyMs === null || (integer(probe.firstResponseLatencyMs) && probe.firstResponseLatencyMs >= 0 &&
         (probe.exitedAt === null || probe.firstResponseLatencyMs <= Number(probe.exitedAt) - probe.startedAt)), "invalid Windows transport first response");
       requireFact(probe.signalAt === null || probe.exitedAt === null || Number(probe.signalAt) <= Number(probe.exitedAt), "Windows transport signal follows exit");
+      if (probe.controllerDeadline !== undefined) requireFact(typeof probe.controllerDeadline === "boolean", "invalid transport deadline observation");
+      if (probe.killAt !== undefined && probe.killAt !== null) requireFact(integer(probe.killAt) && probe.signalAt !== null &&
+        probe.killAt >= Number(probe.signalAt) && (probe.exitedAt === null || probe.killAt <= Number(probe.exitedAt)), "invalid transport kill observation");
     }
   }
   return structuredClone(value) as Progress;
@@ -205,17 +234,22 @@ export async function preflightWindows(input: WindowsPreflightInput, runtime?: W
   return (runtime ?? await createWindowsRuntime()).admit(input);
 }
 function assertInstance(item: WindowsInstance, label: string, runtime: WindowsRuntime): void {
-  requireFact(instanceEligibility(item.id, item.label, runtime.environment).eligible && item.label === label && item.os_id === pins.osId && item.region === pins.region && item.plan === pins.plan, "refusing foreign or protected Windows instance");
+  if (!(instanceEligibility(item.id, item.label, runtime.environment).eligible && item.label === label && item.os_id === pins.osId && item.region === pins.region && item.plan === pins.plan)) {
+    throw windowsFailure("ownership_changed", "connection", "not_started");
+  }
 }
 function assertFirewall(item: WindowsFirewall, label: string, runtime: WindowsRuntime): void {
-  requireFact(firewallEligibility(item.id, item.description, runtime.environment).eligible && item.description === label, "refusing foreign or protected Windows firewall");
+  if (!(firewallEligibility(item.id, item.description, runtime.environment).eligible && item.description === label)) {
+    throw windowsFailure("ownership_changed", "connection", "not_started");
+  }
 }
 async function waitFor(runtime: WindowsRuntime, action: () => Promise<boolean>, timeout: number, name: string, observed?: () => Record<string, unknown>): Promise<void> {
   const start = runtime.now();
   do { if (await action()) return; await runtime.sleep(5_000); } while (runtime.now() - start < timeout);
   // Name which predicate held out through the last observation's booleans and counts, never guest strings.
   const last = observed === undefined ? "" : `; last ${JSON.stringify(Object.fromEntries(Object.entries(observed()).filter(([, value]) => typeof value === "boolean" || typeof value === "number")))}`;
-  throw new Error(`${name} timed out${last}`);
+  const failure = windowsFailure("assertion_failed", "output", "confirmed");
+  failure.message = `${name} timed out${last}`; throw failure;
 }
 function evidence(progress: Progress, identity: WindowsIdentity): Record<string, unknown> {
   const artifact = ({ tag, sourceCommit, archiveSha256 }: WindowsArtifact) => ({ tag, sourceCommit, archiveSha256 });
@@ -229,7 +263,7 @@ function evidence(progress: Progress, identity: WindowsIdentity): Record<string,
 
 export async function runWindows(input: WindowsLaneInput): Promise<Record<string, unknown>> {
   const digest = binding(input.identity);
-  const runtime = input.runtime ?? await createWindowsRuntime();
+  const runtime = input.runtime ?? await createWindowsRuntime(input.execution === undefined ? {} : { execution: input.execution });
   let resumed: Progress | undefined;
   if (input.progress !== undefined) {
     const prior = parseProgress(input.progress, digest);
@@ -246,7 +280,11 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     phase: "intent_checkpointed", settled: true, cleanupRequired: true, startedAt: runtime.now(), timings: {}, facts: {}, transportProbes: [] };
   const save = async () => { parseProgress(progress, digest); await input.checkpoint(structuredClone(progress)); };
   const context: WindowsContext = { epoch: progress.epoch, identity: input.identity,
+    ...(input.execution === undefined ? {} : { execution: input.execution }),
     beforeEffect: async () => {
+      if (input.execution?.signal.aborted || (input.execution && performance.now() >= input.execution.deadline)) {
+        throw windowsFailure("deadline_exceeded", progress.phase, "unknown", {}, input.execution);
+      }
       requireFact(runtime.now() - progress.startedAt < 3 * 60 * 60_000, "Windows resource lifetime bound reached");
       await save();
     },
@@ -270,7 +308,19 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     const maximumAge = (phase === "pixel_verified" ? 2 : 3) * 60 * 60_000;
     requireFact(runtime.now() - progress.startedAt < maximumAge, "Windows resource lifetime bound reached");
     progress.phase = phase; progress.settled = false; await save();
-    const start = runtime.now(); await action();
+    const start = runtime.now();
+    try { await action(); }
+    catch (error) {
+      if (error instanceof QualificationFailure) {
+        const failure = new QualificationFailure(parseLaneFailure({ ...error.evidence, id: input.execution?.nextFailureId() ?? error.evidence.id,
+          ...(error.evidence.lane === "windows" ? { step: phase } : {}), elapsedMs: runtime.now() - start }));
+        failure.message = error.message; throw failure;
+      }
+      if (error instanceof AggregateError) throw error;
+      const failure = windowsFailure("unclassified_failure", phase, "unknown", {}, input.execution, runtime.now() - start);
+      if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
+      throw failure;
+    }
     progress.timings[phase] = runtime.now() - start; progress.settled = true; await save();
   };
   const guest = (action: WindowsGuestAction, principal?: WindowsPrincipal) => runtime.guest(context, action, principal);
@@ -285,7 +335,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     await guest("transport"); const start = runtime.now(); let samples = 0;
     do {
       const state = await guest("prelogin");
-      requireFact(state.taskPresent === true && state.taskRunning === false && state.gatewayProcesses === 0 && state.listeners === 0 &&
+      requireProduct(state.taskPresent === true && state.taskRunning === false && state.gatewayProcesses === 0 && state.listeners === 0 &&
         state.logonTrigger === true && state.interactivePrincipal === true && state.logonTriggerScoped === true, "pre-login task/process/listener invariant failed");
       samples += 1; if (runtime.now() - start >= 30_000 && samples >= 3) break;
       await runtime.sleep(15_000);
@@ -318,14 +368,14 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     });
     await step("transport_ready", async () => {
       const result = await guest("transport");
-      requireFact(typeof result.transportStabilitySamples === "number" && result.transportStabilitySamples >= 3 &&
+      requireProduct(typeof result.transportStabilitySamples === "number" && result.transportStabilitySamples >= 3 &&
         typeof result.transportStabilityDurationMs === "number" && result.transportStabilityDurationMs >= 60_000, "authenticated WinRM stability window incomplete");
       facts(result);
     });
     await step("toolchain_staged", async () => { await save(); await runtime.rdp(context); facts(await guest("stage")); });
-    await step("predecessor_installed", async () => { requireFact((await guest("installPredecessor")).ready === true, "predecessor did not become ready"); });
+    await step("predecessor_installed", async () => { requireProduct((await guest("installPredecessor")).ready === true, "predecessor did not become ready"); });
     await step("candidate_upgraded", async () => {
-      const result = await guest("upgrade"); requireFact(result.ready === true && result.configPreserved === true && result.readinessPreserved === true, "upgrade changed private state or readiness failed"); facts(result);
+      const result = await guest("upgrade"); requireProduct(result.ready === true && result.configPreserved === true && result.readinessPreserved === true, "upgrade changed private state or readiness failed"); facts(result);
       facts(verifyWindowsDoctor(await guest("doctor")));
     });
     await step("reboot_requested", async () => { await guest("reboot"); });
@@ -335,41 +385,41 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     await step("postlogin_ready", async () => { facts({ automaticStartMs: await postlogin("administrator") }); });
     await step("doctor_passed", async () => { facts(verifyWindowsDoctor(await guest("doctor"))); });
     await step("omp_published", async () => {
-      const result = await guest("publish"); requireFact(result.namedPipe === true && result.generation === 1, "OMP did not publish its named pipe"); facts(result);
+      const result = await guest("publish"); requireProduct(result.namedPipe === true && result.generation === 1, "OMP did not publish its named pipe"); facts(result);
       const launch = await guest("launch");
-      requireFact(launch.viewStatus === 200 && launch.controlStatus === 200 && launch.staleViewStatus === 409 && launch.staleControlStatus === 409 && launch.noStore === true, "generation/launch contract failed"); facts(launch);
+      requireProduct(launch.viewStatus === 200 && launch.controlStatus === 200 && launch.staleViewStatus === 409 && launch.staleControlStatus === 409 && launch.noStore === true, "generation/launch contract failed"); facts(launch);
     });
     await step("pixel_verified", async () => {
       const result = await input.pixel("windows", () => runtime.pixel(context));
-      for (const key of ["pixelIdentityAccepted", "viewReadOnly", "controlWritable", "promptAccepted", "returnedToDirectory"]) requireFact(result[key] === true, `Pixel ${key} failed`);
+      for (const key of ["pixelIdentityAccepted", "viewReadOnly", "controlWritable", "promptAccepted", "returnedToDirectory"]) requireProduct(result[key] === true, `Pixel ${key} failed`);
       facts(result);
     });
-    await step("omp_revoked", async () => { await guest("stopOmp"); const result = await guest("revoked"); requireFact(result.revoked === true, "OMP revocation failed"); facts(result); });
-    await step("readiness_rotated", async () => { const result = await guest("rotate"); requireFact(result.ready === true && result.readinessChanged === true && result.configPreserved === true, "readiness rotation invariant failed"); facts(result); });
-    await step("predecessor_restored", async () => { const result = await guest("rollback"); requireFact(result.ready === true && result.historySelected === true && result.configPreserved === true && result.readinessPreserved === true, "history-selected rollback invariant failed"); facts(result); });
-    await step("candidate_restored", async () => { const result = await guest("restore"); requireFact(result.ready === true && result.restored === true && result.configPreserved === true && result.readinessPreserved === true, "candidate restoration invariant failed"); facts(result); });
-    await step("candidate_uninstalled", async () => { const result = await guest("uninstall"); requireFact(result.uninstalled === true && result.configPreserved === true && result.readinessPreserved === true, "uninstall preservation invariant failed"); facts(result); });
+    await step("omp_revoked", async () => { await guest("stopOmp"); const result = await guest("revoked"); requireProduct(result.revoked === true, "OMP revocation failed"); facts(result); });
+    await step("readiness_rotated", async () => { const result = await guest("rotate"); requireProduct(result.ready === true && result.readinessChanged === true && result.configPreserved === true, "readiness rotation invariant failed"); facts(result); });
+    await step("predecessor_restored", async () => { const result = await guest("rollback"); requireProduct(result.ready === true && result.historySelected === true && result.configPreserved === true && result.readinessPreserved === true, "history-selected rollback invariant failed"); facts(result); });
+    await step("candidate_restored", async () => { const result = await guest("restore"); requireProduct(result.ready === true && result.restored === true && result.configPreserved === true && result.readinessPreserved === true, "candidate restoration invariant failed"); facts(result); });
+    await step("candidate_uninstalled", async () => { const result = await guest("uninstall"); requireProduct(result.uninstalled === true && result.configPreserved === true && result.readinessPreserved === true, "uninstall preservation invariant failed"); facts(result); });
     // The same candidate, freshly installed by an account with no administrative rights (#293, #294).
     await step("standard_user_prepared", async () => {
-      requireFact((await guest("prepareStandardUser")).prepared === true, "standard account preparation failed");
+      requireProduct((await guest("prepareStandardUser")).prepared === true, "standard account preparation failed");
       const token = await guest("identity", "standard");
-      requireFact(token.standardUserNonAdmin === true && token.standardUserNoSecurityPrivilege === true, "the standard account's token is privileged");
+      requireProduct(token.standardUserNonAdmin === true && token.standardUserNoSecurityPrivilege === true, "the standard account's token is privileged");
       facts({ standardUserNonAdmin: true, standardUserNoSecurityPrivilege: true });
     });
     await step("standard_tailnet_released", async () => {
-      requireFact((await guest("releaseTailnet")).released === true, "the Administrator did not release Tailscale");
+      requireProduct((await guest("releaseTailnet")).released === true, "the Administrator did not release Tailscale");
       await runtime.deleteTailnet(context);
     });
     await step("standard_tailnet_joined", async () => {
       const joined = await guest("join", "standard");
-      requireFact(joined.taggedNode === true && joined.tunMode === true && joined.funnelOff === true, "standard tagged Tailscale join failed");
+      requireProduct(joined.taggedNode === true && joined.tunMode === true && joined.funnelOff === true, "standard tagged Tailscale join failed");
     });
     // The account acts; the Administrator observes its task, processes and listener, because WMI
     // refuses a standard account's network logon.
     await step("standard_interactive_ready", async () => { await runtime.rdp(context, "standard"); });
     await step("standard_candidate_installed", async () => {
       const result = await guest("installFresh", "standard"); const state = await guest("state");
-      requireFact(result.ready === true && state.loopbackOnly === true, "standard fresh install did not become ready");
+      requireProduct(result.ready === true && state.loopbackOnly === true, "standard fresh install did not become ready");
     });
     await step("standard_reboot_requested", async () => { await guest("reboot"); });
     await step("standard_prelogin_verified", async () => {
@@ -384,12 +434,12 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     });
     await step("standard_readiness_rotated", async () => {
       const result = await guest("rotate", "standard");
-      requireFact(result.ready === true && result.readinessChanged === true && result.configPreserved === true, "standard readiness rotation invariant failed");
+      requireProduct(result.ready === true && result.readinessChanged === true && result.configPreserved === true, "standard readiness rotation invariant failed");
       facts({ standardReadinessChanged: true });
     });
     await step("standard_candidate_uninstalled", async () => {
       const result = await guest("uninstall", "standard"); const state = await guest("state");
-      requireFact(state.taskPresent === false && state.gatewayProcesses === 0 && state.listeners === 0 && result.configPreserved === true && result.readinessPreserved === true,
+      requireProduct(state.taskPresent === false && state.gatewayProcesses === 0 && state.listeners === 0 && result.configPreserved === true && result.readinessPreserved === true,
         "standard uninstall preservation invariant failed");
       facts({ standardUninstalled: true, standardConfigPreserved: true, standardReadinessPreserved: true });
     });
@@ -397,7 +447,10 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     return evidence(progress, input.identity);
   } catch (error) {
     if (runtime.development && PHASES.indexOf(progress.phase) >= PHASES.indexOf("transport_ready") && runtime.now() - progress.startedAt < 3 * 60 * 60_000) throw error;
-    try { await cleanupWindows({ ...input, progress, runtime }); }
+    // A failed primary's cancellation must not disable owned-resource containment.
+    const { execution, ...cleanupInput } = input;
+    try { await cleanupWindows({ ...cleanupInput, progress, runtime,
+      ...(execution === undefined ? {} : { execution: { ...execution, signal: new AbortController().signal, deadline: performance.now() + 30 * 60_000 } }) }); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], "Windows lane and cleanup failed"); }
     throw error;
   }
@@ -410,52 +463,98 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   const label = windowsCampaignLabel(progress.epoch);
   const failures: string[] = [];
   const causes: Error[] = [];
+  let guestFailures = 0, instanceAbsent = false, guestCommandsSkipped = true, ownershipChanged = false;
+  const failed = (name: string, error: unknown) => {
+    if (error instanceof QualificationFailure && error.evidence.reason === "ownership_changed") ownershipChanged = true;
+    failures.push(name);
+    const failure = new QualificationFailure(parseLaneFailure({
+      id: input.execution?.nextFailureId() ?? ++standaloneFailureId, lane: "windowsCleanup", step: "containment",
+      class: "harness", reason: error instanceof QualificationFailure && error.evidence.reason === "ownership_changed" ? "ownership_changed" : "containment_unproven",
+      operation: "unknown", elapsedMs: 0, observations: {},
+    }));
+    if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
+    causes.push(failure);
+  };
   const save = async () => {
     try { await input.checkpoint(structuredClone(progress)); }
     catch (error) {
       if (!failures.includes("checkpoint")) {
-        failures.push("checkpoint"); causes.push(new Error(`checkpoint: ${error instanceof Error ? error.message : "write failed"}`));
+        failed("checkpoint", error);
       }
     }
   };
   // Teardown is idempotent and independently ownership-checked. A broken receipt
   // disk must be reported, but must not prevent destruction of the owned VM.
-  const context: WindowsContext = { epoch: progress.epoch, identity: input.identity, beforeEffect: save };
+  const context: WindowsContext = { epoch: progress.epoch, identity: input.identity, beforeEffect: save,
+    ...(input.execution === undefined ? {} : { execution: input.execution }) };
   const attempt = async (name: string, action: () => Promise<void>) => {
     try { await save(); await action(); }
     catch (error) {
-      failures.push(name);
-      causes.push(new Error(`${name}: ${error instanceof Error ? error.message : "operation failed"}`));
+      failed(name, error);
     }
   };
   if (progress.cleanupRequired) {
-    let ownedGuest = false;
-    await attempt("guestInventory", async () => { ownedGuest = (await runtime.provider.instances()).some(item => item.label === label); });
-    if (ownedGuest) {
+    const owned = new Map<string, WindowsInstance>();
+    let inventoryVerified = false;
+    await attempt("guestInventory", async () => {
+      const bound = await runtime.cleanupInstance?.(progress.epoch);
+      if (bound) { assertInstance(bound, label, runtime); owned.set(bound.id, bound); }
+      let listing = await runtime.provider.instances();
+      if (!listing.some(item => item.label === label) && !bound) {
+        // One empty provider page is not proof that the exact guest is gone.
+        await runtime.sleep(5_000); listing = await runtime.provider.instances();
+      }
+      for (const match of listing.filter(item => item.label === label)) {
+        const fresh = await runtime.provider.instance(match.id);
+        if (fresh) { assertInstance(fresh, label, runtime); owned.set(fresh.id, fresh); }
+      }
+      inventoryVerified = true;
+    });
+    const guestAttempt = async (action: "reconnect" | "stopOmp" | "uninstall" | "resetServe" | "logout", owner?: WindowsPrincipal) => {
+      try { await save(); await runtime.guest(context, action, owner); return true; }
+      catch (error) {
+        if (error instanceof QualificationFailure && error.evidence.reason === "ownership_changed") failed(action, error);
+        else guestFailures += 1;
+        return false;
+      }
+    };
+    if (inventoryVerified && owned.size > 0 && await guestAttempt("reconnect")) {
+      guestCommandsSkipped = false;
       // After the handover Windows refuses the Administrator's Tailscale CLI while the standard account
       // operates it, and the Administrator's gateway is already uninstalled.
       const handedOver = PHASES.indexOf(progress.phase) > PHASES.indexOf("standard_tailnet_released") ||
         (progress.phase === "standard_tailnet_released" && progress.settled);
       const owner: WindowsPrincipal = handedOver ? "standard" : "administrator";
-      await attempt("stopOmp", async () => { await runtime.guest(context, "stopOmp"); });
-      for (const action of ["uninstall", "resetServe", "logout"] as const) await attempt(action, async () => { await runtime.guest(context, action, owner); });
+      await guestAttempt("stopOmp");
+      for (const action of ["uninstall", "resetServe", "logout"] as const) await guestAttempt(action, owner);
     }
     await attempt("tailnetDelete", () => runtime.deleteTailnet(context));
     await attempt("instances", async () => {
-      for (const match of (await runtime.provider.instances()).filter(item => item.label === label)) {
+      requireFact(!ownershipChanged, "instance ownership changed");
+      for (const match of (await runtime.provider.instances()).filter(item => item.label === label)) owned.set(match.id, match);
+      for (const match of owned.values()) {
         await attempt("instanceDelete", async () => {
           const fresh = await runtime.provider.instance(match.id);
           if (!fresh) return;
+          if (fresh.id !== match.id) throw windowsFailure("ownership_changed", "connection", "not_started");
           assertInstance(fresh, label, runtime); await save(); await runtime.provider.destroyInstance(fresh.id, label);
           await waitFor(runtime, async () => await runtime.provider.instance(fresh.id) === undefined, 180_000, "instance deletion");
         });
       }
+      requireFact(inventoryVerified && !failures.includes("instanceDelete"), "instance containment unresolved");
+      for (const item of owned.values()) requireFact(await runtime.provider.instance(item.id) === undefined, "instance still exists");
+      instanceAbsent = true;
     });
     await attempt("firewalls", async () => {
-      for (const match of (await runtime.provider.firewalls()).filter(item => item.description === label)) {
+      const ownedFirewalls = new Map<string, WindowsFirewall>();
+      const bound = await runtime.cleanupFirewall?.(progress.epoch);
+      if (bound) { assertFirewall(bound, label, runtime); ownedFirewalls.set(bound.id, bound); }
+      for (const match of (await runtime.provider.firewalls()).filter(item => item.description === label)) ownedFirewalls.set(match.id, match);
+      for (const match of ownedFirewalls.values()) {
         await attempt("firewallDelete", async () => {
           const fresh = await runtime.provider.firewall(match.id);
           if (!fresh) return;
+          if (fresh.id !== match.id) throw windowsFailure("ownership_changed", "connection", "not_started");
           assertFirewall(fresh, label, runtime); await save(); await runtime.provider.destroyFirewall(fresh.id, label);
           await waitFor(runtime, async () => await runtime.provider.firewall(fresh.id) === undefined, 180_000, "firewall deletion");
         });
@@ -467,6 +566,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
     }
     await attempt("vault", async () => {
       requireFact(!failures.includes("pixelRestore"), "Pixel recovery state must be retained");
+      requireFact(instanceAbsent && failures.length === 0, "resource recovery state must be retained");
       requireFact(!(await runtime.provider.instances()).some(item => item.label === label), "instance still exists");
       await runtime.removeAccess(progress.epoch);
     });
@@ -476,9 +576,11 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   }
   await attempt("instanceResidue", async () => { requireFact(!(await runtime.provider.instances()).some(item => item.label?.startsWith(QUAL_LABEL_PREFIX)), "instance residue"); });
   await attempt("firewallResidue", async () => { requireFact(!(await runtime.provider.firewalls()).some(item => item.description?.startsWith(QUAL_LABEL_PREFIX)), "firewall residue"); });
+  if (guestFailures > 0 && !instanceAbsent) failed("guestContainment", undefined);
   progress.cleanupRequired = failures.length > 0; await save();
   if (failures.length) { progress.cleanupRequired = true; throw new AggregateError(causes, `Windows cleanup failed: ${failures.join(", ")}`); }
-  return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true };
+  return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,
+    guestCleanupFailures: guestFailures, guestCommandsSkipped };
 }
 
 if (import.meta.main) {

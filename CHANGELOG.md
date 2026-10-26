@@ -11,6 +11,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Closed qualification failure and machine-outcome contracts, private atomic outcome persistence,
   and additive schema-3 receipt validation. Unknown, mixed, unresolved or unbound failures remain
   non-retryable; this change does not enable automatic recovery or reinterpret historical failures.
+- Structured Windows transport failure evidence, bounded read-only reconnects, deadline-aware
+  subprocess reaping, and interrupted-upload reconciliation without write replay. Cleanup skips
+  confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,
+  while retaining independent firewall, tailnet, Pixel, and vault containment requirements.
 
 ## [v0.9.0] — 2026-10-25
 
