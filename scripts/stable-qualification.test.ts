@@ -1738,8 +1738,12 @@ test("council498 unresolved remote ownership refuses every destructive Mac clean
 
 test("council498 readiness preserves the shared remote root while attempting all restoration owners", async () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
-  receipt.execution = receiptExecution();
-  const target = { sshDestination: "readiness-unsettled-fixture.invalid", sudoPassword: "" };
+  const target = { sshDestination: "qualifier@readiness-unsettled-fixture.invalid", sudoPassword: "" };
+  const binding = receiptExecution().binding;
+  receipt.execution = { ...receiptExecution(), binding: { ...binding, macHostSha256: digest(target.sshDestination) } };
+  receipt.macHost = target.sshDestination;
+  receipt.candidate = { tag: TAG, sourceCommit: COMMIT, archiveSha256: binding.archiveSha256 };
+  receipt.predecessor = availabilityReceipt().predecessor!;
   let id = 60;
   const execution = { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => ++id };
   const remote = remoteExecutor(target, async () => ({ exitCode: 125, stdout: "", stderr: "" }));
