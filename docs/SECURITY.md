@@ -533,12 +533,19 @@ A late post cannot satisfy a fresh ask: the existing worker must attest its exac
 authoritative snapshot must retain its generation.
 Deadline expiry installs late-post sampling before returning a typed unexplained timeout; readiness
 also samples restoration and retains any late delivery in its failure observations. Ask-metadata
-waits install their sampler before waiting and fail as harness `delivery_metadata_timeout`.
+waits install their sampler before waiting; only exhaustion of the metadata window is
+`delivery_metadata_timeout`. Snapshot errors retain their original identity, and an expired execution
+budget is `delivery_timeout`. Readiness starts its failure clock before mutation; even an error
+normalizing failure evidence cannot skip restoration. Containment errors take precedence over an
+expired delivery budget, including request attestation after a recovered delivery.
+Late samplers remain armed through the old ask's clear settlement, are replaced for a fresh ask,
+and are disarmed immediately on in-budget delivery or an ambiguous overlap retry.
 Late-sampler failure is retained without skipping device restoration. Execution deadlines are
 rechecked after asynchronous observations and before success, including readiness telemetry,
 ownership and clear verification. Every persisted duration/count is a bounded safe integer;
 monotonic durations are rounded before persistence. Readiness retains separate 160-second delivery
-and clear windows.
+and clear windows. Ordinary, re-arm, overlap and Doze clear budgets start before their answer and
+metadata work; entering the final phone observation never grants a new window.
 Unacknowledged target creation remains unresolved after its bounded response route expires.
 Target/forward cleanup failure blocks Pixel release with a harness root and causally linked
 containment collateral, including failures inside network fallback and diagnostic paths; final task

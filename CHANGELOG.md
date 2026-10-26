@@ -28,6 +28,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   guarded fixture asks reject a changed acknowledged session at the extension boundary. Portable
   fixture regressions prove Windows permission refusal without relaxing POSIX admission; bounded CLI
   startup failures retain fixed diagnostic booleans without extending the two-second exit assertion.
+  Readiness failure timing starts before mutation and evidence-construction failure cannot skip
+  restoration. Request attestation preserves containment on expiry; snapshot faults retain their
+  identity, clear budgets include metadata work, and late samplers follow ask settlement and delivery.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
