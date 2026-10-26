@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runAndroidPush, runAndroidPushReadiness, waitForPushDelivery, emptyPushDeliveryMetrics, cleanupAndroidPush, parseAndroidPushProgress, androidPushNeedsCleanup,
@@ -1393,8 +1393,12 @@ test("a changed Pixel owner refuses release without hiding the action failure", 
 test("fixture commands are owned, bounded, and monotonically sequenced", () => {
   const epoch = randomUUID();
   expect(parseFixtureCommand({ epoch, sequence: 2, operation: "replace" }, epoch, 1)).toEqual({ sequence: 2, operation: "replace" });
+  expect(parseFixtureCommand({ epoch, sequence: 2, operation: "ask", expectedSessionId: "session-before" }, epoch, 1))
+    .toEqual({ sequence: 2, operation: "ask", expectedSessionId: "session-before" });
   for (const record of [{ epoch, sequence: 1, operation: "ask" }, { epoch: randomUUID(), sequence: 2, operation: "ask" },
-    { epoch, sequence: 2, operation: "shell" }, { epoch, sequence: 2, operation: "ask", data: "synthetic" }]) {
+    { epoch, sequence: 2, operation: "shell" }, { epoch, sequence: 2, operation: "ask", data: "synthetic" },
+    { epoch, sequence: 2, operation: "answer", expectedSessionId: "session-before" },
+    ...["", "x".repeat(129), "session/unsafe", 1].map(expectedSessionId => ({ epoch, sequence: 2, operation: "ask", expectedSessionId }))]) {
     expect(() => parseFixtureCommand(record, epoch, 1)).toThrow("invalid fixture command");
   }
 });
@@ -1420,7 +1424,7 @@ test("495 round2 fixture controller carries its last acknowledged private sessio
   }
 });
 
-test.each([false, true])("495 round2 fixture selects only its acknowledged session (changed=%s)", async changed => {
+test.each([false, true])("495 round2 fixture requires a private command and its acknowledged session (changed=%s)", async changed => {
   const root = await mkdtemp(join(tmpdir(), "extension-guard-")), epoch = randomUUID();
   const priorRoot = process.env.OMP_PUSH_FIXTURE_ROOT, priorEpoch = process.env.OMP_PUSH_FIXTURE_EPOCH;
   process.env.OMP_PUSH_FIXTURE_ROOT = root; process.env.OMP_PUSH_FIXTURE_EPOCH = epoch;
@@ -1433,14 +1437,18 @@ test.each([false, true])("495 round2 fixture selects only its acknowledged sessi
     ui: { select: async () => { selected++; return undefined; } } });
   try {
     await writeFile(join(root, "command.json"), JSON.stringify({ epoch, sequence: 1, operation: "ask", expectedSessionId: "session-before" }), { mode: 0o600 });
+    expect(((await stat(join(root, "command.json"))).mode & 0o077) === 0).toBe(process.platform !== "win32");
     let ack: Record<string, unknown> | undefined;
     for (let attempt = 0; attempt < 100; attempt++) {
       ack = await readFile(join(root, "ack.json"), "utf8").then(text => JSON.parse(text)).catch(() => undefined);
       if (ack?.sequence === 1) break;
       await Bun.sleep(5);
     }
-    expect(ack?.phase).toBe(changed ? "failed" : "accepted");
-    expect(selected).toBe(changed ? 0 : 1);
+    // This retained-Mac fixture deliberately requires POSIX private files. Windows cannot make
+    // this command's mode 0600; prove refusal there rather than weakening the admission check.
+    const refused = changed || process.platform === "win32";
+    expect(ack?.phase).toBe(refused ? "failed" : "accepted");
+    expect(selected).toBe(refused ? 0 : 1);
   } finally {
     await writeFile(join(root, "command.json"), JSON.stringify({ epoch, sequence: 2, operation: "stop" }), { mode: 0o600 });
     await running;

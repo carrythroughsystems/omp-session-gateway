@@ -25,7 +25,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   shutdown drains admitted handlers before releasing the durable writer claim. Readiness checks both
   delivery and clear budgets after awaited evidence, every persisted duration is a bounded integer,
   and network fallbacks preserve containment failures. Cleanup checks source-scoped v2 triage stores;
-  guarded fixture asks reject a changed acknowledged session at the extension boundary.
+  guarded fixture asks reject a changed acknowledged session at the extension boundary. Portable
+  fixture regressions prove Windows permission refusal without relaxing POSIX admission; bounded CLI
+  startup failures retain fixed diagnostic booleans without extending the two-second exit assertion.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and

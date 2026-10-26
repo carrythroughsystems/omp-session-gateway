@@ -75,10 +75,13 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
       cwd: fileURLToPath(new URL("../../..", import.meta.url)),
       env: sandboxEnvironment(root),
       stdin: "ignore",
-      stdout: "ignore",
+      stdout: "pipe",
       stderr: "pipe",
     },
   );
+  const stdout = new Response(subprocess.stdout).text();
+  const stderr = new Response(subprocess.stderr).text();
+  const occupiedError = /address already in use|port \d+ in use/iu;
   try {
     const result = await Promise.race([
       subprocess.exited.then(exitCode => ({ kind: "exit" as const, exitCode })),
@@ -86,10 +89,13 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
     ]);
     if (result.kind === "timeout") {
       subprocess.kill(9);
-      throw new Error("gateway remained alive after HTTP startup failed");
+      await subprocess.exited;
+      // Distinguish a retained handle after bind refusal from a process that never reached it.
+      // Keep the original two-second bound and emit only fixed diagnostic booleans, not output.
+      throw new Error(`gateway remained alive after HTTP startup failed (bindRefused=${occupiedError.test(await stderr)}, listening=${(await stdout).includes('"event":"http.listening"')})`);
     }
     expect(result.exitCode).not.toBe(0);
-    expect(await new Response(subprocess.stderr).text()).toMatch(/address already in use|port \d+ in use/iu);
+    expect(await stderr).toMatch(occupiedError);
   } finally {
     occupied.stop(true);
     if (subprocess.exitCode === null) subprocess.kill(9);
