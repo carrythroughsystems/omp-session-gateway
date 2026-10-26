@@ -15,6 +15,34 @@ const summary = (): QualificationFailureSummary => ({ failures: [root(), collate
 const secret = "SYNTHETIC_PRIVATE_FAILURE_SENTINEL";
 
 describe("closed qualification failure contracts", () => {
+  test("council R1 collateral cannot bind a generated availability ID", () => {
+    const hold = new DeviceCloudAvailabilityHold({ kind: "device-cloud-availability", stage: "preflight", target: "iphone",
+      vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0 });
+    for (const leaf of [hold, new Error("unknown")]) {
+      const failures = normalizeQualificationFailures(new AggregateError([leaf, new QualificationFailure(collateral())]));
+      expect(failures.some(item => item.class === "harness")).toBe(true);
+      expect(qualificationRetryEligible({ ...summary(), failures }, true)).toBe(false);
+    }
+  });
+  test("council R4 cleanup transports cannot authorize infrastructure recovery", () => {
+    for (const lane of ["androidPushCleanup", "windowsCleanup", "deviceCloudCleanup", "cleanup"]) {
+      expect(() => parseLaneFailure({ ...root(), lane, step: "containment" })).toThrow();
+    }
+  });
+  test("council R4 negative containment and reconciliation observations block retry", () => {
+    for (const observations of [{ cleanupVerified: false }, { mutationReconciled: false }, { remainingResources: 1 }]) {
+      expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(), observations: { ...root().observations, ...observations } }] }, true)).toBe(false);
+    }
+  });
+  test("council R4 push and outage mutations never acquire read-only retry authority", () => {
+    for (const reason of ["push_service_failure", "device_outage", "tailnet_outage"]) {
+      for (const operation of ["unknown", "confirmed"]) {
+        const failure = { ...root(), lane: "androidPush", step: "network_verified", reason, operation,
+          observations: { pushServiceFailure: true, retryableStatus: true, outageSpansWindow: true, deviceUnavailable: true, tailnetUnavailable: true } };
+        expect(qualificationRetryEligible({ ...summary(), failures: [failure] }, true)).toBe(false);
+      }
+    }
+  });
   test("round trips typed roots and collateral without widening their lane", () => {
     const value = summary();
     expect(parseQualificationFailureSummary(JSON.parse(JSON.stringify(value)))).toEqual(value);

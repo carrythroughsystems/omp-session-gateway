@@ -18,7 +18,7 @@ import { deviceCloudHolds, type DeviceCloudHold } from "./device-cloud-availabil
 import { parseDeviceCloudHoldSet, recognizedDeviceCloudOutcome, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
-import { FAILURE_LIMITS, FAILURE_STEPS, FAILURE_REASONS, QualificationFailure, normalizeQualificationFailures, qualificationRetryEligible, parseLaneFailure, parseLaneTimings, parseQualificationFailureSummary, type QualificationFailureLane, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
+import { FAILURE_LIMITS, FAILURE_STEPS, FAILURE_REASONS, QualificationFailure, normalizeQualificationFailures, qualificationRetryEligible, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, type QualificationFailureLane, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
 import { parseQualificationExecution, qualificationExecutionsMatch, parseRigReadinessReceipt, writeQualificationOutcomeFile, readQualificationOutcomeFile, qualificationOutcomeExitCode, type QualificationExecution, type RigReadinessReceipt } from "./qualification-outcome.ts";
 
 /** Candidate-source rollout marker: contract modules alone do not enable new worker arguments. */
@@ -586,8 +586,15 @@ export function validateStableQualificationReceipt(
 /** Validate new authority-bearing fields without rewriting or upgrading historical schema-3 receipts. */
 function validateReceiptExecution(receipt: StableQualificationReceipt): void {
   const execution = receipt.execution === undefined ? undefined : parseQualificationExecution(receipt.execution);
+  const activeLanes = LANE_NAMES.filter(name => {
+    const lane = receipt.lanes[name];
+    return lane.status !== "pending" || lane.attempts !== 0 || lane.evidence !== undefined || lane.failure !== undefined;
+  });
   if (execution !== undefined) {
     const binding = execution.binding;
+    if (activeLanes.some(name => name !== "artifacts") && (receipt.candidate === undefined || receipt.macHost === undefined)) {
+      throw new Error("qualification receipt active execution identity is incomplete");
+    }
     if (binding.candidateTag !== receipt.tag || binding.previousTag !== receipt.previousTag ||
       binding.orchestratorCommit !== receipt.orchestratorCommit ||
       (receipt.candidate !== undefined && (receipt.candidate.tag !== binding.candidateTag ||
@@ -606,10 +613,13 @@ function validateReceiptExecution(receipt: StableQualificationReceipt): void {
       throw new Error("qualification receipt readiness attempt is unbound");
     }
   }
-  const ids = new Set<number>();
+  const failuresById = new Map<number, LaneFailure>();
   for (const name of LANE_NAMES) {
     const lane = receipt.lanes[name];
     if (lane.timings !== undefined) parseLaneTimings(name, lane.timings);
+    if (summary !== undefined && lane.status === "failed" && lane.failure === undefined) {
+      throw new Error("qualification receipt summary omits a failed lane");
+    }
     if (lane.failure === undefined) continue;
     if (execution === undefined || lane.status !== "failed" || !Array.isArray(lane.failure) ||
       lane.failure.length < 1 || lane.failure.length > FAILURE_LIMITS.records) {
@@ -617,8 +627,8 @@ function validateReceiptExecution(receipt: StableQualificationReceipt): void {
     }
     const failures = lane.failure.map(parseLaneFailure);
     for (const failure of failures) {
-      if (failure.lane !== name || ids.has(failure.id)) throw new Error("qualification receipt lane failure identity is invalid");
-      ids.add(failure.id);
+      if (failure.lane !== name || failuresById.has(failure.id)) throw new Error("qualification receipt lane failure identity is invalid");
+      failuresById.set(failure.id, failure);
       if (summary !== undefined) {
         const recorded = summary.failures.find(item => item.id === failure.id);
         if (recorded === undefined || !isDeepStrictEqual(recorded, failure)) {
@@ -627,7 +637,40 @@ function validateReceiptExecution(receipt: StableQualificationReceipt): void {
       }
     }
   }
-  if (ids.size > FAILURE_LIMITS.records) throw new Error("qualification receipt failure count is invalid");
+  if (failuresById.size > FAILURE_LIMITS.records) throw new Error("qualification receipt failure count is invalid");
+  if (summary === undefined) {
+    if (failuresById.size > 0) parseLaneFailures([...failuresById.values()]);
+    return;
+  }
+  for (const failure of summary.failures) {
+    if (failure.lane === "rigReadiness") {
+      if (receipt.rigReadiness?.status !== "failed" || receipt.rigReadiness.campaignAttempt !== execution?.campaignAttempt) {
+        throw new Error("qualification receipt readiness failure has no failed owner");
+      }
+    } else if (failure.lane === "campaign") {
+      if (failure.class !== "harness") throw new Error("qualification receipt campaign failure must remain harness evidence");
+    } else if (failure.lane === "preflight") {
+      if (activeLanes.length > 0 || (receipt.rigReadiness !== undefined &&
+        (receipt.rigReadiness.status !== "pending" || receipt.rigReadiness.epoch !== undefined)) ||
+        !qualificationPreflightFailuresEffectFree([failure])) {
+        throw new Error("qualification receipt preflight failure records effects");
+      }
+    } else if (receipt.lanes[failure.lane].status !== "failed" ||
+      !isDeepStrictEqual(failuresById.get(failure.id), failure)) {
+      throw new Error("qualification receipt summary failure has no matching failed lane");
+    }
+  }
+}
+
+/** Starting another attempt invalidates the prior attempt's whole failure graph, not passed proofs. */
+function clearReceiptFailureEvidence(receipt: StableQualificationReceipt): void {
+  delete receipt.failureSummary;
+  for (const lane of Object.values(receipt.lanes)) delete lane.failure;
+}
+
+function clearLaneFailureEvidence(receipt: StableQualificationReceipt, lane: LaneReceipt): void {
+  if (receipt.failureSummary !== undefined) clearReceiptFailureEvidence(receipt);
+  else delete lane.failure;
 }
 
 function assertNoSecretFields(value: unknown, path = "receipt"): void {
@@ -648,7 +691,11 @@ async function saveReceipt(path: string, receipt: StableQualificationReceipt): P
   receipt.updatedAt = now();
   validateReceiptExecution(receipt);
   assertNoSecretFields(receipt);
-  const bytes = `${JSON.stringify(receipt, undefined, 2)}\n`;
+  await writePrivateJson(path, receipt);
+}
+
+async function writePrivateJson(path: string, value: unknown): Promise<void> {
+  const bytes = `${JSON.stringify(value, undefined, 2)}\n`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const metadata = await lstat(dirname(path));
   if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== process.getuid?.()) throw new Error("unsafe qualification receipt directory");
@@ -695,6 +742,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
 ): Promise<T> {
   const lane = receipt.lanes[name];
   if (!force && lane.status === "passed") return (lane.evidence ?? {}) as T;
+  clearLaneFailureEvidence(receipt, lane);
   lane.status = "running";
   lane.attempts += 1;
   lane.startedAt = now();
@@ -905,6 +953,10 @@ export function assertCampaignCleanupComplete(
   if (receipt.macHost !== undefined && sha256(receipt.macHost) !== execution.binding.macHostSha256) {
     throw new Error("campaign retry Mac binding changed");
   }
+  assertCampaignResourceCleanup(receipt, modules);
+}
+
+function assertCampaignResourceCleanup(receipt: StableQualificationReceipt, modules: StableQualificationLaneModules): void {
   if (receipt.rigReadiness?.cleanupDisposition === "unresolved" || receiptNeedsMacCleanup(receipt)) {
     throw new Error("campaign retry refuses unresolved Mac or readiness effects");
   }
@@ -973,6 +1025,7 @@ export async function withConsumedDeviceCloudHold<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   if (receipt.lanes.deviceCloud.evidence !== undefined) delete receipt.lanes.deviceCloud.evidence.availabilityHold;
+  clearReceiptFailureEvidence(receipt);
   await persist();
   try { return await run(); }
   catch (error) {
@@ -1076,16 +1129,8 @@ export async function finalizeCampaignFailure(
       }
       lane.failure = own;
     }
-    let cleanupComplete = !receiptNeedsMacCleanup(receipt) && receipt.rigReadiness?.cleanupDisposition !== "unresolved";
-    for (const name of Object.keys(CLEANUP_LANES) as ExternalLaneName[]) {
-      const lane = receipt.lanes[name];
-      if (lane.attempts === 0 && lane.status === "pending" && lane.evidence === undefined) continue;
-      try {
-        cleanupComplete &&= !modules[name].needsCleanup(laneProgress(lane)) &&
-          receipt.lanes[CLEANUP_LANES[name]].status === "passed" &&
-          (externalCleanupCurrent(receipt, name) || (laneProgress(lane) === undefined && receipt.lanes[CLEANUP_LANES[name]].evidence?.noAttempt === true));
-      } catch { cleanupComplete = false; }
-    }
+    let cleanupComplete = true;
+    try { assertCampaignResourceCleanup(receipt, modules); } catch { cleanupComplete = false; }
     const summary = parseQualificationFailureSummary({
       failures, timings,
       containment: { proven: cleanupComplete, cleanupComplete, unresolvedMutation: failures.some(item => item.operation === "unknown") },
@@ -2441,6 +2486,7 @@ export function markMacCleanupRequired(receipt: StableQualificationReceipt, macH
   receipt.macHost = macHost;
   const cleanup = receipt.lanes.cleanup;
   if (cleanup.status !== "passed") return newlyBound;
+  clearLaneFailureEvidence(receipt, cleanup);
   cleanup.status = "pending";
   delete cleanup.startedAt;
   delete cleanup.completedAt;
@@ -2451,11 +2497,13 @@ export function markMacCleanupRequired(receipt: StableQualificationReceipt, macH
 
 /** Commit the publication verdict only after the complete, repeatable lifecycle has finished. */
 export async function completeOmpPublicationLifecycle(
-  lane: LaneReceipt,
+  receipt: StableQualificationReceipt,
   persist: () => Promise<void>,
   run: () => Promise<OmpLifecycleEvidence>,
   nextFailureId: () => number = () => 1,
 ): Promise<void> {
+  const lane = receipt.lanes.ompPublication;
+  clearLaneFailureEvidence(receipt, lane);
   lane.status = "running";
   delete lane.completedAt;
   delete lane.error;
@@ -2487,17 +2535,18 @@ export async function completeOmpPublicationLifecycle(
 /** Consumers have settled; their failures do not invalidate the independent publication lifecycle. */
 export async function finishLiveQualification(
   failures: readonly unknown[],
-  publication: LaneReceipt,
+  receipt: StableQualificationReceipt,
   persist: () => Promise<void>,
   stopRelay: () => Promise<void>,
   lifecycle: () => Promise<OmpLifecycleEvidence>,
   preservePublication = false,
   nextFailureId: () => number = () => 1,
 ): Promise<void> {
+  const publication = receipt.lanes.ompPublication;
   const failure = failures.length === 0 ? undefined : new AggregateError(failures, "live qualification consumers failed");
   try {
     await stopRelay();
-    if (!preservePublication) await completeOmpPublicationLifecycle(publication, persist, lifecycle, nextFailureId);
+    if (!preservePublication) await completeOmpPublicationLifecycle(receipt, persist, lifecycle, nextFailureId);
   } catch (error) {
     if (!preservePublication && publication.status === "running") {
       publication.status = "failed";
@@ -2548,15 +2597,17 @@ export async function runRigReadiness(
     }
     return laneFailure(error, "rigReadiness", () => nextReceiptFailureId(receipt));
   };
-  const step = async <T>(phase: keyof RigReadinessReceipt["timings"], action: () => Promise<T>): Promise<T> => {
+  const step = async <T>(phase: keyof RigReadinessReceipt["timings"], action: () => Promise<T>, alwaysRun = false): Promise<T> => {
     const start = performance.now();
     receipt.rigReadiness = { ...receipt.rigReadiness!, phase };
-    await persist();
-    try { return await action(); }
-    finally {
-      receipt.rigReadiness = { ...receipt.rigReadiness!, timings: { ...receipt.rigReadiness!.timings, [phase]: performance.now() - start } };
-      await persist();
-    }
+    const errors: unknown[] = [];
+    try { await persist(); } catch (error) { if (!alwaysRun) throw error; errors.push(error); }
+    let result: T | undefined;
+    try { result = await action(); } catch (error) { errors.push(error); }
+    receipt.rigReadiness = { ...receipt.rigReadiness!, timings: { ...receipt.rigReadiness!.timings, [phase]: performance.now() - start } };
+    try { await persist(); } catch (error) { errors.push(error); }
+    if (errors.length > 0) throw new AggregateError(errors, "readiness step failed");
+    return result as T;
   };
   try {
     await step("fixture", actions.prepare);
@@ -2580,7 +2631,7 @@ export async function runRigReadiness(
   } catch (error) { failures.push(ownedFailure(error)); }
   finally {
     let restored = true;
-    await step("cleanup", () => trackCleanup(receipt, async () => {
+    try { await step("cleanup", () => trackCleanup(receipt, async () => {
       for (const [lane, timeout, action] of [
         ["androidPushCleanup", QUALIFICATION_CEILINGS_MS.androidPushCleanup, actions.restorePixel],
         ["cleanup", QUALIFICATION_CEILINGS_MS.cleanup, actions.restoreMac],
@@ -2588,13 +2639,13 @@ export async function runRigReadiness(
         try { await withQualificationDeadline(lane, timeout, () => nextReceiptFailureId(receipt), action); }
         catch (error) { restored = false; failures.push(ownedFailure(error)); }
       }
-    }));
+    }), true); } catch (error) { failures.push(ownedFailure(error)); }
     receipt.rigReadiness = {
       ...receipt.rigReadiness!, status: failures.length === 0 ? "passed" : "failed",
       observations: { ...receipt.rigReadiness!.observations, baselineRestored: restored },
       cleanupDisposition: restored ? "restored" : "unresolved",
     };
-    await persist();
+    try { await persist(); } catch (error) { receipt.rigReadiness.status = "failed"; failures.push(ownedFailure(error)); }
   }
   if (failures.length > 0) throw new AggregateError(failures, "rig readiness failed");
 }
@@ -2633,8 +2684,7 @@ async function runCampaignReadiness(
     // Push's owner validates its complete baseline/progress; it is private recovery state, not telemetry.
     await mkdir(root, { recursive: true, mode: 0o700 });
     const path = join(root, "push-progress.json");
-    await writeFile(`${path}.tmp`, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-    await rename(`${path}.tmp`, path);
+    await writePrivateJson(path, value);
     progress = value;
   };
   await runRigReadiness(receipt, persist, {
@@ -2792,7 +2842,9 @@ async function runOwnedStableQualification(
           formatVersion: 1, outcome: "qualification-failed",
           scope: receipt.rigReadiness?.status === "failed" ? "rigReadiness" : "campaign",
           execution: receipt.execution, failureSummary: receipt.failureSummary!,
-          receipt: { sha256: sha256(await readFile(receiptPath)), cleanupDisposition: receipt.failureSummary!.containment.proven ? "restored" : "unresolved" },
+          receipt: { sha256: sha256(await readFile(receiptPath)), cleanupDisposition:
+            receipt.failureSummary!.containment.proven && receipt.failureSummary!.containment.cleanupComplete &&
+            !receipt.failureSummary!.containment.unresolvedMutation ? "restored" : "unresolved" },
         });
       }
       throw error;
@@ -2825,6 +2877,7 @@ async function runReceiptStableQualification(
   priorAdmission?: Awaited<ReturnType<typeof preflightStableQualification>>,
 ): Promise<Record<string, unknown>> {
   const resumeIdentity = { tag: options.tag, previousTag: options.previousTag, orchestratorCommit, macHost: options.macHost };
+  clearReceiptFailureEvidence(receipt);
   receipt.status = "running";
   delete receipt.completedAt;
   delete receipt.error;
@@ -2974,6 +3027,7 @@ async function runReceiptStableQualification(
       const publicationLane = receipt.lanes.ompPublication;
       const preservePublication = publicationLane.status === "passed";
       if (!preservePublication) {
+        clearLaneFailureEvidence(receipt, publicationLane);
         publicationLane.status = "running";
         publicationLane.attempts += 1;
         publicationLane.startedAt = now();
@@ -3051,7 +3105,7 @@ async function runReceiptStableQualification(
       }
       const settled = await Promise.allSettled(pending);
       const failures = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-      await finishLiveQualification(failures.map(result => result.reason), publicationLane, persist, async () => {
+      await finishLiveQualification(failures.map(result => result.reason), receipt, persist, async () => {
         await stopSubprocess(tunnelProcess);
         tunnelProcess = undefined;
       }, () => runOmpLifecycle({
@@ -3149,6 +3203,7 @@ async function runReceiptStableQualification(
     if (receipt.execution === undefined) throw await recordDeviceCloudCampaignFailure(receipt, primaryError, resumeIdentity, persist, lanes, options.outcomeFile);
     throw primaryError;
   }
+  clearReceiptFailureEvidence(receipt);
   receipt.status = "passed";
   receipt.completedAt = now();
   delete receipt.error;

@@ -9,8 +9,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 ### Added
 
 - Closed qualification failure and machine-outcome contracts, private atomic outcome persistence,
-  and additive schema-3 receipt validation. Unknown, mixed, unresolved or unbound failures remain
-  non-retryable; this change does not enable automatic recovery or reinterpret historical failures.
+  and additive schema-3 receipt validation, including paired private readiness owner epochs and
+  closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
+  containment-consistent outcomes fail closed; resumed attempts clear stale failure authority.
+  Unknown, mixed, unresolved or unbound failures remain non-retryable; this change does not
+  enable automatic recovery or reinterpret historical failures.
 - Finalize failed stable campaigns after healthy siblings settle, complete independent OMP
   publication lifecycle proof, and retain typed collateral evidence for an unrestored Pixel.
   Add an effectful, fully restored rig-readiness gate before expensive fan-out, bounded owner

@@ -13,8 +13,13 @@
  * - read/writeQualificationOutcomeFile use a bounded, duplicate-key-rejecting private atomic
  *   channel at OMP_STABLE_OUTCOME_FILE. Errors never include file paths, raw input or causes.
  *   Legacy device-cloud files are not upgraded; their parsers and manual recovery remain separate.
+ *   Supply a physical path: every ancestor is checked for symlinks, and size/metadata changes
+ *   during reading are refused. Cleanup disposition must agree with the containment summary.
  * - RigReadinessReceipt and its parser define additive schema-3 readiness observations only;
  *   the effectful readiness owner is responsible for actually measuring and restoring them.
+ *   Its optional epoch/phase pair names a private resource-owning attempt (canonical UUIDv4
+ *   and closed readiness step), never a host/device identity. Absence remains legacy/pre-owner
+ *   evidence; neither the pair nor a deterministic progress path proves containment by itself.
  */
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
@@ -22,8 +27,8 @@ import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
 import {
-  FAILURE_LIMITS, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible,
-  type LaneTimings, type QualificationFailureSummary,
+  FAILURE_LIMITS, FAILURE_STEPS, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, qualificationRetryEligible,
+  type LaneStep, type LaneTimings, type QualificationFailureSummary,
 } from "./qualification-failure.ts";
 
 export const OUTCOME_MAX_BYTES = 131_072;
@@ -64,8 +69,12 @@ export interface RigReadinessReceipt {
   readonly observations: { readonly [K in keyof typeof readinessBounds]?: (typeof readinessBounds)[K] extends "boolean" ? boolean : number };
   readonly timings: LaneTimings<"rigReadiness">;
   readonly cleanupDisposition: CleanupDisposition;
+  /** Private owner identity; epoch and phase must either both be present or both be absent. */
+  readonly epoch?: string;
+  readonly phase?: LaneStep<"rigReadiness">;
 }
 const SHA = /^[a-f0-9]{40}$/u, DIGEST = /^[a-f0-9]{64}$/u;
+const EPOCH = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const TAG = /^v(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})$/u;
 const CANDIDATE = /^v(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})-prealpha\.[1-9][0-9]{0,8}$/u;
 const BINDING_KEYS = ["candidateTag", "sourceCommit", "archiveSha256", "previousTag", "orchestratorCommit", "policySha256", "macHostSha256"] as const;
@@ -107,7 +116,10 @@ export function qualificationExecutionsMatch(value: unknown, expected: unknown):
 
 export function parseRigReadinessReceipt(value: unknown): RigReadinessReceipt {
   const readiness = record(value);
-  keys(readiness, ["status", "campaignAttempt", "observations", "timings", "cleanupDisposition"]);
+  const owner = Object.hasOwn(readiness, "epoch") || Object.hasOwn(readiness, "phase");
+  keys(readiness, ["status", "campaignAttempt", "observations", "timings", "cleanupDisposition", ...(owner ? ["epoch", "phase"] : [])]);
+  if (owner && (!matches(readiness.epoch, EPOCH) || typeof readiness.phase !== "string" ||
+    !(FAILURE_STEPS.rigReadiness as readonly string[]).includes(readiness.phase))) invalid();
   if (!attempt(readiness.campaignAttempt) || typeof readiness.status !== "string" ||
     !["pending", "running", "passed", "failed"].includes(readiness.status) || !cleanup(readiness.cleanupDisposition) ||
     (readiness.status === "passed" && readiness.cleanupDisposition !== "restored")) invalid();
@@ -117,6 +129,7 @@ export function parseRigReadinessReceipt(value: unknown): RigReadinessReceipt {
     const bound = readinessBounds[key as keyof typeof readinessBounds];
     if (bound === "boolean" ? typeof value !== "boolean" :
       typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > bound) invalid();
+    if ((key === "quotaAvailable" || key === "creationAllowance") && !Number.isSafeInteger(value)) invalid();
   }
   if (observations.quotaObservable !== true && Object.hasOwn(observations, "quotaAvailable")) invalid();
   return { ...readiness, observations: { ...observations }, timings: parseLaneTimings("rigReadiness", readiness.timings) } as unknown as RigReadinessReceipt;
@@ -130,12 +143,18 @@ export function parseQualificationOutcome(value: unknown, expected?: Qualificati
   const execution = parseQualificationExecution(outcome.execution);
   if (expected !== undefined && !qualificationExecutionsMatch(execution, expected)) invalid();
   const failureSummary = parseQualificationFailureSummary(outcome.failureSummary);
+  if (outcome.scope === "preflight" && !qualificationPreflightFailuresEffectFree(failureSummary.failures)) invalid();
   let receipt: QualificationOutcome["receipt"];
   if (Object.hasOwn(outcome, "receipt")) {
     const raw = record(outcome.receipt);
     keys(raw, ["sha256", "cleanupDisposition"]);
     if (!matches(raw.sha256, DIGEST) || !cleanup(raw.cleanupDisposition)) invalid();
     receipt = { sha256: raw.sha256, cleanupDisposition: raw.cleanupDisposition };
+    const contained = failureSummary.containment.proven && failureSummary.containment.cleanupComplete &&
+      !failureSummary.containment.unresolvedMutation;
+    if ((receipt.cleanupDisposition === "unresolved") === contained ||
+      (receipt.cleanupDisposition === "not_required" && failureSummary.failures.some(item =>
+        item.operation !== "not_started" && item.operation !== "read_only"))) invalid();
   } else if (outcome.scope !== "preflight" || failureSummary.failures.some(item => item.operation !== "not_started" && item.operation !== "read_only")) invalid();
   return { formatVersion: 1, outcome: "qualification-failed", scope: outcome.scope as QualificationOutcome["scope"], execution, failureSummary,
     ...(receipt === undefined ? {} : { receipt }) };
@@ -158,15 +177,21 @@ function privateMetadata(metadata: Stats, directory: boolean): boolean {
     (directory || metadata.nlink === 1);
 }
 async function privateDirectory(path: string, create: boolean): Promise<void> {
-  let metadata;
-  try { metadata = await lstat(path); }
-  catch (error) {
-    if (!create || (error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(path) === path) throw fileError();
-    await privateDirectory(dirname(path), true);
-    await mkdir(path, { mode: 0o700 });
-    metadata = await lstat(path);
+  const components: string[] = [];
+  for (let component = path; ; component = dirname(component)) {
+    components.push(component);
+    if (dirname(component) === component) break;
   }
-  if (!privateMetadata(metadata, true)) throw fileError();
+  for (const component of components.reverse()) {
+    let metadata;
+    try { metadata = await lstat(component); }
+    catch (error) {
+      if (!create || (error as NodeJS.ErrnoException).code !== "ENOENT") throw fileError();
+      await mkdir(component, { mode: 0o700 });
+      metadata = await lstat(component);
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || (component === path && !privateMetadata(metadata, true))) throw fileError();
+  }
 }
 async function validateDestination(path: string): Promise<void> {
   try { if (!privateMetadata(await lstat(path), false)) throw fileError(); }
@@ -198,8 +223,9 @@ export async function writeQualificationOutcomeFile(path: string, value: Qualifi
 
 export async function readQualificationOutcomeFile(path: string, expected?: QualificationExecution): Promise<QualificationOutcome> {
   try {
-    await privateDirectory(dirname(resolve(path)), false);
-    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const destination = resolve(path);
+    await privateDirectory(dirname(destination), false);
+    const file = await open(destination, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const metadata = await file.stat();
       if (!privateMetadata(metadata, false) || metadata.size < 1 || metadata.size > OUTCOME_MAX_BYTES) throw fileError();
@@ -211,7 +237,9 @@ export async function readQualificationOutcomeFile(path: string, expected?: Qual
         if (read.bytesRead === 0) break;
         length += read.bytesRead;
       }
-      if (length < 1 || length > OUTCOME_MAX_BYTES) throw fileError();
+      const after = await file.stat();
+      if (length < 1 || length > OUTCOME_MAX_BYTES || length !== metadata.size || after.size !== metadata.size ||
+        after.mtimeMs !== metadata.mtimeMs || after.ctimeMs !== metadata.ctimeMs || !privateMetadata(after, false)) throw fileError();
       return parseQualificationOutcome(parseRetainedVendorJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length))), expected);
     } finally { await file.close(); }
   } catch { throw fileError(); }

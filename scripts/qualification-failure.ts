@@ -8,9 +8,14 @@
  *   Unknown/malformed leaves become harness failures. Bounds overflow stops as harness.
  * - parseLaneFailures checks the complete attempt graph; parseLaneFailure checks one leaf.
  *   Collateral references independent roots directly, never other collateral records.
+ *   Normalization resolves origins only against authored typed IDs, never generated IDs.
  * - qualificationRetryEligible is a pure predicate, not authorization: the caller must prove
  *   current resource containment and independently validate candidate/authority bindings.
  *   Receipt absence, unknown operation disposition, or missing proof never imply safety.
+ *   Cleanup transport failures remain harness evidence; negative containment/reconciliation
+ *   observations and mutating infrastructure dispositions block eligibility.
+ * - qualificationPreflightFailuresEffectFree permits only read-only/not-started admission
+ *   surfaces, not later resource observations mislabeled as preflight.
  * - FAILURE_STEPS and parseLaneTimings also govern additive receipt step timings. No raw
  *   errors, host/device identities, notification metadata or provider bodies belong here.
  */
@@ -28,7 +33,8 @@ const transportReasons = {
   connection_timeout: "infra_transient", connection_reset: "infra_transient", read_timeout: "infra_transient",
   retryable_service_failure: "infra_transient",
 } as const;
-const cleanupReasons = { ...commonReasons, ...transportReasons, containment_unproven: "harness", ownership_changed: "harness" } as const;
+const cleanupReasons = { ...commonReasons, connection_timeout: "harness", connection_reset: "harness", read_timeout: "harness",
+  retryable_service_failure: "harness", containment_unproven: "harness", ownership_changed: "harness" } as const;
 /** Reason-to-class mappings are authority, not caller-supplied labels. */
 export const FAILURE_REASONS = {
   campaign: { ...commonReasons, binding_mismatch: "harness", outcome_persistence_failed: "harness" },
@@ -255,6 +261,10 @@ export function normalizeQualificationFailures(error: unknown): readonly LaneFai
     if (used.has(leaf.id)) leaves[index] = undefined;
     else used.add(leaf.id);
   }
+  // Capture authored root identities before allocating IDs for unknown/legacy projections.
+  // A dangling reference must not acquire an origin merely because that numeric slot is free.
+  const roots = new Set(leaves.flatMap((item, index) =>
+    item !== undefined && !generated.has(index) && item.class !== "collateral" ? [item.id] : []));
   let next = 1;
   const failures = leaves.map((leaf, index) => {
     if (leaf !== undefined && !generated.has(index)) return leaf;
@@ -262,8 +272,15 @@ export function normalizeQualificationFailures(error: unknown): readonly LaneFai
     used.add(next);
     return leaf === undefined ? unclassified(next++) : { ...leaf, id: next++ };
   });
-  const roots = new Set(failures.filter(item => item.class !== "collateral").map(item => item.id));
   return failures.map(item => item.class === "collateral" && item.originIds.some(id => !roots.has(id)) ? unclassified(item.id) : item);
+}
+
+/** Admission-only surfaces; a read-only observation of an allocated resource is not preflight. */
+export function qualificationPreflightFailuresEffectFree(failures: readonly LaneFailure[]): boolean {
+  return failures.every(item => (item.operation === "not_started" || item.operation === "read_only") &&
+    (item.lane === "preflight" ||
+      ((item.lane === "windows" || item.lane === "deviceCloud") && item.step === "preflight") ||
+      (item.lane === "android" && item.step === "admission")));
 }
 
 export function qualificationRetryEligible(value: unknown, bindingsMatch: boolean): boolean {
@@ -272,6 +289,10 @@ export function qualificationRetryEligible(value: unknown, bindingsMatch: boolea
     const summary = parseQualificationFailureSummary(value);
     return summary.containment.proven && summary.containment.cleanupComplete && !summary.containment.unresolvedMutation &&
       summary.failures.some(item => item.class === "infra_transient") &&
-      summary.failures.every(item => (item.class === "infra_transient" || item.class === "collateral") && item.operation !== "unknown");
+      summary.failures.every(item =>
+        (item.class === "infra_transient" ? item.operation === "not_started" || item.operation === "read_only" :
+          item.class === "collateral" && item.operation !== "unknown") &&
+        item.observations.cleanupVerified !== false && item.observations.mutationReconciled !== false &&
+        (item.observations.remainingResources ?? 0) === 0);
   } catch { return false; }
 }
