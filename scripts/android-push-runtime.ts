@@ -1,4 +1,4 @@
-import { basename, join, resolve } from "node:path";
+import { basename, join, posix, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -32,7 +32,7 @@ export async function gatewayRawLogsDiscarded(execute: FixtureExecutor): Promise
   const home = await execute(["python3", "-c", "import os; print(os.path.expanduser('~'))"]);
   const directory = home.stdout.trim();
   if (home.exitCode !== 0 || !/^\/[^\r\n\0]+$/u.test(directory) || directory.length > 4096) return false;
-  const plist = join(directory, "Library/LaunchAgents/omp-session-gateway.plist");
+  const plist = posix.join(directory, "Library/LaunchAgents/omp-session-gateway.plist");
   const stdout = await execute(["plutil", "-extract", "StandardOutPath", "raw", "-o", "-", plist]);
   const stderr = await execute(["plutil", "-extract", "StandardErrorPath", "raw", "-o", "-", plist]);
   return stdout.exitCode === 0 && stderr.exitCode === 0 && stdout.stdout.trim() === "/dev/null" && stderr.stdout.trim() === "/dev/null";

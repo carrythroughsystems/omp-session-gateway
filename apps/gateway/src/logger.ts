@@ -63,6 +63,8 @@ export class QualificationLogSink implements LogSink {
   readonly #directory: string;
   #healthy = true;
   #index = 0;
+  #pending = false;
+  #rotated = false;
   constructor(directory: string) {
     assertQualificationLogDirectory(directory);
     this.#directory = directory;
@@ -93,6 +95,7 @@ export class QualificationLogSink implements LogSink {
       const fd = openSync(join(directory, name), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       try { if (name === "health") writeSync(fd, "0\n"); fsyncSync(fd); } finally { closeSync(fd); }
     }
+    this.#syncDirectory();
   }
   #state(value: string): void {
     // Overwrite the existing private inode, not a directory entry: even lost directory-write
@@ -105,11 +108,44 @@ export class QualificationLogSink implements LogSink {
       ftruncateSync(fd, Buffer.byteLength(value)); fsyncSync(fd);
     } finally { closeSync(fd); }
   }
+  #syncDirectory(): void {
+    const fd = openSync(this.#directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+  }
+  #syncLog(): void {
+    const fd = openSync(join(this.#directory, "events.0.jsonl"), constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o600 ||
+        stat.size > QUALIFICATION_LOG_BYTES) throw new Error("unsafe qualification log file");
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+  }
+  #fail(): void {
+    this.#healthy = false;
+    try { this.#state("!"); } catch { /* Never repair missing or inaccessible failure evidence. */ }
+  }
+  #commit(): void {
+    if (!this.#healthy || !this.#pending) return;
+    try {
+      assertQualificationLogDirectory(this.#directory);
+      this.#syncLog();
+      if (this.#rotated) this.#syncDirectory();
+      this.#state(`${this.#index}\n`);
+      this.#pending = false; this.#rotated = false;
+    } catch { this.#fail(); }
+  }
   get healthy(): boolean { return this.#healthy; }
   write(line: string): void {
     if (!this.#healthy) throw new Error("qualification logging failed");
     try {
-      this.#state("!");
+      if (!this.#pending) {
+        // One durable unhealthy transition covers the entire synchronous burst.
+        // The queued commit cannot run between its bounded writes.
+        this.#state("!");
+        this.#pending = true;
+        queueMicrotask(() => this.#commit());
+      }
       assertQualificationLogDirectory(this.#directory);
       const event = parseQualificationLogEvent({ ...JSON.parse(line), index: ++this.#index });
       const bytes = Buffer.from(`${JSON.stringify(event)}\n`);
@@ -119,6 +155,8 @@ export class QualificationLogSink implements LogSink {
       if (!current.isFile() || current.isSymbolicLink() || current.uid !== process.getuid!() || current.nlink !== 1 || (current.mode & 0o777) !== 0o600) throw new Error("unsafe qualification log file");
       // A crash or partial write leaves the durable write-ahead state unhealthy.
       if (current.size + bytes.length > QUALIFICATION_LOG_BYTES) {
+        this.#syncLog();
+        this.#rotated = true;
         for (let index = QUALIFICATION_LOG_FILES - 1; index >= 0; index--) {
           const name = join(this.#directory, `events.${index}.jsonl`);
           let stat;
@@ -133,12 +171,9 @@ export class QualificationLogSink implements LogSink {
         const stat = fstatSync(fd);
         if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o600 ||
           stat.size + bytes.length > QUALIFICATION_LOG_BYTES || writeSync(fd, bytes) !== bytes.length) throw new Error("qualification log write failed");
-        fsyncSync(fd);
       } finally { closeSync(fd); }
-      this.#state(`${this.#index}\n`);
     } catch {
-      this.#healthy = false;
-      try { this.#state("!"); } catch { /* Never repair missing or inaccessible failure evidence. */ }
+      this.#fail();
       throw new Error("qualification logging failed");
     }
   }

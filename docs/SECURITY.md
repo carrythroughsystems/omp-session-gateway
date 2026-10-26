@@ -490,8 +490,10 @@ enables daemon retention. Ordinary installations are unchanged. The sink accepts
 names/fields, finite numbers and booleans (plus the fixed envelope timestamp/level/name), and retains
 four files of at most 256 KiB. The existing absolute destination must be current-user-owned, mode
 0700, with no symlink components; files are single-link, current-user-owned 0600 regular files.
-Unsafe startup fails. Each write durably invalidates the existing private health inode before
-touching log data; success commits the exact event index. Later failure is sticky even when the
+Unsafe startup fails. Each synchronous burst durably invalidates the existing private health inode
+before touching log data; its microtask commit flushes the bounded current file and commits the exact
+event index. Rotation flushes the file being moved; per-event appends do not require per-event fsync.
+An interrupted or failed burst never publishes success. Later failure is sticky even when the
 directory cannot unlink files. Restart and collection require that committed index to match all
 validated rotated records. Rate-limited IPC events use the same closed vocabulary. Raw daemon
 stdout/stderr remain discarded independently of structured retention, proven on the gateway's host.
