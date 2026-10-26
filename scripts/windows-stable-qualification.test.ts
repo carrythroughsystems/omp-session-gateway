@@ -255,7 +255,7 @@ describe("Windows qualification ownership and failure paths", () => {
   test.each(["cancel", "expire"] as const)("493 R1 %s during final settled checkpoint cannot return success", async kind => {
     const f = fixture({ development: true }); const controller = new AbortController();
     const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 };
-    await expect(runWindows({ identity, runtime: f.runtime, pixel: f.pixel, execution,
+    await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, pixel: f.pixel, execution,
       checkpoint: async progress => {
         await f.checkpoint(progress);
         if (progress.phase === "evidence_complete" && progress.settled === true) {

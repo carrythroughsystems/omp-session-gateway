@@ -1093,13 +1093,13 @@ describe("publication lifecycle receipt", () => {
     lane.status = "running"; lane.evidence = { published: true };
     const order: string[] = [];
     const hold = new DeviceCloudAvailabilityHold(parseDeviceCloudHoldSet(receipt.lanes.deviceCloud.evidence!.availabilityHold)[0]!);
-    const error = await finishLiveQualification([hold], lane, async () => {}, async () => { order.push("relay stopped"); }, async () => {
+    const error = await finishLiveQualification([hold], receipt, async () => {}, async () => { order.push("relay stopped"); }, async () => {
       order.push("lifecycle"); return structuredClone(lifecycleEvidence);
     }).catch((error: unknown) => error);
     expect(order).toEqual(["relay stopped", "lifecycle"]);
     expect(deviceCloudHolds(error)).toHaveLength(1);
     expect(lane).toMatchObject({ status: "passed", evidence: { revoked: true, lifecycle: lifecycleEvidence } });
-    const failed = await finishLiveQualification([hold], lane, async () => {}, async () => {}, async () => { throw new Error("lifecycle failed"); }).catch((error: unknown) => error);
+    const failed = await finishLiveQualification([hold], receipt, async () => {}, async () => {}, async () => { throw new Error("lifecycle failed"); }).catch((error: unknown) => error);
     expect(deviceCloudHolds(failed)).toBeUndefined();
     expect(lane).toMatchObject({ status: "failed" });
   });
@@ -1107,7 +1107,7 @@ describe("publication lifecycle receipt", () => {
     const receipt = availabilityReceipt();
     const lane = receipt.lanes.ompPublication;
     const before = structuredClone(lane);
-    await finishLiveQualification([], lane, async () => { throw new Error("publication must not persist again"); }, async () => {}, async () => { throw new Error("lifecycle must not rerun"); }, true);
+    await finishLiveQualification([], receipt, async () => { throw new Error("publication must not persist again"); }, async () => {}, async () => { throw new Error("lifecycle must not rerun"); }, true);
     expect(lane).toEqual(before);
   });
 
@@ -1116,7 +1116,7 @@ describe("publication lifecycle receipt", () => {
     const lane = receipt.lanes.ompPublication;
     lane.evidence = { published: true, generation: 1, modes: [{ status: 200 }] };
     const checkpoints: string[] = [];
-    await completeOmpPublicationLifecycle(lane, async () => { checkpoints.push(lane.status); }, async () => lifecycleEvidence);
+    await completeOmpPublicationLifecycle(receipt, async () => { checkpoints.push(lane.status); }, async () => lifecycleEvidence);
     expect(checkpoints).toEqual(["running", "passed"]);
     expect(receipt.schemaVersion).toBe(3);
     expect(lane.evidence).toEqual({ published: true, generation: 1, modes: [{ status: 200 }], revoked: true, lifecycle: lifecycleEvidence });
@@ -1128,7 +1128,7 @@ describe("publication lifecycle receipt", () => {
     const lane = receipt.lanes.ompPublication;
     lane.evidence = { published: true, lifecycle: lifecycleEvidence, revoked: true };
     let interrupted: typeof lane | undefined;
-    await expect(completeOmpPublicationLifecycle(lane, async () => {
+    await expect(completeOmpPublicationLifecycle(receipt, async () => {
       if (lane.status === "running") interrupted = structuredClone(lane);
     }, async () => { throw new Error("private terminal diagnostic"); })).rejects.toThrow("OMP publication lifecycle failed");
     expect(lane.status).toBe("failed");
@@ -1138,13 +1138,14 @@ describe("publication lifecycle receipt", () => {
     expect(interrupted.status).toBe("running");
     expect(interrupted.evidence).toEqual({ published: true });
     let reruns = 0;
-    await completeOmpPublicationLifecycle(interrupted, async () => {}, async () => { reruns += 1; return lifecycleEvidence; });
+    const resumedReceipt = { ...receipt, lanes: { ...receipt.lanes, ompPublication: interrupted } };
+    await completeOmpPublicationLifecycle(resumedReceipt, async () => {}, async () => { reruns += 1; return lifecycleEvidence; });
     expect(reruns).toBe(1);
     expect(interrupted.status).toBe("passed");
     expect(interrupted.evidence?.lifecycle).toEqual(lifecycleEvidence);
     expect(JSON.stringify(lane)).not.toContain("private terminal diagnostic");
     // A runner failure names its fixed step, so the receipt says where the lifecycle stopped.
-    await expect(completeOmpPublicationLifecycle(lane, async () => {}, async () => { throw new OmpLifecycleFailure("fork"); }))
+    await expect(completeOmpPublicationLifecycle(receipt, async () => {}, async () => { throw new OmpLifecycleFailure("fork"); }))
       .rejects.toThrow("OMP lifecycle fork failed");
     expect(lane.error).toBe("OMP lifecycle fork failed");
   });
@@ -1470,6 +1471,143 @@ function receiptExecution(): QualificationExecution {
   } };
 }
 
+function summarizedReceipt() {
+  const receipt = availabilityReceipt();
+  receipt.execution = receiptExecution();
+  const failure: LaneFailure = { id: 1, lane: "deviceCloud", step: "allocation", class: "infra_transient",
+    reason: "pinned_pool_busy", elapsedMs: 600_000, operation: "not_started", observations: { waitedMs: 600_000 } };
+  receipt.lanes.deviceCloud.failure = [failure];
+  receipt.failureSummary = { failures: [failure], timings: { attemptMs: 700_000, cleanupMs: 1_000 },
+    containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
+  return receipt;
+}
+
+test.each(["missing lane record", "passed root owner", "unrepresented failed lane", "extra summary root"] as const)(
+  "council R2 receipt graph rejects %s", variant => {
+    const receipt = summarizedReceipt();
+    if (variant === "missing lane record") delete receipt.lanes.deviceCloud.failure;
+    if (variant === "passed root owner") { receipt.lanes.deviceCloud.status = "passed"; delete receipt.lanes.deviceCloud.failure; }
+    if (variant === "unrepresented failed lane") receipt.lanes.android.status = "failed";
+    if (variant === "extra summary root") receipt.failureSummary = { ...receipt.failureSummary!,
+      failures: [...receipt.failureSummary!.failures, { ...receipt.failureSummary!.failures[0]!, id: 2 }] };
+    expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  },
+);
+
+test("council R2 standalone lane failure graphs require real closed roots", () => {
+  const receipt = summarizedReceipt();
+  delete receipt.failureSummary;
+  receipt.lanes.deviceCloud.failure = [{ id: 2, lane: "deviceCloud", step: "allocation", class: "collateral",
+    reason: "dependency_failed", elapsedMs: 1, operation: "not_started", observations: {}, originIds: [3] }];
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  receipt.lanes.windows.status = "failed";
+  receipt.lanes.windows.failure = [{ id: 3, lane: "windows", step: "transport_ready", class: "infra_transient",
+    reason: "connection_timeout", elapsedMs: 1, operation: "read_only", observations: { transportFailure: true } }];
+  expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+});
+
+test("council R2 readiness roots require their failed readiness owner", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.execution = receiptExecution(); receipt.status = "failed";
+  receipt.failureSummary = { failures: [{ id: 1, lane: "rigReadiness", step: "macos", reason: "prerequisite_failed",
+    class: "harness", elapsedMs: 1, operation: "read_only", observations: {} }], timings: { attemptMs: 1, cleanupMs: 0 },
+    containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  receipt.rigReadiness = { campaignAttempt: 0, status: "failed", cleanupDisposition: "restored", observations: {}, timings: {} };
+  expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+  receipt.rigReadiness = { ...receipt.rigReadiness, status: "passed" };
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test("council R2 campaign pseudo roots are terminal harness evidence only", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.execution = receiptExecution(); receipt.status = "failed";
+  receipt.failureSummary = { failures: [{ id: 1, lane: "campaign", step: "execution", reason: "unclassified_failure",
+    class: "harness", elapsedMs: 1, operation: "unknown", observations: {} }], timings: { attemptMs: 1, cleanupMs: 0 },
+    containment: { proven: false, cleanupComplete: false, unresolvedMutation: true } };
+  expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+  receipt.failureSummary = { ...receipt.failureSummary, failures: [
+    { id: 1, lane: "preflight", step: "admission", class: "harness", reason: "unclassified_failure",
+      operation: "read_only", elapsedMs: 1, observations: {} },
+    { id: 2, lane: "campaign", step: "execution", class: "collateral", reason: "dependency_failed", elapsedMs: 1,
+      operation: "not_started", observations: {}, originIds: [1] },
+  ] };
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test("council R2 preflight pseudo roots require effects-free inactive receipts", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.execution = receiptExecution(); receipt.status = "failed";
+  receipt.failureSummary = { failures: [{ id: 1, lane: "preflight", step: "admission", reason: "prerequisite_failed",
+    class: "harness", elapsedMs: 1, operation: "read_only", observations: {} }], timings: { attemptMs: 1, cleanupMs: 0 },
+    containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
+  expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+  receipt.lanes.artifacts.attempts = 1;
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  receipt.lanes.artifacts.attempts = 0;
+  receipt.failureSummary = { ...receipt.failureSummary, failures: [{ ...receipt.failureSummary.failures[0]!, operation: "confirmed" }] };
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test.each(["candidate", "macHost"] as const)("council R5 active execution receipts cannot omit %s", field => {
+  const receipt = summarizedReceipt();
+  delete receipt[field];
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test("council R3 lane restart clears prior failure authority before its first persist", async () => {
+  const receipt = summarizedReceipt();
+  const persist = async () => { validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG); };
+  await executeReceiptLane(receipt, "deviceCloud", persist, async () => {
+    expect(receipt.failureSummary).toBeUndefined();
+    expect(receipt.lanes.deviceCloud.failure).toBeUndefined();
+    return { passed: true };
+  });
+  expect(receipt.lanes.deviceCloud.status).toBe("passed");
+});
+
+test("council R3 publication restart and reopened Mac cleanup invalidate prior attempt summaries", async () => {
+  const receipt = summarizedReceipt();
+  const cloud = receipt.lanes.deviceCloud.failure![0]!;
+  const publication: LaneFailure = { id: 2, lane: "ompPublication", step: "cleanup", class: "collateral",
+    reason: "dependency_failed", elapsedMs: 1, operation: "confirmed", observations: {}, originIds: [cloud.id] };
+  receipt.lanes.ompPublication.status = "failed";
+  receipt.lanes.ompPublication.failure = [publication];
+  receipt.failureSummary = { ...receipt.failureSummary!, failures: [cloud, publication] };
+  await completeOmpPublicationLifecycle(receipt, async () => {
+    expect(receipt.failureSummary).toBeUndefined();
+    expect(receipt.lanes.ompPublication.failure).toBeUndefined();
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, async () => lifecycleEvidence);
+  const pending = summarizedReceipt();
+  expect(markMacCleanupRequired(pending, MAC_ENV.OMP_STABLE_MAC_HOST)).toBe(true);
+  expect(pending.lanes.cleanup.status).toBe("pending");
+  expect(pending.failureSummary).toBeUndefined();
+  expect(pending.lanes.deviceCloud.failure).toBeUndefined();
+  expect(validateStableQualificationReceipt(pending, TAG, COMMIT, PREVIOUS_TAG)).toBe(pending);
+});
+
+test("council R3 real cloud resume consumes summary before admission persists", async () => {
+  const root = await mkdtemp(join(tmpdir(), "stable-summary-resume-"));
+  const path = join(root, "stable-qualification.json"), receipt = summarizedReceipt();
+  try {
+    await createReceiptPersister(path, receipt)();
+    let admitted = false;
+    const runtime = await preflightFixture(root);
+    const modules = { ...resumeModules, deviceCloud: { ...resumeModules.deviceCloud, preflight: async () => {
+      const saved = JSON.parse(await readFile(path, "utf8"));
+      expect(saved.failureSummary).toBeUndefined();
+      expect(saved.lanes.deviceCloud.failure).toBeUndefined();
+      admitted = true;
+      throw new Error("synthetic admission stop");
+    } } };
+    await expect(runStableQualification(["--tag", TAG, "--resume-device-cloud"], runtime, modules)).rejects.toThrow();
+    expect(admitted).toBe(true);
+    const saved = validateStableQualificationReceipt(JSON.parse(await readFile(path, "utf8")), TAG, COMMIT, PREVIOUS_TAG);
+    expect(saved.failureSummary).toBeUndefined();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("schema-3 additive fields round trip without changing passed historical proofs", async () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   const failure: LaneFailure = { id: 1, lane: "windows", step: "transport_ready", class: "infra_transient",
@@ -1483,7 +1621,8 @@ test("schema-3 additive fields round trip without changing passed historical pro
   receipt.failureSummary = { failures: [failure], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
     containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
   receipt.rigReadiness = { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored",
-    observations: { quotaObservable: false }, timings: { cleanup: 100 } };
+    observations: { quotaObservable: false }, timings: { cleanup: 100 },
+    epoch: "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b", phase: "cleanup" };
   const root = await mkdtemp(join(tmpdir(), "qualification-receipt-contract-"));
   try {
     const path = join(root, "receipt.json");
@@ -1505,6 +1644,8 @@ test("schema-3 additive fields round trip without changing passed historical pro
 test("additive receipt failures reject foreign lanes, inconsistent summaries and unbound attempts", () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   receipt.execution = receiptExecution();
+  receipt.candidate = { tag: TAG, sourceCommit: COMMIT, archiveSha256: receipt.execution.binding.archiveSha256 };
+  receipt.macHost = MAC_ENV.OMP_STABLE_MAC_HOST;
   receipt.status = "failed";
   const failure: LaneFailure = { id: 1, lane: "windows", step: "transport_ready", class: "harness",
     reason: "unclassified_failure", elapsedMs: 1, operation: "unknown", observations: {} };

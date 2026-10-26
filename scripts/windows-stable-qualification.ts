@@ -81,7 +81,7 @@ export interface WindowsContext {
   /** Durable single-shot claims for qualification; cleanup supplies its idempotent owner. */
   readonly mutation: <T>(key: string, action: () => Promise<T>) => Promise<T>;
   /** Epoch milliseconds in runtime.now()'s clock, shared by creation and admission. */
-  readonly allocationDeadline?: number;
+  readonly allocationDeadline?: number | undefined;
   readonly transportProbe?: (probe: WindowsTransportProbe) => Promise<void>;
   readonly execution?: WindowsExecutionContext;
   /** True only when this invocation enters staging for the first time in this epoch. */
