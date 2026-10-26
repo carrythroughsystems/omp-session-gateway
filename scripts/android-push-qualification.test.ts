@@ -259,7 +259,7 @@ test.each(["baseline", "mutation", "restoration"] as const)(
     expect(host.cleanup).toEqual(["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"]);
     expect(host.state()).toMatchObject({ started: false, asking: false, browser: browserBaseline, device: baseline });
     expect(normalizeQualificationFailures(error).some(item => item.observations.persistenceFailed === true)).toBe(true);
-    expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+    expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(true);
   });
 
 test.each(["fixture", "telemetry", "invalid-clock"] as const)("500 readiness restores after pre-ask %s failure", async stage => {

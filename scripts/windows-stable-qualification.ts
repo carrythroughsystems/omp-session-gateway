@@ -390,6 +390,18 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   if (resumed && !admissionComplete && PHASES.indexOf(resumed.phase) <= PHASES.indexOf("transport_ready") && progress.allocationDeadline === undefined) {
     throw windowsFailure("mutation_unconfirmed", resumed.phase, "unknown", {}, input.execution);
   }
+  const withExpiry = (error: unknown): unknown => {
+    const deadlineFailure = (value: unknown) => value instanceof QualificationFailure && value.evidence.reason === "deadline_exceeded";
+    if (deadlineFailure(error) || (error instanceof AggregateError && error.errors.some(deadlineFailure))) return error;
+    try { assertWindowsExecution(input.execution, "unknown"); }
+    catch (expiry) {
+      if (!(error instanceof QualificationFailure) && !(error instanceof AggregateError) && !pixelUnrestored(error)) return expiry;
+      const failure = new AggregateError([error, expiry], "Windows operation and execution deadline failed");
+      if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
+      return failure;
+    }
+    return error;
+  };
   const context: WindowsContext = { epoch: progress.epoch, identity: input.identity, assertEffect,
     freshStaging: resumed === undefined || PHASES.indexOf(resumed.phase) < PHASES.indexOf("toolchain_staged"),
     get allocationDeadline() { return progress.allocationDeadline; },
@@ -408,12 +420,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       claims[claim] = "started"; await save(); assertEffect();
       let result;
       try { result = await action(); }
-      catch (error) {
-        if (!(error instanceof QualificationFailure && ["deadline_exceeded", "ownership_changed"].includes(error.evidence.reason))) {
-          assertWindowsExecution(input.execution, "unknown");
-        }
-        throw error;
-      }
+      catch (error) { throw withExpiry(error); }
       claims[claim] = "complete"; await save(); assertEffect();
       return result;
     },
@@ -440,13 +447,12 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     const start = runtime.now();
     try { assertEffect(maximumAge); await action(); }
     catch (error) {
-      if (!(error instanceof QualificationFailure && ["deadline_exceeded", "ownership_changed"].includes(error.evidence.reason))) {
-        assertWindowsExecution(input.execution, "unknown");
-      }
+      error = withExpiry(error);
       if (error instanceof QualificationFailure) {
-        const failure = new QualificationFailure(parseLaneFailure({ ...error.evidence, id: input.execution?.nextFailureId() ?? error.evidence.id,
+        const failure = new QualificationFailure(parseLaneFailure({ ...error.evidence,
           ...(error.evidence.lane === "windows" ? { step: phase } : {}), elapsedMs: runtime.now() - start }),
           error.cause === undefined ? undefined : { cause: error.cause });
+        if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
         failure.message = error.message; throw failure;
       }
       if (error instanceof AggregateError) throw error;
@@ -615,10 +621,14 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   const failed = (name: string, error: unknown) => {
     if (error instanceof QualificationFailure && error.evidence.reason === "ownership_changed") ownershipChanged = true;
     failures.push(name);
+    if (error instanceof QualificationFailure || error instanceof AggregateError) {
+      causes.push(error);
+      return;
+    }
     const failure = new QualificationFailure(parseLaneFailure({
       id: input.execution?.nextFailureId() ?? ++standaloneFailureId, lane: "windowsCleanup", step: "containment",
-      class: "harness", reason: error instanceof QualificationFailure && error.evidence.reason === "ownership_changed" ? "ownership_changed" : "containment_unproven",
-      operation: "unknown", elapsedMs: 0, observations: {},
+      class: "harness", reason: "containment_unproven",
+      operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false, ...(name === "checkpoint" ? { persistenceFailed: true } : {}) },
     }));
     if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
     causes.push(failure);

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DeviceCloudAvailabilityHold } from "./device-cloud-availability.ts";
 import {
   FAILURE_LIMITS, QualificationFailure, normalizeQualificationFailures, parseLaneFailure,
-  parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible,
+  parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible, qualificationPreflightFailuresEffectFree,
   type LaneFailure, type QualificationFailureSummary,
 } from "./qualification-failure.ts";
 
@@ -15,6 +15,17 @@ const summary = (): QualificationFailureSummary => ({ failures: [root(), collate
 const secret = "SYNTHETIC_PRIVATE_FAILURE_SENTINEL";
 
 describe("closed qualification failure contracts", () => {
+  test("council498r1 persistence failure cannot acquire retry authority from a contradictory summary", () => {
+    expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(),
+      observations: { ...root().observations, persistenceFailed: true } }] }, true)).toBe(false);
+  });
+  test.each(["preflight", "connection", "output"] as const)("council498r1 Windows admission accepts its actual %s producer step", step => {
+    expect(qualificationPreflightFailuresEffectFree([parseLaneFailure({ ...root(), step,
+      reason: "retryable_service_failure", observations: { httpStatus: 503 } })])).toBe(true);
+  });
+  test.each(["transport_ready", "pixel_verified", "upload"] as const)("council498r1 preflight refuses post-allocation %s evidence", step => {
+    expect(qualificationPreflightFailuresEffectFree([parseLaneFailure({ ...root(), step })])).toBe(false);
+  });
   test("council498 campaign teardown remains a direct non-retryable harness failure", () => {
     const failure = parseLaneFailure({ ...root(), lane: "campaign", step: "teardown",
       reason: "unclassified_failure", class: "harness", operation: "unknown" });

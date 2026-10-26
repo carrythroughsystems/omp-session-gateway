@@ -368,6 +368,7 @@ export async function preflightAndroidPush(input: AndroidPushPreflightInput, run
 async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: AndroidPushProgress, sampleLate?: () => Promise<void>): Promise<Record<string, unknown>> {
   const failures: string[] = [];
   const errors: unknown[] = [];
+  const priorPhase = progress.phase;
   let persistenceFailed = false;
   // Persistence fences new mutations, not restoration of an already captured baseline.
   runtime.beforeEffect = async () => {
@@ -378,11 +379,15 @@ async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: 
     try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch (error) { failures.push(step); errors.push(error); }
     if (["fixtureAsk", "doze", "network"].includes(step)) await sampleLate?.();
   }
-  if (failures.length === 0) {
+  if (failures.length === 0 && !persistenceFailed) {
     progress.cleanupRequired = false;
     progress.phase = "restored";
   }
   await runtime.beforeEffect();
+  if (persistenceFailed) {
+    progress.cleanupRequired = true;
+    progress.phase = priorPhase;
+  }
   if (persistenceFailed) errors.push(new QualificationFailure({
     id: input.execution?.nextFailureId() ?? 1, lane: "androidPushCleanup", step: "containment",
     reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },

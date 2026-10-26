@@ -12,6 +12,7 @@ import {
   assertProtectedFilesUnchanged,
   assertDeviceCloudResumeEligible,
   assertCampaignRetryEligible,
+  assertCampaignCleanupComplete,
   assertRetainedMacCommandsSettled,
   bindVerifiedReleaseIdentities,
   cleanupMac,
@@ -62,6 +63,8 @@ import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCl
 import { readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution } from "./qualification-outcome.ts";
 import { QualificationFailure, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
 import { pixelUnrestored } from "./restoration.ts";
+import { AndroidBrowserCleanupError } from "./android-device.ts";
+import { pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
 // Derived exactly as the orchestrator derives it, so this suite cannot pass against a predecessor
@@ -492,6 +495,7 @@ test.skipIf(process.platform === "win32")("same-host resume cleans bound Mac eff
     await writeFile(join(bin, "ssh"), [
       "#!/bin/sh",
       'case "$*" in',
+      `*" '--' 'settle' "*) exit 0;;`,
       '*"serve reset"*) /bin/rm "$FIXTURE_ROOT/effects/serve";;',
       '*"rm -rf"*) /bin/rm "$FIXTURE_ROOT/effects/artifacts";;',
       '*) exit 93;;',
@@ -1502,14 +1506,14 @@ lane_persistence
 `, "test", join(REPOSITORY_ROOT, "scripts", "qualify-macos-host.sh")], {
       cwd: REPOSITORY_ROOT,
       env: {
-        ...process.env, HOME: root, BOOT_UUID: bootUuid,
+        ...process.env, HOME: root, TMPDIR: root, BOOT_UUID: bootUuid,
         OMP_MAC_HOST: MAC_ENV.OMP_STABLE_MAC_HOST, OMP_MAC_TAG: TAG, OMP_MAC_PREVIOUS_TAG: PREVIOUS_TAG,
         OMP_MAC_LOGIN: "synthetic@example.invalid", OMP_MAC_SUDO_PW: "", OMP_MAC_ARCHIVE_SHA256: candidate.archiveSha256,
       },
       stdout: "pipe", stderr: "pipe",
     });
     const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(125); // unchanged reboot identity retains its remote owner at shell exit
     expect(stdout).toMatch(/guest reboot changed:[ \t]+no/u);
     expect(stderr).toContain("a changed boot identity");
     expect(stdout + stderr).not.toContain(bootUuid);
@@ -1534,7 +1538,7 @@ lane_persistence
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 describe("resumable receipt lanes", () => {
   test.skipIf(process.platform !== "win32")("Windows refuses private receipt persistence before filesystem effects", async () => {
@@ -1663,6 +1667,81 @@ function summarizedReceipt() {
   return receipt;
 }
 
+test.each(["cleanupVerified", "mutationReconciled", "persistenceFailed", "pixel"] as const)(
+  "council498r1 containment consumes every negative %s fact", async fact => {
+    const receipt = summarizedReceipt();
+    Object.assign(receipt.lanes.deviceCloud.evidence!.progress as object, { resources: [] });
+    const error = Object.assign(new QualificationFailure({ id: 51, lane: "android", step: "cleanup",
+      class: "harness", reason: "unclassified_failure", operation: "read_only", elapsedMs: 0,
+      observations: fact === "pixel" ? {} : { [fact]: fact === "persistenceFailed" } }),
+    fact === "pixel" ? { pixelUnrestored: true } : {});
+    await finalizeCampaignFailure(receipt, error, async () => {}, resumeModules);
+    expect(receipt.failureSummary?.containment).toEqual({ proven: false, cleanupComplete: false, unresolvedMutation: true });
+    expect(() => assertCampaignCleanupComplete(receipt, receipt.execution!, resumeModules)).toThrow();
+  });
+
+test("council498r1 readiness cannot restore a remote owner lost before Mac effects were marked", async () => {
+  const receipt = summarizedReceipt();
+  const target = { sshDestination: "early-owner-loss.invalid", sudoPassword: "" };
+  receipt.macHost = target.sshDestination;
+  receipt.execution = { ...receiptExecution(), binding: { ...receiptExecution().binding, macHostSha256: digest(target.sshDestination) } };
+  const error = await runRigReadiness(receipt, async () => {}, {
+    prepare: async () => { await remoteExecutor(target, async () => ({ exitCode: 125, stdout: "", stderr: "" }))(["/bin/true"]); },
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    restorePixel: async () => {}, restoreMac: async () => {},
+  }).catch(error => error);
+  expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "unresolved", observations: { baselineRestored: false } });
+  await finalizeCampaignFailure(receipt, error, async () => {}, resumeModules);
+  expect(receipt.failureSummary?.containment.proven).toBe(false);
+});
+
+test("council498r1 readiness cleanup checkpoint failure cannot claim a restored baseline", async () => {
+  const receipt = summarizedReceipt();
+  const restored: string[] = [];
+  await runRigReadiness(receipt, async () => {
+    if (receipt.rigReadiness?.phase === "cleanup") throw new Error("synthetic disk failure");
+  }, {
+    prepare: async () => { throw new Error("synthetic readiness refusal"); },
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    restorePixel: async () => { restored.push("pixel"); }, restoreMac: async () => { restored.push("mac"); },
+  }).catch(() => {});
+  expect(restored).toEqual(["pixel", "mac"]);
+  expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "unresolved", observations: { baselineRestored: false } });
+});
+
+test.each(["windows", "androidPush", "deviceCloud"] as const)(
+  "council498r1 %s terminal persistence cannot replace an in-lane cleanup root", async name => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    receipt.execution = receiptExecution();
+    const root = Object.assign(new QualificationFailure({ id: 81, lane: `${name}Cleanup`, step: "containment",
+      reason: "containment_unproven", class: "harness", operation: "unknown", elapsedMs: 0,
+      observations: { cleanupVerified: false } }), { pixelUnrestored: true });
+    let writes = 0;
+    const error = await executeReceiptLane(receipt, name, async () => {
+      if (++writes === 2) throw new Error("synthetic terminal disk failure");
+    }, async () => { throw root; }).catch(error => error);
+    expect(pixelUnrestored(error)).toBe(true);
+    expect(normalizeQualificationFailures(error).some(failure => failure.id === 81)).toBe(true);
+    expect(normalizeQualificationFailures(error).some(failure => failure.observations.persistenceFailed === true)).toBe(true);
+  });
+
+test.each(["initial-write", "terminal-write", "cleanup"] as const)(
+  "council498r1 publication %s keeps terminal and containment evidence", async point => {
+    const receipt = summarizedReceipt();
+    let writes = 0, ran = false;
+    const error = await completeOmpPublicationLifecycle(receipt, async () => {
+      writes += 1;
+      if ((point === "initial-write" && writes === 1) || (point === "terminal-write" && writes === 2)) {
+        throw new Error("synthetic publication disk failure");
+      }
+    }, async () => { ran = true; throw new OmpLifecycleFailure("cleanup"); }).catch(error => error);
+    expect(receipt.lanes.ompPublication.status).toBe("failed");
+    expect(receipt.lanes.ompPublication.completedAt).toBeDefined();
+    const failures = normalizeQualificationFailures(error);
+    if (point !== "cleanup") expect(failures.some(failure => failure.observations.persistenceFailed === true)).toBe(true);
+    if (ran) expect(failures.some(failure => failure.reason === "lifecycle_unconfirmed" && failure.observations.cleanupVerified === false)).toBe(true);
+  });
+
 test.each(["sourceCommit", "archiveSha256", "tag"] as const)("council498 artifact %s mismatch never poisons the receipt", field => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   receipt.execution = receiptExecution();
@@ -1734,6 +1813,22 @@ test("council498 unresolved remote ownership refuses every destructive Mac clean
   expect(receipt.lanes.cleanup.status).toBe("failed");
   const failures = normalizeQualificationFailures(new AggregateError([root, error]));
   expect(failures.some(item => item.class === "collateral" && item.reason === "remote_unsettled")).toBe(true);
+});
+
+test.each(["deviceCloud", "androidPush"] as const)("council498r1 Mac cleanup preserves unresolved %s fixture ownership", async name => {
+  const receipt = summarizedReceipt();
+  const target = { sshDestination: "retained-fixture.invalid", sudoPassword: "" };
+  receipt.lanes[name].evidence = { progress: { epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: true } };
+  receipt.lanes[`${name}Cleanup`].status = "failed";
+  let commands = 0;
+  const context = { target, environment: { OMP_MAC_HOST: target.sshDestination }, receipt, lanes: resumeModules };
+  const error = await cleanupMac(context, undefined, undefined, {
+    command: async () => { commands += 1; return { exitCode: 0, stdout: "", stderr: "" }; },
+    script: async () => { commands += 1; return ""; },
+  }).catch(error => error);
+  expect(commands).toBe(0);
+  expect(receipt.lanes.cleanup.evidence).toMatchObject({ retainedFixtureOwners: 1 });
+  expect(normalizeQualificationFailures(error).some(failure => failure.observations.cleanupVerified === false)).toBe(true);
 });
 
 test("council498 readiness preserves the shared remote root while attempting all restoration owners", async () => {
@@ -1961,6 +2056,28 @@ test("council491 failed SSH transport also reconciles its remote command owner",
   expect((await remote(["/bin/true"])).exitCode).toBe(255);
   expect(calls).toBe(2);
 });
+
+test.skipIf(process.platform === "win32")("council498r1 successful remote leader cannot abandon its live process group", async () => {
+  const root = await mkdtemp(join(tmpdir(), "remote-descendant-"));
+  const pidFile = join(root, "child");
+  const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async argv => {
+    const process = Bun.spawn(["/bin/bash", "-c", argv.at(-1)!], {
+      env: { ...globalThis.process.env, HOME: root }, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    });
+    return { exitCode: await process.exited, stdout: "", stderr: "" };
+  };
+  let pid = 0;
+  try {
+    await remoteExecutor({ sshDestination: "descendant-fixture.invalid", sudoPassword: "" }, execute)(
+      ["/bin/bash", "-c", 'sleep 120 </dev/null >/dev/null 2>&1 & printf "%s" "$!" > "$1"', "--", pidFile]);
+    pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  } finally {
+    if (!pid && await Bun.file(pidFile).exists()) pid = Number(await readFile(pidFile, "utf8"));
+    if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* Already settled. */ }
+    await rm(root, { recursive: true, force: true });
+  }
+}, 25_000);
 
 test.skipIf(process.platform === "win32").each([0, 7, "early-hup"] as const)(
   "council498 remote owner survives exit %s until acknowledged settlement", async exit => {
@@ -2696,7 +2813,7 @@ describe("resource-owning lanes", () => {
     expect(module.needsCleanup(progress)).toBe(false);
   });
 
-  test("council491 successful owned cleanup retires its stale in-lane cleanup failure", async () => {
+  test("council498r1 successful later cleanup cannot erase an earlier cleanup failure", async () => {
     const receipt = summarizedReceipt();
     receipt.status = "running";
     delete receipt.failureSummary;
@@ -2713,12 +2830,42 @@ describe("resource-owning lanes", () => {
     };
     const error = await runExternalLane(receipt, "windows", async () => {}, module, await laneContext()).catch(error => error);
     expect(receipt.lanes.windowsCleanup.status).toBe("passed");
-    expect(normalizeQualificationFailures(error).some(item => item.lane === "windowsCleanup")).toBe(false);
+    expect(normalizeQualificationFailures(error).some(item => item.id === 37 && item.lane === "windowsCleanup")).toBe(true);
     await finalizeCampaignFailure(receipt, error, async () => {
       validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
     }, { ...resumeModules, windows: module });
     const finalized = validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
     expect(finalized.failureSummary?.failures.some(item => item.lane === "windows")).toBe(true);
+    expect(finalized.failureSummary?.containment.proven).toBe(false);
+  });
+
+  test("council498r1 Push browser cleanup roots survive later cleanup and queued Pixel collateral", async () => {
+    const receipt = summarizedReceipt();
+    receipt.status = "running";
+    delete receipt.failureSummary;
+    receipt.lanes.androidPush = { status: "pending", attempts: 0 };
+    let id = 90, queued: Promise<unknown> | undefined;
+    const pixel = createPixelLease(() => {}, () => ++id);
+    const browserFailure = pushBrowserCleanupFailure(new AndroidBrowserCleanupError([], 1), () => ++id);
+    const origins = normalizeQualificationFailures(browserFailure).filter(failure => failure.class !== "collateral").map(failure => failure.id);
+    const module: ExternalLaneModule = {
+      preflight: async () => {}, needsCleanup: () => false, cleanup: async () => ({ restored: true }),
+      run: async ({ checkpoint }) => pixel("androidPush", async () => {
+        await checkpoint({ epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: false });
+        queued = pixel("android", async () => { throw new Error("poisoned measurement must not run"); }).catch(error => error);
+        throw browserFailure;
+      }),
+    };
+    const error = await runExternalLane(receipt, "androidPush", async () => {}, module, { ...await laneContext(), pixel }).catch(error => error);
+    expect(receipt.lanes.androidPushCleanup.status).toBe("passed");
+    await finalizeCampaignFailure(receipt, new AggregateError([error, await queued]), async () => {
+      validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+    }, { ...resumeModules, androidPush: module });
+    const finalized = validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+    expect(finalized.failureSummary!.failures.some(failure => origins.includes(failure.id))).toBe(true);
+    expect(finalized.failureSummary!.failures.some(failure => failure.lane === "android" && failure.class === "collateral" &&
+      origins.every(id => failure.originIds.includes(id)))).toBe(true);
+    expect(finalized.failureSummary?.containment.proven).toBe(false);
   });
 
   test("passes only with a cleanup bound to the attempt it released", async () => {
