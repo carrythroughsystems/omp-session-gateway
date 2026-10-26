@@ -198,6 +198,7 @@ export interface LaneReceipt {
   /** Additive evidence only: absence never grants automatic recovery authority. */
   failure?: readonly LaneFailure[];
   timings?: LaneTimings;
+  notStartedReason?: "admission_failed" | "readiness_failed" | "dependency_failed";
 }
 
 export interface CandidateIdentity {
@@ -573,6 +574,10 @@ export function validateStableQualificationReceipt(
     if (!lane || !["pending", "running", "passed", "failed"].includes(lane.status) || !Number.isInteger(lane.attempts)) {
       throw new Error(`qualification receipt lane ${name} is invalid`);
     }
+    if (lane.notStartedReason !== undefined && (lane.status !== "pending" ||
+      !["admission_failed", "readiness_failed", "dependency_failed"].includes(lane.notStartedReason))) {
+      throw new Error("qualification not-started reason is invalid");
+    }
   }
   validateReceiptExecution(receipt as StableQualificationReceipt);
   return receipt as StableQualificationReceipt;
@@ -696,6 +701,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
   delete lane.completedAt;
   delete lane.error;
   delete lane.failure;
+  delete lane.notStartedReason;
   await persist();
   const checkpoint: Checkpoint = async evidence => {
     lane.evidence = { ...(lane.evidence ?? {}), ...evidence };
@@ -946,7 +952,15 @@ export async function withConsumedCampaignRetry<T>(
   delete receipt.failureSummary;
   delete receipt.rigReadiness;
   delete receipt.error;
-  for (const lane of Object.values(receipt.lanes)) delete lane.failure;
+  for (const lane of Object.values(receipt.lanes)) {
+    delete lane.failure;
+    if (lane.status === "failed") {
+      lane.status = "pending";
+      delete lane.startedAt;
+      delete lane.completedAt;
+      delete lane.error;
+    }
+  }
   if (receipt.lanes.deviceCloud.evidence !== undefined) delete receipt.lanes.deviceCloud.evidence.availabilityHold;
   await persist();
   return run();
@@ -1025,6 +1039,11 @@ export async function finalizeCampaignFailure(
   }
   for (const name of LANE_NAMES) {
     const lane = receipt.lanes[name];
+    if (lane.status === "pending") {
+      lane.notStartedReason = receipt.rigReadiness?.status === "failed" ? "readiness_failed" :
+        receipt.lanes.artifacts.attempts === 0 ? "admission_failed" : "dependency_failed";
+    }
+    if (lane.status === "failed" && lane.completedAt === undefined) lane.completedAt = now();
     if (lane.status !== "running") continue;
     lane.status = "failed";
     lane.completedAt = now();
@@ -1042,6 +1061,21 @@ export async function finalizeCampaignFailure(
   receipt.completedAt = now();
   receipt.error = "qualification failed; inspect fixed failure evidence";
   if (receipt.execution !== undefined) {
+    for (const name of LANE_NAMES) {
+      const lane = receipt.lanes[name];
+      if (lane.status !== "failed") continue;
+      let own = failures.filter(item => item.lane === name);
+      if (own.length === 0) {
+        let id = nextReceiptFailureId(receipt);
+        while (ids.has(id)) id = nextReceiptFailureId(receipt);
+        const missing = parseLaneFailure({ id, lane: name, step: FAILURE_STEPS[name][0], reason: "unclassified_failure",
+          class: "harness", elapsedMs: 0, operation: "unknown", observations: {} });
+        failures.push(missing);
+        ids.add(id);
+        own = [missing];
+      }
+      lane.failure = own;
+    }
     let cleanupComplete = !receiptNeedsMacCleanup(receipt) && receipt.rigReadiness?.cleanupDisposition !== "unresolved";
     for (const name of Object.keys(CLEANUP_LANES) as ExternalLaneName[]) {
       const lane = receipt.lanes[name];
@@ -1188,13 +1222,19 @@ async function runCommand(command: readonly string[], options: CommandOptions = 
     stdin: options.stdin ?? "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    detached: process.platform !== "win32",
   });
   let timedOut = false;
   let forceKillTimer: NodeJS.Timeout | undefined;
+  const signalOwner = (signal: NodeJS.Signals) => {
+    if (process.platform === "win32") { subprocess.kill(signal); return; }
+    try { process.kill(-subprocess.pid, signal); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+  };
   const terminate = () => {
-    if (subprocess.exitCode !== null || forceKillTimer !== undefined) return;
-    subprocess.kill("SIGTERM");
-    forceKillTimer = setTimeout(() => subprocess.kill("SIGKILL"), 10_000);
+    if (forceKillTimer !== undefined) return;
+    signalOwner("SIGTERM");
+    forceKillTimer = setTimeout(() => signalOwner("SIGKILL"), 10_000);
   };
   const timer = setTimeout(() => { timedOut = true; terminate(); },
     Math.max(1, Math.min(options.timeoutMs ?? 30 * 60_000, (options.execution?.deadline ?? Infinity) - performance.now())));

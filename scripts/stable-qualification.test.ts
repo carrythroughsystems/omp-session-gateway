@@ -1919,6 +1919,28 @@ test("a Pixel left unrestored refuses every later device lane", async () => {
   expect(later).toBe(0);
 });
 
+test.skipIf(process.platform === "win32")("cancellation terminates the owned child process group before returning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qualification-process-group-"));
+  const ready = join(root, "ready"), escaped = join(root, "escaped");
+  const controller = new AbortController();
+  const script = `const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(`await Bun.sleep(500); await Bun.write(${JSON.stringify(escaped)}, "alive");`)}],
+    {stdin:"ignore",stdout:"inherit",stderr:"inherit"});
+    await Bun.write(${JSON.stringify(ready)}, "ready"); await child.exited;`;
+  const owner = runPixelRestoringChild([process.execPath, "-e", script], {
+    timeoutMs: 5_000, execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 },
+  });
+  owner.catch(() => {});
+  try {
+    const until = performance.now() + 2_000;
+    while (!await Bun.file(ready).exists() && performance.now() < until) await Bun.sleep(5);
+    expect(await Bun.file(ready).exists()).toBe(true);
+    controller.abort(new DOMException("owned cancellation", "AbortError"));
+    await expect(owner).rejects.toThrow("owned cancellation");
+    await Bun.sleep(550);
+    expect(await Bun.file(escaped).exists()).toBe(false);
+  } finally { controller.abort(); await owner.catch(() => {}); await rm(root, { recursive: true, force: true }); }
+});
+
 test("a read-only Android origin refusal leaves the Pixel lease clean for the next admission", async () => {
   const lease = createPixelLease(() => {});
   let calls = 0;
