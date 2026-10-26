@@ -34,6 +34,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Fence fresh retry ordinals, validate every persisted receipt, preserve admission failure ownership,
   restore poisoned resources despite checkpoint failures, and reap remote fixture process groups
   before cleanup. Readiness and provider cancellation retain one failure allocator and terminal proof.
+  Fence every retained-Mac command path after unproved termination, retain command owners through
+  settlement, preserve passed publication proofs on relay teardown failure, validate execution and
+  artifact bindings before writes, and restore every readiness owner despite persistence failures.
 - Structured Windows transport failure evidence, bounded read-only reconnects, deadline-aware
   subprocess reaping, and interrupted-upload reconciliation without write replay. Cleanup skips
   confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,

@@ -15,6 +15,18 @@ const summary = (): QualificationFailureSummary => ({ failures: [root(), collate
 const secret = "SYNTHETIC_PRIVATE_FAILURE_SENTINEL";
 
 describe("closed qualification failure contracts", () => {
+  test("council498 campaign teardown remains a direct non-retryable harness failure", () => {
+    const failure = parseLaneFailure({ ...root(), lane: "campaign", step: "teardown",
+      reason: "unclassified_failure", class: "harness", operation: "unknown" });
+    expect(qualificationRetryEligible({ ...summary(), failures: [failure] }, true)).toBe(false);
+    expect(() => parseLaneFailure({ ...failure, class: "collateral" })).toThrow();
+  });
+  test("council498 remote-unsettled cleanup requires an authored origin in the same graph", () => {
+    const failure = parseLaneFailure({ ...collateral(), lane: "cleanup", step: "containment", reason: "remote_unsettled" });
+    expect(parseLaneFailures([root(), failure])).toEqual([root(), failure]);
+    expect(() => parseLaneFailures([failure])).toThrow();
+    expect(() => parseLaneFailure({ ...failure, class: "infra_transient" })).toThrow();
+  });
   test("council R1 collateral cannot bind a generated availability ID", () => {
     const hold = new DeviceCloudAvailabilityHold({ kind: "device-cloud-availability", stage: "preflight", target: "iphone",
       vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0 });

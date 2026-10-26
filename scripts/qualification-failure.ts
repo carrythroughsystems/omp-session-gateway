@@ -60,11 +60,12 @@ export const FAILURE_REASONS = {
     assertion_failed: "product", authentication_failed: "harness", helper_failed: "harness", mutation_unconfirmed: "harness", ownership_changed: "harness" },
   deviceCloud: { ...commonReasons, pinned_pool_busy: "infra_transient", journey_failed: "product", audit_failed: "product",
     identity_mismatch: "harness", allocation_unknown: "harness", containment_unproven: "harness" },
-  androidPushCleanup: cleanupReasons, windowsCleanup: cleanupReasons, deviceCloudCleanup: cleanupReasons, cleanup: cleanupReasons,
+  androidPushCleanup: cleanupReasons, windowsCleanup: cleanupReasons, deviceCloudCleanup: cleanupReasons,
+  cleanup: { ...cleanupReasons, remote_unsettled: "collateral" },
 } as const;
 export type QualificationFailureLane = keyof typeof FAILURE_REASONS;
 export const FAILURE_STEPS = {
-  campaign: ["execution", "finalization", "outcome", "admission"],
+  campaign: ["execution", "finalization", "outcome", "admission", "teardown"],
   preflight: ["admission", "tools", "pixel", "macos", "windows", "deviceCloud", "lease"],
   rigReadiness: ["lease", "artifacts", "fixture", "pixel_push", "tailnet", "windows", "quota", "macos", "cleanup"],
   artifacts: ["download", "signature", "digest"],

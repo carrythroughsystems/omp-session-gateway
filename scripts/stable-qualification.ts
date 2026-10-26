@@ -283,6 +283,7 @@ interface CommandOptions {
   readonly allowFailure?: boolean;
   readonly stdin?: Uint8Array;
   readonly execution?: QualificationExecutionContext;
+  readonly retainedMac?: string;
 }
 
 interface CommandResult {
@@ -845,7 +846,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
       if (outcome !== undefined) lane.evidence = { ...lane.evidence, availabilityHold: outcome.availabilityHolds };
       else if (lane.evidence !== undefined) delete lane.evidence.availabilityHold;
     }
-    const failure = receipt.execution === undefined ? error : laneFailure(error, name, () => nextReceiptFailureId(receipt));
+    let failure = receipt.execution === undefined ? error : laneFailure(error, name, () => nextReceiptFailureId(receipt));
     if (receipt.execution !== undefined) {
       // A queued owner can settle before its root owner's catch persists. Defer collateral
       // records until finalization can atomically persist the complete, closed failure graph.
@@ -854,7 +855,20 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
       const own = leaves(failure).filter(item => item.lane === name);
       if (own.length > 0 && own.every(item => item.class !== "collateral")) lane.failure = own;
     }
-    await persist();
+    try { await persist(); }
+    catch (storageError) {
+      if (!cleanup) throw storageError;
+      persistenceFailed = true;
+    }
+    if (persistenceFailed) {
+      lane.evidence = { ...lane.evidence, persistenceFailed: true };
+      if (!normalizeQualificationFailures(failure).some(item => item.observations.persistenceFailed === true)) {
+        const storageFailure = new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: name,
+          step: "containment", reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0,
+          observations: { persistenceFailed: true } }));
+        failure = new AggregateError([failure, storageFailure], "cleanup and receipt persistence failed");
+      }
+    }
     throw failure;
   }
 }
@@ -1168,6 +1182,18 @@ export async function finalizeCampaignFailure(
   for (const lane of Object.values(receipt.lanes)) for (const failure of lane.failure ?? []) {
     if (!ids.has(failure.id)) { failures.push(failure); ids.add(failure.id); }
   }
+  // Typed owners can fail before entering a lane (for example setup), or after its proof.
+  // Reconcile the verdict before constructing a summary; never persist a root with a passed/pending owner.
+  for (const failure of failures) {
+    if (!Object.hasOwn(receipt.lanes, failure.lane)) continue;
+    const lane = receipt.lanes[failure.lane as StableQualificationLane];
+    if (lane.status !== "failed") {
+      lane.status = "failed";
+      lane.completedAt = now();
+      lane.error = "qualification owner failed";
+    }
+    delete lane.notStartedReason;
+  }
   for (const name of LANE_NAMES) {
     const lane = receipt.lanes[name];
     if (lane.status === "pending") {
@@ -1192,6 +1218,11 @@ export async function finalizeCampaignFailure(
   receipt.completedAt = now();
   receipt.error = "qualification failed; inspect fixed failure evidence";
   if (receipt.execution !== undefined) {
+    if (failures.some(failure => failure.lane === "rigReadiness")) {
+      receipt.rigReadiness = receipt.rigReadiness === undefined ?
+        { status: "failed", campaignAttempt: receipt.execution.campaignAttempt, cleanupDisposition: "unresolved",
+          observations: { baselineRestored: false }, timings: {} } : { ...receipt.rigReadiness, status: "failed" };
+    }
     if (receipt.rigReadiness !== undefined &&
       (receipt.rigReadiness.status === "running" || receipt.rigReadiness.cleanupDisposition === "unresolved")) {
       receipt.rigReadiness = { ...receipt.rigReadiness, status: "failed" };
@@ -1226,7 +1257,13 @@ export async function finalizeCampaignFailure(
     });
     receipt.failureSummary = summary;
   }
-  await persist();
+  try { await persist(); }
+  catch (storageError) {
+    throw new AggregateError([error, new QualificationFailure(parseLaneFailure({
+      id: nextReceiptFailureId(receipt), lane: "campaign", step: "outcome", class: "harness",
+      reason: "outcome_persistence_failed", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },
+    }), { cause: storageError })], "terminal receipt persistence failed");
+  }
 }
 
 type ExternalLaneRunContext<Extra extends object> = {
@@ -1356,6 +1393,8 @@ export function incompleteQualification(receipt: StableQualificationReceipt): st
 }
 
 async function runCommand(command: readonly string[], options: CommandOptions = {}): Promise<CommandResult> {
+  const retainedMac = options.retainedMac ?? options.env?.OMP_MAC_HOST;
+  if (retainedMac !== undefined) assertRetainedMacCommandsSettled(retainedMac);
   options.execution?.signal.throwIfAborted();
   const environment = Object.fromEntries(
     Object.entries({ ...process.env, ...options.env }).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -1521,6 +1560,24 @@ function assertSameRelease(recorded: CandidateIdentity | undefined, verified: Ca
   }
 }
 
+export function bindVerifiedReleaseIdentities(receipt: StableQualificationReceipt,
+  candidate: CandidateIdentity, predecessor: CandidateIdentity): void {
+  try {
+    assertSameRelease(receipt.candidate, candidate, "candidate");
+    assertSameRelease(receipt.predecessor, predecessor, "predecessor");
+    const binding = receipt.execution?.binding;
+    if (binding !== undefined && (candidate.tag !== binding.candidateTag || candidate.sourceCommit !== binding.sourceCommit ||
+      candidate.archiveSha256 !== binding.archiveSha256 || predecessor.tag !== binding.previousTag)) {
+      throw new Error("verified release identity differs from execution");
+    }
+  } catch (error) {
+    throw new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: "campaign", step: "execution",
+      reason: "binding_mismatch", class: "harness", operation: "read_only", elapsedMs: 0, observations: {} }), { cause: error });
+  }
+  receipt.candidate = { tag: candidate.tag, sourceCommit: candidate.sourceCommit, archiveSha256: candidate.archiveSha256 };
+  receipt.predecessor = { tag: predecessor.tag, sourceCommit: predecessor.sourceCommit, archiveSha256: predecessor.archiveSha256 };
+}
+
 /** Built from the receipt alone, so recorded external effects stay cleanable without admission. */
 function externalLaneIdentity(
   options: StableQualificationOptions,
@@ -1551,12 +1608,26 @@ export function remoteCommandLine(argv: readonly string[]): string {
   return argv.map(shellQuote).join(" ");
 }
 
-const unsettledRemoteTargets = new Set<string>();
+const macFailureAllocators = new Map<string, () => number>();
+const unsettledRemoteTargets = new Map<string, { failure: QualificationFailure; nextFailureId: () => number }>();
+let standaloneMacFailureId = 0;
+
+/** All retained-Mac command paths share this fence, including local wrappers that spawn SSH. */
+export function assertRetainedMacCommandsSettled(destination: string): void {
+  const owner = unsettledRemoteTargets.get(destination);
+  if (owner === undefined) return;
+  const collateral = new QualificationFailure(parseLaneFailure({
+    id: owner.nextFailureId(), lane: "cleanup", step: "containment", reason: "remote_unsettled", class: "collateral",
+    operation: "not_started", elapsedMs: 0, observations: { cleanupVerified: false }, originIds: [owner.failure.evidence.id],
+  }));
+  throw new AggregateError([owner.failure, collateral], "retained Mac command owner remains unsettled");
+}
+
 export function remoteExecutor(target: MacTarget, execute: typeof runCommand = runCommand): RemoteExecutor {
   const ssh = (script: string) => ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
     "-o", "BatchMode=yes", "-q", target.sshDestination, `${MAC_PATH_SETUP}; ${script}`];
   return async (argv, options = {}) => {
-    if (unsettledRemoteTargets.has(target.sshDestination)) throw new Error("remote command ownership remains unresolved");
+    assertRetainedMacCommandsSettled(target.sshDestination);
     options.execution?.signal.throwIfAborted();
     const owner = `.local/state/omp-qualification/command-owners/${randomUUID()}`;
     // Bash job control creates a distinct remote process group, independently of the local SSH
@@ -1565,9 +1636,13 @@ export function remoteExecutor(target: MacTarget, execute: typeof runCommand = r
 umask 077
 owner="$HOME/${owner}"
 mkdir -p "$owner" || exit 125
+pgid=
+trap 'status=$?; trap - EXIT; : > "$owner/done"; exit "$status"' EXIT
+trap 'if [ -n "$pgid" ]; then kill -TERM -- -"$pgid" 2>/dev/null; wait "$pgid" 2>/dev/null; fi; exit 125' HUP INT TERM
 mkdir "$owner/admission" 2>/dev/null || exit 125
-if [ -e "$owner/cancel" ]; then : > "$owner/done"; exit 125; fi
+if [ -e "$owner/cancel" ]; then exit 125; fi
 set -m
+: > "$owner/launching" || exit 125
 /bin/bash -c '
 owner=$1; shift
 for ((i=0; i<100; i++)); do
@@ -1578,8 +1653,7 @@ done
 exit 125
 ' -- "$owner" "$@" <&0 &
 pgid=$!
-trap 'kill -TERM -- -"$pgid" 2>/dev/null; wait "$pgid" 2>/dev/null; exit 125' HUP INT TERM
-if ! printf '%s\\n' "$pgid" > "$owner/pgid" || ! : > "$owner/go"; then
+if ! printf '%s\\n' "$pgid" > "$owner/pgid.tmp" || ! mv "$owner/pgid.tmp" "$owner/pgid" || ! : > "$owner/go"; then
   kill -TERM -- -"$pgid" 2>/dev/null
   wait "$pgid" 2>/dev/null
   exit 125
@@ -1587,22 +1661,23 @@ fi
 rmdir "$owner/admission"
 wait "$pgid"
 status=$?
-: > "$owner/done"
-rm -rf "$owner"
 exit "$status"`;
     let completed: CommandResult | undefined;
+    let primaryError: unknown;
     try {
       completed = await execute(ssh(remoteCommandLine(["/bin/bash", "-c", script, "--", ...argv])), {
         allowFailure: true, timeoutMs: options.timeoutMs ?? 5 * 60_000,
         ...(options.execution === undefined ? {} : { execution: options.execution }),
         ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
       });
-      if (completed.exitCode !== 0) throw new Error("remote command returned unsuccessfully");
-      return completed;
-    } catch (error) {
-      // This fresh, bounded SSH command must finish before any fixture cleanup may start. An
-      // early cancellation tombstone remains private and fences a delayed admission of this UUID.
-      const stop = `
+    } catch (error) { primaryError = error; }
+    // Even ordinary success has a separate acknowledgement. The primary never deletes the pgid
+    // while a cancellation owner could be reading it. A stopped group is proved absent before
+    // removal; an early-admission tombstone stays private to fence a delayed launch of this UUID.
+    const settle = completed?.exitCode === 0 && !options.execution?.signal.aborted ? `
+owner="$HOME/${owner}"
+[ -e "$owner/done" ] || exit 125
+rm -rf "$owner"` : `
 umask 077
 owner="$HOME/${owner}"
 mkdir -p "$owner" || exit 125
@@ -1610,9 +1685,9 @@ mkdir -p "$owner" || exit 125
 claimed=0
 if mkdir "$owner/admission" 2>/dev/null; then claimed=1; fi
 for ((i=0; i<50; i++)); do
-  [ -e "$owner/done" ] && exit 0
   [ -s "$owner/pgid" ] && break
-  [ "$claimed" = 1 ] && exit 0
+  if [ -e "$owner/done" ] && [ ! -e "$owner/launching" ]; then rm -rf "$owner"; exit 0; fi
+  if [ "$claimed" = 1 ] && [ ! -e "$owner/launching" ]; then exit 0; fi
   sleep .1
 done
 read -r pgid < "$owner/pgid" || exit 125
@@ -1620,25 +1695,30 @@ case "$pgid" in ''|*[!0-9]*) exit 125;; esac
 [ "$pgid" -gt 1 ] || exit 125
 kill -TERM -- -"$pgid" 2>/dev/null || :
 for ((i=0; i<100; i++)); do
-  kill -0 -- -"$pgid" 2>/dev/null || exit 0
+  if ! kill -0 -- -"$pgid" 2>/dev/null; then : > "$owner/done"; rm -rf "$owner"; exit 0; fi
   sleep .1
 done
 kill -KILL -- -"$pgid" 2>/dev/null || :
 for ((i=0; i<50; i++)); do
-  kill -0 -- -"$pgid" 2>/dev/null || exit 0
+  if ! kill -0 -- -"$pgid" 2>/dev/null; then : > "$owner/done"; rm -rf "$owner"; exit 0; fi
   sleep .1
 done
 exit 125`;
-      let stopped = false;
-      try { stopped = (await execute(ssh(remoteCommandLine(["/bin/bash", "-c", stop])),
-        { allowFailure: true, timeoutMs: 45_000 })).exitCode === 0; } catch { /* Refuse all later effects on an unresolved owner. */ }
-      if (!stopped) {
-        unsettledRemoteTargets.add(target.sshDestination);
-        throw new Error("remote command termination could not be proven");
-      }
-      if (completed !== undefined) return completed;
-      throw error;
+    let settled = false;
+    try { settled = (await execute(ssh(remoteCommandLine(["/bin/bash", "-c", settle])),
+      { allowFailure: true, timeoutMs: 45_000 })).exitCode === 0; } catch { /* An unproved owner fences all later Mac effects. */ }
+    if (!settled) {
+      const nextFailureId = options.execution?.nextFailureId ?? macFailureAllocators.get(target.sshDestination) ?? (() => ++standaloneMacFailureId);
+      const failure = new QualificationFailure(parseLaneFailure({
+        id: nextFailureId(), lane: "campaign", step: "teardown", reason: "unclassified_failure", class: "harness",
+        operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false, mutationReconciled: false },
+      }), { cause: primaryError });
+      unsettledRemoteTargets.set(target.sshDestination, { failure, nextFailureId });
+      throw failure;
     }
+    if (completed === undefined) throw primaryError;
+    options.execution?.signal.throwIfAborted();
+    return completed;
   };
 }
 
@@ -2013,6 +2093,7 @@ else:
         print("guard=refused:" + str(error).encode()[:400].hex())
 `),
     ].join("; ");
+    assertRetainedMacCommandsSettled(target.sshDestination);
     const result = (await runtime.output([
       "ssh", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
       "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes", "-o", "ConnectTimeout=10",
@@ -2150,7 +2231,7 @@ async function readMacPublicOrigin(target: MacTarget): Promise<string> {
     "-q",
     target.sshDestination,
     MAC_PATH_SETUP + '; TS="$(command -v tailscale || echo "$HOME/go/bin/tailscale")"; "$TS" status --json',
-  ]);
+  ], { retainedMac: target.sshDestination });
   const status = JSON.parse(result) as { Self?: { DNSName?: unknown; Tags?: unknown[] }; BackendState?: unknown };
   const dnsName = status.Self?.DNSName;
   if (status.BackendState !== "Running" || typeof dnsName !== "string" || dnsName === "" || (status.Self?.Tags?.length ?? 0) > 0) {
@@ -2241,6 +2322,7 @@ function ompRemoteCommand(options: StableQualificationOptions, pins: OmpPins, mo
 }
 
 function startOmpSession(options: StableQualificationOptions, target: MacTarget, pins: OmpPins, mode: "run" | "continue" = "run") {
+  assertRetainedMacCommandsSettled(target.sshDestination);
   return Bun.spawn(
     [
       "ssh",
@@ -2364,6 +2446,7 @@ function chooseTunnelPort(): number {
 }
 
 async function startTunnel(target: MacTarget, port: number, execution: QualificationExecutionContext): Promise<ManagedProcess> {
+  assertRetainedMacCommandsSettled(target.sshDestination);
   const process = Bun.spawn(
     [
       "ssh",
@@ -2563,31 +2646,34 @@ async function runRelaySmoke(
   return validateRelayEvidence(JSON.parse(result.stdout), options.relaySeconds, startedAt, now());
 }
 
-async function cleanupMac(
+export async function cleanupMac(
   context: Pick<MacContext, "target" | "environment">,
   collect?: () => Promise<unknown>,
   execution?: QualificationExecutionContext,
+  runtime = { command: runCommand, script: runMacScript },
 ): Promise<Record<string, unknown>> {
+  assertRetainedMacCommandsSettled(context.target.sshDestination);
   const errors: unknown[] = [];
   let uninstallOutput = "";
   let ompOutput = "";
   const attempt = async (label: string, action: () => Promise<unknown>): Promise<void> => {
     try {
+      assertRetainedMacCommandsSettled(context.target.sshDestination);
       await action();
     } catch (error) {
-      errors.push(new Error(`${label} failed`, { cause: error }));
+      errors.push(error instanceof QualificationFailure || error instanceof AggregateError ? error : new Error(`${label} failed`, { cause: error }));
     }
   };
 
   await attempt("gateway uninstall", async () => {
-    uninstallOutput = await runMacScript(context.environment, ["uninstall"], 10 * 60 * 1_000, execution);
+    uninstallOutput = await runtime.script(context.environment, ["uninstall"], 10 * 60 * 1_000, execution);
   });
   if (collect !== undefined) await attempt("structured log collection", async () => {
     if (!uninstallOutput.includes("gateway pids:                          0")) throw new Error("gateway log writer termination is unproven");
     await collect();
   });
   await attempt("Tailscale Serve reset", async () => {
-    await runCommand([
+    await runtime.command([
       "ssh",
       "-o",
       "StrictHostKeyChecking=accept-new",
@@ -2598,13 +2684,13 @@ async function cleanupMac(
       "-q",
       context.target.sshDestination,
       MAC_PATH_SETUP + '; TS="$(command -v tailscale || echo "$HOME/go/bin/tailscale")"; "$TS" serve reset >/dev/null',
-    ], execution === undefined ? {} : { execution });
+    ], { retainedMac: context.target.sshDestination, ...(execution === undefined ? {} : { execution }) });
   });
   await attempt("mainline OMP cleanup", async () => {
-    ompOutput = await runMacScript(context.environment, ["omp-clean"], 10 * 60 * 1_000, execution);
+    ompOutput = await runtime.script(context.environment, ["omp-clean"], 10 * 60 * 1_000, execution);
   });
   await attempt("qualification artifact cleanup", async () => {
-    await runCommand([
+    await runtime.command([
       "ssh",
       "-o",
       "StrictHostKeyChecking=accept-new",
@@ -2615,7 +2701,7 @@ async function cleanupMac(
       "-q",
       context.target.sshDestination,
       MAC_PATH_SETUP + '; rm -rf "$HOME/qual" "$HOME/qual-tools"',
-    ], execution === undefined ? {} : { execution });
+    ], { retainedMac: context.target.sshDestination, ...(execution === undefined ? {} : { execution }) });
   });
 
   for (const [output, expected] of [
@@ -2730,14 +2816,23 @@ export async function finishLiveQualification(
   const failure = failures.length === 0 ? undefined : new AggregateError(failures, "live qualification consumers failed");
   try {
     await stopRelay();
-    if (!preservePublication) await completeOmpPublicationLifecycle(receipt, persist, lifecycle, nextFailureId);
   } catch (error) {
+    const teardown = new QualificationFailure(parseLaneFailure({ id: nextFailureId(), lane: "campaign", step: "teardown",
+      reason: "unclassified_failure", class: "harness", operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false } }), { cause: error });
+    const stopped: unknown[] = failure === undefined ? [teardown] : [failure, teardown];
     if (!preservePublication && publication.status === "running") {
       publication.status = "failed";
       publication.completedAt = now();
       publication.error = "publication dependency did not settle";
-      await persist();
+      stopped.push(new QualificationFailure(parseLaneFailure({ id: nextFailureId(), lane: "ompPublication", step: "cleanup",
+        class: "collateral", reason: "dependency_failed", operation: "not_started", elapsedMs: 0, observations: {},
+        originIds: [teardown.evidence.id] })));
     }
+    throw new AggregateError(stopped, "relay teardown prevented publication completion");
+  }
+  try {
+    if (!preservePublication) await completeOmpPublicationLifecycle(receipt, persist, lifecycle, nextFailureId);
+  } catch (error) {
     const publicationFailure = laneFailure(error, "ompPublication", nextFailureId);
     if (failure !== undefined) throw new AggregateError([failure, publicationFailure], "consumers and publication completion failed");
     throw publicationFailure;
@@ -2772,7 +2867,8 @@ export async function runRigReadiness(
     if (error instanceof AggregateError) return new AggregateError(error.errors.map(ownedFailure), "readiness failures");
     if (error instanceof QualificationFailure) {
       const evidence = error.evidence;
-      if (evidence.lane === "cleanup" && receipt.lanes.cleanup.status === "failed") return error;
+      if ((evidence.lane === "campaign" && evidence.step === "teardown") ||
+        (evidence.lane === "cleanup" && (evidence.reason === "remote_unsettled" || receipt.lanes.cleanup.status === "failed"))) return error;
       const reason = Object.hasOwn(FAILURE_REASONS.rigReadiness, evidence.reason) ? evidence.reason :
         evidence.class === "product" ? "assertion_failed" : "prerequisite_failed";
       return new QualificationFailure(parseLaneFailure({ ...evidence, lane: "rigReadiness",
@@ -2855,6 +2951,27 @@ async function probeMacReadiness(mac: RemoteExecutor): Promise<RigReadinessRecei
   return { macEgress: true, macDoctor: true, loopbackOnly: true, serveExpected: true, funnelOff: true, fixturePinned: true };
 }
 
+export async function restoreRigReadinessPixel(
+  module: ExternalLaneModule<RetainedMacLaneContext>,
+  context: ExternalLaneContext & RetainedMacLaneContext,
+  latestProgress: () => unknown,
+): Promise<void> {
+  let persistenceFailed = false;
+  const failures: unknown[] = [];
+  try {
+    await module.cleanup({ ...context, checkpoint: async value => {
+      try { await context.checkpoint(value); }
+      catch { persistenceFailed = true; }
+    } });
+  } catch (error) { failures.push(error); }
+  if (module.needsCleanup(latestProgress())) failures.push(new Error("rig readiness Pixel restoration is unproven"));
+  if (persistenceFailed) failures.push(new QualificationFailure(parseLaneFailure({
+    id: context.execution?.nextFailureId() ?? ++standaloneMacFailureId, lane: "rigReadiness", step: "cleanup",
+    reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },
+  })));
+  if (failures.length > 0) throw new AggregateError(failures, "rig readiness Pixel restoration failed");
+}
+
 async function runCampaignReadiness(
   options: StableQualificationOptions, target: MacTarget, candidate: CandidateVerification, pins: OmpPins,
   identity: ExternalLaneIdentity, pixel: PixelLease, receipt: StableQualificationReceipt, persist: () => Promise<void>,
@@ -2869,10 +2986,10 @@ async function runCampaignReadiness(
   const mac = remoteExecutor(target);
   const checkpoint = async (value: Record<string, unknown>) => {
     // Push's owner validates its complete baseline/progress; it is private recovery state, not telemetry.
+    progress = value;
     await mkdir(root, { recursive: true, mode: 0o700 });
     const path = join(root, "push-progress.json");
     await writePrivateJson(path, value);
-    progress = value;
   };
   await runRigReadiness(receipt, persist, {
     prepare: async () => {
@@ -2906,10 +3023,9 @@ async function runCampaignReadiness(
     },
     restorePixel: async execution => {
       if (progress === undefined) return;
-      await lanes.androidPush.cleanup({ identity, pixel, progress, checkpoint, execution, mac,
+      await restoreRigReadinessPixel(lanes.androidPush, { identity, pixel, progress, checkpoint, execution, mac,
         origin: context?.publicOrigin ?? await readMacPublicOrigin(target), sessionLabel: options.sessionLabel,
-        ...(logs === undefined ? {} : { qualificationLogs: logs.logs }) });
-      if (lanes.androidPush.needsCleanup(progress)) throw new Error("rig readiness Pixel restoration is unproven");
+        ...(logs === undefined ? {} : { qualificationLogs: logs.logs }) }, () => progress);
     },
     restoreMac: async execution => {
       if (!ownsMac) return;
@@ -2927,6 +3043,11 @@ export async function runStableQualification(
 ): Promise<Record<string, unknown>> {
   const options = parseStableQualificationArgs(argv, runtime.environment);
   const execution = await readExecution(options);
+  if (execution !== undefined) {
+    const commit = await prerequisite("cannot resolve the qualification source commit", () => runtime.output(["git", "rev-parse", "HEAD"]));
+    if (execution.binding.orchestratorCommit !== commit) throw new Error("qualification execution orchestrator source changed");
+    if (options.preflight && execution.campaignAttempt !== 0) throw new Error("bound preflight requires attempt zero");
+  }
   if (options.preflight) {
     try { await preflightStableQualification(options, runtime, lanes); }
     catch (error) {
@@ -3094,6 +3215,7 @@ async function runReceiptStableQualification(
   priorAdmission?: Awaited<ReturnType<typeof preflightStableQualification>>,
 ): Promise<Record<string, unknown>> {
   const resumeIdentity = { tag: options.tag, previousTag: options.previousTag, orchestratorCommit, macHost: options.macHost };
+  macFailureAllocators.set(options.macHost, () => nextReceiptFailureId(receipt));
   clearReceiptFailureEvidence(receipt);
   receipt.status = "running";
   delete receipt.completedAt;
@@ -3159,14 +3281,7 @@ async function runReceiptStableQualification(
     const candidate = await executeReceiptLane(receipt, "artifacts", persist, async checkpoint => {
       const verified = await verifyRelease(options.tag, candidateAssetDirectory(options), false, ghToken);
       const predecessor = await verifyRelease(options.previousTag, predecessorAssetDirectory(options), true, ghToken);
-      assertSameRelease(receipt.candidate, verified, "candidate");
-      assertSameRelease(receipt.predecessor, predecessor, "predecessor");
-      receipt.candidate = { tag: verified.tag, sourceCommit: verified.sourceCommit, archiveSha256: verified.archiveSha256 };
-      receipt.predecessor = {
-        tag: predecessor.tag,
-        sourceCommit: predecessor.sourceCommit,
-        archiveSha256: predecessor.archiveSha256,
-      };
+      bindVerifiedReleaseIdentities(receipt, verified, predecessor);
       const evidence = {
         sourceCommit: verified.sourceCommit,
         archiveSha256: verified.archiveSha256,
@@ -3278,7 +3393,7 @@ async function runReceiptStableQualification(
       if (typeof instanceId !== "string") throw new Error("published OMP instance id is missing");
 
       const tunnelPort = chooseTunnelPort();
-      tunnelProcess = await withQualificationDeadline("relay", 90_000, () => nextReceiptFailureId(receipt),
+      tunnelProcess = await withQualificationDeadline("campaign", 90_000, () => nextReceiptFailureId(receipt),
         execution => startTunnel(target!, tunnelPort, execution));
       const pending: Promise<unknown>[] = [];
       if (receipt.lanes.android.status !== "passed") {

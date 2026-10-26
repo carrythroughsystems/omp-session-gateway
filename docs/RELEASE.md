@@ -919,6 +919,9 @@ a VM or claim delivery readiness. A new campaign admits, acquires the release-ho
 candidate and predecessor bytes, then runs the separate readiness gate before Windows allocation
 or Debian workflow dispatch. Exact-authorized retries acquire the same owner and consume their
 working-receipt authorization before renewed admission; a foreign/live owner always refuses.
+Bound execution source must equal HEAD before any admission or outcome write. Standalone bound
+`--preflight` is attempt-zero only: authorized retries perform renewed admission inside the
+authority-consuming campaign command, not through a second standalone preflight.
 
 Readiness requires a clean retained-Mac baseline: no existing gateway service/listener and empty
 Serve/Funnel mappings. It refuses an occupied host rather than capturing and replaying arbitrary
@@ -942,6 +945,9 @@ counts as a qualification pass. An unresolved restore blocks same-candidate elig
 Passing receipts require readiness itself to be terminal and restored. A poisoned Pixel still
 admits serialized restoration. Failed checkpoint storage does not skip cleanup, but records
 `persistenceFailed` and prevents retry eligibility; failed log preparation never publishes a log owner.
+The baseline is retained in memory before its sidecar write. Even a failed initial checkpoint or
+repeated restore checkpoint failures cannot skip subsequent restoration owners. A failing final
+receipt write preserves the typed cleanup failure and unrestored-Pixel signal.
 
 Outer runaway ceilings do not replace product assertions: Windows 180 minutes, Push/cloud 90
 minutes, core Android 30 minutes, relay configured duration plus five minutes, Windows/cloud
@@ -954,6 +960,10 @@ readiness has a 30-minute outer ceiling and uses the same receipt failure alloca
 and absence-confirmation cancellation remain distinct from retryable transport timeouts. Remote
 fixture cancellation terminates the recorded remote process group via a fresh bounded SSH owner.
 If termination cannot be proved, later effects on that host refuse instead of racing cleanup.
+That shared fence includes direct SSH and Mac-script cleanup, not just fixture commands, and
+records `remote_unsettled` collateral against a campaign teardown root. Private command-owner
+records survive exit until a separate settle/stop acknowledgement; early-admission cancellation
+tombstones remain fenced. Relay-stop failure never overwrites a preserved publication pass.
 
 Manual attempt-zero readiness remains diagnostic and does not fabricate driver policy bindings.
 Fresh unbound effectful campaigns require attempt zero. Later ordinals require the driver's exact

@@ -346,15 +346,26 @@ export async function preflightAndroidPush(input: AndroidPushPreflightInput, run
 async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: AndroidPushProgress, sampleLate?: () => Promise<void>): Promise<Record<string, unknown>> {
   const failures: string[] = [];
   const errors: unknown[] = [];
-  runtime.beforeEffect = async () => { await input.checkpoint(structuredClone(progress)); };
+  let persistenceFailed = false;
+  // Persistence fences new mutations, not restoration of an already captured baseline.
+  runtime.beforeEffect = async () => {
+    try { await input.checkpoint(structuredClone(progress)); }
+    catch { persistenceFailed = true; }
+  };
   for (const step of CLEANUP_STEPS) {
     try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch (error) { failures.push(step); errors.push(error); }
     if (["fixtureAsk", "doze", "network"].includes(step)) await sampleLate?.();
   }
-  if (failures.length > 0) throw Object.assign(new AggregateError(errors, `Android Push cleanup failed: ${failures.join(", ")}`), { pixelUnrestored: true });
-  progress.cleanupRequired = false;
-  progress.phase = "restored";
-  await input.checkpoint(structuredClone(progress));
+  if (failures.length === 0) {
+    progress.cleanupRequired = false;
+    progress.phase = "restored";
+  }
+  await runtime.beforeEffect();
+  if (persistenceFailed) errors.push(new QualificationFailure({
+    id: input.execution?.nextFailureId() ?? 1, lane: "androidPushCleanup", step: "containment",
+    reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },
+  }));
+  if (errors.length > 0) throw Object.assign(new AggregateError(errors, "Android Push restoration or persistence failed"), { pixelUnrestored: true });
   return { epoch: progress.epoch, restored: true, deviceRestored: true, browserRestored: true, fixtureStopped: true };
 }
 
@@ -375,7 +386,6 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     const progress: AndroidPushProgress = { lane: "androidPush", epoch: randomUUID(), binding: binding(input.identity), phase: "baseline_captured",
       cleanupRequired: true, device: await runtime.device(), browser: null, notificationTopicDigest: null, secondaryNotificationTopicDigest: null, results: {} };
     runtime.beforeEffect = () => input.checkpoint(structuredClone(progress));
-    await runtime.beforeEffect();
     let primary: unknown, delivered = false, roundTripMs = 0, deliveryStarted = 0;
     let sampleLate: (() => Promise<void>) | undefined;
     const metrics = emptyPushDeliveryMetrics();
@@ -396,6 +406,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
         observations: { timeoutMs: 90_000 } });
     };
     try {
+      await runtime.beforeEffect();
       progress.browser = await runtime.browser(); await runtime.beforeEffect();
       if (progress.browser.permission !== "granted") throw new Error("Push readiness permission prerequisite");
       await runtime.fixture("start", progress.epoch);

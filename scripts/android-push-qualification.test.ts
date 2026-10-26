@@ -14,7 +14,7 @@ import { withDevelopmentPixelLease } from "./android-pixel-lease.ts";
 import { runFixtureOperation, type FixtureExecutor } from "./push-qualification-fixture.ts";
 import { authenticateAndroidNotification, awaitPageExecutionContext, isPushNotificationRoute, holdAndroidNotificationDenial, ownedPushForwards, observePushLaunch } from "./android-push-runtime.ts";
 import { pixelUnrestored } from "./restoration.ts";
-import { QualificationFailure } from "./qualification-failure.ts";
+import { QualificationFailure, normalizeQualificationFailures } from "./qualification-failure.ts";
 
 const identity: AndroidPushIdentity = { tag: "v0.6.0-prealpha.1", candidate: { tag: "v0.6.0-prealpha.1", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64), archivePath: "synthetic.tar" },
   omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "c".repeat(40), sourceTree: "d".repeat(40), nativeTarballSha256: "e".repeat(64), nativeBinarySha256: "f".repeat(64) }, origin: "https://gateway.example.test" };
@@ -240,6 +240,27 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   expect(host.state().device).toEqual(baseline);
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
 });
+
+test.each(["baseline", "mutation", "restoration"] as const)(
+  "council498 readiness %s persistence failure cannot skip any restoration owner", async point => {
+    const host = fake();
+    let cleaning = false, id = 80;
+    host.runtime.beginCleanup = () => { cleaning = true; };
+    host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+    host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
+    const checkpoint = host.input.checkpoint;
+    const error = await runAndroidPushReadiness({ ...host.input,
+      execution: { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => ++id },
+      checkpoint: async value => {
+        await checkpoint(value);
+        if (point === "baseline" || (point === "mutation" && host.state().effects > 1) || cleaning) throw new Error("synthetic checkpoint failure");
+      },
+    }).catch(error => error);
+    expect(host.cleanup).toEqual(["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"]);
+    expect(host.state()).toMatchObject({ started: false, asking: false, browser: browserBaseline, device: baseline });
+    expect(normalizeQualificationFailures(error).some(item => item.observations.persistenceFailed === true)).toBe(true);
+    expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  });
 
 test("R1 fractional monotonic measurements remain typed and R4 telemetry errors retain late sampling", async () => {
   const host = fake(), metrics = emptyPushDeliveryMetrics();
