@@ -85,6 +85,10 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 53 changel
 
 ### Fixed
 
+- Retain bounded, byte-exact qualification child stdout/stderr in immutable private release-driver
+  job logs for successful and failed campaigns, retries and preflights before terminal publication.
+  Bind both logs into the retry plan's job digest without changing sanitized diagnostics or public
+  announcements.
 - Re-enter only the current process's retained development Pixel lease during automatic cleanup,
   bounded by its fresh cleanup deadline; preserve foreign or changed ownership. Attribute
   execution-clipped helper timers to controller expiry, recheck rejected mutations, and guard the

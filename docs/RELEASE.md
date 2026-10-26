@@ -421,7 +421,14 @@ The candidate campaign uses a dedicated published `release-driver/*-campaign` br
 the prepare merge, so unrelated movement of main cannot silently change the orchestrator source.
 
 Campaign, approve checks and smoke run detached in named tmux sessions with a start claim, JSON
-result and exit file under `jobs/`. Campaign receipts remain at
+result and exit file under `jobs/`. Every campaign worker, including retries and preflight failures,
+retains the qualification child's exact stdout and stderr as immutable `qualification-out.log` and
+`qualification-err.log` in its private job directory (mode `0600`). Each file holds the last
+262,144 bytes across that job's preflight and campaign invocations, without trimming or re-encoding;
+both files are empty if qualification never starts. These files are fsynced before the exit and
+terminal result are written, on success and failure. The outer worker's `out.log`/`err.log` remain
+separate. Raw child output and error chains stay private: never copy these logs into tracking
+issues or announcements. The sanitized `diagnostic.json` contract is unchanged. Campaign receipts remain at
 `~/.local/share/omp-session-gateway/qualification/<candidate>/stable-qualification.json`.
 Qualification and smoke use their existing shared release-host lease (including its durable failed
 owner); the driver never deletes or replaces the database or steals a foreign/live owner.
@@ -554,7 +561,8 @@ before launch therefore retains the correct failed-job cleanup/retirement author
 The first retry waits **60 seconds**, the second **120 seconds**; ticks before that
 deadline are idle. This is a minimum delay, not a change to the launchd tick interval. Each plan
 binds the failed/next ordinal, candidate tag/source/archive digest, predecessor, orchestrator
-commit, authority policy, retained Mac, immutable prior job digest (including `out.log`/`err.log`),
+commit, authority policy, retained Mac, immutable prior job digest (including `out.log`/`err.log`
+and `qualification-out.log`/`qualification-err.log`),
 the original machine-outcome byte digest, exact failed-receipt digest,
 closed failure summary, restart lanes and preflight/readiness/campaign scope.
 
