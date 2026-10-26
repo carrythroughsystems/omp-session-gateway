@@ -76,6 +76,15 @@ describe("standing routine release authority", () => {
   test.each(["scripts/qualification-failure.ts", "scripts/qualification-outcome.ts"])("protects qualification recovery contract %s", path => {
     expect(routinePathClassification(path)?.authority).toBe(true);
   });
+  test.each(["scripts/release-driver.ts", "scripts/release-driver-runtime.ts", "scripts/stable-qualification.ts", "scripts/stable-lanes.ts", "scripts/release-host-lease.ts"])(
+    "automatic retry authority remains protected: %s", path => {
+      expect(routinePathClassification(path)?.authority).toBe(true);
+      for (const kind of ["prepare", "approve", "record"] as const) {
+        expect(generatedReleaseFilesMatch(kind, [{ filename: path }])).toBe(false);
+        expect(generatedReleaseFilesMatch(kind, [{ filename: "docs/RELEASE_STATUS.md", previous_filename: path }])).toBe(false);
+      }
+    },
+  );
   test("checks writer-readable protection facts against the installed administrator attestation", () => {
     const branch = { protected: true, protection: { enabled: true, required_status_checks: { contexts: [...REQUIRED_CHECKS], enforcement_level: "everyone" } } };
     expect(ROUTINE_BRANCH_PROTECTION.required_signatures).toBe(true);

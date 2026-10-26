@@ -1892,6 +1892,47 @@ unchanged.
 - **Limitations:** `tern new tab` targets Tern's first window and uses `--keep-open` so failed commands remain inspectable in Tern. `profile.env` supplies only the Tern CLI child's environment and is not assumed to cross Tern's GUI-server RPC boundary into the pane; the Tern pane's OMP environment must already publish into the directory configured in `omp.discoveryDir` with `collab.autoStart = control`. Absent `tern` preserves zero Tern dependency (18 base `doctor` checks); when `tern` is authored, `doctor` adds `ternAvailable` to verify runtime paths, `inspect --json`, and ledger readability without starting OMP. Native **Open in Tern** handoff remains out of scope: Android Tern `0.9.5` is upstream-blocked ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)) and desktop handoff is deferred. Existing Tested / Supported / Qualified claims and upstream pins remain unchanged.
 - **Upgrade and rollback:** `omp-gateway install` preserves authored `tern` verbatim. Every managed `rollback` or `rollback --to` conservatively disables creation via `projectPreTernConfig` (composed with `projectPreFleetConfig` for targets `< 0.8.0`), saving the full authored config to private `<configDir>/config.pre-rollback.json` first (refusing overwrite if that backup exists) while preserving `<stateDir>/session-creations.json` and leaving running Tern tabs and OMP processes untouched. Re-enabling creation requires explicit operator restoration on a compatible runtime. See [Operations](OPERATIONS.md#opt-in-tern-session-creation), [Protocol](PROTOCOL.md#session-creation-state-machine), and [Upgrade and rollback](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
 
+## ADR-044 — Bounded automatic infrastructure recovery on the same candidate
+
+**Status:** Accepted — 2026-10-25. Supersedes ADR-034's manual-only retry rule for new-format
+campaigns; historical device-cloud holds retain their explicit manual recovery contract.
+
+**Decision:** The stable driver automatically schedules at most two retries of evidence-backed,
+fully contained infrastructure failures. `campaignAttempt` is the sole budget: 0, 1, 2. A
+persisted `retry-pending` plan waits 60 seconds then 120 seconds before launching its reserved
+next ordinal; executed-attempt state advances only at job creation/reconciliation, not scheduling.
+Closed root/collateral classifications, agreeing observed exit/result/receipt/outcome evidence,
+current cleanup and reconciled allocation outcomes are required. Unknown, mixed, product,
+harness, collateral-only, dirty and exhausted failures enter `diagnostic-required`; a raw timeout
+or exit 143 never establishes infrastructure attribution.
+
+Every attempt binds the same candidate tag, source/archive digest, predecessor, orchestrator,
+authority policy and retained Mac. Completed job/result/exit/original-outcome/log bytes and an
+immutable exact receipt snapshot bind the next plan. Receiptless preflight retries require an
+explicit digest-bound effect-free predecessor outcome, never a fresh unbound attempt 1 or 2.
+Standalone read-only preflight is restricted to attempt 0; both forms of retry consume their
+predecessor authority before renewed admission within the campaign command.
+For receipt retries, shared orchestrator eligibility determines a nonempty exact set of failed or
+pending lanes; passed qualification proofs remain unchanged, failed resource owners use fresh
+epochs, readiness repeats, and the old authorization is durably consumed before admission.
+Automatic retries retain the exact release-host owner and reacquire its OS lock; they never clear,
+replace or steal the lease. A live/foreign worker or owner and any approval/publication block
+advancement. The spec-only failed-launch path reuses its ordinal; a worker start claim forbids
+relaunch regardless of tmux availability.
+
+The existing intent and announcement outbox reconcile scheduling, launch and comments after
+crashes. Public comments expose only closed classes/reasons/lane names and numeric attempt,
+timing and delay data, not raw errors, addresses, notification metadata or provider responses.
+The `retry-device-cloud` command remains legacy-only and cannot reset or bypass this budget.
+Only retiring the candidate through the existing successful-request/source-fix path resets it.
+
+**Consequences:** Infrastructure interruptions need not burn a new prealpha, without weakening
+product assertions, deadlines, signing/provenance, approval, publication or smoke gates. Receipt
+schema 3 remains additive and old receipts remain readable, but missing new evidence is
+non-retryable. Rollout requires a drained reviewed driver re-pin and a new candidate containing
+the execution/outcome implementation; rollback must first drain new-format work. Offline tests
+are not claims of a successful real-rig retry or qualification.
+
 ---
 
 ## ADR-045 — CI-only browser retries with closed flake evidence

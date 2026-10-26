@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +26,32 @@ function campaign(directory: string, owner: string) {
 }
 
 describe.skipIf(process.platform === "win32")("cross-process release-host ownership", () => {
+  test("automatic attempts retain the exact owner and inode until final success clears normally", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gateway-host-retry-budget-"));
+    const owner = "qualification:v1.2.3-prealpha.1:private-receipt";
+    const path = join(root, "lease.sqlite");
+    const recordedOwner = () => {
+      const database = new Database(path, { readonly: true });
+      try { return database.query<{ owner: string }, []>("SELECT owner FROM campaign WHERE id = 1").get()?.owner; }
+      finally { database.close(); }
+    };
+    try {
+      let inode: number | undefined;
+      for (const attempt of [0, 1]) {
+        await expect(withReleaseHostLease(owner, async () => { throw new Error(`failed attempt ${attempt}`); }, root)).rejects.toThrow("failed attempt");
+        expect(recordedOwner()).toBe(owner);
+        inode ??= (await stat(path)).ino;
+        expect((await stat(path)).ino).toBe(inode);
+        await expect(withReleaseHostLease("foreign-owner", async () => { throw new Error("must not run"); }, root)).rejects.toThrow("previous campaign");
+        expect(recordedOwner()).toBe(owner);
+      }
+      expect(await withReleaseHostLease(owner, async () => "attempt 2 passed", root)).toBe("attempt 2 passed");
+      expect(recordedOwner()).toBeUndefined();
+      expect((await stat(path)).ino).toBe(inode!);
+      await withReleaseHostLease("next-candidate", async () => {}, root);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   test("self-clear requires verified cleanup and the exact inactive owner", async () => {
     const root = await mkdtemp(join(tmpdir(), "gateway-host-self-clear-"));
     try {

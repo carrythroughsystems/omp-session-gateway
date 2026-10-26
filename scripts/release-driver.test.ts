@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -64,12 +65,15 @@ test("routine controls normalize generated versions but retain policy and depend
   expect(await runtime.controls("old", true)).toEqual(await runtime.controls("new", true));
 });
 
-import { assertFailedCampaignCleanup, botEnvironment, campaignAvailabilityObservation, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
-import { applyDecisionPatch, campaignAttempt, compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, parseCampaignInfrastructureHold, REPOSITORY, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
-import type { CampaignInfrastructureHold, Decision, DriverPort, DriverState, JobObservation, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
-import { createStableQualificationReceipt } from "./stable-qualification.ts";
+import { assertFailedCampaignCleanup, botEnvironment, campaignAvailabilityObservation, campaignWorkerArguments, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
+import { applyDecisionPatch, campaignAttempt, campaignExecution, campaignRetryLaunchState, parseCampaignRetryPlan, compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, parseCampaignInfrastructureHold, REPOSITORY, requestVersion, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
+import type { CampaignFailureObservation, CampaignInfrastructureHold, Decision, DriverPort, DriverState, JobObservation, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
+import { assertCampaignCleanupComplete, assertCampaignRetryEligible, createStableQualificationReceipt, withConsumedCampaignRetry } from "./stable-qualification.ts";
 import type { ExternalLaneModule, StableQualificationLaneModules, StableQualificationReceipt } from "./stable-qualification.ts";
 import { readDeviceCloudOutcomeFile, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
+import { writeQualificationOutcomeFile } from "./qualification-outcome.ts";
+import { withReleaseHostLease } from "./release-host-lease.ts";
+import type { QualificationFailureSummary } from "./qualification-failure.ts";
 
 import { REQUIRED_CHECKS, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineSourceHold } from "./release-policy.ts";
 const authority = { policy: "policy-1", protectedChanges: [], sourceReviewed: true, sourceFresh: true, releaseClassAllowed: true };
@@ -178,7 +182,7 @@ class FakeDriver implements DriverPort {
   }
   async snapshot() { return structuredClone(this.repo); }
   async perform(step: Decision, current: DriverState) {
-    const key = `${current.candidate}:${step.operation}`;
+    const key = `${current.candidate}:${campaignAttempt(current)}:${step.operation}`;
     const existing = this.effects.get(key);
     if (existing !== undefined) return existing;
     this.performed.push(step.operation);
@@ -621,6 +625,654 @@ const retryReceiptModules: StableQualificationLaneModules = (() => {
   };
   return { windows: lane, androidPush: lane, deviceCloud: lane, createPixelLease: () => async (_owner, action) => action() };
 })();
+
+function automaticCampaign(): DriverState {
+  const selected = { ...heldCampaign().selected, phase: "qualifying" as const };
+  delete selected.infrastructureHold;
+  selected.qualificationExecution = campaignExecution(selected);
+  return selected;
+}
+function automaticFailure(selected: DriverState, summary?: QualificationFailureSummary): CampaignFailureObservation {
+  return { jobSha256: "a".repeat(64), outcomeSha256: "b".repeat(64), restartLanes: [], outcome: {
+    formatVersion: 1, outcome: "qualification-failed", scope: "preflight", execution: campaignExecution(selected),
+    failureSummary: summary ?? {
+      failures: [{ id: 1, lane: "preflight", step: "macos", reason: "connection_timeout", class: "infra_transient",
+        elapsedMs: 50, operation: "read_only", observations: { transportFailure: true } }],
+      timings: { attemptMs: 100, cleanupMs: 0 }, containment: { proven: true, cleanupComplete: true, unresolvedMutation: false },
+    },
+  } };
+}
+function scheduledRetry(selected: DriverState, evidence = automaticFailure(selected), now = 1_000): { step: Decision; next: DriverState } {
+  const step = nextStep(selected, snapshot({ campaign: { status: "failed", campaignFailure: evidence } }), config, "2026-10-25", now);
+  if (step.operation !== "schedule-campaign-retry") throw new Error("expected retry scheduling: " + step.detail);
+  return { step, next: { ...applyDecisionPatch(selected, step), phase: step.phase } };
+}
+
+describe("automatic same-candidate campaign retry state machine", () => {
+  test("infra failures allocate 1 then 2, persist 60/120-second deadlines, then exhaust", () => {
+    let selected = automaticCampaign();
+    const identity = [selected.candidate, selected.candidateCommit, selected.candidateDigest, selected.previousStable, selected.macHost, selected.authorityPolicy];
+    for (const ordinal of [1, 2]) {
+      const { next, step } = scheduledRetry(selected);
+      expect(campaignAttempt(next)).toBe(ordinal - 1);
+      expect(next.retryNotBefore).toBe(1_000 + ordinal * 60_000);
+      expect(step.detail).toContain(`delayMs=${ordinal * 60_000}`);
+      expect([next.candidate, next.candidateCommit, next.candidateDigest, next.previousStable, next.macHost, next.authorityPolicy]).toEqual(identity);
+      const repo = snapshot({ authority: { ...authority, policy: next.authorityPolicy! } });
+      expect(nextStep(next, repo, config, undefined, next.retryNotBefore! - 1).operation).toBe("idle");
+      expect(nextStep(next, repo, config, undefined, next.retryNotBefore!).operation).toBe("start-campaign");
+      expect(nextStep({ ...selected, intent: JSON.parse(JSON.stringify(step)) }, snapshot(), config, undefined, 999_999)).toEqual(step);
+      selected = { ...campaignRetryLaunchState(next), phase: "qualifying" };
+    }
+    const exhausted = nextStep(selected, snapshot({ campaign: { status: "failed", campaignFailure: automaticFailure(selected) } }), config);
+    expect(exhausted.operation).toBe("stop");
+    if (exhausted.operation !== "idle") expect(exhausted.phase).toBe("diagnostic-required");
+    expect(exhausted.detail).toContain("attempt=2; retry exhausted");
+    expect(exhausted.detail).toContain("preflight:infra_transient:connection_timeout");
+  });
+  test.each(["product", "harness", "unknown", "mixed", "dirty", "mutation", "collateral-only", "dangling"] as const)(
+    "%s failures stop without scheduling or spending another ordinal", kind => {
+      const selected = automaticCampaign(), failure = automaticFailure(selected);
+      const summary = { ...failure.outcome.failureSummary, failures: [...failure.outcome.failureSummary.failures] };
+      const harness = { id: 2, lane: "campaign", step: "execution", class: "harness", reason: "unclassified_failure",
+        operation: "read_only", elapsedMs: 0, observations: {} } as const;
+      if (kind === "product") summary.failures = [{ ...harness, lane: "androidPush", step: "private_verified", class: "product", reason: "assertion_failed" }];
+      if (kind === "harness") summary.failures = [harness];
+      if (kind === "unknown") summary.failures = [{ ...harness, class: "unrecognized" } as never];
+      if (kind === "mixed") summary.failures = [...summary.failures, harness];
+      if (kind === "dirty") summary.containment = { ...summary.containment, cleanupComplete: false };
+      if (kind === "mutation") summary.containment = { ...summary.containment, unresolvedMutation: true };
+      if (kind === "collateral-only" || kind === "dangling") {
+        const collateral = { ...harness, class: "collateral", reason: "dependency_failed", originIds: [99] } as const;
+        summary.failures = kind === "collateral-only" ? [collateral] : [...summary.failures, collateral];
+      }
+      const campaignFailure = { ...failure, outcome: { ...failure.outcome, scope: "campaign" as const, failureSummary: summary,
+        receipt: { sha256: "b".repeat(64), cleanupDisposition: kind === "dirty" || kind === "mutation" ? "unresolved" as const : "restored" as const } } };
+      const step = nextStep(selected, snapshot({ campaign: { status: "failed", campaignFailure } }), config);
+      expect(step.operation).toBe("stop");
+      if (kind === "product") expect(step.detail).toContain("androidPush:product:assertion_failed");
+      if (kind === "harness" || kind === "mixed") expect(step.detail).toContain("campaign:harness:unclassified_failure");
+      if (step.operation !== "idle") expect(step.patch?.campaignAttempt).toBeUndefined();
+    },
+  );
+  test("missing evidence, bare exit 75/143 and unknown outcome fields never authorize retry", () => {
+    const selected = automaticCampaign(), valid = automaticFailure(selected);
+    for (const campaign of [
+      { status: "absent" as const }, { status: "failed" as const, detail: "exit 75" }, { status: "failed" as const, detail: "exit 143" },
+      { status: "failed" as const, campaignFailure: { ...valid, raw: "PRIVATE-DIAGNOSTIC-CANARY" } },
+      { status: "failed" as const, campaignFailure: { ...valid, outcome: { ...valid.outcome, raw: "PRIVATE-DIAGNOSTIC-CANARY" } } },
+    ]) expect(nextStep(selected, snapshot({ campaign }), config).operation).toBe("stop");
+  });
+  test.each(["candidate", "candidateCommit", "candidateDigest", "previousStable", "authorityPolicy", "macHost"] as const)(
+    "persisted retry plan refuses changed %s", field => {
+      const { next } = scheduledRetry(automaticCampaign());
+      const changed = { ...next, [field]: field === "macHost" ? "other@fixture.invalid" : "changed" };
+      expect(() => parseCampaignRetryPlan(changed.retryPlan, changed)).toThrow();
+      expect(nextStep(changed, snapshot(), config, undefined, 1_000_000).operation).toBe("stop");
+    },
+  );
+  test("pending retry refuses changed authority, publication and invalid reconciliation", () => {
+    const { next } = scheduledRetry(automaticCampaign());
+    expect(nextStep(next, snapshot({ authority: { ...authority, policy: "2".repeat(64) } }), config, undefined, 1_000_000).holdReason).toBe("policy-changed");
+    for (const change of [{ tags: [`v${next.version}`] }, { campaignRetryInvalid: true }, { latestStable: `v${next.version}` }]) {
+      expect(nextStep(next, snapshot(change), config, undefined, 1_000_000).operation).toBe("stop");
+    }
+  });
+  test("legacy holds remain manual; new executions cannot acquire legacy authority", async () => {
+    const { selected, hold } = heldCampaign();
+    expect(nextStep(selected, snapshot(), config).operation).toBe("idle");
+    const fresh = automaticCampaign();
+    expect(nextStep(fresh, snapshot({ campaign: { status: "infrastructure-hold", availabilityHold: hold } }), config).operation).toBe("stop");
+    expect(nextStep({ ...fresh, qualificationExecution: undefined }, snapshot({
+      campaign: { status: "failed", campaignFailure: automaticFailure(fresh) },
+    }), config).operation).toBe("stop");
+    const runtime = new RetryDriver(driverConfig(), false);
+    runtime.current.qualificationExecution = campaignExecution(runtime.current);
+    await expect(runtime.authorizeDeviceCloudRetry(selected.candidate, 0)).rejects.toThrow("exact held candidate");
+  });
+  test("only a new candidate selection resets exhausted budget and clears every retry authority field", () => {
+    const first = scheduledRetry(automaticCampaign()).next;
+    const second = scheduledRetry({ ...campaignRetryLaunchState(first), phase: "qualifying" }).next;
+    const failed = { ...campaignRetryLaunchState(second), phase: "diagnostic-required" as const, failedMain: second.candidateCommit };
+    expect(nextStep(failed, snapshot({ main: failed.failedMain! }), config).operation).toBe("idle");
+    const step = nextStep(failed, snapshot({ main: "d".repeat(40) }), config);
+    expect(step.operation).toBe("rerequest");
+    if (step.operation === "idle") throw new Error("missing rerequest");
+    const next = applyDecisionPatch(failed, step);
+    expect(next.campaignAttempt).toBe(0);
+    expect(next.candidate).not.toBe(failed.candidate);
+    for (const key of ["qualificationExecution", "retryPlan", "retryNotBefore", "infrastructureHold", "resumeDeviceCloud"]) expect(Object.hasOwn(next, key)).toBe(false);
+  });
+  test.each(["intent", "outbox"] as const)("%s crash replay allocates and announces only once", async point => {
+    const fake = new FakeDriver();
+    fake.state = automaticCampaign();
+    fake.repo.campaign = { status: "failed", campaignFailure: automaticFailure(fake.state) };
+    if (point === "intent") fake.failSave = 2;
+    else fake.crashAfterComment = true;
+    await expect(tick(fake, config)).rejects.toThrow("simulated");
+    await tick(fake, config);
+    expect(campaignAttempt(fake.state)).toBe(0);
+    expect(fake.state.phase).toBe("retry-pending");
+    expect(fake.performed).toEqual(["schedule-campaign-retry"]);
+    expect(fake.commentWrites).toBe(1);
+    expect(fake.state.intent).toBeUndefined();
+    expect(fake.state.announcement).toBeUndefined();
+    const body = [...fake.comments.values()][0]!;
+    expect(body).toContain("preflight:infra_transient:connection_timeout");
+    expect(body).not.toContain(fake.state.macHost!);
+    expect(body).not.toContain(fake.state.candidateDigest!);
+  });
+  test("eventual success preserves existing promotion, smoke and record gates", async () => {
+    const fake = new FakeDriver();
+    const { next } = scheduledRetry(automaticCampaign());
+    fake.state = { ...campaignRetryLaunchState(next), phase: "qualifying", authorityPolicy: authority.policy };
+    fake.repo.campaign = { status: "passed" };
+    expect((await tick(fake, config)).operation).toBe("finish-campaign");
+    expect(fake.state.campaignAttempt).toBe(1);
+    expect((await tick(fake, config)).operation).toBe("open-approve");
+    expect((await tick(fake, config)).operation).toBe("start-approve-checks");
+    expect((await tick(fake, config)).operation).toBe("finish-approve-checks");
+    fake.repo.approve!.checksPassed = false;
+    expect((await tick(fake, config)).holdReason).toBe("required-checks-missing");
+    fake.repo.approve!.checksPassed = true;
+    for (const operation of ["merge-approve", "tag-stable", "observe-stable", "verify-stable", "start-smoke", "finish-smoke", "open-record", "merge-record", "close"] as const) {
+      expect((await tick(fake, config)).operation).toBe(operation);
+    }
+  });
+  test("worker arguments bind execution and consume receipt retries before preflight", () => {
+    const first = automaticCampaign();
+    expect(campaignWorkerArguments(first, "/private/execution.json", true)).toEqual(["--execution-file", "/private/execution.json", "--preflight"]);
+    const failure = automaticFailure(first);
+    const receiptFailure = { ...failure, restartLanes: ["windows" as const], outcome: { ...failure.outcome, scope: "campaign" as const,
+      receipt: { sha256: "b".repeat(64), cleanupDisposition: "restored" as const } } };
+    const next = campaignRetryLaunchState(scheduledRetry(first, receiptFailure).next);
+    expect(campaignWorkerArguments(next, "/private/execution.json")).toEqual(["--execution-file", "/private/execution.json", "--retry-receipt-sha256", "b".repeat(64)]);
+    expect(() => campaignWorkerArguments(next, "/private/execution.json", true)).toThrow("before admission");
+    const preflightRetry = campaignRetryLaunchState(scheduledRetry(first).next);
+    expect(campaignWorkerArguments(preflightRetry, "/private/execution.json")).toEqual([
+      "--execution-file", "/private/execution.json", "--retry-outcome-file", join("/private", "retry-preflight-outcome.json"),
+      "--retry-outcome-sha256", preflightRetry.retryPlan!.outcomeSha256,
+    ]);
+    expect(campaignWorkerArguments({ ...heldCampaign().selected, resumeDeviceCloud: true }, "")).toEqual(["--resume-device-cloud"]);
+  });
+  test.each([1, 2])("receiptless retry %i cannot request standalone preflight", attempt => {
+    let selected = automaticCampaign();
+    for (let ordinal = 0; ordinal < attempt; ordinal++) {
+      selected = { ...campaignRetryLaunchState(scheduledRetry(selected).next), phase: "qualifying" };
+    }
+    expect(() => campaignWorkerArguments(selected, "/private/execution.json", true)).toThrow("before admission");
+  });
+});
+
+class AutomaticRuntime extends StudioDriver {
+  current = automaticCampaign();
+  active = false;
+  activeAttempt: number | undefined;
+  owner: string | undefined;
+  published = false;
+  changedPolicy = false;
+  changedSource = false;
+  changedDigest = false;
+  receiptPath = "";
+  approvalExists = false;
+  override async pages<T>(path: string): Promise<T[]> {
+    return (path.startsWith("tags?") ? [{ name: this.current.previousStable }] :
+      this.approvalExists && path.includes("-approve") ? [{}] : []) as T[];
+  }
+  override async issues() { return [this.current.issue]; }
+  override releaseHostLeasePath() { return join(this.config.stateDir, "lease", "lease.sqlite"); }
+  override async campaignWorkerRunning(selected: DriverState) { return this.active || campaignAttempt(selected) === this.activeAttempt; }
+  override async releaseHostOwner() { return this.owner; }
+  override receipt() { return this.receiptPath; }
+  override async readPr() { return pr({ merged: true, mergeCommit: this.changedSource ? "d".repeat(40) : this.current.candidateCommit }); }
+  override async authority() { return { ...authority, policy: this.changedPolicy ? "2".repeat(64) : this.current.authorityPolicy! }; }
+  override async candidateSupportsExecution() { return true; }
+  override campaignRetryLanes(receipt: StableQualificationReceipt, selected: DriverState) {
+    return assertCampaignRetryEligible(receipt, campaignExecution(selected), retryReceiptModules);
+  }
+  override campaignCleanupComplete(receipt: StableQualificationReceipt, selected: DriverState) {
+    assertCampaignCleanupComplete(receipt, campaignExecution(selected), retryReceiptModules);
+  }
+  override async api<T>(path: string): Promise<T | undefined> {
+    const current = this.current;
+    return (path === "commits/main" ? { sha: current.candidateCommit }
+      : path === "contents/UPSTREAM.lock.json?ref=main" ? { content: Buffer.from(JSON.stringify({ tag: requestVersion(current.issue) })).toString("base64") }
+      : path === "releases/latest" ? { tag_name: current.previousStable }
+      : path === `git/ref/tags/${current.candidate}` ? { ref: `refs/tags/${current.candidate}`, object: { sha: "a".repeat(40), type: "tag" } }
+      : path === `git/tags/${"a".repeat(40)}` ? { tag: current.candidate, object: { type: "commit", sha: current.candidateCommit }, verification: { verified: true, reason: "valid" } }
+      : path === `releases/tags/${current.candidate}` ? { draft: false, prerelease: true, assets: [
+        { name: `omp-session-gateway-${current.version}-bun.tar`, digest: `sha256:${this.changedDigest ? "0".repeat(64) : current.candidateDigest}` },
+      ] } : this.published ? { exists: true } : undefined) as T | undefined;
+  }
+}
+async function completedAutomaticJob(root: string, withReceipt: boolean | "readiness" = false) {
+  root = await realpath(root);
+  const runtime = new AutomaticRuntime(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+  runtime.receiptPath = join(root, "stable-qualification.json");
+  const selected = runtime.current;
+  let evidence = automaticFailure(selected);
+  let receipt: StableQualificationReceipt | undefined;
+  if (withReceipt) {
+    receipt = withReceipt === "readiness" ?
+      createStableQualificationReceipt(selected.candidate, selected.candidateCommit!, selected.previousStable!) : receiptScopedCampaign(selected).receipt;
+    receipt.status = "failed";
+    receipt.execution = selected.qualificationExecution!;
+    receipt.completedAt = "2026-10-25T00:01:00.000Z";
+    const windowsFailure = { id: 1, lane: "windows", step: "transport_ready", class: "infra_transient", reason: "probe_deadline",
+      elapsedMs: 50, operation: "read_only", observations: { controllerDeadline: true, readOnlyProbe: true } } as const;
+    if (withReceipt === "readiness") {
+      receipt.macHost = selected.macHost!;
+      receipt.candidate = { tag: selected.candidate, sourceCommit: selected.candidateCommit!, archiveSha256: selected.candidateDigest! };
+      receipt.predecessor = { tag: selected.previousStable!, sourceCommit: "c".repeat(40), archiveSha256: "d".repeat(64) };
+      receipt.lanes.artifacts = { status: "passed", attempts: 1, evidence: {} };
+      receipt.rigReadiness = { status: "failed", campaignAttempt: 0, observations: { baselineRestored: true }, timings: { macos: 50 },
+        cleanupDisposition: "restored", epoch: "11111111-2222-4333-8444-555555555555", phase: "macos" };
+      receipt.failureSummary = { ...evidence.outcome.failureSummary, failures: [{
+        id: 1, lane: "rigReadiness", step: "macos", class: "infra_transient", reason: "connection_timeout",
+        elapsedMs: 50, operation: "read_only", observations: { transportFailure: true },
+      }] };
+      receipt.lanes.cleanup = { status: "passed", attempts: 1, evidence: { restored: true } };
+    } else {
+      receipt.lanes.deviceCloud.status = "passed";
+      delete receipt.lanes.deviceCloud.evidence!.availabilityHold;
+      receipt.lanes.windows.status = "failed";
+      receipt.lanes.windows.failure = [windowsFailure];
+      receipt.failureSummary = { ...evidence.outcome.failureSummary, failures: [windowsFailure] };
+    }
+    evidence = { ...evidence, outcome: { ...evidence.outcome, scope: withReceipt === "readiness" ? "rigReadiness" : "campaign", failureSummary: receipt.failureSummary,
+      receipt: { sha256: createHash("sha256").update(JSON.stringify(receipt) + "\n").digest("hex"), cleanupDisposition: "restored" } } };
+    runtime.owner = `qualification:${selected.candidate}:${runtime.receiptPath}`;
+    await writeFile(runtime.receiptPath, JSON.stringify(receipt) + "\n", { mode: 0o600 });
+    await expect(withReleaseHostLease(runtime.owner, async () => { throw new Error("retained fixture owner"); },
+      join(root, "lease"))).rejects.toThrow("retained fixture owner");
+  }
+  const directory = runtime.jobDirectory("campaign", selected);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(join(directory, "spec.json"), JSON.stringify({ kind: "campaign", state: selected, root: join(import.meta.dir, "..") }) + "\n", { mode: 0o600 });
+  await writeFile(join(directory, "result.json"), '{"status":"failed"}\n', { mode: 0o600 });
+  await writeFile(join(directory, "exit"), "75\n", { mode: 0o600 });
+  await writeFile(join(directory, "out.log"), "fixed stdout fixture\n", { mode: 0o600 });
+  await writeFile(join(directory, "err.log"), "fixed stderr fixture\n", { mode: 0o600 });
+  await writeQualificationOutcomeFile(join(directory, "failure-outcome.json"), evidence.outcome);
+  if (receipt !== undefined) await writeFile(join(directory, "failed-qualification.json"), await readFile(runtime.receiptPath), { mode: 0o600 });
+  const observed = await runtime.completedCampaignFailure(selected);
+  return { runtime, directory, receipt, ...scheduledRetry(selected, observed) };
+}
+
+describe("council R1 retry authority counterexamples", () => {
+  test("allocation retains the failed attempt until a retry job is launched", () => {
+    const selected = automaticCampaign(), { next } = scheduledRetry(selected);
+    expect(next.campaignAttempt ?? 0).toBe(0);
+    expect(next.qualificationExecution).toEqual(selected.qualificationExecution);
+    expect(next.retryPlan?.nextAttempt).toBe(1);
+  });
+  test("pending diagnostics bind failedMain to the executed candidate, not newer main", () => {
+    const selected = automaticCampaign(), { next } = scheduledRetry(selected);
+    const step = nextStep(next, snapshot({ main: "d".repeat(40), campaignRetryInvalid: true }), config);
+    expect(step.operation).toBe("stop");
+    if (step.operation !== "idle") expect(step.patch?.failedMain).toBe(selected.candidateCommit);
+  });
+  test("a schedule revalidation race stops instead of refreshing the backoff forever", async () => {
+    class Invalidated extends FakeDriver {
+      override async perform(): Promise<Partial<DriverState>> { throw new StaleIntentError("campaign retry evidence is missing or changed"); }
+    }
+    const fake = new Invalidated();
+    fake.state = automaticCampaign();
+    fake.repo.campaign = { status: "failed", campaignFailure: automaticFailure(fake.state) };
+    expect((await tick(fake, config)).operation).toBe("stop");
+    expect(fake.state.phase).toBe("diagnostic-required");
+    expect(fake.state.campaignAttempt ?? 0).toBe(0);
+    expect(fake.state.intent).toBeUndefined();
+  });
+  test("receipt retry authority requires a nonempty exact restart set", () => {
+    const selected = automaticCampaign(), evidence = automaticFailure(selected);
+    const campaignFailure = { ...evidence, outcome: { ...evidence.outcome, scope: "campaign" as const,
+      receipt: { sha256: "b".repeat(64), cleanupDisposition: "restored" as const } } };
+    expect(nextStep(selected, snapshot({ campaign: { status: "failed", campaignFailure } }), config).operation).toBe("stop");
+  });
+  test("preflight evidence cannot simultaneously claim a receipt", () => {
+    const selected = automaticCampaign(), evidence = automaticFailure(selected);
+    const campaignFailure = { ...evidence, outcome: { ...evidence.outcome,
+      receipt: { sha256: "b".repeat(64), cleanupDisposition: "restored" as const } } };
+    expect(nextStep(selected, snapshot({ campaign: { status: "failed", campaignFailure } }), config).operation).toBe("stop");
+  });
+  test("generic failed observations cannot borrow a typed infrastructure outcome", () => {
+    const selected = automaticCampaign();
+    const campaign: JobObservation = { status: "failed", detail: "campaign harness:unclassified_failure",
+      campaignFailure: automaticFailure(selected) };
+    expect(nextStep(selected, snapshot({ campaign }), config).operation).toBe("stop");
+  });
+  test.each([
+    { protectedChanges: ["scripts/release-driver.ts"] }, { sourceReviewed: false, unreviewedCommit: "d".repeat(40) },
+    { sourceFresh: false }, { releaseClassAllowed: false },
+  ])("pending retry applies every routine source-authority guard: %j", change => {
+    const { next } = scheduledRetry(automaticCampaign());
+    const currentAuthority = { ...authority, policy: next.authorityPolicy!, ...change,
+      protectedChanges: [...(change.protectedChanges ?? authority.protectedChanges)] };
+    const step = nextStep(next, snapshot({ authority: currentAuthority }), config, undefined, 1_000_000);
+    expect(step.holdReason).toBe(routineSourceHold(currentAuthority, next.authorityPolicy));
+    if ("unreviewedCommit" in change && step.operation !== "idle") expect(step.patch?.holdCommit).toBe(change.unreviewedCommit);
+  });
+});
+
+async function automaticWorkerFixture(root: string, exitCode: number, selected = automaticCampaign()) {
+  process.exitCode = 0; // Each production worker starts in its own process.
+  root = await realpath(root);
+  const checkout = join(root, "checkout"), bin = join(root, "bin");
+  await mkdir(checkout); await mkdir(bin);
+  await writeFile(join(bin, "security"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await writeFile(join(checkout, "package.json"), JSON.stringify({ name: "retry-worker-fixture", scripts: { "qualify:stable": "bun fixture.ts" } }));
+  const install = Bun.spawn([process.execPath, "install", "--lockfile-only"], { cwd: checkout, stdout: "ignore", stderr: "pipe" });
+  const installError = await new Response(install.stderr).text();
+  expect(await install.exited, installError).toBe(0);
+  class Worker extends AutomaticRuntime {
+    override async authenticate() {}
+    override async checkout() { return checkout; }
+    override async git() { return this.current.candidateCommit!; }
+    override async push() {}
+  }
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath}`;
+  const runtime = new Worker(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+  process.env.PATH = previousPath;
+  runtime.current = selected;
+  runtime.receiptPath = join(root, "stable-qualification.json");
+  const directory = runtime.jobDirectory("campaign", selected);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const original = JSON.stringify(automaticFailure(selected).outcome, null, 4) + "\n\n";
+  await writeFile(join(checkout, "fixture.ts"), `import { writeFile } from "node:fs/promises";
+await writeFile(process.env.OMP_STABLE_OUTCOME_FILE!, ${JSON.stringify(original)}, { mode: 0o600 });
+process.exitCode = ${exitCode};\n`);
+  await writeFile(join(directory, "spec.json"), JSON.stringify({ kind: "campaign", state: selected, root: join(import.meta.dir, "..") }));
+  await writeFile(join(directory, "out.log"), "", { mode: 0o600 });
+  await writeFile(join(directory, "err.log"), "", { mode: 0o600 });
+  return { runtime, directory, original };
+}
+
+describe.skipIf(process.platform === "win32")("council R1 retry runtime counterexamples", () => {
+  test("receiptless retry worker consumes authority before its only admission command", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-admission-command-")), previousExit = process.exitCode;
+    try {
+      const { next } = await completedAutomaticJob(root);
+      const selected = campaignRetryLaunchState(next);
+      const { runtime, directory } = await automaticWorkerFixture(root, 1, selected);
+      const invocations = join(root, "invocations.jsonl");
+      await writeFile(join(root, "checkout", "fixture.ts"), `import { appendFile } from "node:fs/promises";
+await appendFile(${JSON.stringify(invocations)}, JSON.stringify(process.argv.slice(2)) + "\\n");
+process.exitCode = 1;\n`);
+      await runtime.worker(join(directory, "spec.json"));
+      const calls = (await readFile(invocations, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+      expect(calls).toEqual([["--tag", selected.candidate, ...campaignWorkerArguments(selected, join(directory, "execution.json"))]]);
+      expect(calls[0]).not.toContain("--preflight");
+      expect(await readFile(join(directory, "retry-preflight-outcome.json"), "utf8")).toBe(
+        await readFile(join(runtime.jobDirectory("campaign", next), "failure-outcome.json"), "utf8"));
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["exit", "harness-result", "readiness-scope"] as const)(
+    "terminal evidence rejects disagreeing %s", async change => {
+      const root = await mkdtemp(join(tmpdir(), "retry-terminal-counterexample-"));
+      try {
+        const { runtime, directory } = await completedAutomaticJob(root, true);
+        if (change === "exit") await writeFile(join(directory, "exit"), "1\n");
+        if (change === "harness-result") await writeFile(join(directory, "result.json"), JSON.stringify({ status: "failed", detail: "campaign harness:unclassified_failure" }));
+        if (change === "readiness-scope") {
+          const outcome = JSON.parse(await readFile(join(directory, "failure-outcome.json"), "utf8"));
+          outcome.scope = "rigReadiness";
+          await writeQualificationOutcomeFile(join(directory, "failure-outcome.json"), outcome);
+        }
+        expect(await runtime.job("campaign", runtime.current)).toEqual({ status: "failed", detail: "campaign harness:invalid_evidence" });
+      } finally { await rm(root, { recursive: true, force: true }); }
+    },
+  );
+  test.each([1, 143])("worker preserves observed exit %i and withholds infrastructure authority", async exitCode => {
+    const root = await mkdtemp(join(tmpdir(), "retry-worker-exit-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory } = await automaticWorkerFixture(root, exitCode);
+      await runtime.worker(join(directory, "spec.json"));
+      expect(await readFile(join(directory, "exit"), "utf8")).toBe(`${exitCode}\n`);
+      expect(JSON.parse(await readFile(join(directory, "result.json"), "utf8"))).toEqual({ status: "failed", detail: "campaign harness:unclassified_failure" });
+      expect((await runtime.job("campaign", runtime.current)).campaignFailure).toBeUndefined();
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test("worker snapshots original outcome bytes without reformatting", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-outcome-bytes-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory, original } = await automaticWorkerFixture(root, 75);
+      await runtime.worker(join(directory, "spec.json"));
+      expect(await readFile(join(directory, "failure-outcome.json"), "utf8")).toBe(original);
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test("worker commits the observed exit before terminal result publication", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-result-publication-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory } = await automaticWorkerFixture(root, 75);
+      await mkdir(join(directory, "result.json"));
+      await expect(runtime.worker(join(directory, "spec.json"))).rejects.toThrow();
+      expect(await readFile(join(directory, "exit"), "utf8")).toBe("75\n");
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["out.log", "err.log"])("retry authority includes original %s bytes", async name => {
+    const root = await mkdtemp(join(tmpdir(), "retry-log-digest-"));
+    try {
+      const { runtime, next, step, directory } = await completedAutomaticJob(root);
+      await writeFile(join(directory, name), "changed diagnostic bytes\n");
+      await expect(runtime.perform(step, next)).rejects.toThrow();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("qualifying snapshot invalidates changed receipt before scheduling", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-qualifying-invalid-"));
+    try {
+      const { runtime } = await completedAutomaticJob(root, true);
+      await writeFile(runtime.receiptPath, (await readFile(runtime.receiptPath, "utf8")) + " ");
+      const repo = await runtime.snapshot(runtime.current);
+      expect(repo.campaignRetryInvalid).toBe(true);
+      expect(nextStep(runtime.current, repo, config).operation).toBe("stop");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("pending diagnostics retain the failed job needed for lease retirement", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-retirement-binding-"));
+    try {
+      const { runtime, next } = await completedAutomaticJob(root, true);
+      expect(await runtime.failedCampaignCleanup({ ...next, phase: "diagnostic-required" })).toBe(next.retryPlan!.outcome.receipt!.sha256);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("snapshot preserves the exact unreviewed source commit on a routine hold", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-authority-source-"));
+    try {
+      const { runtime, next } = await completedAutomaticJob(root);
+      runtime.authority = async () => { throw new RoutineHoldError("out-of-class", "d".repeat(40)); };
+      const step = nextStep(next, await runtime.snapshot(next), config);
+      expect(step.holdReason).toBe("out-of-class");
+      if (step.operation !== "idle") expect(step.patch?.holdCommit).toBe("d".repeat(40));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("same-owner live OS lock blocks scheduling without rewriting its owner", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-live-owner-"));
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      const { runtime, next, step } = await completedAutomaticJob(root, true);
+      child = Bun.spawn([process.execPath, "--eval", `
+import { withReleaseHostLease } from ${JSON.stringify(join(import.meta.dir, "release-host-lease.ts"))};
+await withReleaseHostLease(${JSON.stringify(runtime.owner)}, async () => {
+  console.log("held"); await Bun.stdin.text(); throw new Error("retain owner");
+}, ${JSON.stringify(join(root, "lease"))});`], { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+      const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+      expect(new TextDecoder().decode((await reader.read()).value).trim()).toBe("held");
+      await expect(runtime.perform(step, next)).rejects.toThrow();
+      expect(runtime.owner).toBe(`qualification:${runtime.current.candidate}:${runtime.receiptPath}`);
+    } finally { child?.kill(); await child?.exited; await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["started", "result", "tmux"] as const)("launch and observation reject a changed specification before reconciling %s", async fence => {
+    const root = await mkdtemp(join(tmpdir(), "retry-spec-fence-")), previousPath = process.env.PATH;
+    try {
+      const bin = join(root, "bin"); await mkdir(bin);
+      await writeFile(join(bin, "tmux"), `#!/bin/sh\nexit ${fence === "tmux" ? 0 : 1}\n`, { mode: 0o700 });
+      process.env.PATH = `${bin}:${previousPath}`;
+      const { runtime, directory } = await completedAutomaticJob(root);
+      process.env.PATH = previousPath;
+      const spec = JSON.parse(await readFile(join(directory, "spec.json"), "utf8"));
+      spec.state.candidateDigest = "0".repeat(64);
+      await writeFile(join(directory, "spec.json"), JSON.stringify(spec));
+      if (fence !== "result") await rm(join(directory, "result.json"));
+      if (fence === "started") await writeFile(join(directory, "started"), "");
+      await expect(runtime.launch("campaign", runtime.current)).rejects.toThrow("specification");
+      expect(await runtime.job("campaign", runtime.current)).toEqual({ status: "failed", detail: "campaign harness:invalid_evidence" });
+    } finally { process.env.PATH = previousPath; await rm(root, { recursive: true, force: true }); }
+  });
+  test("terminal result without exit or live worker is diagnostic, not eternally running", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-orphan-terminal-"));
+    try {
+      const { runtime, directory } = await completedAutomaticJob(root);
+      await rm(join(directory, "exit"));
+      expect(await runtime.job("campaign", runtime.current)).toEqual({ status: "failed", detail: "campaign harness:invalid_evidence" });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+// Private outcome persistence is the POSIX Studio channel; pure state-machine tests stay portable.
+describe.skipIf(process.platform === "win32")("automatic retry runtime revalidation", () => {
+  test("restored readiness can retry or retire without inventing passes for unstarted expensive lanes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "driver-readiness-retirement-"));
+    try {
+      const { runtime, next, step, receipt } = await completedAutomaticJob(root, "readiness");
+      expect(next.retryPlan!.outcome.scope).toBe("rigReadiness");
+      expect(next.retryPlan!.restartLanes).toContain("debian");
+      expect(receipt!.lanes.debian.status).toBe("pending");
+      expect(await runtime.failedCampaignCleanup(runtime.current)).toBe(next.retryPlan!.outcome.receipt!.sha256);
+      await runtime.perform(step, next);
+      expect(receipt!.lanes.debian.attempts).toBe(0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("shared authorization consumes before effects and leaves passed lane proofs byte-for-byte", async () => {
+    const root = await mkdtemp(join(tmpdir(), "driver-automatic-consumption-"));
+    try {
+      const { next, receipt } = await completedAutomaticJob(root, true);
+      const passed = Object.entries(receipt!.lanes).filter(([, lane]) => lane.status === "passed").map(([name, lane]) => [name, JSON.stringify(lane)] as const);
+      const order: string[] = [];
+      const launched = campaignRetryLaunchState(next);
+      await withConsumedCampaignRetry(receipt!, launched.qualificationExecution!, async () => {
+        expect(receipt!.execution).toEqual(launched.qualificationExecution);
+        expect(receipt!.failureSummary).toBeUndefined();
+        order.push("persist");
+      }, async () => {
+        expect(order).toEqual(["persist"]);
+        expect(receipt!.lanes.windows.status).toBe("pending");
+        order.push("run");
+      });
+      expect(order).toEqual(["persist", "run"]);
+      for (const [name, bytes] of passed) expect(JSON.stringify(receipt!.lanes[name as keyof StableQualificationReceipt["lanes"]])).toBe(bytes);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test.each([false, true])("scheduling revalidates immutable evidence without changing lease or passed proof (receipt=%s)", async withReceipt => {
+    const root = await mkdtemp(join(tmpdir(), "driver-automatic-proof-"));
+    try {
+      const { runtime, next, step, directory, receipt } = await completedAutomaticJob(root, withReceipt);
+      const old = new Map(await Promise.all((await readdir(directory)).map(async name => [name, await readFile(join(directory, name), "utf8")] as const)));
+      const owner = runtime.owner;
+      await runtime.perform(step, next);
+      await runtime.perform(JSON.parse(JSON.stringify(step)), next);
+      expect(runtime.owner).toBe(owner);
+      for (const [name, bytes] of old) expect(await readFile(join(directory, name), "utf8")).toBe(bytes);
+      if (receipt !== undefined) {
+        expect(await readFile(runtime.receiptPath, "utf8")).toBe(JSON.stringify(receipt) + "\n");
+        expect(await runtime.failedCampaignCleanup(runtime.current)).toBe(next.retryPlan!.outcome.receipt!.sha256);
+        expect(next.retryPlan?.restartLanes).toContain("windows");
+        for (const name of ["debian", "macos", "android", "androidPush", "relay", "deviceCloud", "ompPublication"] as const) {
+          expect(next.retryPlan?.restartLanes).not.toContain(name);
+        }
+      }
+      expect(await Bun.file(join(runtime.jobDirectory("campaign", campaignRetryLaunchState(next)), "spec.json")).exists()).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["policy", "source", "digest", "host", "receipt", "snapshot", "spec", "result", "exit", "publication", "foreign-owner", "missing-owner", "live", "future-worker", "approval", "orphan-approval", "occupied"] as const)(
+    "refuses %s without spending an ordinal or changing prior evidence", async change => {
+      const root = await mkdtemp(join(tmpdir(), "driver-automatic-refusal-"));
+      try {
+        const { runtime, next, step, directory } = await completedAutomaticJob(root, true);
+        if (change === "policy") runtime.changedPolicy = true;
+        if (change === "source") runtime.changedSource = true;
+        if (change === "digest") runtime.changedDigest = true;
+        if (change === "host") next.macHost = "other@fixture.invalid";
+        if (change === "receipt") await writeFile(runtime.receiptPath, (await readFile(runtime.receiptPath, "utf8")) + " ");
+        if (change === "snapshot") await writeFile(join(directory, "failed-qualification.json"), "{}");
+        if (change === "spec") await writeFile(join(directory, "spec.json"), "{}");
+        if (change === "result") await writeFile(join(directory, "result.json"), '{"status":"passed"}');
+        if (change === "exit") await rm(join(directory, "exit"));
+        if (change === "publication") runtime.published = true;
+        if (change === "foreign-owner") runtime.owner = "foreign-campaign";
+        if (change === "missing-owner") runtime.owner = undefined;
+        if (change === "live") runtime.active = true;
+        if (change === "future-worker") {
+          runtime.activeAttempt = 7;
+          await mkdir(runtime.jobDirectory("campaign", { ...next, campaignAttempt: 7 }), { recursive: true });
+        }
+        if (change === "approval") next.approvePr = 999;
+        if (change === "orphan-approval") runtime.approvalExists = true;
+        if (change === "occupied") await mkdir(runtime.jobDirectory("campaign", campaignRetryLaunchState(next)), { recursive: true });
+        await expect(runtime.perform(step, next)).rejects.toThrow();
+        expect(campaignAttempt(next)).toBe(0);
+        expect(await Bun.file(join(runtime.jobDirectory("campaign", { ...next, campaignAttempt: 1 }), "started")).exists()).toBe(false);
+      } finally { await rm(root, { recursive: true, force: true }); }
+    },
+  );
+  test("malformed, missing and mismatching worker outcomes are fixed diagnostics, never raw output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "driver-automatic-outcome-"));
+    try {
+      const { runtime, directory } = await completedAutomaticJob(root);
+      await writeFile(join(directory, "failure-outcome.json"), '{"outcome":"PRIVATE-OUTCOME-CANARY"}', { mode: 0o600 });
+      const observation = await runtime.job("campaign", runtime.current);
+      expect(observation).toEqual({ status: "failed", detail: "campaign harness:invalid_evidence" });
+      expect(JSON.stringify(observation)).not.toContain("PRIVATE-OUTCOME-CANARY");
+      await rm(join(directory, "exit"));
+      expect(await runtime.job("campaign", runtime.current)).toEqual({ status: "failed", detail: "campaign harness:invalid_evidence" });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test.skipIf(process.platform === "win32")("spec-only automatic launch reuses ordinal; a start claim is a hard fence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "driver-automatic-launch-"));
+    const previousPath = process.env.PATH;
+    try {
+      const bin = join(root, "bin"), attempted = join(root, "attempted"), launched = join(root, "launched");
+      await mkdir(bin);
+      await writeFile(join(bin, "tmux"), `#!/bin/sh\n[ "$1" != has-session ] || exit 1\n[ -f '${attempted}' ] || { touch '${attempted}'; exit 9; }\nprintf '%s\\n' "$*" >> '${launched}'\n`, { mode: 0o700 });
+      process.env.PATH = `${bin}:${previousPath}`;
+      const { runtime, next } = await completedAutomaticJob(root);
+      process.env.PATH = previousPath;
+      const start: Decision = { operation: "start-campaign", phase: "qualifying", detail: "campaign attempt=1; start" };
+      await expect(runtime.perform(start, next)).rejects.toThrow("exited 9");
+      const directory = runtime.jobDirectory("campaign", campaignRetryLaunchState(next));
+      const bytes = await readFile(join(directory, "spec.json"), "utf8");
+      expect((await runtime.perform(start, next)).campaignAttempt).toBe(1);
+      await writeFile(join(directory, "started"), "", { mode: 0o600 });
+      // Working evidence can advance after the claim. Replay must neither revalidate stale bytes nor spawn.
+      await writeFile(runtime.receiptPath, "{}");
+      await runtime.perform(start, next);
+      expect((await readFile(launched, "utf8")).trim().split("\n")).toHaveLength(1);
+      expect(await readFile(join(directory, "spec.json"), "utf8")).toBe(bytes);
+      expect(campaignAttempt(next)).toBe(0);
+      expect(await readdir(join(root, "jobs"))).toHaveLength(2);
+    } finally { process.env.PATH = previousPath; await rm(root, { recursive: true, force: true }); }
+  });
+  test("candidate rollout marker is required and existing legacy specifications never upgrade", async () => {
+    const root = await mkdtemp(join(tmpdir(), "driver-automatic-rollout-"));
+    try {
+      class Rollout extends StudioDriver {
+        marker = false;
+        override async api<T>(): Promise<T | undefined> {
+          return { content: Buffer.from(this.marker ? "export const QUALIFICATION_EXECUTION_FORMAT = 1;\n" : "legacy candidate\n").toString("base64") } as T;
+        }
+      }
+      const runtime = new Rollout(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+      const selected = automaticCampaign(); delete selected.qualificationExecution;
+      expect((await runtime.campaignLaunchState(selected)).qualificationExecution).toBeUndefined();
+      runtime.marker = true;
+      expect((await runtime.campaignLaunchState(selected)).qualificationExecution).toEqual(campaignExecution(selected));
+      const directory = runtime.jobDirectory("campaign", selected);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeFile(join(directory, "spec.json"), JSON.stringify({ kind: "campaign", state: selected, root: join(import.meta.dir, "..") }));
+      expect((await runtime.campaignLaunchState(selected)).qualificationExecution).toBeUndefined();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
 
 function cleanCloudProgress(epoch: string) {
   return {
@@ -1411,7 +2063,7 @@ describe("round-two class closure", () => {
       prepared: true, "candidate-tagged": true, "candidate-published": true, "candidate-verified": true, qualifying: true,
       qualified: true, "approve-open": true, "approve-checking": true, "approval-required": true, approved: true,
       "stable-tagged": true, "stable-published": true, "stable-verified": true, smoking: true, smoked: true,
-      "record-open": true, recorded: true, closed: true, "diagnostic-required": true, "infrastructure-held": true, stopped: true,
+      "record-open": true, recorded: true, closed: true, "diagnostic-required": true, "infrastructure-held": true, "retry-pending": true, stopped: true,
     };
     const subject = { ...state(), candidateCommit: evidence.candidateCommit, candidateDigest: evidence.candidateDigest,
       approvedHead: evidence.head, approvedTree: evidence.tree, failedMain: state().selectedMain };
@@ -1431,6 +2083,8 @@ describe("round-two class closure", () => {
     for (const phase of Object.keys(phases) as DriverState["phase"][]) for (const repo of repos) calls.push([{ ...subject, phase }, repo]);
     const held = heldCampaign();
     calls.push([{ ...held.selected, phase: "qualifying" }, { ...base, campaign: { status: "infrastructure-hold", availabilityHold: held.hold } }]);
+    const automatic = automaticCampaign();
+    calls.push([automatic, { ...base, campaign: { status: "failed", campaignFailure: automaticFailure(automatic) } }]);
     const unprepared = { ...base, main: "d".repeat(40) };
     delete unprepared.prepare;
     calls.push([{ ...state("held"), holdReason: "stale-source" }, unprepared]);
@@ -1450,7 +2104,7 @@ describe("round-two class closure", () => {
         expect(Object.hasOwn(applied, key), key).toBe(false);
       }
     }
-    expect([...patchOperations].sort()).toEqual(["accept-approval", "hold", "hold-device-cloud", "open-prepare", "ready-order", "rerequest", "select", "start-approve-checks", "stop", "update-order", "update-release-pr"]);
+    expect([...patchOperations].sort()).toEqual(["accept-approval", "hold", "hold-device-cloud", "open-prepare", "ready-order", "rerequest", "schedule-campaign-retry", "select", "start-approve-checks", "stop", "update-order", "update-release-pr"]);
   });
 
   test("DB-R1 an old relabeled issue cannot inherit a run recorded for a closed issue", async () => {
