@@ -15,6 +15,9 @@
  *   Legacy device-cloud files are not upgraded; their parsers and manual recovery remain separate.
  * - RigReadinessReceipt and its parser define additive schema-3 readiness observations only;
  *   the effectful readiness owner is responsible for actually measuring and restoring them.
+ *   Its optional epoch/phase pair names a private resource-owning attempt (canonical UUIDv4
+ *   and closed readiness step), never a host/device identity. Absence remains legacy/pre-owner
+ *   evidence; neither the pair nor a deterministic progress path proves containment by itself.
  */
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
@@ -22,8 +25,8 @@ import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
 import {
-  FAILURE_LIMITS, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible,
-  type LaneTimings, type QualificationFailureSummary,
+  FAILURE_LIMITS, FAILURE_STEPS, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible,
+  type LaneStep, type LaneTimings, type QualificationFailureSummary,
 } from "./qualification-failure.ts";
 
 export const OUTCOME_MAX_BYTES = 131_072;
@@ -64,8 +67,12 @@ export interface RigReadinessReceipt {
   readonly observations: { readonly [K in keyof typeof readinessBounds]?: (typeof readinessBounds)[K] extends "boolean" ? boolean : number };
   readonly timings: LaneTimings<"rigReadiness">;
   readonly cleanupDisposition: CleanupDisposition;
+  /** Private owner identity; epoch and phase must either both be present or both be absent. */
+  readonly epoch?: string;
+  readonly phase?: LaneStep<"rigReadiness">;
 }
 const SHA = /^[a-f0-9]{40}$/u, DIGEST = /^[a-f0-9]{64}$/u;
+const EPOCH = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const TAG = /^v(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})$/u;
 const CANDIDATE = /^v(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})-prealpha\.[1-9][0-9]{0,8}$/u;
 const BINDING_KEYS = ["candidateTag", "sourceCommit", "archiveSha256", "previousTag", "orchestratorCommit", "policySha256", "macHostSha256"] as const;
@@ -107,7 +114,10 @@ export function qualificationExecutionsMatch(value: unknown, expected: unknown):
 
 export function parseRigReadinessReceipt(value: unknown): RigReadinessReceipt {
   const readiness = record(value);
-  keys(readiness, ["status", "campaignAttempt", "observations", "timings", "cleanupDisposition"]);
+  const owner = Object.hasOwn(readiness, "epoch") || Object.hasOwn(readiness, "phase");
+  keys(readiness, ["status", "campaignAttempt", "observations", "timings", "cleanupDisposition", ...(owner ? ["epoch", "phase"] : [])]);
+  if (owner && (!matches(readiness.epoch, EPOCH) || typeof readiness.phase !== "string" ||
+    !(FAILURE_STEPS.rigReadiness as readonly string[]).includes(readiness.phase))) invalid();
   if (!attempt(readiness.campaignAttempt) || typeof readiness.status !== "string" ||
     !["pending", "running", "passed", "failed"].includes(readiness.status) || !cleanup(readiness.cleanupDisposition) ||
     (readiness.status === "passed" && readiness.cleanupDisposition !== "restored")) invalid();

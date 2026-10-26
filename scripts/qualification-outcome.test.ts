@@ -3,9 +3,10 @@ import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  OUTCOME_MAX_BYTES, parseQualificationExecution, parseQualificationOutcome, qualificationOutcomeExitCode,
+  OUTCOME_MAX_BYTES, parseQualificationExecution, parseQualificationOutcome, parseRigReadinessReceipt, qualificationOutcomeExitCode,
   readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution, type QualificationOutcome,
 } from "./qualification-outcome.ts";
+import { FAILURE_STEPS } from "./qualification-failure.ts";
 
 const execution = (): QualificationExecution => ({ formatVersion: 1, campaignAttempt: 0, binding: {
   candidateTag: "v0.9.0-prealpha.1", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64),
@@ -18,6 +19,32 @@ const outcome = (): QualificationOutcome => ({ formatVersion: 1, outcome: "quali
   receipt: { sha256: "f".repeat(64), cleanupDisposition: "restored" } });
 
 describe("general qualification machine outcome", () => {
+  test("readiness owner epoch and phase round trip together through every closed phase", () => {
+    for (const phase of FAILURE_STEPS.rigReadiness) {
+      const readiness = { status: "running", campaignAttempt: 0, observations: {}, timings: {},
+        cleanupDisposition: "unresolved", epoch: "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b", phase };
+      expect(parseRigReadinessReceipt(JSON.parse(JSON.stringify(readiness)))).toEqual(readiness);
+    }
+  });
+  test("readiness without an owner pair remains readable", () => {
+    const readiness = { status: "pending", campaignAttempt: 0, observations: {}, timings: {}, cleanupDisposition: "not_required" };
+    expect(parseRigReadinessReceipt(readiness)).toEqual(readiness);
+  });
+  test("readiness owner pairs reject incomplete, foreign, malformed and secret values without echo", () => {
+    const readiness = { status: "running", campaignAttempt: 0, observations: {}, timings: {}, cleanupDisposition: "unresolved" };
+    const epoch = "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b";
+    for (const pair of [{ epoch }, { phase: "fixture" }, { epoch, phase: undefined }, { epoch: undefined, phase: "fixture" },
+      { epoch: epoch.toUpperCase(), phase: "fixture" }, { epoch: epoch.replace("-4e5f-", "-1e5f-"), phase: "fixture" },
+      { epoch: "../SYNTHETIC_PRIVATE_OWNER", phase: "fixture" }, { epoch: "private.example.ts.net", phase: "fixture" },
+      { epoch, phase: "transport_ready" }, { epoch, phase: "SYNTHETIC_PRIVATE_OWNER" },
+      { epoch, phase: "fixture", owner: "SYNTHETIC_PRIVATE_OWNER" }]) {
+      let error: unknown;
+      try { parseRigReadinessReceipt({ ...readiness, ...pair }); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).not.toContain("SYNTHETIC_PRIVATE_OWNER");
+      expect(String(error)).not.toContain("private.example.ts.net");
+    }
+  });
   test("JSON round trip keeps exact attempt and authority bindings", () => {
     const value = outcome();
     expect(parseQualificationOutcome(JSON.parse(JSON.stringify(value)), execution())).toEqual(value);

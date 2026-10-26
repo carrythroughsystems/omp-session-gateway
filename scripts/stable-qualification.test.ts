@@ -1483,7 +1483,8 @@ test("schema-3 additive fields round trip without changing passed historical pro
   receipt.failureSummary = { failures: [failure], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
     containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
   receipt.rigReadiness = { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored",
-    observations: { quotaObservable: false }, timings: { cleanup: 100 } };
+    observations: { quotaObservable: false }, timings: { cleanup: 100 },
+    epoch: "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b", phase: "cleanup" };
   const root = await mkdtemp(join(tmpdir(), "qualification-receipt-contract-"));
   try {
     const path = join(root, "receipt.json");

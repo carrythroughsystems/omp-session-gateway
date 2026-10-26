@@ -9,8 +9,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 ### Added
 
 - Closed qualification failure and machine-outcome contracts, private atomic outcome persistence,
-  and additive schema-3 receipt validation. Unknown, mixed, unresolved or unbound failures remain
-  non-retryable; this change does not enable automatic recovery or reinterpret historical failures.
+  and additive schema-3 receipt validation, including paired private readiness owner epochs and
+  closed phases. Unknown, mixed, unresolved or unbound failures remain non-retryable; this change
+  does not enable automatic recovery or reinterpret historical failures.
 
 ## [v0.9.0] — 2026-10-25
 
