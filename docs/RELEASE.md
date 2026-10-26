@@ -548,10 +548,14 @@ Product, harness, unknown, mixed, collateral-only, malformed and dirty evidence 
 An unexplained Push timeout or raw Windows exit 143 is not infrastructure evidence.
 
 `schedule-campaign-retry` persists `retry-pending`, a bound plan and `retryNotBefore` before
-advancement. The first retry waits **60 seconds**, the second **120 seconds**; ticks before that
+advancement. The plan's `nextAttempt` reserves the next ordinal; `campaignAttempt` and execution
+stay bound to the failed job until launch creates or reconciles the next job. A diagnostic stop
+before launch therefore retains the correct failed-job cleanup/retirement authority.
+The first retry waits **60 seconds**, the second **120 seconds**; ticks before that
 deadline are idle. This is a minimum delay, not a change to the launchd tick interval. Each plan
 binds the failed/next ordinal, candidate tag/source/archive digest, predecessor, orchestrator
-commit, authority policy, retained Mac, immutable prior job digest, exact failed-receipt digest,
+commit, authority policy, retained Mac, immutable prior job digest (including `out.log`/`err.log`),
+the original machine-outcome byte digest, exact failed-receipt digest,
 closed failure summary, restart lanes and preflight/readiness/campaign scope.
 
 Before scheduling and before an unclaimed launch, the driver checks the completed job/result/exit,
@@ -559,9 +563,17 @@ unchanged receipt bytes and candidate publication, unchanged reviewed authority,
 stable publication, no active candidate worker from any attempt, and no foreign/live host owner.
 Failed receipt bytes are preserved as `failed-qualification.json` in the completed job before the
 working receipt can advance. The job also retains its immutable specification, machine outcome,
-result and exit. Never modify or delete them to force recovery.
+result and exit. The observed subprocess exit must equal the typed outcome's exit, receipt scope
+must agree, and receipt retries need a nonempty exact restart set. An unclassified worker failure
+cannot borrow a leftover typed outcome. The exit is committed before the terminal result; an
+orphaned result without an exit or live worker is diagnostic, not running. Never modify or delete
+these files to force recovery. Revalidation failure stops instead of refreshing backoff indefinitely.
 
 The next worker consumes the previous receipt's eligibility durably **before admission or setup**.
+An effect-free preflight retry instead supplies the exact prior private snapshot through
+`--retry-outcome-file` and `--retry-outcome-sha256`; receipt retries use
+`--retry-receipt-sha256`. Attempts 1–2 cannot start effectful work without one of these mutually
+exclusive, fully bound predecessor proofs. Read-only `--preflight` does not grant that authority.
 Passed qualification lanes and complete publication proofs are preserved byte-for-byte. Failed
 Push/Windows/cloud journeys restart on fresh resource epochs; unstarted lanes run normally.
 Incomplete collateral publication restarts the full lifecycle on an isolated OMP host. Artifacts
@@ -569,13 +581,16 @@ are reverified without replacing a passed proof; readiness runs again and final 
 before setup effects. No provider/guest mutation is blindly replayed.
 
 The release-host owner stays exactly `qualification:<candidate>:<receipt path>` across attempts.
-Automatic retry never calls lease clear: the same owner reacquires the SQLite OS lock. A live or
+Automatic retry never calls lease clear: scheduling and unclaimed launch probe the existing
+SQLite OS lock without changing its row; the same owner later reacquires it. A live or
 foreign holder blocks work; final success clears ownership normally. `recoverFailedCampaign()`
 remains only for retiring a failed candidate after a source fix.
 
 Job names remain `jobs/<issue>-<candidate>-campaign/` for zero and
 `jobs/<issue>-<candidate>-campaign-retry-<n>/` thereafter. A spec-only tmux launch failure reuses
-the allocated ordinal and exact specification. A `started` claim is a hard no-relaunch fence even
+the allocated ordinal and exact specification. Existing result, session and start fences are
+reconciled only after verifying that specification against the bound execution.
+A `started` claim is a hard no-relaunch fence even
 if tmux disappears; inspect and recover manually rather than deleting it. Intent/outbox replay
 does not allocate another attempt or duplicate issue comments. Attempt starts, failed-attempt
 scheduling, exhaustion and success are announced with fixed classes/reasons/lane names and numeric

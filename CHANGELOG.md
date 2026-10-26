@@ -17,6 +17,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   failures: attempts 0–2, persisted 60/120-second backoff, immutable failed-attempt evidence,
   exact-owner lease retention and privacy-safe tracking comments. Product, harness, unknown,
   mixed, dirty and exhausted failures stop; historical device-cloud holds remain manual.
+  Retry authority requires agreeing observed terminal evidence and original outcome/log digests;
+  pending plans retain failed-job identity until launch, and probe the live OS lock without
+  changing ownership. Receiptless retries require an explicit effect-free predecessor proof.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and

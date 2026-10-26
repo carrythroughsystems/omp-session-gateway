@@ -1899,15 +1899,18 @@ campaigns; historical device-cloud holds retain their explicit manual recovery c
 
 **Decision:** The stable driver automatically schedules at most two retries of evidence-backed,
 fully contained infrastructure failures. `campaignAttempt` is the sole budget: 0, 1, 2. A
-persisted `retry-pending` plan waits 60 seconds then 120 seconds before launching the already
-allocated next ordinal. Closed root/collateral classifications, terminal receipt/outcome evidence,
+persisted `retry-pending` plan waits 60 seconds then 120 seconds before launching its reserved
+next ordinal; executed-attempt state advances only at job creation/reconciliation, not scheduling.
+Closed root/collateral classifications, agreeing observed exit/result/receipt/outcome evidence,
 current cleanup and reconciled allocation outcomes are required. Unknown, mixed, product,
 harness, collateral-only, dirty and exhausted failures enter `diagnostic-required`; a raw timeout
 or exit 143 never establishes infrastructure attribution.
 
 Every attempt binds the same candidate tag, source/archive digest, predecessor, orchestrator,
-authority policy and retained Mac. Completed job/result/exit/outcome bytes and an immutable exact
-receipt snapshot bind the next plan. Shared orchestrator eligibility determines exact failed or
+authority policy and retained Mac. Completed job/result/exit/original-outcome/log bytes and an
+immutable exact receipt snapshot bind the next plan. Receiptless preflight retries require an
+explicit digest-bound effect-free predecessor outcome, never a fresh unbound attempt 1 or 2.
+For receipt retries, shared orchestrator eligibility determines a nonempty exact set of failed or
 pending lanes; passed qualification proofs remain unchanged, failed resource owners use fresh
 epochs, readiness repeats, and the old authorization is durably consumed before admission.
 Automatic retries retain the exact release-host owner and reacquire its OS lock; they never clear,

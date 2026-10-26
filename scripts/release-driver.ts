@@ -83,7 +83,7 @@ export interface DriverState {
   failedMain?: string | undefined;
   /** Retired selections remain auditable; tags, jobs and qualification receipts never move. */
   retired?: { candidate: string; reason: string; at: string; issue: number; preparePr?: number; failedMain?: string }[];
-  /** Attempt zero preserves the original job paths. Each authorized retry gets a new ordinal. */
+  /** The executed/created job ordinal. A pending plan alone never advances this binding. */
   campaignAttempt?: number | undefined;
   qualificationExecution?: QualificationExecution | undefined;
   retryPlan?: CampaignRetryPlan | undefined;
@@ -119,7 +119,8 @@ export interface JobObservation {
 
 export interface CampaignFailureObservation {
   readonly outcome: QualificationOutcome;
-  /** Hash of the exact immutable spec, result, exit, outcome and optional receipt snapshot bytes. */
+  readonly outcomeSha256: string;
+  /** Hash of exact immutable spec, result, exit, original outcome, logs and receipt snapshot bytes. */
   readonly jobSha256: string;
   readonly restartLanes: readonly StableQualificationLane[];
 }
@@ -139,41 +140,54 @@ export function campaignExecution(state: DriverState): QualificationExecution {
     binding: { candidateTag: state.candidate, sourceCommit: state.candidateCommit, archiveSha256: state.candidateDigest,
       previousTag: state.previousStable, orchestratorCommit: state.candidateCommit, policySha256: state.authorityPolicy,
       macHostSha256: createHash("sha256").update(state.macHost).digest("hex") },
-    ...(attempt === 0 ? {} : { retryPlanSha256: state.retryPlan === undefined ? undefined : campaignRetryPlanDigest(state.retryPlan) }),
+    ...(attempt === 0 ? {} : { retryPlanSha256: state.retryPlan?.nextAttempt === attempt + 1 ?
+      state.retryPlan.outcome.execution.retryPlanSha256 : state.retryPlan === undefined ? undefined : campaignRetryPlanDigest(state.retryPlan) }),
   });
 }
 export function parseCampaignFailureObservation(value: unknown, state: DriverState): CampaignFailureObservation {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid campaign failure observation");
   const raw = value as Record<string, unknown>;
-  if (Object.keys(raw).sort().join(",") !== "jobSha256,outcome,restartLanes" ||
+  if (Object.keys(raw).sort().join(",") !== "jobSha256,outcome,outcomeSha256,restartLanes" ||
     typeof raw.jobSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(raw.jobSha256) ||
+    typeof raw.outcomeSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(raw.outcomeSha256) ||
     !Array.isArray(raw.restartLanes) || raw.restartLanes.some(lane => !RETRY_LANES.includes(lane)) ||
     new Set(raw.restartLanes).size !== raw.restartLanes.length) throw new Error("invalid campaign failure observation");
   const expected = campaignExecution(state);
   if (!qualificationExecutionsMatch(state.qualificationExecution, expected)) throw new Error("campaign has no bound execution");
   const outcome = parseQualificationOutcome(raw.outcome, expected);
-  if (outcome.scope === "preflight" && raw.restartLanes.length !== 0) throw new Error("invalid preflight restart lanes");
-  return { outcome, jobSha256: raw.jobSha256, restartLanes: [...raw.restartLanes] };
+  if ((outcome.scope === "preflight") !== (outcome.receipt === undefined) ||
+    (outcome.scope === "preflight" && raw.restartLanes.length !== 0) ||
+    (outcome.receipt !== undefined && expected.campaignAttempt < 2 &&
+      qualificationOutcomeExitCode(outcome, expected) === 75 && raw.restartLanes.length === 0)) throw new Error("invalid campaign restart scope");
+  return { outcome, outcomeSha256: raw.outcomeSha256, jobSha256: raw.jobSha256, restartLanes: [...raw.restartLanes] };
 }
 export function campaignRetryPlanDigest(plan: CampaignRetryPlan): string {
   return createHash("sha256").update(JSON.stringify(plan)).digest("hex");
 }
-/** Parse against the allocated next attempt; prior execution supplies only the old plan identity. */
+/** A plan binds both the failed job and its next ordinal, before and after launch commits it. */
 export function parseCampaignRetryPlan(value: unknown, state: DriverState): CampaignRetryPlan {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid campaign retry plan");
   const raw = value as Record<string, unknown>;
-  if (Object.keys(raw).sort().join(",") !== "formatVersion,jobSha256,nextAttempt,outcome,restartLanes" ||
+  if (Object.keys(raw).sort().join(",") !== "formatVersion,jobSha256,nextAttempt,outcome,outcomeSha256,restartLanes" ||
     raw.formatVersion !== 1 || (raw.nextAttempt !== 1 && raw.nextAttempt !== 2) ||
-    raw.nextAttempt !== campaignAttempt(state)) throw new Error("invalid campaign retry plan");
+    (raw.nextAttempt !== campaignAttempt(state) + 1 && raw.nextAttempt !== campaignAttempt(state))) throw new Error("invalid campaign retry plan");
   const outcome = parseQualificationOutcome(raw.outcome);
   const expected = parseQualificationExecution({ ...outcome.execution, binding: campaignExecutionBinding(state) });
   if (outcome.execution.campaignAttempt !== raw.nextAttempt - 1 ||
     !qualificationExecutionsMatch(outcome.execution, expected) || qualificationOutcomeExitCode(outcome, expected) !== 75 ||
     typeof raw.jobSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(raw.jobSha256) ||
+    typeof raw.outcomeSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(raw.outcomeSha256) ||
     !Array.isArray(raw.restartLanes) || raw.restartLanes.some(lane => !RETRY_LANES.includes(lane)) ||
     new Set(raw.restartLanes).size !== raw.restartLanes.length ||
-    (outcome.scope === "preflight" && raw.restartLanes.length !== 0)) throw new Error("invalid campaign retry plan");
-  return { formatVersion: 1, outcome, jobSha256: raw.jobSha256, restartLanes: [...raw.restartLanes], nextAttempt: raw.nextAttempt };
+    (outcome.scope === "preflight") !== (outcome.receipt === undefined) ||
+    (outcome.scope === "preflight" ? raw.restartLanes.length !== 0 : raw.restartLanes.length === 0)) throw new Error("invalid campaign retry plan");
+  return { formatVersion: 1, outcome, outcomeSha256: raw.outcomeSha256, jobSha256: raw.jobSha256, restartLanes: [...raw.restartLanes], nextAttempt: raw.nextAttempt };
+}
+/** Launch input only: the driver commits this ordinal after creating/reconciling its exact job. */
+export function campaignRetryLaunchState(state: DriverState): DriverState {
+  const plan = parseCampaignRetryPlan(state.retryPlan, state);
+  const next = { ...state, campaignAttempt: plan.nextAttempt };
+  return { ...next, qualificationExecution: campaignExecution(next) };
 }
 function campaignExecutionBinding(state: DriverState): QualificationExecution["binding"] {
   return campaignExecution({ ...state, campaignAttempt: 0, retryPlan: undefined }).binding;
@@ -231,6 +245,7 @@ export interface RepositorySnapshot {
   hostRecoveryRequired?: boolean;
   /** Read-only revalidation failed; a pending retry must not spin or acquire fresh authority. */
   campaignRetryInvalid?: boolean;
+  authorityFailureCommit?: string | undefined;
 }
 export interface DriverConfig { bot: string; founder: string }
 export interface Decision {
@@ -309,7 +324,7 @@ export function promotionHold(state: DriverState, repo: RepositorySnapshot, conf
 export function nextStep(state: DriverState | undefined, repo: RepositorySnapshot, config: DriverConfig, date = new Date().toISOString().slice(0, 10), now = Date.now()): Decision | Idle {
   if (state?.intent !== undefined) return state.intent;
   if (state?.phase === "infrastructure-held") return idle("device-cloud infrastructure held; explicit retry-device-cloud authorization required; no automatic retry");
-  if (repo.authorityFailure !== undefined) return routineHold(repo.authorityFailure);
+  if (repo.authorityFailure !== undefined) return routineHold(repo.authorityFailure, repo.authorityFailureCommit);
   const stalePrepare = state?.phase === "held" && state.holdReason === "stale-source"
     && state.candidateCommit === undefined && (repo.prepare === undefined ? state.preparePr === undefined : !repo.prepare.merged);
   if (state?.holdReason !== undefined && !stalePrepare) return idle("held: " + state.holdReason + (state.holdCommit === undefined ? "" : " at source commit " + state.holdCommit) + "; inspect exact subject before operator recovery");
@@ -321,10 +336,11 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       schemaVersion: 1, sequence: 0, issue, version, candidate: nextCandidate(version, repo.tags), selectedMain: repo.main, previousStable: repo.latestStable, date,
     }, links: [issue.url] });
   }
-  const failure = (detail: string) => decision("stop", "diagnostic-required", detail + (["qualifying", "smoking"].includes(state.phase) ? "; inspect and recover the exact owning release-host lease before further device work" : ""), {
+  const failure = (detail: string) => decision("stop", "diagnostic-required", detail + (["qualifying", "retry-pending", "smoking"].includes(state.phase) ? "; inspect and recover the exact owning release-host lease before further device work" : ""), {
     // The kill switch may defer observation until after the fix landed. Bind failure to what ran.
-    patch: { failedMain: state.phase === "qualifying" ? state.candidateCommit ?? state.selectedMain : repo.main },
+    patch: { failedMain: ["qualifying", "retry-pending"].includes(state.phase) ? state.candidateCommit ?? state.selectedMain : repo.main },
   });
+  if (repo.campaignRetryInvalid) return failure("campaign harness:binding_mismatch");
   if (state.phase === "stopped") return idle("stopped; founder/operator intervention required");
   if (state.phase === "diagnostic-required" || stalePrepare) {
     if (state.stableCommit !== undefined || repo.tags.includes(`v${state.version}`) || compareVersions(repo.latestStable, state.version) >= 0) {
@@ -357,12 +373,12 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       if (!qualificationExecutionsMatch(state.qualificationExecution, campaignExecution(state))) throw new Error("invalid retry execution");
       if (!Number.isSafeInteger(state.retryNotBefore) || state.retryNotBefore! < 0) throw new Error("invalid retry deadline");
     } catch { return failure("campaign harness:invalid_evidence"); }
-    if (repo.campaignRetryInvalid) return failure("campaign harness:binding_mismatch");
     if (state.approvePr !== undefined || state.stableCommit !== undefined || repo.tags.includes(`v${state.version}`) ||
       compareVersions(repo.latestStable, state.version) >= 0) return failure("campaign harness:binding_mismatch");
-    if (repo.authority !== undefined && repo.authority.policy !== state.authorityPolicy) return routineHold("policy-changed");
-    if (now < state.retryNotBefore!) return idle(`campaign attempt=${campaignAttempt(state)}; backoff pending`);
-    return decision("start-campaign", "qualifying", `campaign attempt=${campaignAttempt(state)}; start`);
+    const reason = routineSourceHold(repo.authority, state.authorityPolicy);
+    if (reason !== undefined) return routineHold(reason, repo.authority?.unreviewedCommit);
+    if (now < state.retryNotBefore!) return idle(`campaign attempt=${state.retryPlan!.nextAttempt}; backoff pending`);
+    return decision("start-campaign", "qualifying", `campaign attempt=${state.retryPlan!.nextAttempt}; start`);
   }
   if (["selected", "order-updated", "order-ready", "order-landed", "held"].includes(state.phase)) {
     const comparison = compareVersions(repo.upstreamTag, requestVersion(state.issue)!);
@@ -417,6 +433,7 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       return decision("start-approve-checks", "approve-checking", "resume only the same-subject local checks; no device/cloud action is replayed", { pr });
     }
     if (state.phase === "qualifying" && job?.status === "failed" && job.campaignFailure !== undefined) {
+      if (job.detail !== undefined) return failure("campaign harness:invalid_evidence");
       try {
         const evidence = parseCampaignFailureObservation(job.campaignFailure, state);
         const attempt = campaignAttempt(state);
@@ -428,10 +445,9 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
           compareVersions(repo.latestStable, state.version) >= 0) return failure("campaign harness:binding_mismatch");
         const nextAttempt = (attempt + 1) as 1 | 2, delay = nextAttempt * 60_000;
         const retryPlan: CampaignRetryPlan = { formatVersion: 1, ...evidence, nextAttempt };
-        const allocated = { ...state, campaignAttempt: nextAttempt, retryPlan };
         return decision("schedule-campaign-retry", "retry-pending",
           `campaign attempt=${attempt}; ${retrySummary(evidence)}; nextAttempt=${nextAttempt}; delayMs=${delay}`, {
-            patch: { campaignAttempt: nextAttempt, retryPlan, retryNotBefore: now + delay, qualificationExecution: campaignExecution(allocated) },
+            patch: { retryPlan, retryNotBefore: now + delay },
             clear: ["infrastructureHold", "resumeDeviceCloud"],
           });
       } catch { return failure("campaign harness:invalid_evidence"); }
@@ -512,9 +528,16 @@ export async function tick(port: DriverPort, config: DriverConfig, plan = false)
       result = {};
     } else {
       if (!(error instanceof StaleIntentError)) throw error;
-      delete state.intent;
-      await port.save(state);
-      return idle("re-planning: " + step.operation + " refused before any effect (" + error.message + ")");
+      if (step.operation === "schedule-campaign-retry" || (step.operation === "start-campaign" && state.retryPlan !== undefined)) {
+        step = decision("stop", "diagnostic-required", "campaign harness:binding_mismatch", {
+          patch: { failedMain: state.candidateCommit ?? state.selectedMain },
+        });
+        result = {};
+      } else {
+        delete state.intent;
+        await port.save(state);
+        return idle("re-planning: " + step.operation + " refused before any effect (" + error.message + ")");
+      }
     }
   }
   state = { ...applyDecisionPatch(state, step), ...result, phase: step.phase, sequence: state.sequence + 1 };
