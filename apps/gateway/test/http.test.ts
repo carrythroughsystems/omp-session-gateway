@@ -1066,6 +1066,7 @@ describe("HTTP boundary", () => {
     expect((await configResponse.json()) as Record<string, unknown>).toMatchObject({
       version: 2,
       applicationServerKey: expect.any(String),
+      subscriptionCount: 0,
     });
 
     const body = {

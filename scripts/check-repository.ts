@@ -67,7 +67,8 @@ const nonProviderFetches: Readonly<Record<string, readonly string[]>> = {
   // The caller's owned adb-forwarded Chrome endpoint, never a provider request.
   "android-device.ts": ['"http://127.0.0.1:" + port + "/json/version"'],
   "android-leak-sweep.ts": ['origin + "/api/v1/sessions"'],
-  "android-push-runtime.ts": ['`${identity.origin}/api/v1/sessions`', "'/api/v1/sessions'", "'/api/v1/sessions/'+${JSON.stringify(fixture.instanceId)}+'/launch'"],
+  // Authenticated reads of the owned retained gateway, never subscription endpoints or a provider.
+  "android-push-runtime.ts": ['`${identity.origin}/api/v1/sessions`', '`${identity.origin}/api/v1/push/config`', "'/api/v1/sessions'", "'/api/v1/sessions/'+${JSON.stringify(fixture.instanceId)}+'/launch'"],
   "browser-journey.ts": ['"/api/v1/sessions"', '"/api/v1/sessions/" + target.instanceId + "/launch"'],
   "device-cloud-runtime.ts": ['`${origin}/`', '`${origin}/api/v1/sessions`', '`${origin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`'],
   // Single-shot latency and stream measurements of the isolated loopback gateway; a retry would skew them.

@@ -70,6 +70,16 @@ describe("general qualification machine outcome", () => {
         timings: {}, cleanupDisposition: "restored" })).toThrow();
     }
   });
+  test("readiness delivery observations are finite bounded integer counts", () => {
+    const base = { status: "failed", campaignAttempt: 0, timings: {}, cleanupDisposition: "restored" };
+    expect(parseRigReadinessReceipt({ ...base, observations: { baselineRestored: true, subscriptionCount: 2, sendCount: 4, ackCount: 4 } })
+      .observations).toMatchObject({ subscriptionCount: 2, sendCount: 4, ackCount: 4 });
+    for (const key of ["subscriptionCount", "sendCount", "ackCount"]) {
+      for (const value of [-1, 1.5, Infinity, NaN, 16_385]) {
+        expect(() => parseRigReadinessReceipt({ ...base, observations: { baselineRestored: true, [key]: value } })).toThrow();
+      }
+    }
+  });
   test("council U1 complete outcomes reject duplicate and escaped-equivalent keys through portable parsing and POSIX file reads", async () => {
     const root = process.platform === "win32" ? undefined : await mkdtemp(join(privateTmpdir, "qualification-duplicate-"));
     try {

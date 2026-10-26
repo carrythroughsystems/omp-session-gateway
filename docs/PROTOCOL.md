@@ -244,17 +244,20 @@ session freshness; the latter still requires successful OMP observations.
 
 ### `GET /api/v1/push/config`
 
-Returns the public half of the per-install VAPID key:
+Returns the public half of the per-install VAPID key and the eligible gateway-global recipient count:
 
 ```json
 {
   "version": 2,
-  "applicationServerKey": "<url-safe-P-256-public-key>"
+  "applicationServerKey": "<url-safe-P-256-public-key>",
+  "subscriptionCount": 1
 }
 ```
 
-The response is authenticated and no-store. The VAPID private key never leaves the gateway's
-user-only state file and process memory.
+The response is authenticated and no-store. `subscriptionCount` is an integer from 0 through 8,
+counting the currently stored subscriptions whose identity is still eligible for delivery. It is
+gateway-global, not scoped to the querying browser or an OMP session. No endpoints, keys or identities
+are enumerated. The VAPID private key never leaves the gateway's user-only state file and process memory.
 
 ### `POST /api/v1/push/subscription`
 

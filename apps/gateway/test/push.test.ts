@@ -117,6 +117,25 @@ async function createRoot(): Promise<string> {
 }
 
 describe("Web Push service", () => {
+  test("authenticated push config counts eligible global recipients without listing private state", async () => {
+    const root = await createRoot();
+    const gatewayConfig = config(root), registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
+    const service = await PushService.open({ config: gatewayConfig, registry, transport: new RecordingTransport() });
+    try {
+      expect(service.configResponse()).toMatchObject({ subscriptionCount: 0 });
+      for (const suffix of ["one", "two"]) await service.subscribe("dev-localhost", {
+        version: PUSH_API_VERSION, subscription: { ...subscription, endpoint: `${endpoint}/${suffix}` },
+      });
+      const result = service.configResponse();
+      expect(result).toMatchObject({ subscriptionCount: 2 });
+      for (const secret of [endpoint, previousKeys.auth, previousKeys.p256dh, "dev-localhost"]) {
+        expect(JSON.stringify(result)).not.toContain(secret);
+      }
+      await service.unsubscribe("dev-localhost", { version: PUSH_API_VERSION, endpoint: `${endpoint}/one` });
+      expect(service.configResponse()).toMatchObject({ subscriptionCount: 1 });
+    } finally { await service.stop(); }
+  });
+
   test.each([undefined, 503, 410])("emits bounded transport evidence without notification or subscription data (%s)", async status => {
     const root = await createRoot();
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });

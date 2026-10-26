@@ -64,6 +64,7 @@ const readinessBounds = {
   windowsResourcesAbsent: "boolean", creationAllowance: 1_000, quotaObservable: "boolean", quotaAvailable: 1_000_000,
   macEgress: "boolean", macDoctor: "boolean", loopbackOnly: "boolean", serveExpected: "boolean", funnelOff: "boolean",
   fixturePinned: "boolean", deliveryMs: FAILURE_LIMITS.elapsedMs, clearMs: FAILURE_LIMITS.elapsedMs,
+  subscriptionCount: 8, sendCount: 16_384, ackCount: 16_384,
 } as const;
 export interface RigReadinessReceipt {
   readonly status: "pending" | "running" | "passed" | "failed";
@@ -131,7 +132,7 @@ export function parseRigReadinessReceipt(value: unknown): RigReadinessReceipt {
     const bound = readinessBounds[key as keyof typeof readinessBounds];
     if (bound === "boolean" ? typeof value !== "boolean" :
       typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > bound) invalid();
-    if ((key === "quotaAvailable" || key === "creationAllowance") && !Number.isSafeInteger(value)) invalid();
+    if (["quotaAvailable", "creationAllowance", "subscriptionCount", "sendCount", "ackCount"].includes(key) && !Number.isSafeInteger(value)) invalid();
   }
   if (observations.quotaObservable !== true && Object.hasOwn(observations, "quotaAvailable")) invalid();
   if ((readiness.cleanupDisposition === "restored" && observations.baselineRestored !== true) ||

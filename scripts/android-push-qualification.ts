@@ -13,18 +13,18 @@ import { createAndroidPushRuntime, rethrowPushSafetyFailure } from "./android-pu
 import { withDevelopmentPixelLease } from "./android-pixel-lease.ts";
 import { executeFixture } from "./push-qualification-fixture.ts";
 import { everyError, pixelUnrestored } from "./restoration.ts";
-import { FAILURE_LIMITS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
+import { FAILURE_LIMITS, PUSH_BROWSER_STEPS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
 import type { QualificationLogWindow, PushDeliveryTelemetry } from "./qualification-logs.ts";
 
 export interface PushExecution { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
 export interface PushDeliveryMetrics {
   firstDeliveryMs: number; secondDeliveryMs: number; deliveryRearmCount: number; deliveryRearmReason: number;
-  sends: number; acknowledgements: number; latePostCount: number; latePostMs: number; clearMs: number;
+  subscriptionCount: number; sendCount: number; ackCount: number; latePostCount: number; latePostMs: number; clearMs: number;
   /** Ordered [first, second] millisecond pairs, one pair per delivery; zero second means no re-arm. */
   deliveryTimings: number[];
 }
 export function emptyPushDeliveryMetrics(): PushDeliveryMetrics {
-  return { firstDeliveryMs: 0, secondDeliveryMs: 0, deliveryRearmCount: 0, deliveryRearmReason: 0, sends: 0, acknowledgements: 0, latePostCount: 0, latePostMs: 0, clearMs: 0, deliveryTimings: [] };
+  return { firstDeliveryMs: 0, secondDeliveryMs: 0, deliveryRearmCount: 0, deliveryRearmReason: 0, subscriptionCount: 0, sendCount: 0, ackCount: 0, latePostCount: 0, latePostMs: 0, clearMs: 0, deliveryTimings: [] };
 }
 
 /** Every success boundary checks both the execution budget and its own observation window. */
@@ -69,7 +69,8 @@ export async function waitForPushDelivery(options: {
   const fail = (reason: "privacy_failed" | "delivery_timeout" | "invalid_evidence" | "push_service_failure", elapsedMs: number, status = 0): never => {
     const common = { id: options.execution?.nextFailureId() ?? 1, lane: "androidPush" as const, step: options.phase, elapsedMs: pushMilliseconds(elapsedMs),
       operation: "read_only" as const, observations: { firstDeliveryMs: metrics.firstDeliveryMs, secondDeliveryMs: metrics.secondDeliveryMs,
-        rearmCount: metrics.deliveryRearmCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs, clearMs: metrics.clearMs } };
+        rearmCount: metrics.deliveryRearmCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs, clearMs: metrics.clearMs,
+        subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount, ackCount: metrics.ackCount } };
     if (reason === "privacy_failed") throw new QualificationFailure({ ...common, reason, class: "product" });
     if (reason === "push_service_failure") throw new QualificationFailure({ ...common, reason, class: "infra_transient",
       observations: { ...common.observations, pushServiceFailure: true, retryableStatus: true, httpStatus: status } });
@@ -121,8 +122,9 @@ export async function waitForPushDelivery(options: {
     let telemetry: PushDeliveryTelemetry | undefined;
     try { telemetry = window === undefined || runtime.deliveryTelemetry === undefined ? undefined : await runtime.deliveryTelemetry(window); }
     catch (error) { rethrowPushSafetyFailure(error); if (exhausted()) requireTime(); return fail("invalid_evidence", elapsed); }
-    metrics.sends += telemetry?.sends ?? 0;
-    metrics.acknowledgements += telemetry?.acknowledgements ?? 0;
+    metrics.subscriptionCount = Math.max(metrics.subscriptionCount, telemetry?.subscriptionCount ?? 0);
+    metrics.sendCount += telemetry?.sends ?? 0;
+    metrics.ackCount += telemetry?.acknowledgements ?? 0;
     if (delivered) {
       if (options.kind === "attention" && metrics.deliveryRearmCount > 0) {
         let matches = false;
@@ -135,7 +137,7 @@ export async function waitForPushDelivery(options: {
       options.onTimeout?.(undefined);
       return session;
     }
-    if (telemetry === undefined || !telemetry.sufficient) return fail("delivery_timeout", elapsed);
+    if (telemetry === undefined || !telemetry.sufficient && !telemetry.retryable) return fail("delivery_timeout", elapsed);
     if (!telemetry.retryable) fail("delivery_timeout", elapsed);
     let ownedAlias: number | undefined;
     await checked(session);
@@ -212,6 +214,7 @@ export interface AndroidPushRuntime {
   deliveryTelemetry?(window: QualificationLogWindow): Promise<PushDeliveryTelemetry>;
   deliveryOwnership?(session: SessionMetadata): Promise<number | undefined>;
   deliveryRequestMatches?(session: SessionMetadata): Promise<boolean>;
+  subscriptionCount(): Promise<number>;
   detail(level: PushDetailLevel): Promise<void>;
   closePwa(): Promise<void>;
   openPwa(): Promise<void>;
@@ -441,7 +444,14 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     };
     try {
       await runtime.beforeEffect(); requireBudget();
-      progress.browser = await runtime.browser(); requireBudget();
+      try { progress.browser = await runtime.browser(); }
+      catch (error) {
+        rethrowPushSafetyFailure(error);
+        throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "browser_capture",
+          class: "harness", reason: "browser_baseline_failed", operation: "unknown",
+          elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted), observations: {} }, { cause: error });
+      }
+      requireBudget();
       await runtime.beforeEffect(); requireBudget();
       if (progress.browser.permission !== "granted") throw new Error("Push readiness permission prerequisite");
       await runtime.fixture("start", progress.epoch); requireBudget();
@@ -455,6 +465,23 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       const window = await runtime.beginDeliveryTelemetry?.("readiness");
       requireBudget();
       if (window === undefined) throw new Error("Push readiness telemetry unavailable");
+      let subscriptionCount: number;
+      try { subscriptionCount = await runtime.subscriptionCount(); }
+      catch (error) {
+        rethrowPushSafetyFailure(error);
+        throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
+          class: "harness", reason: "invalid_evidence", operation: "read_only",
+          elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted), observations: {} }, { cause: error });
+      }
+      requireBudget();
+      if (!Number.isSafeInteger(subscriptionCount) || subscriptionCount < 0 || subscriptionCount > 8) throw new QualificationFailure({
+        id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push", class: "harness", reason: "invalid_evidence",
+        operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted), observations: {} });
+      metrics.subscriptionCount = subscriptionCount;
+      if (subscriptionCount !== 1) throw new QualificationFailure({
+        id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push", class: "harness",
+        reason: subscriptionCount > 1 ? "stale_subscriptions" : "prerequisite_failed", operation: "read_only",
+        elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted), observations: { subscriptionCount, sendCount: 0, ackCount: 0 } });
       deliveryStarted = runtime.now();
       budgetStart = deliveryStarted;
       sampleLate = lateDeliveryObserver(() => checkedDelivery(runtime, published, "attention", "private", () => {
@@ -473,7 +500,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       const ownedAlias = await runtime.deliveryOwnership?.(session);
       requireBudget();
       roundTripMs = pushMilliseconds(runtime.now() - deliveryStarted);
-      if (telemetry?.sufficient !== true || telemetry.acknowledgements !== 1 || ownedAlias === undefined ||
+      if (telemetry?.sufficient !== true || telemetry.sends < 1 || telemetry.acknowledgements !== telemetry.sends || ownedAlias === undefined ||
         ownedAlias !== telemetry.requestAlias) throw new QualificationFailure({
         id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push", class: "harness", reason: "invalid_evidence",
         elapsedMs: roundTripMs, operation: "read_only", observations: {} });
@@ -498,7 +525,10 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
           const evidence = error.evidence;
           const common = { id: evidence.id, lane: "rigReadiness" as const, step: "pixel_push" as const, elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted),
             operation: evidence.operation, observations: evidence.observations };
-          if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
+          if (evidence.reason === "browser_baseline_failed") primary = new QualificationFailure({
+            ...common, step: PUSH_BROWSER_STEPS.find(step => step === evidence.step) ?? "browser_capture",
+            class: "harness", reason: "browser_baseline_failed" }, { cause: error });
+          else if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
           else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" });
           else if (evidence.reason === "delivery_timeout") primary = new QualificationFailure({ ...common, class: "harness", reason: "delivery_timeout" });
           else primary = new QualificationFailure({ ...common, class: "harness", reason: "invalid_evidence" });
@@ -524,9 +554,12 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       throw Object.assign(new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness restoration failed"), { pixelUnrestored: true });
     }
     if (primary instanceof QualificationFailure) throw new QualificationFailure({ ...primary.evidence,
-      observations: { ...primary.evidence.observations, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } });
+      observations: { ...primary.evidence.observations, subscriptionCount: metrics.subscriptionCount,
+        sendCount: metrics.sendCount, ackCount: metrics.ackCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } },
+      { cause: primary });
     if (primary !== undefined) throw primary;
-    return { delivered, acknowledged: true, elapsedMs: roundTripMs, clearMs: metrics.clearMs, cleanup };
+    return { delivered, acknowledged: true, elapsedMs: roundTripMs, clearMs: metrics.clearMs,
+      subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount, ackCount: metrics.ackCount, cleanup };
   });
 }
 

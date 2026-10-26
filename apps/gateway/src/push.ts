@@ -285,7 +285,9 @@ export class PushService {
   }
 
   configResponse(): PushConfigResponse {
-    return { version: PUSH_API_VERSION, applicationServerKey: this.#vapid.publicKey };
+    let subscriptionCount = 0;
+    for (const subscription of this.#subscriptions) if (this.#identityAllowed(subscription.identityKey)) subscriptionCount++;
+    return { version: PUSH_API_VERSION, applicationServerKey: this.#vapid.publicKey, subscriptionCount };
   }
 
   async subscribe(identityKey: string, request: PushSubscriptionRequest): Promise<PushDetailLevel> {

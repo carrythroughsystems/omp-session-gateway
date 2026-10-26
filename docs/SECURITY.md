@@ -522,9 +522,12 @@ controllability, no active ask, and matching request/alias state. The existing p
 acknowledgement carries its OMP session ID into a guarded command; the extension checks that ID
 synchronously before showing the ask. This detects a session switch, not a same-session host-generation
 rotation between the runtime's check and the extension's mutation; the cross-process check is not atomic.
-Provider acknowledgement is acceptance, not phone presentation. Collector windows
-use event indices and require a unique queue/send; simultaneous sends, rotation gaps, missing or
-invalid telemetry never authorize recovery by time proximity. Request identities remain volatile.
+Provider acknowledgement is acceptance, not phone presentation. Collector windows use event indices
+and one exact request alias; every queue's declared fan-out must have all sends acknowledged before
+delivery telemetry is sufficient. Multiple acknowledged recipients are legitimate. Missing completions,
+foreign aliases, rotation gaps and invalid telemetry never establish success by time proximity.
+Retry authority remains narrower: only the existing single-send explicit retryable failure permits
+re-arm; a partially acknowledged fan-out never does. Request identities remain volatile.
 Subscription replay provenance is a required boolean on queue/send events; omission cannot mean a fresh
 send. Subscription replays cannot authorize a fresh-ask retry. Radio
 restoration closes the original window before reopening the WebAPK; post-restoration observation

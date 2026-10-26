@@ -5,7 +5,7 @@ import type { FixtureExecutor } from "./push-qualification-fixture.ts";
 import { FAILURE_STEPS, type QualificationFailureLane } from "./qualification-failure.ts";
 
 export interface QualificationLogWindow { readonly lane: QualificationFailureLane; readonly phase: string; readonly after: number; readonly ordinal: number }
-export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number; readonly clearAcknowledged?: boolean; readonly requestAlias?: number }
+export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly subscriptionCount: number; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number; readonly clearAcknowledged?: boolean; readonly requestAlias?: number }
 export interface QualificationLogs {
   prepare(): Promise<void>;
   begin(lane: QualificationLogWindow["lane"], phase: string): Promise<QualificationLogWindow>;
@@ -22,26 +22,58 @@ export function parseQualificationLogs(texts: readonly string[], firstIndex = 1)
   return parseQualificationLogFiles(texts, firstIndex);
 }
 
-/** A unique queue/send pair, not wall-clock proximity, establishes the observation window. */
+/** One request alias owns every queue and complete fan-out in the observation window. */
 export function pushDeliveryTelemetry(events: readonly QualificationLogEvent[]): PushDeliveryTelemetry {
   const push = events.filter(event => event.event.startsWith("push."));
   const queues = push.filter(event => event.event === "push.queue_accepted");
   const sends = push.filter(event => event.event === "push.send_started");
   const acks = push.filter(event => event.event === "push.send_acknowledged");
   const failures = push.filter(event => event.event === "push.send_failed");
-  const sequence = queues[0]?.sequence;
   const requestAlias = queues[0]?.request_alias;
-  const unique = queues.length === 1 && sends.length === 1 && sends[0]?.subscriptions === 1 &&
-    typeof requestAlias === "number" && Number.isSafeInteger(requestAlias) && requestAlias > 0 &&
-    push.every(event => event.sequence === sequence && event.request_alias === requestAlias) && acks.length + failures.length === 1 &&
-    sends[0]!.index > queues[0]!.index && (acks[0] ?? failures[0])!.index > sends[0]!.index;
-  const sufficient = unique && queues[0]?.attention === true && sends[0]?.attention === true &&
-    queues[0]?.subscription_replay === false && sends[0]?.subscription_replay === false;
+  let subscriptionCount = 0;
+  const groups = new Map<number, { started: number; completed: number; expected: number }>();
+  let attributable = queues.length > 0 && sends.length > 0 &&
+    typeof requestAlias === "number" && Number.isSafeInteger(requestAlias) && requestAlias > 0;
+  let previousIndex = 0;
+  for (const event of push) {
+    if (event.request_alias !== requestAlias || typeof event.sequence !== "number" || !Number.isSafeInteger(event.sequence) ||
+      event.sequence < 1 || event.index <= previousIndex) { attributable = false; break; }
+    previousIndex = event.index;
+    const group = groups.get(event.sequence);
+    if (event.event === "push.queue_accepted") {
+      if (group !== undefined || event.subscription_replay !== false) { attributable = false; break; }
+      groups.set(event.sequence, { started: 0, completed: 0, expected: 0 });
+    } else if (event.event === "push.send_started") {
+      if (group === undefined || event.subscription_replay !== false || typeof event.subscriptions !== "number" ||
+        !Number.isSafeInteger(event.subscriptions) || event.subscriptions < 1 || event.subscriptions > 8 ||
+        group.expected !== 0 && group.expected !== event.subscriptions ||
+        event.attention !== queues[0]?.attention || event.clear !== queues[0]?.clear ||
+        event.activity_stop !== queues[0]?.activity_stop) { attributable = false; break; }
+      group.expected = event.subscriptions;
+      subscriptionCount = Math.max(subscriptionCount, event.subscriptions);
+      group.started++;
+    } else if (event.event === "push.send_acknowledged" || event.event === "push.send_failed") {
+      if (group === undefined || group.completed >= group.started) { attributable = false; break; }
+      group.completed++;
+    } else {
+      attributable = false;
+      break;
+    }
+  }
+  for (const group of groups.values()) {
+    if (group.expected < 1 || group.started !== group.expected || group.completed !== group.started) attributable = false;
+  }
+  attributable &&= queues.every(queue => queue.attention === queues[0]?.attention && queue.clear === queues[0]?.clear && queue.activity_stop === queues[0]?.activity_stop);
+  const acknowledged = attributable && failures.length === 0 && acks.length === sends.length;
+  const sufficient = acknowledged && queues[0]?.attention === true;
   const status = typeof failures[0]?.status === "number" ? failures[0].status : 0;
-  return { sufficient, sends: sends.length, acknowledgements: acks.length, failures: failures.length,
-    retryable: sufficient && failures.length === 1 && (status === 429 || status >= 500 && status <= 599), httpStatus: sufficient ? status : 0,
-    clearAcknowledged: unique && queues[0]?.clear === true && sends[0]?.clear === true && acks.length === 1,
-    ...(unique ? { requestAlias: requestAlias as number } : {}) };
+  // Preserve the existing single failed-send recovery authority; partial fan-out never authorizes re-arm.
+  const retryable = attributable && queues[0]?.attention === true && sends.length === 1 && failures.length === 1 &&
+    (status === 429 || status >= 500 && status <= 599);
+  return { sufficient, subscriptionCount,
+    sends: sends.length, acknowledgements: acks.length, failures: failures.length, retryable, httpStatus: attributable ? status : 0,
+    clearAcknowledged: acknowledged && queues[0]?.clear === true,
+    ...(attributable ? { requestAlias: requestAlias as number } : {}) };
 }
 
 // Filesystem inspection runs on the retained Mac, not on a Studio pathname with the same spelling.

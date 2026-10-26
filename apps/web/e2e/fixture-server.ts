@@ -357,7 +357,7 @@ export async function startDashboardFixture(
           "Content-Type": "application/json; charset=utf-8",
           Pragma: "no-cache",
         });
-        response.end(JSON.stringify({ version: 2, applicationServerKey: "V".repeat(87) }));
+        response.end(JSON.stringify({ version: 2, applicationServerKey: "V".repeat(87), subscriptionCount: 0 }));
         return;
       }
       if (

@@ -10,6 +10,60 @@ import { normalizeQualificationFailures, parseLaneFailures, qualificationRetryEl
 import { notificationTopicDigest } from "./android-notification.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
 
+test.each(["browser_wake", "browser_webapk", "browser_forward", "browser_target", "browser_attach",
+  "browser_context", "browser_navigation", "browser_notification_state"] as const)(
+  "browser baseline identifies the bounded %s failure without leaking its CDP message", async step => {
+    const failure = new Error("SYNTHETIC-PRIVATE-CDP-TARGET");
+    const spies = [
+      spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+      spyOn(deviceOperations, "wakeAndroidDisplay").mockImplementation(async () => {
+        if (step === "browser_wake") throw failure;
+        return "Awake";
+      }),
+      spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+      spyOn(webApkOperations, "openWebApk").mockImplementation(async () => { if (step === "browser_webapk") throw failure; }),
+    ];
+    const driver = {
+      browserSend: async () => {
+        if (step === "browser_target") throw failure;
+        return { targetInfos: [{ type: "page", targetId: "synthetic", url: identity.origin + "/" }] };
+      },
+      attachTab: async () => { if (step === "browser_attach") throw failure; },
+      navigate: async () => { if (step === "browser_navigation") throw failure; },
+      evaluate: async (expression: string) => {
+        if (step === "browser_context" || step === "browser_notification_state" && expression.includes("#notify")) throw failure;
+        if (expression.includes("document.readyState")) return "complete";
+        if (expression.includes("#notify")) return true;
+        if (expression.includes("getSubscription")) return { subscribed: true, permission: "granted", detail: "session" };
+        return { href: identity.origin + "/", secure: true };
+      },
+    };
+    // The test supplies only the browser methods used by the baseline path.
+    const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => {
+      if (step === "browser_forward") throw failure;
+      return run(driver);
+    }) as typeof withAndroidChrome);
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.beforeEffect = async () => {};
+      let error: unknown;
+      try { await runtime.browser(); } catch (caught) { error = caught; }
+      expect(error).toMatchObject({ evidence: { lane: "androidPush", step, reason: "browser_baseline_failed", class: "harness" } });
+      expect(JSON.stringify(normalizeQualificationFailures(error))).not.toContain(failure.message);
+    } finally { chrome.mockRestore(); for (const spy of spies) spy.mockRestore(); }
+  });
+
+test.each([0, 1, 2, 8])("readiness reads eligible subscription count %s through the authenticated config path", async subscriptionCount => {
+  const fetch = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
+    version: 2, applicationServerKey: "V".repeat(87), subscriptionCount,
+  }));
+  try {
+    expect(await createAndroidPushRuntime(identity).subscriptionCount()).toBe(subscriptionCount);
+    expect(fetch.mock.calls[0]?.[0]).toBe(`${identity.origin}/api/v1/push/config`);
+    expect(fetch.mock.calls[0]?.[1]).toMatchObject({ cache: "no-store", signal: expect.any(AbortSignal) });
+  } finally { fetch.mockRestore(); }
+});
+
 test.each(["instance", "generation", "request", "alias"] as const)("495 round2 re-arm refuses a changed %s at its transport boundary", async variant => {
   const expected: SessionMetadata = { instanceId: "fixture-instance-0001", generation: 1, canView: true, canControl: true, inputRequired: false,
     startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z" };
@@ -71,6 +125,8 @@ test.each(["network-cleanup", "triage-v2"] as const)("495 round2 runtime preserv
 test("only the exact owned DevTools probe is classified as a non-provider fetch", () => {
   expect(checkProviderReads("scripts/android-device.ts", 'fetch("http://127.0.0.1:" + port + "/json/version", {signal})')).toEqual([]);
   expect(checkProviderReads("scripts/android-device.ts", 'fetch("https://unreviewed.example.test", {signal})')).toHaveLength(1);
+  expect(checkProviderReads("scripts/android-push-runtime.ts", 'fetch(`${identity.origin}/api/v1/push/config`, {signal})')).toEqual([]);
+  expect(checkProviderReads("scripts/android-push-runtime.ts", 'fetch(`${identity.origin}/api/v1/push/other`, {signal})')).toHaveLength(1);
 });
 
 test.each(["fresh", "late", "ambiguous", "missing"] as const)("worker metadata refuses %s attribution without waking a page", async variant => {

@@ -1294,6 +1294,22 @@ describe("campaign terminal evidence and readiness", () => {
     expect(Object.values(receipt.lanes).every(lane => lane.status === "pending")).toBe(true);
   });
 
+  test("readiness ownership preserves the browser baseline substep after cleanup", async () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const error = await runRigReadiness(receipt, async () => {}, {
+      prepare: async () => {}, windows: async () => ({}), macos: async () => ({}),
+      push: async () => { throw new QualificationFailure({
+        id: 1, lane: "rigReadiness", step: "browser_forward", reason: "browser_baseline_failed",
+        class: "harness", operation: "unknown", elapsedMs: 19_000, observations: {},
+      }); },
+      restorePixel: async () => {}, restoreMac: async () => {},
+    }).catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([
+      { lane: "rigReadiness", step: "browser_forward", reason: "browser_baseline_failed" },
+    ]);
+    expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "restored", observations: { baselineRestored: true } });
+  });
+
   test("readiness restoration failure stays unresolved even when Mac cleanup succeeds", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     let macRestored = false;

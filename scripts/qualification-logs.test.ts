@@ -12,6 +12,35 @@ const flags = { request_alias: 1, attention: true, clear: false, activity_stop: 
 const send = [event(1, "push.queue_accepted", { sequence: 1, ...flags }), event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 1 }),
   event(3, "push.send_failed", { sequence: 1, elapsed_ms: 1, status: 503 })];
 
+test("readiness fan-out requires complete acknowledgement of every send for one alias", () => {
+  const fanout = [
+    event(1, "push.queue_accepted", { sequence: 1, ...flags }),
+    event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 2 }),
+    event(3, "push.send_started", { sequence: 1, ...flags, subscriptions: 2 }),
+    event(4, "push.send_acknowledged", { sequence: 1, elapsed_ms: 1 }),
+    event(5, "push.send_acknowledged", { sequence: 1, elapsed_ms: 2 }),
+  ];
+  expect(pushDeliveryTelemetry(fanout)).toMatchObject({
+    sufficient: true, subscriptionCount: 2, sends: 2, acknowledgements: 2, requestAlias: 1,
+  });
+  const repeated = [...fanout, ...fanout.map(item => ({ ...item, index: item.index + 5, sequence: 2 }))];
+  expect(pushDeliveryTelemetry(repeated)).toMatchObject({ sufficient: true, sends: 4, acknowledgements: 4, requestAlias: 1 });
+  const changedCohort = [...fanout,
+    event(6, "push.queue_accepted", { sequence: 2, ...flags }),
+    event(7, "push.send_started", { sequence: 2, ...flags, subscriptions: 1 }),
+    event(8, "push.send_acknowledged", { sequence: 2, elapsed_ms: 1 }),
+  ];
+  expect(pushDeliveryTelemetry(changedCohort)).toMatchObject({ sufficient: true, subscriptionCount: 2, sends: 3, acknowledgements: 3 });
+  for (const incomplete of [
+    fanout.slice(0, -1),
+    fanout.filter(item => item.index !== 2),
+    fanout.map(item => item.index === 5 ? { ...item, request_alias: 2 } : item),
+    fanout.map(item => item.index === 3 ? { ...item, sequence: 2 } : item),
+    fanout.map(item => item.index === 5 ? { ...item, event: "push.send_failed", status: 503 } : item),
+    fanout.map(item => ({ ...item, subscription_replay: true })),
+  ]) expect(pushDeliveryTelemetry(incomplete)).toMatchObject({ sufficient: false, retryable: false });
+});
+
 test.skipIf(process.platform === "win32")("495 round2 collector excludes writer restart before retention and retires before unlink", async () => {
   const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-claim-")); chmodSync(root, 0o700);
   const job = mkdtempSync(join(root, "job-")); chmodSync(job, 0o700);
@@ -64,7 +93,7 @@ os.unlink=checked_unlink
 });
 
 test("only an unambiguous single send's explicit retryable status authorizes recovery", () => {
-  expect(pushDeliveryTelemetry(send)).toMatchObject({ sufficient: true, retryable: true, sends: 1, acknowledgements: 0 });
+  expect(pushDeliveryTelemetry(send)).toMatchObject({ sufficient: false, retryable: true, sends: 1, acknowledgements: 0 });
   expect(pushDeliveryTelemetry([...send, event(4, "push.queue_accepted", { sequence: 2, ...flags })]).sufficient).toBe(false);
   expect(pushDeliveryTelemetry([send[0]!, { ...send[1]!, subscriptions: 2 }, send[2]!]).sufficient).toBe(false);
   expect(pushDeliveryTelemetry([send[0]!, send[1]!, event(3, "push.send_acknowledged", { sequence: 1, elapsed_ms: 1 })]).retryable).toBe(false);
@@ -220,7 +249,7 @@ test.skipIf(process.platform === "win32")("collector validates real private path
     logger.event("info", "push.queue_accepted", { sequence: 1, ...flags });
     logger.event("info", "push.send_started", { sequence: 1, ...flags, subscriptions: 1 });
     logger.event("warn", "push.send_failed", { sequence: 1, request_alias: 1, elapsed_ms: 10, status: 503 });
-    expect(await logs.end(window)).toMatchObject({ sufficient: true, retryable: true });
+    expect(await logs.end(window)).toMatchObject({ sufficient: false, retryable: true });
     expect(await logs.healthy()).toBe(true);
     sink.close();
     expect(await logs.collect()).toEqual({ files: 2, events: 3 });
