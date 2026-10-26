@@ -1910,6 +1910,8 @@ Every attempt binds the same candidate tag, source/archive digest, predecessor, 
 authority policy and retained Mac. Completed job/result/exit/original-outcome/log bytes and an
 immutable exact receipt snapshot bind the next plan. Receiptless preflight retries require an
 explicit digest-bound effect-free predecessor outcome, never a fresh unbound attempt 1 or 2.
+Standalone read-only preflight is restricted to attempt 0; both forms of retry consume their
+predecessor authority before renewed admission within the campaign command.
 For receipt retries, shared orchestrator eligibility determines a nonempty exact set of failed or
 pending lanes; passed qualification proofs remain unchanged, failed resource owners use fresh
 epochs, readiness repeats, and the old authorization is durably consumed before admission.

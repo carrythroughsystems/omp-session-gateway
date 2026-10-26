@@ -573,7 +573,9 @@ The next worker consumes the previous receipt's eligibility durably **before adm
 An effect-free preflight retry instead supplies the exact prior private snapshot through
 `--retry-outcome-file` and `--retry-outcome-sha256`; receipt retries use
 `--retry-receipt-sha256`. Attempts 1–2 cannot start effectful work without one of these mutually
-exclusive, fully bound predecessor proofs. Read-only `--preflight` does not grant that authority.
+exclusive, fully bound predecessor proofs. Standalone read-only `--preflight` is attempt-0-only
+and does not grant retry authority. Retry workers invoke only the authority-bound campaign
+command, which consumes the predecessor proof before renewed read-only admission.
 Passed qualification lanes and complete publication proofs are preserved byte-for-byte. Failed
 Push/Windows/cloud journeys restart on fresh resource epochs; unstarted lanes run normally.
 Incomplete collateral publication restarts the full lifecycle on an isolated OMP host. Artifacts

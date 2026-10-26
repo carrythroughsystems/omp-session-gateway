@@ -24,6 +24,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Retry authority requires agreeing observed terminal evidence and original outcome/log digests;
   pending plans retain failed-job identity until launch, and probe the live OS lock without
   changing ownership. Receiptless retries require an explicit effect-free predecessor proof.
+  All retries consume predecessor authority before renewed admission; standalone preflight is
+  restricted to the initial attempt.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and

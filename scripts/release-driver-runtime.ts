@@ -152,7 +152,7 @@ class CampaignFailureResult extends Error {
 export function campaignWorkerArguments(state: DriverState, executionPath: string, preflight = false): string[] {
   if (state.qualificationExecution === undefined) return preflight ? ["--preflight"] : state.resumeDeviceCloud ? ["--resume-device-cloud"] : [];
   if (!qualificationExecutionsMatch(state.qualificationExecution, campaignExecution(state))) throw new Error("campaign execution binding changed");
-  if (preflight && state.retryPlan?.outcome.receipt !== undefined) throw new Error("receipt retry must consume authorization before admission");
+  if (preflight && campaignAttempt(state) !== 0) throw new Error("retry must consume authorization before admission");
   return ["--execution-file", executionPath, ...(preflight ? ["--preflight"] : []),
     ...(state.retryPlan?.outcome.receipt === undefined ? (!preflight && state.retryPlan !== undefined ?
       ["--retry-outcome-file", join(dirname(executionPath), "retry-preflight-outcome.json"), "--retry-outcome-sha256", state.retryPlan.outcomeSha256] : []) :
@@ -1278,8 +1278,8 @@ export class StudioDriver implements DriverPort {
           }
           if (result.code !== 0) throw new Error(`stable qualification exited ${result.code}; inspect private job logs`, { cause: { out: result.out.slice(-262144), err: result.err.slice(-262144) } });
         };
-        // Resume consumes the receipt's old eligibility before its own in-process admission.
-        if (!state.resumeDeviceCloud && state.retryPlan?.outcome.receipt === undefined) await runCampaign(campaignWorkerArguments(state, executionPath, true));
+        // Every retry consumes predecessor authority before its own in-process admission.
+        if (!state.resumeDeviceCloud && campaignAttempt(state) === 0) await runCampaign(campaignWorkerArguments(state, executionPath, true));
         await runCampaign(campaignWorkerArguments(state, executionPath));
         const receipt = await jsonFile<StableQualificationReceipt>(this.receipt(state));
         if (receipt?.status !== "passed" || receipt.schemaVersion !== 3 || receipt.tag !== state.candidate || receipt.candidate?.sourceCommit !== state.candidateCommit || receipt.candidate?.archiveSha256 !== state.candidateDigest || Object.values(receipt.lanes).some(lane => lane.status !== "passed")) throw new Error("qualification receipt is not fully passed and candidate-bound");

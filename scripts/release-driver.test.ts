@@ -795,6 +795,13 @@ describe("automatic same-candidate campaign retry state machine", () => {
     ]);
     expect(campaignWorkerArguments({ ...heldCampaign().selected, resumeDeviceCloud: true }, "")).toEqual(["--resume-device-cloud"]);
   });
+  test.each([1, 2])("receiptless retry %i cannot request standalone preflight", attempt => {
+    let selected = automaticCampaign();
+    for (let ordinal = 0; ordinal < attempt; ordinal++) {
+      selected = { ...campaignRetryLaunchState(scheduledRetry(selected).next), phase: "qualifying" };
+    }
+    expect(() => campaignWorkerArguments(selected, "/private/execution.json", true)).toThrow("before admission");
+  });
 });
 
 class AutomaticRuntime extends StudioDriver {
@@ -948,7 +955,7 @@ describe("council R1 retry authority counterexamples", () => {
   });
 });
 
-async function automaticWorkerFixture(root: string, exitCode: number) {
+async function automaticWorkerFixture(root: string, exitCode: number, selected = automaticCampaign()) {
   process.exitCode = 0; // Each production worker starts in its own process.
   root = await realpath(root);
   const checkout = join(root, "checkout"), bin = join(root, "bin");
@@ -968,8 +975,9 @@ async function automaticWorkerFixture(root: string, exitCode: number) {
   process.env.PATH = `${bin}:${previousPath}`;
   const runtime = new Worker(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
   process.env.PATH = previousPath;
+  runtime.current = selected;
   runtime.receiptPath = join(root, "stable-qualification.json");
-  const selected = runtime.current, directory = runtime.jobDirectory("campaign", selected);
+  const directory = runtime.jobDirectory("campaign", selected);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const original = JSON.stringify(automaticFailure(selected).outcome, null, 4) + "\n\n";
   await writeFile(join(checkout, "fixture.ts"), `import { writeFile } from "node:fs/promises";
@@ -982,6 +990,24 @@ process.exitCode = ${exitCode};\n`);
 }
 
 describe.skipIf(process.platform === "win32")("council R1 retry runtime counterexamples", () => {
+  test("receiptless retry worker consumes authority before its only admission command", async () => {
+    const root = await mkdtemp(join(tmpdir(), "retry-admission-command-")), previousExit = process.exitCode;
+    try {
+      const { next } = await completedAutomaticJob(root);
+      const selected = campaignRetryLaunchState(next);
+      const { runtime, directory } = await automaticWorkerFixture(root, 1, selected);
+      const invocations = join(root, "invocations.jsonl");
+      await writeFile(join(root, "checkout", "fixture.ts"), `import { appendFile } from "node:fs/promises";
+await appendFile(${JSON.stringify(invocations)}, JSON.stringify(process.argv.slice(2)) + "\\n");
+process.exitCode = 1;\n`);
+      await runtime.worker(join(directory, "spec.json"));
+      const calls = (await readFile(invocations, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+      expect(calls).toEqual([["--tag", selected.candidate, ...campaignWorkerArguments(selected, join(directory, "execution.json"))]]);
+      expect(calls[0]).not.toContain("--preflight");
+      expect(await readFile(join(directory, "retry-preflight-outcome.json"), "utf8")).toBe(
+        await readFile(join(runtime.jobDirectory("campaign", next), "failure-outcome.json"), "utf8"));
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
   test.each(["exit", "harness-result", "readiness-scope"] as const)(
     "terminal evidence rejects disagreeing %s", async change => {
       const root = await mkdtemp(join(tmpdir(), "retry-terminal-counterexample-"));
