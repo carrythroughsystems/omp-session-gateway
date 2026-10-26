@@ -2527,7 +2527,8 @@ describe("resource-owning lanes", () => {
     await finalizeCampaignFailure(receipt, error, async () => {
       validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
     }, { ...resumeModules, windows: module });
-    expect(receipt.failureSummary?.failures.some(item => item.lane === "windows")).toBe(true);
+    const finalized = validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+    expect(finalized.failureSummary?.failures.some(item => item.lane === "windows")).toBe(true);
   });
 
   test("passes only with a cleanup bound to the attempt it released", async () => {

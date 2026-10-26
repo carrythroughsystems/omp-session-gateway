@@ -23,6 +23,7 @@ test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructur
     setTimeout(() => controller.abort(new Error("synthetic cancellation")), 20);
     const error = await result;
     expect(error).toBeInstanceOf(QualificationFailure);
+    if (!(error instanceof QualificationFailure)) throw new Error("expected typed provider cancellation");
     expect(error.evidence).toMatchObject({ id: 31, class: "harness", operation: method === "GET" ? "read_only" : "unknown" });
     expect(sends).toBe(1);
   } finally { globalThis.fetch = original; }
