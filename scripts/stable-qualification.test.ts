@@ -1664,7 +1664,6 @@ test("bound read-only preflight failure writes an effect-free outcome without cr
     expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
-
 test.each(["missing lane record", "passed root owner", "unrepresented failed lane", "extra summary root"] as const)(
   "council R2 receipt graph rejects %s", variant => {
     const receipt = summarizedReceipt();
@@ -1732,7 +1731,6 @@ test("council P2 restarting a standalone root clears its dependent graph before 
     validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
   }, async () => ({}));
 });
-
 test("council R2 campaign pseudo roots are terminal harness evidence only", () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   receipt.execution = receiptExecution(); receipt.status = "failed";
