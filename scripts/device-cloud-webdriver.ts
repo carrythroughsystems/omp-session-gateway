@@ -15,13 +15,15 @@ export class WebDriverError extends Error {
   constructor(message: string, readonly status: number, readonly code: string) { super(message); }
 }
 
-async function webDriverCommand(vendor: DeviceCloudVendor, authorization: string, operation: string, method: string, path: string, body: unknown, timeoutMs = 120_000): Promise<unknown> {
+async function webDriverCommand(vendor: DeviceCloudVendor, authorization: string, operation: string, method: string, path: string, body: unknown, timeoutMs = 120_000, signal?: AbortSignal): Promise<unknown> {
+  signal?.throwIfAborted();
   const connection = CONNECTIONS[vendor];
   const send = () => fetch(`${connection.endpoint}${path}`, {
     method, headers: { "content-type": "application/json", authorization }, redirect: "error",
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeoutMs),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: signal === undefined ? AbortSignal.timeout(timeoutMs) : AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
   });
-  const response = method === "GET" ? await readProvider(send) : await send();
+  const response = method === "GET" ? await readProvider(send, signal === undefined ? {} : { signal }) : await send();
   const payload = vendorJson(await boundedVendorText(response, connection.name), connection.name);
   const value = isRecord(payload) ? payload.value : undefined;
   if (operation === "session start" && isRecord(payload) && isRecord(value) &&
@@ -43,10 +45,10 @@ async function webDriverCommand(vendor: DeviceCloudVendor, authorization: string
   return value;
 }
 
-export async function endWebDriverSession(vendor: DeviceCloudVendor, username: string, password: string, sessionId: string): Promise<void> {
+export async function endWebDriverSession(vendor: DeviceCloudVendor, username: string, password: string, sessionId: string, signal?: AbortSignal): Promise<void> {
   if (!CONNECTIONS[vendor].sessionId.test(sessionId)) throw new Error("invalid cloud WebDriver session id");
   try {
-    await webDriverCommand(vendor, `Basic ${btoa(`${username}:${password}`)}`, "session end", "DELETE", `/session/${sessionId}`, undefined);
+    await webDriverCommand(vendor, `Basic ${btoa(`${username}:${password}`)}`, "session end", "DELETE", `/session/${sessionId}`, undefined, 120_000, signal);
   } catch (error) {
     if (error instanceof WebDriverError && (error.status === 404 || error.code === "invalid session id")) return;
     throw error;
@@ -63,16 +65,16 @@ export function pageEvaluationScript(expression: string): string {
 
 export class WebDriverSession implements JourneyPage {
   readonly #authorization: string;
-  private constructor(readonly vendor: DeviceCloudVendor, readonly id: string, authorization: string) {
+  private constructor(readonly vendor: DeviceCloudVendor, readonly id: string, authorization: string, readonly signal?: AbortSignal) {
     this.#authorization = authorization;
   }
 
   /** Checkpoint before the first further command; a failed checkpoint immediately ends the known session. */
-  static async create(vendor: DeviceCloudVendor, username: string, password: string, capabilities: Record<string, unknown>, created: (sessionId: string) => Promise<void>): Promise<{ readonly session: WebDriverSession; readonly capabilities: Record<string, unknown> }> {
+  static async create(vendor: DeviceCloudVendor, username: string, password: string, capabilities: Record<string, unknown>, created: (sessionId: string) => Promise<void>, signal?: AbortSignal): Promise<{ readonly session: WebDriverSession; readonly capabilities: Record<string, unknown> }> {
     const authorization = `Basic ${btoa(`${username}:${password}`)}`;
-    const value = await webDriverCommand(vendor, authorization, "session start", "POST", "/session", { capabilities: { alwaysMatch: capabilities } }, 600_000);
+    const value = await webDriverCommand(vendor, authorization, "session start", "POST", "/session", { capabilities: { alwaysMatch: capabilities } }, 600_000, signal);
     if (!isRecord(value) || typeof value.sessionId !== "string" || !CONNECTIONS[vendor].sessionId.test(value.sessionId)) throw new Error("cloud provider started no identifiable session");
-    const session = new WebDriverSession(vendor, value.sessionId, authorization);
+    const session = new WebDriverSession(vendor, value.sessionId, authorization, signal);
     try {
       await created(session.id);
       await session.command("timeouts", "POST", "/timeouts", { script: 90_000, pageLoad: 90_000 });
@@ -86,7 +88,7 @@ export class WebDriverSession implements JourneyPage {
 
   /** Also supplies TestingBot's native-iPhone adapter; it cannot change the fixed vendor endpoint. */
   command(operation: string, method: string, path: string, body?: unknown): Promise<unknown> {
-    return webDriverCommand(this.vendor, this.#authorization, operation, method, `/session/${this.id}${path}`, body);
+    return webDriverCommand(this.vendor, this.#authorization, operation, method, `/session/${this.id}${path}`, body, 120_000, this.signal);
   }
 
   async navigate(url: string): Promise<unknown> { return this.command("navigation", "POST", "/url", { url }); }

@@ -11,6 +11,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Closed qualification failure and machine-outcome contracts, private atomic outcome persistence,
   and additive schema-3 receipt validation. Unknown, mixed, unresolved or unbound failures remain
   non-retryable; this change does not enable automatic recovery or reinterpret historical failures.
+- Finalize failed stable campaigns after healthy siblings settle, complete independent OMP
+  publication lifecycle proof, and retain typed collateral evidence for an unrestored Pixel.
+  Add an effectful, fully restored rig-readiness gate before expensive fan-out, bounded owner
+  cancellation, and exact-bound failed-attempt recovery without rewriting passed proofs.
 
 ## [v0.9.0] — 2026-10-25
 

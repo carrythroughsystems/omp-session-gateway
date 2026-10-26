@@ -912,6 +912,47 @@ The Windows lane also needs a mode-private `~/.vultr-apikey` whose API access co
 
 The orchestrator refuses a dirty or unpublished branch, rejects changed candidate or receipt identity, and hash-guards `STABLE_RELEASE.lock.json` plus `docs/RELEASE_STATUS.md`. It never edits either file, creates a stable tag, or publishes a stable release. Ledger approval and stable publication remain separate maintainer effects after the receipt is reviewed.
 
+### Effectful rig readiness before fan-out
+
+`--preflight` remains read-only admission: it does not subscribe a phone, stage a fixture, allocate
+a VM or claim delivery readiness. A new campaign admits, acquires the release-host lease, verifies
+candidate and predecessor bytes, then runs the separate readiness gate before Windows allocation
+or Debian workflow dispatch. Exact-authorized retries acquire the same owner and consume their
+working-receipt authorization before renewed admission; a foreign/live owner always refuses.
+
+Readiness requires a clean retained-Mac baseline: no existing gateway service/listener and empty
+Serve/Funnel mappings. It refuses an occupied host rather than capturing and replaying arbitrary
+host configuration. It installs a disposable candidate gateway and pinned stock-OMP fixture,
+checks bounded required egress and candidate doctor/loopback/Serve/Funnel invariants, and performs
+one Private background/locked Pixel push through the actual tailnet/FCM send, acknowledgement and
+presentation path. Delivery must occur within 160 seconds; answer and authoritative clear must
+also pass. HTTP reachability alone does not prove FCM readiness.
+
+Windows readiness reuses credential, inventory, image, plan and toolchain admission and requires
+remaining per-tag creation allowance with no unreconciled qualification resources. Unsupported
+provider quota metadata is explicitly `quotaObservable: false`; no probe VM is allocated and no
+unlimited quota is inferred.
+
+`receipt.rigReadiness` records the attempt, private owner epoch, closed phase, observations,
+monotonic timings and cleanup disposition. The epoch's private
+`rig-readiness/<epoch>/push-progress.json` retains the Push owner's validated baseline for recovery,
+not logs or posted evidence. Pixel restoration precedes Mac teardown, including on failure. The
+fixture is fully removed before the normal Mac upgrade/reboot/rollback lifecycle; readiness never
+counts as a qualification pass. An unresolved restore blocks same-candidate eligibility.
+
+Outer runaway ceilings do not replace product assertions: Windows 180 minutes, Push/cloud 90
+minutes, core Android 30 minutes, relay configured duration plus five minutes, Windows/cloud
+cleanup 30 minutes, and Push cleanup 15 minutes. Mac cleanup uses **90 minutes**, not the proposed
+30: its existing two 10-minute scripts plus two 30-minute SSH owners require 80 minutes before
+margin. None of those existing bounds is shortened. Cancellation aborts owned work and awaits
+termination before cleanup; healthy sibling lanes are not terminated.
+
+Manual attempt-zero readiness remains diagnostic and does not fabricate driver policy bindings.
+New-format recovery requires the driver's exact execution and prior receipt-byte digest; a
+completed failed job's snapshot, logs, outcome, result and exit file remain immutable. Passed
+qualification proofs are reused without rewriting them. These tooling changes are not evidence
+that any particular signed candidate or live rig has passed.
+
 ### BrowserStack device-cloud fallback
 
 The fixed policy is TestingBot-only iPhone (including Home Screen/background Web Push), and

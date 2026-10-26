@@ -93,3 +93,52 @@ test("programming errors, invalid fetch input and caller cancellation are not re
     expect(delays).toEqual([]);
   }
 });
+
+test("caller cancellation aborts an owned read and awaits its termination without replay", async () => {
+  const controller = new AbortController();
+  let calls = 0, settled = false;
+  const result = readProvider(async signal => {
+    calls += 1;
+    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    await Bun.sleep(5);
+    settled = true;
+    throw signal.reason;
+  }, { signal: controller.signal });
+  controller.abort(new DOMException("cancelled", "AbortError"));
+  await expect(result).rejects.toThrow("cancelled");
+  expect(settled).toBe(true);
+  expect(calls).toBe(1);
+});
+
+test("cancellation during backoff prevents another provider read", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const result = readProvider(async () => {
+    calls += 1;
+    return new Response(null, { status: 503 });
+  }, { signal: controller.signal });
+  await Bun.sleep(5);
+  controller.abort();
+  await expect(result).rejects.toThrow();
+  expect(calls).toBe(1);
+});
+
+test("one total budget includes reads and backoff and cancels pending transport", async () => {
+  let calls = 0, ended = false;
+  await expect(readProvider(async signal => {
+    calls += 1;
+    if (calls === 1) return new Response(null, { status: 503 });
+    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    ended = true;
+    throw signal.reason;
+  }, { budgetMs: 20, sleep: async () => { await Bun.sleep(5); } })).rejects.toThrow("budget exhausted");
+  expect(calls).toBe(2);
+  expect(ended).toBe(true);
+});
+
+test("expired budgets never issue a read or a confirming absence read", async () => {
+  let calls = 0;
+  await expect(readProvider(async () => { calls += 1; return new Response(); }, { deadline: performance.now() - 1 })).rejects.toThrow("budget exhausted");
+  await expect(confirmAbsence(async () => { calls += 1; return undefined; }, { budgetMs: 0 })).rejects.toThrow("budget exhausted");
+  expect(calls).toBe(0);
+});

@@ -41,6 +41,8 @@ describe("retained-Mac Push fixture staging", () => {
   test("device-cloud fixture construction stages nothing before lease ownership", async () => {
     let leased = false;
     const calls: string[] = [];
+    const executions: unknown[] = [];
+    const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
     const context: ExternalLaneContext & RetainedMacLaneContext = {
       identity: {
         tag: "v0.7.7-prealpha.1", previousTag: "v0.7.6", orchestratorCommit: "a".repeat(40), receiptRoot: "/fixture",
@@ -49,11 +51,13 @@ describe("retained-Mac Push fixture staging", () => {
         omp: { bunVersion: "1.4.0", sourceCommit: "e".repeat(40), sourceTree: "f".repeat(40), version: "18.12.3", nativeTarballSha256: "0".repeat(64), nativeBinarySha256: "1".repeat(64) },
       },
       progress: undefined, checkpoint: async () => {}, origin: "https://fixture.invalid", sessionLabel: "fixture",
+      execution,
       pixel: async (_owner, action) => { leased = true; try { return await action(); } finally { leased = false; } },
-      mac: async argv => {
+      mac: async (argv, options) => {
         expect(leased).toBe(true);
         calls.push(argv.join(" "));
-        return { exitCode: 0, stdout: calls.length === 1 ? "/Users/ompqual" : "", stderr: "" };
+        executions.push(options?.execution);
+        return { exitCode: 0, stdout: argv.includes('printf %s "$HOME"') ? "/Users/ompqual" : "", stderr: "" };
       },
     };
     const prepare = retainedMacCloudFixture(context);
@@ -61,6 +65,12 @@ describe("retained-Mac Push fixture staging", () => {
     const fixture = await context.pixel("deviceCloud", prepare);
     expect(fixture.base).toBe("/Users/ompqual/qual-tools/device-cloud/fixtures");
     expect(calls).toHaveLength(1 + PUSH_FIXTURE_FILES.length);
+    expect(executions.every(value => value === execution)).toBe(true);
+    const cleanup = { ...execution, signal: new AbortController().signal };
+    const restored = await context.pixel("deviceCloud-cleanup", () => prepare(cleanup));
+    await context.pixel("deviceCloud-cleanup", () => restored.execute(["fixture", "stop"]));
+    expect(executions.at(-1)).toBe(cleanup);
+    expect(restored.base).toBe(fixture.base);
   });
 
   test("stages exactly the Push fixture's import closure", async () => {

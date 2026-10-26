@@ -156,6 +156,10 @@ completion nor relay endurance; it uses OMP’s public relay.
 
 Provider-read fault injection covers network recovery, mixed network/HTTP failures, bounded
 exhaustion with the last error, and immediate programming-error/cancellation propagation.
+Cancellation cases cover an owned read, backoff, and a shared total budget; the helper waits for
+transport settlement and never replays a mutating provider request. Cloud outer cancellation must
+not enter the journey retry path and must release sessions, tunnels and fixtures with a fresh
+cleanup signal while retaining the same epoch and mutation-reconciliation history.
 Repository admission requires direct TypeScript harness fetches to use the read helper or an
 exact reviewed target exemption. Gateway/session, browser and loopback probes remain single-shot
 observations (or keep their own observation deadline); capability POSTs and provider writes must
@@ -187,9 +191,19 @@ The stable-qualification suite also covers the 1,800-second relay floor, malform
 passed evidence, and resume rejection without new admission or dispatch. A rejected proof must
 still clean recorded pending Mac effects and must not reopen already completed cleanup.
 
+| Orchestration boundary | Required offline regression |
+| --- | --- |
+| Sibling settlement | One consumer fails while another passes; the healthy sibling finishes before tunnel stop and publication lifecycle |
+| Pixel ownership | An unrestored holder poisons queued work; collateral references the same attempt's originating failures |
+| Terminal evidence | Ordinary failure leaves no started lane `running`; failed publication and campaign have completion timestamps |
+| Cleanup and retries | Dirty or stale cleanup blocks eligibility; passed proofs remain unchanged; consuming authority precedes admission; prior snapshot bytes stay immutable |
+| Rig readiness | Failure at setup, Windows admission, Mac checks or Push still restores Pixel before Mac; restoration failure remains unresolved and cannot authorize retry |
+| Adapter cancellation | Runtime waits/subprocesses receive the owning signal/deadline; cleanup gets a fresh context, not the aborted primary signal |
+| Manual compatibility | Historical schema-3 receipts remain readable; manual readiness attempt zero gains no automatic authority; unbound later attempts refuse |
+
 The retained-Mac `ompPublication` lane adds the shared
 [lifecycle runner](../scripts/omp-lifecycle-qualification.ts) after every live-session consumer
-settles successfully and the relay tunnel stops. It writes `/new` and `/fork` (after two
+settles and the relay tunnel stops, including after unrelated consumer failures. It writes `/new` and `/fork` (after two
 synthetic messages) to the existing `ssh -tt` stdin, then stops/revokes, relaunches with
 `--continue`, and stops/revokes again. Each rotation keeps the instance, increments generation by
 one, requires stale launch POST `409 generation_mismatch` without a capability, and requires

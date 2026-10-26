@@ -356,6 +356,35 @@ planted SDK-log canary. Percy uploads those redacted CLI logs with builds; the s
 upload is disabled. These renders are not functional browser tests or signed-candidate qualification.
 See [BrowserStack](BROWSERSTACK.md) and ADR-035 for vendor-role and access policy.
 
+## Qualification attempt ownership
+
+The stable orchestrator retains schema-3 receipts and existing lane owners rather than introducing
+a workflow engine. New driver-bound executions identify the exact candidate, predecessor,
+orchestrator, policy, retained Mac and attempt. A completed attempt's job and exact receipt snapshot
+are immutable; only the candidate's working receipt advances. Consuming a retry removes the old
+failure authorization durably before admission or setup. Passed product proofs remain unchanged,
+while failed resource-owning lanes start on fresh epochs after current cleanup proof.
+
+Consumer failure does not cancel healthy siblings. The shared OMP host and relay tunnel live until
+their consumers settle; the tunnel stops before the independent publication lifecycle runs.
+Publication failure has a terminal timestamp, never an invented pass. Every normally returned
+campaign failure finalizes all started lanes and the campaign. Hard process death or failed storage
+remains an interrupted attempt, not authority to relaunch.
+
+Execution cancellation carries a monotonic deadline to owned reads, subprocesses and waits. The
+owner aborts and awaits termination before cleanup; no timed-out promise is abandoned. Cleanup
+serializes per resource owner, not globally: Pixel restoration stays under its lease, Windows
+destruction does not queue behind unrelated Pixel work, and retained-Mac destructive cleanup waits
+for Mac consumers and their fixture restoration. A poisoned Pixel refuses subsequent work with
+collateral references to its originating failures.
+
+Read-only admission is distinct from effectful rig readiness. After lease acquisition and verified
+candidate/predecessor bytes, readiness stages a disposable candidate/stock-OMP fixture, measures
+the real push path, and restores it before any full matrix fan-out. Its private receipt epoch owns
+the Pixel baseline sidecar; structured observations contain only bounded numbers and booleans.
+Manual attempt-zero readiness is diagnostic evidence, not a synthesized policy binding or automatic
+retry authorization.
+
 ## 4. Why not process scanning or terminal automation?
 
 Process enumeration can find PIDs but cannot safely attach OMP's browser collaboration protocol to an existing interactive context or recover a capability without reading process memory. Simulated keystrokes, terminal scraping, QR decoding, and clipboard monitoring are fragile and create additional secret channels.

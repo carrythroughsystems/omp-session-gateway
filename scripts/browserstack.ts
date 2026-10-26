@@ -381,14 +381,16 @@ function sessionContent(record: Record<string, unknown>, raw: string, presentati
 export class BrowserStackApi {
   readonly #authorization: string;
   readonly #removalStarted = new Set<string>();
-  constructor(credentials: BrowserStackCredentials) {
+  constructor(credentials: BrowserStackCredentials, private signal?: AbortSignal) {
     this.#authorization = `Basic ${btoa(`${credentials.username}:${credentials.accessKey}`)}`;
   }
+  /** Replace cancellation ownership without resetting mutation-reconciliation history. */
+  setSignal(signal: AbortSignal | undefined): void { this.signal = signal; }
 
   async #get(path: string, beforeRetry?: (response: Response) => Promise<void>): Promise<Response> {
-    return readProvider(() => fetch(`${API}${path}`, {
-      headers: { authorization: this.#authorization }, redirect: "error", signal: AbortSignal.timeout(30_000),
-    }), beforeRetry === undefined ? undefined : { beforeRetry });
+    return readProvider(signal => fetch(`${API}${path}`, {
+      headers: { authorization: this.#authorization }, redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+    }), { ...(this.signal === undefined ? {} : { signal: this.signal }), ...(beforeRetry === undefined ? {} : { beforeRetry }) });
   }
 
   async plan(now = Date.now()): Promise<void> {
@@ -456,7 +458,8 @@ export class BrowserStackApi {
     if (!ARTIFACT_ORIGINS.has(parsed.origin) || !reviewedArtifactQuery(parsed) || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
       (!parsed.pathname.includes(sessionId) && !parsed.pathname.includes(buildId))) throw new Error("unreviewed BrowserStack artifact reference");
     // Signed references carry their own authorization. Never forward account authorization here.
-    return readProvider(() => fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(30_000) }), beforeRetry === undefined ? undefined : { beforeRetry });
+    return readProvider(signal => fetch(parsed, { redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) }),
+      { ...(this.signal === undefined ? {} : { signal: this.signal }), ...(beforeRetry === undefined ? {} : { beforeRetry }) });
   }
 
   async testRecord(sessionId: string, remember?: (artifacts: readonly CloudArtifact[]) => Promise<void>, inspect?: CloudRecordRemoval["inspect"]): Promise<TestRecord | undefined> {
@@ -617,7 +620,8 @@ export class BrowserStackApi {
     let deletionError: Error | undefined;
     if (existing.status !== 404 && !removal.deleted && !this.#removalStarted.has(sessionId)) {
       this.#removalStarted.add(sessionId);
-      const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE", headers: { authorization: this.#authorization }, redirect: "error", signal: AbortSignal.timeout(30_000) });
+      const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE", headers: { authorization: this.#authorization }, redirect: "error",
+        signal: this.signal === undefined ? AbortSignal.timeout(30_000) : AbortSignal.any([this.signal, AbortSignal.timeout(30_000)]) });
       await inspect(response, "delete");
       if (response.status !== 200) {
         deletionError = new Error(`BrowserStack record deletion failed with HTTP ${response.status}`);
@@ -678,6 +682,7 @@ export interface BrowserStackLocalIdentity {
   readonly identifier: string;
 }
 export interface BrowserStackLocalOptions extends BrowserStackLocalIdentity {
+  readonly signal?: AbortSignal;
   readonly localProxyPort: number;
   readonly hosts: readonly string[];
 }
@@ -843,6 +848,7 @@ export async function stopBrowserStackLocal(options: BrowserStackLocalIdentity, 
 
 /** Private config; vendor-child argv exposure is the explicit single-user-workstation exception. */
 export async function startBrowserStackLocal(options: BrowserStackLocalOptions, credentials: BrowserStackCredentials, timeoutMs = 120_000): Promise<void> {
+  options.signal?.throwIfAborted();
   const argv = browserStackLocalArguments(options);
   await mkdir(options.directory, { recursive: true, mode: 0o700 });
   const directory = await lstat(options.directory);
@@ -882,6 +888,7 @@ export async function startBrowserStackLocal(options: BrowserStackLocalOptions, 
     void child.exited.then(closePipe);
     const deadline = Date.now() + timeoutMs;
     while (!ready) {
+      options.signal?.throwIfAborted();
       if (streamFailed || child.exitCode !== null || Date.now() >= deadline) throw new Error("BrowserStack Local did not become ready");
       await Bun.sleep(200);
     }
@@ -898,13 +905,15 @@ export async function startBrowserStackLocal(options: BrowserStackLocalOptions, 
   }
 }
 
-export async function ensureBrowserStackLocal(directory = join(homedir(), ".cache", "omp-session-gateway", "browserstack")): Promise<string> {
+export async function ensureBrowserStackLocal(directory = join(homedir(), ".cache", "omp-session-gateway", "browserstack"), signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   requireBrowserStackRosetta();
   const binary = join(directory, `BrowserStackLocal-${BROWSERSTACK_LOCAL.version}`);
   const existing = await readFile(binary).catch(() => undefined);
   if (existing?.byteLength === BROWSERSTACK_LOCAL.bytes && createHash("sha256").update(existing).digest("hex") === BROWSERSTACK_LOCAL.sha256) return binary;
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const response = await readProvider(() => fetch(BROWSERSTACK_LOCAL.url, { redirect: "error", signal: AbortSignal.timeout(120_000) }));
+  const response = await readProvider(readSignal => fetch(BROWSERSTACK_LOCAL.url, { redirect: "error", signal: AbortSignal.any([readSignal, AbortSignal.timeout(120_000)]) }),
+    signal === undefined ? {} : { signal });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`BrowserStack Local download failed with HTTP ${response.status}`); }
   const reader = response.body?.getReader();
   if (reader === undefined) throw new Error("BrowserStack Local download has no body");

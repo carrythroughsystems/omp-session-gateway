@@ -17,7 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isRecord } from "../packages/collab-client/upstream/src/tool-render/util.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { fixtureModelError } from "./omp-fixture.ts";
-import type { OmpPins, PixelLease } from "./stable-qualification.ts";
+import { withQualificationDeadline, type QualificationExecutionContext, type OmpPins, type PixelLease } from "./stable-qualification.ts";
 import { TESTINGBOT_TUNNEL } from "./testingbot.ts";
 import { TESTINGBOT_SESSION_ID, BROWSERSTACK_SESSION_ID } from "./device-cloud-webdriver.ts";
 import type { TestRecord, DeviceCloudVendor, CloudArtifact, CloudRecordRemoval } from "./device-cloud-common.ts";
@@ -146,6 +146,8 @@ export interface DeviceCloudTargetAttempt {
 }
 
 export interface DeviceCloudRuntime {
+  /** Called only after the previous owned operation settles; cleanup gets a fresh deadline. */
+  setExecution?(execution: QualificationExecutionContext | undefined): void;
   now(): number;
   pause(milliseconds: number): Promise<void>;
   /** Read-only: tools, credentials, and a pinned model for every target in the vendor catalog. */
@@ -166,6 +168,7 @@ export interface DeviceCloudRuntime {
 }
 
 export interface DeviceCloudLaneInput {
+  readonly execution?: QualificationExecutionContext;
   readonly identity: DeviceCloudIdentity;
   /** The label of the campaign's live OMP session, the one the Pixel's core lane also drives. */
   readonly sessionLabel: string;
@@ -683,6 +686,7 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
             },
           });
         } catch (error) {
+          input.execution?.signal.throwIfAborted();
           failure = error;
           recorded.outcome = error instanceof DeviceCloudJourneyFailure ? "journey-failed" :
             deviceCloudHolds(error) === undefined ? "failed" : "availability-held";
@@ -721,6 +725,7 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
       }
     }
   } catch (error) {
+    input.execution?.signal.throwIfAborted();
     failures.push(error);
   }
   // The retained record is finalized only after end; still inspect every record on partial attempts.
@@ -847,6 +852,8 @@ async function release(input: DeviceCloudLaneInput, progress: DeviceCloudProgres
 }
 
 export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Record<string, unknown>> {
+  input.execution?.signal.throwIfAborted();
+  input.runtime.setExecution?.(input.execution);
   const bind = binding(input.identity);
   if (input.progress !== undefined) {
     const previous = parseDeviceCloudProgress(input.progress);
@@ -859,6 +866,7 @@ export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Recor
   // One lease turn covers the attempt and its release, so no Pixel lane starts while its sessions,
   // tunnel, or fixture remain.
   return input.pixel("deviceCloud", async () => {
+    input.execution?.signal.throwIfAborted();
     const progress: DeviceCloudProgress = {
       lane: "deviceCloud", epoch: randomUUID(), binding: bind, phase: "attempt_started", cleanupRequired: true, sessions: [], resources: [], tunnels: [], results: {}, journeys: {},
     };
@@ -873,7 +881,10 @@ export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Recor
       failure = error;
     }
     try {
-      await release(input, progress, save);
+      await withQualificationDeadline("deviceCloudCleanup", 30 * 60_000, input.execution?.nextFailureId ?? (() => 1), async execution => {
+        runtime.setExecution?.(execution);
+        await release(input, progress, save);
+      });
     } catch (releaseError) {
       failure = Object.assign(failure === undefined ? releaseError as Error : new AggregateError([failure, releaseError], "the device-cloud attempt and its release failed"), { pixelUnrestored: true });
     }
@@ -884,6 +895,7 @@ export async function runDeviceCloud(input: DeviceCloudLaneInput): Promise<Recor
 
 /** Releases an attempt that stopped before its own release finished. */
 export async function cleanupDeviceCloud(input: DeviceCloudLaneInput): Promise<Record<string, unknown>> {
+  input.runtime.setExecution?.(input.execution);
   const progress = parseDeviceCloudProgress(input.progress);
   if (progress.binding !== binding(input.identity)) throw new Error("device-cloud progress belongs to a different candidate, origin, or device profile");
   if (!progress.cleanupRequired) return { epoch: progress.epoch, restored: true };
