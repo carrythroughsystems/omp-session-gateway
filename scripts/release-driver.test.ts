@@ -875,7 +875,8 @@ async function completedAutomaticJob(root: string, withReceipt: boolean | "readi
   return { runtime, directory, receipt, ...scheduledRetry(selected, observed) };
 }
 
-describe("automatic retry runtime revalidation", () => {
+// Private outcome persistence is the POSIX Studio channel; pure state-machine tests stay portable.
+describe.skipIf(process.platform === "win32")("automatic retry runtime revalidation", () => {
   test("restored readiness can retry or retire without inventing passes for unstarted expensive lanes", async () => {
     const root = await mkdtemp(join(tmpdir(), "driver-readiness-retirement-"));
     try {
