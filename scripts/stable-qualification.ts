@@ -618,6 +618,14 @@ function validateReceiptExecution(receipt: StableQualificationReceipt): void {
     if (readiness.campaignAttempt !== (execution?.campaignAttempt ?? 0)) {
       throw new Error("qualification receipt readiness attempt is unbound");
     }
+    if ((readiness.status === "failed" || readiness.cleanupDisposition === "unresolved") &&
+      (receipt.status === "passed" || (summary !== undefined && !summary.failures.some(failure => failure.lane === "rigReadiness")))) {
+      throw new Error("qualification receipt omits its failed readiness owner");
+    }
+    if (readiness.cleanupDisposition === "unresolved" && summary !== undefined &&
+      (summary.containment.proven || summary.containment.cleanupComplete)) {
+      throw new Error("qualification receipt readiness containment is contradictory");
+    }
   }
   const failuresById = new Map<number, LaneFailure>();
   for (const name of LANE_NAMES) {
@@ -675,8 +683,7 @@ function clearReceiptFailureEvidence(receipt: StableQualificationReceipt): void 
 }
 
 function clearLaneFailureEvidence(receipt: StableQualificationReceipt, lane: LaneReceipt): void {
-  if (receipt.failureSummary !== undefined) clearReceiptFailureEvidence(receipt);
-  else delete lane.failure;
+  if (receipt.failureSummary !== undefined || lane.failure !== undefined) clearReceiptFailureEvidence(receipt);
 }
 
 function assertNoSecretFields(value: unknown, path = "receipt"): void {
@@ -1122,6 +1129,17 @@ export async function finalizeCampaignFailure(
   receipt.completedAt = now();
   receipt.error = "qualification failed; inspect fixed failure evidence";
   if (receipt.execution !== undefined) {
+    if (receipt.rigReadiness !== undefined &&
+      (receipt.rigReadiness.status === "running" || receipt.rigReadiness.cleanupDisposition === "unresolved")) {
+      receipt.rigReadiness = { ...receipt.rigReadiness, status: "failed" };
+    }
+    if (receipt.rigReadiness?.status === "failed" && !failures.some(failure => failure.lane === "rigReadiness")) {
+      let id = nextReceiptFailureId(receipt);
+      while (ids.has(id)) id = nextReceiptFailureId(receipt);
+      failures.push(parseLaneFailure({ id, lane: "rigReadiness", step: "cleanup", class: "collateral", reason: "dependency_failed",
+        elapsedMs: 0, operation: "not_started", observations: {}, originIds: failures.filter(item => item.class !== "collateral").map(item => item.id) }));
+      ids.add(id);
+    }
     for (const name of LANE_NAMES) {
       const lane = receipt.lanes[name];
       if (lane.status !== "failed") continue;
@@ -2660,7 +2678,10 @@ export async function runRigReadiness(
       observations: { ...receipt.rigReadiness!.observations, baselineRestored: restored },
       cleanupDisposition: restored ? "restored" : "unresolved",
     };
-    try { await persist(); } catch (error) { receipt.rigReadiness.status = "failed"; failures.push(ownedFailure(error)); }
+    try { await persist(); } catch (error) {
+      receipt.rigReadiness = { ...receipt.rigReadiness, status: "failed" };
+      failures.push(ownedFailure(error));
+    }
   }
   if (failures.length > 0) throw new AggregateError(failures, "rig readiness failed");
 }

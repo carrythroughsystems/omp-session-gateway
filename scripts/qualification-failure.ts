@@ -290,6 +290,7 @@ export function qualificationRetryEligible(value: unknown, bindingsMatch: boolea
     return summary.containment.proven && summary.containment.cleanupComplete && !summary.containment.unresolvedMutation &&
       summary.failures.some(item => item.class === "infra_transient") &&
       summary.failures.every(item =>
+        !(item.class === "infra_transient" && item.step === "cleanup") &&
         (item.class === "infra_transient" ? item.operation === "not_started" || item.operation === "read_only" :
           item.class === "collateral" && item.operation !== "unknown") &&
         item.observations.cleanupVerified !== false && item.observations.mutationReconciled !== false &&

@@ -132,6 +132,9 @@ export function parseRigReadinessReceipt(value: unknown): RigReadinessReceipt {
     if ((key === "quotaAvailable" || key === "creationAllowance") && !Number.isSafeInteger(value)) invalid();
   }
   if (observations.quotaObservable !== true && Object.hasOwn(observations, "quotaAvailable")) invalid();
+  if ((readiness.cleanupDisposition === "restored" && observations.baselineRestored !== true) ||
+    (observations.baselineRestored === true && readiness.cleanupDisposition === "unresolved") ||
+    (observations.baselineRestored === false && readiness.cleanupDisposition !== "unresolved")) invalid();
   return { ...readiness, observations: { ...observations }, timings: parseLaneTimings("rigReadiness", readiness.timings) } as unknown as RigReadinessReceipt;
 }
 

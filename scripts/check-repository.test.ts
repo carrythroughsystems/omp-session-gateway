@@ -11,6 +11,14 @@ test("cloud transport may retry only GET, and record DELETE is never replayed", 
   const deletion = 'const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE" });';
   expect(checkProviderReads("scripts/browserstack.ts", deletion)).toEqual([]);
   expect(checkProviderReads("scripts/browserstack.ts", deletion.replace("await fetch", "await readProvider(() => fetch"))).toHaveLength(1);
+  for (const callback of ["signal", "(signal)", "(readSignal)"]) {
+    expect(checkProviderReads("scripts/testingbot.ts", `await readProvider(${callback} => fetch(url, { signal }));`)).toEqual([]);
+    expect(checkProviderReads("scripts/browserstack.ts", deletion.replace("await fetch", `await readProvider(${callback} => fetch`))).toHaveLength(1);
+  }
+  const cancellable = source.replace("readProvider(send)", "readProvider(send, signal === undefined ? {} : { signal })");
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", cancellable)).toEqual([]);
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", cancellable.replace('method === "GET"', 'method !== "DELETE"'))).toHaveLength(1);
+  expect(checkProviderReads("scripts/device-cloud-webdriver.ts", cancellable.replace(": await send()", ": await readProvider(send)"))).toHaveLength(1);
 });
 
 test("reports both abrupt completions through nested blocks without leaking past finally", () => {

@@ -29,6 +29,11 @@ describe("closed qualification failure contracts", () => {
       expect(() => parseLaneFailure({ ...root(), lane, step: "containment" })).toThrow();
     }
   });
+  test.each(["rigReadiness", "ompPublication", "relay", "android"] as const)(
+    "council P2 ordinary %s cleanup transport is never retry authority", lane => {
+      expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(), lane, step: "cleanup" }] }, true)).toBe(false);
+    },
+  );
   test("council R4 negative containment and reconciliation observations block retry", () => {
     for (const observations of [{ cleanupVerified: false }, { mutationReconciled: false }, { remainingResources: 1 }]) {
       expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(), observations: { ...root().observations, ...observations } }] }, true)).toBe(false);

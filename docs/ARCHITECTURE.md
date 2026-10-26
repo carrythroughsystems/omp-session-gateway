@@ -384,6 +384,11 @@ the real push path, and restores it before any full matrix fan-out. Its private 
 the Pixel baseline sidecar; structured observations contain only bounded numbers and booleans.
 Manual attempt-zero readiness is diagnostic evidence, not a synthesized policy binding or automatic
 retry authorization.
+Failed or unresolved readiness is a failure-graph owner, never a passing receipt: its terminal
+summary must represent it, and unresolved restoration cannot coexist with proven cleanup.
+`restored` requires an explicit `baselineRestored: true`. Restarting a root invalidates the
+entire prior standalone failure graph before persistence, including dependent collateral.
+Transport failures at an ordinary lane's explicit `cleanup` step do not authorize automatic retry.
 
 ## 4. Why not process scanning or terminal automation?
 

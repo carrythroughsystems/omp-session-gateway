@@ -1308,7 +1308,7 @@ describe("campaign terminal evidence and readiness", () => {
 
   test("manual readiness attempt zero is diagnostic only and cannot synthesize retry authority", () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
-    receipt.rigReadiness = { status: "failed", campaignAttempt: 0, observations: {}, timings: {}, cleanupDisposition: "restored" };
+    receipt.rigReadiness = { status: "failed", campaignAttempt: 0, observations: { baselineRestored: true }, timings: {}, cleanupDisposition: "restored" };
     expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
     receipt.rigReadiness = { ...receipt.rigReadiness, campaignAttempt: 1 };
     expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow("attempt is unbound");
@@ -1696,10 +1696,41 @@ test("council R2 readiness roots require their failed readiness owner", () => {
     class: "harness", elapsedMs: 1, operation: "read_only", observations: {} }], timings: { attemptMs: 1, cleanupMs: 0 },
     containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
   expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
-  receipt.rigReadiness = { campaignAttempt: 0, status: "failed", cleanupDisposition: "restored", observations: {}, timings: {} };
+  receipt.rigReadiness = { campaignAttempt: 0, status: "failed", cleanupDisposition: "restored", observations: { baselineRestored: true }, timings: {} };
   expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
   receipt.rigReadiness = { ...receipt.rigReadiness, status: "passed" };
   expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test.each(["failed owner omitted", "unresolved containment", "passed with failed owner"] as const)(
+  "council P2 readiness receipt rejects %s", variant => {
+    const receipt = summarizedReceipt();
+    receipt.rigReadiness = { status: "failed", campaignAttempt: 0, observations: { baselineRestored: true },
+      timings: {}, cleanupDisposition: "restored" };
+    if (variant === "unresolved containment") {
+      receipt.rigReadiness = { ...receipt.rigReadiness, cleanupDisposition: "unresolved", observations: { baselineRestored: false } };
+      receipt.failureSummary = { ...receipt.failureSummary!, failures: [...receipt.failureSummary!.failures,
+        { id: 2, lane: "rigReadiness", step: "cleanup", class: "collateral", reason: "dependency_failed",
+          elapsedMs: 0, operation: "not_started", observations: {}, originIds: [1] }] };
+    }
+    if (variant === "passed with failed owner") {
+      receipt.status = "passed"; delete receipt.failureSummary;
+      receipt.lanes.deviceCloud.status = "passed"; delete receipt.lanes.deviceCloud.failure;
+    }
+    expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  },
+);
+
+test("council P2 restarting a standalone root clears its dependent graph before persistence", async () => {
+  const receipt = summarizedReceipt();
+  delete receipt.failureSummary;
+  receipt.lanes.android.status = "failed";
+  receipt.lanes.android.failure = [{ id: 2, lane: "android", step: "admission", class: "collateral",
+    reason: "dependency_failed", elapsedMs: 0, operation: "not_started", observations: {}, originIds: [1] }];
+  await executeReceiptLane(receipt, "deviceCloud", async () => {
+    expect(receipt.lanes.android.failure).toBeUndefined();
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, async () => ({}));
 });
 
 test("council R2 campaign pseudo roots are terminal harness evidence only", () => {
@@ -1811,10 +1842,11 @@ test("schema-3 additive fields round trip without changing passed historical pro
   receipt.status = "failed";
   receipt.lanes.debian = { status: "passed", attempts: 1, evidence: { historicalProof: true } };
   receipt.lanes.windows = { status: "failed", attempts: 1, failure: [failure], timings: { transport_ready: 90_000 } };
-  receipt.failureSummary = { failures: [failure], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
+  receipt.failureSummary = { failures: [failure, { id: 2, lane: "rigReadiness", step: "windows", class: "collateral",
+    reason: "dependency_failed", elapsedMs: 0, operation: "not_started", observations: {}, originIds: [1] }], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
     containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
   receipt.rigReadiness = { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored",
-    observations: { quotaObservable: false }, timings: { cleanup: 100 },
+    observations: { quotaObservable: false, baselineRestored: true }, timings: { cleanup: 100 },
     epoch: "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b", phase: "cleanup" };
   const root = await mkdtemp(join(tmpdir(), "qualification-receipt-contract-"));
   try {
@@ -1861,12 +1893,14 @@ test("readiness fields and outcome evidence cannot persist identifiers or fabric
   const path = join(root, "receipt.json");
   try {
     for (const observations of [{ host: "SYNTHETIC_PRIVATE_HOST" }, { quotaObservable: false, quotaAvailable: 10 }]) {
-      Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored", observations, timings: {} } });
+      Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored",
+        observations: { baselineRestored: true, ...observations }, timings: {} } });
       expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
       await expect(createReceiptPersister(path, receipt)()).rejects.toThrow();
       expect(await readdir(root)).toEqual([]);
     }
-    Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 1, cleanupDisposition: "restored", observations: {}, timings: {} } });
+    Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 1, cleanupDisposition: "restored",
+      observations: { baselineRestored: true }, timings: {} } });
     expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow("unbound");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

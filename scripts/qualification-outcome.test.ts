@@ -21,6 +21,12 @@ const outcome = (): QualificationOutcome => ({ formatVersion: 1, outcome: "quali
   receipt: { sha256: "f".repeat(64), cleanupDisposition: "restored" } });
 
 describe("general qualification machine outcome", () => {
+  test.each([
+    ["restored", false], ["restored", undefined], ["unresolved", true], ["not_required", false],
+  ] as const)("council P2 readiness %s cannot contradict baseline %s", (cleanupDisposition, baselineRestored) => {
+    expect(() => parseRigReadinessReceipt({ status: "failed", campaignAttempt: 0, observations:
+      baselineRestored === undefined ? {} : { baselineRestored }, timings: {}, cleanupDisposition })).toThrow();
+  });
   test("council P2 preflight scope cannot launder post-allocation observations", () => {
     const value = outcome();
     for (const step of ["instance_created", "transport_ready", "candidate_upgraded"]) {
@@ -38,7 +44,7 @@ describe("general qualification machine outcome", () => {
   });
   test("council P2 readiness quota and creation allowances are integer counts", () => {
     for (const observations of [{ quotaObservable: true, quotaAvailable: 1.5 }, { creationAllowance: 1.5 }]) {
-      expect(() => parseRigReadinessReceipt({ status: "failed", campaignAttempt: 0, observations,
+      expect(() => parseRigReadinessReceipt({ status: "failed", campaignAttempt: 0, observations: { baselineRestored: true, ...observations },
         timings: {}, cleanupDisposition: "restored" })).toThrow();
     }
   });
