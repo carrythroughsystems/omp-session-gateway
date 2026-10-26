@@ -82,3 +82,15 @@ test.skipIf(process.platform === "win32")("a never-started gateway's empty direc
     expect(existsSync(remoteDirectory)).toBe(false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test.skipIf(process.platform === "win32")("remote preparation refuses an ancestor symlink before creating any destination", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-symlink-")); chmodSync(root, 0o700);
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), "qualification-outside-"));
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  try {
+    symlinkSync(outside, join(root, ".local"));
+    const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory, jobDirectory: root });
+    await expect(logs.prepare()).rejects.toThrow("inspection failed");
+    expect(readdirSync(outside)).toHaveLength(0);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});

@@ -238,6 +238,19 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
 });
 
+test("readiness includes fixture acknowledgement time in its 160-second delivery bound", async () => {
+  const host = fake();
+  const fixture = host.runtime.fixture;
+  host.runtime.fixture = async (...args) => {
+    await fixture(...args);
+    if (args[0] === "ask") await host.runtime.pause(160_000);
+  };
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  await expect(runAndroidPushReadiness(host.input)).rejects.toMatchObject({ evidence: { lane: "rigReadiness", step: "pixel_push", reason: "delivery_timeout" } });
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).cleanupRequired).toBe(false);
+  expect(host.state().device).toEqual(baseline);
+});
+
 test("overlap recovery cannot reset the phase's consumed delivery re-arm budget", async () => {
   const host = fake();
   const fixture = host.runtime.fixture, observe = host.runtime.observe;
