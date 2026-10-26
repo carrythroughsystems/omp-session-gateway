@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { checkDocumentTimers, checkProviderReads, checkUnsafeFinally } from "./check-repository.ts";
+import { checkDocumentTimers, checkE2EReadiness, checkProviderReads, checkUnsafeFinally } from "./check-repository.ts";
+import { readFile } from "node:fs/promises";
 
 test("cloud transport may retry only GET, and record DELETE is never replayed", () => {
   const source = 'const connection = { endpoint: "https://hub.testingbot.com/wd/hub", fallback: { endpoint: "https://hub.browserstack.com/wd/hub" } };\n' +
@@ -226,3 +227,73 @@ test("council491 Windows dispatcher forwards cancellation without permitting wri
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace(': await send();', ': await readProvider(send);'))).toHaveLength(1);
 });
 
+
+test("e2e readiness forbids completion access, request-finished events and networkidle, including optional/computed access", () => {
+  for (const source of [
+    "await response.finished();", "const completion = response?.finished;", 'await response["finished"]();',
+    'await response?.["finished"]?.();', 'await response[`finished`]();',
+    'const completion = response["fin\\u0069shed"];',
+    'await page.waitForEvent("requestfinished");', 'await page["waitForEvent"]("requestfinished");',
+    'await page?.waitForEvent?.(`requestfinished`);', 'page.on("requestfinished", done);',
+    'await page.goto(url, { waitUntil: "networkidle" });', 'await page.waitForLoadState("networkidle");',
+    'await page.waitForURL(url, { waitUntil: "networkidle" });', 'await page.setContent(html, { waitUntil: "networkidle" });',
+    'await page["waitForLoadState"]?.("networkidle");',
+  ]) expect(checkE2EReadiness("apps/web/e2e/nested/example.e2e.ts", source)).toHaveLength(1);
+  expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", "// response.finished()\nawait response?.finished();")[0]).toContain(":2:");
+});
+
+test("e2e readiness ignores comments and inert strings and permits explicit HTTP-contract assertions", () => {
+  const source = [
+    "// await response.finished();",
+    'const text = "networkidle"; const example = `response.finished()`;',
+    'const response = await page.waitForResponse("/api/v1/sessions");',
+    "expect(response.status()).toBe(200);",
+    "expect(await response.json()).toMatchObject({ sessions: [] });",
+    'await page.goto(origin, { waitUntil: "domcontentloaded" });',
+    'await expect(page.locator("#ready")).toHaveText("Ready");',
+  ].join("\n");
+  expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", source)).toEqual([]);
+  expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", 'await page.waitForResponse("/api/v1/sessions");')).toHaveLength(1);
+  expect(checkE2EReadiness("apps/web/test/example.test.ts", "response.finished()")).toEqual([]);
+});
+
+test("HTTP assertion exemptions never cross scopes, shadowing or a response reassignment", () => {
+  for (const source of [
+    'test("a", async () => { const response = await page.waitForResponse(url); }); test("b", () => { const response = other; expect(response.status()).toBe(200); });',
+    'async function scenario() { const response = await page.waitForResponse(url); { const response = other; expect(response.status()).toBe(200); } }',
+    'async function scenario() { let response = await page.waitForResponse(url); response = other; expect(response.status()).toBe(200); }',
+    'async function scenario() { const response = await page.waitForResponse(url); function later(response) { expect(response.status()).toBe(200); } }',
+    'async function scenario() { const response = await page.waitForResponse(url); const later = response => expect(response.status()).toBe(200); }',
+    'async function scenario() { var response = await page.waitForResponse(url); var response = other; expect(response.status()).toBe(200); }',
+  ]) expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", source)).toHaveLength(1);
+});
+
+test("race-free response contracts support destructuring, promise aliases, annotations and inline awaits", () => {
+  for (const source of [
+    'const [response] = await Promise.all([page.waitForResponse(url), page.click("#go")]); expect(response.status()).toBe(200);',
+    'const [, response] = await Promise.all([page.click("#go"), page.waitForResponse(url)]); expect(response.status()).toBe(200);',
+    'const pending = page.waitForResponse(url); await page.click("#go"); const response = await pending; expect(response.status()).toBe(200);',
+    'const pending = page.waitForResponse(url); await page.click("#go"); expect((await pending).status()).toBe(200);',
+    'const response: Response = await page.waitForResponse(url); expect(response.status()).toBe(200);',
+    'expect((await page.waitForResponse(url)).status()).toBe(200);',
+    'const response = await page.waitForResponse(url); expect(response.status()).not.toBe(500);',
+  ]) expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", source)).toEqual([]);
+});
+
+test("completion access cannot hide a literal behind nested parentheses", () => {
+  for (const source of [
+    'await response[("finished")]();', 'await response?.[((("finished")))]?.();',
+    'const completion = response[((`finished`))];',
+  ]) expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", source)).toHaveLength(1);
+});
+
+test("startup-retry browser regressions install and freeze their clock before first navigation", async () => {
+  for (const [file, title] of [
+    ["availability-lifecycle.e2e.ts", "await page.clock.install({ time });"],
+    ["network-recovery.e2e.ts", 'await page.clock.install({ time: new Date("2026-10-25T01:30:00Z") });'],
+  ]) {
+    const source = await readFile(new URL(`../apps/web/e2e/${file}`, import.meta.url), "utf8");
+    const controlled = source.slice(source.indexOf(title!));
+    expect(controlled.indexOf("await page.clock.pauseAt(")).toBeLessThan(controlled.indexOf("await page.goto("));
+  }
+});

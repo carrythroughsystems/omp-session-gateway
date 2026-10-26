@@ -36,8 +36,12 @@ export default defineConfig({
   testMatch: "*.e2e.ts",
   fullyParallel: false,
   workers: playwrightWorkers(),
-  reporter: [["line"]],
+  retries: process.env.CI === "true" || process.env.CI === "1" ? 1 : 0,
+  reporter: [["line"], [fileURLToPath(new URL("../../scripts/browser-flake-reporter.ts", import.meta.url)), { lane: "browser-notifications" }]],
   use: {
+    trace: "off",
+    video: "off",
+    screenshot: "off",
     browserName: "chromium",
     hasTouch: true,
     isMobile: true,
