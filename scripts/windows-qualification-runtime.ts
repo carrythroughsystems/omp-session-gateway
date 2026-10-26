@@ -37,6 +37,7 @@ interface Access extends Record<string, unknown> {
   standardUser?: { account: string; password: string };
   standardConfigDigest?: string;
   standardCredentialDigest?: string;
+  uploads?: Partial<Record<"candidate.tar" | "predecessor.tar" | "source.tar", "started" | "complete">>;
 }
 /** The WinRM and RDP account for `principal`, refusing the standard one before it exists. */
 function account(access: Access, principal: WindowsPrincipal): { readonly account: string; readonly password: string } {
@@ -172,6 +173,9 @@ export async function command(argv: readonly string[], options: {
     if (inputFailed || sentSignal !== 0 || !(options.allowedExitCodes ?? [0]).includes(exit.code)) {
       throw new WindowsCommandFailure(exit.code, controllerDeadline, sentSignal, performance.now() - started, timeoutMs);
     }
+    if (options.execution?.signal.aborted || (options.execution && performance.now() >= options.execution.deadline)) {
+      throw windowsFailure("deadline_exceeded", "command", "unknown", {}, options.execution);
+    }
     return out.trim();
   } finally {
     terminate(false);
@@ -251,7 +255,10 @@ export async function verifyWindowsStaleLaunch(origin: string, session: Record<s
     const payload = await response.json() as Record<string, unknown>;
     const released = Object.hasOwn(payload, "capability");
     delete payload.capability;
-    if (response.status !== 409 || released || !response.headers.get("cache-control")?.includes("no-store")) throw new Error("stale generation did not fail closed with 409");
+    if (response.status !== 409 || released || !response.headers.get("cache-control")?.includes("no-store")) {
+      const failure = windowsFailure("assertion_failed", "output", "confirmed");
+      failure.message = "stale generation did not fail closed with 409"; throw failure;
+    }
   }
   return { staleViewStatus: 409, staleControlStatus: 409 };
 }
@@ -287,8 +294,26 @@ type WindowsUploadStep = "existence/hash" | "remove" | "stream";
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+const interruptedUploadTransports = new WeakSet<QualificationFailure>();
+/** Helper diagnostics are already redacted in Python; keep their bounded shape out of evidence. */
+function withWinrmDiagnostic(error: QualificationFailure, value: Record<string, unknown>): QualificationFailure {
+  if (typeof value.diagnostic !== "string" || value.diagnostic.length > 512) return error;
+  const exception = value.exception;
+  if (exception !== undefined) {
+    if (!object(exception) || Object.keys(exception).sort().join(",") !== "frames,message,type,uploadStep" ||
+      typeof exception.type !== "string" || !/^[A-Za-z0-9_]{1,120}$/u.test(exception.type) ||
+      typeof exception.message !== "string" || exception.message.length > 2048 ||
+      !(exception.uploadStep === null || ["existence/hash", "remove", "stream"].includes(String(exception.uploadStep))) ||
+      !Array.isArray(exception.frames) || exception.frames.length > 16 || exception.frames.some(frame =>
+        !object(frame) || Object.keys(frame).sort().join(",") !== "file,function,line" ||
+        typeof frame.file !== "string" || !/^[A-Za-z0-9_.<>-]{1,120}$/u.test(frame.file) ||
+        typeof frame.function !== "string" || !/^[A-Za-z0-9_.<>-]{1,120}$/u.test(frame.function) ||
+        !Number.isSafeInteger(frame.line) || Number(frame.line) < 1)) return error;
+  }
+  return new QualificationFailure(error.evidence, { cause: new Error(windowsWinrmDiagnostic(value as Parameters<typeof windowsWinrmDiagnostic>[0])) });
+}
 /** Only closed helper evidence is classification; diagnostics stay outside the failure record. */
-export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?: WindowsExecutionContext): Record<string, unknown> {
+export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?: WindowsExecutionContext, upload = false): Record<string, unknown> {
   const invalid = () => windowsFailure("helper_failed", "output", readOnly ? "read_only" : "unknown", {}, execution);
   if (!object(value) || !Number.isInteger(value.exitCode) || typeof value.stdout !== "string" ||
     value.stdout.length > 1024 * 1024 || !object(value.teardown) ||
@@ -311,39 +336,60 @@ export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?
       : value.exitCode !== -1) || (failure.kind === "helper" && failure.condition !== "helper_failure")) throw invalid();
   const step = failure.stage as "connection" | "command" | "output" | "upload";
   if (failure.kind === "transport" && failure.condition === "authentication") {
-    throw windowsFailure("authentication_failed", step, readOnly ? "read_only" : "unknown", {}, execution);
+    throw withWinrmDiagnostic(windowsFailure("authentication_failed", step, readOnly ? "read_only" : "unknown", {}, execution), value);
   }
   if (readOnly && failure.kind === "transport") {
     if (["connection_timeout", "connection_reset", "read_timeout"].includes(String(failure.condition))) {
-      throw windowsFailure(failure.condition as "connection_timeout" | "connection_reset" | "read_timeout",
-        step, "read_only", { transportFailure: true }, execution);
+      throw withWinrmDiagnostic(windowsFailure(failure.condition as "connection_timeout" | "connection_reset" | "read_timeout",
+        step, "read_only", { transportFailure: true }, execution), value);
     }
     if (failure.condition === "retryable_http" && (failure.httpStatus === 429 || Number(failure.httpStatus) >= 500)) {
-      throw windowsFailure("retryable_service_failure", step, "read_only", { httpStatus: Number(failure.httpStatus) }, execution);
+      throw withWinrmDiagnostic(windowsFailure("retryable_service_failure", step, "read_only", { httpStatus: Number(failure.httpStatus) }, execution), value);
     }
   }
-  throw windowsFailure(readOnly || failure.kind !== "transport" ? "helper_failed" : "mutation_unconfirmed", step,
-    readOnly ? "read_only" : failure.disposition === "not_started" ? "not_started" : failure.disposition === "confirmed" ? "confirmed" : "unknown", {}, execution);
+  const error = withWinrmDiagnostic(windowsFailure(readOnly || failure.kind !== "transport" ? "helper_failed" : "mutation_unconfirmed", step,
+    readOnly ? "read_only" : failure.disposition === "not_started" ? "not_started" : failure.disposition === "confirmed" ? "confirmed" : "unknown", {}, execution), value);
+  if (upload && !readOnly && failure.kind === "transport" && failure.disposition !== "confirmed" &&
+    (["connection_timeout", "connection_reset", "read_timeout"].includes(String(failure.condition)) ||
+      (failure.condition === "retryable_http" && (failure.httpStatus === 429 || Number(failure.httpStatus) >= 500)))) {
+    interruptedUploadTransports.add(error);
+  }
+  throw error;
 }
 
 export async function reconnectWindowsTransport<T>(probe: (timeoutMs: number) => Promise<T>,
   clock: Pick<WindowsRuntime, "now" | "sleep">, execution?: WindowsExecutionContext): Promise<T> {
   const deadline = clock.now() + 90_000;
   const delays = [2_000, 4_000, 8_000, 16_000];
-  for (let attempt = 0; ; attempt += 1) {
+  const assertExecution = () => {
     if (execution?.signal.aborted || (execution && performance.now() >= execution.deadline)) {
       throw windowsFailure("deadline_exceeded", "connection", "read_only", {}, execution);
     }
+  };
+  for (let attempt = 0; ; attempt += 1) {
+    assertExecution();
     try {
       const result = await probe(Math.max(1, Math.min(deadline - clock.now(), (execution?.deadline ?? Infinity) - performance.now())));
+      assertExecution();
       if (clock.now() > deadline) throw windowsFailure("deadline_exceeded", "connection", "read_only", {}, execution);
       return result;
     }
     catch (error) {
+      assertExecution();
       if (!(error instanceof QualificationFailure) || error.evidence.class !== "infra_transient") throw error;
       const delay = delays[attempt];
       if (delay === undefined || clock.now() + delay >= deadline) throw error;
-      await clock.sleep(delay);
+      if (execution === undefined) await clock.sleep(delay);
+      else {
+        // Await every owned sleep; never abandon a Promise.race loser on cancellation.
+        let remaining = delay;
+        while (remaining > 0) {
+          assertExecution();
+          const slice = Math.min(remaining, 100, execution.deadline - performance.now());
+          await clock.sleep(slice); remaining -= slice;
+          assertExecution();
+        }
+      }
     }
   }
 }
@@ -356,13 +402,32 @@ export async function reconcileWindowsUpload(operations: {
 }, execution?: WindowsExecutionContext): Promise<void> {
   try { await operations.stream(); return; }
   catch (error) {
-    if (!(error instanceof QualificationFailure) || error.evidence.reason !== "mutation_unconfirmed") throw error;
+    if (!(error instanceof QualificationFailure) || !interruptedUploadTransports.has(error)) throw error;
     const found = await operations.inspect();
     if (found.writerEnded && found.matches) return;
     if (found.writerEnded && found.exists) await operations.remove();
     throw windowsFailure("mutation_unconfirmed", "upload", "unknown",
       { mutationReconciled: found.writerEnded }, execution);
   }
+}
+
+/** A durable started claim fences same-epoch development re-entry, including unknown exits. */
+export async function windowsUploadOnce(operations: {
+  state: () => Promise<"started" | "complete" | undefined>;
+  checkpoint: (state: "started" | "complete") => Promise<void>;
+  upload: () => Promise<void>;
+  verify: () => Promise<boolean>;
+}, execution?: WindowsExecutionContext): Promise<void> {
+  const state = await operations.state();
+  if (state !== undefined && state !== "started" && state !== "complete") throw windowsFailure("helper_failed", "upload", "unknown", {}, execution);
+  if (state === "started") throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, execution);
+  if (state === "complete") {
+    if (await operations.verify()) return;
+    throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, execution);
+  }
+  await operations.checkpoint("started");
+  await operations.upload();
+  await operations.checkpoint("complete");
 }
 
 /** Add only the Python helper's redacted message and source-free traceback to its legacy diagnostic. */
@@ -488,7 +553,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
         timeoutMs: Math.max(1, Math.floor(timeoutMs - (performance.now() - started))), allowedExitCodes: [0, 1], ...(transportProbe === undefined ? {} : { transportProbe }),
         ...(execution === undefined ? {} : { execution }),
       }));
-      return windowsWinrmResult(result, !mutation, execution);
+      return windowsWinrmResult(result, !mutation, execution, upload !== undefined);
     } catch (error) {
       if (error instanceof QualificationFailure) throw error;
       if (error instanceof WindowsCommandFailure) {
@@ -512,7 +577,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       ? reconnectWindowsTransport(execute, { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution)
       : execute();
   };
-  const upload = async (context: WindowsContext, local: string, name: string) => {
+  const upload = async (context: WindowsContext, local: string, name: "candidate.tar" | "predecessor.tar" | "source.tar") => {
     const expected = digest(await readFile(local));
     const destinationPath = `C:\\omp-winqual-${context.epoch}\\${name}`;
     const inspect = async () => {
@@ -543,15 +608,26 @@ if ($exists) {
       return windowsUploadStep("remove", step => winrm(context, "param($p)\nRemove-Item -LiteralPath $p.path -Force\n'{\"removed\":true}'",
         { path: destinationPath }, undefined, undefined, true, "administrator", undefined, step));
     };
-    const found = await inspect();
-    if (found.matches === true) return;
-    if (found.exists === true) {
-      if (!found.writerEnded) throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, context.execution);
-      await remove();
-    }
-    await context.beforeEffect();
-    await reconcileWindowsUpload({ inspect, remove,
-      stream: () => windowsUploadStep("stream", step => winrm(context, "", undefined, 900_000, { sourcePath: local, destinationPath }, true, "administrator", undefined, step)),
+    await windowsUploadOnce({
+      state: async () => (await loadAccess(context.epoch)).uploads?.[name],
+      checkpoint: async state => {
+        await context.beforeEffect();
+        const access = await loadAccess(context.epoch);
+        await atomicPrivate(vaultPath(context.epoch), { ...access, uploads: { ...access.uploads, [name]: state } });
+      },
+      verify: async () => { const found = await inspect(); return found.matches && found.writerEnded; },
+      upload: async () => {
+        const found = await inspect();
+        if (found.matches && found.writerEnded) return;
+        if (found.exists) {
+          if (!found.writerEnded) throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, context.execution);
+          await remove();
+        }
+        await context.beforeEffect();
+        await reconcileWindowsUpload({ inspect, remove,
+          stream: () => windowsUploadStep("stream", step => winrm(context, "", undefined, 900_000, { sourcePath: local, destinationPath }, true, "administrator", undefined, step)),
+        }, context.execution ?? options.execution);
+      },
     }, context.execution ?? options.execution);
   };
   const poll = async (action: () => Promise<boolean>, ms: number, name: string, execution?: WindowsExecutionContext) => {
@@ -642,6 +718,7 @@ if ($exists) {
       await atomicPrivate(vaultPath(epoch), { ...await existingAccess(epoch), instance: instance.id, host: instance.main_ip ?? "", password: instance.default_password });
     },
     async removeAccess(epoch) { await rm(vaultPath(epoch), { force: true }); },
+    async hasAccess(epoch) { return await existingAccess(epoch) !== undefined; },
     async cleanupInstance(epoch) {
       const access = await existingAccess(epoch);
       if (!access?.instance) return undefined;

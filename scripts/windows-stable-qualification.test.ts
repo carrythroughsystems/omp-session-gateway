@@ -224,6 +224,52 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; li
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test("R1 late firewall residue retains vault and dirty checkpoint", async () => {
+    const f = fixture(); await f.run();
+    let listings = 0;
+    f.runtime.provider.firewalls = async () => ++listings === 1 ? [] : f.firewalls;
+    await expect(f.clean()).rejects.toThrow("firewallResidue");
+    expect(f.events).not.toContain("vaultRemoved");
+    expect(windowsNeedsCleanup(f.progress)).toBe(true);
+  });
+  test("R1 completion checkpoint precedes vault removal and survives a crash at that boundary", async () => {
+    const f = fixture(); await f.run();
+    let vaultPresent = true;
+    f.runtime.removeAccess = async () => {
+      expect(windowsNeedsCleanup(f.progress)).toBe(false);
+      vaultPresent = false; throw new Error("synthetic crash after vault unlink");
+    };
+    await expect(f.clean()).rejects.toThrow();
+    expect(vaultPresent).toBe(false);
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
+    f.runtime.restorePixel = async () => { throw new Error("missing vault cannot restore Pixel"); };
+    f.runtime.removeAccess = async () => {};
+    await f.clean();
+  });
+  test("R1 missing completion checkpoint must retain recovery vault", async () => {
+    const f = fixture(); await f.run();
+    await expect(cleanupWindows({ identity, progress: f.progress, runtime: f.runtime, pixel: f.pixel,
+      checkpoint: async next => { if (next.cleanupRequired === false) throw new Error("synthetic disk failure"); await f.checkpoint(next); },
+    })).rejects.toThrow();
+    expect(f.events).not.toContain("vaultRemoved"); expect(windowsNeedsCleanup(f.progress)).toBe(true);
+  });
+  test("R1 missing vault without committed completion stays blocked", async () => {
+    const f = fixture(); await f.run();
+    f.runtime.hasAccess = async () => false;
+    await expect(f.clean()).rejects.toThrow("vaultState");
+    expect(windowsNeedsCleanup(f.progress)).toBe(true);
+    expect(f.events).not.toContain("vaultRemoved");
+  });
+  test("R1 guest failure after reconnect skips remaining guest mutations", async () => {
+    const f = fixture(); await f.run(); f.events.length = 0;
+    const original = f.runtime.guest;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "stopOmp") throw windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true });
+      return original(context, action, principal);
+    };
+    expect(await f.clean()).toMatchObject({ guestCleanupFailures: 1 });
+    for (const action of ["uninstall@standard", "resetServe@standard", "logout@standard"]) expect(f.events).not.toContain(action);
+  });
   test("completed evidence retains separate transport probe observations", async () => {
     const f = fixture(); const original = f.runtime.guest;
     const probes: WindowsTransportProbe[] = [];
@@ -379,7 +425,7 @@ describe("Windows qualification ownership and failure paths", () => {
     const f = fixture({ fail: "resetServe" }); await f.run();
     expect(await f.clean()).toMatchObject({ guestCleanupFailures: 1, instancesRemaining: 0 });
     // After the handover only the standard account may operate Tailscale and its own gateway.
-    expect(f.events).toContain("logout@standard"); expect(f.events).toContain("uninstall@standard"); expect(f.events).toContain("tailnetDeleted"); expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+    expect(f.events).not.toContain("logout@standard"); expect(f.events).toContain("uninstall@standard"); expect(f.events).toContain("tailnetDeleted"); expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
     await f.clean(); expect(windowsNeedsCleanup(f.progress)).toBe(false);
   });
   test("a confirmed absent VM skips every guest command but still proves external cleanup", async () => {
@@ -500,6 +546,12 @@ describe("Windows qualification ownership and failure paths", () => {
 });
 
 describe("Windows stale launch HTTP boundary", () => {
+  test("R1 a stale-launch contract violation is typed product evidence", async () => {
+    const failure = await verifyWindowsStaleLaunch("https://synthetic.invalid", { instanceId: "synthetic-session", generation: 1 },
+      async () => new Response("{}", { status: 200 })).catch(error => error);
+    expect(failure).toBeInstanceOf(QualificationFailure);
+    expect(failure.evidence).toMatchObject({ class: "product", reason: "assertion_failed" });
+  });
   test("both modes refuse a stale generation without releasing a value", async () => {
     const modes: string[] = [];
     const fake = async (_url: string, options: RequestInit) => { modes.push(JSON.parse(String(options.body)).mode); return new Response('{"error":"generation_mismatch"}', { status: 409, headers: { "cache-control": "no-store" } }); };

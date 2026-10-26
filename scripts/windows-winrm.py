@@ -13,13 +13,13 @@ from urllib.parse import quote
 
 try:
     from winrm.protocol import Protocol
-    from requests.exceptions import ConnectTimeout, ReadTimeout
+    from requests.exceptions import ConnectTimeout, ReadTimeout, ConnectionError as RequestsConnectionError
     from winrm.exceptions import InvalidCredentialsError, WinRMTransportError
     IMPORT_ERROR = None
 except ImportError as error:
     # Import/encoding faults are helper failures, never transport evidence.
     IMPORT_ERROR = error
-    ConnectTimeout = ReadTimeout = InvalidCredentialsError = WinRMTransportError = ()
+    ConnectTimeout = ReadTimeout = RequestsConnectionError = InvalidCredentialsError = WinRMTransportError = ()
 
 # The remote command line is constant. The script and its input travel on the encrypted
 # WinRS input stream, not -EncodedCommand, environment variables, or temporary scripts.
@@ -128,6 +128,9 @@ def failure_detail(error, stage, disposition):
 
 def connection_reset(error):
     """requests/urllib3 wrap socket resets in exception args, never classify their text."""
+    if not (isinstance(error, ConnectionError) or isinstance(error, RequestsConnectionError) or
+            (isinstance(error, OSError) and error.errno == errno.ECONNRESET)):
+        return False
     pending, seen = [error], set()
     for _ in range(16):
         if not pending:
@@ -207,22 +210,28 @@ def main(request=None):
         # A guest whose WinRM service is still settling can finish the command and then refuse the
         # teardown. The response stays the only line on stdout, and the error that ended the command,
         # if any, is the one reported; the service expires an abandoned shell on its own.
+        interruption = None
         if command is not None:
             teardown['commandAttempted'] = True
             try:
                 protocol.cleanup_command(shell, command)
                 teardown['commandStopped'] = True
-            except Exception:
-                pass
+            except BaseException as error:
+                if not isinstance(error, Exception):
+                    interruption = error
         if shell is not None:
             teardown['shellAttempted'] = True
             try:
                 protocol.close_shell(shell)
                 teardown['shellClosed'] = True
-            except Exception:
-                pass
+            except BaseException as error:
+                if not isinstance(error, Exception) and interruption is None:
+                    interruption = error
         if result is not None:
             result['teardown'] = teardown
+        if interruption is not None:
+            interruption.winrm_result = result
+            raise interruption
     print(json.dumps(result))
 
 
