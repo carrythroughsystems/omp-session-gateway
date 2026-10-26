@@ -263,7 +263,9 @@ async function observeWindowsLaunch(origin: string, session: Record<string, unkn
       });
     } catch { throw windowsFailure("helper_failed", "connection", "read_only"); }
     if (response.status !== (expected === "stale" ? 409 : 200) || !response.headers.get("cache-control")?.includes("no-store")) {
-      try { await response.body?.cancel(); } finally { throw assertion(); }
+      const failure = assertion();
+      try { await response.body?.cancel(); } catch { throw failure; }
+      throw failure;
     }
     let payload: unknown;
     try { payload = await response.json(); } catch { throw windowsFailure("helper_failed", "output", "read_only"); }
