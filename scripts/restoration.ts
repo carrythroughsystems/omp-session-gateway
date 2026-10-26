@@ -1,4 +1,9 @@
-/** Attempt every restoration step without replacing the body's error or losing its identity. */
+/**
+ * Attempt every restoration step without replacing the body's error or losing its identity.
+ * Keep QualificationFailure and DeviceCloudAvailabilityHold leaves intact in AggregateError.errors:
+ * campaign normalization must see typed roots alongside cleanup failures, never a message/cause
+ * wrapper that hides one. Do not normalize here: failure IDs belong to the whole attempt.
+ */
 export async function runWithRestoration<T>(
   label: string,
   body: () => T | Promise<T>,

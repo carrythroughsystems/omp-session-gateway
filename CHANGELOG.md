@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Closed qualification failure and machine-outcome contracts, private atomic outcome persistence,
+  and additive schema-3 receipt validation. Unknown, mixed, unresolved or unbound failures remain
+  non-retryable; this change does not enable automatic recovery or reinterpret historical failures.
+
 ## [v0.9.0] — 2026-10-25
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 44 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.

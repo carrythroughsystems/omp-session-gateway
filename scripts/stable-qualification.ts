@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/pr
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { PRODUCT_VERSION as VERSION } from "./build-release.ts";
 import { runAdb, parseAndroidPackageVersion, readAndroidQualificationPin, requireAndroidDevicePreconditions, requireAndroidGatewayReachability, requireSingleDevice, resolveAndroidBrowserTarget } from "./android-device.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
@@ -17,6 +18,8 @@ import { deviceCloudHolds, type DeviceCloudHold } from "./device-cloud-availabil
 import { parseDeviceCloudHoldSet, recognizedDeviceCloudOutcome, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
+import { FAILURE_LIMITS, parseLaneFailure, parseLaneTimings, parseQualificationFailureSummary, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
+import { parseQualificationExecution, parseRigReadinessReceipt, type QualificationExecution, type RigReadinessReceipt } from "./qualification-outcome.ts";
 
 const REPOSITORY = "carrythroughsystems/omp-session-gateway";
 const ESCAPED_VERSION = VERSION.replaceAll(".", "\\.");
@@ -114,6 +117,9 @@ export interface LaneReceipt {
   completedAt?: string;
   evidence?: Record<string, unknown>;
   error?: string;
+  /** Additive evidence only: absence never grants automatic recovery authority. */
+  failure?: readonly LaneFailure[];
+  timings?: LaneTimings;
 }
 
 export interface CandidateIdentity {
@@ -138,6 +144,9 @@ export interface StableQualificationReceipt {
   macHost?: string;
   lanes: Record<StableQualificationLane, LaneReceipt>;
   error?: string;
+  execution?: QualificationExecution;
+  failureSummary?: QualificationFailureSummary;
+  rigReadiness?: RigReadinessReceipt;
 }
 
 export interface StableQualificationOptions {
@@ -470,7 +479,55 @@ export function validateStableQualificationReceipt(
       throw new Error(`qualification receipt lane ${name} is invalid`);
     }
   }
+  validateReceiptExecution(receipt as StableQualificationReceipt);
   return receipt as StableQualificationReceipt;
+}
+
+/** Validate new authority-bearing fields without rewriting or upgrading historical schema-3 receipts. */
+function validateReceiptExecution(receipt: StableQualificationReceipt): void {
+  const execution = receipt.execution === undefined ? undefined : parseQualificationExecution(receipt.execution);
+  if (execution !== undefined) {
+    const binding = execution.binding;
+    if (binding.candidateTag !== receipt.tag || binding.previousTag !== receipt.previousTag ||
+      binding.orchestratorCommit !== receipt.orchestratorCommit ||
+      (receipt.candidate !== undefined && (receipt.candidate.tag !== binding.candidateTag ||
+        receipt.candidate.sourceCommit !== binding.sourceCommit || receipt.candidate.archiveSha256 !== binding.archiveSha256)) ||
+      (receipt.macHost !== undefined && createHash("sha256").update(receipt.macHost).digest("hex") !== binding.macHostSha256)) {
+      throw new Error("qualification receipt execution binding is invalid");
+    }
+  }
+  const summary = receipt.failureSummary === undefined ? undefined : parseQualificationFailureSummary(receipt.failureSummary);
+  if (summary !== undefined && (execution === undefined || receipt.status !== "failed")) {
+    throw new Error("qualification receipt failure summary is unbound or nonterminal");
+  }
+  if (receipt.rigReadiness !== undefined) {
+    const readiness = parseRigReadinessReceipt(receipt.rigReadiness);
+    if (execution === undefined || readiness.campaignAttempt !== execution.campaignAttempt) {
+      throw new Error("qualification receipt readiness attempt is unbound");
+    }
+  }
+  const ids = new Set<number>();
+  for (const name of LANE_NAMES) {
+    const lane = receipt.lanes[name];
+    if (lane.timings !== undefined) parseLaneTimings(name, lane.timings);
+    if (lane.failure === undefined) continue;
+    if (execution === undefined || lane.status !== "failed" || !Array.isArray(lane.failure) ||
+      lane.failure.length < 1 || lane.failure.length > FAILURE_LIMITS.records) {
+      throw new Error("qualification receipt lane failure is invalid");
+    }
+    const failures = lane.failure.map(parseLaneFailure);
+    for (const failure of failures) {
+      if (failure.lane !== name || ids.has(failure.id)) throw new Error("qualification receipt lane failure identity is invalid");
+      ids.add(failure.id);
+      if (summary !== undefined) {
+        const recorded = summary.failures.find(item => item.id === failure.id);
+        if (recorded === undefined || !isDeepStrictEqual(recorded, failure)) {
+          throw new Error("qualification receipt lane failure differs from its summary");
+        }
+      }
+    }
+  }
+  if (ids.size > FAILURE_LIMITS.records) throw new Error("qualification receipt failure count is invalid");
 }
 
 function assertNoSecretFields(value: unknown, path = "receipt"): void {
@@ -489,6 +546,7 @@ function assertNoSecretFields(value: unknown, path = "receipt"): void {
 
 async function saveReceipt(path: string, receipt: StableQualificationReceipt): Promise<void> {
   receipt.updatedAt = now();
+  validateReceiptExecution(receipt);
   assertNoSecretFields(receipt);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await chmod(dirname(path), 0o700);

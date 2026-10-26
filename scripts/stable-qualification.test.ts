@@ -46,6 +46,8 @@ import {
 import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-qualification.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
+import type { QualificationExecution } from "./qualification-outcome.ts";
+import type { LaneFailure } from "./qualification-failure.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
 // Derived exactly as the orchestrator derives it, so this suite cannot pass against a predecessor
@@ -1441,6 +1443,98 @@ test("receipt identity cannot mix passed lanes across orchestrator commits", () 
   expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, "v0.2.0")).toThrow(
     "rollback predecessors",
   );
+});
+
+test("legacy schema-3 receipts have no implicit automatic retry evidence", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  expect(validateStableQualificationReceipt(JSON.parse(JSON.stringify(receipt)), TAG, COMMIT, PREVIOUS_TAG)).toEqual(receipt);
+  expect(Object.hasOwn(receipt, "execution")).toBe(false);
+  expect(Object.hasOwn(receipt, "failureSummary")).toBe(false);
+});
+
+test("schema-3 parsing rejects malformed additive retry and readiness fields", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  for (const field of ["execution", "failureSummary", "rigReadiness"]) {
+    expect(() => validateStableQualificationReceipt({ ...receipt, [field]: {} }, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  }
+  for (const field of ["failure", "timings"]) {
+    const lanes = { ...receipt.lanes, windows: { ...receipt.lanes.windows, [field]: { host: "SYNTHETIC_PRIVATE_HOST" } } };
+    expect(() => validateStableQualificationReceipt({ ...receipt, lanes }, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  }
+});
+
+function receiptExecution(): QualificationExecution {
+  return { formatVersion: 1, campaignAttempt: 0, binding: {
+    candidateTag: TAG, previousTag: PREVIOUS_TAG, sourceCommit: COMMIT, archiveSha256: "b".repeat(64),
+    orchestratorCommit: COMMIT, policySha256: "c".repeat(64), macHostSha256: digest(MAC_ENV.OMP_STABLE_MAC_HOST),
+  } };
+}
+
+test("schema-3 additive fields round trip without changing passed historical proofs", async () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  const failure: LaneFailure = { id: 1, lane: "windows", step: "transport_ready", class: "infra_transient",
+    reason: "connection_timeout", elapsedMs: 90_000, operation: "read_only", observations: { transportFailure: true } };
+  receipt.execution = receiptExecution();
+  receipt.macHost = MAC_ENV.OMP_STABLE_MAC_HOST;
+  receipt.candidate = { tag: TAG, sourceCommit: COMMIT, archiveSha256: receipt.execution.binding.archiveSha256 };
+  receipt.status = "failed";
+  receipt.lanes.debian = { status: "passed", attempts: 1, evidence: { historicalProof: true } };
+  receipt.lanes.windows = { status: "failed", attempts: 1, failure: [failure], timings: { transport_ready: 90_000 } };
+  receipt.failureSummary = { failures: [failure], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
+    containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } };
+  receipt.rigReadiness = { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored",
+    observations: { quotaObservable: false }, timings: { cleanup: 100 } };
+  const root = await mkdtemp(join(tmpdir(), "qualification-receipt-contract-"));
+  try {
+    const path = join(root, "receipt.json");
+    await createReceiptPersister(path, receipt)();
+    const parsed = validateStableQualificationReceipt(JSON.parse(await readFile(path, "utf8")), TAG, COMMIT, PREVIOUS_TAG);
+    expect(parsed).toEqual(receipt);
+    expect(parsed.schemaVersion).toBe(3);
+    expect(parsed.lanes.debian).toEqual({ status: "passed", attempts: 1, evidence: { historicalProof: true } });
+    for (const mutate of [
+      () => { parsed.execution = { ...receiptExecution(), binding: { ...receiptExecution().binding, sourceCommit: "d".repeat(40) } }; },
+      () => { parsed.execution = { ...receiptExecution(), binding: { ...receiptExecution().binding, macHostSha256: "d".repeat(64) } }; },
+    ]) {
+      mutate();
+      expect(() => validateStableQualificationReceipt(parsed, TAG, COMMIT, PREVIOUS_TAG)).toThrow("execution binding");
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("additive receipt failures reject foreign lanes, inconsistent summaries and unbound attempts", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.execution = receiptExecution();
+  receipt.status = "failed";
+  const failure: LaneFailure = { id: 1, lane: "windows", step: "transport_ready", class: "harness",
+    reason: "unclassified_failure", elapsedMs: 1, operation: "unknown", observations: {} };
+  receipt.lanes.windows = { status: "failed", attempts: 1, failure: [failure] };
+  receipt.failureSummary = { failures: [{ ...failure, elapsedMs: 2 }], timings: { attemptMs: 10, cleanupMs: 1 },
+    containment: { proven: false, cleanupComplete: false, unresolvedMutation: true } };
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow("differs");
+  delete receipt.failureSummary;
+  receipt.lanes.android = { status: "failed", attempts: 1, failure: [failure] };
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow("identity");
+  delete receipt.lanes.android.failure;
+  delete receipt.execution;
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test("readiness fields and outcome evidence cannot persist identifiers or fabricated quota metadata", async () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.execution = receiptExecution();
+  const root = await mkdtemp(join(tmpdir(), "qualification-receipt-private-"));
+  const path = join(root, "receipt.json");
+  try {
+    for (const observations of [{ host: "SYNTHETIC_PRIVATE_HOST" }, { quotaObservable: false, quotaAvailable: 10 }]) {
+      Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 0, cleanupDisposition: "restored", observations, timings: {} } });
+      expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+      await expect(createReceiptPersister(path, receipt)()).rejects.toThrow();
+      expect(await readdir(root)).toEqual([]);
+    }
+    Object.assign(receipt, { rigReadiness: { status: "failed", campaignAttempt: 1, cleanupDisposition: "restored", observations: {}, timings: {} } });
+    expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow("unbound");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("receipt-driven Mac cleanup survives restarts and reopens before renewed effects", () => {
