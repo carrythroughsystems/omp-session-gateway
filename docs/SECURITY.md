@@ -497,7 +497,8 @@ Push events retain only process-local numeric sequence, kind flags, subscription
 and HTTP status. Provider acknowledgement is acceptance, not phone presentation. Collector windows
 use event indices and require a unique queue/send; simultaneous sends, rotation gaps, missing or
 invalid telemetry never authorize recovery by time proximity. Request identities remain volatile.
-A late post cannot satisfy a fresh ask: the existing worker must attest its exact request/generation.
+A late post cannot satisfy a fresh ask: the existing worker must attest its exact request and the
+authoritative snapshot must retain its generation.
 At most one evidence-backed fresh ask is allowed per phase, separate from overlap recovery; all
 privacy assertions and the 60/160-second bounds remain unchanged. The forbidden-sink proof requires
 both raw-stream discard and validated structured-log safety.

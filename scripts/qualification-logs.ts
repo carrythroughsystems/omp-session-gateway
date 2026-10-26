@@ -2,8 +2,9 @@ import { constants, closeSync, fstatSync, openSync, readFileSync, writeSync } fr
 import { join } from "node:path";
 import { assertQualificationLogDirectory, parseQualificationLogEvent, QUALIFICATION_LOG_BYTES, QUALIFICATION_LOG_FILES, type QualificationLogEvent } from "../apps/gateway/src/logger.ts";
 import type { FixtureExecutor } from "./push-qualification-fixture.ts";
+import { FAILURE_STEPS, type QualificationFailureLane } from "./qualification-failure.ts";
 
-export interface QualificationLogWindow { readonly lane: "androidPush" | "rigReadiness"; readonly phase: string; readonly after: number; readonly ordinal: number }
+export interface QualificationLogWindow { readonly lane: QualificationFailureLane; readonly phase: string; readonly after: number; readonly ordinal: number }
 export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number }
 export interface QualificationLogs {
   prepare(): Promise<void>;
@@ -16,7 +17,6 @@ export function qualificationLogDirectory(home: string, epoch: string): string {
   if (!/^\/[A-Za-z0-9._/-]+$/u.test(home) || home.split("/").includes("..") || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(epoch)) throw new Error("invalid qualification log path");
   return `${home}/.local/state/omp-session-gateway/qualification-logs/${epoch}`;
 }
-const phases = ["readiness", "private_verified", "session_verified", "preview_verified", "attention_tap_verified", "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified", "force_stop_verified", "permission_verified", "lock_resume_verified", "network_verified", "doze_verified", "forbidden_sinks_verified"];
 
 export function parseQualificationLogs(texts: readonly string[]): QualificationLogEvent[] {
   if (texts.length > QUALIFICATION_LOG_FILES) throw new Error("qualification logs exceed file bound");
@@ -128,7 +128,8 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
   return {
     async prepare() { await remote("prepare"); },
     async begin(lane, phase) {
-      if (!["androidPush", "rigReadiness"].includes(lane) || !phases.includes(phase) || ordinal >= 256) throw new Error("invalid qualification capture window");
+      if (!Object.hasOwn(FAILURE_STEPS, lane) || (!(FAILURE_STEPS[lane] as readonly string[]).includes(phase) &&
+        !(lane === "rigReadiness" && phase === "readiness")) || ordinal >= 256) throw new Error("invalid qualification capture window");
       const events = await read();
       const window = { lane, phase, after: events.at(-1)?.index ?? 0, ordinal: ++ordinal };
       windows.set(window, []);

@@ -321,7 +321,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       cleanupRequired: true, device: await runtime.device(), browser: null, notificationTopicDigest: null, secondaryNotificationTopicDigest: null, results: {} };
     runtime.beforeEffect = () => input.checkpoint(structuredClone(progress));
     await runtime.beforeEffect();
-    let primary: unknown, delivered = false;
+    let primary: unknown, delivered = false, roundTripMs = 0;
     const metrics = emptyPushDeliveryMetrics();
     const waitSnapshot = async (predicate: (session: SessionMetadata) => boolean) => {
       const deadline = runtime.now() + 90_000;
@@ -343,10 +343,15 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       await runtime.detail("private"); await runtime.closePwa(); await runtime.lock();
       const window = await runtime.beginDeliveryTelemetry?.("readiness");
       if (window === undefined) throw new Error("Push readiness telemetry unavailable");
+      const deliveryStarted = runtime.now();
       await runtime.fixture("ask", progress.epoch);
       const session = await waitSnapshot(session => session.inputRequired);
+      const remaining = PUSH_RECOVERY_MS - (runtime.now() - deliveryStarted);
+      if (remaining <= 0) throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
+        class: "harness", reason: "delivery_timeout", elapsedMs: runtime.now() - deliveryStarted, operation: "read_only", observations: { timeoutMs: PUSH_RECOVERY_MS } });
       await waitForPushDelivery({ runtime, session, detail: "private", kind: "attention", phase: "private_verified",
-        timeout: PUSH_RECOVERY_MS, metrics, window, ...(input.execution === undefined ? {} : { execution: input.execution }) });
+        timeout: remaining, metrics, window, ...(input.execution === undefined ? {} : { execution: input.execution }) });
+      roundTripMs = runtime.now() - deliveryStarted;
       const telemetry = await runtime.deliveryTelemetry?.(window);
       if (telemetry?.sufficient !== true || telemetry.acknowledgements !== 1) throw new Error("Push readiness provider acknowledgement unavailable");
       const start = runtime.now();
@@ -358,7 +363,17 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       }
       metrics.clearMs = runtime.now() - start;
       delivered = true;
-    } catch (error) { primary = error; }
+    } catch (error) {
+      if (error instanceof QualificationFailure && error.evidence.lane === "androidPush") {
+        const evidence = error.evidence;
+        const common = { id: evidence.id, lane: "rigReadiness" as const, step: "pixel_push" as const, elapsedMs: evidence.elapsedMs,
+          operation: evidence.operation, observations: evidence.observations };
+        if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
+        else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" });
+        else if (evidence.reason === "delivery_timeout") primary = new QualificationFailure({ ...common, class: "harness", reason: "delivery_timeout" });
+        else primary = new QualificationFailure({ ...common, class: "harness", reason: "invalid_evidence" });
+      } else primary = error;
+    }
     runtime.beginCleanup?.();
     let cleanup: Record<string, unknown>;
     try { cleanup = await restore(input, runtime, progress); }
@@ -366,7 +381,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       throw Object.assign(new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness restoration failed"), { pixelUnrestored: true });
     }
     if (primary !== undefined) throw primary;
-    return { delivered, acknowledged: true, elapsedMs: metrics.firstDeliveryMs, clearMs: metrics.clearMs, cleanup };
+    return { delivered, acknowledged: true, elapsedMs: roundTripMs, clearMs: metrics.clearMs, cleanup };
   });
 }
 
