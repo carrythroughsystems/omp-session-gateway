@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { SecretCapability, type ObservedSessionInput } from "@omp-session-gateway/protocol";
 import type { GatewayConfig } from "../src/config.ts";
 import { requestHasTrustedDashboardContext, requestHasValidMutationContext } from "../src/auth.ts";
-import { createHttpHandler } from "../src/http.ts";
+import { createHttpHandler, startHttpServer } from "../src/http.ts";
 import { finalizeHttpResponse } from "../src/http-policy.ts";
 import { QualificationLogSink, SafeLogger } from "../src/logger.ts";
 import { PushService } from "../src/push.ts";
@@ -161,6 +161,29 @@ function launchRequest(
     identity,
   );
 }
+
+test.skipIf(process.platform === "win32")("495 round2 HTTP shutdown settles admitted handlers before closing structured logs", async () => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), "http-shutdown-"));
+  const sink = new QualificationLogSink(root);
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const server = startHttpServer({ config: { ...config(), http: { ...config().http, port: 0 } },
+    registry: populatedRegistry(), staticAssets: assets, logger: new SafeLogger(sink), readinessToken: "synthetic-readiness",
+    launchResolver: { async resolve() { entered.resolve(); await release.promise; throw new Error("synthetic handler failure"); } } });
+  let settled = false;
+  const req = launchRequest();
+  const response = fetch(new URL("/api/v1/sessions/http-instance-000001/launch", server.url), {
+    method: "POST", headers: req.headers, body: await req.text(),
+  }).catch(() => undefined);
+  try {
+    await entered.promise;
+    const stopping = server.stop(true).then(() => { settled = true; });
+    await Bun.sleep(10);
+    expect(settled).toBe(false);
+    release.resolve(); await stopping;
+    sink.close();
+    expect(await readFile(join(root, "events.0.jsonl"), "utf8")).toContain('"event":"http.request_failed"');
+  } finally { release.resolve(); await server.stop(true); await response; await rm(root, { recursive: true, force: true }); }
+});
 
 async function readSseEvent(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
   const decoder = new TextDecoder();

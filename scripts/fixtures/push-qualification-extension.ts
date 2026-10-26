@@ -4,6 +4,7 @@ import { join } from "node:path";
 /** Structural subset of the documented OMP 18.3.0 extension API; no private OMP imports. */
 interface Context {
   readonly hasUI: boolean;
+  readonly sessionManager: { getSessionId(): string };
   readonly ui: { select(title: string, choices: string[], options: { signal: AbortSignal }): Promise<string | undefined> };
   isIdle(): boolean;
   abort(): void;
@@ -22,15 +23,19 @@ export const PUSH_FIXTURE_ASK_BODY = "Qualification answer canary";
 export const PUSH_FIXTURE_SESSION_NAME = "Push qualification session";
 export const PUSH_FIXTURE_COMMANDS = ["ask", "answer", "busy", "release", "replace", "stop"] as const;
 export type PushFixtureCommand = (typeof PUSH_FIXTURE_COMMANDS)[number];
-export interface FixtureCommand { readonly sequence: number; readonly operation: PushFixtureCommand }
+export interface FixtureCommand { readonly sequence: number; readonly operation: PushFixtureCommand; readonly expectedSessionId?: string }
 
 export function parseFixtureCommand(value: unknown, epoch: string, previous: number): FixtureCommand {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid fixture command");
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).sort().join(",") !== "epoch,operation,sequence" || record.epoch !== epoch ||
+  const guarded = record.expectedSessionId !== undefined;
+  if (Object.keys(record).sort().join(",") !== (guarded ? "epoch,expectedSessionId,operation,sequence" : "epoch,operation,sequence") || record.epoch !== epoch ||
     typeof record.sequence !== "number" || !Number.isSafeInteger(record.sequence) || record.sequence <= previous ||
-    !PUSH_FIXTURE_COMMANDS.includes(record.operation as PushFixtureCommand)) throw new Error("invalid fixture command");
-  return { sequence: record.sequence, operation: record.operation as PushFixtureCommand };
+    !PUSH_FIXTURE_COMMANDS.includes(record.operation as PushFixtureCommand) ||
+    guarded && (record.operation !== "ask" || typeof record.expectedSessionId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/u.test(record.expectedSessionId))) throw new Error("invalid fixture command");
+  return { sequence: record.sequence, operation: record.operation as PushFixtureCommand,
+    ...(guarded ? { expectedSessionId: record.expectedSessionId as string } : {}) };
 }
 
 /** Explicitly loaded only into an owned fixture. Control files are NOT discovery files. */
@@ -44,9 +49,10 @@ export default function pushQualificationExtension(api: ExtensionApi): void {
   let sequence = 0;
   let previousCommand: string | undefined;
   let running = false;
+  let sessionId: (() => string) | undefined;
   const acknowledge = async (phase: "ready" | "accepted" | "settled" | "failed"): Promise<void> => {
     const path = join(root, "ack.json");
-    await writeFile(`${path}.tmp`, JSON.stringify({ epoch, sequence, phase }), { mode: 0o600 });
+    await writeFile(`${path}.tmp`, JSON.stringify({ epoch, sequence, phase, sessionId: sessionId?.() }), { mode: 0o600 });
     await rename(`${path}.tmp`, path);
   };
   api.on("before_agent_start", async (_event, context) => {
@@ -62,6 +68,7 @@ export default function pushQualificationExtension(api: ExtensionApi): void {
     async handler(_args, context) {
       if (running || !context.hasUI) throw new Error("qualification fixture requires one interactive owner");
       running = true;
+      sessionId = () => context.sessionManager.getSessionId();
       await api.setSessionName(PUSH_FIXTURE_SESSION_NAME);
       await acknowledge("ready");
       while (running) {
@@ -93,6 +100,9 @@ export default function pushQualificationExtension(api: ExtensionApi): void {
           switch (command.operation) {
             case "ask": {
               if (ask !== undefined || !context.isIdle()) throw new Error("fixture is not idle");
+              if (command.expectedSessionId !== undefined && context.sessionManager.getSessionId() !== command.expectedSessionId) {
+                throw new Error("fixture session changed before ask");
+              }
               const controller = new AbortController();
               ask = controller;
               void context.ui.select(PUSH_FIXTURE_ASK_TITLE, [PUSH_FIXTURE_ASK_BODY], { signal: controller.signal })

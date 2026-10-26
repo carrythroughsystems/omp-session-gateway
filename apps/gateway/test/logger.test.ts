@@ -1,8 +1,52 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QualificationLogSink, SafeLogger } from "../src/logger.ts";
+
+test.skipIf(process.platform === "win32")("495 round2 a late producer is refused without throwing into an admitted handler", () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "closed-log-")); chmodSync(dir, 0o700);
+  try {
+    const sink = new QualificationLogSink(dir), logger = new SafeLogger(sink);
+    sink.close();
+    expect(() => logger.event("error", "http.request_failed")).not.toThrow();
+    expect(readFileSync(join(dir, "events.0.jsonl"), "utf8")).toBe("");
+    expect((sink as unknown as { droppedAfterClose: number }).droppedAfterClose).toBe(1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("495 round2 a failed closed-marker fsync cannot release the exclusive writer claim", () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "close-claim-")); chmodSync(dir, 0o700);
+  const sink = new QualificationLogSink(dir);
+  const original = fs.fsyncSync;
+  const sync = spyOn(fs, "fsyncSync").mockImplementation(fd => {
+    if (readFileSync(join(dir, "writer"), "utf8") === "closed\n") throw new Error("synthetic close failure");
+    original(fd);
+  });
+  try {
+    expect(() => sink.close()).toThrow();
+    sync.mockRestore();
+    // Even if health invalidation also failed, a closed-looking marker is not a released claim.
+    writeFileSync(join(dir, "health"), "[0,1]\n");
+    expect(() => new QualificationLogSink(dir)).toThrow();
+  } finally { sync.mockRestore(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("495 round2 failed claim release remains closed to restart", () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "release-claim-")); chmodSync(dir, 0o700);
+  const sink = new QualificationLogSink(dir), original = fs.unlinkSync;
+  const unlink = spyOn(fs, "unlinkSync").mockImplementation(path => {
+    if (String(path).endsWith("/claim")) throw new Error("synthetic claim release failure");
+    original(path);
+  });
+  try {
+    expect(() => sink.close()).toThrow();
+    expect(sink.healthy).toBe(false);
+    expect(readFileSync(join(dir, "claim"), "utf8")).toBe("writer\n");
+    expect(() => new QualificationLogSink(dir)).toThrow();
+  } finally { unlink.mockRestore(); rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("rejects runtime nonnumeric fields including nonfinite numbers", () => {
   const logger = new SafeLogger({ write() { throw new Error("must not write"); } });

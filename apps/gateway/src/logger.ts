@@ -99,10 +99,22 @@ export class QualificationLogSink implements LogSink {
   #pending = false;
   #rotated = false;
   #closed = false;
+  #droppedAfterClose = 0;
   constructor(directory: string) {
     assertQualificationLogDirectory(directory);
+    if (directory.endsWith(".retired")) throw new Error("qualification log directory retired");
     this.#directory = directory;
-    const names = readdirSync(directory);
+    // Both startup and final collection acquire this same exclusive claim. A failed close
+    // never releases it, even if the closed-looking writer or health write reached the cache.
+    let claim: number;
+    try { claim = openSync(join(directory, "claim"), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); }
+    catch { throw new Error("qualification writer was not closed or destination is claimed"); }
+    try {
+      if (writeSync(claim, "writer\n") !== 7) throw new Error("qualification claim write failed");
+      fsyncSync(claim);
+    } finally { closeSync(claim); }
+    this.#syncDirectory();
+    const names = readdirSync(directory).filter(name => name !== "claim");
     if (names.length > 0) {
       if (!names.includes("health") || !names.includes("writer") || !names.includes("events.0.jsonl") ||
         names.some(name => name !== "health" && name !== "writer" && !/^events\.[0-3]\.jsonl$/u.test(name))) throw new Error("qualification logging was interrupted");
@@ -176,6 +188,7 @@ export class QualificationLogSink implements LogSink {
     } catch { this.#fail(); }
   }
   get healthy(): boolean { return this.#healthy; }
+  get droppedAfterClose(): number { return this.#droppedAfterClose; }
   get nextIndex(): number {
     if (!this.#healthy || this.#closed || !Number.isSafeInteger(this.#index + 1)) throw new Error("qualification logging failed");
     return this.#index + 1;
@@ -185,14 +198,21 @@ export class QualificationLogSink implements LogSink {
     if (this.#closed) return;
     this.#commit();
     if (this.#healthy) {
-      try { this.#state("closed\n", "writer"); }
+      try {
+        this.#state("closed\n", "writer");
+        this.#syncDirectory();
+        // Last fallible step: everything it authorizes is already durable. A crash before
+        // this unlink persists may leave a stale claim, which requires explicit reset.
+        unlinkSync(join(this.#directory, "claim"));
+      }
       catch { this.#fail(); }
     }
     this.#closed = true;
     if (!this.#healthy) throw new Error("qualification logging failed");
   }
   write(line: string): void {
-    if (!this.#healthy || this.#closed) throw new Error("qualification logging failed");
+    if (this.#closed) { this.#droppedAfterClose = Math.min(Number.MAX_SAFE_INTEGER, this.#droppedAfterClose + 1); return; }
+    if (!this.#healthy) throw new Error("qualification logging failed");
     try {
       if (!this.#pending) {
         // One durable unhealthy transition covers the entire synchronous burst.

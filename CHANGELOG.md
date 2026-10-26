@@ -21,6 +21,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Unproven CDP target/forward cleanup blocks Pixel release; task restoration cannot reopen CDP.
   Re-arm rechecks generation before mutation, metadata timeouts retain late sampling, and post-evidence
   deadline checks plus bounded integer phase durations prevent stale delivery success.
+  Writer/collector exclusion and atomic log-directory retirement close retention races; forced HTTP
+  shutdown drains admitted handlers before releasing the durable writer claim. Readiness checks both
+  delivery and clear budgets after awaited evidence, every persisted duration is a bounded integer,
+  and network fallbacks preserve containment failures. Cleanup checks source-scoped v2 triage stores;
+  guarded fixture asks reject a changed acknowledged session at the extension boundary.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
