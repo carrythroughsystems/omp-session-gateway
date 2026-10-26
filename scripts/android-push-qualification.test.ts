@@ -75,6 +75,7 @@ function fake(options: FakeOptions = {}) {
   const runtime: AndroidPushRuntime = {
     now: () => time, beforeEffect: async () => {},
     deliveryOwnership: async () => 1,
+    subscriptionCount: async () => 1,
     pause: async milliseconds => {
       time += milliseconds;
       if (time < socketStaleUntil) return;
@@ -205,8 +206,8 @@ test.each(["unknown", "accepted", "ambiguous", "privacy", "late", "transient", "
       const present = rearms > 0 || scenario === "late" && now >= 60_000;
       return { count: scenario === "privacy" ? 2 : present ? 1 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false };
     };
-    host.runtime.deliveryTelemetry = async () => ({ sufficient: scenario !== "unknown" && scenario !== "ambiguous",
-      sends: scenario === "ambiguous" ? 2 : 1, acknowledgements: scenario === "accepted" ? 1 : 0,
+    host.runtime.deliveryTelemetry = async () => ({ sufficient: scenario === "accepted",
+      subscriptionCount: scenario === "ambiguous" ? 2 : 1, sends: scenario === "ambiguous" ? 2 : 1, acknowledgements: scenario === "accepted" ? 1 : 0,
       failures: scenario === "accepted" ? 0 : 1, retryable: !["unknown", "accepted", "ambiguous", "late"].includes(scenario), httpStatus: 503, requestAlias: 1 });
     host.runtime.deliveryRequestMatches = async () => scenario !== "old-request";
     if (scenario === "exhausted") metrics.deliveryRearmCount = 1;
@@ -235,10 +236,81 @@ test.each(["unknown", "accepted", "ambiguous", "privacy", "late", "transient", "
 test("effectful readiness restores its exact baseline without awarding qualification phases", async () => {
   const host = fake();
   host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
-  expect(await runAndroidPushReadiness(host.input)).toMatchObject({ delivered: true, acknowledged: true, cleanup: { restored: true } });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
+  expect(await runAndroidPushReadiness(host.input)).toMatchObject({
+    delivered: true, acknowledged: true, subscriptionCount: 1, sendCount: 1, ackCount: 1, cleanup: { restored: true },
+  });
   expect(host.state().device).toEqual(baseline);
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
+});
+
+test("506 council readiness returns counters from the final acknowledged snapshot", async () => {
+  const host = fake();
+  let reads = 0;
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ++reads === 1 ?
+    { sufficient: false, subscriptionCount: 0, sends: 0, acknowledgements: 0, failures: 0, retryable: false, httpStatus: 0 } :
+    { sufficient: true, subscriptionCount: 2, sends: 2, acknowledgements: 2, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
+  expect(await runAndroidPushReadiness(host.input)).toMatchObject({
+    delivered: true, acknowledged: true, subscriptionCount: 2, sendCount: 2, ackCount: 2,
+  });
+  expect(reads).toBe(2);
+});
+
+test("506 council readiness cannot substitute a posted record for lock-screen presentation", async () => {
+  const host = fake();
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1,
+    failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
+  let presented = false;
+  host.runtime.presentation = async () => { presented = true; return false; };
+  await expect(runAndroidPushReadiness(host.input)).rejects.toMatchObject({
+    evidence: { lane: "rigReadiness", reason: "assertion_failed", class: "product" },
+  });
+  expect(presented).toBe(true);
+  expect(host.cleanup).toHaveLength(7);
+});
+
+test.each(["elapsed", "typed"] as const)("506 council readiness preserves %s browser deadline attribution", async variant => {
+  const host = fake();
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+  host.runtime.browser = async () => {
+    execution.deadline = 0;
+    if (variant === "typed") throw new QualificationFailure({ id: 1, lane: "androidPush", step: "browser_forward",
+      reason: "deadline_exceeded", class: "harness", elapsedMs: 1, operation: "unknown", observations: { controllerDeadline: true } });
+    throw new Error("synthetic elapsed browser execution");
+  };
+  await expect(runAndroidPushReadiness({ ...host.input, execution })).rejects.toMatchObject({
+    evidence: { lane: "rigReadiness", reason: variant === "typed" ? "deadline_exceeded" : "delivery_timeout" },
+  });
+  expect(host.cleanup).toHaveLength(7);
+});
+
+test("readiness refuses stale subscriptions before any fixture ask and restores the baseline", async () => {
+  const host = fake(), fixture = host.runtime.fixture;
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  host.runtime.subscriptionCount = async () => 2;
+  let asks = 0;
+  host.runtime.fixture = async (...args) => { if (args[0] === "ask") asks++; await fixture(...args); };
+  await expect(runAndroidPushReadiness(host.input)).rejects.toMatchObject({
+    evidence: { lane: "rigReadiness", reason: "stale_subscriptions", class: "harness", observations: { subscriptionCount: 2 } },
+  });
+  expect(asks).toBe(0);
+  expect(host.cleanup).toHaveLength(7);
+  expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", cleanupRequired: false });
+});
+
+test("readiness checkpoints before browser capture and classifies an untyped baseline failure", async () => {
+  const host = fake();
+  host.runtime.browser = async () => {
+    expect(host.checkpoints.at(-1)).toMatchObject({ phase: "baseline_captured", cleanupRequired: true, browser: null });
+    throw new Error("SYNTHETIC-PRIVATE-CDP-ERROR");
+  };
+  let failure: unknown;
+  try { await runAndroidPushReadiness(host.input); } catch (error) { failure = error; }
+  expect(failure).toMatchObject({ evidence: { lane: "rigReadiness", step: "browser_capture", reason: "browser_baseline_failed", class: "harness" } });
+  expect(JSON.stringify(normalizeQualificationFailures(failure))).not.toContain("SYNTHETIC-PRIVATE-CDP-ERROR");
+  expect(host.cleanup).toHaveLength(7);
 });
 
 test.each(["baseline", "mutation", "restoration"] as const)(
@@ -247,7 +319,7 @@ test.each(["baseline", "mutation", "restoration"] as const)(
     let cleaning = false, id = 80;
     host.runtime.beginCleanup = () => { cleaning = true; };
     host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
-    host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
+    host.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
     const checkpoint = host.input.checkpoint;
     const error = await runAndroidPushReadiness({ ...host.input,
       execution: { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => ++id },
@@ -333,7 +405,7 @@ test.each(["normal", "rearm", "doze"] as const)("500 %s clear includes metadata 
     host.runtime.observe = async (...args) => asks === 1 && !clearing ?
       { count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false } : observe(...args);
     host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
-    host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1,
+    host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0, failures: 1,
       retryable: true, httpStatus: 503, requestAlias: 1, clearAcknowledged: true });
     host.runtime.deliveryRequestMatches = async () => true;
   }
@@ -349,7 +421,7 @@ test("500 timed-out ask keeps its sampler until rearm clear settlement", async (
   const session = (await host.runtime.snapshot("epoch"))!;
   let arrived = false, sample: (() => Promise<void>) | undefined;
   host.runtime.observe = async () => ({ count: arrived ? 1 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1,
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0, failures: 1,
     retryable: true, httpStatus: 503, requestAlias: 1 });
   const failure = new Error("synthetic clear failure");
   await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention",
@@ -379,7 +451,7 @@ test("500 expiry after a settled rearm cannot reinstate the old ask sampler", as
   let sample: (() => Promise<void>) | undefined;
   const freshSampler = async () => {};
   host.runtime.observe = async () => ({ count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1,
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0, failures: 1,
     retryable: true, httpStatus: 503, requestAlias: 1 });
   await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention",
     phase: "private_verified", timeout: 1, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
@@ -403,7 +475,7 @@ test("500 overlap retry discards ambiguous late attribution without resetting it
 test.each(["telemetry", "ownership", "answer", "clear"] as const)(
   "495 round2 readiness rejects its expired delivery budget after %s awaits", async stage => {
     const host = fake();
-    const telemetry = { sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
+    const telemetry = { sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
     let reads = 0, answered = false, delayed = false;
     host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
     const delay = async () => { if (!delayed) { delayed = true; await host.runtime.pause(160_001); } };
@@ -476,7 +548,7 @@ test("R2 a foreign failed send cannot invoke the fixture re-arm callback", async
   await host.runtime.fixture("start", "synthetic"); await host.runtime.fixture("ask", "synthetic");
   const session = (await host.runtime.snapshot("synthetic"))!;
   host.runtime.observe = async () => ({ count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, requestAlias: 2 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, requestAlias: 2 });
   let rearms = 0;
   await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention",
     phase: "private_verified", timeout: 1, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
@@ -491,7 +563,7 @@ test("R2 a product failure after telemetry still stops before re-arm", async () 
   let duplicate = false, rearms = 0;
   host.runtime.observe = async () => ({ count: duplicate ? 2 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
   host.runtime.deliveryTelemetry = async () => {
-    duplicate = true; return { sufficient: true, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, requestAlias: 1 };
+    duplicate = true; return { sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, requestAlias: 1 };
   };
   await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention",
     phase: "private_verified", timeout: 1, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
@@ -509,7 +581,7 @@ test("R2 a foreign clear acknowledgement cannot release a fresh fixture ask", as
   };
   host.runtime.observe = async () => ({ count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
   host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: answered ? 1 : 0,
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: answered, subscriptionCount: 1, sends: 1, acknowledgements: answered ? 1 : 0,
     failures: answered ? 0 : 1, retryable: !answered, httpStatus: 503, clearAcknowledged: answered, requestAlias: answered ? 2 : 1 });
   await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { class: "harness", reason: "delivery_timeout" } });
   expect(asks).toBe(1);
@@ -537,7 +609,7 @@ test("R2 readiness preserves a late delivery observed during restoration", async
   let arrived = false;
   host.runtime.observe = async () => ({ count: arrived ? 1 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
   host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, sends: 0, acknowledgements: 0, failures: 0, retryable: false, httpStatus: 0 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 0, sends: 0, acknowledgements: 0, failures: 0, retryable: false, httpStatus: 0 });
   const cleanup = host.runtime.cleanup;
   host.runtime.cleanup = async (...args) => { await cleanup(...args); if (args[0] === "fixtureAsk") { arrived = true; await host.runtime.pause(500); } };
   await expect(runAndroidPushReadiness(host.input)).rejects.toMatchObject({
@@ -552,7 +624,7 @@ test.each(["telemetry", "request"] as const)("495 R6 cancellation during %s cann
   host.runtime.observe = async () => ({ count: 1, titleMatches: true, bodyMatches: true, forbiddenFound: false });
   host.runtime.deliveryTelemetry = async () => {
     if (stage === "telemetry") controller.abort();
-    return { sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
+    return { sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
   };
   host.runtime.deliveryRequestMatches = async () => { controller.abort(); return true; };
   if (stage === "request") metrics.deliveryRearmCount = 1;
@@ -581,7 +653,7 @@ test.each(["instance", "generation"] as const)("495 R4 %s changes after clearing
   };
   host.runtime.observe = async () => ({ count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
   host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: answered ? 1 : 0,
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: answered, subscriptionCount: 1, sends: 1, acknowledgements: answered ? 1 : 0,
     failures: answered ? 0 : 1, retryable: !answered, httpStatus: 503, clearAcknowledged: answered, requestAlias: 1 });
   await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { class: "harness", reason: "invalid_evidence" } });
   expect(asks).toBe(1);
@@ -615,7 +687,7 @@ test("495 A1 readiness late-observer failure cannot skip subsequent restoration 
     return { count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false };
   };
   host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, sends: 0, acknowledgements: 0, failures: 0, retryable: false, httpStatus: 0 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 0, sends: 0, acknowledgements: 0, failures: 0, retryable: false, httpStatus: 0 });
   host.runtime.cleanup = async (...args) => { cleaning = true; await cleanup(...args); };
   let failure: unknown;
   try { await runAndroidPushReadiness(host.input); } catch (error) { failure = error; }
@@ -660,7 +732,7 @@ test("R3 offline recovery closes the original send window before subscription re
     windowOpen = true; return { lane: "androidPush", phase, after: 0, ordinal: 1 };
   };
   host.runtime.deliveryTelemetry = async () => {
-    windowOpen = false; return { sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
+    windowOpen = false; return { sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
   };
   host.runtime.network = async value => {
     if (offline && value === "wifi") { expect(windowOpen).toBe(false); restored = true; }
@@ -676,7 +748,7 @@ test("R6 an absent phone notification does not prove outbound clear before re-ar
   host.runtime.fixture = async (...args) => { if (args[0] === "ask") asks++; await fixture(...args); };
   host.runtime.observe = async () => ({ count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
   host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, clearAcknowledged: false, requestAlias: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, clearAcknowledged: false, requestAlias: 1 });
   await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { class: "harness", reason: "delivery_timeout" } });
   expect(asks).toBe(1);
 });
@@ -694,7 +766,7 @@ test("R6 fresh ask waits for outbound clear acknowledgement and fresh-request ow
   host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
   host.runtime.deliveryTelemetry = async () => {
     clearAcknowledged = answeredAt > 0 && host.runtime.now() - answeredAt >= 1_000;
-    return { sufficient: true, sends: 1, acknowledgements: asks > 1 ? 1 : 0, failures: asks > 1 ? 0 : 1,
+    return { sufficient: asks > 1, subscriptionCount: 1, sends: 1, acknowledgements: asks > 1 ? 1 : 0, failures: asks > 1 ? 0 : 1,
       retryable: asks === 1, httpStatus: 503, clearAcknowledged, requestAlias: 1 };
   };
   host.runtime.deliveryRequestMatches = async () => true;
@@ -726,7 +798,7 @@ test("overlap recovery cannot reset the phase's consumed delivery re-arm budget"
     if (asks === 2 && !overlap) { overlap = true; throw new NotificationOverlapError(); }
   };
   host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: asks + 1 });
-  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, clearAcknowledged: true, requestAlias: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, clearAcknowledged: true, requestAlias: 1 });
   host.runtime.deliveryRequestMatches = async () => true;
   await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { class: "infra_transient", reason: "push_service_failure" } });
   expect(asks).toBe(3);

@@ -1016,6 +1016,57 @@ one Private background/locked Pixel push through the actual tailnet/FCM send, ac
 presentation path. Delivery must occur within 160 seconds; answer and authoritative clear must
 also pass. HTTP reachability alone does not prove FCM readiness.
 
+Before issuing its ask, readiness reads the authenticated `GET /api/v1/push/config` recipient count.
+The disposable rig must have exactly one eligible subscription, belonging to its prepared Pixel.
+More than one produces the harness refusal `stale_subscriptions` with `subscriptionCount`; zero
+refuses admission as a missing prerequisite. This read exposes no endpoints, keys or identities, and
+the harness never guesses which subscription is stale or deletes someone else's subscription.
+Push telemetry separately accepts legitimate fan-out only when every send for the fixture's request
+alias is acknowledged, and records finite integer `subscriptionCount` (largest recipient cohort),
+`sendCount` and `ackCount` observations from the final complete telemetry snapshot. A passed receipt
+requires positive matching send/ack counts and affirmative Pixel reachability, send, acknowledgement,
+presentation and clear observations. Provider acceptance and a posted notification record cannot
+replace the owned lock-screen presentation check or authoritative clear.
+
+To recover a `stale_subscriptions` refusal, keep the driver disabled and first finish Pixel/Mac
+restoration. `qualify-macos-host.sh omp-clean uninstall` removes the fixture and service, **not**
+the retained gateway-global `push-state.json`. If the known old browsers are available, use each
+browser's notification-off control while the gateway is running; it uses the authenticated
+`DELETE /api/v1/push/subscription` path for that browser's endpoint. Do not remove an unknown endpoint
+automatically. If stale browsers are unavailable, the operator may explicitly reset **all**
+subscriptions on this disposable retained Mac after proving its gateway is stopped (`jq` required):
+
+```sh
+# Run as the retained Mac qualification user, only with the gateway stopped.
+# Preserve VAPID keys and every other private state field; print no state contents.
+(
+  set -eu
+  umask 077
+  state="$HOME/.local/state/omp-session-gateway/push-state.json"
+  test ! -e "$HOME/Library/LaunchAgents/omp-session-gateway.plist"
+  ! launchctl print "gui/$(id -u)/omp-session-gateway" >/dev/null 2>&1
+  ! lsof -nP -iTCP:4317 -sTCP:LISTEN >/dev/null 2>&1
+  test -f "$state" && test ! -L "$state"
+  temporary="$(mktemp "$state.reset.XXXXXX")"
+  trap 'rm -f "$temporary"' EXIT
+  jq '.subscriptions = []' "$state" > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$state"
+)
+```
+
+Then prepare the next authorized candidate fixture, open only the retained Pixel's installed PWA,
+and explicitly disable/re-enable notifications to register its current subscription. Confirm the
+authenticated count is exactly one before authorizing another readiness attempt. This is operator
+reconciliation, not an automatic retry or qualification pass; do not rotate credentials or clear the
+driver's lease, receipts or state to bypass the refusal.
+
+The Push owner persists `push-progress.json` before browser baseline capture. Capture failures are
+typed `browser_baseline_failed` with a bounded browser substep (wake, WebAPK, CDP forward/connect,
+target inventory, attachment, execution context, navigation or notification-state read), rather than
+an unclassified raw CDP error. Cleanup/containment failures retain their stronger disposition.
+Expired execution deadlines retain deadline attribution rather than becoming browser baseline errors.
+
 Windows readiness reuses credential, inventory, image, plan and toolchain admission and requires
 remaining per-tag creation allowance with no unreconciled qualification resources. Unsupported
 provider quota metadata is explicitly `quotaObservable: false`; no probe VM is allocated and no

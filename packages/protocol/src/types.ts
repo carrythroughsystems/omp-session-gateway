@@ -242,6 +242,8 @@ export interface PushUnsubscribeRequest {
 export interface PushConfigResponse {
   readonly version: typeof PUSH_API_VERSION;
   readonly applicationServerKey: string;
+  /** Eligible gateway-global recipients; never endpoints, keys or authenticated identities. */
+  readonly subscriptionCount: number;
 }
 
 /** Capability-free message encrypted for one browser push subscription. */

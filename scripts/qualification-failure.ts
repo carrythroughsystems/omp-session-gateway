@@ -49,7 +49,7 @@ export const FAILURE_REASONS = {
   preflight: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness" },
   rigReadiness: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness", assertion_failed: "product",
     push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient",
-    delivery_timeout: "harness", delivery_metadata_timeout: "harness" },
+    delivery_timeout: "harness", delivery_metadata_timeout: "harness", stale_subscriptions: "harness", browser_baseline_failed: "harness" },
   artifacts: { ...commonReasons, ...transportReasons, signature_failed: "harness", digest_mismatch: "harness" },
   debian: { ...commonReasons, ...transportReasons, assertion_failed: "product", workflow_unknown: "harness" },
   macos: { ...commonReasons, ...transportReasons, assertion_failed: "product", prerequisite_failed: "harness" },
@@ -57,7 +57,7 @@ export const FAILURE_REASONS = {
   relay: { ...commonReasons, ...transportReasons, assertion_failed: "product" },
   android: { ...commonReasons, ...transportReasons, assertion_failed: "product", device_outage: "infra_transient", prerequisite_failed: "harness" },
   androidPush: { ...commonReasons, ...transportReasons, assertion_failed: "product", privacy_failed: "product",
-    delivery_timeout: "harness", delivery_metadata_timeout: "harness",
+    delivery_timeout: "harness", delivery_metadata_timeout: "harness", browser_baseline_failed: "harness",
     push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient" },
   windows: { ...commonReasons, ...transportReasons, probe_deadline: "infra_transient", allocation_rejected: "infra_transient",
     assertion_failed: "product", authentication_failed: "harness", helper_failed: "harness", mutation_unconfirmed: "harness", ownership_changed: "harness" },
@@ -67,10 +67,13 @@ export const FAILURE_REASONS = {
   cleanup: { ...cleanupReasons, remote_unsettled: "collateral" },
 } as const;
 export type QualificationFailureLane = keyof typeof FAILURE_REASONS;
+export const PUSH_BROWSER_STEPS = ["browser_capture", "browser_wake", "browser_webapk", "browser_forward",
+  "browser_target", "browser_attach", "browser_context", "browser_navigation", "browser_notification_state"] as const;
+export type PushBrowserStep = (typeof PUSH_BROWSER_STEPS)[number];
 export const FAILURE_STEPS = {
   campaign: ["execution", "finalization", "outcome", "admission", "teardown"],
   preflight: ["admission", "tools", "pixel", "macos", "windows", "deviceCloud", "lease"],
-  rigReadiness: ["lease", "artifacts", "fixture", "pixel_push", "tailnet", "windows", "quota", "macos", "cleanup"],
+  rigReadiness: ["lease", "artifacts", "fixture", "pixel_push", "tailnet", "windows", "quota", "macos", "cleanup", ...PUSH_BROWSER_STEPS],
   artifacts: ["download", "signature", "digest"],
   debian: ["dispatch", "observe", "teardown"],
   macos: ["setup", "install", "upgrade", "reboot", "doctor", "rollback", "restore", "uninstall"],
@@ -81,7 +84,7 @@ export const FAILURE_STEPS = {
   androidPush: ["baseline_captured", "subscription_ready", "private_verified", "session_verified", "preview_verified",
     "attention_tap_verified", "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified",
     "force_stop_verified", "permission_verified", "lock_resume_verified", "network_verified", "doze_verified", "forbidden_sinks_verified",
-    "evidence_complete", "restored"],
+    "evidence_complete", "restored", ...PUSH_BROWSER_STEPS],
   windows: ["preflight", "connection", "command", "output", "upload", "intent_checkpointed", "firewall_created", "instance_created",
     "transport_ready", "toolchain_staged", "predecessor_installed", "candidate_upgraded", "reboot_requested", "prelogin_verified", "postlogin_ready",
     "doctor_passed", "omp_published", "pixel_verified", "omp_revoked", "readiness_rotated", "predecessor_restored", "candidate_restored",
@@ -108,6 +111,7 @@ const observationBounds = {
   pushServiceFailure: "boolean", outageSpansWindow: "boolean", deviceUnavailable: "boolean", tailnetUnavailable: "boolean",
   allocationRejected: "boolean", noAllocation: "boolean", cleanupVerified: "boolean", mutationReconciled: "boolean",
   persistenceFailed: "boolean",
+  subscriptionCount: 8, sendCount: 16_384, ackCount: 16_384,
 } as const;
 export type FailureObservations = { readonly [K in keyof typeof observationBounds]?: (typeof observationBounds)[K] extends "boolean" ? boolean : number };
 type FailureFor<L extends QualificationFailureLane> = {

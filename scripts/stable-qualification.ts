@@ -2899,7 +2899,7 @@ export async function runRigReadiness(
       const reason = Object.hasOwn(FAILURE_REASONS.rigReadiness, evidence.reason) ? evidence.reason :
         evidence.class === "product" ? "assertion_failed" : "prerequisite_failed";
       return Object.assign(new QualificationFailure(parseLaneFailure({ ...evidence, lane: "rigReadiness",
-        step: receipt.rigReadiness?.phase ?? "fixture", reason,
+        step: evidence.reason === "browser_baseline_failed" ? evidence.step : receipt.rigReadiness?.phase ?? "fixture", reason,
         observations: { ...evidence.observations, ...(pixelUnrestored(error) || qualificationContainmentUnproven([evidence]) ? { cleanupVerified: false } : {}) },
         class: FAILURE_REASONS.rigReadiness[reason as keyof typeof FAILURE_REASONS.rigReadiness] })),
       pixelUnrestored(error) ? { pixelUnrestored: true } : {});
@@ -3049,8 +3049,14 @@ async function runCampaignReadiness(
       if (result.delivered !== true || result.acknowledged !== true || typeof result.elapsedMs !== "number" || typeof result.clearMs !== "number") {
         throw new Error("rig readiness push path is unproven");
       }
+      for (const key of ["subscriptionCount", "sendCount", "ackCount"] as const) {
+        if (typeof result[key] !== "number" || !Number.isSafeInteger(result[key]) || result[key] < 1) {
+          throw new Error("rig readiness push counts are unproven");
+        }
+      }
       return { pixelReachable: true, pushSent: true, pushAcknowledged: true, pushPresented: true, pushCleared: true,
-        deliveryMs: result.elapsedMs, clearMs: result.clearMs };
+        deliveryMs: result.elapsedMs, clearMs: result.clearMs, subscriptionCount: result.subscriptionCount as number,
+        sendCount: result.sendCount as number, ackCount: result.ackCount as number };
     },
     restorePixel: async execution => {
       if (progress === undefined) return;

@@ -1294,6 +1294,22 @@ describe("campaign terminal evidence and readiness", () => {
     expect(Object.values(receipt.lanes).every(lane => lane.status === "pending")).toBe(true);
   });
 
+  test("readiness ownership preserves the browser baseline substep after cleanup", async () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const error = await runRigReadiness(receipt, async () => {}, {
+      prepare: async () => {}, windows: async () => ({}), macos: async () => ({}),
+      push: async () => { throw new QualificationFailure({
+        id: 1, lane: "rigReadiness", step: "browser_forward", reason: "browser_baseline_failed",
+        class: "harness", operation: "unknown", elapsedMs: 19_000, observations: {},
+      }); },
+      restorePixel: async () => {}, restoreMac: async () => {},
+    }).catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([
+      { lane: "rigReadiness", step: "browser_forward", reason: "browser_baseline_failed" },
+    ]);
+    expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "restored", observations: { baselineRestored: true } });
+  });
+
   test("readiness restoration failure stays unresolved even when Mac cleanup succeeds", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     let macRestored = false;
@@ -2199,6 +2215,18 @@ test("council R2 readiness roots require their failed readiness owner", () => {
   expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
   receipt.rigReadiness = { ...receipt.rigReadiness, status: "passed" };
   expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test("506 council campaign validation rejects a readiness pass without delivery or presentation proof", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.rigReadiness = { campaignAttempt: 0, status: "passed", cleanupDisposition: "restored", timings: {},
+    observations: { baselineRestored: true, pixelReachable: true, pushSent: true, pushAcknowledged: true,
+      pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 1, ackCount: 1 } };
+  expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+  for (const observations of [{ sendCount: 0 }, { ackCount: 0 }, { pushPresented: false }, { pushCleared: false }]) {
+    const invalid = { ...receipt, rigReadiness: { ...receipt.rigReadiness, observations: { ...receipt.rigReadiness.observations, ...observations } } };
+    expect(() => validateStableQualificationReceipt(invalid, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  }
 });
 
 test.each(["failed owner omitted", "unresolved containment", "passed with failed owner"] as const)(

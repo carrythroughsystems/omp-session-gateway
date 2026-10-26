@@ -506,11 +506,13 @@ export function parsePushUnsubscribeRequest(value: unknown): PushUnsubscribeRequ
 
 export function parsePushConfigResponse(value: unknown): PushConfigResponse {
   const record = requireRecord(value);
-  requireExactKeys(record, ["version", "applicationServerKey"]);
-  if (record.version !== PUSH_API_VERSION) throw new ProtocolValidationError();
+  requireExactKeys(record, ["version", "applicationServerKey", "subscriptionCount"]);
+  if (record.version !== PUSH_API_VERSION || !Number.isSafeInteger(record.subscriptionCount) ||
+    typeof record.subscriptionCount !== "number" || record.subscriptionCount < 0 || record.subscriptionCount > 8) throw new ProtocolValidationError();
   return {
     version: PUSH_API_VERSION,
     applicationServerKey: requirePushKey(record.applicationServerKey, 80, 128),
+    subscriptionCount: record.subscriptionCount,
   };
 }
 

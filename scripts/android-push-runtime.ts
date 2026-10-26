@@ -2,7 +2,7 @@ import { basename, join, posix, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { parseSessionListResponse } from "../packages/protocol/src/validation.ts";
+import { parsePushConfigResponse, parseSessionListResponse } from "../packages/protocol/src/validation.ts";
 import { PUSH_API_VERSION, type PushDetailLevel, type SessionMetadata } from "../packages/protocol/src/types.ts";
 import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget,
   runAdb, wakeAndroidDisplay, unlockAndroidKeyguard, showAndroidPinBouncer, type AndroidAdbCommand, type AndroidChromeDriver, type AndroidExecution } from "./android-device.ts";
@@ -14,7 +14,7 @@ import { PAGE_PRELUDE } from "./android-leak-probe.ts";
 import type { AndroidPushIdentity, AndroidPushPhase, AndroidPushRuntime, PushBrowserBaseline, PushDeviceBaseline, PushExecution, PushFixtureRole, PushTapObservation, TriageObservation } from "./android-push-qualification.ts";
 import { everyError, pixelUnrestored, runWithRestoration } from "./restoration.ts";
 import type { QualificationLogs } from "./qualification-logs.ts";
-import { QualificationFailure } from "./qualification-failure.ts";
+import { QualificationFailure, type PushBrowserStep } from "./qualification-failure.ts";
 
 export interface AndroidPushRuntimeOptions {
   readonly fixtureBase?: string;
@@ -265,7 +265,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   const checkExecution = () => {
     if (execution === undefined) return;
     execution.signal.throwIfAborted();
-    if (performance.now() >= execution.deadline) throw new Error("Android Push execution deadline");
+    if (performance.now() >= execution.deadline) throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
+      reason: "deadline_exceeded", class: "harness", operation: "unknown", elapsedMs: 0, observations: { controllerDeadline: true } });
   };
   const privacyFailure = () => new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
     class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: 0, observations: {} });
@@ -321,23 +322,34 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   const navigateRoot = async (driver: AndroidChromeDriver) => {
     await runtime.beforeEffect();
     try { await driver.navigate(`${identity.origin}/`); }
-    catch (error) { rethrowPushSafetyFailure(error); throw new Error("Android Push directory did not load"); }
+    catch (error) { rethrowPushSafetyFailure(error); throw new Error("Android Push directory did not load", { cause: error }); }
   };
-  const page = async <T>(action: (driver: AndroidChromeDriver) => Promise<T>, navigate = false): Promise<T> => {
+  const page = async <T>(action: (driver: AndroidChromeDriver) => Promise<T>, navigate = false,
+    baseline?: { step: PushBrowserStep }): Promise<T> => {
+    if (baseline !== undefined) baseline.step = "browser_wake";
     await wake();
+    if (baseline !== undefined) baseline.step = "browser_webapk";
     packageName ??= await requireWebApk(command, identity.origin);
     await openWebApk(mutate, packageName);
     await runtime.beforeEffect();
+    if (baseline !== undefined) baseline.step = "browser_forward";
     return chrome(async driver => {
+      if (baseline !== undefined) baseline.step = "browser_target";
       let target: string | undefined;
       await wait(async () => { target = await targetForOrigin(driver); return target !== undefined; }, "WebAPK target");
+      if (baseline !== undefined) baseline.step = "browser_attach";
       await driver.attachTab(target!);
+      if (baseline !== undefined) baseline.step = "browser_context";
       await awaitPageExecutionContext(() => driver.evaluate("document.readyState"));
       // The target keeps the origin URL while its document is a chrome-error:// page (the app
       // launched while the gateway was unreachable). Such a document has no service worker and
       // no secure context, so every page-side step would fail inside it: load the directory.
       const document = await driver.evaluate<{ href: string; secure: boolean }>("({ href: location.href, secure: window.isSecureContext })");
-      if (navigate || !document.href.startsWith(`${identity.origin}/`) || !document.secure) await navigateRoot(driver);
+      if (navigate || !document.href.startsWith(`${identity.origin}/`) || !document.secure) {
+        if (baseline !== undefined) baseline.step = "browser_navigation";
+        await navigateRoot(driver);
+      }
+      if (baseline !== undefined) baseline.step = "browser_notification_state";
       return action(driver);
     }, { port: 9238, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
   };
@@ -424,7 +436,29 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         chromeNotificationsAllowed: /android.permission.POST_NOTIFICATIONS: granted=true/u.test(await command("shell", "dumpsys", "package", "com.android.chrome")),
         webApkNotificationsAllowed: /android.permission.POST_NOTIFICATIONS: granted=true/u.test(await command("shell", "dumpsys", "package", packageName)) };
     },
-    browser: () => page(browserState, true),
+    async browser() {
+      const baseline: { step: PushBrowserStep } = { step: "browser_capture" }, started = runtime.now();
+      try {
+        const result = await page(browserState, true, baseline);
+        checkExecution();
+        return result;
+      }
+      catch (error) {
+        rethrowPushSafetyFailure(error);
+        checkExecution();
+        throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: baseline.step,
+          reason: "browser_baseline_failed", class: "harness", operation: "unknown",
+          elapsedMs: Math.round(runtime.now() - started), observations: {} }, { cause: error });
+      }
+    },
+    async subscriptionCount() {
+      checkExecution();
+      const signal = execution === undefined ? AbortSignal.timeout(15_000) :
+        AbortSignal.any([execution.signal, AbortSignal.timeout(Math.max(1, Math.min(15_000, execution.deadline - performance.now())))]);
+      const response = await fetch(`${identity.origin}/api/v1/push/config`, { cache: "no-store", signal });
+      if (!response.ok) throw new Error("Android Push subscription inventory refused");
+      return parsePushConfigResponse(await response.json()).subscriptionCount;
+    },
     async fixture(operation, epoch, role = "primary", expectedOwner) {
       currentEpoch = epoch;
       if (operation === "start") {

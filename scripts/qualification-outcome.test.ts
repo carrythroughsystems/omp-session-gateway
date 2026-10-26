@@ -70,6 +70,29 @@ describe("general qualification machine outcome", () => {
         timings: {}, cleanupDisposition: "restored" })).toThrow();
     }
   });
+  test("readiness delivery observations are finite bounded integer counts", () => {
+    const base = { status: "failed", campaignAttempt: 0, timings: {}, cleanupDisposition: "restored" };
+    expect(parseRigReadinessReceipt({ ...base, observations: { baselineRestored: true, subscriptionCount: 2, sendCount: 4, ackCount: 4 } })
+      .observations).toMatchObject({ subscriptionCount: 2, sendCount: 4, ackCount: 4 });
+    for (const key of ["subscriptionCount", "sendCount", "ackCount"]) {
+      for (const value of [-1, 1.5, Infinity, NaN, 16_385]) {
+        expect(() => parseRigReadinessReceipt({ ...base, observations: { baselineRestored: true, [key]: value } })).toThrow();
+      }
+    }
+  });
+  test("506 council passed readiness requires positive matching counts and presentation/clear proofs", () => {
+    const observations: Record<string, boolean | number> = { baselineRestored: true, pixelReachable: true, pushSent: true,
+      pushAcknowledged: true, pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 2, ackCount: 2 };
+    const base = { status: "passed", campaignAttempt: 0, timings: {}, cleanupDisposition: "restored" };
+    expect(parseRigReadinessReceipt({ ...base, observations }).status).toBe("passed");
+    for (const key of ["subscriptionCount", "sendCount", "ackCount", "pixelReachable", "pushSent", "pushAcknowledged", "pushPresented", "pushCleared"]) {
+      const missing = { ...observations };
+      delete missing[key];
+      expect(() => parseRigReadinessReceipt({ ...base, observations: missing })).toThrow();
+      expect(() => parseRigReadinessReceipt({ ...base, observations: { ...observations, [key]: key.endsWith("Count") ? 0 : false } })).toThrow();
+    }
+    expect(() => parseRigReadinessReceipt({ ...base, observations: { ...observations, ackCount: 1 } })).toThrow();
+  });
   test("council U1 complete outcomes reject duplicate and escaped-equivalent keys through portable parsing and POSIX file reads", async () => {
     const root = process.platform === "win32" ? undefined : await mkdtemp(join(privateTmpdir, "qualification-duplicate-"));
     try {

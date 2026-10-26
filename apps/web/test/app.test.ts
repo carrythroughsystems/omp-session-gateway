@@ -737,7 +737,7 @@ async function bootApp(options: {
       return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
     }
     if (path === "/api/v1/push/config") {
-      return Response.json({ version: 2, applicationServerKey: "V".repeat(87) });
+      return Response.json({ version: 2, applicationServerKey: "V".repeat(87), subscriptionCount: 0 });
     }
     if (path === "/api/v1/push/subscription") {
       const body = typeof init.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};

@@ -382,6 +382,18 @@ describe("strict protocol validation", () => {
     expect(() => parseSessionListResponse({ revision: 1, sessions: [metadata({ qualificationPushAlias: 1 })] })).toThrow();
     expect(Object.hasOwn(parseSessionListResponse({ revision: 1, sessions: [metadata(active)] }).sessions[0]!, "qualificationPushAlias")).toBe(false);
   });
+  test("push config exposes only a bounded integer recipient count", () => {
+    for (const subscriptionCount of [0, 1, 8]) {
+      expect(parsePushConfigResponse({ version: 2, applicationServerKey: "V".repeat(87), subscriptionCount }).subscriptionCount).toBe(subscriptionCount);
+    }
+    for (const subscriptionCount of [undefined, -1, 9, 1.5, NaN, Infinity, "1", null]) {
+      expect(() => parsePushConfigResponse({ version: 2, applicationServerKey: "V".repeat(87), subscriptionCount })).toThrow();
+    }
+    expect(() => parsePushConfigResponse({
+      version: 2, applicationServerKey: "V".repeat(87), subscriptionCount: 1, endpoints: ["SYNTHETIC-PRIVATE-ENDPOINT"],
+    })).toThrow();
+  });
+
   test("validates strict capability-free Web Push contracts", () => {
     const subscription = {
       endpoint: "https://push.example.test/send/subscription-1",
@@ -403,7 +415,7 @@ describe("strict protocol validation", () => {
       parsePushUnsubscribeRequest({ version: 2, endpoint: subscription.endpoint }).endpoint,
     ).toBe(subscription.endpoint);
     expect(
-      parsePushConfigResponse({ version: 2, applicationServerKey: "V".repeat(87) }).applicationServerKey,
+      parsePushConfigResponse({ version: 2, applicationServerKey: "V".repeat(87), subscriptionCount: 0 }).applicationServerKey,
     ).toHaveLength(87);
     expect(
       parseAttentionPushMessage({
