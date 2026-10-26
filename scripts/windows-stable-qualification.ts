@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createWindowsRuntime, windowsDevelopmentCli } from "./windows-qualification-runtime.ts";
+import { createWindowsRuntime, windowsDevelopmentCli, windowsTransportStability } from "./windows-qualification-runtime.ts";
 import pins from "./windows-qualification-pins.json";
 import upstream from "../UPSTREAM.lock.json";
 import type { OmpPins } from "./stable-qualification.ts";
@@ -18,14 +18,14 @@ export function windowsFailure(reason: keyof typeof FAILURE_REASONS.windows, ste
 }
 export function assertWindowsExecution(execution?: WindowsExecutionContext): void {
   if (execution?.signal.aborted || (execution && performance.now() >= execution.deadline)) {
-    throw windowsFailure("deadline_exceeded", "command", "not_started", {}, execution);
+    throw windowsFailure("deadline_exceeded", "command", "not_started", { controllerDeadline: true }, execution);
   }
 }
 /** Shared creation boundary: no await may separate this guard from a provider create call. */
 export function assertWindowsAllocation(execution: WindowsExecutionContext | undefined, allocationDeadline: number | undefined, now = Date.now()): void {
   assertWindowsExecution(execution);
   if (allocationDeadline === undefined || !Number.isFinite(allocationDeadline)) throw windowsFailure("helper_failed", "command", "not_started", {}, execution);
-  if (now >= allocationDeadline) throw windowsFailure("deadline_exceeded", "command", "not_started", {}, execution);
+  if (now >= allocationDeadline) throw windowsFailure("deadline_exceeded", "command", "not_started", { controllerDeadline: true }, execution);
 }
 
 export interface WindowsArtifact {
@@ -88,6 +88,7 @@ export interface WindowsContext {
   readonly mutation: <T>(key: string, action: () => Promise<T>) => Promise<T>;
   /** Epoch milliseconds in runtime.now()'s clock, shared by creation and admission. */
   readonly allocationDeadline?: number | undefined;
+  readonly transportAdmission?: { transportStabilitySamples: number; transportStabilityDurationMs: number } | undefined;
   readonly transportProbe?: (probe: WindowsTransportProbe) => Promise<void>;
   readonly execution?: WindowsExecutionContext;
   /** True only when this invocation enters staging for the first time in this epoch. */
@@ -110,6 +111,7 @@ export interface WindowsRuntime {
   saveAccess(epoch: string, instance: WindowsInstance): Promise<void>;
   removeAccess(epoch: string): Promise<void>;
   hasAccess?(epoch: string): Promise<boolean>;
+  transportAdmission?(epoch: string): Promise<Record<string, unknown> | undefined>;
   /** Refetch the vault-bound ID even if the provider changed its label. */
   cleanupInstance?(epoch: string): Promise<WindowsInstance | undefined>;
   cleanupFirewall?(epoch: string): Promise<WindowsFirewall | undefined>;
@@ -290,7 +292,9 @@ async function waitFor(runtime: WindowsRuntime, action: () => Promise<boolean>, 
   }
   // Name which predicate held out through the last observation's booleans and counts, never guest strings.
   const last = observed === undefined ? "" : `; last ${JSON.stringify(Object.fromEntries(Object.entries(observed()).filter(([, value]) => typeof value === "boolean" || typeof value === "number")))}`;
-  const failure = windowsFailure("assertion_failed", "output", "confirmed");
+  const failure = windowsFailure("deadline_exceeded", "output", "read_only", {
+    controllerDeadline: true, readOnlyProbe: true, timeoutMs: timeout, waitedMs: runtime.now() - start,
+  });
   failure.message = `${name} timed out${last}`; throw failure;
 }
 function evidence(progress: Progress, identity: WindowsIdentity): Record<string, unknown> {
@@ -306,9 +310,15 @@ function evidence(progress: Progress, identity: WindowsIdentity): Record<string,
 export async function runWindows(input: WindowsLaneInput): Promise<Record<string, unknown>> {
   const digest = binding(input.identity);
   const runtime = input.runtime ?? await createWindowsRuntime(input.execution === undefined ? {} : { execution: input.execution });
+  const prior = input.progress === undefined ? undefined : parseProgress(input.progress, digest);
+  let activeProgress = prior, repairable = false;
+  // Establish containment ownership before any retained-state rejection or preflight work.
+  const cleanupExecution = { signal: new AbortController().signal, deadline: performance.now() + 30 * 60_000,
+    nextFailureId: input.execution?.nextFailureId ?? (() => ++standaloneFailureId) };
+  try {
+  assertWindowsExecution(input.execution);
   let resumed: Progress | undefined;
-  if (input.progress !== undefined) {
-    const prior = parseProgress(input.progress, digest);
+  if (prior !== undefined) {
     if (prior.phase === "evidence_complete" && prior.settled) { assertWindowsExecution(input.execution); return evidence(prior, input.identity); }
     if (runtime.development && prior.cleanupRequired && runtime.now() - prior.startedAt < 3 * 60 * 60_000) {
       if (!prior.settled && !READ_ONLY_PHASES.includes(prior.phase)) {
@@ -317,27 +327,32 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       resumed = prior;
     }
     else {
-      // Stable campaigns reconcile interrupted effects instead of replaying mutations.
-      await cleanupWindows({ ...input, runtime });
+      // The protected exit reconciles interrupted effects instead of replaying mutations.
       throw new Error("interrupted Windows attempt cleaned; start a fresh epoch");
     }
   }
   await preflightWindows({ identity: input.identity, ...(resumed ? { epoch: resumed.epoch } : {}) }, runtime);
   const progress: Progress = resumed ?? { schemaVersion: 1, lane: "windows", epoch: runtime.uuid(), binding: digest,
     phase: "intent_checkpointed", settled: true, cleanupRequired: true, startedAt: runtime.now(), timings: {}, facts: {}, transportProbes: [] };
+  activeProgress = progress;
+  const durableAdmission = windowsTransportStability(progress.facts) ??
+    (resumed ? windowsTransportStability(await runtime.transportAdmission?.(resumed.epoch)) : undefined);
+  let admissionComplete = durableAdmission !== undefined;
   const save = async () => { parseProgress(progress, digest); await input.checkpoint(structuredClone(progress)); };
   const assertAllocation = () => {
     if (PHASES.indexOf(progress.phase) <= PHASES.indexOf("transport_ready") &&
+      !(progress.phase === "transport_ready" && admissionComplete) &&
       progress.allocationDeadline !== undefined && runtime.now() >= progress.allocationDeadline) {
-      throw windowsFailure("deadline_exceeded", progress.phase, "unknown", {}, input.execution);
+      throw windowsFailure("deadline_exceeded", progress.phase, "unknown", { controllerDeadline: true }, input.execution);
     }
   };
-  if (resumed && PHASES.indexOf(resumed.phase) <= PHASES.indexOf("transport_ready") && progress.allocationDeadline === undefined) {
+  if (resumed && !admissionComplete && PHASES.indexOf(resumed.phase) <= PHASES.indexOf("transport_ready") && progress.allocationDeadline === undefined) {
     throw windowsFailure("mutation_unconfirmed", resumed.phase, "unknown", {}, input.execution);
   }
   const context: WindowsContext = { epoch: progress.epoch, identity: input.identity,
     freshStaging: resumed === undefined || PHASES.indexOf(resumed.phase) < PHASES.indexOf("toolchain_staged"),
     get allocationDeadline() { return progress.allocationDeadline; },
+    ...(durableAdmission === undefined ? {} : { transportAdmission: durableAdmission }),
     ...(input.execution === undefined ? {} : { execution: input.execution }),
     beforeEffect: async () => {
       if (input.execution?.signal.aborted || (input.execution && performance.now() >= input.execution.deadline)) {
@@ -424,7 +439,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       `${principal === "standard" ? "standard " : ""}automatic LogonTrigger startup`, () => last);
     return runtime.now() - start;
   };
-  try {
+    repairable = true;
     let firewall: WindowsFirewall | undefined = resumed ? (await runtime.provider.firewalls()).find(item => item.description === label) : undefined;
     await step("firewall_created", async () => {
       progress.allocationDeadline = runtime.now() + 12 * 60_000; await save();
@@ -449,6 +464,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       requireProduct(typeof result.transportStabilitySamples === "number" && result.transportStabilitySamples >= 3 &&
         typeof result.transportStabilityDurationMs === "number" && result.transportStabilityDurationMs >= 60_000, "authenticated WinRM stability window incomplete");
       facts(result);
+      admissionComplete = true;
     });
     await step("toolchain_staged", async () => { await save(); await rdp(); facts(await guest("stage")); });
     await step("predecessor_installed", async () => { requireProduct((await guest("installPredecessor")).ready === true, "predecessor did not become ready"); });
@@ -527,12 +543,12 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   } catch (error) {
     const interrupted = input.execution?.signal.aborted || (input.execution && performance.now() >= input.execution.deadline) ||
       (error instanceof QualificationFailure && ["deadline_exceeded", "probe_deadline"].includes(error.evidence.reason));
-    if (!interrupted && runtime.development && PHASES.indexOf(progress.phase) >= PHASES.indexOf("transport_ready") &&
-      runtime.now() - progress.startedAt < 3 * 60 * 60_000) throw error;
+    if (activeProgress === undefined) throw error;
+    if (prior === undefined && !interrupted && repairable && runtime.development && PHASES.indexOf(activeProgress.phase) >= PHASES.indexOf("transport_ready") &&
+      runtime.now() - activeProgress.startedAt < 3 * 60 * 60_000) throw error;
     // A failed primary's cancellation must not disable owned-resource containment.
-    const { execution, ...cleanupInput } = input;
-    try { await cleanupWindows({ ...cleanupInput, progress, runtime,
-      ...(execution === undefined ? {} : { execution: { ...execution, signal: new AbortController().signal, deadline: performance.now() + 30 * 60_000 } }) }); }
+    cleanupExecution.deadline = performance.now() + 30 * 60_000;
+    try { await cleanupWindows({ ...input, progress: activeProgress, runtime, execution: cleanupExecution }); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], "Windows lane and cleanup failed"); }
     throw error;
   }

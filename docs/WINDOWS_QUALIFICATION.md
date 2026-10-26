@@ -115,6 +115,7 @@ Allocation and authenticated WinRM admission share one 12-minute deadline, durab
 firewall creation; firewall/VM creation and provider allocation consume that same budget.
 The same allocation-and-execution guard runs after awaited checkpoints/inventory reads and
 immediately before each creation POST; an expired budget cannot begin a new allocation.
+Creation-counter persistence is also guarded before it can consume the local allowance.
 Subsequent transport probes use bounded reconnect, not another allocation window. Admission requires
 three consecutive read-only successes spanning at least 60 seconds; a transport error resets
 both the count and window, while a guest assertion failure aborts immediately. The observed
@@ -149,6 +150,10 @@ Reconnect and readiness/RDP/allocation polls reject success at or after their lo
 Admission persists the actual stability sample count and duration before the phase checkpoint;
 a resumed admission reuses those observations only after reconnect. A legacy boolean marker
 without observations must re-observe the stability window within the original allocation budget.
+Validated completed admission is not subjected to that old allocation deadline again; it uses
+only the reconnect and current execution budgets. Reconnect checks remaining time before every
+probe, including after delayed backoff. Local/shared expiry is `deadline_exceeded`, never the
+last transient transport failure, with controller origin and numeric timeout/wait observations.
 
 An interrupted upload is reconciled by existence and SHA-256 after read-only connection recovery.
 Only a recognized helper-reported transport interruption permits that reconciliation; a raw process
@@ -297,7 +302,10 @@ repair: rerunning `run` resumes only read-only phases and skips completed phases
 mutating phase refuses resume regardless of completed upload claims. `cleanup` is explicit
 after an abandoned attempt.
 Outer cancellation or deadline always runs containment, including development mode; only
-repairable code failures may retain the guest. FreeRDP ownership covers stdin write/end as
+repairable code failures on an initial development attempt may retain the guest. Once retained
+progress is accepted, every failing re-entry—including mutation refusal and preflight failure—
+uses independent containment. That cleanup owner exists before preflight and receives a fresh
+cleanup deadline when containment begins. FreeRDP ownership covers stdin write/end as
 well as readiness observation: every failure terminates and awaits the child.
 Failed phase resumes are counted in evidence; repair time is not called successful phase time.
 Development resume is refused after three hours, and every VM must be destroyed within four
