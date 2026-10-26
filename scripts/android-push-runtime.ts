@@ -25,6 +25,7 @@ export interface AndroidPushRuntimeOptions {
   readonly executeWithContext?: (argv: readonly string[], execution: PushExecution | undefined) => ReturnType<FixtureExecutor>;
   readonly gatewayLogsDiscarded?: () => Promise<boolean>;
   readonly qualificationLogs?: Pick<QualificationLogs, "begin" | "end" | "healthy">;
+  readonly browserFailure?: QualificationLogs["browserFailure"];
   readonly execution?: PushExecution;
 }
 
@@ -63,7 +64,7 @@ export function pushBrowserCleanupFailure(error: AndroidBrowserCleanupError, nex
     class: "harness", reason: "containment_unproven", operation: "unknown", elapsedMs: 0, observations });
   const collateral = new QualificationFailure({ id: nextFailureId(), lane: "androidPushCleanup", step: "containment",
     class: "collateral", reason: "dependency_failed", originIds: [origin.evidence.id], operation: "unknown", elapsedMs: 0, observations });
-  return Object.assign(new AggregateError([...error.errors, origin, collateral], "Android Push browser containment unproven"), { pixelUnrestored: true });
+  return Object.assign(new AggregateError([...error.errors, origin, collateral], "Android Push browser containment unproven", { cause: error }), { pixelUnrestored: true });
 }
 
 /** Reads only an existing worker; no page navigation or fabricated notification can satisfy this. */
@@ -264,16 +265,18 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     (options.execute ?? executeFixture)(argv) : options.executeWithContext(argv, execution);
   const checkExecution = () => {
     if (execution === undefined) return;
-    execution.signal.throwIfAborted();
-    if (performance.now() >= execution.deadline) throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
-      reason: "deadline_exceeded", class: "harness", operation: "unknown", elapsedMs: 0, observations: { controllerDeadline: true } });
+    if (execution.signal.aborted) rethrowPushSafetyFailure(execution.signal.reason);
+    if (execution.signal.aborted || performance.now() >= execution.deadline) throw new QualificationFailure({
+      id: nextFailureId(), lane: "androidPush", step: phase, reason: "deadline_exceeded", class: "harness",
+      operation: "unknown", elapsedMs: 0, observations: { controllerDeadline: true } },
+      execution.signal.aborted ? { cause: execution.signal.reason } : undefined);
   };
-  const privacyFailure = () => new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
-    class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: 0, observations: {} });
+  const privacyFailure = (options?: ErrorOptions) => new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
+    class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: 0, observations: {} }, options);
   const logEvidence = async <T>(read: () => Promise<T>): Promise<T> => {
     try { return await read(); }
     catch (error) { rethrowPushSafetyFailure(error); throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
-      class: "harness", reason: "invalid_evidence", operation: "read_only", elapsedMs: 0, observations: {} }); }
+      class: "harness", reason: "invalid_evidence", operation: "read_only", elapsedMs: 0, observations: {} }, { cause: error }); }
   };
   // Neither root's label is a prefix of the other's: notification bodies carry the label.
   const location = (epoch: string, role: PushFixtureRole = "primary"): PushFixtureLocation => ({
@@ -444,11 +447,25 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         return result;
       }
       catch (error) {
-        rethrowPushSafetyFailure(error);
-        checkExecution();
-        throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: baseline.step,
-          reason: "browser_baseline_failed", class: "harness", operation: "unknown",
-          elapsedMs: Math.round(runtime.now() - started), observations: {} }, { cause: error });
+        let failure: Error;
+        try {
+          rethrowPushSafetyFailure(error);
+          failure = new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: baseline.step,
+            reason: "browser_baseline_failed", class: "harness", operation: "unknown",
+            elapsedMs: Math.round(runtime.now() - started), observations: {} }, { cause: error });
+        } catch (safetyError) { failure = safetyError as Error; }
+        try { await options.browserFailure?.(baseline.step, error, Math.round(runtime.now() - started)); }
+        catch (retentionError) {
+          // Private diagnostic failure cannot manufacture a new sanitized failure leaf.
+          failure.cause = new AggregateError(failure.cause === undefined ? [retentionError] : [failure.cause, retentionError],
+            "Push browser diagnostic retention failed");
+        }
+        if (failure instanceof QualificationFailure && failure.evidence.reason === "deadline_exceeded") throw failure;
+        try { checkExecution(); }
+        catch (deadline) {
+          if (deadline !== failure) throw new AggregateError([failure, deadline], "Push browser failed at execution deadline");
+        }
+        throw failure;
       }
     },
     async subscriptionCount() {
@@ -554,7 +571,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const owned = records[0];
       if (records.length === 1 && owned !== undefined) {
         if (owned.postedAt <= (baselineRecords.get(owned.key) ?? 0)) throw new Error("owned notification did not advance from its record baseline");
-        try { trackUnchangedNotificationPost(observedPosts, session, kind, owned); } catch { throw privacyFailure(); }
+        try { trackUnchangedNotificationPost(observedPosts, session, kind, owned); } catch (error) { throw privacyFailure({ cause: error }); }
       }
       return { count: records.length, titleMatches: records.length === 1 && owned?.title === expected.title,
         bodyMatches: records.length === 1 && owned?.body === expected.body,
@@ -588,8 +605,10 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         let attachedError = false;
         let observerFailure = "none";
         let observerSafetyFailure: unknown;
+        const observerErrors: unknown[] = [];
         const recordFailure = (error: unknown) => {
           attachedError = true;
+          observerErrors.push(error);
           try { rethrowPushSafetyFailure(error); } catch { observerSafetyFailure ??= error; }
           const message = error instanceof Error ? error.message : "";
           const method = ["Page.enable", "Runtime.enable", "Network.enable", "Target.setAutoAttach", "Runtime.runIfWaitingForDebugger", "Page.addScriptToEvaluateOnNewDocument"].find(item => message.includes(item)) ?? "other";
@@ -703,8 +722,13 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
               unlock: async () => { await runtime.beforeEffect(); await unlockAndroidKeyguard(serial!, undefined, undefined, execution); }, wait });
           } catch (error) {
             rethrowPushSafetyFailure(error);
-            const nodes = await readAndroidUi(command);
-            const remaining = (await readAndroidNotificationRecords(command, packageName!)).filter(record => record.tag.endsWith(`omp-attention-${session.instanceId}`)).length;
+            let nodes: AndroidUiNode[], remaining: number;
+            try {
+              nodes = await readAndroidUi(command);
+              remaining = (await readAndroidNotificationRecords(command, packageName!)).filter(record => record.tag.endsWith(`omp-attention-${session.instanceId}`)).length;
+            } catch (diagnosticError) {
+              throw new Error("notification authentication diagnostics failed", { cause: new AggregateError([error, diagnosticError]) });
+            }
             throw new Error(`notification authentication unavailable (owned records: ${remaining}; secure inputs: ${nodes.filter(node => node.systemInput).length})`, { cause: error });
           }
           stage = "page attachment";
@@ -735,7 +759,10 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           return { launches, successful, currentGeneration, currentRequest, scrubbedBeforeNetwork: routeObserved && routeScrubbed && apiScrubbed && metadataObserved && surface.scrubbed,
             writable: surface.writable, readOnly: surface.readOnly, expired: surface.expired };
         } catch (error) {
-          if (observerSafetyFailure !== undefined) throw observerSafetyFailure;
+          if (observerSafetyFailure !== undefined) throw new AggregateError([observerSafetyFailure], "Android Push observer safety failure",
+            { cause: new AggregateError([error, ...observerErrors], "Android Push observer diagnostics") });
+          if (error instanceof Error && observerErrors.length > 0) error.cause = new AggregateError(
+            [...(error.cause === undefined ? [] : [error.cause]), ...observerErrors], "Android Push observer diagnostics");
           rethrowPushSafetyFailure(error);
           if (everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
           // Already-observed closed values only: secondary device reads must not mask the cause.
@@ -817,7 +844,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       } catch (error) {
         rethrowPushSafetyFailure(error);
         // The closed values the wait saw, so a missing replay names what the device did show.
-        const seen = (await posted()).map(record => ({ tag: record.tag.slice(-48), title: record.title, body: record.body, postedAfterBaseline: record.postedAt > before }));
+        const seen = (await posted().catch(diagnosticError => {
+          throw new Error("Android Push replay diagnostics failed", { cause: new AggregateError([error, diagnosticError]) });
+        })).map(record => ({ tag: record.tag.slice(-48), title: record.title, body: record.body, postedAfterBaseline: record.postedAt > before }));
         throw new Error(`${error instanceof Error ? error.message : "Android Push replayed notification unavailable"} (expected title ${JSON.stringify(expected.title)}, body ${JSON.stringify(expected.body)}; records ${JSON.stringify(seen)})`, { cause: error });
       }
       await runtime.closePwa();

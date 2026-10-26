@@ -485,6 +485,26 @@ Allowed at normal verbosity:
 All gateway log fields are numeric or boolean. Never attach string-valued identifiers, hashes,
 paths, error messages, metadata, or serialized query objects.
 
+The stable qualification CLI's private stderr separately retains developer-authored Error messages
+and stacks along cause/AggregateError edges. Readiness's private `browser-substep.json` retains the
+failed browser step, error message, CDP method and elapsed time. Both use the repository's identifier
+and capability rules to redact private identifiers and withhold capability-bearing lines, never
+serialize arbitrary error properties, and never enter receipts, gateway logs or public artifacts.
+Repeated/cyclic errors and traversal-limit exhaustion are marked explicitly rather than recursed.
+Message/stack ceilings are 4/16 KiB respectively; oversized fields are withheld without retaining
+partial secrets or scanning unbounded provider bodies. Redaction/truncation is explicit and the
+complete serialized diagnostic is capped below 256 KiB. Diagnostic-retention failures stay in
+private causes, not the sanitized failure graph; concurrent execution expiry cannot replace a
+browser failure or discard its cause.
+
+These are access-restricted local diagnostics (0700 parent directory, 0600 files), not sanitized
+publication surfaces. Producer-authored Error messages are the authorship boundary: producers
+must not embed secrets or unreviewed response bodies. Identifier/capability scanning is defense
+in depth, not a general-purpose body classifier. A short capability-free response body copied
+into an Error message is retained in these private sinks; it must never enter receipt evidence,
+gateway structured telemetry or public artifacts. Operators must inspect and redact private
+diagnostics before sharing them.
+
 Qualification explicitly supplies `--qualification-log-dir`; an environment variable alone never
 enables daemon retention. Ordinary installations are unchanged. The sink accepts only closed event
 names/fields, finite numbers and booleans (plus the fixed envelope timestamp/level/name), and retains

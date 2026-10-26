@@ -1066,6 +1066,25 @@ typed `browser_baseline_failed` with a bounded browser substep (wake, WebAPK, CD
 target inventory, attachment, execution context, navigation or notification-state read), rather than
 an unclassified raw CDP error. Cleanup/containment failures retain their stronger disposition.
 Expired execution deadlines retain deadline attribution rather than becoming browser baseline errors.
+The stable CLI now writes the cause/AggregateError chain and stacks to its private stderr, retained
+by the release driver as `qualification-err.log`. Readiness also writes an exclusive mode-0600
+`rig-readiness-logs/browser-substep.json` containing the failed substep, error message, CDP method
+(or null) and elapsed milliseconds before restoration. These are operator diagnostics only:
+identifier/capability redaction applies, arbitrary error properties are excluded, and neither file
+is receipt evidence or a public release artifact. Inspect both when the receipt names only a typed
+browser failure; a diagnostic write failure preserves the original error rather than replacing it.
+Lane/readiness remapping preserves private causes. A concurrent browser deadline remains a sibling
+typed failure, while diagnostic-retention errors remain cause-only and do not add receipt failures.
+Private messages are limited to 4 KiB and stacks to 16 KiB; oversized fields are withheld before
+scanning, with `truncated: true`. Redaction is flagged with `redacted: true`. The complete compact
+stderr diagnostic and browser file each stay within the driver's 256-KiB retention ceiling, with
+an explicit terminal marker when the cause graph exceeds its byte budget.
+The browser file selects the deepest retained CDP cause and carries redaction/truncation flags
+from the entire chain, including omitted siblings. Ordinary errors remain privately reachable
+through deadline, persistence and containment conversions. Nested readiness failures receive the
+same lane remapping and final delivery counters as single failures. These mode-0600 diagnostics
+are not a general body sanitizer: producer-authored messages remain an authorship boundary;
+inspect them before sharing, as described in `docs/SECURITY.md`.
 
 Windows readiness reuses credential, inventory, image, plan and toolchain admission and requires
 remaining per-tag creation allowance with no unreconciled qualification resources. Unsupported

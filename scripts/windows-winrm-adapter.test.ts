@@ -3,10 +3,57 @@ import { join } from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { classifyWindowsCommandFailure, command, reconnectWindowsTransport, reconcileWindowsUpload, windowsUploadStep, windowsWinrmDiagnostic, windowsWinrmResult } from "./windows-qualification-runtime";
-import { QualificationFailure } from "./qualification-failure";
+import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures } from "./qualification-failure";
 import type { WindowsTransportProbe } from "./windows-stable-qualification";
 import { assertWindowsAllocation, windowsFailure, windowsRemaining } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
+
+test.each(["request", "request-expiry", "launch-fetch", "launch-json", "upload-step", "command"] as const)(
+  "509 round2 Windows runtime preserves ordinary %s provenance", async stage => {
+    const raw = new Error(`synthetic private ${stage} provenance`);
+    const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+    let error: unknown;
+    if (stage.startsWith("request")) {
+      const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => {
+        if (stage === "request-expiry") execution.deadline = 0;
+        throw raw;
+      }, { preconnect: globalThis.fetch.preconnect }));
+      try { error = await winrmRuntime.request("https://synthetic.invalid", {}, "POST", undefined, execution).catch(error => error); }
+      finally { mock.mockRestore(); }
+    } else if (stage.startsWith("launch")) {
+      error = await winrmRuntime.verifyWindowsStaleLaunch("https://synthetic.invalid", { instanceId: "synthetic", generation: 1 },
+        async () => {
+          if (stage === "launch-fetch") throw raw;
+          return Object.assign(new Response("{}", { status: 409, headers: { "cache-control": "no-store" } }), { json: async () => { throw raw; } });
+        }, execution).catch(error => error);
+    } else if (stage === "upload-step") error = await windowsUploadStep("stream", async () => { throw raw; }).catch(error => error);
+    else error = classifyWindowsCommandFailure(new winrmRuntime.WindowsCommandFailure(1, null, 0, 1, 1000, { cause: raw }), true, false, execution);
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+    expect(JSON.stringify(normalizeQualificationFailures(error))).not.toContain(raw.message);
+  });
+
+test.each(["stable", "reconnect", "poll"] as const)("509 round2 Windows %s expiry retains the ordinary failing probe", async stage => {
+  let now = 0;
+  const raw = new Error("synthetic private expired probe");
+  const clock = { now: () => now, sleep: async (ms: number) => { now += ms; } };
+  const probe = async (): Promise<never> => { now = 90_000; throw raw; };
+  const error = await (stage === "stable" ? winrmRuntime.waitForStableWindowsTransport(probe, clock, 90_000) :
+    stage === "reconnect" ? reconnectWindowsTransport(probe, clock) :
+    winrmRuntime.pollWindows(probe, 90_000, "synthetic poll", undefined, clock)).catch(error => error);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "deadline_exceeded" }]);
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+});
+
+test("509 round2 WinRM invalid-output conversion retains the parsing error", () => {
+  const raw = new Error("synthetic private decoder failure");
+  const parser = spyOn(JSON, "parse").mockImplementation(() => { throw raw; });
+  let error: unknown;
+  try { windowsWinrmResult({ exitCode: 0, stdout: "{}", failure: null,
+    teardown: { commandAttempted: true, commandStopped: true, shellAttempted: true, shellClosed: true } }, true); }
+  catch (caught) { error = caught; }
+  finally { parser.mockRestore(); }
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+});
 
 test.each(["cancel", "deadline"] as const)("council498r1 Windows Android subprocess owns %s and cleanup switches owner", async mode => {
   const controller = new AbortController(), killed: string[] = [];
@@ -74,6 +121,19 @@ const transportResult = (condition = "connection_timeout") => ({
   failure: { kind: "transport", stage: "connection", condition, httpStatus: null, disposition: "not_started" },
   teardown: { commandAttempted: false, commandStopped: false, shellAttempted: false, shellClosed: false },
 });
+test.each(["unconfirmed", "inspection"] as const)("509 round2 upload %s keeps the original interrupted transport diagnostic", async stage => {
+  const original = "synthetic private interrupted upload", recovery = new Error("synthetic private inspection failure");
+  const error = await reconcileWindowsUpload({
+    stream: async () => windowsWinrmResult({ ...transportResult(), diagnostic: original }, false, undefined, true),
+    inspect: async () => { if (stage === "inspection") throw recovery; return { exists: true, matches: false, writerEnded: false }; },
+    remove: async () => {},
+  }).catch(error => error);
+  const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+  expect(messages).toContain(original);
+  if (stage === "inspection") expect(messages).toContain(recovery.message);
+  else expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "mutation_unconfirmed" }]);
+});
+
 test("structured read-only timeouts are transient; text, credentials, encoding and malformed JSON are harness", () => {
   let failure: unknown;
   try { windowsWinrmResult(transportResult(), true); } catch (error) { failure = error; }

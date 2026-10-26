@@ -102,8 +102,8 @@ async function firstWinrmResponse(stream: ReadableStream<Uint8Array>, observed: 
 type WindowsTermination = "command_deadline" | "execution_deadline" | "external";
 export class WindowsCommandFailure extends Error {
   constructor(readonly exitCode: number, readonly termination: WindowsTermination | null, readonly signal: number,
-    readonly elapsedMs: number, readonly timeoutMs: number) {
-    super("Windows command failed; output withheld");
+    readonly elapsedMs: number, readonly timeoutMs: number, options?: ErrorOptions) {
+    super("Windows command failed; output withheld", options);
   }
   get controllerDeadline(): boolean { return this.termination === "command_deadline" || this.termination === "execution_deadline"; }
 }
@@ -114,7 +114,14 @@ export function classifyWindowsCommandFailure(error: WindowsCommandFailure, read
   return windowsFailure(stopped ? "deadline_exceeded" : readOnly && connectionProbe && error.controllerDeadline ? "probe_deadline" : readOnly ? "helper_failed" : "mutation_unconfirmed",
     "command", readOnly ? "read_only" : "unknown",
     { controllerDeadline: error.controllerDeadline || expired, readOnlyProbe: readOnly && connectionProbe,
-      exitCode: Math.max(0, Math.min(255, error.exitCode)), signal: error.signal, timeoutMs: error.timeoutMs }, execution, error.elapsedMs);
+      exitCode: Math.max(0, Math.min(255, error.exitCode)), signal: error.signal, timeoutMs: error.timeoutMs }, execution, error.elapsedMs, { cause: error });
+}
+/** Preserve secondary diagnostic provenance without adding a sanitized failure leaf. */
+function retainWindowsCause(error: unknown, cause: unknown): unknown {
+  if (error === cause) return error;
+  if (!(error instanceof Error)) return new AggregateError([error, cause], "Windows operation and diagnostic failed");
+  error.cause = new AggregateError([cause, ...(error.cause === undefined ? [] : [error.cause])], "Windows operation diagnostics");
+  return error;
 }
 export async function command(argv: readonly string[], options: {
   cwd?: string; input?: string; timeoutMs?: number; allowedExitCodes?: readonly number[];
@@ -172,19 +179,20 @@ export async function command(argv: readonly string[], options: {
     ? new Response(proc.stderr).arrayBuffer()
     : firstWinrmResponse(proc.stderr, at => record({ firstResponseLatencyMs: Math.max(0, at - probe!.startedAt) }))]);
   try {
-    let inputFailed = false;
+    let inputFailed = false, inputFailure: unknown;
     try {
       if (options.input !== undefined) {
         if (proc.stdin === undefined || typeof proc.stdin === "number") throw new Error("subprocess input pipe unavailable");
         proc.stdin.write(options.input); proc.stdin.end();
       }
-    } catch { inputFailed = true; terminate("external"); }
+    } catch (error) { inputFailed = true; inputFailure = error; terminate("external"); }
     const [exit, out] = await drained;
     record({ exitedAt: exit.at, exitCode: exit.code });
     await updates;
     if (checkpointFailed) throw checkpointFailure;
     if (inputFailed || sentSignal !== 0 || !(options.allowedExitCodes ?? [0]).includes(exit.code)) {
-      throw new WindowsCommandFailure(exit.code, termination, sentSignal, performance.now() - started, timeoutMs);
+      throw new WindowsCommandFailure(exit.code, termination, sentSignal, performance.now() - started, timeoutMs,
+        inputFailed ? { cause: inputFailure } : options.execution?.signal.aborted ? { cause: options.execution.signal.reason } : undefined);
     }
     assertWindowsExecution(options.execution, "unknown");
     return out.trim();
@@ -217,7 +225,7 @@ function vaultPath(epoch: string): string { windowsCampaignLabel(epoch); return 
 async function loadAccess(epoch: string): Promise<Access> {
   const text = await privateFile(vaultPath(epoch));
   try { return JSON.parse(text) as Access; }
-  catch { throw new Error("qualification vault is malformed"); }
+  catch (error) { throw new Error("qualification vault is malformed", { cause: error }); }
 }
 /**
  * The epoch's vault, or undefined once cleanup has removed it. Cleanup removes the vault only after the
@@ -258,20 +266,20 @@ export async function request<T>(url: string, headers: Record<string, string>, m
     const text = response.status === 204 ? "" : await response.text();
     signal.throwIfAborted();
     try { return text === "" ? undefined : JSON.parse(text) as T; }
-    catch { throw windowsFailure("helper_failed", "output", method === "GET" ? "read_only" : "unknown", {}, execution); }
+    catch (error) { throw windowsFailure("helper_failed", "output", method === "GET" ? "read_only" : "unknown", {}, execution, 0, { cause: error }); }
   }
   catch (error) {
     if (signal.aborted || performance.now() >= operationDeadline) {
-      throw windowsFailure("deadline_exceeded", "connection", method === "GET" ? "read_only" : "unknown", {}, execution);
+      throw windowsFailure("deadline_exceeded", "connection", method === "GET" ? "read_only" : "unknown", {}, execution, 0, { cause: error });
     }
     if (error instanceof QualificationFailure) throw error;
     const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
     if (method === "GET") {
-      if (code === "ECONNRESET") throw windowsFailure("connection_reset", "connection", "read_only", { transportFailure: true }, execution);
-      if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") throw windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true }, execution);
-      if (error instanceof DOMException && error.name === "TimeoutError") throw windowsFailure("read_timeout", "connection", "read_only", { transportFailure: true }, execution);
+      if (code === "ECONNRESET") throw windowsFailure("connection_reset", "connection", "read_only", { transportFailure: true }, execution, 0, { cause: error });
+      if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") throw windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true }, execution, 0, { cause: error });
+      if (error instanceof DOMException && error.name === "TimeoutError") throw windowsFailure("read_timeout", "connection", "read_only", { transportFailure: true }, execution, 0, { cause: error });
     }
-    throw windowsFailure(method === "GET" ? "helper_failed" : "mutation_unconfirmed", "connection", method === "GET" ? "read_only" : "unknown", {}, execution);
+    throw windowsFailure(method === "GET" ? "helper_failed" : "mutation_unconfirmed", "connection", method === "GET" ? "read_only" : "unknown", {}, execution, 0, { cause: error });
   } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
@@ -293,14 +301,14 @@ async function observeWindowsLaunch(origin: string, session: Record<string, unkn
         body: JSON.stringify({ mode, generation: session.generation + (expected === "stale" ? 1 : 0) }),
         cache: "no-store", signal: AbortSignal.timeout(expected === "stale" ? 30_000 : 10_000),
       });
-    } catch (error) { if (error instanceof QualificationFailure) throw error; throw windowsFailure("helper_failed", "connection", "read_only", {}, execution); }
+    } catch (error) { if (error instanceof QualificationFailure) throw error; throw windowsFailure("helper_failed", "connection", "read_only", {}, execution, 0, { cause: error }); }
     if (response.status !== (expected === "stale" ? 409 : 200) || !response.headers.get("cache-control")?.includes("no-store")) {
       const failure = assertion();
-      try { await response.body?.cancel(); } catch { throw failure; }
+      try { await response.body?.cancel(); } catch (error) { throw retainWindowsCause(failure, error); }
       throw failure;
     }
     let payload: unknown;
-    try { payload = await response.json(); } catch { throw windowsFailure("helper_failed", "output", "read_only"); }
+    try { payload = await response.json(); } catch (error) { throw windowsFailure("helper_failed", "output", "read_only", {}, execution, 0, { cause: error }); }
     if (!object(payload)) throw windowsFailure("helper_failed", "output", "read_only");
     const released = Object.hasOwn(payload, "capability");
     const valuePresent = typeof payload.capability === "string" && payload.capability !== "";
@@ -357,13 +365,19 @@ export async function waitForStableWindowsTransport(
 ): Promise<Record<string, unknown>> {
   const started = clock.now();
   let samples = 0; let firstSuccess = 0;
+  let lastFailure: unknown;
+  const remaining = () => {
+    try { return windowsRemaining(started, deadline, clock.now(), execution); }
+    catch (error) { throw lastFailure === undefined ? error : retainWindowsCause(error, lastFailure); }
+  };
   while (true) {
-    const remaining = windowsRemaining(started, deadline, clock.now(), execution);
+    const budget = remaining();
     let observation: Record<string, unknown>;
     try {
-      observation = await probe(Math.min(180_000, remaining));
+      observation = await probe(Math.min(180_000, budget));
     } catch (error) {
-      const nextBudget = windowsRemaining(started, deadline, clock.now(), execution);
+      lastFailure = error;
+      const nextBudget = remaining();
       if (!(error instanceof QualificationFailure) || error.evidence.class !== "infra_transient") throw error;
       samples = 0; firstSuccess = 0;
       await clock.sleep(Math.min(30_000, nextBudget));
@@ -407,7 +421,10 @@ export async function pollWindows(action: () => Promise<boolean>, ms: number, na
     remaining();
     let succeeded: boolean;
     try { succeeded = await action(); }
-    catch (error) { remaining(); throw error; }
+    catch (error) {
+      try { remaining(); } catch (expiry) { throw retainWindowsCause(expiry, error); }
+      throw error;
+    }
     const budget = remaining();
     if (succeeded) return;
     await clock.sleep(Math.min(5_000, budget));
@@ -469,11 +486,11 @@ function withWinrmDiagnostic(error: QualificationFailure, value: Record<string, 
         typeof frame.function !== "string" || !/^[A-Za-z0-9_.<>-]{1,120}$/u.test(frame.function) ||
         !Number.isSafeInteger(frame.line) || Number(frame.line) < 1)) return error;
   }
-  return new QualificationFailure(error.evidence, { cause: new Error(windowsWinrmDiagnostic(value as Parameters<typeof windowsWinrmDiagnostic>[0])) });
+  return new QualificationFailure(error.evidence, { cause: new Error(windowsWinrmDiagnostic(value as Parameters<typeof windowsWinrmDiagnostic>[0]), { cause: error }) });
 }
 /** Only closed helper evidence is classification; diagnostics stay outside the failure record. */
 export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?: WindowsExecutionContext, upload = false): Record<string, unknown> {
-  const invalid = () => windowsFailure("helper_failed", "output", readOnly ? "read_only" : "unknown", {}, execution);
+  const invalid = (options?: ErrorOptions) => windowsFailure("helper_failed", "output", readOnly ? "read_only" : "unknown", {}, execution, 0, options);
   if (!object(value) || !Number.isInteger(value.exitCode) || typeof value.stdout !== "string" ||
     value.stdout.length > 1024 * 1024 || !object(value.teardown) ||
     Object.keys(value.teardown).sort().join(",") !== "commandAttempted,commandStopped,shellAttempted,shellClosed" ||
@@ -485,7 +502,7 @@ export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?
       const observation: unknown = JSON.parse(value.stdout);
       if (!object(observation)) throw invalid();
       return observation;
-    } catch { throw invalid(); }
+    } catch (error) { throw invalid({ cause: error }); }
   }
   const failure = value.failure;
   if (!object(failure) || Object.keys(failure).sort().join(",") !== "condition,disposition,httpStatus,kind,stage" ||
@@ -528,8 +545,12 @@ export async function reconnectWindowsTransport<T>(probe: (timeoutMs: number) =>
   clock: Pick<WindowsRuntime, "now" | "sleep">, execution?: WindowsExecutionContext): Promise<T> {
   const started = clock.now(), deadline = started + 90_000;
   const delays = [2_000, 4_000, 8_000, 16_000];
-  const remaining = () => Math.min(windowsRemaining(started, deadline, clock.now(), execution),
-    execution === undefined ? Infinity : windowsRemaining(execution.deadline - 90_000, execution.deadline, performance.now(), execution));
+  let lastFailure: unknown;
+  const remaining = () => {
+    try { return Math.min(windowsRemaining(started, deadline, clock.now(), execution),
+      execution === undefined ? Infinity : windowsRemaining(execution.deadline - 90_000, execution.deadline, performance.now(), execution)); }
+    catch (error) { throw lastFailure === undefined ? error : retainWindowsCause(error, lastFailure); }
+  };
   for (let attempt = 0; ; attempt += 1) {
     const budget = remaining();
     let result: T;
@@ -537,6 +558,7 @@ export async function reconnectWindowsTransport<T>(probe: (timeoutMs: number) =>
       result = await probe(budget);
     }
     catch (error) {
+      lastFailure = error;
       const budget = remaining();
       if (!(error instanceof QualificationFailure) || error.evidence.class !== "infra_transient") throw error;
       const delay = delays[attempt];
@@ -567,12 +589,14 @@ export async function reconcileWindowsUpload(operations: {
   try { assertWindowsExecution(execution); await operations.stream(); return; }
   catch (error) {
     if (!(error instanceof QualificationFailure) || !interruptedUploadTransports.has(error)) throw error;
-    assertWindowsExecution(execution);
-    const found = await operations.inspect();
-    if (found.writerEnded && found.matches) return;
-    if (found.writerEnded && found.exists) { assertWindowsExecution(execution); await operations.remove(); }
-    throw windowsFailure("mutation_unconfirmed", "upload", "unknown",
-      { mutationReconciled: found.writerEnded }, execution);
+    try {
+      assertWindowsExecution(execution);
+      const found = await operations.inspect();
+      if (found.writerEnded && found.matches) return;
+      if (found.writerEnded && found.exists) { assertWindowsExecution(execution); await operations.remove(); }
+      throw windowsFailure("mutation_unconfirmed", "upload", "unknown",
+        { mutationReconciled: found.writerEnded }, execution);
+    } catch (recoveryError) { throw retainWindowsCause(recoveryError, error); }
   }
 }
 
@@ -616,7 +640,7 @@ export async function windowsUploadStep<T>(step: WindowsUploadStep, action: (ste
   try { return await action(step); }
   catch (error) {
     if (error instanceof QualificationFailure) throw error;
-    throw windowsFailure("helper_failed", "upload", "unknown");
+    throw windowsFailure("helper_failed", "upload", "unknown", {}, undefined, 0, { cause: error });
   }
 }
 
@@ -761,9 +785,10 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
         throw classifyWindowsCommandFailure(error, !mutation, object(input) && input.action === "transport", owner);
       }
       if (error instanceof QualificationFailure && ["deadline_exceeded", "ownership_changed"].includes(error.evidence.reason)) throw error;
-      assertWindowsExecution(owner, mutation ? "unknown" : "read_only");
+      try { assertWindowsExecution(owner, mutation ? "unknown" : "read_only"); }
+      catch (expiry) { throw retainWindowsCause(expiry, error); }
       if (error instanceof QualificationFailure) throw error;
-      throw windowsFailure("helper_failed", "output", mutation ? "unknown" : "read_only", {}, owner);
+      throw windowsFailure("helper_failed", "output", mutation ? "unknown" : "read_only", {}, owner, 0, { cause: error });
     }
   };
   const ps = async (context: WindowsContext, action: string, extra: Record<string, unknown> = {}, timeoutMs?: number, principal: WindowsPrincipal = "administrator") => {

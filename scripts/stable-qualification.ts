@@ -19,7 +19,7 @@ import { parseDeviceCloudHoldSet, recognizedDeviceCloudOutcome, writeDeviceCloud
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { abortablePause } from "./provider-read.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
-import { FAILURE_LIMITS, FAILURE_STEPS, FAILURE_REASONS, QualificationFailure, normalizeQualificationFailures, qualificationRetryEligible, qualificationContainmentUnproven, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, type QualificationFailureLane, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
+import { FAILURE_LIMITS, FAILURE_STEPS, FAILURE_REASONS, QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, qualificationRetryEligible, qualificationContainmentUnproven, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, type QualificationFailureLane, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
 import { parseQualificationExecution, qualificationExecutionsMatch, parseRigReadinessReceipt, writeQualificationOutcomeFile, readQualificationOutcomeFile, qualificationOutcomeExitCode, type QualificationExecution, type RigReadinessReceipt } from "./qualification-outcome.ts";
 
 /** Candidate-source rollout marker: contract modules alone do not enable new worker arguments. */
@@ -57,7 +57,15 @@ export async function withQualificationDeadline<T>(
     execution.signal.throwIfAborted();
     return result;
   } catch (error) {
-    if (execution.signal.aborted && error !== execution.signal.reason) {
+    const containsAbort = (value: unknown, seen = new Set<unknown>()): boolean => {
+      if (value === execution.signal.reason) return true;
+      if (value instanceof QualificationFailure && execution.signal.reason instanceof QualificationFailure &&
+        value.evidence.id === execution.signal.reason.evidence.id && value.evidence.reason === "deadline_exceeded") return true;
+      if (!(value instanceof AggregateError) || seen.has(value)) return false;
+      seen.add(value);
+      return value.errors.some(child => containsAbort(child, seen));
+    };
+    if (execution.signal.aborted && !containsAbort(error)) {
       throw new AggregateError([execution.signal.reason, error], "qualification deadline and owner failed");
     }
     throw error;
@@ -94,15 +102,15 @@ function nextReceiptFailureId(receipt: StableQualificationReceipt): number {
 function laneFailure(error: unknown, lane: QualificationFailureLane, nextFailureId: () => number): unknown {
   if (error instanceof QualificationFailure) return pixelUnrestored(error) ? Object.assign(new QualificationFailure(parseLaneFailure({
     ...error.evidence, observations: { ...error.evidence.observations, cleanupVerified: false },
-  }), { cause: error.cause }), { pixelUnrestored: true }) : error;
-  if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(child => laneFailure(child, lane, nextFailureId)), "qualification failures"),
+  }), { cause: error }), { pixelUnrestored: true }) : error;
+  if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(child => laneFailure(child, lane, nextFailureId)), "qualification failures", { cause: error }),
     pixelUnrestored(error) ? { pixelUnrestored: true } : {});
   const holds = deviceCloudHolds(error);
   if (holds !== undefined) {
     const failures = holds.map(hold => new QualificationFailure(parseLaneFailure({
       id: nextFailureId(), lane: "deviceCloud", step: hold.stage, class: "infra_transient", reason: "pinned_pool_busy",
       elapsedMs: hold.waitedMs, operation: "not_started", observations: { waitedMs: hold.waitedMs },
-    })));
+    }), { cause: error }));
     return failures.length === 1 ? failures[0] : new AggregateError(failures, "qualification availability holds");
   }
   return Object.assign(new QualificationFailure({
@@ -813,9 +821,10 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
   delete lane.notStartedReason;
   const cleanup = name === "cleanup" || Object.values(CLEANUP_LANES).includes(name as typeof CLEANUP_LANES[keyof typeof CLEANUP_LANES]);
   let persistenceFailed = false;
+  const persistenceErrors: unknown[] = [];
   const checkpointPersist = async () => {
     try { await persist(); }
-    catch (error) { if (!cleanup) throw error; persistenceFailed = true; }
+    catch (error) { if (!cleanup) throw error; persistenceFailed = true; persistenceErrors.push(error); }
   };
   await checkpointPersist();
   const checkpoint: Checkpoint = async evidence => {
@@ -828,7 +837,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
       lane.evidence = { ...lane.evidence, ...evidence, persistenceFailed: true };
       throw new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: name,
         step: "containment", reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0,
-        observations: { persistenceFailed: true } }));
+        observations: { persistenceFailed: true } }), { cause: new AggregateError(persistenceErrors, "receipt persistence failed") });
     }
     lane.status = "passed";
     lane.completedAt = now();
@@ -839,9 +848,10 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
     catch (error) {
       if (!cleanup) throw error;
       persistenceFailed = true;
+      persistenceErrors.push(error);
       throw new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: name,
         step: "containment", reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0,
-        observations: { persistenceFailed: true } }));
+        observations: { persistenceFailed: true } }), { cause: error });
     }
     return evidence;
   } catch (error) {
@@ -868,13 +878,13 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
       if (own.length > 0 && own.every(item => item.class !== "collateral")) lane.failure = own;
     }
     try { await persist(); }
-    catch { persistenceFailed = true; }
+    catch (error) { persistenceFailed = true; persistenceErrors.push(error); }
     if (persistenceFailed) {
       lane.evidence = { ...lane.evidence, persistenceFailed: true };
       if (!normalizeQualificationFailures(failure).some(item => item.observations.persistenceFailed === true)) {
         const storageFailure = new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: name,
           step: cleanup ? "containment" : FAILURE_STEPS[name][0], reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0,
-          observations: { persistenceFailed: true } }));
+          observations: { persistenceFailed: true } }), { cause: new AggregateError(persistenceErrors, "receipt persistence failed") });
         failure = new AggregateError([failure, storageFailure], "cleanup and receipt persistence failed");
       }
     }
@@ -1479,7 +1489,7 @@ export async function runPixelRestoringChild(command: readonly string[], options
   try {
     return await runCommand(command, options);
   } catch (error) {
-    throw Object.assign(error instanceof Error ? error : new Error("Pixel child failed"), { pixelUnrestored: true });
+    throw Object.assign(error instanceof Error ? error : new Error("Pixel child failed", { cause: error }), { pixelUnrestored: true });
   }
 }
 
@@ -1653,21 +1663,25 @@ function remoteOwnerCommand(mode: "run" | "settle", owner: string, argv: readonl
 
 async function settleMacCommand(target: MacTarget, owner: string, execute: typeof runCommand = runCommand,
   execution?: QualificationExecutionContext): Promise<void> {
-  let settled = false;
+  let settled = false, cause: unknown;
   try { settled = (await execute(macSshCommand(target, remoteOwnerCommand("settle", owner)),
-    { allowFailure: true, timeoutMs: 45_000 })).exitCode === 0; } catch { /* Independent control has its own bound. */ }
+    { allowFailure: true, timeoutMs: 45_000 })).exitCode === 0; } catch (error) { cause = error; }
   if (settled) return;
-  throw markUnsettledMac(target, execution);
+  throw markUnsettledMac(target, execution, cause);
 }
 
-function markUnsettledMac(target: MacTarget, execution?: QualificationExecutionContext): QualificationFailure {
+function markUnsettledMac(target: MacTarget, execution?: QualificationExecutionContext, cause?: unknown): QualificationFailure {
   const existing = unsettledRemoteTargets.get(target.sshDestination);
-  if (existing !== undefined) return existing.failure;
+  if (existing !== undefined) {
+    if (cause !== undefined) existing.failure.cause = new AggregateError(
+      [...(existing.failure.cause === undefined ? [] : [existing.failure.cause]), cause], "retained Mac settlement diagnostics");
+    return existing.failure;
+  }
   const nextFailureId = execution?.nextFailureId ?? macFailureAllocators.get(target.sshDestination) ?? (() => ++standaloneMacFailureId);
   const failure = new QualificationFailure(parseLaneFailure({
     id: nextFailureId(), lane: "campaign", step: "teardown", reason: "unclassified_failure", class: "harness",
     operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false, mutationReconciled: false },
-  }));
+  }), cause === undefined ? undefined : { cause });
   unsettledRemoteTargets.set(target.sshDestination, { failure, nextFailureId });
   return failure;
 }
@@ -1976,12 +1990,12 @@ const defaultPreflightRuntime: StablePreflightRuntime = {
   loadMacTarget: loadConfiguredMacTarget,
 };
 
-/** Discard raw probe errors: SSH, adb and credential tools can include private identifiers or secrets. */
+/** Public-facing text stays fixed; the original probe error is private cause-only evidence. */
 async function prerequisite<T>(description: string, probe: () => Promise<T>): Promise<T> {
   try {
     return await probe();
-  } catch {
-    throw new Error("Stable preflight: " + description);
+  } catch (error) {
+    throw new Error("Stable preflight: " + description, { cause: error });
   }
 }
 
@@ -2233,13 +2247,13 @@ export async function runMacScript(environment: Record<string, string>, lanes: r
   } catch (error) { errors.push(error); }
   let owners: string[];
   try { owners = await readdir(journal); }
-  catch { throw new AggregateError([...errors, markUnsettledMac(target, execution)], "retained Mac owner inventory is unproven"); }
+  catch (error) { throw new AggregateError([...errors, markUnsettledMac(target, execution, error)], "retained Mac owner inventory is unproven"); }
   for (const owner of owners) {
     try { await settleMacCommand(target, owner, execute, execution); await rm(join(journal, owner)); }
     catch (error) { errors.push(error); }
   }
   try { if ((await readdir(journal)).length === 0) await rm(journal, { recursive: true }); }
-  catch { errors.push(markUnsettledMac(target, execution)); }
+  catch (error) { errors.push(markUnsettledMac(target, execution, error)); }
   if (errors.length > 0) throw new AggregateError(errors, "retained Mac script or remote settlement failed");
   execution?.signal.throwIfAborted();
   return `${result!.stdout}${result!.stderr}`;
@@ -2792,10 +2806,10 @@ export async function completeOmpPublicationLifecycle(
   }
   const checkpoint = async () => {
     try { await persist(); }
-    catch {
+    catch (error) {
       lane.evidence = { ...lane.evidence, persistenceFailed: true };
       throw new QualificationFailure(parseLaneFailure({ id: nextFailureId(), lane: "ompPublication", step: "cleanup",
-        reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true } }));
+        reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true } }), { cause: error });
     }
   };
   try {
@@ -2890,7 +2904,7 @@ export async function runRigReadiness(
   await persist();
   const failures: unknown[] = [];
   const ownedFailure = (error: unknown): unknown => {
-    if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(ownedFailure), "readiness failures"),
+    if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(ownedFailure), "readiness failures", { cause: error }),
       pixelUnrestored(error) ? { pixelUnrestored: true } : {});
     if (error instanceof QualificationFailure) {
       const evidence = error.evidence;
@@ -2901,7 +2915,7 @@ export async function runRigReadiness(
       return Object.assign(new QualificationFailure(parseLaneFailure({ ...evidence, lane: "rigReadiness",
         step: evidence.reason === "browser_baseline_failed" ? evidence.step : receipt.rigReadiness?.phase ?? "fixture", reason,
         observations: { ...evidence.observations, ...(pixelUnrestored(error) || qualificationContainmentUnproven([evidence]) ? { cleanupVerified: false } : {}) },
-        class: FAILURE_REASONS.rigReadiness[reason as keyof typeof FAILURE_REASONS.rigReadiness] })),
+        class: FAILURE_REASONS.rigReadiness[reason as keyof typeof FAILURE_REASONS.rigReadiness] }), { cause: error }),
       pixelUnrestored(error) ? { pixelUnrestored: true } : {});
     }
     return laneFailure(error, "rigReadiness", () => nextReceiptFailureId(receipt));
@@ -2988,18 +3002,19 @@ export async function restoreRigReadinessPixel(
   latestProgress: () => unknown,
 ): Promise<void> {
   let persistenceFailed = false;
+  const persistenceErrors: unknown[] = [];
   const failures: unknown[] = [];
   try {
     await module.cleanup({ ...context, checkpoint: async value => {
       try { await context.checkpoint(value); }
-      catch { persistenceFailed = true; }
+      catch (error) { persistenceFailed = true; persistenceErrors.push(error); }
     } });
   } catch (error) { failures.push(error); }
   if (module.needsCleanup(latestProgress())) failures.push(new Error("rig readiness Pixel restoration is unproven"));
   if (persistenceFailed) failures.push(new QualificationFailure(parseLaneFailure({
     id: context.execution?.nextFailureId() ?? ++standaloneMacFailureId, lane: "rigReadiness", step: "cleanup",
     reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },
-  })));
+  }), { cause: new AggregateError(persistenceErrors, "readiness restoration persistence failed") }));
   if (failures.length > 0) throw new AggregateError(failures, "rig readiness Pixel restoration failed");
 }
 
@@ -3497,7 +3512,7 @@ async function runReceiptStableQualification(
       catch (error) {
         const cleanupError = error instanceof QualificationFailure || error instanceof AggregateError ? error :
           new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: "campaign", step: "teardown",
-            reason: "unclassified_failure", class: "harness", operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false } }));
+            reason: "unclassified_failure", class: "harness", operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false } }), { cause: error });
         primaryError = primaryError === undefined ? cleanupError : new AggregateError([primaryError, cleanupError], "qualification and live-session cleanup failed");
       }
     }
@@ -3595,6 +3610,7 @@ if (import.meta.main) {
     const hold = recognizedDeviceCloudOutcome(error);
     if (hold !== undefined) console.error("stable qualification held: pinned device-cloud pools are busy; explicit operator retry required");
     else console.error("stable qualification failed; inspect the private receipt and outcome");
+    console.error(JSON.stringify({ privateQualificationFailure: privateQualificationFailureDiagnostic(error) }));
     process.exitCode = hold === undefined ? 1 : 75;
     try {
       const options = parseStableQualificationArgs(Bun.argv.slice(2));

@@ -61,7 +61,7 @@ import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-
 import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
 import { readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution } from "./qualification-outcome.ts";
-import { QualificationFailure, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
+import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import { AndroidBrowserCleanupError } from "./android-device.ts";
 import { pushBrowserCleanupFailure } from "./android-push-runtime.ts";
@@ -78,6 +78,17 @@ const PREVIOUS_TAG =
 const COMMIT = "a".repeat(40);
 const MAC_ENV = { OMP_STABLE_MAC_HOST: "gwqual@fixture.invalid", OMP_STABLE_MAC_MODEL: "Mac17,14" };
 const REPOSITORY_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+test("private CLI diagnostic retains the failure message and stack on stderr", async () => {
+  const child = Bun.spawn([process.execPath, "scripts/stable-qualification.ts", "--unknown-private-diagnostic"], {
+    cwd: REPOSITORY_ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  expect(code).toBe(1);
+  expect(stdout).toBe("");
+  expect(stderr).toContain("unknown argument: --unknown-private-diagnostic");
+  expect(stderr).toContain("parseCandidateTagArgs");
+});
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -1277,6 +1288,23 @@ describe("campaign terminal evidence and readiness", () => {
     expect(events).toEqual(["aborted", "reaped", "cleanup"]);
   });
 
+  test.each(["original", "remapped"] as const)("509 round2 deadline does not duplicate its %s abort root inside a returned aggregate", async variant => {
+    let id = 0, owned: AggregateError | undefined;
+    const error = await withQualificationDeadline("androidPush", 5, () => ++id, async execution => {
+      await new Promise<void>(resolve => execution.signal.addEventListener("abort", () => resolve(), { once: true }));
+      const evidence = (execution.signal.reason as QualificationFailure).evidence;
+      if (evidence.reason !== "deadline_exceeded") throw new Error("expected controller deadline");
+      const reason = variant === "original" ? execution.signal.reason : new QualificationFailure({
+        ...evidence, lane: "rigReadiness", step: "pixel_push",
+      }, { cause: execution.signal.reason });
+      owned = new AggregateError([new AggregateError([reason], "nested owner")], "owner settled");
+      throw owned;
+    }).catch(error => error);
+    expect(error).toBe(owned);
+    expect(normalizeQualificationFailures(error)).toHaveLength(1);
+    expect(normalizeQualificationFailures(error)[0]?.reason).toBe("deadline_exceeded");
+  });
+
   test.each(["prepare", "windows", "macos", "push"] as const)("readiness %s failure restores Pixel then Mac and never passes a qualification lane", async phase => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     const events: string[] = [];
@@ -1294,19 +1322,29 @@ describe("campaign terminal evidence and readiness", () => {
     expect(Object.values(receipt.lanes).every(lane => lane.status === "pending")).toBe(true);
   });
 
-  test("readiness ownership preserves the browser baseline substep after cleanup", async () => {
+  test("509 council readiness ownership preserves the browser cause through aggregate and lane owners", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const cause = new Error("CDP Runtime.evaluate: synthetic context missing");
+    const aggregateCause = new Error("synthetic aggregate context");
     const error = await runRigReadiness(receipt, async () => {}, {
       prepare: async () => {}, windows: async () => ({}), macos: async () => ({}),
-      push: async () => { throw new QualificationFailure({
+      push: async () => { throw new AggregateError([new QualificationFailure({
         id: 1, lane: "rigReadiness", step: "browser_forward", reason: "browser_baseline_failed",
         class: "harness", operation: "unknown", elapsedMs: 19_000, observations: {},
-      }); },
+      }, { cause })], "synthetic readiness aggregate", { cause: aggregateCause }); },
       restorePixel: async () => {}, restoreMac: async () => {},
     }).catch(error => error);
     expect(normalizeQualificationFailures(error)).toMatchObject([
       { lane: "rigReadiness", step: "browser_forward", reason: "browser_baseline_failed" },
     ]);
+    const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+    expect(messages).toContain(cause.message);
+    expect(messages).toContain(aggregateCause.message);
+    receipt.execution = receiptExecution();
+    const laneError = await executeReceiptLane(receipt, "androidPush", async () => {}, async () => {
+      throw Object.assign(error, { pixelUnrestored: true });
+    }).catch(error => error);
+    expect(privateQualificationFailureDiagnostic(laneError).map(entry => entry.message)).toContain(cause.message);
     expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "restored", observations: { baselineRestored: true } });
   });
 

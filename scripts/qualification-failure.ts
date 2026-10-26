@@ -3,7 +3,8 @@
  * - LaneFailure is a lane/reason/class-discriminated, capability-free record. IDs are unique
  *   within one campaign attempt; callers allocate them across lanes, not per lane.
  * - QualificationFailure validates a record; only its evidence is JSON-serializable. Causes
- *   remain in memory. Ordinary Error.cause and structural lookalikes are never classification.
+ *   remain outside receipts; the private CLI diagnostic traverses them separately. Ordinary
+ *   Error.cause and structural lookalikes are never classification.
  * - normalizeQualificationFailures traverses AggregateError and the two explicit typed errors.
  *   Unknown/malformed leaves become harness failures. Bounds overflow stops as harness.
  * - parseLaneFailures checks the complete attempt graph; parseLaneFailure checks one leaf.
@@ -24,6 +25,8 @@
  *   errors, host/device identities, notification metadata or provider bodies belong here.
  */
 import { DeviceCloudAvailabilityHold, parseDeviceCloudHold } from "./device-cloud-availability.ts";
+import { findCapabilityLeaks } from "./capability-leak-rules.ts";
+import { findIdentifierLeaks } from "./identifier-leak-rules.ts";
 
 export type LaneFailureClass = "product" | "infra_transient" | "harness" | "collateral";
 export type OperationDisposition = "not_started" | "read_only" | "confirmed" | "unknown";
@@ -244,6 +247,76 @@ export class QualificationFailure extends Error {
     this.evidence = safe;
   }
   toJSON(): LaneFailure { return parseLaneFailure(this.evidence); }
+}
+
+export const PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES = 262_144;
+export interface PrivateQualificationDiagnostic {
+  readonly path: string;
+  readonly message: string;
+  readonly stack: string;
+  readonly truncated?: true;
+  readonly redacted?: true;
+}
+/** Private operator diagnostics only; never use these strings as receipt or retry evidence. */
+export function privateQualificationFailureDiagnostic(error: unknown): readonly PrivateQualificationDiagnostic[] {
+  const entries: PrivateQualificationDiagnostic[] = [], seen = new Set<Error>();
+  let exhausted = false, bytes = 0;
+  const add = (entry: PrivateQualificationDiagnostic): void => {
+    const size = Buffer.byteLength(JSON.stringify(entry)) + 1;
+    // Reserve room for the envelope and an explicit terminal marker.
+    if (bytes + size > PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES - 1024) {
+      entries.push({ path: "error", message: "private diagnostic byte limit reached", stack: "", truncated: true });
+      exhausted = true;
+      return;
+    }
+    entries.push(entry); bytes += size;
+  };
+  const visit = (current: unknown, path: string, depth: number): void => {
+    if (exhausted) return;
+    if (entries.length >= FAILURE_LIMITS.nodes || depth > FAILURE_LIMITS.depth) {
+      add({ path, message: "private diagnostic traversal limit reached", stack: "", truncated: true });
+      exhausted = true;
+      return;
+    }
+    if (!(current instanceof Error) || seen.has(current)) {
+      add({ path, message: current instanceof Error ? "already reported error" : "non-Error cause withheld", stack: "" });
+      return;
+    }
+    seen.add(current);
+    let truncated = false, redacted = false;
+    const redact = (text: string, limit: number): string => {
+      // Do not cut a secret at a byte boundary or run unbounded regexes on a provider body.
+      if (Buffer.byteLength(text) > limit) { truncated = true; return "[oversized private diagnostic withheld]"; }
+      const safe = text.split("\n").map(line => {
+        // Remove nested opt-outs to a fixed point, then scan and emit that same text.
+        while (line.includes("identifier-leak-allow")) {
+          line = line.replaceAll("identifier-leak-allow", "");
+          redacted = true;
+        }
+        if (findCapabilityLeaks(line).length > 0) { redacted = true; return "[capability-bearing diagnostic withheld]"; }
+        for (const finding of findIdentifierLeaks(line)) {
+          redacted = true;
+          line = line.replaceAll(finding.match, `[redacted ${finding.label}]`);
+        }
+        return line;
+      }).join("\n");
+      if (Buffer.byteLength(safe) > limit) { truncated = true; return "[oversized redacted diagnostic withheld]"; }
+      return safe;
+    };
+    const message = typeof current.message === "string" ? redact(current.message, 4096) : "non-string Error message withheld";
+    const stack = typeof current.stack === "string" ? redact(current.stack, 16_384) : message;
+    add({ path, message, stack, ...(truncated ? { truncated: true } : {}), ...(redacted ? { redacted: true } : {}) });
+    if (current.cause !== undefined) visit(current.cause, `${path}.cause`, depth + 1);
+    if (current instanceof AggregateError) {
+      if (!Array.isArray(current.errors)) visit(current.errors, `${path}.errors`, depth + 1);
+      else for (const [index, child] of current.errors.entries()) {
+        visit(child, `${path}.errors[${index}]`, depth + 1);
+        if (exhausted) break;
+      }
+    }
+  };
+  visit(error, "error", 0);
+  return entries;
 }
 
 function unclassified(id: number, reason: "unclassified_failure" | "normalization_limit_exceeded" = "unclassified_failure"): LaneFailure {

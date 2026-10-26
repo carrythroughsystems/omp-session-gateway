@@ -6,7 +6,7 @@ import { cleanupWindows, runWindows, verifyWindowsDoctor, windowsCampaignLabel, 
 import pins from "./windows-qualification-pins.json";
 import type { WindowsContext, WindowsFirewall, WindowsGuestAction, WindowsIdentity, WindowsInstance, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
 import { command as windowsCommand, reconnectWindowsTransport, verifyWindowsStaleLaunch, windowsPixelForeground, windowsPixelLauncher, waitForStableWindowsTransport } from "./windows-qualification-runtime.ts";
-import { QualificationFailure, normalizeQualificationFailures } from "./qualification-failure.ts";
+import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures } from "./qualification-failure.ts";
 import * as windowsRuntime from "./windows-qualification-runtime.ts";
 import { firewallEligibility } from "./vultr-target.ts";
 import { createPixelLease, parseQualificationPins } from "./stable-qualification.ts";
@@ -234,6 +234,52 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; pr
     run: () => runWindows({ identity, progress: undefined, checkpoint, pixel, runtime }),
     clean: () => cleanupWindows({ identity, progress, checkpoint, pixel, runtime }) };
 }
+
+test.each(["phase", "cleanup", "retirement"] as const)("509 council Windows %s reconstruction preserves the private cause", async stage => {
+  const f = fixture(), cause = new Error("synthetic private Windows cause");
+  if (stage === "phase") {
+    f.runtime.guest = async () => { throw new QualificationFailure({ id: 120, lane: "windows", step: "output",
+      class: "harness", reason: "unclassified_failure", operation: "read_only", elapsedMs: 0, observations: {} }, { cause }); };
+    const error = await f.run().catch(error => error);
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(cause.message);
+  } else {
+    await f.run();
+    if (stage === "cleanup") f.runtime.restorePixel = async () => { throw cause; };
+    else f.runtime.removeAccess = async () => { throw cause; };
+    const error = await f.clean().catch(error => error);
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(cause.message);
+  }
+});
+
+test.each(["phase", "expiry", "guest-containment", "poll-expiry"] as const)(
+  "509 round2 Windows ordinary %s error stays privately reachable", async stage => {
+    const f = fixture(), raw = new Error(`synthetic private ordinary ${stage} failure`);
+    let id = 200;
+    const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
+    if (stage === "phase" || stage === "expiry") {
+      f.runtime.guest = async () => { if (stage === "expiry") execution.deadline = 0; throw raw; };
+      const error = await runWindows({ identity, progress: undefined, runtime: f.runtime, checkpoint: f.checkpoint, pixel: f.pixel, execution }).catch(error => error);
+      expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+      expect(normalizeQualificationFailures(error).some(item => item.reason === (stage === "expiry" ? "deadline_exceeded" : "unclassified_failure"))).toBe(true);
+    } else {
+      await f.run();
+      if (stage === "guest-containment") {
+        f.runtime.guest = async () => { throw raw; };
+        f.runtime.provider.destroyInstance = async () => { throw new Error("synthetic provider containment failure"); };
+      } else {
+        f.runtime.provider.destroyInstance = async () => {};
+        const instance = f.runtime.provider.instance;
+        let calls = 0;
+        f.runtime.provider.instance = async (...args) => {
+          if (++calls === 3) { execution.deadline = 0; throw raw; }
+          return instance(...args);
+        };
+      }
+      const error = await cleanupWindows({ identity, progress: f.progress, runtime: f.runtime, checkpoint: f.checkpoint, pixel: f.pixel, execution }).catch(error => error);
+      expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+      expect(normalizeQualificationFailures(error).some(item => item.reason === "containment_unproven" || item.reason === "deadline_exceeded")).toBe(true);
+    }
+  });
 
 describe("Windows qualification ownership and failure paths", () => {
   test("council498r1 Windows Pixel projection preserves poison origins through later cleanup", async () => {

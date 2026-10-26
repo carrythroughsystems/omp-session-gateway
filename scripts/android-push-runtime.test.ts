@@ -1,17 +1,45 @@
 import { expect, spyOn, test } from "bun:test";
 import * as deviceOperations from "./android-device.ts";
 import * as webApkOperations from "./android-webapk.ts";
+import * as notificationOperations from "./android-notification.ts";
 import { AndroidBrowserCleanupError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
 import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { checkProviderReads } from "./check-repository.ts";
 import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qualification.ts";
-import { normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
+import { privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
 import { notificationTopicDigest } from "./android-notification.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
 
-test.each(["before", "during"] as const)("506 council browser deadline elapsed %s capture retains deadline attribution", async when => {
-  const execution = { signal: new AbortController().signal, deadline: when === "before" ? 0 : performance.now() + 60_000, nextFailureId: () => 1 };
+test("509 round2 runtime privacy conversion preserves ordinary notification errors", async () => {
+  const raw = new Error("synthetic notification identity changed");
+  const session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
+    startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
+    ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
+  let reads = 0;
+  const spies = [
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [session] }),
+      { preconnect: globalThis.fetch.preconnect })),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++reads === 1 ? [] : [{
+      key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
+      title: "OMP session needs attention", body: "", text: "",
+    }]),
+    spyOn(notificationOperations, "trackUnchangedNotificationPost").mockImplementation(() => { throw raw; }),
+  ];
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.dndOff = async () => true;
+    await runtime.beginNotificationPhase("synthetic", "private_verified");
+    const error = await runtime.observe(session, "attention", "private").catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "privacy_failed" }]);
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+  } finally { for (const spy of spies) spy.mockRestore(); }
+});
+
+test.each(["before", "during"] as const)("509 council browser deadline elapsed %s capture retains deadline and original cause", async when => {
+  let id = 0;
+  const execution = { signal: new AbortController().signal, deadline: when === "before" ? 0 : performance.now() + 60_000, nextFailureId: () => ++id };
   const wake = spyOn(deviceOperations, "wakeAndroidDisplay").mockImplementation(async () => {
     execution.deadline = 0;
     throw new Error("synthetic elapsed browser execution");
@@ -23,7 +51,12 @@ test.each(["before", "during"] as const)("506 council browser deadline elapsed %
   try {
     const runtime = createAndroidPushRuntime(identity, { execution });
     runtime.beforeEffect = async () => {};
-    await expect(runtime.browser()).rejects.toMatchObject({ evidence: { reason: "deadline_exceeded", class: "harness" } });
+    const error = await runtime.browser().catch(error => error);
+    expect(normalizeQualificationFailures(error)).toContainEqual(expect.objectContaining({ reason: "deadline_exceeded", class: "harness" }));
+    if (when === "during") {
+      expect(normalizeQualificationFailures(error)).toContainEqual(expect.objectContaining({ reason: "browser_baseline_failed" }));
+      expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain("synthetic elapsed browser execution");
+    }
   } finally { select.mockRestore(); wake.mockRestore(); }
 });
 
@@ -61,14 +94,50 @@ test.each(["browser_wake", "browser_webapk", "browser_forward", "browser_target"
       return run(driver);
     }) as typeof withAndroidChrome);
     try {
-      const runtime = createAndroidPushRuntime(identity);
+      let diagnostic: unknown;
+      const runtime = createAndroidPushRuntime(identity, { browserFailure: async (substep, error, elapsedMs) => {
+        diagnostic = { substep, error, elapsedMs };
+      } });
       runtime.beforeEffect = async () => {};
       let error: unknown;
       try { await runtime.browser(); } catch (caught) { error = caught; }
       expect(error).toMatchObject({ evidence: { lane: "androidPush", step, reason: "browser_baseline_failed", class: "harness" } });
       expect(JSON.stringify(normalizeQualificationFailures(error))).not.toContain(failure.message);
+      expect(diagnostic).toMatchObject({ substep: step, error: failure, elapsedMs: expect.any(Number) });
     } finally { chrome.mockRestore(); for (const spy of spies) spy.mockRestore(); }
   });
+
+test("509 council diagnostic retention failures stay private beside typed cleanup failures", async () => {
+  const original = new Error("CDP Runtime.evaluate: synthetic context failure"), retention = new Error("private diagnostic disk failure");
+  const typed = pushBrowserCleanupFailure(new AndroidBrowserCleanupError([original], 1), (() => { let id = 0; return () => ++id; })());
+  const wake = spyOn(deviceOperations, "wakeAndroidDisplay").mockRejectedValue(typed);
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  try {
+    const runtime = createAndroidPushRuntime(identity, { browserFailure: async () => { throw retention; } });
+    runtime.beforeEffect = async () => {};
+    const error = await runtime.browser().catch(error => error);
+    expect(normalizeQualificationFailures(error)).toEqual(normalizeQualificationFailures(typed));
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(retention.message);
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(original.message);
+  } finally { select.mockRestore(); wake.mockRestore(); }
+});
+
+test("509 council abort during diagnostic retention keeps the original browser root and raw cause", async () => {
+  const original = new Error("CDP Runtime.evaluate: synthetic execution context vanished"), controller = new AbortController();
+  let id = 0;
+  const wake = spyOn(deviceOperations, "wakeAndroidDisplay").mockRejectedValue(original);
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  try {
+    const runtime = createAndroidPushRuntime(identity, {
+      execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id },
+      browserFailure: async () => { controller.abort(new Error("synthetic controller cancellation")); },
+    });
+    runtime.beforeEffect = async () => {};
+    const error = await runtime.browser().catch(error => error);
+    expect(normalizeQualificationFailures(error).map(item => item.reason)).toEqual(["browser_baseline_failed", "deadline_exceeded"]);
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(original.message);
+  } finally { select.mockRestore(); wake.mockRestore(); }
+});
 
 test.each([0, 1, 2, 8])("readiness reads eligible subscription count %s through the authenticated config path", async subscriptionCount => {
   const fetch = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
