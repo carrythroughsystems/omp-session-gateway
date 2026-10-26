@@ -151,7 +151,7 @@ export default class BrowserFlakeReporter implements Reporter {
     } catch {
       // Playwright swallows reporter exceptions. The wrapper also validates the required file.
       process.stderr.write("browser flake reporting failed; details withheld\n");
-      return { status: "failed" };
+      if (isBrowserCI(process.env.CI)) return { status: "failed" };
     }
   }
   printsToStdio(): boolean { return false; }

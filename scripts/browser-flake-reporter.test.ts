@@ -116,6 +116,8 @@ test("Playwright lifecycle writes failed/flaky evidence and makes reporter write
     expect(parseBrowserFlakeReport(JSON.parse(await readFile(path, "utf8"))).tests[0]?.outcome).toBe("flaky");
     process.env.OMP_BROWSER_FLAKE_REPORT = directory;
     expect(await reporter.onEnd({ status: "passed", startTime: new Date(), duration: 21 })).toEqual({ status: "failed" });
+    process.env.CI = "false";
+    expect(await reporter.onEnd({ status: "passed", startTime: new Date(), duration: 21 })).toBeUndefined();
   } finally {
     for (const [key, value] of Object.entries(before)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -136,7 +138,7 @@ test("both nonvisual configurations retry only true/1 CI and disable automatic s
       expect(config.workers).toBe(file.includes("compat") ? 1 : 2);
       for (const key of ["trace", "video", "screenshot"]) expect(config.use[key]).toBe("off");
       expect(config.reporter[0]).toEqual(["line"]);
-      expect(config.reporter[1][0]).toEndWith("/scripts/browser-flake-reporter.ts");
+      expect(config.reporter[1][0]).toBe(join(root, "scripts/browser-flake-reporter.ts"));
       if (file.includes("compat")) expect(config.projects).toEqual(["desktop-chromium", "desktop-firefox", "desktop-webkit", "iphone-webkit"]);
     }
   }
