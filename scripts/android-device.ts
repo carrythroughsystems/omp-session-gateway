@@ -315,40 +315,53 @@ const ANDROID_PIN_MIN_LENGTH = 4;
 const ANDROID_PIN_MAX_LENGTH = 16;
 const ANDROID_KEYGUARD_FAILURE = "Android keyguard authentication failed";
 
-type AndroidKeychainReader = (account: string, service: string) => Promise<Uint8Array>;
+export interface AndroidExecution { readonly signal: AbortSignal; readonly deadline: number }
+type AndroidKeychainReader = (account: string, service: string, execution?: AndroidExecution) => Promise<Uint8Array>;
 export type AndroidInteractiveAdbShell = (serial: string, input: Uint8Array) => Promise<number>;
 export type AndroidKeyguardUnlock = () => Promise<void>;
 
-async function readMacOsKeychainItem(account: string, service: string): Promise<Uint8Array> {
+async function readMacOsKeychainItem(account: string, service: string, execution?: AndroidExecution): Promise<Uint8Array> {
   if (process.platform !== "darwin") throw new Error(ANDROID_KEYGUARD_FAILURE);
+  execution?.signal.throwIfAborted();
+  if (execution !== undefined && performance.now() >= execution.deadline) throw new Error(ANDROID_KEYGUARD_FAILURE);
   const child = Bun.spawn(
     ["security", "find-generic-password", "-a", account, "-s", service, "-w"],
     { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
   );
-  const [stdoutBuffer, stderrBuffer, exitCode] = await Promise.all([
-    new Response(child.stdout).arrayBuffer(),
-    new Response(child.stderr).arrayBuffer(),
-    child.exited,
-  ]);
-  const stdout = new Uint8Array(stdoutBuffer);
-  const stderr = new Uint8Array(stderrBuffer);
-  stderr.fill(0);
-  if (exitCode !== 0) {
-    stdout.fill(0);
-    throw new Error(ANDROID_KEYGUARD_FAILURE);
+  let grace: ReturnType<typeof setTimeout> | undefined, cancelled = false;
+  const cancel = () => { cancelled = true; child.kill("SIGTERM"); grace ??= setTimeout(() => child.kill("SIGKILL"), 2_000); };
+  execution?.signal.addEventListener("abort", cancel, { once: true });
+  const timer = execution === undefined ? undefined : setTimeout(cancel, Math.max(1, execution.deadline - performance.now()));
+  if (execution?.signal.aborted) cancel();
+  try {
+    const [stdoutResult, stderrResult, exitResult] = await Promise.allSettled([
+      new Response(child.stdout).arrayBuffer().catch(error => { cancel(); throw error; }),
+      new Response(child.stderr).arrayBuffer().catch(error => { cancel(); throw error; }),
+      child.exited,
+    ]);
+    const stdout = stdoutResult.status === "fulfilled" ? new Uint8Array(stdoutResult.value) : new Uint8Array();
+    if (stderrResult.status === "fulfilled") new Uint8Array(stderrResult.value).fill(0);
+    if (cancelled || exitResult.status !== "fulfilled" || exitResult.value !== 0 ||
+      stdoutResult.status !== "fulfilled" || stderrResult.status !== "fulfilled") {
+      stdout.fill(0); throw new Error(ANDROID_KEYGUARD_FAILURE);
+    }
+    return stdout;
+  } finally {
+    clearTimeout(timer); clearTimeout(grace);
+    execution?.signal.removeEventListener("abort", cancel);
   }
-  return stdout;
 }
 
 /** Reads the device-scoped qualification PIN without placing it in argv, env, or logs. */
 export async function readAndroidQualificationPin(
   serial: string,
   readKeychain: AndroidKeychainReader = readMacOsKeychainItem,
+  execution?: AndroidExecution,
 ): Promise<Uint8Array> {
   if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(serial)) throw new Error(ANDROID_KEYGUARD_FAILURE);
   let bytes: Uint8Array;
   try {
-    bytes = await readKeychain(serial, ANDROID_QUALIFICATION_PIN_KEYCHAIN_SERVICE);
+    bytes = await readKeychain(serial, ANDROID_QUALIFICATION_PIN_KEYCHAIN_SERVICE, execution);
   } catch {
     throw new Error(ANDROID_KEYGUARD_FAILURE);
   }
@@ -383,27 +396,31 @@ function androidPinKeyeventStream(pin: Uint8Array): Uint8Array {
   return new TextEncoder().encode(commands.join(""));
 }
 
-async function runAndroidInteractiveAdbShell(serial: string, input: Uint8Array): Promise<number> {
-  await runAdb(serial, ["shell"], { input });
+async function runAndroidInteractiveAdbShell(serial: string, input: Uint8Array, execution?: AndroidExecution): Promise<number> {
+  if (execution !== undefined && performance.now() >= execution.deadline) throw new Error(ANDROID_KEYGUARD_FAILURE);
+  await runAdb(serial, ["shell"], { input, ...(execution === undefined ? {} :
+    { signal: execution.signal, timeoutMs: Math.max(1, execution.deadline - performance.now()) }) });
   return 0;
 }
 
 /** Authenticates once through one interactive adb shell; every failure is deliberately redacted. */
 export async function unlockAndroidKeyguard(
   serial: string,
-  readPin: (serial: string) => Promise<Uint8Array> = readAndroidQualificationPin,
-  runShell: AndroidInteractiveAdbShell = runAndroidInteractiveAdbShell,
+  readPin?: (serial: string) => Promise<Uint8Array>,
+  runShell?: AndroidInteractiveAdbShell,
+  execution?: AndroidExecution,
 ): Promise<void> {
   let pin: Uint8Array;
   try {
-    pin = await readPin(serial);
+    pin = await (readPin === undefined ? readAndroidQualificationPin(serial, undefined, execution) : readPin(serial));
   } catch {
     throw new Error(ANDROID_KEYGUARD_FAILURE);
   }
   try {
     const input = androidPinKeyeventStream(pin);
     try {
-      if ((await runShell(serial, input)) !== 0) throw new Error(ANDROID_KEYGUARD_FAILURE);
+      const code = await (runShell === undefined ? runAndroidInteractiveAdbShell(serial, input, execution) : runShell(serial, input));
+      if (code !== 0) throw new Error(ANDROID_KEYGUARD_FAILURE);
     } catch {
       throw new Error(ANDROID_KEYGUARD_FAILURE);
     } finally {
@@ -588,6 +605,8 @@ export function assertDevtoolsEndpointMatchesPackage(
     debuggerUrl.protocol !== "ws:" ||
     debuggerUrl.hostname !== "127.0.0.1" ||
     debuggerUrl.port !== String(expectedPort) ||
+    debuggerUrl.hash !== "" ||
+    debuggerUrl.username !== "" || debuggerUrl.password !== "" ||
     !debuggerUrl.pathname.startsWith("/devtools/browser")
   ) {
     throw new Error("DevTools endpoint WebSocket escaped the local ADB forward");
@@ -695,11 +714,14 @@ export async function withAndroidChrome<T>(
   };
   const serial = await requireSingleDevice((...args) => adb(undefined, args));
   const packageVersion = parseAndroidPackageVersion(await adb(serial, ["shell", "dumpsys", "package", target.packageName]));
-  if (options.launchBrowser !== false) await wakeAndroidChrome(serial, target, (...args) => adb(serial, args));
-  await adb(serial, ["forward", "tcp:" + port, target.devtoolsSocket]);
+  if (options.launchBrowser !== false) await wakeAndroidChrome(serial, target, (...args) => adb(serial, args),
+    async milliseconds => { check(); await Bun.sleep(milliseconds); check(); },
+    () => unlockAndroidKeyguard(serial, undefined, undefined, execution));
 
-  let webSocketDebuggerUrl: string;
+  let socket: WebSocket;
   try {
+    // Acquisition can succeed remotely before cancellation rejects its local acknowledgement.
+    await adb(serial, ["forward", "tcp:" + port, target.devtoolsSocket]);
     const endpointResponse = await waitForDevtoolsEndpoint("http://127.0.0.1:" + port + "/json/version",
       () => { check(); return fetch("http://127.0.0.1:" + port + "/json/version", execution === undefined ? {} : {
         signal: AbortSignal.any([execution.signal, AbortSignal.timeout(Math.max(1, execution.deadline - performance.now()))]) }); },
@@ -707,20 +729,20 @@ export async function withAndroidChrome<T>(
     if (!endpointResponse.ok) throw new Error("DevTools endpoint metadata request failed");
     // Deliberately outside the retry: a well-formed reply from the wrong browser is a hard failure,
     // never a transient. Desktop Chrome on this workstation answers remote-debugging ports too.
-    webSocketDebuggerUrl = assertDevtoolsEndpointMatchesPackage(
+    const webSocketDebuggerUrl = assertDevtoolsEndpointMatchesPackage(
       target.packageName,
       packageVersion,
       await endpointResponse.json(),
       port,
     );
+    socket = new WebSocket(webSocketDebuggerUrl);
   } catch (error) {
     await runAdb(serial, ["forward", "--remove", "tcp:" + port], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
     throw error;
   }
-  const socket = new WebSocket(webSocketDebuggerUrl);
   const pending = new Map<
     number,
-    { readonly method: string; readonly cleanup: boolean; resolve(value: Record<string, unknown>): void; reject(error: Error): void }
+    { readonly method: string; readonly cleanup: boolean; cancel(): void; resolve(value: Record<string, unknown>): void; reject(error: Error): void }
   >();
   let nextId = 0;
   let sessionId: string | undefined;
@@ -732,7 +754,10 @@ export async function withAndroidChrome<T>(
   const cancelled = () => {
     rejectOpening?.(new Error("Android browser execution cancelled"));
     for (const [id, entry] of pending) if (!entry.cleanup) {
-      pending.delete(id); entry.reject(new Error("Android browser execution cancelled"));
+      // A mutating create may already own a target. Keep its response route alive for the
+      // bounded cleanup window so a late targetId is closed, not orphaned.
+      if (entry.method === "Target.createTarget") entry.cancel();
+      else { pending.delete(id); entry.reject(new Error("Android browser execution cancelled")); }
     }
   };
   execution?.signal.addEventListener("abort", cancelled, { once: true });
@@ -761,10 +786,13 @@ export async function withAndroidChrome<T>(
     new Promise<Record<string, unknown>>((resolve, reject) => {
       if (!cleanup) check();
       const id = (nextId += 1);
-      const timer = setTimeout(() => {
+      const timeout = () => {
         if (pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
-      }, cleanup ? 10_000 : CALL_TIMEOUT_MS);
-      pending.set(id, { method, cleanup, resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
+      };
+      let timer = setTimeout(timeout, cleanup ? 10_000 : CALL_TIMEOUT_MS), cancelled = false;
+      pending.set(id, { method, cleanup,
+        cancel() { if (!cancelled) { cancelled = true; clearTimeout(timer); timer = setTimeout(timeout, 10_000); } },
+        resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
       const frame: Record<string, unknown> = { id, method, params: parameters };
       const destination = explicitSession ?? (useSession ? sessionId : undefined);
       if (destination !== undefined) frame.sessionId = destination;
@@ -772,6 +800,14 @@ export async function withAndroidChrome<T>(
       catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
     });
 
+  const closeTarget = async (cleanup = cleaning) => {
+    if (targetId === undefined) return;
+    const result = await send("Target.closeTarget", { targetId }, false, undefined, cleanup);
+    if (result.success !== true) throw new Error("Android browser target closure refused");
+    targetId = undefined; sessionId = undefined; ownsTarget = false;
+  };
+  let primaryFailure: unknown, cleanupFailure: unknown, failed = false;
+  let result!: T;
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => finish(new Error("DevTools WebSocket open timeout")),
@@ -818,8 +854,7 @@ export async function withAndroidChrome<T>(
             lastError = error;
             sessionId = undefined;
             // Retain ownership through the cleanup attempt; cancellation cannot suppress closure.
-            await send("Target.closeTarget", { targetId }, false, undefined, true);
-            targetId = undefined; ownsTarget = false;
+            await closeTarget(true);
             const retryable =
               error instanceof Error && error.message.includes("Session with given id not found");
             if (!retryable || attempt === 3) throw error;
@@ -838,10 +873,7 @@ export async function withAndroidChrome<T>(
         await send("Runtime.enable");
       },
       async closeTab() {
-        if (targetId !== undefined) await send("Target.closeTarget", { targetId }, false);
-        targetId = undefined;
-        sessionId = undefined;
-        ownsTarget = false;
+        await closeTarget();
       },
       browserSend: (method, parameters) => send(method, parameters, false),
       sessionSend: (session, method, parameters) => send(method, parameters, false, session),
@@ -875,17 +907,24 @@ export async function withAndroidChrome<T>(
       send: (method, parameters) => send(method, parameters),
     };
 
-    return await run(driver);
+    result = await run(driver);
+  } catch (error) {
+    primaryFailure = error; failed = true;
   } finally {
     cleaning = true;
     clearTimeout(deadline);
     execution?.signal.removeEventListener("abort", cancelled);
-    if (targetId !== undefined && ownsTarget) {
-      await send("Target.closeTarget", { targetId }, false).catch(() => {});
+    for (let attempt = 0; attempt < 2 && targetId !== undefined && ownsTarget; attempt++) {
+      try { await closeTarget(true); cleanupFailure = undefined; }
+      catch (error) { cleanupFailure = error; }
     }
     socket.close();
     await runAdb(serial, ["forward", "--remove", `tcp:${port}`], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
   }
+  if (cleanupFailure !== undefined) throw Object.assign(new AggregateError(
+    failed ? [primaryFailure, cleanupFailure] : [cleanupFailure], "Android browser target cleanup failed"), { pixelUnrestored: true });
+  if (failed) throw primaryFailure;
+  return result;
 }
 
 /** Device identity for an evidence record. */

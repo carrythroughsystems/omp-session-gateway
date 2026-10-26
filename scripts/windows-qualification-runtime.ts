@@ -369,6 +369,12 @@ export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?
     (failure.kind === "guest" ? Number(value.exitCode) <= 0 || Number(value.exitCode) > 255 || failure.condition !== "guest_failure"
       : value.exitCode !== -1) || (failure.kind === "helper" && failure.condition !== "helper_failure")) throw invalid();
   const step = failure.stage as "connection" | "command" | "output" | "upload";
+  if (failure.kind === "transport" && (
+    (["connection_timeout", "connection_reset", "read_timeout"].includes(String(failure.condition)) && failure.httpStatus !== null) ||
+    (failure.condition === "authentication" && failure.httpStatus !== null && failure.httpStatus !== 401 && failure.httpStatus !== 403) ||
+    ((failure.httpStatus === 401 || failure.httpStatus === 403) && failure.condition !== "authentication") ||
+    (failure.condition === "retryable_http" && !(failure.httpStatus === 429 || Number(failure.httpStatus) >= 500))
+  )) throw invalid();
   if (failure.kind === "transport" && failure.condition === "authentication") {
     throw withWinrmDiagnostic(windowsFailure("authentication_failed", step, readOnly ? "read_only" : "unknown", {}, execution), value);
   }
@@ -612,9 +618,9 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
         candidateVersion: releaseVersion(context.identity.candidate.tag), previousVersion: releaseVersion(context.identity.predecessor.tag),
         login: environment.OMP_STABLE_WINDOWS_LOGIN ?? "alphastorm@github" }, budget ?? timeoutMs, undefined, !readOnly, principal,
         action === "transport" ? context.transportProbe : undefined);
-    return readOnly && action !== "transport"
-      ? reconnectWindowsTransport(execute, { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution)
-      : execute();
+    if (!readOnly) return context.mutation(`ps:${principal}:${action}`, execute);
+    return action !== "transport" ? reconnectWindowsTransport(execute,
+      { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution) : execute();
   };
   const upload = async (context: WindowsContext, local: string, name: "candidate.tar" | "predecessor.tar" | "source.tar") => {
     const expected = digest(await readFile(local));
@@ -760,11 +766,6 @@ if ($exists) {
     },
     async removeAccess(epoch) { await rm(vaultPath(epoch), { force: true }); },
     async hasAccess(epoch) { return await existingAccess(epoch) !== undefined; },
-    async stagingUploadsComplete(epoch) {
-      const access = await existingAccess(epoch);
-      return access?.toolsReady === true && ["candidate.tar", "predecessor.tar", "source.tar"].every(name =>
-        access.uploads?.[name as "candidate.tar" | "predecessor.tar" | "source.tar"] === "complete");
-    },
     async cleanupInstance(epoch) {
       const access = await existingAccess(epoch);
       if (!access?.instance) return undefined;
@@ -814,7 +815,14 @@ if ($exists) {
           { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution);
       }
       if (action === "transport") {
-        const deadline = performance.now() + 12 * 60_000;
+        if (access.transportAdmitted === true) {
+          return reconnectWindowsTransport(timeoutMs => ps(context, "transport", {}, timeoutMs),
+            { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution);
+        }
+        if (context.allocationDeadline === undefined) throw windowsFailure("helper_failed", "connection", "not_started", {}, context.execution);
+        const remaining = context.allocationDeadline - Date.now();
+        if (remaining <= 0) throw windowsFailure("deadline_exceeded", "connection", "not_started", {}, context.execution);
+        const deadline = performance.now() + remaining;
         // Creation can return a provisional address. Wait for provider allocation,
         // then authenticate the guest at that freshly observed address.
         await poll(async () => {
@@ -824,10 +832,12 @@ if ($exists) {
           await context.beforeEffect(); await save({ host: current.main_ip });
           return true;
         }, Math.max(0, deadline - performance.now()), "provider Windows allocation", context.execution ?? options.execution);
-        return waitForStableWindowsTransport(
+        const observed = await waitForStableWindowsTransport(
           timeoutMs => ps(context, "transport", {}, timeoutMs),
           { now: performance.now, sleep: Bun.sleep }, deadline,
         );
+        await context.beforeEffect(); await save({ transportAdmitted: true });
+        return observed;
       }
       if (action === "stage") {
         if (access.toolsReady !== true) {
@@ -863,7 +873,7 @@ if ($exists) {
       }
       if (action === "publish") {
         if (!access.ompPath) throw new Error("owned OMP build is absent");
-        const inherited = await winrm(context, `@{ SystemRoot=$env:SystemRoot; SystemDrive=$env:SystemDrive; windir=$env:windir; ComSpec=$env:ComSpec; PATHEXT=$env:PATHEXT; PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE; NUMBER_OF_PROCESSORS=$env:NUMBER_OF_PROCESSORS; PATH=$env:PATH; USERPROFILE=$env:USERPROFILE; HOME=$env:USERPROFILE; TEMP=$env:TEMP; TMP=$env:TMP; APPDATA=$env:APPDATA; LOCALAPPDATA=$env:LOCALAPPDATA } | ConvertTo-Json -Compress`);
+        const inherited = await winrm(context, `@{ SystemRoot=$env:SystemRoot; SystemDrive=$env:SystemDrive; windir=$env:windir; ComSpec=$env:ComSpec; PATHEXT=$env:PATHEXT; PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE; NUMBER_OF_PROCESSORS=$env:NUMBER_OF_PROCESSORS; PATH=$env:PATH; USERPROFILE=$env:USERPROFILE; HOME=$env:USERPROFILE; TEMP=$env:TEMP; TMP=$env:TMP; APPDATA=$env:APPDATA; LOCALAPPDATA=$env:LOCALAPPDATA } | ConvertTo-Json -Compress`, undefined, undefined, undefined, false);
         const environment = { ...inherited, ...OMP_FIXTURE_ENV } as Record<string, string>;
         const script = windowsHostScript(access.ompPath, OMP_FIXTURE_ARGS, `C:\\omp-winqual-${context.epoch}\\${sessionLabel}`, environment);
         await context.beforeEffect();
@@ -879,9 +889,6 @@ if ($exists) {
         return { viewStatus: 200, controlStatus: 200, noStore: true, ...await verifyWindowsStaleLaunch(String(access.origin), session) };
       }
       if (action === "revoked") { await waitForRevocation(String(access.origin), sessionLabel); return { revoked: true }; }
-      if (options.development && action === "installPredecessor" && access.configDigest && access.credentialDigest) {
-        return ps(context, "inspectPredecessor");
-      }
       await context.beforeEffect(); const result = await ps(context, action, {}, undefined, principal);
       // The guest's post-mutation status window is observed, not silent: record every read past the first.
       if (typeof result.statusReads === "number" && result.statusReads > 1) console.log(`Windows ${action}: status settled after ${result.statusReads} reads`);

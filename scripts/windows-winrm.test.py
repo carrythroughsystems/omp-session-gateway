@@ -385,6 +385,16 @@ class WinrmFramingTests(unittest.TestCase):
                                          'password': 'synthetic-only', 'script': 'synthetic'})
         self.assertEqual(result['failure']['condition'], 'connection_reset')
 
+    def test_493_r1_http_authentication_precedes_nested_reset(self):
+        for status in (401, 403):
+            error = WinRMTransportError(status)
+            error.__cause__ = ConnectionResetError()
+            with patch.object(Transport, 'open_shell', side_effect=error):
+                result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                             'password': 'synthetic-only', 'script': 'synthetic'})
+            self.assertEqual(result['failure']['condition'], 'authentication')
+            self.assertEqual(result['failure']['httpStatus'], status)
+
 
 if __name__ == '__main__':
     unittest.main()

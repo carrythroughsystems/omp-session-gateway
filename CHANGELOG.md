@@ -14,6 +14,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   write-ahead log health, retained-host raw-stream proof, explicit runtime protocol negotiation,
   outbound-clear acknowledgement, and drained cancellation preserve recovery evidence across failure.
   Synchronous log bursts coalesce durability barriers; retained-Mac proof paths remain POSIX on every host.
+  Recovery binds opaque qualification aliases to the exact fixture ask before mutation. Bracketed log
+  reads, committed rotation boundaries, durable local retention and sticky search-permission failures
+  preserve evidence; bounded nested Android operations retain late-created targets and readiness late posts.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
@@ -34,7 +37,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
   containment before deleting recovery state; fence incomplete same-epoch uploads, unknown process
   exits, legacy staging without upload claims, and cancellation races instead of recovering them
   as successful work. Retire the old epoch vault before replacing development identity, and require
-  settled provider inventory before cleanup completion.
+  settled provider inventory before cleanup completion. Fence every guest mutation with durable
+  single-shot claims, preserve committed containment during retirement failures, and share one
+  allocation/admission deadline from before firewall creation. Refuse cancelled final evidence
+  and contradictory transport status; keep POSIX signal-escalation coverage off Windows runners.
 
 ### Fixed
 

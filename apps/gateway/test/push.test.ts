@@ -130,6 +130,7 @@ describe("Web Push service", () => {
     await service.flush();
     await service.subscribe("dev-localhost", parsePushSubscriptionRequest({ version: PUSH_API_VERSION, detailLevel: "preview", subscription }));
     await service.flush(); await service.stop();
+    expect(service.qualificationAlias(registry.snapshot().sessions[0]!)).toBeUndefined();
     const events = lines.map(line => JSON.parse(line));
     expect(events.some(event => event.event === "push.queue_accepted")).toBe(true);
     expect(events.some(event => event.event === "push.send_started")).toBe(true);
