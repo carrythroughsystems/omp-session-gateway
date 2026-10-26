@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -44,6 +44,18 @@ const installedCliArgument = resolve(installedCliPath);
 const boundInstance = "readiness_Instance-9".padEnd(43, "x");
 /** The installing account every rendered Windows task is scoped to, as `whoami /user` reports it. */
 const windowsUserSid = "S-1-5-21-1111111111-2222222222-3333333333-1001";
+
+test.skipIf(process.platform === "win32")("qualification option preserves discarded raw streams and leaves ordinary service unchanged", async () => {
+  const directory = await mkdtemp(join(realpathSync(tmpdir()), "service-qualification-"));
+  try {
+    const ordinary = serviceDefinition(config, "darwin", installedCliPath);
+    const qualified = serviceDefinition(config, "darwin", installedCliPath, undefined, undefined, undefined, directory);
+    expect(ordinary.content).not.toContain("--qualification-log-dir");
+    expect(qualified.content).toContain("--qualification-log-dir");
+    expect(qualified.content.match(/<string>\/dev\/null<\/string>/gu)).toHaveLength(2);
+    expect(serviceDefinition(config, "linux", installedCliPath, undefined, undefined, undefined, directory).content).toContain("StandardOutput=null\nStandardError=null");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 function withEnv(name: string, value: string | undefined, body: () => void): void {
   const previous = process.env[name];

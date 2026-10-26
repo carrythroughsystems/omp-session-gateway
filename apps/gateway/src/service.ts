@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { GatewayConfig } from "./config.ts";
+import { assertQualificationLogDirectory } from "./logger.ts";
 type ServicePathConfig = Pick<GatewayConfig, "paths">;
 
 export interface ServiceDefinition {
@@ -16,13 +17,14 @@ export interface UserServiceStatus {
   readonly active: boolean;
 }
 
-function serviceArgv(installedCli?: string, readinessInstance?: string): readonly string[] {
+function serviceArgv(installedCli?: string, readinessInstance?: string, qualificationLogDirectory?: string): readonly string[] {
   const fallbackSource = fileURLToPath(new URL("./cli.ts", import.meta.url));
   const cliSource = resolve(installedCli ?? process.argv[1] ?? fallbackSource);
   const argv = basename(process.execPath).startsWith("bun")
     ? [process.execPath, cliSource, "serve"]
     : [process.execPath, "serve"];
   if (readinessInstance !== undefined) argv.push("--readiness-instance", readinessInstance);
+  if (qualificationLogDirectory !== undefined) argv.push("--qualification-log-dir", qualificationLogDirectory);
   return argv;
 }
 
@@ -66,11 +68,13 @@ export function serviceDefinition(
   readinessInstance?: string,
   homeDirectory = homedir(),
   windowsUserSid?: string,
+  qualificationLogDirectory?: string,
 ): ServiceDefinition {
   if (readinessInstance !== undefined && !/^[A-Za-z0-9_-]{43}$/u.test(readinessInstance)) {
     throw new Error("invalid service readiness instance");
   }
-  const argv = serviceArgv(installedCli, readinessInstance);
+  if (qualificationLogDirectory !== undefined) assertQualificationLogDirectory(qualificationLogDirectory);
+  const argv = serviceArgv(installedCli, readinessInstance, qualificationLogDirectory);
   if (platform === "linux") {
     const command = argv.map(value => JSON.stringify(value)).join(" ");
     // systemd refuses to start a unit whose ReadWritePaths= names a path that does not exist, and
@@ -84,6 +88,7 @@ export function serviceDefinition(
     const runtimeManagedBySystemd =
       xdgRuntimeDir !== undefined && config.paths.runtimeDir === join(xdgRuntimeDir, "omp-session-gateway");
     const readWritePaths = [config.paths.configDir, config.paths.stateDir];
+    if (qualificationLogDirectory !== undefined) readWritePaths.push(qualificationLogDirectory);
     if (!runtimeManagedBySystemd) readWritePaths.push(config.paths.runtimeDir);
     const runtimeDirectory = runtimeManagedBySystemd
       ? "RuntimeDirectory=omp-session-gateway\nRuntimeDirectoryMode=0700\n"
@@ -91,7 +96,7 @@ export function serviceDefinition(
     return {
       identifier: "omp-session-gateway",
       path: serviceDefinitionPath(config, platform, homeDirectory),
-      content: `[Unit]\nDescription=OMP Session Gateway\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${command}\nRestart=on-failure\nRestartSec=5\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n${runtimeDirectory}ReadWritePaths=${readWritePaths.map(value => JSON.stringify(value)).join(" ")}\n\n[Install]\nWantedBy=default.target\n`,
+      content: `[Unit]\nDescription=OMP Session Gateway\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${command}\nRestart=on-failure\nRestartSec=5\n${qualificationLogDirectory === undefined ? "" : "StandardOutput=null\nStandardError=null\n"}NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n${runtimeDirectory}ReadWritePaths=${readWritePaths.map(value => JSON.stringify(value)).join(" ")}\n\n[Install]\nWantedBy=default.target\n`,
     };
   }
   if (platform === "darwin") {
@@ -413,6 +418,7 @@ export async function installUserService(
   installedCli?: string,
   readinessInstance?: string,
   host: ServiceHost = systemServiceHost,
+  qualificationLogDirectory?: string,
 ): Promise<ServiceDefinition> {
   // Ownership first, before `mkdir` and before the definition write. Two roots that share a HOME
   // compute the same definition path, so the write alone replaces the other root's service, and on
@@ -427,6 +433,7 @@ export async function installUserService(
     readinessInstance,
     host.homeDirectory,
     windowsUserSid,
+    qualificationLogDirectory,
   );
   if (!serviceProgramBelongsTo(definition.content, config.paths.stateDir)) {
     throw new Error("gateway service program must be staged under the configured state directory");

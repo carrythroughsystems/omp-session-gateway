@@ -173,7 +173,7 @@ export class AndroidAdbError extends Error {
 export type AndroidAdbSpawner = (
   argv: string[],
   options: { stdin: "ignore" | Uint8Array; stdout: "pipe"; stderr: "pipe" },
-) => { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array>; exited: Promise<number>; kill: () => void };
+) => { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array>; exited: Promise<number>; kill: (signal?: number | NodeJS.Signals) => void };
 
 /** The only adb subprocess owner. Never include argv, device identifiers, output or raw causes in failures. */
 /**
@@ -194,27 +194,36 @@ export function evaluationValue<T>(result: Record<string, unknown>): T {
 export async function runAdb(
   serial: string | undefined,
   args: readonly string[],
-  options: { readonly input?: Uint8Array; readonly timeoutMs?: number; readonly spawn?: AndroidAdbSpawner } = {},
+  options: { readonly input?: Uint8Array; readonly timeoutMs?: number; readonly signal?: AbortSignal; readonly spawn?: AndroidAdbSpawner } = {},
 ): Promise<string> {
   let deadline: ReturnType<typeof setTimeout> | undefined;
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  let cancel: (() => void) | undefined;
   try {
+    options.signal?.throwIfAborted();
     const argv = serial === undefined ? ["adb", ...args] : ["adb", "-s", serial, ...args];
     const child = (options.spawn ?? ((argv, options) => Bun.spawn(argv, options)))(argv, {
       stdin: options.input ?? "ignore", stdout: "pipe", stderr: "pipe",
     });
-    if (options.timeoutMs !== undefined) deadline = setTimeout(() => child.kill(), options.timeoutMs);
+    cancel = () => { child.kill("SIGTERM"); grace ??= setTimeout(() => child.kill("SIGKILL"), 2_000); };
+    options.signal?.addEventListener("abort", cancel, { once: true });
+    if (options.signal?.aborted) cancel();
+    if (options.timeoutMs !== undefined) deadline = setTimeout(cancel, options.timeoutMs);
     const [stdout, , code] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).arrayBuffer(),
       child.exited,
     ]);
     if (code !== 0) throw new AndroidAdbError(code);
+    options.signal?.throwIfAborted();
     return stdout;
   } catch (error) {
     if (error instanceof AndroidAdbError) throw error;
     throw new AndroidAdbError();
   } finally {
     clearTimeout(deadline);
+    clearTimeout(grace);
+    if (cancel !== undefined) options.signal?.removeEventListener("abort", cancel);
   }
 }
 
@@ -584,10 +593,6 @@ export function assertDevtoolsEndpointMatchesPackage(
   return debuggerUrl.href;
 }
 
-async function androidPackageVersion(serial: string, packageName: string): Promise<string> {
-  return parseAndroidPackageVersion(await runAdb(serial, ["shell", "dumpsys", "package", packageName]));
-}
-
 /** The single authorized device; failure messages never expose device identifiers. */
 export async function requireSingleDevice(
   command: AndroidAdbCommand = (...args) => runAdb(undefined, args),
@@ -671,18 +676,32 @@ export async function waitForDevtoolsEndpoint(
  */
 export async function withAndroidChrome<T>(
   run: (driver: AndroidChromeDriver) => Promise<T>,
-  options: { readonly port?: number; readonly launchBrowser?: boolean } = {},
+  options: { readonly port?: number; readonly launchBrowser?: boolean;
+    readonly execution?: { readonly signal: AbortSignal; readonly deadline: number } } = {},
 ): Promise<T> {
+  const execution = options.execution;
+  const check = () => {
+    execution?.signal.throwIfAborted();
+    if (execution !== undefined && performance.now() >= execution.deadline) throw new Error("Android browser execution deadline");
+  };
+  check();
   const port = options.port ?? DEFAULT_FORWARD_PORT;
   const target = resolveAndroidBrowserTarget();
-  const serial = await requireSingleDevice();
-  const packageVersion = await androidPackageVersion(serial, target.packageName);
-  if (options.launchBrowser !== false) await wakeAndroidChrome(serial, target);
-  await runAdb(serial, ["forward", "tcp:" + port, target.devtoolsSocket]);
+  const adb = (serial: string | undefined, args: readonly string[]) => {
+    check();
+    return runAdb(serial, args, execution === undefined ? {} : { signal: execution.signal, timeoutMs: Math.max(1, execution.deadline - performance.now()) });
+  };
+  const serial = await requireSingleDevice((...args) => adb(undefined, args));
+  const packageVersion = parseAndroidPackageVersion(await adb(serial, ["shell", "dumpsys", "package", target.packageName]));
+  if (options.launchBrowser !== false) await wakeAndroidChrome(serial, target, (...args) => adb(serial, args));
+  await adb(serial, ["forward", "tcp:" + port, target.devtoolsSocket]);
 
   let webSocketDebuggerUrl: string;
   try {
-    const endpointResponse = await waitForDevtoolsEndpoint("http://127.0.0.1:" + port + "/json/version");
+    const endpointResponse = await waitForDevtoolsEndpoint("http://127.0.0.1:" + port + "/json/version",
+      () => { check(); return fetch("http://127.0.0.1:" + port + "/json/version", execution === undefined ? {} : {
+        signal: AbortSignal.any([execution.signal, AbortSignal.timeout(Math.max(1, execution.deadline - performance.now()))]) }); },
+      { now: () => performance.now(), sleep: async milliseconds => { check(); await Bun.sleep(milliseconds); check(); } });
     if (!endpointResponse.ok) throw new Error("DevTools endpoint metadata request failed");
     // Deliberately outside the retry: a well-formed reply from the wrong browser is a hard failure,
     // never a transient. Desktop Chrome on this workstation answers remote-debugging ports too.
@@ -693,7 +712,7 @@ export async function withAndroidChrome<T>(
       port,
     );
   } catch (error) {
-    await runAdb(serial, ["forward", "--remove", "tcp:" + port]).catch(() => {});
+    await runAdb(serial, ["forward", "--remove", "tcp:" + port], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
     throw error;
   }
   const socket = new WebSocket(webSocketDebuggerUrl);
@@ -706,6 +725,13 @@ export async function withAndroidChrome<T>(
   let targetId: string | undefined;
   let ownsTarget = false;
   const eventListeners = new Set<(method: string, parameters: Record<string, unknown>) => void>();
+  let cleaning = false;
+  const cancelled = () => {
+    for (const entry of pending.values()) entry.reject(new Error("Android browser execution cancelled"));
+    pending.clear();
+  };
+  execution?.signal.addEventListener("abort", cancelled, { once: true });
+  const deadline = execution === undefined ? undefined : setTimeout(cancelled, Math.max(1, execution.deadline - performance.now()));
 
   socket.onmessage = (event: MessageEvent) => {
     const message = JSON.parse(String(event.data)) as {
@@ -728,6 +754,7 @@ export async function withAndroidChrome<T>(
 
   const send = (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
+      if (!cleaning) check();
       const id = (nextId += 1);
       pending.set(id, { method, resolve, reject });
       const frame: Record<string, unknown> = { id, method, params: parameters };
@@ -820,6 +847,7 @@ export async function withAndroidChrome<T>(
         }
         if (typeof result.errorText === "string") throw new Error(`navigation failed: ${result.errorText}`);
         for (let attempt = 0; attempt < LOAD_ATTEMPTS; attempt += 1) {
+          check();
           await Bun.sleep(LOAD_POLL_MS);
           const state = await driver
             .evaluate<[string, string]>("[document.readyState, location.href]")
@@ -836,11 +864,14 @@ export async function withAndroidChrome<T>(
 
     return await run(driver);
   } finally {
+    cleaning = true;
+    clearTimeout(deadline);
+    execution?.signal.removeEventListener("abort", cancelled);
     if (targetId !== undefined && ownsTarget) {
       await send("Target.closeTarget", { targetId }, false).catch(() => {});
     }
     socket.close();
-    await runAdb(serial, ["forward", "--remove", `tcp:${port}`]).catch(() => {});
+    await runAdb(serial, ["forward", "--remove", `tcp:${port}`], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
   }
 }
 

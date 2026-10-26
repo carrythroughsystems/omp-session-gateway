@@ -485,6 +485,29 @@ Allowed at normal verbosity:
 All gateway log fields are numeric or boolean. Never attach string-valued identifiers, hashes,
 paths, error messages, metadata, or serialized query objects.
 
+Qualification explicitly supplies `--qualification-log-dir`; an environment variable alone never
+enables daemon retention. Ordinary installations are unchanged. The sink accepts only closed event
+names/fields, finite numbers and booleans (plus the fixed envelope timestamp/level/name), and retains
+four files of at most 256 KiB. The existing absolute destination must be current-user-owned, mode
+0700, with no symlink components; files are single-link, current-user-owned 0600 regular files.
+Unsafe startup fails. A later write failure is sticky; a missing successful-write marker refuses
+restart. Raw daemon stdout/stderr remain discarded independently of structured retention.
+
+Push events retain only process-local numeric sequence, kind flags, subscription counts, durations,
+and HTTP status. Provider acknowledgement is acceptance, not phone presentation. Collector windows
+use event indices and require a unique queue/send; simultaneous sends, rotation gaps, missing or
+invalid telemetry never authorize recovery by time proximity. Request identities remain volatile.
+A late post cannot satisfy a fresh ask: the existing worker must attest its exact request/generation.
+At most one evidence-backed fresh ask is allowed per phase, separate from overlap recovery; all
+privacy assertions and the 60/160-second bounds remain unchanged. The forbidden-sink proof requires
+both raw-stream discard and validated structured-log safety.
+
+Logs live outside fixture-cleanup directories. After the daemon stops, collection validates bounded
+records into private, exclusively-created immutable job files and lane/phase slices, then removes
+the remote copies. Failed validation or retention leaves remote evidence intact and fails closed.
+No raw errors, endpoints, identifiers or identifier hashes, notification text, payloads, capabilities,
+tokens, or provider bodies are retained in these artifacts.
+
 Forbidden:
 
 - capabilities or substrings;
