@@ -41,6 +41,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   single-shot claims, preserve committed containment during retirement failures, and share one
   allocation/admission deadline from before firewall creation. Refuse cancelled final evidence
   and contradictory transport status; keep POSIX signal-escalation coverage off Windows runners.
+  Check allocation expiry immediately before creation POSTs, settle firewall-only recovery vaults
+  without false ownership vetoes, contain cancelled development attempts, and reject late poll
+  success. FreeRDP input failures reap their child; resumed admission retains stability evidence.
 
 ### Fixed
 

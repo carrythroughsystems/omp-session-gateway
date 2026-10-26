@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { classifyWindowsCommandFailure, command, reconnectWindowsTransport, reconcileWindowsUpload, windowsUploadStep, windowsWinrmDiagnostic, windowsWinrmResult } from "./windows-qualification-runtime";
 import { QualificationFailure } from "./qualification-failure";
 import type { WindowsTransportProbe } from "./windows-stable-qualification";
-import { windowsFailure } from "./windows-stable-qualification";
+import { assertWindowsAllocation, windowsFailure } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
 
 test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructure retry authority", async method => {
@@ -25,6 +25,28 @@ test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructur
     expect(error).toBeInstanceOf(QualificationFailure);
     if (!(error instanceof QualificationFailure)) throw new Error("expected typed provider cancellation");
     expect(error.evidence).toMatchObject({ id: 31, class: "harness", operation: method === "GET" ? "read_only" : "unknown" });
+    expect(sends).toBe(1);
+  } finally { globalThis.fetch = original; }
+});
+
+test.each([false, true])("council491 allocation budget cancels an owned POST with execution=%s", async bound => {
+  const original = globalThis.fetch;
+  const controller = new AbortController();
+  let sends = 0;
+  globalThis.fetch = (async (_url, options) => {
+    sends += 1;
+    return new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Response.json({ accepted: true })), 150);
+      options?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(options.signal!.reason); }, { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    const execution = bound ? { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 41 } : undefined;
+    const error = await winrmRuntime.request("https://synthetic.invalid", {}, "POST", {}, execution, performance.now() + 20).catch(error => error);
+    expect(error).toBeInstanceOf(QualificationFailure);
+    if (!(error instanceof QualificationFailure)) throw new Error("expected typed allocation cancellation");
+    expect(error.evidence).toMatchObject({ class: "harness", operation: "unknown" });
+    expect(controller.signal.aborted).toBe(false);
     expect(sends).toBe(1);
   } finally { globalThis.fetch = original; }
 });
@@ -97,6 +119,52 @@ test("reconnect accounts for command time in its 90-second budget", async () => 
   expect(budgets).toEqual([90_000, 28_000]);
   expect(sleeps).toEqual([2_000]);
   expect(now).toBe(90_000);
+});
+test("493 R2 reconnect refuses success exactly at its deadline", async () => {
+  let now = 0;
+  await expect(reconnectWindowsTransport(async () => { now = 90_000; return {}; },
+    { now: () => now, sleep: async ms => { now += ms; } })).rejects.toThrow("deadline_exceeded");
+});
+test.each(["provider Windows allocation", "certificate-pinned interactive RDP"])("493 R2 %s polling refuses late success", async name => {
+  let now = 0;
+  expect(typeof winrmRuntime.pollWindows).toBe("function");
+  await expect(winrmRuntime.pollWindows(async () => { now = 100; return true; }, 100, name, undefined,
+    { now: () => now, sleep: async ms => { now += ms; } })).rejects.toThrow("timed out");
+});
+test.each(["write", "end"] as const)("493 R2 FreeRDP %s failure still kills and awaits its child", async operation => {
+  const calls: string[] = []; let settle!: (code: number) => void;
+  const child = {
+    stdin: { write: (_input: string) => { calls.push("write"); if (operation === "write") throw new Error("synthetic input failure"); },
+      end: () => { calls.push("end"); if (operation === "end") throw new Error("synthetic input failure"); } },
+    exitCode: null as number | null,
+    kill: () => { calls.push("kill"); child.exitCode = 143; settle(143); },
+    exited: new Promise<number>(resolve => { settle = resolve; }).then(code => { calls.push("exit"); return code; }),
+  };
+  expect(typeof winrmRuntime.settleWindowsRdp).toBe("function");
+  await expect(winrmRuntime.settleWindowsRdp(child, "synthetic-only", async () => { calls.push("observe"); })).rejects.toThrow("synthetic input failure");
+  expect(calls).toContain("kill"); expect(calls).toContain("exit"); expect(calls).not.toContain("observe");
+});
+test("493 R2 admitted transport requires durable stability observations, not a boolean marker", () => {
+  expect(typeof winrmRuntime.windowsTransportStability).toBe("function");
+  expect(winrmRuntime.windowsTransportStability(undefined)).toBeUndefined();
+  expect(winrmRuntime.windowsTransportStability({ transportAdmitted: true })).toBeUndefined();
+  expect(winrmRuntime.windowsTransportStability({ transportStabilitySamples: 3, transportStabilityDurationMs: 60_000 }))
+    .toEqual({ transportStabilitySamples: 3, transportStabilityDurationMs: 60_000 });
+  expect(winrmRuntime.windowsTransportStability({ transportStabilitySamples: 2, transportStabilityDurationMs: 60_000 })).toBeUndefined();
+});
+test("493 R2 allocation guard checks both clocks at the creation boundary", () => {
+  const controller = new AbortController();
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+  expect(() => assertWindowsAllocation(execution, 100, 99)).not.toThrow();
+  expect(() => assertWindowsAllocation(execution, 100, 100)).toThrow("deadline_exceeded");
+  controller.abort();
+  expect(() => assertWindowsAllocation(execution, 100, 99)).toThrow("deadline_exceeded");
+  expect(() => assertWindowsAllocation(undefined, undefined, 99)).toThrow("helper_failed");
+});
+test("493 R2 firewall-only vault is not guest access", () => {
+  expect(winrmRuntime.windowsGuestAccessAvailable({ firewall: "synthetic-firewall" })).toBe(false);
+  expect(winrmRuntime.windowsGuestAccessAvailable({ instance: "synthetic-owned" })).toBe(false);
+  expect(winrmRuntime.windowsGuestAccessAvailable({ instance: "synthetic-owned", password: "synthetic-only" })).toBe(true);
 });
 test("reconnect uses exactly the four backoffs and refuses late success or untyped errors", async () => {
   let now = 0; const sleeps: number[] = [];

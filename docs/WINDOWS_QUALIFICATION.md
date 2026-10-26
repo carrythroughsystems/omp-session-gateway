@@ -113,6 +113,8 @@ SERVFAIL for the Tailscale names and their CloudFront target while `github.com` 
 failed two v0.7.2 campaign attempts with a bare `WebException` at the Tailscale MSI download.
 Allocation and authenticated WinRM admission share one 12-minute deadline, durably set before
 firewall creation; firewall/VM creation and provider allocation consume that same budget.
+The same allocation-and-execution guard runs after awaited checkpoints/inventory reads and
+immediately before each creation POST; an expired budget cannot begin a new allocation.
 Subsequent transport probes use bounded reconnect, not another allocation window. Admission requires
 three consecutive read-only successes spanning at least 60 seconds; a transport error resets
 both the count and window, while a guest assertion failure aborts immediately. The observed
@@ -143,6 +145,10 @@ helper with delays of **2, 4, 8, and 16 seconds**, at most five calls, inside a 
 operational budget that includes time already spent executing probes. Process teardown remains
 mandatory on expiry. Cleanup uses this reconnect path, never another 12-minute allocation window.
 Mutating guest actions and upload streams are never replayed.
+Reconnect and readiness/RDP/allocation polls reject success at or after their local deadline.
+Admission persists the actual stability sample count and duration before the phase checkpoint;
+a resumed admission reuses those observations only after reconnect. A legacy boolean marker
+without observations must re-observe the stability window within the original allocation budget.
 
 An interrupted upload is reconciled by existence and SHA-256 after read-only connection recovery.
 Only a recognized helper-reported transport interruption permits that reconciliation; a raw process
@@ -270,6 +276,9 @@ checkpoint, which precedes vault removal. A crash after unlink can therefore res
 completion without missing Pixel recovery state; a missing vault without that completion stays
 blocked. A failed guest command after reconnect skips the remaining guest mutations and proceeds
 directly to independent containment.
+A firewall-only vault does not imply a bound guest identity. Cleanup skips guest commands,
+destroys its owned firewall and any instance matching the epoch creation label, and does not
+turn the absent guest identity into an ownership-change veto. Foreign ownership still blocks.
 The final inventories are taken after a five-second settling interval, matching the provider
 lookup-absence policy. A firewall that becomes visible during that interval blocks completion
 and retains recovery state; cleanup must reconcile it before the epoch can be retired.
@@ -287,6 +296,9 @@ afterwards. For development only, a code failure after guest access retains the 
 repair: rerunning `run` resumes only read-only phases and skips completed phases. Any unsettled
 mutating phase refuses resume regardless of completed upload claims. `cleanup` is explicit
 after an abandoned attempt.
+Outer cancellation or deadline always runs containment, including development mode; only
+repairable code failures may retain the guest. FreeRDP ownership covers stdin write/end as
+well as readiness observation: every failure terminates and awaits the child.
 Failed phase resumes are counted in evidence; repair time is not called successful phase time.
 Development resume is refused after three hours, and every VM must be destroyed within four
 hours of creation. The current development campaign permits six total VM creations, one at a

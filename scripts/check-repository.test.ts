@@ -221,7 +221,7 @@ test("document-context web sources schedule timers only through window or an inj
 });
 test("council491 Windows dispatcher forwards cancellation without permitting write replay", () => {
   const source = 'const send = (readSignal: AbortSignal = signal) => fetch(url, { method, signal: readSignal });\n' +
-    'const response = method === "GET" ? await readProvider(send, { signal, ...(execution === undefined ? {} : { deadline: execution.deadline }) }) : await send();';
+    'const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();';
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toEqual([]);
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace('method === "GET"', 'method !== "DELETE"'))).toHaveLength(1);
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace(': await send();', ': await readProvider(send);'))).toHaveLength(1);

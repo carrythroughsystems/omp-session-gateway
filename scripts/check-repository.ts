@@ -111,7 +111,7 @@ export function checkProviderReads(rel: string, text: string): string[] {
     if ((rel === "scripts/windows-qualification-runtime.ts" && target === "url") &&
       /const send = \((?:readSignal: AbortSignal = signal)?\) => $/u.test(before) &&
       (text.includes('const response = method === "GET" ? await readProvider(send) : await send();') ||
-        text.includes('const response = method === "GET" ? await readProvider(send, { signal, ...(execution === undefined ? {} : { deadline: execution.deadline }) }) : await send();'))) continue;
+        text.includes('const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();'))) continue;
     failures.push(rel + ":" + (before.split("\n").length) + ": unreviewed direct fetch; use readProvider for idempotent provider reads or document the exact non-provider target");
   }
   return failures;

@@ -21,6 +21,12 @@ export function assertWindowsExecution(execution?: WindowsExecutionContext): voi
     throw windowsFailure("deadline_exceeded", "command", "not_started", {}, execution);
   }
 }
+/** Shared creation boundary: no await may separate this guard from a provider create call. */
+export function assertWindowsAllocation(execution: WindowsExecutionContext | undefined, allocationDeadline: number | undefined, now = Date.now()): void {
+  assertWindowsExecution(execution);
+  if (allocationDeadline === undefined || !Number.isFinite(allocationDeadline)) throw windowsFailure("helper_failed", "command", "not_started", {}, execution);
+  if (now >= allocationDeadline) throw windowsFailure("deadline_exceeded", "command", "not_started", {}, execution);
+}
 
 export interface WindowsArtifact {
   readonly tag: string;
@@ -68,9 +74,9 @@ export interface WindowsProvider {
   firewalls(): Promise<WindowsFirewall[]>;
   instance(id: string): Promise<WindowsInstance | undefined>;
   firewall(id: string): Promise<WindowsFirewall | undefined>;
-  createFirewall(label: string, execution?: WindowsExecutionContext): Promise<WindowsFirewall>;
+  createFirewall(label: string, execution?: WindowsExecutionContext, allocationDeadline?: number): Promise<WindowsFirewall>;
   configureFirewall(id: string, label: string): Promise<void>;
-  createInstance(label: string, firewall: string, execution?: WindowsExecutionContext): Promise<WindowsInstance>;
+  createInstance(label: string, firewall: string, execution?: WindowsExecutionContext, allocationDeadline?: number): Promise<WindowsInstance>;
   destroyInstance(id: string, label: string): Promise<void>;
   destroyFirewall(id: string, label: string): Promise<void>;
 }
@@ -276,7 +282,13 @@ function assertFirewall(item: WindowsFirewall, label: string, runtime: WindowsRu
 }
 async function waitFor(runtime: WindowsRuntime, action: () => Promise<boolean>, timeout: number, name: string, observed?: () => Record<string, unknown>): Promise<void> {
   const start = runtime.now();
-  do { if (await action()) return; await runtime.sleep(5_000); } while (runtime.now() - start < timeout);
+  while (runtime.now() - start < timeout) {
+    const succeeded = await action();
+    const remaining = timeout - (runtime.now() - start);
+    if (remaining <= 0) break;
+    if (succeeded) return;
+    await runtime.sleep(Math.min(5_000, remaining));
+  }
   // Name which predicate held out through the last observation's booleans and counts, never guest strings.
   const last = observed === undefined ? "" : `; last ${JSON.stringify(Object.fromEntries(Object.entries(observed()).filter(([, value]) => typeof value === "boolean" || typeof value === "number")))}`;
   const failure = windowsFailure("assertion_failed", "output", "confirmed");
@@ -418,8 +430,8 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     let firewall: WindowsFirewall | undefined = resumed ? (await runtime.provider.firewalls()).find(item => item.description === label) : undefined;
     await step("firewall_created", async () => {
       progress.allocationDeadline = runtime.now() + 12 * 60_000; await save();
-      assertWindowsExecution(input.execution);
-      firewall = await runtime.provider.createFirewall(label, input.execution);
+      assertWindowsAllocation(input.execution, progress.allocationDeadline, runtime.now());
+      firewall = await runtime.provider.createFirewall(label, input.execution, progress.allocationDeadline);
       const fresh = await runtime.provider.firewall(firewall.id);
       requireFact(fresh, "created firewall missing"); assertFirewall(fresh, label, runtime);
       await save(); await runtime.provider.configureFirewall(fresh.id, label);
@@ -427,8 +439,8 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     await step("instance_created", async () => {
       requireFact(firewall, "firewall is missing");
       requireFact((await runtime.provider.instances()).every(item => !item.label?.startsWith(QUAL_LABEL_PREFIX)), "another Windows qualification instance exists");
-      assertWindowsExecution(input.execution);
-      const instance = await runtime.provider.createInstance(label, firewall.id, input.execution);
+      assertWindowsAllocation(input.execution, progress.allocationDeadline, runtime.now());
+      const instance = await runtime.provider.createInstance(label, firewall.id, input.execution, progress.allocationDeadline);
       assertInstance(instance, label, runtime);
       // A failed write reaches finally cleanup, which independently lists/refetches the exact label.
       await save();
@@ -515,7 +527,10 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     assertWindowsExecution(input.execution);
     return evidence(progress, input.identity);
   } catch (error) {
-    if (runtime.development && PHASES.indexOf(progress.phase) >= PHASES.indexOf("transport_ready") && runtime.now() - progress.startedAt < 3 * 60 * 60_000) throw error;
+    const interrupted = input.execution?.signal.aborted || (input.execution && performance.now() >= input.execution.deadline) ||
+      (error instanceof QualificationFailure && ["deadline_exceeded", "probe_deadline"].includes(error.evidence.reason));
+    if (!interrupted && runtime.development && PHASES.indexOf(progress.phase) >= PHASES.indexOf("transport_ready") &&
+      runtime.now() - progress.startedAt < 3 * 60 * 60_000) throw error;
     // A failed primary's cancellation must not disable owned-resource containment.
     const { execution, ...cleanupInput } = input;
     try { await cleanupWindows({ ...cleanupInput, progress, runtime,
@@ -571,8 +586,9 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
       await attempt("vaultState", async () => { requireFact(await runtime.hasAccess!(progress.epoch), "uncommitted cleanup lacks recovery vault"); });
     }
     const owned = new Map<string, WindowsInstance>();
-    let inventoryVerified = false;
+    let inventoryVerified = false, guestAccessAvailable = true;
     await attempt("guestInventory", async () => {
+      guestAccessAvailable = runtime.hasAccess === undefined || await runtime.hasAccess(progress.epoch);
       const bound = await runtime.cleanupInstance?.(progress.epoch);
       if (bound) { assertInstance(bound, label, runtime); owned.set(bound.id, bound); }
       let listing = await runtime.provider.instances();
@@ -594,7 +610,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
         return false;
       }
     };
-    if (inventoryVerified && owned.size > 0 && await guestAttempt("reconnect")) {
+    if (inventoryVerified && guestAccessAvailable && owned.size > 0 && await guestAttempt("reconnect")) {
       guestCommandsSkipped = false;
       // After the handover Windows refuses the Administrator's Tailscale CLI while the standard account
       // operates it, and the Administrator's gateway is already uninstalled.
