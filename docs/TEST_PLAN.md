@@ -194,11 +194,13 @@ still clean recorded pending Mac effects and must not reopen already completed c
 | Orchestration boundary | Required offline regression |
 | --- | --- |
 | Sibling settlement | One consumer fails while another passes; the healthy sibling finishes before tunnel stop and publication lifecycle |
-| Pixel ownership | An unrestored holder poisons queued work; collateral references the same attempt's originating failures |
+| Pixel ownership | An unrestored holder poisons queued measurements, never restoration; actual readiness/cleanup owners and one allocator preserve collateral references |
 | Terminal evidence | Ordinary failure leaves no started lane `running`; failed publication and campaign have completion timestamps |
-| Cleanup and retries | Dirty or stale cleanup blocks eligibility; passed proofs remain unchanged; consuming authority precedes admission; prior snapshot bytes stay immutable |
+| Cleanup and retries | Dirty/stale/persistence-failed cleanup blocks eligibility; restoration survives failed writes; reconciled cleanup errors do not contradict passed cleanup; fresh attempts require zero; consuming exact receipt authority precedes admission |
 | Rig readiness | Failure at setup, Windows admission, Mac checks or Push still restores Pixel before Mac; restoration failure remains unresolved and cannot authorize retry |
-| Adapter cancellation | Runtime waits/subprocesses receive the owning signal/deadline; cleanup gets a fresh context, not the aborted primary signal |
+| Adapter cancellation | Pending health/provider reads and backoff abort; mutating requests never replay; real distinct remote process groups are reaped before cleanup; cleanup gets a fresh context |
+| Restart admission | Cloud holds and typed Windows admission errors produce campaign-owned terminal summaries/outcomes without failing passed lanes; restarted publication clears not-started metadata |
+| Readiness finality | Passing receipts reject running readiness; failed log preparation does not publish a collectible owner; Windows admission uses the receipt failure allocator |
 | Manual compatibility | Historical schema-3 receipts remain readable; manual readiness attempt zero gains no automatic authority; unbound later attempts refuse |
 
 The retained-Mac `ompPublication` lane adds the shared
@@ -268,7 +270,7 @@ test reaches a VM, a phone, or a device cloud:
 - a crashed attempt resumes from its last checkpoint, and a cleanup that leaves recorded resources
   fails;
 - a resumed campaign that fails admission still destroys the Windows VM it recorded;
-- the Pixel lease runs one device action at a time and refuses every later one after a lane reports
+- the Pixel lease runs one device action at a time and refuses later measurements, but not restoration, after a lane reports
   the phone unrestored;
 - fake hotspot, USB/Bluetooth tethering, pending-upstream, malformed and failed adb probes refuse
   at orchestrator admission before provider lookup, lane admission or receipt creation;

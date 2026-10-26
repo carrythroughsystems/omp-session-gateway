@@ -1014,6 +1014,9 @@ monotonic timings and cleanup disposition. The epoch's private
 not logs or posted evidence. Pixel restoration precedes Mac teardown, including on failure. The
 fixture is fully removed before the normal Mac upgrade/reboot/rollback lifecycle; readiness never
 counts as a qualification pass. An unresolved restore blocks same-candidate eligibility.
+Passing receipts require readiness itself to be terminal and restored. A poisoned Pixel still
+admits serialized restoration. Failed checkpoint storage does not skip cleanup, but records
+`persistenceFailed` and prevents retry eligibility; failed log preparation never publishes a log owner.
 
 Outer runaway ceilings do not replace product assertions: Windows 180 minutes, Push/cloud 90
 minutes, core Android 30 minutes, relay configured duration plus five minutes, Windows/cloud
@@ -1021,9 +1024,19 @@ cleanup 30 minutes, and Push cleanup 15 minutes. Mac cleanup uses **90 minutes**
 30: its existing two 10-minute scripts plus two 30-minute SSH owners require 80 minutes before
 margin. None of those existing bounds is shortened. Cancellation aborts owned work and awaits
 termination before cleanup; healthy sibling lanes are not terminated.
+Tunnel startup uses bounded one-second health reads within a 90-second owner ceiling. Windows
+readiness has a 30-minute outer ceiling and uses the same receipt failure allocator; provider read
+and absence-confirmation cancellation remain distinct from retryable transport timeouts. Remote
+fixture cancellation terminates the recorded remote process group via a fresh bounded SSH owner.
+If termination cannot be proved, later effects on that host refuse instead of racing cleanup.
 
 Manual attempt-zero readiness remains diagnostic and does not fabricate driver policy bindings.
-New-format recovery requires the driver's exact execution and prior receipt-byte digest; a
+Fresh unbound effectful campaigns require attempt zero. Later ordinals require the driver's exact
+execution and either a terminal-failed prior receipt digest or the private immutable prior preflight
+outcome (`--retry-outcome-file` plus `--retry-outcome-sha256`). Receiptless authority must be infra-only,
+effect-free and exactly bound to the preceding ordinal and unchanged subject; it is consumed under
+the lease before renewed admission. Renewed admission failures are campaign-owned, not failures of
+already-passed product lanes. A
 completed failed job's snapshot, logs, outcome, result and exit file remain immutable. Passed
 qualification proofs are reused without rewriting them. These tooling changes are not evidence
 that any particular signed candidate or live rig has passed.

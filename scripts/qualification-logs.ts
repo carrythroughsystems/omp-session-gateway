@@ -1,11 +1,11 @@
-import { constants, closeSync, fstatSync, openSync, readFileSync, writeSync } from "node:fs";
+import { constants, closeSync, fstatSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { assertQualificationLogDirectory, parseQualificationLogEvent, QUALIFICATION_LOG_BYTES, QUALIFICATION_LOG_FILES, type QualificationLogEvent } from "../apps/gateway/src/logger.ts";
+import { assertQualificationLogDirectory, parseQualificationLogFiles, parseQualificationLogHealth, type QualificationLogEvent } from "../apps/gateway/src/logger.ts";
 import type { FixtureExecutor } from "./push-qualification-fixture.ts";
 import { FAILURE_STEPS, type QualificationFailureLane } from "./qualification-failure.ts";
 
 export interface QualificationLogWindow { readonly lane: QualificationFailureLane; readonly phase: string; readonly after: number; readonly ordinal: number }
-export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number; readonly clearAcknowledged?: boolean }
+export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number; readonly clearAcknowledged?: boolean; readonly requestAlias?: number }
 export interface QualificationLogs {
   prepare(): Promise<void>;
   begin(lane: QualificationLogWindow["lane"], phase: string): Promise<QualificationLogWindow>;
@@ -18,23 +18,8 @@ export function qualificationLogDirectory(home: string, epoch: string): string {
   return `${home}/.local/state/omp-session-gateway/qualification-logs/${epoch}`;
 }
 
-export function parseQualificationLogs(texts: readonly string[]): QualificationLogEvent[] {
-  if (texts.length > QUALIFICATION_LOG_FILES) throw new Error("qualification logs exceed file bound");
-  const events: QualificationLogEvent[] = [];
-  for (const text of texts) {
-    if (Buffer.byteLength(text) > QUALIFICATION_LOG_BYTES || (text !== "" && !text.endsWith("\n"))) throw new Error("invalid qualification log size");
-    for (const line of text.split("\n")) {
-      if (line === "") continue;
-      if (Buffer.byteLength(line) > 2048 || events.length >= 16_384) throw new Error("qualification logs exceed event bound");
-      const event = parseQualificationLogEvent(JSON.parse(line));
-      // Writers emit canonical JSON; this also rejects duplicate/escaped keys and hidden discarded values.
-      if (JSON.stringify(event) !== line) throw new Error("noncanonical qualification event");
-      events.push(event);
-    }
-  }
-  events.sort((left, right) => left.index - right.index);
-  for (let index = 1; index < events.length; index++) if (events[index]!.index !== events[index - 1]!.index + 1) throw new Error("qualification log sequence gap");
-  return events;
+export function parseQualificationLogs(texts: readonly string[], firstIndex = 1): QualificationLogEvent[] {
+  return parseQualificationLogFiles(texts, firstIndex);
 }
 
 /** A unique queue/send pair, not wall-clock proximity, establishes the observation window. */
@@ -45,22 +30,26 @@ export function pushDeliveryTelemetry(events: readonly QualificationLogEvent[]):
   const acks = push.filter(event => event.event === "push.send_acknowledged");
   const failures = push.filter(event => event.event === "push.send_failed");
   const sequence = queues[0]?.sequence;
+  const requestAlias = queues[0]?.request_alias;
   const unique = queues.length === 1 && sends.length === 1 && sends[0]?.subscriptions === 1 &&
-    push.every(event => event.sequence === sequence) && acks.length + failures.length === 1 &&
+    typeof requestAlias === "number" && Number.isSafeInteger(requestAlias) && requestAlias > 0 &&
+    push.every(event => event.sequence === sequence && event.request_alias === requestAlias) && acks.length + failures.length === 1 &&
     sends[0]!.index > queues[0]!.index && (acks[0] ?? failures[0])!.index > sends[0]!.index;
   const sufficient = unique && queues[0]?.attention === true && sends[0]?.attention === true &&
-    queues[0]?.subscription_replay !== true && sends[0]?.subscription_replay !== true;
+    queues[0]?.subscription_replay === false && sends[0]?.subscription_replay === false;
   const status = typeof failures[0]?.status === "number" ? failures[0].status : 0;
   return { sufficient, sends: sends.length, acknowledgements: acks.length, failures: failures.length,
     retryable: sufficient && failures.length === 1 && (status === 429 || status >= 500 && status <= 599), httpStatus: sufficient ? status : 0,
-    clearAcknowledged: unique && queues[0]?.clear === true && sends[0]?.clear === true && acks.length === 1 };
+    clearAcknowledged: unique && queues[0]?.clear === true && sends[0]?.clear === true && acks.length === 1,
+    ...(unique ? { requestAlias: requestAlias as number } : {}) };
 }
 
 // Filesystem inspection runs on the retained Mac, not on a Studio pathname with the same spelling.
 // It returns only bounded bytes to the in-memory validator; raw bytes never enter job artifacts.
 const remoteScript = `import os,sys,stat,json
-p,op=sys.argv[1:]
+p,expected,op=sys.argv[1:]
 if not os.path.isabs(p) or os.path.normpath(p)!=p: raise ValueError('unsafe path')
+if os.path.lexists(p+'.unhealthy'): raise ValueError('sticky failure')
 if op=='prepare':
  q='/'
  for part in os.path.dirname(p).split('/')[1:]:
@@ -77,38 +66,30 @@ while True:
  if os.path.dirname(q)==q: break
  q=os.path.dirname(q)
 if op=='prepare': print('{}');sys.exit(0)
-names=os.listdir(p)
-allowed=['health']+['events.%d.jsonl'%i for i in range(4)]
-if any(n not in allowed for n in names): raise ValueError('unknown file')
-texts=[]
-health=None
-for n in sorted(names):
+def read_private(n,limit):
  fd=os.open(os.path.join(p,n),os.O_RDONLY|os.O_NOFOLLOW)
  try:
   s=os.fstat(fd)
-  if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.getuid() or stat.S_IMODE(s.st_mode)!=0o600 or s.st_nlink!=1 or s.st_size>262144: raise ValueError('unsafe file')
-  data=os.read(fd,262145)
-  if len(data)>262144: raise ValueError('oversized file')
-  if n=='health':
-   if len(data)>32: raise ValueError('invalid health')
-   health=data.decode('ascii')
-  else: texts.append(data.decode('utf-8'))
+  if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.getuid() or stat.S_IMODE(s.st_mode)!=0o600 or s.st_nlink!=1 or s.st_size>limit: raise ValueError('unsafe file')
+  data=os.read(fd,limit+1)
+  if len(data)>limit: raise ValueError('oversized file')
+  return data.decode('utf-8')
  finally: os.close(fd)
+try: before=read_private('health',64)
+except FileNotFoundError: before=None
+names=os.listdir(p)
+files=sorted(n for n in names if n!='health')
+if len(files)>4 or files!=['events.%d.jsonl'%i for i in range(len(files))]: raise ValueError('rotation gap')
+texts=[read_private(n,262144) for n in reversed(files)]
+try: after=read_private('health',64)
+except FileNotFoundError: after=None
+stable=before==after and before is not None and before.startswith('[') and before.endswith('\\n')
 if op=='remove':
+ if names and (not stable or after!=expected): raise ValueError('retained snapshot changed')
+ if os.path.lexists(p+'.unhealthy'): raise ValueError('sticky failure')
  for n in names: os.unlink(os.path.join(p,n))
  os.rmdir(p)
-stable=False
-if health is not None:
- if op=='remove': stable=True
- else:
-  fd=os.open(os.path.join(p,'health'),os.O_RDONLY|os.O_NOFOLLOW)
-  try:
-   s=os.fstat(fd)
-   if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.getuid() or stat.S_IMODE(s.st_mode)!=0o600 or s.st_nlink!=1: raise ValueError('unsafe health')
-   stable=health==os.read(fd,33).decode('ascii')
-  finally: os.close(fd)
-committed=int(health) if health is not None and health.endswith('\\n') and health[:-1].isdigit() else -1
-print(json.dumps({'healthy':stable and committed>=0 and 'events.0.jsonl' in names,'index':committed,'texts':texts,'empty':len(names)==0}))
+print(json.dumps({'healthy':stable and 'events.0.jsonl' in names,'health':after,'texts':texts,'empty':len(names)==0}))
 `;
 
 export function createQualificationLogs(options: { execute: FixtureExecutor; remoteDirectory: string; jobDirectory: string }): QualificationLogs {
@@ -116,31 +97,36 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
   let ordinal = 0;
   const windows = new Map<QualificationLogWindow, QualificationLogEvent[]>();
   let retainedBytes = 0;
-  const remote = async (operation: "prepare" | "read" | "remove") => {
-    const result = await options.execute(["python3", "-c", remoteScript, options.remoteDirectory, operation]);
+  const remote = async (operation: "prepare" | "read" | "remove", expected = "") => {
+    const result = await options.execute(["python3", "-c", remoteScript, options.remoteDirectory, expected, operation]);
     if (result.exitCode !== 0 || Buffer.byteLength(result.stdout) > 2 * 1024 * 1024) throw new Error("qualification log inspection failed");
     return JSON.parse(result.stdout) as unknown;
   };
-  const read = async () => {
+  const readState = async () => {
     let value = await remote("read");
-    // The synchronous writer marks health pending while committing one bounded event.
-    // Only that explicit in-progress marker is sampled again, never malformed/unsafe records.
+    // A pending writer or any changed health state invalidates the entire bracketed read.
     for (let attempt = 0; attempt < 2 && typeof value === "object" && value !== null && "healthy" in value && value.healthy === false; attempt++) {
       await Bun.sleep(50);
       value = await remote("read");
     }
     if (typeof value !== "object" || value === null || !("healthy" in value) || value.healthy !== true || !("texts" in value) ||
       !Array.isArray(value.texts) || value.texts.some(text => typeof text !== "string")) throw new Error("qualification logging unhealthy");
-    const events = parseQualificationLogs(value.texts);
-    if (!("index" in value) || value.index !== (events.at(-1)?.index ?? 0)) throw new Error("qualification health sequence differs");
-    return events;
+    if (!("health" in value) || typeof value.health !== "string") throw new Error("qualification health missing");
+    const [index, first] = parseQualificationLogHealth(value.health);
+    const events = parseQualificationLogs(value.texts, first);
+    if (index !== (events.at(-1)?.index ?? 0)) throw new Error("qualification health sequence differs");
+    return { events, health: value.health };
   };
+  const read = async () => (await readState()).events;
   const persist = (name: string, events: readonly QualificationLogEvent[]) => {
     assertQualificationLogDirectory(options.jobDirectory);
     const path = join(options.jobDirectory, name);
     const bytes = events.map(event => JSON.stringify(event)).join("\n") + (events.length === 0 ? "" : "\n");
     const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    try { if (writeSync(fd, bytes) !== Buffer.byteLength(bytes) || fstatSync(fd).nlink !== 1) throw new Error("qualification log retention failed"); }
+    try {
+      if (writeSync(fd, bytes) !== Buffer.byteLength(bytes) || fstatSync(fd).nlink !== 1) throw new Error("qualification log retention failed");
+      fsyncSync(fd);
+    }
     finally { closeSync(fd); }
     if (readFileSync(path, "utf8") !== bytes) throw new Error("qualification log retention differs");
   };
@@ -174,10 +160,12 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
         await remote("remove");
         return { files: 0, events: 0 };
       }
-      const events = await read();
+      const { events, health } = await readState();
       persist("gateway-structured.jsonl", events);
       for (const [window, slice] of windows) persist(`gateway-${window.lane}-${window.phase}-${window.ordinal}.jsonl`, slice);
-      await remote("remove");
+      const directory = openSync(options.jobDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(directory); } finally { closeSync(directory); }
+      await remote("remove", health);
       return { files: windows.size + 1, events: events.length };
     },
   };

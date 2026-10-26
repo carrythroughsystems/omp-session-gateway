@@ -907,7 +907,7 @@ describe("council R1 retry authority counterexamples", () => {
   });
   test("a schedule revalidation race stops instead of refreshing the backoff forever", async () => {
     class Invalidated extends FakeDriver {
-      override async perform() { throw new StaleIntentError("campaign retry evidence is missing or changed"); }
+      override async perform(): Promise<Partial<DriverState>> { throw new StaleIntentError("campaign retry evidence is missing or changed"); }
     }
     const fake = new Invalidated();
     fake.state = automaticCampaign();
@@ -940,7 +940,8 @@ describe("council R1 retry authority counterexamples", () => {
     { sourceFresh: false }, { releaseClassAllowed: false },
   ])("pending retry applies every routine source-authority guard: %j", change => {
     const { next } = scheduledRetry(automaticCampaign());
-    const currentAuthority = { ...authority, policy: next.authorityPolicy!, ...change };
+    const currentAuthority = { ...authority, policy: next.authorityPolicy!, ...change,
+      protectedChanges: [...(change.protectedChanges ?? authority.protectedChanges)] };
     const step = nextStep(next, snapshot({ authority: currentAuthority }), config, undefined, 1_000_000);
     expect(step.holdReason).toBe(routineSourceHold(currentAuthority, next.authorityPolicy));
     if ("unreviewedCommit" in change && step.operation !== "idle") expect(step.patch?.holdCommit).toBe(change.unreviewedCommit);

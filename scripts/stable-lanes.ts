@@ -24,6 +24,7 @@ import { admitDeviceCloud, createDeviceCloudRuntime } from "./device-cloud-runti
 import type { FixtureExecutor } from "./push-qualification-fixture.ts";
 import {
   createPixelLease,
+  withQualificationDeadline,
   type RetainedMacLaneContext,
   type ExternalLaneContext,
   type ExternalLaneModule,
@@ -32,6 +33,7 @@ import {
   type QualificationExecutionContext,
 } from "./stable-qualification.ts";
 import { cleanupWindows, preflightWindows, runWindows, windowsNeedsCleanup } from "./windows-stable-qualification.ts";
+import { createWindowsRuntime } from "./windows-qualification-runtime.ts";
 
 /** Everything the Push fixture imports, relative to `scripts/` (see push-qualification-fixture.ts). */
 export const PUSH_FIXTURE_FILES = [
@@ -169,6 +171,7 @@ export async function retainedMacLogs(mac: RemoteExecutor, epoch: string, jobDir
     },
     remoteDirectory: directory, jobDirectory,
   });
+  await logs.prepare();
   return { directory, logs };
 }
 
@@ -249,8 +252,9 @@ export const defaultLaneModules: StableQualificationLaneModules = {
   deviceCloud,
   createPixelLease: nextFailureId => createPixelLease(undefined, nextFailureId),
   readiness: {
-    windows: async identity => {
-      const admission = await preflightWindows({ identity });
+    windows: async (identity, nextFailureId) => {
+      const admission = await withQualificationDeadline("rigReadiness", 30 * 60_000, nextFailureId,
+        async execution => preflightWindows({ identity }, await createWindowsRuntime({ execution })));
       if (typeof admission.localCreationAllowance !== "number" || admission.localCreationAllowance < 1) throw new Error("invalid Windows creation allowance");
       return {
         windowsApiReady: admission.admitted, windowsResourcesAbsent: admission.protectionVerified,

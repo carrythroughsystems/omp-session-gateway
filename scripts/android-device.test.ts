@@ -636,6 +636,11 @@ describe("Android DevTools endpoint ownership", () => {
       ),
     ).toThrow("DevTools endpoint WebSocket escaped the local ADB forward");
   });
+
+  test("R2 rejects fragments before constructing the DevTools WebSocket", () => {
+    expect(() => assertDevtoolsEndpointMatchesPackage("com.chrome.canary", "154.0.8015.0",
+      { ...metadata, webSocketDebuggerUrl: `${metadata.webSocketDebuggerUrl}#fragment` }, 9222)).toThrow();
+  });
 });
 
 describe("Android DevTools endpoint wait", () => {

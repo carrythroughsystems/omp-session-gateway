@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { remoteCommandLine, type RemoteExecutor } from "./stable-qualification.ts";
-import { gatewayStreamsDiscarded, PUSH_FIXTURE_FILES, remoteHome, retainedMacCloudFixture, stageRemoteFile } from "./stable-lanes.ts";
+import { gatewayStreamsDiscarded, PUSH_FIXTURE_FILES, remoteHome, retainedMacCloudFixture, retainedMacLogs, stageRemoteFile } from "./stable-lanes.ts";
 import type { ExternalLaneContext, RetainedMacLaneContext } from "./stable-qualification.ts";
 
 const SCRIPTS = fileURLToPath(new URL(".", import.meta.url));
@@ -27,6 +27,15 @@ function shellWith(env: Record<string, string> = { PATH: "/usr/bin:/bin" }): Rem
   };
 }
 const localShell = shellWith();
+
+test("council491 log ownership is not returned before remote preparation succeeds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qualification-log-owner-"));
+  let calls = 0;
+  const mac: RemoteExecutor = async () => ++calls === 1 ?
+    { exitCode: 0, stdout: "/fixture-home", stderr: "" } : { exitCode: 1, stdout: "", stderr: "" };
+  try { await expect(retainedMacLogs(mac, "11111111-2222-4333-8444-555555555555", root)).rejects.toThrow(); }
+  finally { await rm(root, { recursive: true, force: true }); }
+});
 
 async function relativeImports(file: string): Promise<string[]> {
   const source = await readFile(join(SCRIPTS, file), "utf8");

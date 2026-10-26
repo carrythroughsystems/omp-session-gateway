@@ -803,7 +803,9 @@ export class StudioDriver implements DriverPort {
     if (state.phase === "stable-tagged") repo.stableWorkflow = await this.workflow(`v${state.version}`, state.stableCommit!);
     if (state.phase === "qualifying") {
       repo.campaign = await this.job("campaign", state);
-      const proposed = nextStep({ ...state, intent: undefined }, repo, this.config);
+      const observedState = { ...state };
+      delete observedState.intent;
+      const proposed = nextStep(observedState, repo, this.config);
       if (proposed.operation === "schedule-campaign-retry") {
         try { await this.validateCampaignRetry(applyDecisionPatch(state, proposed)); }
         catch (error) { retryInvalid(error); }

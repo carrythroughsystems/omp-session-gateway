@@ -18,11 +18,11 @@ const QUALIFICATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "omp.directory_changed": ["inserted", "removed", "hosts"],
   "ipc.protocol_rejected": ["suppressed"], "ipc.authentication_denied": ["suppressed"],
   "ipc.connection_timeout": ["suppressed"], "ipc.connection_error": ["suppressed"],
-  "push.queue_accepted": ["sequence", "attention", "clear", "activity_stop", "subscription_replay"],
-  "push.send_started": ["sequence", "attention", "clear", "activity_stop", "subscriptions", "subscription_replay"],
-  "push.send_acknowledged": ["sequence", "elapsed_ms"],
-  "push.send_failed": ["sequence", "elapsed_ms", "status"],
-  "push.subscription_evicted": ["sequence", "count"],
+  "push.queue_accepted": ["sequence", "request_alias", "attention", "clear", "activity_stop", "subscription_replay"],
+  "push.send_started": ["sequence", "request_alias", "attention", "clear", "activity_stop", "subscriptions", "subscription_replay"],
+  "push.send_acknowledged": ["sequence", "request_alias", "elapsed_ms"],
+  "push.send_failed": ["sequence", "request_alias", "elapsed_ms", "status"],
+  "push.subscription_evicted": ["sequence", "request_alias", "count"],
   "push.delivery_failed": [],
 };
 export type QualificationLogEvent = Readonly<Record<string, number | boolean | string>> & {
@@ -42,9 +42,41 @@ export function parseQualificationLogEvent(value: unknown): QualificationLogEven
     if (!fields.includes(key) || (typeof item !== "boolean" && !(typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= Number.MAX_SAFE_INTEGER))) throw new Error("unsafe qualification event");
   }
   if (record.event !== "http.authorization_denied" && record.event !== "push.send_failed" &&
-    fields.some(key => !["suppressed", "subscription_replay"].includes(key) && record[key] === undefined)) throw new Error("incomplete qualification event");
-  if (record.event === "push.send_failed" && (record.sequence === undefined || record.elapsed_ms === undefined)) throw new Error("incomplete qualification event");
+    fields.some(key => key !== "suppressed" && record[key] === undefined)) throw new Error("incomplete qualification event");
+  if (record.event === "push.send_failed" && (record.sequence === undefined || record.request_alias === undefined || record.elapsed_ms === undefined)) throw new Error("incomplete qualification event");
+  for (const key of fields) {
+    if (record[key] === undefined) continue;
+    const boolean = ["attention", "clear", "activity_stop", "subscription_replay", "identity_untrustworthy"].includes(key);
+    if (typeof record[key] !== (boolean ? "boolean" : "number") ||
+      !boolean && key !== "elapsed_ms" && !Number.isSafeInteger(record[key])) throw new Error("invalid qualification field type");
+  }
   return record as QualificationLogEvent;
+}
+
+/** Durable high-water index and the first retained index, advanced only by rotation. */
+export function parseQualificationLogHealth(text: string): readonly [number, number] {
+  if (!/^\[(?:0|[1-9]\d*),[1-9]\d*\]\n$/u.test(text) || text.length > 64) throw new Error("invalid qualification health");
+  const [index, first] = JSON.parse(text) as [number, number];
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(first) || first > Math.max(1, index)) throw new Error("invalid qualification health");
+  return [index, first];
+}
+
+/** Files must arrive oldest-first; sorting records would conceal a torn or truncated history. */
+export function parseQualificationLogFiles(texts: readonly string[], firstIndex = 1): QualificationLogEvent[] {
+  if (texts.length > QUALIFICATION_LOG_FILES || !Number.isSafeInteger(firstIndex) || firstIndex < 1 ||
+    firstIndex > 1 && texts.length !== QUALIFICATION_LOG_FILES) throw new Error("invalid qualification rotation");
+  const events: QualificationLogEvent[] = [];
+  for (const text of texts) {
+    if (Buffer.byteLength(text) > QUALIFICATION_LOG_BYTES || (text !== "" && !text.endsWith("\n")) ||
+      texts.length > 1 && text === "") throw new Error("invalid qualification log size");
+    for (const line of text.split("\n").slice(0, -1)) {
+      if (Buffer.byteLength(line) > 2048 || events.length >= 16_384) throw new Error("qualification logs exceed event bound");
+      const event = parseQualificationLogEvent(JSON.parse(line));
+      if (JSON.stringify(event) !== line || event.index !== firstIndex + events.length) throw new Error("invalid qualification log sequence");
+      events.push(event);
+    }
+  }
+  return events;
 }
 
 /** Existing, explicitly private destination; never follows even an ancestor symlink. */
@@ -63,9 +95,14 @@ export class QualificationLogSink implements LogSink {
   readonly #directory: string;
   #healthy = true;
   #index = 0;
+  #firstIndex = 1;
+  #pending = false;
+  #rotated = false;
   constructor(directory: string) {
     assertQualificationLogDirectory(directory);
     this.#directory = directory;
+    try { lstatSync(`${directory}.unhealthy`); throw new Error("qualification logging previously failed"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     const names = readdirSync(directory);
     if (names.length > 0) {
       if (!names.includes("health") || !names.includes("events.0.jsonl") ||
@@ -73,26 +110,22 @@ export class QualificationLogSink implements LogSink {
       for (const name of names) {
         const path = join(directory, name), stat = lstatSync(path);
         if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid!() || stat.nlink !== 1 ||
-          (stat.mode & 0o777) !== 0o600 || stat.size > QUALIFICATION_LOG_BYTES || name === "health" && stat.size > 32) throw new Error("unsafe qualification log file");
+          (stat.mode & 0o777) !== 0o600 || stat.size > QUALIFICATION_LOG_BYTES || name === "health" && stat.size > 64) throw new Error("unsafe qualification log file");
       }
-      for (const name of names.filter(name => name !== "health").sort().reverse()) {
-        const text = readFileSync(join(directory, name), "utf8");
-        if (text !== "" && !text.endsWith("\n")) throw new Error("qualification logging was interrupted");
-        for (const line of text.trimEnd().split("\n")) {
-          if (line === "") continue;
-          const event = parseQualificationLogEvent(JSON.parse(line));
-          if (Buffer.byteLength(line) > 2048 || JSON.stringify(event) !== line ||
-            this.#index !== 0 && event.index !== this.#index + 1) throw new Error("invalid qualification log sequence");
-          this.#index = event.index;
-        }
-      }
-      if (readFileSync(join(directory, "health"), "utf8") !== `${this.#index}\n`) throw new Error("qualification logging was interrupted");
+      const files = names.filter(name => name !== "health").sort();
+      if (files.some((name, index) => name !== `events.${index}.jsonl`)) throw new Error("qualification rotation gap");
+      const [committed, first] = parseQualificationLogHealth(readFileSync(join(directory, "health"), "utf8"));
+      const events = parseQualificationLogFiles(files.reverse().map(name => readFileSync(join(directory, name), "utf8")), first);
+      this.#index = events.at(-1)?.index ?? 0;
+      this.#firstIndex = first;
+      if (committed !== this.#index) throw new Error("qualification logging was interrupted");
       return;
     }
     for (const name of ["events.0.jsonl", "health"]) {
       const fd = openSync(join(directory, name), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      try { if (name === "health") writeSync(fd, "0\n"); fsyncSync(fd); } finally { closeSync(fd); }
+      try { if (name === "health") writeSync(fd, "[0,1]\n"); fsyncSync(fd); } finally { closeSync(fd); }
     }
+    this.#syncDirectory();
   }
   #state(value: string): void {
     // Overwrite the existing private inode, not a directory entry: even lost directory-write
@@ -105,11 +138,56 @@ export class QualificationLogSink implements LogSink {
       ftruncateSync(fd, Buffer.byteLength(value)); fsyncSync(fd);
     } finally { closeSync(fd); }
   }
+  #syncDirectory(): void {
+    const fd = openSync(this.#directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+  }
+  #syncLog(): void {
+    const fd = openSync(join(this.#directory, "events.0.jsonl"), constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o600 ||
+        stat.size > QUALIFICATION_LOG_BYTES) throw new Error("unsafe qualification log file");
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+  }
+  #fail(): void {
+    this.#healthy = false;
+    try { this.#state("!"); } catch { /* Never repair missing or inaccessible failure evidence. */ }
+    // Search permission on the log directory may itself be gone. A sibling marker does not
+    // depend on traversing that directory, and restoration must never erase this evidence.
+    try {
+      const fd = openSync(`${this.#directory}.unhealthy`, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      try { writeSync(fd, "!"); fsyncSync(fd); } finally { closeSync(fd); }
+      const parent = openSync(dirname(this.#directory), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+    } catch { /* Failure remains sticky in this writer; never replace an existing marker. */ }
+  }
+  #commit(): void {
+    if (!this.#healthy || !this.#pending) return;
+    try {
+      assertQualificationLogDirectory(this.#directory);
+      this.#syncLog();
+      if (this.#rotated) this.#syncDirectory();
+      this.#state(`[${this.#index},${this.#firstIndex}]\n`);
+      this.#pending = false; this.#rotated = false;
+    } catch { this.#fail(); }
+  }
   get healthy(): boolean { return this.#healthy; }
+  get nextIndex(): number {
+    if (!this.#healthy || !Number.isSafeInteger(this.#index + 1)) throw new Error("qualification logging failed");
+    return this.#index + 1;
+  }
   write(line: string): void {
     if (!this.#healthy) throw new Error("qualification logging failed");
     try {
-      this.#state("!");
+      if (!this.#pending) {
+        // One durable unhealthy transition covers the entire synchronous burst.
+        // The queued commit cannot run between its bounded writes.
+        this.#state("!");
+        this.#pending = true;
+        queueMicrotask(() => this.#commit());
+      }
       assertQualificationLogDirectory(this.#directory);
       const event = parseQualificationLogEvent({ ...JSON.parse(line), index: ++this.#index });
       const bytes = Buffer.from(`${JSON.stringify(event)}\n`);
@@ -119,6 +197,8 @@ export class QualificationLogSink implements LogSink {
       if (!current.isFile() || current.isSymbolicLink() || current.uid !== process.getuid!() || current.nlink !== 1 || (current.mode & 0o777) !== 0o600) throw new Error("unsafe qualification log file");
       // A crash or partial write leaves the durable write-ahead state unhealthy.
       if (current.size + bytes.length > QUALIFICATION_LOG_BYTES) {
+        this.#syncLog();
+        this.#rotated = true;
         for (let index = QUALIFICATION_LOG_FILES - 1; index >= 0; index--) {
           const name = join(this.#directory, `events.${index}.jsonl`);
           let stat;
@@ -127,18 +207,17 @@ export class QualificationLogSink implements LogSink {
           if (index === QUALIFICATION_LOG_FILES - 1) unlinkSync(name);
           else renameSync(name, join(this.#directory, `events.${index + 1}.jsonl`));
         }
+        const oldest = readdirSync(this.#directory).filter(name => /^events\.[1-3]\.jsonl$/u.test(name)).sort().at(-1)!;
+        this.#firstIndex = parseQualificationLogEvent(JSON.parse(readFileSync(join(this.#directory, oldest), "utf8").split("\n", 1)[0]!)).index;
       }
       const fd = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
       try {
         const stat = fstatSync(fd);
         if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o600 ||
           stat.size + bytes.length > QUALIFICATION_LOG_BYTES || writeSync(fd, bytes) !== bytes.length) throw new Error("qualification log write failed");
-        fsyncSync(fd);
       } finally { closeSync(fd); }
-      this.#state(`${this.#index}\n`);
     } catch {
-      this.#healthy = false;
-      try { this.#state("!"); } catch { /* Never repair missing or inaccessible failure evidence. */ }
+      this.#fail();
       throw new Error("qualification logging failed");
     }
   }
@@ -172,6 +251,11 @@ export class SafeLogger {
   constructor(sink: LogSink = stdoutSink, now: () => number = Date.now) {
     this.#sink = sink;
     this.#now = now;
+  }
+
+  /** Qualification aliases use the next append index, never identity-derived bytes. */
+  get nextQualificationIndex(): number | undefined {
+    return this.#sink instanceof QualificationLogSink ? this.#sink.nextIndex : undefined;
   }
 
   event(level: LogLevel, event: string, fields: LogFields = {}): void {

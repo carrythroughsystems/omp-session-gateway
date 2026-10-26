@@ -111,7 +111,11 @@ sets every up adapter to `1.1.1.1` and `8.8.8.8`, clears the DNS cache, and prov
 `name resolution failed: <host>` otherwise. On 2026-10-02 the Vultr-assigned resolver answered
 SERVFAIL for the Tailscale names and their CloudFront target while `github.com` resolved, which
 failed two v0.7.2 campaign attempts with a bare `WebException` at the Tailscale MSI download.
-Allocation and authenticated WinRM admission share one 12-minute deadline. Admission requires
+Allocation and authenticated WinRM admission share one 12-minute deadline, durably set before
+firewall creation; firewall/VM creation and provider allocation consume that same budget.
+The same allocation-and-execution guard runs after awaited checkpoints/inventory reads and
+immediately before each creation POST; an expired budget cannot begin a new allocation.
+Subsequent transport probes use bounded reconnect, not another allocation window. Admission requires
 three consecutive read-only successes spanning at least 60 seconds; a transport error resets
 both the count and window, while a guest assertion failure aborts immediately. The observed
 `transportStabilitySamples` and `transportStabilityDurationMs` are receipt facts. Mutations are
@@ -141,6 +145,10 @@ helper with delays of **2, 4, 8, and 16 seconds**, at most five calls, inside a 
 operational budget that includes time already spent executing probes. Process teardown remains
 mandatory on expiry. Cleanup uses this reconnect path, never another 12-minute allocation window.
 Mutating guest actions and upload streams are never replayed.
+Reconnect and readiness/RDP/allocation polls reject success at or after their local deadline.
+Admission persists the actual stability sample count and duration before the phase checkpoint;
+a resumed admission reuses those observations only after reconnect. A legacy boolean marker
+without observations must re-observe the stability window within the original allocation budget.
 
 An interrupted upload is reconciled by existence and SHA-256 after read-only connection recovery.
 Only a recognized helper-reported transport interruption permits that reconciliation; a raw process
@@ -152,10 +160,13 @@ Unknown writer disposition, authentication, or helper faults do not become succe
 Each upload records a private durable `started` claim before work and a `complete` checkpoint only
 after success. An incomplete claim refuses development re-entry in the same epoch; it cannot stream
 the upload again. A completed upload is reused only after checking its bytes again.
-Legacy retained staging phases without those claims have unknown prior disposition and cannot
-resume staging. Only a phase that has never entered staging grants fresh upload authority;
-resuming an unsettled staging phase requires every archive's completed claim and never grants
-new upload authority. Clean the retained epoch instead of manufacturing claims for old state.
+Only a phase that has never entered staging grants fresh upload authority. Upload completion
+does not prove Tailscale join, unpack, build, or upgrade disposition. Every mutating guest
+action and its nested PowerShell commands have durable single-shot `started`/`complete`
+claims; RDP logons are claimed too. Unsettled mutating phases, including legacy phases
+without claims, cannot resume. Even a completed command claim is not permission to repeat
+the surrounding unsettled phase. Clean the retained epoch instead of manufacturing claims.
+Development repair may resume read-only phases without repeating completed mutations.
 Private helper diagnostics retain only the existing redacted, source-free exception context;
 typed failures contain closed codes and numeric/boolean observations, not that diagnostic text.
 
@@ -265,20 +276,29 @@ checkpoint, which precedes vault removal. A crash after unlink can therefore res
 completion without missing Pixel recovery state; a missing vault without that completion stays
 blocked. A failed guest command after reconnect skips the remaining guest mutations and proceeds
 directly to independent containment.
+A firewall-only vault does not imply a bound guest identity. Cleanup skips guest commands,
+destroys its owned firewall and any instance matching the epoch creation label, and does not
+turn the absent guest identity into an ownership-change veto. Foreign ownership still blocks.
 The final inventories are taken after a five-second settling interval, matching the provider
 lookup-absence policy. A firewall that becomes visible during that interval blocks completion
 and retains recovery state; cleanup must reconcile it before the epoch can be retired.
 Development `run`/`artifacts` also retire a cleanup-complete epoch's remaining vault before
 removing its old progress and replacing `identity.json`. Completed containment alone does not
 authorize overwriting the identity while its vault may still exist.
+Once `cleanupRequired=false` is committed it never flips back to true. Failures while
+rechecking containment or deleting the remaining vault keep `retirementPending=true`;
+retry retirement without attempting Pixel restoration from an already removed vault.
 Provider reads retry a transient 5xx. A lookup that answers missing, or a Vultr listing without its
 array, is final only when a second read five seconds later agrees: on 2026-09-29 one listing did so
 while the lane polled for allocation, failing an attempt whose VM was still booting.
 A stable interrupted attempt is reconciled, never blindly replayed; start a fresh epoch
 afterwards. For development only, a code failure after guest access retains the VM for immediate
-repair: rerunning `run` resumes that epoch only when the phase's disposition is known, skips
-completed phases, and checks completed-upload postconditions rather than replacing the VM.
-Legacy or incomplete upload claims refuse staging resume. `cleanup` is explicit after an abandoned attempt.
+repair: rerunning `run` resumes only read-only phases and skips completed phases. Any unsettled
+mutating phase refuses resume regardless of completed upload claims. `cleanup` is explicit
+after an abandoned attempt.
+Outer cancellation or deadline always runs containment, including development mode; only
+repairable code failures may retain the guest. FreeRDP ownership covers stdin write/end as
+well as readiness observation: every failure terminates and awaits the child.
 Failed phase resumes are counted in evidence; repair time is not called successful phase time.
 Development resume is refused after three hours, and every VM must be destroyed within four
 hours of creation. The current development campaign permits six total VM creations, one at a

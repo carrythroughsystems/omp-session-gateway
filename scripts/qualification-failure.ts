@@ -37,7 +37,11 @@ const cleanupReasons = { ...commonReasons, connection_timeout: "harness", connec
   retryable_service_failure: "harness", containment_unproven: "harness", ownership_changed: "harness" } as const;
 /** Reason-to-class mappings are authority, not caller-supplied labels. */
 export const FAILURE_REASONS = {
-  campaign: { ...commonReasons, binding_mismatch: "harness", outcome_persistence_failed: "harness" },
+  campaign: { ...commonReasons, ...transportReasons, binding_mismatch: "harness", outcome_persistence_failed: "harness",
+    prerequisite_failed: "harness", pinned_pool_busy: "infra_transient", assertion_failed: "product",
+    authentication_failed: "harness", helper_failed: "harness", mutation_unconfirmed: "harness", ownership_changed: "harness",
+    probe_deadline: "infra_transient", allocation_rejected: "infra_transient", privacy_failed: "product", delivery_timeout: "harness",
+    push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient" },
   preflight: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness" },
   rigReadiness: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness", assertion_failed: "product",
     push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient", delivery_timeout: "harness" },
@@ -57,7 +61,7 @@ export const FAILURE_REASONS = {
 } as const;
 export type QualificationFailureLane = keyof typeof FAILURE_REASONS;
 export const FAILURE_STEPS = {
-  campaign: ["execution", "finalization", "outcome"],
+  campaign: ["execution", "finalization", "outcome", "admission"],
   preflight: ["admission", "tools", "pixel", "macos", "windows", "deviceCloud", "lease"],
   rigReadiness: ["lease", "artifacts", "fixture", "pixel_push", "tailnet", "windows", "quota", "macos", "cleanup"],
   artifacts: ["download", "signature", "digest"],
@@ -96,6 +100,7 @@ const observationBounds = {
   transportFailure: "boolean", controllerDeadline: "boolean", readOnlyProbe: "boolean", retryableStatus: "boolean",
   pushServiceFailure: "boolean", outageSpansWindow: "boolean", deviceUnavailable: "boolean", tailnetUnavailable: "boolean",
   allocationRejected: "boolean", noAllocation: "boolean", cleanupVerified: "boolean", mutationReconciled: "boolean",
+  persistenceFailed: "boolean",
 } as const;
 export type FailureObservations = { readonly [K in keyof typeof observationBounds]?: (typeof observationBounds)[K] extends "boolean" ? boolean : number };
 type FailureFor<L extends QualificationFailureLane> = {
@@ -148,6 +153,8 @@ export function parseLaneFailure(value: unknown): LaneFailure {
     if (!Array.isArray(item.originIds) || item.originIds.length < 1 || item.originIds.length > FAILURE_LIMITS.records ||
       item.originIds.some(id => !failureId(id) || id === item.id) || new Set(item.originIds).size !== item.originIds.length) invalid();
   }
+  if (lane === "campaign" && item.class !== "harness" &&
+    (item.step !== "admission" || !["not_started", "read_only"].includes(item.operation))) invalid();
   if (item.class === "infra_transient") {
     switch (item.reason) {
       case "connection_timeout": case "connection_reset": case "read_timeout":
@@ -170,8 +177,8 @@ export function parseLaneFailure(value: unknown): LaneFailure {
         if (observations.outageSpansWindow !== true || observations[item.reason === "device_outage" ? "deviceUnavailable" : "tailnetUnavailable"] !== true) invalid();
         break;
       case "pinned_pool_busy":
-        if (item.operation !== "not_started" || !["preflight", "allocation"].includes(item.step) ||
-          !bounded(observations.waitedMs, 600_000) || (item.step === "preflight" && observations.waitedMs !== 0)) invalid();
+        if (item.operation !== "not_started" || !["preflight", "allocation", ...(lane === "campaign" ? ["admission"] : [])].includes(item.step) ||
+          !bounded(observations.waitedMs, 600_000) || (["preflight", "admission"].includes(item.step) && observations.waitedMs !== 0)) invalid();
         break;
       default: invalid();
     }

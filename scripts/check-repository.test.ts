@@ -219,6 +219,14 @@ test("document-context web sources schedule timers only through window or an inj
     expect(checkDocumentTimers(path, leaked)).toEqual([]);
   }
 });
+test("council491 Windows dispatcher forwards cancellation without permitting write replay", () => {
+  const source = 'const send = (readSignal: AbortSignal = signal) => fetch(url, { method, signal: readSignal });\n' +
+    'const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();';
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toEqual([]);
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace('method === "GET"', 'method !== "DELETE"'))).toHaveLength(1);
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace(': await send();', ': await readProvider(send);'))).toHaveLength(1);
+});
+
 
 test("e2e readiness forbids completion access, request-finished events and networkidle, including optional/computed access", () => {
   for (const source of [

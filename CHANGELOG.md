@@ -13,6 +13,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
   records late posts and per-delivery timings, and stops unexplained timeouts without retry. Durable
   write-ahead log health, retained-host raw-stream proof, explicit runtime protocol negotiation,
   outbound-clear acknowledgement, and drained cancellation preserve recovery evidence across failure.
+  Synchronous log bursts coalesce durability barriers; retained-Mac proof paths remain POSIX on every host.
+  Recovery binds opaque qualification aliases to the exact fixture ask before mutation. Bracketed log
+  reads, committed rotation boundaries, durable local retention and sticky search-permission failures
+  preserve evidence; bounded nested Android operations retain late-created targets and readiness late posts.
 - Automatic same-candidate qualification retries for validated, fully contained infrastructure
   failures: attempts 0–2, persisted 60/120-second backoff, immutable failed-attempt evidence,
   exact-owner lease retention and privacy-safe tracking comments. Product, harness, unknown,
@@ -30,6 +34,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   publication lifecycle proof, and retain typed collateral evidence for an unrestored Pixel.
   Add an effectful, fully restored rig-readiness gate before expensive fan-out, bounded owner
   cancellation, and exact-bound failed-attempt recovery without rewriting passed proofs.
+  Fence fresh retry ordinals, validate every persisted receipt, preserve admission failure ownership,
+  restore poisoned resources despite checkpoint failures, and reap remote fixture process groups
+  before cleanup. Readiness and provider cancellation retain one failure allocator and terminal proof.
 - Structured Windows transport failure evidence, bounded read-only reconnects, deadline-aware
   subprocess reaping, and interrupted-upload reconciliation without write replay. Cleanup skips
   confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,
@@ -37,7 +44,13 @@ The format is based on Keep a Changelog and Semantic Versioning.
   containment before deleting recovery state; fence incomplete same-epoch uploads, unknown process
   exits, legacy staging without upload claims, and cancellation races instead of recovering them
   as successful work. Retire the old epoch vault before replacing development identity, and require
-  settled provider inventory before cleanup completion.
+  settled provider inventory before cleanup completion. Fence every guest mutation with durable
+  single-shot claims, preserve committed containment during retirement failures, and share one
+  allocation/admission deadline from before firewall creation. Refuse cancelled final evidence
+  and contradictory transport status; keep POSIX signal-escalation coverage off Windows runners.
+  Check allocation expiry immediately before creation POSTs, settle firewall-only recovery vaults
+  without false ownership vetoes, contain cancelled development attempts, and reject late poll
+  success. FreeRDP input failures reap their child; resumed admission retains stability evidence.
 
 ### Fixed
 
