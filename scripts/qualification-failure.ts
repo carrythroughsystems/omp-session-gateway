@@ -14,6 +14,9 @@
  *   Receipt absence, unknown operation disposition, or missing proof never imply safety.
  *   Cleanup transport failures remain harness evidence; negative containment/reconciliation
  *   observations and mutating infrastructure dispositions block eligibility.
+ * - qualificationContainmentUnproven shares monotonic negative cleanup/reconciliation,
+ *   persistence and resource facts across summary validation and campaign containment.
+ *   Later successful cleanup cannot erase a recorded failed cleanup owner.
  *   Push/readiness delivery metadata timeouts are harness evidence, not proof of an outage.
  * - qualificationPreflightFailuresEffectFree permits only read-only/not-started admission
  *   surfaces, not later resource observations mislabeled as preflight.
@@ -215,7 +218,17 @@ export function parseQualificationFailureSummary(value: unknown): QualificationF
   keys(containment, ["proven", "cleanupComplete", "unresolvedMutation"]);
   if (!duration(timings.attemptMs) || !duration(timings.cleanupMs) || timings.cleanupMs > timings.attemptMs ||
     Object.values(containment).some(value => typeof value !== "boolean")) invalid();
-  return { failures: parseLaneFailures(summary.failures), timings: { ...timings }, containment: { ...containment } } as QualificationFailureSummary;
+  const failures = parseLaneFailures(summary.failures);
+  if (qualificationContainmentUnproven(failures) &&
+    (containment.proven || containment.cleanupComplete || !containment.unresolvedMutation)) invalid();
+  return { failures, timings: { ...timings }, containment: { ...containment } } as QualificationFailureSummary;
+}
+
+/** Negative cleanup facts are monotonic, including when a later physical cleanup succeeds. */
+export function qualificationContainmentUnproven(failures: readonly LaneFailure[]): boolean {
+  return failures.some(failure => failure.observations.cleanupVerified === false || failure.observations.mutationReconciled === false ||
+    failure.observations.persistenceFailed === true || (failure.observations.remainingResources ?? 0) > 0 ||
+    ["cleanup", "androidPushCleanup", "windowsCleanup", "deviceCloudCleanup"].includes(failure.lane));
 }
 
 export class QualificationFailure extends Error {
@@ -290,7 +303,8 @@ export function normalizeQualificationFailures(error: unknown): readonly LaneFai
 export function qualificationPreflightFailuresEffectFree(failures: readonly LaneFailure[]): boolean {
   return failures.every(item => (item.operation === "not_started" || item.operation === "read_only") &&
     (item.lane === "preflight" ||
-      ((item.lane === "windows" || item.lane === "deviceCloud") && item.step === "preflight") ||
+      (item.lane === "windows" && ["preflight", "connection", "output"].includes(item.step)) ||
+      (item.lane === "deviceCloud" && item.step === "preflight") ||
       (item.lane === "android" && item.step === "admission")));
 }
 
@@ -299,12 +313,11 @@ export function qualificationRetryEligible(value: unknown, bindingsMatch: boolea
   try {
     const summary = parseQualificationFailureSummary(value);
     return summary.containment.proven && summary.containment.cleanupComplete && !summary.containment.unresolvedMutation &&
+      !qualificationContainmentUnproven(summary.failures) &&
       summary.failures.some(item => item.class === "infra_transient") &&
       summary.failures.every(item =>
         !(item.class === "infra_transient" && item.step === "cleanup") &&
         (item.class === "infra_transient" ? item.operation === "not_started" || item.operation === "read_only" :
-          item.class === "collateral" && item.operation !== "unknown") &&
-        item.observations.cleanupVerified !== false && item.observations.mutationReconciled !== false &&
-        (item.observations.remainingResources ?? 0) === 0);
+          item.class === "collateral" && item.operation !== "unknown"));
   } catch { return false; }
 }

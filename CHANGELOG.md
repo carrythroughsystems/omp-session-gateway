@@ -39,7 +39,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
   enable automatic recovery or reinterpret historical failures.
 - Finalize failed stable campaigns after healthy siblings settle, complete independent OMP
   publication lifecycle proof, and retain typed collateral evidence for an unrestored Pixel.
-  Add an effectful, fully restored rig-readiness gate before expensive fan-out, bounded owner
+  Add an effectful rig-readiness gate with device/service restoration before expensive fan-out, bounded owner
   cancellation, and exact-bound failed-attempt recovery without rewriting passed proofs.
   Fence fresh retry ordinals, validate every persisted receipt, preserve admission failure ownership,
   restore poisoned resources despite checkpoint failures, and reap remote fixture process groups
@@ -47,6 +47,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Fence every retained-Mac command path after unproved termination, retain command owners through
   settlement, preserve passed publication proofs on relay teardown failure, validate execution and
   artifact bindings before writes, and restore every readiness owner despite persistence failures.
+  Keep cleanup/reconciliation/persistence failures monotonic across later successful cleanup;
+  preserve failure identities and Pixel poisoning through terminal writes. Unify shell uploads,
+  PTYs and reboot ownership behind whole-process-group settlement, retain fixtures for unresolved
+  cloud/Push owners, and propagate Windows physical-client/restoration cancellation. Readiness
+  explicitly does not yet restore byte-identical private installation state.
 - Structured Windows transport failure evidence, bounded read-only reconnects, deadline-aware
   subprocess reaping, and interrupted-upload reconciliation without write replay. Cleanup skips
   confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,

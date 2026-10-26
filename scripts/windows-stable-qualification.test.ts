@@ -6,10 +6,11 @@ import { cleanupWindows, runWindows, verifyWindowsDoctor, windowsCampaignLabel, 
 import pins from "./windows-qualification-pins.json";
 import type { WindowsContext, WindowsFirewall, WindowsGuestAction, WindowsIdentity, WindowsInstance, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
 import { command as windowsCommand, reconnectWindowsTransport, verifyWindowsStaleLaunch, windowsPixelForeground, windowsPixelLauncher, waitForStableWindowsTransport } from "./windows-qualification-runtime.ts";
-import { QualificationFailure } from "./qualification-failure.ts";
+import { QualificationFailure, normalizeQualificationFailures } from "./qualification-failure.ts";
 import * as windowsRuntime from "./windows-qualification-runtime.ts";
 import { firewallEligibility } from "./vultr-target.ts";
-import { parseQualificationPins } from "./stable-qualification.ts";
+import { createPixelLease, parseQualificationPins } from "./stable-qualification.ts";
+import { pixelUnrestored } from "./restoration.ts";
 
 const epoch = "11111111-1111-4111-8111-111111111111";
 const label = windowsCampaignLabel(epoch);
@@ -235,6 +236,22 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; pr
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test("council498r1 Windows Pixel projection preserves poison origins through later cleanup", async () => {
+    const f = fixture();
+    let id = 70;
+    const pixel = createPixelLease(() => {}, () => ++id);
+    const root = Object.assign(windowsFailure("unclassified_failure", "pixel_verified", "unknown", {},
+      { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id }), { pixelUnrestored: true });
+    f.runtime.pixel = async () => { throw root; };
+    const primary = await runWindows({ identity, progress: undefined, runtime: f.runtime, checkpoint: f.checkpoint, pixel,
+      execution: { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id } }).catch(error => error);
+    const dependent = await pixel("android", async () => { throw new Error("poisoned measurement must not run"); }).catch(error => error);
+    const failures = normalizeQualificationFailures(new AggregateError([primary, dependent]));
+    expect(pixelUnrestored(primary)).toBe(true);
+    expect(failures.some(item => item.id === root.evidence.id && item.lane === "windows")).toBe(true);
+    expect(failures.some(item => item.class === "collateral" && item.originIds.includes(root.evidence.id))).toBe(true);
+    expect(f.instances).toEqual([]);
+  });
   test("499 R1 automatic cleanup inherits its in-process development Pixel lease for restoration", async () => {
     const root = await mkdtemp(join(tmpdir(), "windows-pixel-"));
     const f = fixture({ development: true });
@@ -336,15 +353,18 @@ describe("Windows qualification ownership and failure paths", () => {
   test("499 R1 a rejected already-started mutation checks execution expiry before projecting its failure", async () => {
     const f = fixture({ development: true }), original = f.runtime.guest;
     const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 };
+    const operationFailure = windowsFailure("helper_failed", "command", "unknown");
     f.runtime.guest = async (context, action, principal) => {
       if (action === "stage") {
         execution.deadline = performance.now() - 1;
-        throw windowsFailure("helper_failed", "command", "unknown");
+        throw operationFailure;
       }
       return original(context, action, principal);
     };
     const failure = await runWindows({ identity, progress: undefined, runtime: f.runtime, checkpoint: f.checkpoint, pixel: f.pixel, execution }).catch(error => error);
-    expect(failure.evidence).toMatchObject({ reason: "deadline_exceeded", operation: "unknown", observations: { controllerDeadline: true } });
+    const evidence = normalizeQualificationFailures(failure);
+    expect(evidence).toContainEqual(expect.objectContaining({ reason: "deadline_exceeded", operation: "unknown", observations: { controllerDeadline: true } }));
+    expect(evidence).toContainEqual(operationFailure.evidence);
     expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
   });
   test.each([
