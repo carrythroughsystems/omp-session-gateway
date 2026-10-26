@@ -196,16 +196,24 @@ still clean recorded pending Mac effects and must not reopen already completed c
 | Sibling settlement | One consumer fails while another passes; the healthy sibling finishes before tunnel stop and publication lifecycle |
 | Pixel ownership | An unrestored holder poisons queued measurements, never restoration; actual readiness/cleanup owners and one allocator preserve collateral references |
 | Terminal evidence | Ordinary failure leaves no started lane `running`; failed publication and campaign have completion timestamps |
-| Cleanup and retries | Dirty/stale/persistence-failed cleanup blocks eligibility; restoration survives failed writes; reconciled cleanup errors do not contradict passed cleanup; fresh attempts require zero; consuming exact receipt authority precedes admission |
+| Cleanup and retries | Dirty/stale/persistence-failed cleanup blocks eligibility; later cleanup cannot erase historical cleanup roots or poisoning; fresh attempts require zero; consuming exact receipt authority precedes admission |
 | Rig readiness | Failure at setup, Windows admission, Mac checks or Push still restores Pixel before Mac; restoration failure remains unresolved and cannot authorize retry |
-| Adapter cancellation | Pending health/provider reads and backoff abort; mutating requests never replay; real distinct remote process groups are reaped before cleanup; cleanup gets a fresh context |
+| Adapter cancellation | Pending health/provider reads and backoff abort; mutating requests never replay; real distinct remote process groups are reaped before cleanup; Windows physical-client ADB/CDP paths receive cancellation and a fresh restoration owner |
 | Restart admission | Cloud holds and typed Windows admission errors produce campaign-owned terminal summaries/outcomes without failing passed lanes; restarted publication clears not-started metadata |
 | Readiness finality | Passing receipts reject running readiness; failed log preparation does not publish a collectible owner; Windows admission uses the receipt failure allocator |
 | Manual compatibility | Historical schema-3 receipts remain readable; manual readiness attempt zero gains no automatic authority; unbound later attempts refuse |
 | Terminal owner reconciliation | Pending/passed/running direct failure owners finalize to valid failed receipts; relay-stop failure leaves an authorized preserved publication proof unchanged |
 | Execution and artifact binding | Foreign HEAD and later bound preflight ordinals refuse before admission/outcome writes; candidate tag/source/digest mismatch never overwrites receipt identity |
-| Remote ownership fence | Unproved remote termination dispatches no destructive Mac cleanup; collateral references its teardown root; success/nonzero/early-HUP owners survive until acknowledged settlement |
-| Readiness persistence failure | Baseline, mutation and restoration write failures still run every Pixel restore; outer sidecar failure and final lane-catch persistence retain typed evidence and poisoning |
+| Remote ownership fence | Successful leader exit with live descendants still settles the group; actual shell-wrapper loss is reaped or fenced; PTY input reaches the foreground group; reboot ownership requires changed boot identity; admission exceptions are bounded/read-only |
+| Readiness persistence failure | Baseline, mutation and restoration write failures still run every Pixel restore; only durable sidecars advance the mirror; terminal write failures retain original roots and poisoning and cannot claim restoration |
+| Unified containment | Negative cleanup/reconciliation facts, remaining resources, persistence failures and pre-lane unsettled owners forbid proven containment, retry and retirement |
+| Fixture dependency retention | Unresolved cloud or Push restoration retains the whole shared Mac fixture/owner directory; independent Windows cleanup does not queue behind it |
+| Receiptless Windows admission | An actual bounded GET503 producer yields a private receiptless preflight outcome; post-allocation steps remain forbidden |
+| Publication persistence | Initial/terminal write failures leave a failed completed lane; cleanup failure and failed terminal persistence retain independent typed evidence |
+
+The offline gate does not prove byte-identical installation-state restoration by readiness: token
+and runtime activation history/current pointer persist across uninstall. Isolation/restoration of
+that private state remains an explicit deferred P2, not a live-rig acceptance claim.
 
 The retained-Mac `ompPublication` lane adds the shared
 [lifecycle runner](../scripts/omp-lifecycle-qualification.ts) after every live-session consumer

@@ -14,6 +14,7 @@ import { runAndroidCollabSmoke } from "./android-collab-smoke.ts";
 import { releaseVersion } from "./release-policy.ts";
 import { firewallEligibility, instanceEligibility, QUAL_LABEL_PREFIX } from "./vultr-target.ts";
 import { confirmAbsence, readProvider } from "./provider-read.ts";
+import { pixelUnrestored } from "./restoration.ts";
 
 const root = resolve(import.meta.dir, "..");
 const privateRoot = join(homedir(), ".local/share/omp-session-gateway/qualification");
@@ -619,12 +620,31 @@ export async function windowsUploadStep<T>(step: WindowsUploadStep, action: (ste
   }
 }
 
+/** Resolve the current owner at dispatch; cleanup replaces the cancelled primary execution. */
+export function windowsAndroidCommands(owner: () => WindowsExecutionContext | undefined) {
+  const runAdb: typeof androidAdb = (serial, args, settings = {}) => {
+    const execution = owner();
+    assertWindowsExecution(execution);
+    if (execution === undefined) return androidAdb(serial, args, settings);
+    const remaining = execution.deadline - performance.now();
+    if (remaining <= 0) throw windowsFailure("deadline_exceeded", "pixel_verified", "not_started", {}, execution);
+    return androidAdb(serial, args, { ...settings,
+      signal: settings.signal === undefined ? execution.signal : AbortSignal.any([execution.signal, settings.signal]),
+      timeoutMs: Math.min(settings.timeoutMs ?? Infinity, Math.ceil(remaining)),
+    });
+  };
+  const requireSingleDevice: typeof androidDevice = command => {
+    assertWindowsExecution(owner());
+    return androidDevice(command ?? ((...args) => runAdb(undefined, args)));
+  };
+  return { runAdb, requireSingleDevice };
+}
+
 export async function createWindowsRuntime(options: { development?: boolean; execution?: WindowsExecutionContext } = {}): Promise<WindowsRuntime> {
   let execution = options.execution;
   const hostCommand = (argv: readonly string[], settings: Parameters<typeof command>[1] = {}) =>
     command(argv, { ...settings, ...(execution === undefined ? {} : { execution }) });
-  const runAdb: typeof androidAdb = (...args) => { assertWindowsExecution(execution); return androidAdb(...args); };
-  const requireSingleDevice: typeof androidDevice = (...args) => { assertWindowsExecution(execution); return androidDevice(...args); };
+  const { runAdb, requireSingleDevice } = windowsAndroidCommands(() => execution);
   const environment: Record<string, string | undefined> = { ...process.env };
   const vultrKey = (await privateFile(join(homedir(), ".vultr-apikey"))).trim();
   let joinValue = ""; let apiValue = "";
@@ -816,6 +836,7 @@ if ($exists) {
     }, context.execution ?? execution);
   };
   const restorePixel = async (context: WindowsContext) => {
+    const owner = context.execution ?? execution;
     const access = await existingAccess(context.epoch);
     const baseline = access?.pixelState;
     if (!access) throw Object.assign(new Error("Windows Pixel recovery state is missing"), { pixelUnrestored: true });
@@ -832,7 +853,7 @@ if ($exists) {
           assertWindowsExecution(context.execution ?? execution); await driver.send("Target.closeTarget", { targetId: target.targetId });
         }
       }
-    });
+    }, owner === undefined ? {} : { execution: owner });
     await context.beforeEffect();
     await runAdb(serial, ["shell", "monkey", "-p", baseline.launcherPackage, "-c", baseline.launcherCategory, "1"], { timeoutMs: 30_000 });
     if (baseline.keyguard || baseline.wakefulness !== "Awake") {
@@ -850,7 +871,8 @@ if ($exists) {
     if (component !== baseline.component) throw new Error("Pixel foreground baseline restoration failed");
     delete access.pixelState; await atomicPrivate(vaultPath(context.epoch), access);
     } catch (error) {
-      throw Object.assign(new Error("Windows Pixel baseline restoration failed", { cause: error }), { pixelUnrestored: true });
+      throw Object.assign(error instanceof QualificationFailure || error instanceof AggregateError ? error :
+        new Error("Windows Pixel baseline restoration failed", { cause: error }), { pixelUnrestored: true });
     }
   };
   return {
@@ -1066,12 +1088,14 @@ if ($exists) {
       let primary: unknown;
       try {
         assertWindowsExecution(context.execution ?? execution);
-        const smoke = await runAndroidCollabSmoke({ origin: String(access.origin), label: sessionLabel, allowDisposableTarget: true });
+        const owner = context.execution ?? execution;
+        const smoke = await runAndroidCollabSmoke({ origin: String(access.origin), label: sessionLabel, allowDisposableTarget: true,
+          ...(owner === undefined ? {} : { execution: owner }) });
         // Serve must supply the user identity for this exact-login, production-mode gateway.
         result = { pixelIdentityAccepted: true, viewReadOnly: smoke.viewReadOnly, controlWritable: smoke.controlWritable, promptAccepted: smoke.promptAccepted, returnedToDirectory: smoke.returnedToDirectory };
       } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown failure";
-        primary = new Error(`Windows Pixel: ${message.replaceAll(String(access.origin), "[origin]").replaceAll(serial, "[device]")}`);
+        primary = error instanceof QualificationFailure || error instanceof AggregateError || pixelUnrestored(error) ? error :
+          new Error("Windows physical client failed", { cause: error });
       }
       try { await restorePixel(context); }
       catch (error) {

@@ -8,6 +8,23 @@ import type { WindowsTransportProbe } from "./windows-stable-qualification";
 import { assertWindowsAllocation, windowsFailure, windowsRemaining } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
 
+test.each(["cancel", "deadline"] as const)("council498r1 Windows Android subprocess owns %s and cleanup switches owner", async mode => {
+  const controller = new AbortController(), killed: string[] = [];
+  let owner = { signal: controller.signal, deadline: performance.now() + (mode === "deadline" ? 20 : 5_000), nextFailureId: () => 301 };
+  const android = winrmRuntime.windowsAndroidCommands(() => owner);
+  const result = android.runAdb(undefined, ["devices"], { timeoutMs: 60_000, spawn: (_argv, options) => {
+    const child = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 200)"], options);
+    return { ...child, stdout: child.stdout, stderr: child.stderr, exited: child.exited,
+      kill: signal => { killed.push(String(signal)); child.kill(signal); } };
+  } }).then(() => false, () => true);
+  if (mode === "cancel") setTimeout(() => controller.abort(), 20);
+  expect(await result).toBe(true);
+  expect(killed).toContain("SIGTERM");
+  owner = { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => 302 };
+  expect(await android.runAdb(undefined, ["devices"], { spawn: (_argv, options) =>
+    Bun.spawn([process.execPath, "-e", 'process.stdout.write("settled")'], options) })).toBe("settled");
+});
+
 test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructure retry authority", async method => {
   const original = globalThis.fetch;
   const controller = new AbortController();

@@ -1017,14 +1017,25 @@ unlimited quota is inferred.
 monotonic timings and cleanup disposition. The epoch's private
 `rig-readiness/<epoch>/push-progress.json` retains the Push owner's validated baseline for recovery,
 not logs or posted evidence. Pixel restoration precedes Mac teardown, including on failure. The
-fixture is fully removed before the normal Mac upgrade/reboot/rollback lifecycle; readiness never
-counts as a qualification pass. An unresolved restore blocks same-candidate eligibility.
+disposable service and staging are removed before the normal Mac upgrade/reboot/rollback lifecycle;
+readiness never counts as a qualification pass. An unresolved restore blocks same-candidate eligibility.
 Passing receipts require readiness itself to be terminal and restored. A poisoned Pixel still
 admits serialized restoration. Failed checkpoint storage does not skip cleanup, but records
 `persistenceFailed` and prevents retry eligibility; failed log preparation never publishes a log owner.
-The baseline is retained in memory before its sidecar write. Even a failed initial checkpoint or
-repeated restore checkpoint failures cannot skip subsequent restoration owners. A failing final
-receipt write preserves the typed cleanup failure and unrestored-Pixel signal.
+The Push owner retains its transient baseline, while the orchestrator's mirror advances only after
+a durable sidecar write. Even a failed initial checkpoint or repeated restore checkpoint failures
+cannot skip subsequent restoration owners. Failed cleanup persistence cannot claim baseline
+restoration; terminal write failures preserve the original typed cleanup identity and Pixel poisoning.
+Later successful cleanup does not erase earlier cleanup failures. Negative cleanup/reconciliation
+facts, remaining resources, persistence failure or any unsettled remote owner block containment,
+same-candidate eligibility and automatic retirement. Unrestored cloud/Push fixtures retain their
+Mac directory and owner records rather than being destroyed by unrelated Mac teardown.
+
+**Deferred installation-state limitation (P2):** readiness uninstall retains the gateway token and
+runtime activation history/current pointer. This gate does not capture, digest-compare or isolate
+those private states, so the subsequent full Mac lifecycle starts after readiness activated the
+candidate. `baselineRestored` proves the captured Pixel baseline, service/Serve containment and
+staging restoration—not byte-identical pre-readiness installation state.
 
 Outer runaway ceilings do not replace product assertions: Windows 180 minutes, Push/cloud 90
 minutes, core Android 30 minutes, relay configured duration plus five minutes, Windows/cloud
@@ -1037,10 +1048,13 @@ readiness has a 30-minute outer ceiling and uses the same receipt failure alloca
 and absence-confirmation cancellation remain distinct from retryable transport timeouts. Remote
 fixture cancellation terminates the recorded remote process group via a fresh bounded SSH owner.
 If termination cannot be proved, later effects on that host refuse instead of racing cleanup.
-That shared fence includes direct SSH and Mac-script cleanup, not just fixture commands, and
-records `remote_unsettled` collateral against a campaign teardown root. Private command-owner
-records survive exit until a separate settle/stop acknowledgement; early-admission cancellation
-tombstones remain fenced. Relay-stop failure never overwrites a preserved publication pass.
+The shared Bash fence covers direct execution, shell wrappers, streamed uploads and OMP PTYs,
+not just fixture commands, and records `remote_unsettled` collateral against the original teardown
+root. The wrapper journals each owner before dispatch. Private command-owner records survive
+leader exit until separate whole-group settlement; a `done` marker alone is insufficient. Detached
+reboot owners require a changed boot identity, and early-admission cancellation tombstones remain
+fenced. Only bounded read-only admission probes bypass owner files. Relay-stop failure never
+overwrites a preserved publication pass; publication write failure still stamps terminal evidence.
 
 Manual attempt-zero readiness remains diagnostic and does not fabricate driver policy bindings.
 Fresh unbound effectful campaigns require attempt zero. Later ordinals require the driver's exact

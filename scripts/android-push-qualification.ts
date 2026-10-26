@@ -86,7 +86,11 @@ export async function waitForPushDelivery(options: {
     let delivered = false;
     try {
       while (!pushBudgetExpired(runtime, options.execution, start, options.timeout)) {
-        if ((await checked(session)).count === 1 && !pushBudgetExpired(runtime, options.execution, start, options.timeout)) { delivered = true; break; }
+        if ((await checked(session)).count === 1 && !pushBudgetExpired(runtime, options.execution, start, options.timeout)) {
+          delivered = true;
+          options.onTimeout?.(undefined);
+          break;
+        }
         await runtime.pause(Math.min(500, Math.max(0, options.timeout - (runtime.now() - start))));
       }
     } catch (error) {
@@ -105,7 +109,7 @@ export async function waitForPushDelivery(options: {
       metrics.deliveryTimings[timing + attempt] = duration;
       if (attempt === 0 && timing === 0) metrics.firstDeliveryMs = duration;
       if (attempt === 1) metrics.secondDeliveryMs = duration;
-      options.onTimeout?.(late);
+      options.onTimeout?.(delivered ? undefined : late);
       fail("delivery_timeout", duration);
     };
     if (!delivered) {
@@ -123,7 +127,7 @@ export async function waitForPushDelivery(options: {
       if (options.kind === "attention" && metrics.deliveryRearmCount > 0) {
         let matches = false;
         try { matches = await runtime.deliveryRequestMatches?.(session) ?? false; }
-        catch (error) { if (exhausted()) requireTime(); throw error; }
+        catch (error) { rethrowPushSafetyFailure(error); if (exhausted()) requireTime(); throw error; }
         requireTime();
         if (!matches) fail("invalid_evidence", elapsed);
       }
@@ -142,9 +146,10 @@ export async function waitForPushDelivery(options: {
     if (ownedAlias === undefined || ownedAlias !== telemetry.requestAlias) return fail("invalid_evidence", elapsed);
     if (metrics.deliveryRearmCount !== 0 || attempt !== 0 || options.rearm === undefined) return fail("push_service_failure", elapsed, telemetry.httpStatus);
     metrics.deliveryRearmCount = 1; metrics.deliveryRearmReason = 1; // 1 = provider 429/retryable 5xx
-    options.onTimeout?.(undefined);
     const fresh = await options.rearm({ ...session, qualificationPushAlias: ownedAlias }, late);
-    if (exhausted()) requireTime();
+    // Rearm settled the old ask and may have installed the fresh ask's sampler; do not
+    // overwrite that observer with the old timed-out request on a late return.
+    if (exhausted()) fail("delivery_timeout", runtime.now() - start);
     if (fresh.session.instanceId !== session.instanceId || fresh.session.generation !== session.generation ||
       fresh.session.ask === undefined || fresh.session.ask.requestId === session.ask?.requestId) fail("invalid_evidence", elapsed);
     session = fresh.session; window = fresh.window;
@@ -363,6 +368,7 @@ export async function preflightAndroidPush(input: AndroidPushPreflightInput, run
 async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: AndroidPushProgress, sampleLate?: () => Promise<void>): Promise<Record<string, unknown>> {
   const failures: string[] = [];
   const errors: unknown[] = [];
+  const priorPhase = progress.phase;
   let persistenceFailed = false;
   // Persistence fences new mutations, not restoration of an already captured baseline.
   runtime.beforeEffect = async () => {
@@ -373,11 +379,15 @@ async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: 
     try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch (error) { failures.push(step); errors.push(error); }
     if (["fixtureAsk", "doze", "network"].includes(step)) await sampleLate?.();
   }
-  if (failures.length === 0) {
+  if (failures.length === 0 && !persistenceFailed) {
     progress.cleanupRequired = false;
     progress.phase = "restored";
   }
   await runtime.beforeEffect();
+  if (persistenceFailed) {
+    progress.cleanupRequired = true;
+    progress.phase = priorPhase;
+  }
   if (persistenceFailed) errors.push(new QualificationFailure({
     id: input.execution?.nextFailureId() ?? 1, lane: "androidPushCleanup", step: "containment",
     reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },
@@ -403,7 +413,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     const progress: AndroidPushProgress = { lane: "androidPush", epoch: randomUUID(), binding: binding(input.identity), phase: "baseline_captured",
       cleanupRequired: true, device: await runtime.device(), browser: null, notificationTopicDigest: null, secondaryNotificationTopicDigest: null, results: {} };
     runtime.beforeEffect = () => checkpointPushProgress(input, progress);
-    let primary: unknown, delivered = false, roundTripMs = 0, deliveryStarted = 0;
+    let primary: unknown, delivered = false, roundTripMs = 0, deliveryStarted = runtime.now();
     let sampleLate: (() => Promise<void>) | undefined;
     const metrics = emptyPushDeliveryMetrics();
     let budgetStart: number | undefined;
@@ -416,20 +426,15 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     };
     const waitSnapshot = async (predicate: (session: SessionMetadata) => boolean) => {
       const start = runtime.now(), deadline = start + 90_000;
-      try {
-        while (runtime.now() < deadline) {
-          requireBudget();
-          const session = await runtime.snapshot(progress.epoch);
-          requireBudget();
-          if (pushBudgetExpired(runtime, input.execution, start, 90_000)) break;
-          if (session !== undefined && predicate(session)) return session;
-          await runtime.pause(500);
-          requireBudget();
-        }
-      } catch (error) {
-        rethrowPushSafetyFailure(error);
-        if (error instanceof QualificationFailure || error instanceof AggregateError) throw error;
+      while (runtime.now() < deadline) {
+        requireBudget();
+        const session = await runtime.snapshot(progress.epoch);
+        requireBudget();
+        if (pushBudgetExpired(runtime, input.execution, start, 90_000)) break;
+        if (session !== undefined && predicate(session)) return session;
+        await runtime.pause(500);
       }
+      requireBudget();
       throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
         class: "harness", reason: "delivery_metadata_timeout", operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - start),
         observations: { timeoutMs: 90_000 } });
@@ -487,15 +492,21 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       requireBudget();
       delivered = true;
     } catch (error) {
-      if (error instanceof QualificationFailure && error.evidence.lane === "androidPush") {
-        const evidence = error.evidence;
-        const common = { id: evidence.id, lane: "rigReadiness" as const, step: "pixel_push" as const, elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted),
-          operation: evidence.operation, observations: evidence.observations };
-        if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
-        else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" });
-        else if (evidence.reason === "delivery_timeout") primary = new QualificationFailure({ ...common, class: "harness", reason: "delivery_timeout" });
-        else primary = new QualificationFailure({ ...common, class: "harness", reason: "invalid_evidence" });
-      } else primary = error;
+      primary = error;
+      try {
+        if (error instanceof QualificationFailure && error.evidence.lane === "androidPush") {
+          const evidence = error.evidence;
+          const common = { id: evidence.id, lane: "rigReadiness" as const, step: "pixel_push" as const, elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted),
+            operation: evidence.operation, observations: evidence.observations };
+          if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
+          else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" });
+          else if (evidence.reason === "delivery_timeout") primary = new QualificationFailure({ ...common, class: "harness", reason: "delivery_timeout" });
+          else primary = new QualificationFailure({ ...common, class: "harness", reason: "invalid_evidence" });
+        }
+      } catch (normalizationError) {
+        // Evidence construction must never bypass restoration of an already-mutated fixture.
+        primary = new AggregateError([error, normalizationError], "Push readiness evidence normalization failed");
+      }
     }
     runtime.beginCleanup?.();
     let cleanup: Record<string, unknown>;
@@ -554,20 +565,17 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "product",
       reason: "assertion_failed", operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {},
     }), { message });
-    const wait = async <T>(name: string, observe: () => Promise<T | undefined>, timeout = 60_000): Promise<T> => {
-      const start = runtime.now(), deadline = start + timeout;
-      try {
-        while (runtime.now() < deadline) {
-          if (pushBudgetExpired(runtime, input.execution)) break;
-          const result = await observe();
-          if (pushBudgetExpired(runtime, input.execution, start, timeout)) break;
-          if (result !== undefined) return result;
-          await runtime.pause(500);
-        }
-      } catch (error) {
-        rethrowPushSafetyFailure(error);
-        if (name !== "metadata" || error instanceof QualificationFailure || error instanceof AggregateError) throw error;
+    const wait = async <T>(name: string, observe: () => Promise<T | undefined>, timeout = 60_000, start = runtime.now()): Promise<T> => {
+      const deadline = start + timeout;
+      while (runtime.now() < deadline) {
+        requireExecution();
+        const result = await observe();
+        requireExecution();
+        if (pushBudgetExpired(runtime, input.execution, start, timeout)) break;
+        if (result !== undefined) return result;
+        await runtime.pause(500);
       }
+      requireExecution();
       const evidence = { id: input.execution?.nextFailureId() ?? 1, lane: "androidPush" as const, step: activePhase,
         class: "harness" as const, operation: "read_only" as const,
         elapsedMs: pushMilliseconds(runtime.now() - start), observations: { timeoutMs: timeout } };
@@ -608,8 +616,11 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
     const clear = async (timeout = 60_000, role: PushFixtureRole = "primary") => {
       const start = runtime.now();
       await fixture("answer", role);
-      const current = await snapshot(s => !s.inputRequired, role);
-      await wait("authoritative clear", async () => (await runtime.observe(current, "attention", "private")).count === 0 ? true : undefined, timeout);
+      await wait("authoritative clear", async () => {
+        const current = await runtime.snapshot(progress.epoch, role);
+        if (current === undefined || current.inputRequired) return undefined;
+        return (await runtime.observe(current, "attention", "private")).count === 0 ? true : undefined;
+      }, timeout, start);
       metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - start);
     };
     const delivered = async (session: SessionMetadata, kind: "attention" | "activity_stop" = "attention", detail: PushDetailLevel = "session", timeout = 60_000) => {
@@ -636,13 +647,15 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           const clearing = runtime.now();
           const clearWindow = await runtime.beginDeliveryTelemetry?.(activePhase);
           await fixture("answer");
-          const settled = await snapshot(s => !s.inputRequired);
-          await wait("authoritative clear before re-arm", async () => {
+          const settled = await wait("authoritative clear before re-arm", async () => {
             await late();
+            const current = await runtime.snapshot(progress.epoch);
+            if (current === undefined || current.inputRequired) return undefined;
             const telemetry = clearWindow === undefined ? undefined : await runtime.deliveryTelemetry?.(clearWindow);
             return telemetry?.clearAcknowledged === true && telemetry.requestAlias === old.qualificationPushAlias &&
-              (await runtime.observe(settled, "attention", detail)).count === 0 ? true : undefined;
-          }, timeout);
+              (await runtime.observe(current, "attention", detail)).count === 0 ? current : undefined;
+          }, timeout, clearing);
+          lateDelivery = undefined;
           metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - clearing);
           const nextWindow = await runtime.beginDeliveryTelemetry?.(activePhase);
           lateDelivery = lateDeliveryObserver(() => checkedDelivery(runtime, settled, "attention", detail, () => {
@@ -664,6 +677,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           await save();
           if (!everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
           if (index !== 0) throw error;
+          lateDelivery = undefined;
           progress.results[phase] = { ...progress.results[phase], rearmCount: 1, rearmReason: "unowned_notification_overlap" };
           await save();
           // Re-arm only for an observed foreign post, never for a missing required event.
@@ -675,14 +689,16 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           // Settle every owned ask and let its authoritative clear land, then dismiss what remains: an
           // activity-stop notice has no clear, so waiting for its tag to empty never ends.
           for (const role of ["primary", "secondary"] as const) {
+            const clearing = runtime.now();
             const host = await runtime.snapshot(progress.epoch, role);
             if (host === undefined) continue;
             if (host.inputRequired) await fixture("answer", role);
-            const settled = await snapshot(s => !s.inputRequired && s.busy === false, role);
             await wait("authoritative clear", async () => {
+              const settled = await runtime.snapshot(progress.epoch, role);
+              if (settled === undefined || settled.inputRequired || settled.busy !== false) return undefined;
               const observation = await runtime.observe(settled, "attention", "private");
               return observation.count === 0 || !observation.titleMatches ? true : undefined;
-            }, PUSH_RECOVERY_MS);
+            }, PUSH_RECOVERY_MS, clearing);
           }
           await runtime.dismissOwned();
           await runtime.closePwa();
@@ -959,10 +975,14 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         // prealpha.3 campaigns an ask or clear waited minutes, until another lane opened Chrome. The
         // variant above is observed with the app closed; resuming it once lets a deferred ask or clear
         // run here rather than on the owner's phone after the lane. Doze is therefore the last delivery phase.
+        const clearing = runtime.now();
         await fixture("answer");
-        const settled = await snapshot(s => !s.inputRequired);
+        const settled = await wait("authoritative clear after Doze", async () => {
+          const current = await runtime.snapshot(progress.epoch);
+          return current !== undefined && !current.inputRequired ? current : undefined;
+        }, 60_000, clearing);
         await runtime.openPwa();
-        await wait("authoritative clear after Doze", async () => (await runtime.observe(settled, "attention", "private")).count === 0 ? true : undefined);
+        await wait("authoritative clear after Doze", async () => (await runtime.observe(settled, "attention", "private")).count === 0 ? true : undefined, 60_000, clearing);
         await runtime.closePwa();
         await finish("doze_verified", { variant: duringDoze ? "delivered_during_doze" : afterExit ? "delivered_after_doze_exit" : "undelivered_after_doze_exit" });
       });
