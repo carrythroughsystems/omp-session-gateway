@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { runAdb, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
-import { createAndroidPushRuntime, observePushDeliveryRequest } from "./android-push-runtime.ts";
+import { runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
+import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDeliveryRequest, qualificationPushAliasFor } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { checkProviderReads } from "./check-repository.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
@@ -73,6 +73,46 @@ test("already-cancelled browser work cannot select a device or open Chrome", asy
   expect(called).toBe(false);
 });
 
+test("R2 device discovery uses the runtime cancellation context", async () => {
+  const controller = new AbortController(), exited = Promise.withResolvers<number>();
+  let killed = false;
+  const stream = new ReadableStream<Uint8Array>({ start(value) { value.enqueue(new TextEncoder().encode("List of devices attached\nsynthetic device\n")); value.close(); } });
+  const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+    stdout: stream, stderr: new ReadableStream({ start(value) { value.close(); } }), exited: exited.promise, kill() { killed = true; },
+  })) as typeof Bun.spawn);
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } });
+    const pending = runtime.preflight({ origin: identity.origin }).catch(() => {});
+    expect(spawn).toHaveBeenCalledTimes(1);
+    controller.abort(); await Bun.sleep(10);
+    const cancelled = killed;
+    exited.resolve(143); await pending;
+    expect(cancelled).toBe(true);
+  } finally { spawn.mockRestore(); }
+});
+
+test("R2 nested keyguard shell refuses a cancelled execution before spawning", async () => {
+  const controller = new AbortController(); controller.abort();
+  const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+    stdout: new ReadableStream({ start(value) { value.close(); } }), stderr: new ReadableStream({ start(value) { value.close(); } }),
+    exited: Promise.resolve(0), stdin: { write() {}, end() {} }, kill() {},
+  })) as typeof Bun.spawn);
+  try {
+    await expect(unlockAndroidKeyguard("synthetic", async () => new TextEncoder().encode("1234"), undefined,
+      { signal: controller.signal, deadline: performance.now() + 1_000 })).rejects.toThrow();
+    expect(spawn).not.toHaveBeenCalled();
+  } finally { spawn.mockRestore(); }
+});
+
+test("R2 permission override connection receives its bounded execution context", async () => {
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 1_000 };
+  let received: unknown;
+  const release = await holdAndroidNotificationDenial(identity.origin, async (run, context) => {
+    received = context; await run({ browserSend: async () => ({}) });
+  }, execution);
+  try { expect(received).toBe(execution); } finally { await release(); }
+});
+
 test("R2 raw log proof resolves the retained Mac home and uses its configured executor", async () => {
   const { gatewayRawLogsDiscarded } = await import("./android-push-runtime.ts");
   const calls: readonly string[][] = [];
@@ -93,6 +133,18 @@ test("R2 fresh request attestation accepts the delivering secondary snapshot and
   expect(matchesPushDeliverySnapshot(session, [{ ...session, generation: 1 }])).toBe(false);
 });
 
+test("R2 numeric alias lookup refuses foreign, stale and ambiguous fixture snapshots", () => {
+  const session = { instanceId: "secondary", generation: 2, inputRequired: true, canControl: true, ask: { requestId: "fresh" } } as SessionMetadata;
+  const current = { ...session, qualificationPushAlias: 12 };
+  expect(qualificationPushAliasFor(session, [undefined, current])).toBe(12);
+  for (const changed of [{ ...current, instanceId: "foreign" }, { ...current, generation: 1 },
+    { ...current, ask: { ...current.ask!, requestId: "old" } }, { ...current, canControl: false }]) {
+    expect(qualificationPushAliasFor(session, [changed])).toBeUndefined();
+  }
+  expect(qualificationPushAliasFor(session, [current, current])).toBeUndefined();
+  expect(qualificationPushAliasFor(session, [session])).toBeUndefined();
+});
+
 test("R3 rejecting ADB streams cannot finish cancellation before the child exits", async () => {
   const controller = new AbortController(), exited = Promise.withResolvers<number>();
   let stdout!: ReadableStreamDefaultController<Uint8Array>, done = false;
@@ -107,35 +159,49 @@ test("R3 rejecting ADB streams cannot finish cancellation before the child exits
   expect(prematurelyDone).toBe(false);
 });
 
-for (const scenario of ["abort-attach", "deadline-open"] as const) test(`R3/R4 CDP cleans owned targets and settles ${scenario}`, async () => {
+for (const scenario of ["abort-attach", "deadline-open", "abort-create", "close-refused", "forward-cancel", "constructor-throws"] as const) test(`R2 CDP cleanup retains ownership through ${scenario}`, async () => {
   const controller = new AbortController(), calls: string[] = [];
   const stream = (text: string) => new ReadableStream<Uint8Array>({ start(value) { value.enqueue(new TextEncoder().encode(text)); value.close(); } });
-  const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => ({
+  const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+    if (argv.includes("forward")) calls.push(argv.includes("--remove") ? "forward.remove" : "forward.acquire");
+    if (scenario === "forward-cancel" && argv.includes("forward") && !argv.includes("--remove")) controller.abort();
+    return {
     stdout: stream(argv.includes("devices") ? "List of devices attached\nsynthetic device\n" : argv.includes("package") ? "versionName=153.0.0.0" : ""),
     stderr: stream(""), exited: Promise.resolve(0), kill() {},
-  })) as typeof Bun.spawn);
+  }; }) as typeof Bun.spawn);
   const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
     "Android-Package": "com.android.chrome", Browser: "Chrome/153.0.0.0", webSocketDebuggerUrl: "ws://127.0.0.1:9238/devtools/browser/synthetic",
   })));
   const realSocket = globalThis.WebSocket;
   class Socket {
     onmessage?: (event: { data: string }) => void; onopen?: () => void; onerror?: () => void;
-    constructor() { if (scenario !== "deadline-open") queueMicrotask(() => this.onopen?.()); }
+    constructor() {
+      if (scenario === "constructor-throws") throw new Error("synthetic socket construction failure");
+      if (scenario !== "deadline-open") queueMicrotask(() => this.onopen?.());
+    }
     close() { calls.push("socket.close"); }
     send(frame: string) {
       const message = JSON.parse(frame); calls.push(message.method);
-      if (message.method === "Target.attachToTarget") { controller.abort(); return; }
+      if (message.method === "Target.attachToTarget" && scenario === "abort-attach") { controller.abort(); return; }
+      if (message.method === "Target.createTarget" && scenario === "abort-create") {
+        controller.abort();
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: { targetId: "late-owned-tab" } }) }), 10);
+        return;
+      }
       const result = message.method === "Browser.getVersion" ? { product: "Chrome/153.0.0.0" } :
-        message.method === "Target.createTarget" ? { targetId: "owned-tab" } : {};
+        message.method === "Target.createTarget" ? { targetId: "owned-tab" } :
+        message.method === "Target.closeTarget" ? { success: scenario !== "close-refused" || calls.filter(call => call === "Target.closeTarget").length > 1 } : {};
       queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result }) }));
     }
   }
   globalThis.WebSocket = Socket as unknown as typeof WebSocket;
   const started = performance.now();
   try {
-    await expect(withAndroidChrome(driver => driver.openTab(), { port: 9238, launchBrowser: false,
+    await expect(withAndroidChrome(async driver => { await driver.openTab(); await driver.closeTab(); throw new Error("synthetic completion"); }, { port: 9238, launchBrowser: false,
       execution: { signal: controller.signal, deadline: started + 100 } })).rejects.toThrow();
-    if (scenario === "abort-attach") expect(calls).toContain("Target.closeTarget");
-    else expect(performance.now() - started).toBeLessThan(1_000);
+    if (scenario === "abort-attach" || scenario === "abort-create") expect(calls).toContain("Target.closeTarget");
+    if (scenario === "close-refused") expect(calls.filter(call => call === "Target.closeTarget")).toHaveLength(2);
+    expect(calls).toContain("forward.remove");
+    expect(performance.now() - started).toBeLessThan(1_000);
   } finally { globalThis.WebSocket = realSocket; fetchMock.mockRestore(); spawn.mockRestore(); }
 }, 12_000);

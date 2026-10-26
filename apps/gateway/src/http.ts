@@ -338,7 +338,11 @@ export function createHttpHandler(options: {
       return Response.json(response);
     }
     if (url.pathname === "/api/v1/sessions" && request.method === "GET") {
-      return Response.json(registry.snapshot());
+      const snapshot = registry.snapshot();
+      return Response.json({ ...snapshot, sessions: snapshot.sessions.map(session => {
+        const qualificationPushAlias = options.pushService?.qualificationAlias(session);
+        return qualificationPushAlias === undefined ? session : { ...session, qualificationPushAlias };
+      }) });
     }
     if (url.pathname === "/api/v1/session-creation-options" && request.method === "GET" && options.creationService) {
       return Response.json(await options.creationService.options());

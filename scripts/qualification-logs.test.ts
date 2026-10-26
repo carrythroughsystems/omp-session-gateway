@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,8 +7,8 @@ import { randomUUID } from "node:crypto";
 import { QualificationLogSink, SafeLogger } from "../apps/gateway/src/logger.ts";
 import { createQualificationLogs, parseQualificationLogs, pushDeliveryTelemetry, qualificationLogDirectory } from "./qualification-logs.ts";
 import { executeFixture } from "./push-qualification-fixture.ts";
-const event = (index: number, name: string, fields: Record<string, number | boolean>) => ({ timestamp: "2026-01-01T00:00:00.000Z", level: "info" as const, event: name, ...fields, index });
-const flags = { attention: true, clear: false, activity_stop: false };
+const event = (index: number, name: string, fields: Record<string, number | boolean>) => ({ timestamp: "2026-01-01T00:00:00.000Z", level: "info" as const, event: name, request_alias: 1, ...fields, index });
+const flags = { request_alias: 1, attention: true, clear: false, activity_stop: false, subscription_replay: false };
 const send = [event(1, "push.queue_accepted", { sequence: 1, ...flags }), event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 1 }),
   event(3, "push.send_failed", { sequence: 1, elapsed_ms: 1, status: 503 })];
 
@@ -21,8 +22,8 @@ test("only an unambiguous single send's explicit retryable status authorizes rec
 
 test("R3 subscription replay is not an attributable fresh ask and R6 clear acknowledgement is explicit", () => {
   expect(pushDeliveryTelemetry(send.map(item => ({ ...item, subscription_replay: true }))).sufficient).toBe(false);
-  const clear = [event(1, "push.queue_accepted", { sequence: 1, attention: false, clear: true, activity_stop: false }),
-    event(2, "push.send_started", { sequence: 1, attention: false, clear: true, activity_stop: false, subscriptions: 1 }),
+  const clear = [event(1, "push.queue_accepted", { sequence: 1, ...flags, attention: false, clear: true }),
+    event(2, "push.send_started", { sequence: 1, ...flags, attention: false, clear: true, subscriptions: 1 }),
     event(3, "push.send_acknowledged", { sequence: 1, elapsed_ms: 1 })];
   expect(pushDeliveryTelemetry(clear)).toMatchObject({ clearAcknowledged: true });
   expect(pushDeliveryTelemetry(clear.slice(0, 2))).toMatchObject({ clearAcknowledged: false });
@@ -53,6 +54,93 @@ test("log parser rejects hidden payloads, invalid values, duplicate keys, gaps a
   expect(parseQualificationLogs([send.map(item => JSON.stringify(item)).join("\n") + "\n"])).toHaveLength(3);
 });
 
+test("R2 collector refuses lost prefixes and disordered records rather than sorting away evidence", () => {
+  const lines = send.map(item => JSON.stringify(item));
+  for (const texts of [[`${lines[1]}\n${lines[2]}\n`], [`${lines[1]}\n${lines[0]}\n${lines[2]}\n`],
+    [`${lines[1]}\n${lines[2]}\n`, `${lines[0]}\n`]]) expect(() => parseQualificationLogs(texts)).toThrow();
+});
+
+test("R2 missing replay provenance cannot authorize a fresh-ask recovery", () => {
+  const missing = send.map(item => { const copy = { ...item }; delete (copy as Record<string, unknown>).subscription_replay; return copy; });
+  expect(pushDeliveryTelemetry(missing)).toMatchObject({ sufficient: false, retryable: false });
+});
+
+test.skipIf(process.platform === "win32")("R2 collector brackets a concurrent committed append with two health reads", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-bracket-")); chmodSync(root, 0o700);
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  let armed = false, reads = 0;
+  const execute = async (argv: readonly string[]) => {
+    if (argv.at(-1) !== "read" || !armed) return executeFixture(argv);
+    armed = false; reads++;
+    const hook = `import os,sys,json
+original_open=os.open
+def intercepted_open(path,flags,*args,**kwargs):
+ if path==os.path.join(sys.argv[1],'events.0.jsonl'):
+  with open(path) as f: event=json.loads(f.readline())
+  event['index']=2
+  with open(path,'a') as f: f.write(json.dumps(event,separators=(',',':'))+'\\n')
+  health=os.path.join(sys.argv[1],'health')
+  with open(health) as f: structured=f.read().startswith('[')
+  with open(health,'w') as f: f.write('[2,1]\\n' if structured else '2\\n')
+  os.open=original_open
+ return original_open(path,flags,*args,**kwargs)
+os.open=intercepted_open
+`;
+    return executeFixture([...argv.slice(0, 2), hook + argv[2], ...argv.slice(3)]);
+  };
+  const logs = createQualificationLogs({ execute: async argv => {
+    if (argv.at(-1) === "read" && !armed) reads++;
+    return execute(argv);
+  }, remoteDirectory, jobDirectory: root });
+  try {
+    await logs.prepare();
+    new SafeLogger(new QualificationLogSink(remoteDirectory)).event("info", "http.listening", { port: 4317 });
+    await Promise.resolve(); armed = true;
+    expect(await logs.healthy()).toBe(true);
+    expect(reads).toBe(2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("R2 retained files and their directory are durable before remote removal", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-fsync-")); chmodSync(root, 0o700);
+  const job = mkdtempSync(join(root, "job-")); chmodSync(job, 0o700);
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  let fileSynced = false, directorySynced = false;
+  const logs = createQualificationLogs({ remoteDirectory, jobDirectory: job, execute: async argv => {
+    if (argv.at(-1) === "remove") { expect(fileSynced).toBe(true); expect(directorySynced).toBe(true); }
+    return executeFixture(argv);
+  } });
+  const original = fs.fsyncSync;
+  let syncing: ReturnType<typeof spyOn> | undefined;
+  try {
+    await logs.prepare(); new QualificationLogSink(remoteDirectory);
+    syncing = spyOn(fs, "fsyncSync").mockImplementation(fd => {
+      if (fs.fstatSync(fd).isDirectory()) directorySynced = true; else fileSynced = true;
+      original(fd);
+    });
+    await logs.collect();
+    expect(existsSync(remoteDirectory)).toBe(false);
+  } finally { syncing?.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32").each(["file", "directory"] as const)("R2 failed %s fsync preserves remote evidence", async stage => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-durability-")); chmodSync(root, 0o700);
+  const job = mkdtempSync(join(root, "job-")); chmodSync(job, 0o700);
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory, jobDirectory: job });
+  const original = fs.fsyncSync;
+  let syncing: ReturnType<typeof spyOn> | undefined;
+  try {
+    await logs.prepare(); new QualificationLogSink(remoteDirectory);
+    syncing = spyOn(fs, "fsyncSync").mockImplementation(fd => {
+      if (fs.fstatSync(fd).isDirectory() === (stage === "directory")) throw new Error("synthetic retention failure");
+      original(fd);
+    });
+    await expect(logs.collect()).rejects.toThrow("synthetic retention failure");
+    expect(existsSync(join(remoteDirectory, "health"))).toBe(true);
+  } finally { syncing?.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test.skipIf(process.platform === "win32")("collector validates real private paths, keeps immutable slices and removes only after collection", async () => {
   const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-collection-")); chmodSync(root, 0o700);
   const job = mkdtempSync(join(root, "job-")); chmodSync(job, 0o700);
@@ -64,7 +152,7 @@ test.skipIf(process.platform === "win32")("collector validates real private path
     const window = await logs.begin("androidPush", "private_verified");
     logger.event("info", "push.queue_accepted", { sequence: 1, ...flags });
     logger.event("info", "push.send_started", { sequence: 1, ...flags, subscriptions: 1 });
-    logger.event("warn", "push.send_failed", { sequence: 1, elapsed_ms: 10, status: 503 });
+    logger.event("warn", "push.send_failed", { sequence: 1, request_alias: 1, elapsed_ms: 10, status: 503 });
     expect(await logs.end(window)).toMatchObject({ sufficient: true, retryable: true });
     expect(await logs.healthy()).toBe(true);
     expect(await logs.collect()).toEqual({ files: 2, events: 3 });

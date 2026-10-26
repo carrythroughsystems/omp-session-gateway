@@ -233,6 +233,7 @@ export class PushService {
   readonly #path: string;
   readonly #vapid: VapidKeyPair;
   readonly #attention = new Map<string, AttentionState>();
+  readonly #qualificationAliases = new Map<string, { generation: number; requestId: string; alias: number }>();
   readonly #deliveryChains = new Map<string, Promise<void>>();
   #subscriptions: readonly StoredPushSubscription[];
   #mutationTail = Promise.resolve();
@@ -339,6 +340,13 @@ export class PushService {
     await this.flush();
   }
 
+  /** Read-only lookup for the exact current ask; the opaque alias contains no identity bytes. */
+  qualificationAlias(session: SessionMetadata): number | undefined {
+    if (!session.inputRequired || session.ask === undefined) return undefined;
+    const entry = this.#qualificationAliases.get(session.instanceId);
+    return entry?.generation === session.generation && entry.requestId === session.ask.requestId ? entry.alias : undefined;
+  }
+
   #identityAllowed(identityKey: string): boolean {
     return this.#config.auth.mode === "dev-localhost"
       ? identityKey === "dev-localhost"
@@ -349,6 +357,7 @@ export class PushService {
     if (this.#stopped) return;
     if (event.type === "snapshot") {
       this.#attention.clear();
+      this.#qualificationAliases.clear();
       for (const session of event.sessions) {
         this.#attention.set(session.instanceId, {
           generation: session.generation,
@@ -365,6 +374,7 @@ export class PushService {
       if (previous.active && previous.requestId !== undefined) {
         this.#queueClear(event.instanceId, previous.requestId);
       }
+      this.#qualificationAliases.delete(event.instanceId);
       return;
     }
 
@@ -379,6 +389,7 @@ export class PushService {
       this.#queueClear(session.instanceId, previous.requestId);
     }
     if (active) this.#queueAttention(session);
+    else this.#qualificationAliases.delete(session.instanceId);
     this.#attention.set(session.instanceId, {
       generation: session.generation,
       ...(session.ask === undefined ? {} : { requestId: session.ask.requestId }),
@@ -400,6 +411,12 @@ export class PushService {
     if (requestId === undefined) return;
     const pendingAskCount = this.#pendingAskCount();
     const subscriptionReplay = subscriptions !== undefined;
+    let alias = this.qualificationAlias(session);
+    if (alias === undefined) {
+      alias = this.#logger.nextQualificationIndex;
+      if (alias !== undefined) this.#qualificationAliases.set(session.instanceId, { generation: session.generation, requestId, alias });
+    }
+    const requestAlias = alias ?? 0;
     this.#queueDelivery(session.instanceId, "attention", async sequence => {
       await this.#deliver(
         sequence,
@@ -418,8 +435,9 @@ export class PushService {
         },
         subscriptions,
         subscriptionReplay,
+        requestAlias,
       );
-    }, subscriptionReplay);
+    }, subscriptionReplay, requestAlias);
   }
 
   #queueActivityStop(event: SessionActivityStopEvent): void {
@@ -450,6 +468,8 @@ export class PushService {
 
   #queueClear(instanceId: string, requestId: string): void {
     const pendingAskCount = this.#pendingAskCount();
+    const entry = this.#qualificationAliases.get(instanceId);
+    const alias = entry?.requestId === requestId ? entry.alias : 0;
     this.#queueDelivery(instanceId, "clear", async sequence => {
       await this.#deliver(sequence, () => ({
         version: PUSH_API_VERSION,
@@ -457,13 +477,13 @@ export class PushService {
         instanceId,
         requestId,
         pendingAskCount,
-      }));
-    });
+      }), undefined, false, alias);
+    }, false, alias);
   }
 
-  #queueDelivery(instanceId: string, kind: AttentionPushMessage["type"], send: (sequence: number) => Promise<void>, subscriptionReplay = false): void {
+  #queueDelivery(instanceId: string, kind: AttentionPushMessage["type"], send: (sequence: number) => Promise<void>, subscriptionReplay = false, requestAlias = 0): void {
     const sequence = ++this.#deliverySequence;
-    this.#logger.event("info", "push.queue_accepted", { sequence, attention: kind === "attention", clear: kind === "clear", activity_stop: kind === "activity_stop", subscription_replay: subscriptionReplay });
+    this.#logger.event("info", "push.queue_accepted", { sequence, request_alias: requestAlias, attention: kind === "attention", clear: kind === "clear", activity_stop: kind === "activity_stop", subscription_replay: subscriptionReplay });
     const prior = this.#deliveryChains.get(instanceId) ?? Promise.resolve();
     const delivery = prior
       .then(() => send(sequence))
@@ -481,6 +501,7 @@ export class PushService {
     messageFor: (subscription: StoredPushSubscription) => AttentionPushMessage,
     selectedSubscriptions?: readonly StoredPushSubscription[],
     subscriptionReplay = false,
+    requestAlias = 0,
   ): Promise<void> {
     const subscriptions = (selectedSubscriptions ?? this.#subscriptions).filter(subscription =>
       this.#identityAllowed(subscription.identityKey),
@@ -491,7 +512,7 @@ export class PushService {
       subscriptions.map(async subscription => {
         const message = messageFor(subscription);
         const start = performance.now();
-        this.#logger.event("info", "push.send_started", { sequence, attention: message.type === "attention", clear: message.type === "clear",
+        this.#logger.event("info", "push.send_started", { sequence, request_alias: requestAlias, attention: message.type === "attention", clear: message.type === "clear",
           activity_stop: message.type === "activity_stop", subscriptions: subscriptions.length, subscription_replay: subscriptionReplay });
         try {
           await this.#transport.send(subscription, JSON.stringify(message), {
@@ -500,10 +521,10 @@ export class PushService {
             privateKey: this.#vapid.privateKey,
             ttlSeconds: PUSH_TTL_SECONDS,
           });
-          this.#logger.event("info", "push.send_acknowledged", { sequence, elapsed_ms: performance.now() - start });
+          this.#logger.event("info", "push.send_acknowledged", { sequence, request_alias: requestAlias, elapsed_ms: performance.now() - start });
         } catch (error) {
           const code = statusCode(error);
-          this.#logger.event("warn", "push.send_failed", { sequence, elapsed_ms: performance.now() - start, status: code });
+          this.#logger.event("warn", "push.send_failed", { sequence, request_alias: requestAlias, elapsed_ms: performance.now() - start, status: code });
           if (code === 404 || code === 410) stale.push(subscription);
         }
       }),
@@ -517,7 +538,7 @@ export class PushService {
         removed = current.length - next.length;
         return next;
       });
-      if (removed > 0) this.#logger.event("info", "push.subscription_evicted", { sequence, count: removed });
+      if (removed > 0) this.#logger.event("info", "push.subscription_evicted", { sequence, request_alias: requestAlias, count: removed });
     }
   }
 

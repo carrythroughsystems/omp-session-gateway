@@ -47,7 +47,7 @@ test.skipIf(process.platform === "win32")("qualification sink refuses unsafe des
     expect(sink.healthy).toBe(false);
     rmSync(join(root, "events.0.jsonl"));
     expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
-  } finally { rmSync(`${root}-link`, { force: true }); rmSync(root, { recursive: true, force: true }); }
+  } finally { rmSync(`${root}-link`, { force: true }); rmSync(`${root}.unhealthy`, { force: true }); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("coalesces repetitive denial events into a bounded log rate", () => {
@@ -79,7 +79,7 @@ test.skipIf(process.platform === "win32")("R1 write-ahead health survives a dire
     expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
     chmodSync(dir, 0o700);
     expect(() => new QualificationLogSink(dir)).toThrow();
-  } finally { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }); }
+  } finally { chmodSync(dir, 0o700); rmSync(`${dir}.unhealthy`, { force: true }); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test.skipIf(process.platform === "win32")("U1 restart validates every rotated event and all rate-limited IPC events remain safe", async () => {
@@ -105,7 +105,7 @@ test.skipIf(process.platform === "win32")("coalesces a synchronous burst behind 
     expect(readFileSync(join(dir, "health"), "utf8")).toBe("!");
     expect(() => new QualificationLogSink(dir)).toThrow();
     await Promise.resolve();
-    expect(readFileSync(join(dir, "health"), "utf8")).toBe("100\n");
+    expect(readFileSync(join(dir, "health"), "utf8")).toBe("[100,1]\n");
     expect(new QualificationLogSink(dir).healthy).toBe(true);
     logger.event("info", "http.listening", { port: 4317 });
     chmodSync(dir, 0o500);
@@ -115,7 +115,7 @@ test.skipIf(process.platform === "win32")("coalesces a synchronous burst behind 
     expect(sink.healthy).toBe(false);
     expect(readFileSync(join(dir, "health"), "utf8")).toBe("!");
     expect(() => new QualificationLogSink(dir)).toThrow();
-  } finally { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }); }
+  } finally { chmodSync(dir, 0o700); rmSync(`${dir}.unhealthy`, { force: true }); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("does not suppress distinct lifecycle information", () => {
@@ -125,3 +125,33 @@ test("does not suppress distinct lifecycle information", () => {
   logger.event("info", "http.listening", { port: 4318 });
   expect(lines).toHaveLength(2);
 });
+
+test.skipIf(process.platform === "win32")("R2 search-permission loss cannot resurrect a committed healthy sink", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "health-search-")); chmodSync(root, 0o700);
+  const dir = mkdtempSync(join(root, "logs-")); chmodSync(dir, 0o700);
+  try {
+    const logger = new SafeLogger(new QualificationLogSink(dir));
+    logger.event("info", "http.listening", { port: 4317 }); await Promise.resolve();
+    chmodSync(dir, 0);
+    expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
+    chmodSync(dir, 0o700);
+    expect(() => new QualificationLogSink(dir)).toThrow();
+  } finally { chmodSync(dir, 0o700); rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32").each(["missing-first", "truncated-first", "missing-rotated"] as const)(
+  "R2 restart refuses lost retained history: %s", async variant => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "health-retention-")); chmodSync(dir, 0o700);
+    try {
+      const logger = new SafeLogger(new QualificationLogSink(dir));
+      for (let index = 0; index < (variant === "missing-rotated" ? 12_000 : 3); index++) logger.event("info", "http.listening", { port: 4317 });
+      await Promise.resolve();
+      if (variant === "missing-rotated") rmSync(join(dir, "events.3.jsonl"));
+      else {
+        const path = join(dir, "events.0.jsonl");
+        const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+        writeFileSync(path, `${lines.slice(variant === "missing-first" ? 1 : 2).join("\n")}\n`);
+      }
+      expect(() => new QualificationLogSink(dir)).toThrow();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });

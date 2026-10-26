@@ -492,33 +492,48 @@ four files of at most 256 KiB. The existing absolute destination must be current
 0700, with no symlink components; files are single-link, current-user-owned 0600 regular files.
 Unsafe startup fails. Each synchronous burst durably invalidates the existing private health inode
 before touching log data; its microtask commit flushes the bounded current file and commits the exact
-event index. Rotation flushes the file being moved; per-event appends do not require per-event fsync.
+event index and first retained index. Rotation flushes the file being moved; per-event appends do not require per-event fsync.
 An interrupted or failed burst never publishes success. Later failure is sticky even when the
-directory cannot unlink files. Restart and collection require that committed index to match all
-validated rotated records. Rate-limited IPC events use the same closed vocabulary. Raw daemon
+directory cannot unlink files or loses search permission: a private sibling failure marker survives
+permission restoration. It is never automatically reset or repaired. Restart and collection require
+contiguous records in oldest-to-newest file order, beginning at index 1 unless the committed rotation
+boundary explains the prefix. Missing/truncated retained files and record reordering are failures.
+Rate-limited IPC events use the same closed vocabulary. Raw daemon
 stdout/stderr remain discarded independently of structured retention, proven on the gateway's host.
 Install/rollback/repair only forward the logging option to runtimes advertising `structured-v1`;
 older installed runtimes omit it rather than receiving an unsupported command-line option.
 
-Push events retain only process-local numeric sequence, kind flags, subscription counts, durations,
-and HTTP status. Provider acknowledgement is acceptance, not phone presentation. Collector windows
+Push events retain only numeric sequence and opaque request alias, kind flags, subscription counts,
+durations, and HTTP status. Qualification-only aliases are allocated from the next retained-log append
+index and mapped to exact session/generation/request tuples only in process memory. They are not
+identity encodings, hashes, or keys, and retained append indices prevent reuse across daemon restarts
+in the same job. The existing authenticated read-only session list exposes the optional
+`qualificationPushAlias` only for the exact current ask; ordinary responses omit it. Before any re-arm,
+the runtime re-fetches the owned fixture snapshot and requires its alias to match queue, send and
+failure evidence. The matching outbound clear acknowledgement is required before issuing the new ask.
+Provider acknowledgement is acceptance, not phone presentation. Collector windows
 use event indices and require a unique queue/send; simultaneous sends, rotation gaps, missing or
 invalid telemetry never authorize recovery by time proximity. Request identities remain volatile.
-Subscription replays have a separate boolean kind and cannot authorize a fresh-ask retry. Radio
+Subscription replay provenance is a required boolean on queue/send events; omission cannot mean a fresh
+send. Subscription replays cannot authorize a fresh-ask retry. Radio
 restoration closes the original window before reopening the WebAPK; post-restoration observation
 uses a new window. Re-arm requires both phone clear and outbound clear acknowledgement.
 A late post cannot satisfy a fresh ask: the existing worker must attest its exact request and the
 authoritative snapshot must retain its generation.
+Deadline expiry installs late-post sampling before returning a typed unexplained timeout; readiness
+also samples restoration and retains any late delivery in its failure observations.
 At most one evidence-backed fresh ask is allowed per phase, separate from overlap recovery; all
 privacy assertions and the 60/160-second bounds remain unchanged. The forbidden-sink proof requires
 both raw-stream discard and validated structured-log safety.
 Per-phase `deliveryTimings` retains ordered first/second millisecond pairs for each delivery,
 without overwriting earlier observations; the phase-wide one-re-arm budget remains independent.
 
-Logs live outside fixture-cleanup directories. After the daemon stops, collection validates bounded
-records into private, exclusively-created immutable job files and lane/phase slices, then removes
-the remote copies. Failed validation or retention leaves remote evidence intact and fails closed.
-No raw errors, endpoints, identifiers or identifier hashes, notification text, payloads, capabilities,
+Logs live outside fixture-cleanup directories. Reads bracket event files with health reads and retry
+any changed or pending health state; a torn snapshot never becomes evidence. After the daemon stops,
+collection validates bounded records into private, exclusively-created immutable job files and
+lane/phase slices, fsyncs the files and their directory, and rechecks the retained health state before
+removing remote copies. Failed validation or retention leaves remote evidence intact and fails closed.
+No raw errors, endpoints, real identifiers or identifier hashes, notification text, payloads, capabilities,
 tokens, or provider bodies are retained in these artifacts.
 
 Forbidden:
