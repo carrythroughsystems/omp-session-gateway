@@ -10,7 +10,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 - Qualification-only private rotating structured gateway logs and bounded Push send/ack evidence.
   Push recovery permits one evidence-backed fresh ask per phase, preserves existing delivery bounds,
-  records late posts and phase timings, and stops unexplained timeouts without retry.
+  records late posts and per-delivery timings, and stops unexplained timeouts without retry. Durable
+  write-ahead log health, retained-host raw-stream proof, explicit runtime protocol negotiation,
+  outbound-clear acknowledgement, and drained cancellation preserve recovery evidence across failure.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
@@ -26,7 +28,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,
   while retaining independent firewall, tailnet, Pixel, and vault containment requirements. Commit
   containment before deleting recovery state; fence incomplete same-epoch uploads, unknown process
-  exits, and cancellation races instead of recovering them as successful work.
+  exits, legacy staging without upload claims, and cancellation races instead of recovering them
+  as successful work. Retire the old epoch vault before replacing development identity, and require
+  settled provider inventory before cleanup completion.
 
 ## [v0.9.0] — 2026-10-25
 

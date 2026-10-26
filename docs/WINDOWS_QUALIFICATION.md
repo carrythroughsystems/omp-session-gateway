@@ -152,6 +152,10 @@ Unknown writer disposition, authentication, or helper faults do not become succe
 Each upload records a private durable `started` claim before work and a `complete` checkpoint only
 after success. An incomplete claim refuses development re-entry in the same epoch; it cannot stream
 the upload again. A completed upload is reused only after checking its bytes again.
+Legacy retained staging phases without those claims have unknown prior disposition and cannot
+resume staging. Only a phase that has never entered staging grants fresh upload authority;
+resuming an unsettled staging phase requires every archive's completed claim and never grants
+new upload authority. Clean the retained epoch instead of manufacturing claims for old state.
 Private helper diagnostics retain only the existing redacted, source-free exception context;
 typed failures contain closed codes and numeric/boolean observations, not that diagnostic text.
 
@@ -261,13 +265,20 @@ checkpoint, which precedes vault removal. A crash after unlink can therefore res
 completion without missing Pixel recovery state; a missing vault without that completion stays
 blocked. A failed guest command after reconnect skips the remaining guest mutations and proceeds
 directly to independent containment.
+The final inventories are taken after a five-second settling interval, matching the provider
+lookup-absence policy. A firewall that becomes visible during that interval blocks completion
+and retains recovery state; cleanup must reconcile it before the epoch can be retired.
+Development `run`/`artifacts` also retire a cleanup-complete epoch's remaining vault before
+removing its old progress and replacing `identity.json`. Completed containment alone does not
+authorize overwriting the identity while its vault may still exist.
 Provider reads retry a transient 5xx. A lookup that answers missing, or a Vultr listing without its
 array, is final only when a second read five seconds later agrees: on 2026-09-29 one listing did so
 while the lane polled for allocation, failing an attempt whose VM was still booting.
 A stable interrupted attempt is reconciled, never blindly replayed; start a fresh epoch
 afterwards. For development only, a code failure after guest access retains the VM for immediate
-repair: rerunning `run` resumes that epoch, skips completed phases, and checks staging
-postconditions rather than replacing the VM. `cleanup` is explicit after an abandoned attempt.
+repair: rerunning `run` resumes that epoch only when the phase's disposition is known, skips
+completed phases, and checks completed-upload postconditions rather than replacing the VM.
+Legacy or incomplete upload claims refuse staging resume. `cleanup` is explicit after an abandoned attempt.
 Failed phase resumes are counted in evidence; repair time is not called successful phase time.
 Development resume is refused after three hours, and every VM must be destroyed within four
 hours of creation. The current development campaign permits six total VM creations, one at a

@@ -34,6 +34,7 @@ export interface InstalledRuntime {
   readonly directory: string;
   readonly cliPath: string;
   readonly readinessProtocol: "legacy" | "instance-v1";
+  readonly qualificationLogProtocol?: "structured-v1";
 }
 
 export interface StagedRuntime extends InstalledRuntime {
@@ -177,6 +178,8 @@ async function validatedRuntime(directory: string): Promise<InstalledRuntime> {
   const sha256 = typeof manifest === "object" && manifest !== null ? Reflect.get(manifest, "sha256") : undefined;
   const readinessProtocolValue =
     typeof manifest === "object" && manifest !== null ? Reflect.get(manifest, "readinessProtocol") : undefined;
+  const qualificationLogProtocol =
+    typeof manifest === "object" && manifest !== null ? Reflect.get(manifest, "qualificationLogProtocol") : undefined;
   if (
     typeof version !== "string" ||
     !VERSION_PATTERN.test(version) ||
@@ -189,6 +192,7 @@ async function validatedRuntime(directory: string): Promise<InstalledRuntime> {
   if (readinessProtocolValue !== undefined && readinessProtocolValue !== "instance-v1") {
     throw new Error("invalid installed runtime readiness protocol");
   }
+  if (qualificationLogProtocol !== undefined && qualificationLogProtocol !== "structured-v1") throw new Error("invalid installed runtime qualification log protocol");
   const cliPath = join(directory, "apps", "gateway", "src", "cli.js");
   const cliInfo = await lstat(cliPath);
   if (!cliInfo.isFile() || cliInfo.isSymbolicLink()) throw new Error("unsafe installed gateway CLI");
@@ -197,6 +201,7 @@ async function validatedRuntime(directory: string): Promise<InstalledRuntime> {
     directory,
     cliPath,
     readinessProtocol: readinessProtocolValue === "instance-v1" ? "instance-v1" : "legacy",
+    ...(qualificationLogProtocol === "structured-v1" ? { qualificationLogProtocol } as const : {}),
   };
 }
 
@@ -316,7 +321,7 @@ export async function stageRuntimePayload(
     const versionDirectory = `${GATEWAY_VERSION}-${digest.slice(0, 12)}`;
     await writeFile(
       join(staging, "installation.json"),
-      `${JSON.stringify({ version: GATEWAY_VERSION, sha256: digest, readinessProtocol: "instance-v1" })}\n`,
+      `${JSON.stringify({ version: GATEWAY_VERSION, sha256: digest, readinessProtocol: "instance-v1", qualificationLogProtocol: "structured-v1" })}\n`,
       { mode: 0o600 },
     );
     const directory = join(versions, versionDirectory);

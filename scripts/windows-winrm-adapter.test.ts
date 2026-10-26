@@ -118,6 +118,7 @@ test("R1 a started upload is single-shot across development re-entry", async () 
   expect(typeof winrmRuntime.windowsUploadOnce).toBe("function");
   let state: "started" | "complete" | undefined; let streams = 0;
   const operations = {
+    allowFresh: true,
     state: async () => state,
     checkpoint: async (next: "started" | "complete") => { state = next; },
     upload: async () => { streams += 1; throw windowsFailure("mutation_unconfirmed", "upload", "unknown"); },
@@ -168,6 +169,50 @@ test("R1 typed helper conversion retains bounded redacted diagnostics only in it
   expect((failure as Error).cause).toBeInstanceOf(Error);
   expect(((failure as Error).cause as Error).message).toContain("synthetic-codec");
   expect(JSON.stringify(failure)).not.toContain("synthetic-codec");
+});
+test("R2 a resumed legacy staging phase cannot turn an absent upload claim into fresh authority", async () => {
+  let writes = 0;
+  await expect(winrmRuntime.windowsUploadOnce({
+    allowFresh: false, state: async () => undefined, checkpoint: async () => { writes += 1; },
+    upload: async () => { writes += 1; }, verify: async () => true,
+  })).rejects.toThrow("mutation_unconfirmed");
+  expect(writes).toBe(0);
+});
+test("R2 exit zero without a real command/shell transcript is refused", () => {
+  expect(() => windowsWinrmResult({ exitCode: 0, stdout: '{"ready":true}', failure: null,
+    teardown: { commandAttempted: false, commandStopped: false, shellAttempted: false, shellClosed: false },
+  }, true)).toThrow("helper_failed");
+  expect(windowsWinrmResult({ exitCode: 0, stdout: '{"ready":true}', failure: null,
+    teardown: { commandAttempted: true, commandStopped: false, shellAttempted: true, shellClosed: false },
+  }, true)).toEqual({ ready: true });
+});
+test("R2 completed upload claims may verify on resume without fresh upload authority", async () => {
+  let streamed = false;
+  await winrmRuntime.windowsUploadOnce({
+    allowFresh: false, state: async () => "complete", checkpoint: async () => {},
+    upload: async () => { streamed = true; }, verify: async () => true,
+  });
+  expect(streamed).toBe(false);
+});
+test("R2 live launch predicate violations are product failures, but transport exceptions are harness", async () => {
+  expect(typeof winrmRuntime.verifyWindowsLaunchContracts).toBe("function");
+  const session = { instanceId: "synthetic-session", generation: 1 };
+  const failure = await winrmRuntime.verifyWindowsLaunchContracts("https://synthetic.invalid", session,
+    async () => new Response('{"mode":"wrong","generation":1,"capability":"synthetic-never-real"}', { status: 200, headers: { "cache-control": "no-store" } })).catch(error => error);
+  expect(failure.evidence).toMatchObject({ class: "product", reason: "assertion_failed" });
+  const transport = await winrmRuntime.verifyWindowsLaunchContracts("https://synthetic.invalid", session,
+    async () => { throw new Error("synthetic transport error"); }).catch(error => error);
+  expect(transport.evidence.class).toBe("harness");
+});
+test("R2 live View and Control preserve the shared launch contract and scrub capability values", async () => {
+  const modes: string[] = [];
+  await winrmRuntime.verifyWindowsLaunchContracts("https://synthetic.invalid", { instanceId: "synthetic-session", generation: 2 },
+    async (_url, options) => {
+      const { mode, generation } = JSON.parse(String(options.body));
+      modes.push(mode);
+      return new Response(JSON.stringify({ mode, generation, capability: "synthetic-never-real" }), { status: 200, headers: { "cache-control": "no-store" } });
+    });
+  expect(modes).toEqual(["view", "control"]);
 });
 
 test("WinRM failures preserve legacy classification and actionable sanitized helper evidence", () => {

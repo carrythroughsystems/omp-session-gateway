@@ -51,6 +51,9 @@ test("qualification logging is explicit and refuses unsafe paths before install 
   const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
   expect(source).not.toContain("process.env.OMP_MAC_QUALIFICATION_LOG_DIR");
   expect(source).toContain("new SafeLogger(sink)");
+  for (const runtime of ["runtime", "priorRuntime", "target.runtime", "authoritative"]) {
+    expect(source).toContain(`${runtime}.qualificationLogProtocol === "structured-v1" ? logDirectory : undefined`);
+  }
 });
 
 test("exits promptly and closes staged resources when HTTP startup fails", async () => {
