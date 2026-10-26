@@ -53,6 +53,7 @@ export const ROUTINE_AUTHORITY_PATHS: Readonly<Record<string, string>> = {
 export const ROUTINE_IMPLEMENTATION_PATHS: Readonly<Record<string, string>> = {
   ".github/workflows/ci.yml": "Runs implementation checks, with no release signing/publication.",
   ".github/workflows/compatibility.yml": "Exercises compatibility checks.",
+  ".github/workflows/browser-flake-budget.yml": "Audits sanitized browser CI flakes without release authority.",
   ".github/workflows/droplet-qualification.yml": "Runs and cleans the Debian qualification host.",
   ".github/workflows/capacity-qualification.yml": "Exercises capacity qualification.",
   ".github/workflows/platform-qualification.yml": "Exercises platform qualification.",
@@ -75,6 +76,8 @@ export const ROUTINE_IMPLEMENTATION_PATHS: Readonly<Record<string, string>> = {
   "scripts/android-stages.ts": "Sequences Android test stages.",
   "scripts/android-webapk.ts": "Exercises installed Android shells.",
   "scripts/browser-journey.ts": "Exercises synthetic collaboration journeys.",
+  "scripts/browser-flake-reporter.ts": "Retains closed browser test-attempt evidence only.",
+  "scripts/browser-flake-budget.ts": "Audits browser CI flake budgets without authorizing releases.",
   "scripts/browserstack.ts": "Runs BrowserStack lane operations and cleanup.",
   "scripts/browserstack-pins.json": "Pins BrowserStack qualification targets.",
   "scripts/build-web.ts": "Builds web implementation assets, not publication authority.",

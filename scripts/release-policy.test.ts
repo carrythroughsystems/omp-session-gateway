@@ -68,6 +68,11 @@ describe("standing routine release authority", () => {
   test("DB-R4 cleanup predicate binding belongs to the protected authority surface", () => {
     expect(routineProtectedPath("scripts/stable-lanes.ts")).toBe(true);
   });
+  test("browser flake reporting and maintenance remain implementation checks, not release authority", () => {
+    for (const path of ["scripts/browser-flake-reporter.ts", "scripts/browser-flake-budget.ts", ".github/workflows/browser-flake-budget.yml"]) {
+      expect(routinePathClassification(path)?.authority).toBe(false);
+    }
+  });
   test.each(["scripts/qualification-failure.ts", "scripts/qualification-outcome.ts"])("protects qualification recovery contract %s", path => {
     expect(routinePathClassification(path)?.authority).toBe(true);
   });
