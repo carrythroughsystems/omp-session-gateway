@@ -11,9 +11,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Qualification-only private rotating structured gateway logs and bounded Push send/ack evidence.
   Push recovery permits one evidence-backed fresh ask per phase, preserves existing delivery bounds,
   records late posts and phase timings, and stops unexplained timeouts without retry.
-- Closed qualification failure and machine-outcome contracts, private atomic outcome persistence,
-  and additive schema-3 receipt validation. Unknown, mixed, unresolved or unbound failures remain
-  non-retryable; this change does not enable automatic recovery or reinterpret historical failures.
+- Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
+  and additive schema-3 receipt validation, including paired private readiness owner epochs and
+  closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
+  containment-consistent outcomes fail closed; resumed attempts clear stale failure authority.
+  Unknown, mixed, unresolved or unbound failures remain non-retryable; this change does not
+  enable automatic recovery or reinterpret historical failures.
 - Structured Windows transport failure evidence, bounded read-only reconnects, deadline-aware
   subprocess reaping, and interrupted-upload reconciliation without write replay. Cleanup skips
   confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,
