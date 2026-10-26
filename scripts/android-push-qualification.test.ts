@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runAndroidPush, runAndroidPushReadiness, waitForPushDelivery, emptyPushDeliveryMetrics, cleanupAndroidPush, parseAndroidPushProgress, androidPushNeedsCleanup,
@@ -9,12 +9,12 @@ import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { observeNotificationDump, parseAndroidUi, NotificationOverlapError, findAndroidNotification, tapAndroidNotification, notificationTopicDigest, notificationMatchesDigest, trackUnchangedNotificationPost } from "./android-notification.ts";
 import { requireAndroidPushDevice } from "./android-push-runtime.ts";
 import { webApkTasks, closeWebApk, setupAndroidWebApk, withWebApkSetupRestoration } from "./android-webapk.ts";
-import { parseFixtureCommand } from "./fixtures/push-qualification-extension.ts";
+import pushQualificationExtension, { parseFixtureCommand } from "./fixtures/push-qualification-extension.ts";
 import { withDevelopmentPixelLease } from "./android-pixel-lease.ts";
 import { runFixtureOperation, type FixtureExecutor } from "./push-qualification-fixture.ts";
 import { authenticateAndroidNotification, awaitPageExecutionContext, isPushNotificationRoute, holdAndroidNotificationDenial, ownedPushForwards, observePushLaunch } from "./android-push-runtime.ts";
 import { pixelUnrestored } from "./restoration.ts";
-import { QualificationFailure } from "./qualification-failure.ts";
+import { QualificationFailure, normalizeQualificationFailures } from "./qualification-failure.ts";
 
 const identity: AndroidPushIdentity = { tag: "v0.6.0-prealpha.1", candidate: { tag: "v0.6.0-prealpha.1", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64), archivePath: "synthetic.tar" },
   omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "c".repeat(40), sourceTree: "d".repeat(40), nativeTarballSha256: "e".repeat(64), nativeBinarySha256: "f".repeat(64) }, origin: "https://gateway.example.test" };
@@ -241,6 +241,78 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
 });
 
+test.each(["baseline", "mutation", "restoration"] as const)(
+  "council498 readiness %s persistence failure cannot skip any restoration owner", async point => {
+    const host = fake();
+    let cleaning = false, id = 80;
+    host.runtime.beginCleanup = () => { cleaning = true; };
+    host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+    host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
+    const checkpoint = host.input.checkpoint;
+    const error = await runAndroidPushReadiness({ ...host.input,
+      execution: { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => ++id },
+      checkpoint: async value => {
+        await checkpoint(value);
+        if (point === "baseline" || (point === "mutation" && host.state().effects > 1) || cleaning) throw new Error("synthetic checkpoint failure");
+      },
+    }).catch(error => error);
+    expect(host.cleanup).toEqual(["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"]);
+    expect(host.state()).toMatchObject({ started: false, asking: false, browser: browserBaseline, device: baseline });
+    expect(normalizeQualificationFailures(error).some(item => item.observations.persistenceFailed === true)).toBe(true);
+    expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  });
+
+test.each(["telemetry", "ownership", "answer", "clear"] as const)(
+  "495 round2 readiness rejects its expired delivery budget after %s awaits", async stage => {
+    const host = fake();
+    const telemetry = { sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
+    let reads = 0, answered = false, delayed = false;
+    host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+    const delay = async () => { if (!delayed) { delayed = true; await host.runtime.pause(160_001); } };
+    host.runtime.deliveryTelemetry = async () => { if (++reads === 2 && stage === "telemetry") await delay(); return telemetry; };
+    host.runtime.deliveryOwnership = async () => { if (stage === "ownership") await delay(); return 1; };
+    const fixture = host.runtime.fixture, observe = host.runtime.observe;
+    host.runtime.fixture = async (...args) => {
+      await fixture(...args);
+      if (args[0] === "answer") { answered = true; if (stage === "answer") await delay(); }
+    };
+    host.runtime.observe = async (...args) => {
+      if (answered && stage === "clear") await delay();
+      return observe(...args);
+    };
+    await expect(runAndroidPushReadiness(host.input)).rejects.toMatchObject({ evidence: { reason: "delivery_timeout", class: "harness" } });
+    expect(host.cleanup).toHaveLength(7);
+  });
+
+test("495 round2 all persisted delivery durations are bounded integers", async () => {
+  const host = fake(), now = host.runtime.now;
+  let fraction = 0;
+  host.runtime.now = () => now() + fraction++ / 1_000;
+  await runAndroidPush(host.input);
+  const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+  for (const result of Object.values(progress.results)) {
+    for (const value of Object.values(result)) if (typeof value === "number") expect(Number.isSafeInteger(value)).toBe(true);
+  }
+  for (const key of ["elapsedMs", "firstDeliveryMs", "secondDeliveryMs", "clearMs", "latePostMs"]) {
+    for (const value of [0.125, 86_400_001, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => parseAndroidPushProgress({ ...progress, results: { private_verified: { [key]: value } } })).toThrow();
+    }
+  }
+});
+
+test.each(["metadata", "phase"] as const)("495 round2 qualification checks the %s success boundary after awaits", async stage => {
+  const host = fake(), controller = new AbortController(), snapshot = host.runtime.snapshot, sinks = host.runtime.sinks;
+  let delayed = false;
+  if (stage === "metadata") host.runtime.snapshot = async (...args) => {
+    const current = await snapshot(...args);
+    if (current?.inputRequired && !delayed) { delayed = true; await host.runtime.pause(90_001); }
+    return current;
+  };
+  else host.runtime.sinks = async (...args) => { const result = await sinks(...args); controller.abort(); return result; };
+  await expect(runAndroidPush({ ...host.input, execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } }))
+    .rejects.toMatchObject({ evidence: { class: "harness", reason: stage === "metadata" ? "delivery_metadata_timeout" : "delivery_timeout" } });
+  expect(host.cleanup).toHaveLength(7);
+});
 test("R1 fractional monotonic measurements remain typed and R4 telemetry errors retain late sampling", async () => {
   const host = fake(), metrics = emptyPushDeliveryMetrics();
   await host.runtime.fixture("start", "synthetic"); await host.runtime.fixture("ask", "synthetic");
@@ -332,6 +404,99 @@ test("R2 readiness preserves a late delivery observed during restoration", async
   await expect(runAndroidPushReadiness(host.input)).rejects.toMatchObject({
     evidence: { lane: "rigReadiness", class: "harness", reason: "delivery_timeout", observations: { latePostCount: 1, latePostMs: 160_500 } },
   });
+});
+
+test.each(["telemetry", "request"] as const)("495 R6 cancellation during %s cannot finish a delivery", async stage => {
+  const host = fake(), metrics = emptyPushDeliveryMetrics(), controller = new AbortController();
+  await host.runtime.fixture("start", "synthetic"); await host.runtime.fixture("ask", "synthetic");
+  const session = (await host.runtime.snapshot("synthetic"))!;
+  host.runtime.observe = async () => ({ count: 1, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.deliveryTelemetry = async () => {
+    if (stage === "telemetry") controller.abort();
+    return { sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
+  };
+  host.runtime.deliveryRequestMatches = async () => { controller.abort(); return true; };
+  if (stage === "request") metrics.deliveryRearmCount = 1;
+  let sample: (() => Promise<void>) | undefined;
+  await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention", phase: "private_verified",
+    timeout: 60_000, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
+    execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 },
+    onTimeout: value => { sample = value; } })).rejects.toMatchObject({ evidence: { reason: "delivery_timeout", class: "harness" } });
+  expect(sample).toBeDefined();
+});
+
+test.each(["instance", "generation"] as const)("495 R4 %s changes after clearing stop before the next ask", async variant => {
+  const host = fake(), fixture = host.runtime.fixture, snapshot = host.runtime.snapshot;
+  let asks = 0, answered = false;
+  host.runtime.fixture = async (...args) => {
+    if (args[0] === "ask") asks++;
+    if (args[0] === "answer") answered = true;
+    await fixture(...args);
+  };
+  host.runtime.snapshot = async (...args) => {
+    const session = await snapshot(...args);
+    return session === undefined || !answered ? session : { ...session,
+      ...(variant === "instance" ? { instanceId: "foreign-instance" } : { generation: session.generation + 1 }) };
+  };
+  host.runtime.observe = async () => ({ count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: answered ? 1 : 0,
+    failures: answered ? 0 : 1, retryable: !answered, httpStatus: 503, clearAcknowledged: answered, requestAlias: 1 });
+  await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { class: "harness", reason: "invalid_evidence" } });
+  expect(asks).toBe(1);
+});
+
+test.each(["readiness", "qualification"] as const)("495 R5 %s metadata timeout retains late-post evidence", async lane => {
+  const host = fake(), snapshot = host.runtime.snapshot, cleanup = host.runtime.cleanup;
+  let late = false;
+  host.runtime.snapshot = async (...args) => {
+    const session = await snapshot(...args);
+    return session?.inputRequired ? undefined : session;
+  };
+  host.runtime.observe = async () => ({ count: late ? 1 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.beginDeliveryTelemetry = async phase => ({ lane: phase === "readiness" ? "rigReadiness" : "androidPush", phase, after: 0, ordinal: 1 });
+  host.runtime.cleanup = async (...args) => {
+    await cleanup(...args);
+    if (args[0] === "fixtureAsk") { late = true; await host.runtime.pause(500); }
+  };
+  const failure = lane === "readiness" ? runAndroidPushReadiness(host.input) : runAndroidPush(host.input);
+  await expect(failure).rejects.toMatchObject({ evidence: { reason: "delivery_metadata_timeout", class: "harness" } });
+  if (lane === "readiness") await expect(failure).rejects.toMatchObject({ evidence: { observations: { latePostCount: 1, latePostMs: 90_500 } } });
+  else expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results.private_verified).toMatchObject({ latePostCount: 1, latePostMs: 90_500 });
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+});
+
+test("495 A1 readiness late-observer failure cannot skip subsequent restoration owners", async () => {
+  const host = fake(), cleanup = host.runtime.cleanup;
+  let cleaning = false;
+  host.runtime.observe = async () => {
+    if (cleaning) throw new Error("synthetic late observer failure");
+    return { count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false };
+  };
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, sends: 0, acknowledgements: 0, failures: 0, retryable: false, httpStatus: 0 });
+  host.runtime.cleanup = async (...args) => { cleaning = true; await cleanup(...args); };
+  let failure: unknown;
+  try { await runAndroidPushReadiness(host.input); } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect(host.cleanup).toEqual(["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"]);
+  expect(pixelUnrestored(failure)).toBe(false);
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+});
+
+test("495 R7 phase durations are bounded integer observations on write and read", async () => {
+  const host = fake(), now = host.runtime.now;
+  let fraction = 0;
+  host.runtime.now = () => now() + fraction++ / 1_000;
+  await runAndroidPush(host.input);
+  const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+  for (const phase of Object.values(progress.results)) {
+    expect(Number.isSafeInteger(phase.phaseElapsedMs)).toBe(true);
+    expect(phase.phaseElapsedMs as number).toBeLessThanOrEqual(86_400_000);
+  }
+  for (const phaseElapsedMs of [0.125, -1, 86_400_001, Number.MAX_SAFE_INTEGER + 1]) {
+    expect(() => parseAndroidPushProgress({ ...progress, results: { private_verified: { phaseElapsedMs } } })).toThrow();
+  }
 });
 
 test("R3 each delivery keeps its own first and second timing in a multi-delivery phase", async () => {
@@ -1248,8 +1413,67 @@ test("a changed Pixel owner refuses release without hiding the action failure", 
 test("fixture commands are owned, bounded, and monotonically sequenced", () => {
   const epoch = randomUUID();
   expect(parseFixtureCommand({ epoch, sequence: 2, operation: "replace" }, epoch, 1)).toEqual({ sequence: 2, operation: "replace" });
+  expect(parseFixtureCommand({ epoch, sequence: 2, operation: "ask", expectedSessionId: "session-before" }, epoch, 1))
+    .toEqual({ sequence: 2, operation: "ask", expectedSessionId: "session-before" });
   for (const record of [{ epoch, sequence: 1, operation: "ask" }, { epoch: randomUUID(), sequence: 2, operation: "ask" },
-    { epoch, sequence: 2, operation: "shell" }, { epoch, sequence: 2, operation: "ask", data: "synthetic" }]) {
+    { epoch, sequence: 2, operation: "shell" }, { epoch, sequence: 2, operation: "ask", data: "synthetic" },
+    { epoch, sequence: 2, operation: "answer", expectedSessionId: "session-before" },
+    ...["", "x".repeat(129), "session/unsafe", 1].map(expectedSessionId => ({ epoch, sequence: 2, operation: "ask", expectedSessionId }))]) {
     expect(() => parseFixtureCommand(record, epoch, 1)).toThrow("invalid fixture command");
+  }
+});
+
+test("495 round2 fixture controller carries its last acknowledged private session into the guarded ask", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fixture-guard-")), epoch = randomUUID();
+  await writeFile(join(root, "owner"), epoch);
+  await writeFile(join(root, "ack.json"), JSON.stringify({ epoch, sequence: 0, phase: "ready", sessionId: "session-before" }));
+  const operation = runFixtureOperation({ root, epoch, binary: "synthetic", bun: process.execPath, scripts: root }, "ask", async () => {
+    throw new Error("guarded control must not launch a process");
+  }, true);
+  try {
+    let command: Record<string, unknown> | undefined;
+    for (let attempt = 0; attempt < 100 && command === undefined; attempt++) {
+      command = await readFile(join(root, "command.json"), "utf8").then(text => JSON.parse(text)).catch(() => undefined);
+      if (command === undefined) await Bun.sleep(5);
+    }
+    expect(command?.expectedSessionId).toBe("session-before");
+  } finally {
+    await writeFile(join(root, "ack.json"), JSON.stringify({ epoch, sequence: 1, phase: "accepted" }));
+    await operation;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.each([false, true])("495 round2 fixture requires a private command and its acknowledged session (changed=%s)", async changed => {
+  const root = await mkdtemp(join(tmpdir(), "extension-guard-")), epoch = randomUUID();
+  const priorRoot = process.env.OMP_PUSH_FIXTURE_ROOT, priorEpoch = process.env.OMP_PUSH_FIXTURE_EPOCH;
+  process.env.OMP_PUSH_FIXTURE_ROOT = root; process.env.OMP_PUSH_FIXTURE_EPOCH = epoch;
+  let handler!: Parameters<Parameters<typeof pushQualificationExtension>[0]["registerCommand"]>[1]["handler"];
+  let selected = 0;
+  pushQualificationExtension({ on() {}, sendUserMessage() {}, setSessionName: async () => {},
+    registerCommand(_name, command) { handler = command.handler; } });
+  const running = handler("", { hasUI: true, sessionManager: { getSessionId: () => changed ? "session-after" : "session-before" },
+    isIdle: () => true, abort() {}, shutdown() {}, newSession: async () => ({ cancelled: false }),
+    ui: { select: async () => { selected++; return undefined; } } });
+  try {
+    await writeFile(join(root, "command.json"), JSON.stringify({ epoch, sequence: 1, operation: "ask", expectedSessionId: "session-before" }), { mode: 0o600 });
+    expect(((await stat(join(root, "command.json"))).mode & 0o077) === 0).toBe(process.platform !== "win32");
+    let ack: Record<string, unknown> | undefined;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      ack = await readFile(join(root, "ack.json"), "utf8").then(text => JSON.parse(text)).catch(() => undefined);
+      if (ack?.sequence === 1) break;
+      await Bun.sleep(5);
+    }
+    // This retained-Mac fixture deliberately requires POSIX private files. Windows cannot make
+    // this command's mode 0600; prove refusal there rather than weakening the admission check.
+    const refused = changed || process.platform === "win32";
+    expect(ack?.phase).toBe(refused ? "failed" : "accepted");
+    expect(selected).toBe(refused ? 0 : 1);
+  } finally {
+    await writeFile(join(root, "command.json"), JSON.stringify({ epoch, sequence: 2, operation: "stop" }), { mode: 0o600 });
+    await running;
+    if (priorRoot === undefined) delete process.env.OMP_PUSH_FIXTURE_ROOT; else process.env.OMP_PUSH_FIXTURE_ROOT = priorRoot;
+    if (priorEpoch === undefined) delete process.env.OMP_PUSH_FIXTURE_EPOCH; else process.env.OMP_PUSH_FIXTURE_EPOCH = priorEpoch;
+    await rm(root, { recursive: true, force: true });
   }
 });

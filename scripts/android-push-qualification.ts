@@ -9,11 +9,11 @@ import type { OmpPins } from "./stable-qualification.ts";
 import type { PushDetailLevel, SessionMetadata } from "../packages/protocol/src/types.ts";
 import type { PushFixtureCommand } from "./fixtures/push-qualification-extension.ts";
 import { NotificationOverlapError, notificationTopicDigest, type NotificationObservation } from "./android-notification.ts";
-import { createAndroidPushRuntime } from "./android-push-runtime.ts";
+import { createAndroidPushRuntime, rethrowPushSafetyFailure } from "./android-push-runtime.ts";
 import { withDevelopmentPixelLease } from "./android-pixel-lease.ts";
 import { executeFixture } from "./push-qualification-fixture.ts";
 import { everyError, pixelUnrestored } from "./restoration.ts";
-import { normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
+import { FAILURE_LIMITS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
 import type { QualificationLogWindow, PushDeliveryTelemetry } from "./qualification-logs.ts";
 
 export interface PushExecution { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
@@ -27,6 +27,35 @@ export function emptyPushDeliveryMetrics(): PushDeliveryMetrics {
   return { firstDeliveryMs: 0, secondDeliveryMs: 0, deliveryRearmCount: 0, deliveryRearmReason: 0, sends: 0, acknowledgements: 0, latePostCount: 0, latePostMs: 0, clearMs: 0, deliveryTimings: [] };
 }
 
+/** Every success boundary checks both the execution budget and its own observation window. */
+function pushBudgetExpired(runtime: AndroidPushRuntime, execution: PushExecution | undefined, start?: number, timeout = Infinity): boolean {
+  return execution !== undefined && (execution.signal.aborted || performance.now() >= execution.deadline) ||
+    start !== undefined && runtime.now() - start >= timeout;
+}
+
+function pushMilliseconds(value: number): number {
+  const elapsed = Math.round(value);
+  if (!Number.isSafeInteger(elapsed) || elapsed < 0 || elapsed > FAILURE_LIMITS.elapsedMs) throw new Error("invalid bounded Push duration");
+  return elapsed;
+}
+
+async function checkedDelivery(runtime: AndroidPushRuntime, session: SessionMetadata, kind: "attention" | "activity_stop",
+  detail: PushDetailLevel, privacyFailed: () => never): Promise<NotificationObservation> {
+  await runtime.assertNotificationOwnership();
+  const observed = await runtime.observe(session, kind, detail);
+  if (observed.count > 1 || observed.forbiddenFound || observed.count === 1 && (!observed.titleMatches || !observed.bodyMatches)) privacyFailed();
+  return observed;
+}
+
+function lateDeliveryObserver(observe: () => Promise<NotificationObservation>, now: () => number,
+  started: number, metrics: PushDeliveryMetrics, seen = false): () => Promise<void> {
+  return async () => {
+    if ((await observe()).count === 1 && !seen) {
+      seen = true; metrics.latePostCount++; metrics.latePostMs = pushMilliseconds(now() - started);
+    }
+  };
+}
+
 /** A fresh ask is issued only after a typed service failure and an authoritative old-ask clear. */
 export async function waitForPushDelivery(options: {
   runtime: AndroidPushRuntime; session: SessionMetadata; detail: PushDetailLevel; kind: "attention" | "activity_stop";
@@ -38,7 +67,7 @@ export async function waitForPushDelivery(options: {
   const { runtime, metrics } = options;
   let session = options.session, window = options.window;
   const fail = (reason: "privacy_failed" | "delivery_timeout" | "invalid_evidence" | "push_service_failure", elapsedMs: number, status = 0): never => {
-    const common = { id: options.execution?.nextFailureId() ?? 1, lane: "androidPush" as const, step: options.phase, elapsedMs: Math.round(elapsedMs),
+    const common = { id: options.execution?.nextFailureId() ?? 1, lane: "androidPush" as const, step: options.phase, elapsedMs: pushMilliseconds(elapsedMs),
       operation: "read_only" as const, observations: { firstDeliveryMs: metrics.firstDeliveryMs, secondDeliveryMs: metrics.secondDeliveryMs,
         rearmCount: metrics.deliveryRearmCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs, clearMs: metrics.clearMs } };
     if (reason === "privacy_failed") throw new QualificationFailure({ ...common, reason, class: "product" });
@@ -47,38 +76,37 @@ export async function waitForPushDelivery(options: {
     if (reason === "invalid_evidence") throw new QualificationFailure({ ...common, reason, class: "harness" });
     throw new QualificationFailure({ ...common, reason: "delivery_timeout", class: "harness" });
   };
-  const checked = async (target: SessionMetadata) => {
-    await runtime.assertNotificationOwnership();
-    const observed = await runtime.observe(target, options.kind, options.detail);
-    if (observed.count > 1 || observed.forbiddenFound || observed.count === 1 && (!observed.titleMatches || !observed.bodyMatches)) fail("privacy_failed", 0);
-    return observed;
-  };
+  const checked = (target: SessionMetadata) => checkedDelivery(runtime, target, options.kind, options.detail, () => fail("privacy_failed", 0));
   const timing = metrics.deliveryTimings.length;
   if (timing >= 128) fail("invalid_evidence", 0);
   metrics.deliveryTimings.push(0, 0);
-  const exhausted = () => options.execution !== undefined &&
-    (options.execution.signal.aborted || performance.now() >= options.execution.deadline);
+  const exhausted = () => pushBudgetExpired(runtime, options.execution);
   for (let attempt = 0; attempt < 2; attempt++) {
     const start = runtime.now();
     let delivered = false;
     try {
-      while (runtime.now() - start < options.timeout && !exhausted()) {
-        if ((await checked(session)).count === 1 && runtime.now() - start < options.timeout && !exhausted()) { delivered = true; break; }
+      while (!pushBudgetExpired(runtime, options.execution, start, options.timeout)) {
+        if ((await checked(session)).count === 1 && !pushBudgetExpired(runtime, options.execution, start, options.timeout)) { delivered = true; break; }
         await runtime.pause(Math.min(500, Math.max(0, options.timeout - (runtime.now() - start))));
       }
     } catch (error) {
+      rethrowPushSafetyFailure(error);
       if (!exhausted() || error instanceof QualificationFailure || error instanceof NotificationOverlapError) throw error;
     }
-    const elapsed = Math.round(runtime.now() - start);
+    const elapsed = pushMilliseconds(runtime.now() - start);
     metrics.deliveryTimings[timing + attempt] = elapsed;
     if (attempt === 0 && timing === 0) metrics.firstDeliveryMs = elapsed;
     if (attempt === 1) metrics.secondDeliveryMs = elapsed;
     const timedOutSession = session;
-    let lateSeen = false;
-    const late = async () => {
-      if ((await checked(timedOutSession)).count === 1 && !lateSeen) {
-        lateSeen = true; metrics.latePostCount++; metrics.latePostMs = Math.round(runtime.now() - start);
-      }
+    const late = lateDeliveryObserver(() => checked(timedOutSession), runtime.now, start, metrics, delivered);
+    const requireTime = () => {
+      if (!pushBudgetExpired(runtime, options.execution, start, options.timeout)) return;
+      const duration = pushMilliseconds(runtime.now() - start);
+      metrics.deliveryTimings[timing + attempt] = duration;
+      if (attempt === 0 && timing === 0) metrics.firstDeliveryMs = duration;
+      if (attempt === 1) metrics.secondDeliveryMs = duration;
+      options.onTimeout?.(late);
+      fail("delivery_timeout", duration);
     };
     if (!delivered) {
       options.onTimeout?.(late);
@@ -88,11 +116,18 @@ export async function waitForPushDelivery(options: {
     }
     let telemetry: PushDeliveryTelemetry | undefined;
     try { telemetry = window === undefined || runtime.deliveryTelemetry === undefined ? undefined : await runtime.deliveryTelemetry(window); }
-    catch { return fail("invalid_evidence", elapsed); }
+    catch (error) { rethrowPushSafetyFailure(error); if (exhausted()) requireTime(); return fail("invalid_evidence", elapsed); }
     metrics.sends += telemetry?.sends ?? 0;
     metrics.acknowledgements += telemetry?.acknowledgements ?? 0;
     if (delivered) {
-      if (options.kind === "attention" && metrics.deliveryRearmCount > 0 && (runtime.deliveryRequestMatches === undefined || !await runtime.deliveryRequestMatches(session))) fail("invalid_evidence", elapsed);
+      if (options.kind === "attention" && metrics.deliveryRearmCount > 0) {
+        let matches = false;
+        try { matches = await runtime.deliveryRequestMatches?.(session) ?? false; }
+        catch (error) { if (exhausted()) requireTime(); throw error; }
+        requireTime();
+        if (!matches) fail("invalid_evidence", elapsed);
+      }
+      requireTime();
       options.onTimeout?.(undefined);
       return session;
     }
@@ -102,12 +137,14 @@ export async function waitForPushDelivery(options: {
     await checked(session);
     try {
       ownedAlias = await runtime.deliveryOwnership?.(session);
-    } catch { return fail("invalid_evidence", elapsed); }
+    } catch (error) { rethrowPushSafetyFailure(error); if (exhausted()) requireTime(); return fail("invalid_evidence", elapsed); }
+    if (exhausted()) requireTime();
     if (ownedAlias === undefined || ownedAlias !== telemetry.requestAlias) return fail("invalid_evidence", elapsed);
     if (metrics.deliveryRearmCount !== 0 || attempt !== 0 || options.rearm === undefined) return fail("push_service_failure", elapsed, telemetry.httpStatus);
     metrics.deliveryRearmCount = 1; metrics.deliveryRearmReason = 1; // 1 = provider 429/retryable 5xx
     options.onTimeout?.(undefined);
     const fresh = await options.rearm({ ...session, qualificationPushAlias: ownedAlias }, late);
+    if (exhausted()) requireTime();
     if (fresh.session.instanceId !== session.instanceId || fresh.session.generation !== session.generation ||
       fresh.session.ask === undefined || fresh.session.ask.requestId === session.ask?.requestId) fail("invalid_evidence", elapsed);
     session = fresh.session; window = fresh.window;
@@ -162,7 +199,7 @@ export interface AndroidPushRuntime {
   dndOff(): Promise<boolean>;
   device(): Promise<PushDeviceBaseline>;
   browser(): Promise<PushBrowserBaseline>;
-  fixture(operation: "start" | PushFixtureCommand, epoch: string, role?: PushFixtureRole): Promise<void>;
+  fixture(operation: "start" | PushFixtureCommand, epoch: string, role?: PushFixtureRole, expectedOwner?: SessionMetadata): Promise<void>;
   snapshot(epoch: string, role?: PushFixtureRole): Promise<SessionMetadata | undefined>;
   beginNotificationPhase(epoch: string, phase?: AndroidPushPhase): Promise<void>;
   assertNotificationOwnership(): Promise<void>;
@@ -292,13 +329,14 @@ export function parseAndroidPushProgress(value: unknown): AndroidPushProgress {
         continue;
       }
       if ((key === "dndOff" && item !== true) || (key === "rearmCount" && item !== 1) ||
-        (key === "rearmReason" && item !== "unowned_notification_overlap") || (key === "phaseElapsedMs" && typeof item !== "number")) throw new Error("invalid Android Push phase observation");
+        (key === "rearmReason" && item !== "unowned_notification_overlap") ||
+        (key === "phaseElapsedMs" && (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0 || item > FAILURE_LIMITS.elapsedMs))) throw new Error("invalid Android Push phase observation");
       if ((!["dndOff", "phaseElapsedMs", "rearmCount", "rearmReason", ...DELIVERY_FIELDS].includes(key) && !RESULT_FIELDS[phase as AndroidPushPhase]?.includes(key)) || !/^[a-z][A-Za-z]{0,47}$/u.test(key) || /(capability|password|secret|authKey|token|bearer)/iu.test(key) ||
-        (typeof item !== "boolean" && !(typeof item === "number" && Number.isFinite(item) && item >= 0) &&
+        (typeof item !== "boolean" && !(typeof item === "number" && Number.isSafeInteger(item) && item >= 0 && item <= FAILURE_LIMITS.elapsedMs) &&
           ["delivered_while_force_stopped", "suppressed_until_relaunch", "delivered_during_doze", "delivered_after_doze_exit", "undelivered_after_doze_exit", "cellular_path_unavailable", "unowned_notification_overlap"].includes(String(item)) === false)) throw new Error("unsafe Android Push evidence");
     }
     const recorded = result as Record<string, unknown>;
-    if (DELIVERY_FIELDS.some(key => recorded[key] !== undefined && (typeof recorded[key] !== "number" || !Number.isFinite(recorded[key]) || (recorded[key] as number) < 0 || (recorded[key] as number) > 86_400_000)) ||
+    if (DELIVERY_FIELDS.some(key => recorded[key] !== undefined && (typeof recorded[key] !== "number" || !Number.isSafeInteger(recorded[key]) || (recorded[key] as number) < 0 || (recorded[key] as number) > FAILURE_LIMITS.elapsedMs)) ||
       (recorded.deliveryRearmCount !== undefined && ![0, 1].includes(recorded.deliveryRearmCount as number)) ||
       (recorded.deliveryRearmReason !== undefined && ![0, 1].includes(recorded.deliveryRearmReason as number))) throw new Error("invalid delivery timing evidence");
     if ((recorded.rearmCount === undefined) !== (recorded.rearmReason === undefined)) throw new Error("incomplete Android Push re-arm observation");
@@ -311,6 +349,10 @@ export function androidPushNeedsCleanup(progress: unknown): boolean {
   return progress !== undefined && parseAndroidPushProgress(progress).cleanupRequired;
 }
 
+async function checkpointPushProgress(input: LaneInput, progress: AndroidPushProgress): Promise<void> {
+  await input.checkpoint(structuredClone(parseAndroidPushProgress(progress)));
+}
+
 export async function preflightAndroidPush(input: AndroidPushPreflightInput, runtime?: AndroidPushRuntime): Promise<AndroidPushAdmission> {
   validateOrigin(input.origin);
   const host = runtime ?? createAndroidPushRuntime({ origin: input.origin,
@@ -320,15 +362,27 @@ export async function preflightAndroidPush(input: AndroidPushPreflightInput, run
 
 async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: AndroidPushProgress, sampleLate?: () => Promise<void>): Promise<Record<string, unknown>> {
   const failures: string[] = [];
-  runtime.beforeEffect = async () => { await input.checkpoint(structuredClone(progress)); };
+  const errors: unknown[] = [];
+  let persistenceFailed = false;
+  // Persistence fences new mutations, not restoration of an already captured baseline.
+  runtime.beforeEffect = async () => {
+    try { await checkpointPushProgress(input, progress); }
+    catch { persistenceFailed = true; }
+  };
   for (const step of CLEANUP_STEPS) {
-    try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch { failures.push(step); }
+    try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch (error) { failures.push(step); errors.push(error); }
     if (["fixtureAsk", "doze", "network"].includes(step)) await sampleLate?.();
   }
-  if (failures.length > 0) throw Object.assign(new Error(`Android Push cleanup failed: ${failures.join(", ")}`), { pixelUnrestored: true });
-  progress.cleanupRequired = false;
-  progress.phase = "restored";
-  await input.checkpoint(structuredClone(progress));
+  if (failures.length === 0) {
+    progress.cleanupRequired = false;
+    progress.phase = "restored";
+  }
+  await runtime.beforeEffect();
+  if (persistenceFailed) errors.push(new QualificationFailure({
+    id: input.execution?.nextFailureId() ?? 1, lane: "androidPushCleanup", step: "containment",
+    reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },
+  }));
+  if (errors.length > 0) throw Object.assign(new AggregateError(errors, "Android Push restoration or persistence failed"), { pixelUnrestored: true });
   return { epoch: progress.epoch, restored: true, deviceRestored: true, browserRestored: true, fixtureStopped: true };
 }
 
@@ -348,58 +402,94 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
   return input.pixel("androidPush-readiness", async () => {
     const progress: AndroidPushProgress = { lane: "androidPush", epoch: randomUUID(), binding: binding(input.identity), phase: "baseline_captured",
       cleanupRequired: true, device: await runtime.device(), browser: null, notificationTopicDigest: null, secondaryNotificationTopicDigest: null, results: {} };
-    runtime.beforeEffect = () => input.checkpoint(structuredClone(progress));
-    await runtime.beforeEffect();
+    runtime.beforeEffect = () => checkpointPushProgress(input, progress);
     let primary: unknown, delivered = false, roundTripMs = 0, deliveryStarted = 0;
     let sampleLate: (() => Promise<void>) | undefined;
     const metrics = emptyPushDeliveryMetrics();
+    let budgetStart: number | undefined;
+    const requireBudget = () => {
+      if (!pushBudgetExpired(runtime, input.execution, budgetStart, PUSH_RECOVERY_MS)) return;
+      throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
+        class: "harness", reason: "delivery_timeout", operation: "read_only",
+        elapsedMs: budgetStart === undefined ? 0 : pushMilliseconds(runtime.now() - budgetStart),
+        observations: { latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } });
+    };
     const waitSnapshot = async (predicate: (session: SessionMetadata) => boolean) => {
-      const deadline = runtime.now() + 90_000;
-      while (runtime.now() < deadline) {
-        const session = await runtime.snapshot(progress.epoch);
-        if (session !== undefined && predicate(session)) return session;
-        await runtime.pause(500);
+      const start = runtime.now(), deadline = start + 90_000;
+      try {
+        while (runtime.now() < deadline) {
+          requireBudget();
+          const session = await runtime.snapshot(progress.epoch);
+          requireBudget();
+          if (pushBudgetExpired(runtime, input.execution, start, 90_000)) break;
+          if (session !== undefined && predicate(session)) return session;
+          await runtime.pause(500);
+          requireBudget();
+        }
+      } catch (error) {
+        rethrowPushSafetyFailure(error);
+        if (error instanceof QualificationFailure || error instanceof AggregateError) throw error;
       }
-      throw new Error("Push readiness metadata unavailable");
+      throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
+        class: "harness", reason: "delivery_metadata_timeout", operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - start),
+        observations: { timeoutMs: 90_000 } });
     };
     try {
-      progress.browser = await runtime.browser(); await runtime.beforeEffect();
+      await runtime.beforeEffect(); requireBudget();
+      progress.browser = await runtime.browser(); requireBudget();
+      await runtime.beforeEffect(); requireBudget();
       if (progress.browser.permission !== "granted") throw new Error("Push readiness permission prerequisite");
-      await runtime.fixture("start", progress.epoch);
+      await runtime.fixture("start", progress.epoch); requireBudget();
       const published = await waitSnapshot(session => session.canView && session.canControl && !session.inputRequired);
       progress.notificationTopicDigest = notificationTopicDigest(`omp-attention-${published.instanceId}`);
-      await runtime.beforeEffect();
-      await runtime.beginNotificationPhase(progress.epoch, "private_verified");
-      await runtime.detail("private"); await runtime.closePwa(); await runtime.lock();
+      await runtime.beforeEffect(); requireBudget();
+      await runtime.beginNotificationPhase(progress.epoch, "private_verified"); requireBudget();
+      await runtime.detail("private"); requireBudget();
+      await runtime.closePwa(); requireBudget();
+      await runtime.lock(); requireBudget();
       const window = await runtime.beginDeliveryTelemetry?.("readiness");
+      requireBudget();
       if (window === undefined) throw new Error("Push readiness telemetry unavailable");
       deliveryStarted = runtime.now();
-      await runtime.fixture("ask", progress.epoch);
+      budgetStart = deliveryStarted;
+      sampleLate = lateDeliveryObserver(() => checkedDelivery(runtime, published, "attention", "private", () => {
+        throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
+          class: "product", reason: "assertion_failed", operation: "read_only", elapsedMs: 0, observations: {} });
+      }), runtime.now, deliveryStarted, metrics);
+      await runtime.fixture("ask", progress.epoch, "primary", published); requireBudget();
       const session = await waitSnapshot(session => session.inputRequired);
       const remaining = PUSH_RECOVERY_MS - (runtime.now() - deliveryStarted);
       await waitForPushDelivery({ runtime, session, detail: "private", kind: "attention", phase: "private_verified",
         timeout: Math.max(0, remaining), metrics, window, onTimeout: sample => { sampleLate = sample; },
         ...(input.execution === undefined ? {} : { execution: input.execution }) });
-      roundTripMs = Math.round(runtime.now() - deliveryStarted);
+      requireBudget();
       const telemetry = await runtime.deliveryTelemetry?.(window);
+      requireBudget();
       const ownedAlias = await runtime.deliveryOwnership?.(session);
+      requireBudget();
+      roundTripMs = pushMilliseconds(runtime.now() - deliveryStarted);
       if (telemetry?.sufficient !== true || telemetry.acknowledgements !== 1 || ownedAlias === undefined ||
         ownedAlias !== telemetry.requestAlias) throw new QualificationFailure({
         id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push", class: "harness", reason: "invalid_evidence",
         elapsedMs: roundTripMs, operation: "read_only", observations: {} });
       const start = runtime.now();
-      await runtime.fixture("answer", progress.epoch);
+      budgetStart = start;
+      await runtime.fixture("answer", progress.epoch); requireBudget();
       const settled = await waitSnapshot(session => !session.inputRequired);
-      while ((await runtime.observe(settled, "attention", "private")).count !== 0) {
-        if (runtime.now() - start >= PUSH_RECOVERY_MS) throw new Error("Push readiness clear unavailable");
+      while (true) {
+        const observed = await runtime.observe(settled, "attention", "private");
+        requireBudget();
+        if (observed.count === 0) break;
         await runtime.pause(500);
+        requireBudget();
       }
-      metrics.clearMs = Math.round(runtime.now() - start);
+      metrics.clearMs = pushMilliseconds(runtime.now() - start);
+      requireBudget();
       delivered = true;
     } catch (error) {
       if (error instanceof QualificationFailure && error.evidence.lane === "androidPush") {
         const evidence = error.evidence;
-        const common = { id: evidence.id, lane: "rigReadiness" as const, step: "pixel_push" as const, elapsedMs: Math.round(runtime.now() - deliveryStarted),
+        const common = { id: evidence.id, lane: "rigReadiness" as const, step: "pixel_push" as const, elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted),
           operation: evidence.operation, observations: evidence.observations };
         if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
         else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" });
@@ -409,7 +499,16 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     }
     runtime.beginCleanup?.();
     let cleanup: Record<string, unknown>;
-    try { cleanup = await restore(input, runtime, progress, sampleLate); }
+    try { cleanup = await restore(input, runtime, progress, async () => {
+      if (sampleLate === undefined) return;
+      try { await sampleLate(); }
+      catch (error) {
+        if (primary instanceof QualificationFailure) primary = new QualificationFailure({ ...primary.evidence,
+          observations: { ...primary.evidence.observations, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } });
+        primary = new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness and late observation failed");
+        sampleLate = undefined;
+      }
+    }); }
     catch (error) {
       throw Object.assign(new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness restoration failed"), { pixelUnrestored: true });
     }
@@ -432,7 +531,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
   return input.pixel("androidPush", async () => {
     const progress: AndroidPushProgress = { lane: "androidPush", epoch: randomUUID(), binding: bind, phase: "baseline_captured", cleanupRequired: true,
       device: await runtime.device(), browser: null, notificationTopicDigest: null, secondaryNotificationTopicDigest: null, results: {} };
-    const save = async () => { await input.checkpoint(structuredClone(progress)); };
+    const save = async () => { await checkpointPushProgress(input, progress); };
     runtime.beforeEffect = save;
     await save();
     let primary: unknown;
@@ -440,43 +539,78 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
     let activePhase: AndroidPushPhase = "subscription_ready";
     let metrics = emptyPushDeliveryMetrics();
     let lateDelivery: (() => Promise<void>) | undefined;
+    const phaseElapsed = () => {
+      try { return pushMilliseconds(runtime.now() - phaseStarted); }
+      catch { throw new QualificationFailure({
+          id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "harness", reason: "invalid_evidence",
+          elapsedMs: 0, operation: "read_only", observations: {} }); }
+    };
+    const requireExecution = () => {
+      if (pushBudgetExpired(runtime, input.execution)) throw new QualificationFailure({
+        id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "harness", reason: "delivery_timeout",
+        elapsedMs: phaseElapsed(), operation: "read_only", observations: {} });
+    };
     const assertion = (message: string) => Object.assign(new QualificationFailure({
       id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "product",
-      reason: "assertion_failed", operation: "read_only", elapsedMs: Math.round(runtime.now() - phaseStarted), observations: {},
+      reason: "assertion_failed", operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {},
     }), { message });
     const wait = async <T>(name: string, observe: () => Promise<T | undefined>, timeout = 60_000): Promise<T> => {
-      const deadline = runtime.now() + timeout;
-      while (runtime.now() < deadline) {
-        input.execution?.signal.throwIfAborted();
-        const result = await observe();
-        if (result !== undefined) return result;
-        await runtime.pause(500);
+      const start = runtime.now(), deadline = start + timeout;
+      try {
+        while (runtime.now() < deadline) {
+          if (pushBudgetExpired(runtime, input.execution)) break;
+          const result = await observe();
+          if (pushBudgetExpired(runtime, input.execution, start, timeout)) break;
+          if (result !== undefined) return result;
+          await runtime.pause(500);
+        }
+      } catch (error) {
+        rethrowPushSafetyFailure(error);
+        if (name !== "metadata" || error instanceof QualificationFailure || error instanceof AggregateError) throw error;
       }
-      throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase,
-        class: "harness", reason: "delivery_timeout", operation: "read_only", elapsedMs: timeout, observations: { timeoutMs: timeout } });
+      const evidence = { id: input.execution?.nextFailureId() ?? 1, lane: "androidPush" as const, step: activePhase,
+        class: "harness" as const, operation: "read_only" as const,
+        elapsedMs: pushMilliseconds(runtime.now() - start), observations: { timeoutMs: timeout } };
+      if (name === "metadata") throw new QualificationFailure({ ...evidence, reason: "delivery_metadata_timeout" });
+      throw new QualificationFailure({ ...evidence, reason: "delivery_timeout" });
     };
     const snapshot = async (predicate: (s: SessionMetadata) => boolean, role: PushFixtureRole = "primary") => wait("metadata", async () => {
       const session = await runtime.snapshot(progress.epoch, role);
       return session !== undefined && predicate(session) ? session : undefined;
     }, 90_000);
     const assertDndOff = async () => { if (!await runtime.dndOff()) throw new Error("turn Do Not Disturb off on the Pixel for the qualification window"); };
-    const fixture = async (operation: "start" | PushFixtureCommand, role: PushFixtureRole = "primary") => {
+    const fixture = async (operation: "start" | PushFixtureCommand, role: PushFixtureRole = "primary", expectedOwner?: SessionMetadata) => {
       if (!["answer", "stop"].includes(operation)) await assertDndOff();
-      await save(); await runtime.fixture(operation, progress.epoch, role);
+      await save();
+      requireExecution();
+      let verifiedOwner: SessionMetadata | undefined;
+      if (expectedOwner !== undefined) {
+        const owner = await runtime.snapshot(progress.epoch, role);
+        requireExecution();
+        if (owner === undefined || owner.instanceId !== expectedOwner.instanceId || owner.generation !== expectedOwner.generation ||
+          owner.inputRequired || !owner.canControl) throw new QualificationFailure({
+          id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "harness", reason: "invalid_evidence",
+          operation: "read_only", elapsedMs: phaseElapsed(), observations: {} });
+        verifiedOwner = owner;
+      }
+      await runtime.fixture(operation, progress.epoch, role, verifiedOwner);
+      requireExecution();
     };
     const finish = async (phase: AndroidPushPhase, result: Record<string, boolean | number | string>) => {
       await assertDndOff();
+      requireExecution();
       if (phase !== "subscription_ready" && phase !== "evidence_complete") await runtime.assertNotificationOwnership();
+      requireExecution();
       const now = runtime.now();
-      progress.phase = phase; progress.results[phase] = { ...progress.results[phase], ...metrics, ...result, dndOff: true, phaseElapsedMs: now - phaseStarted };
-      phaseStarted = now; await save();
+      progress.phase = phase; progress.results[phase] = { ...progress.results[phase], ...metrics, ...result, dndOff: true, phaseElapsedMs: phaseElapsed() };
+      phaseStarted = now; await save(); requireExecution();
     };
     const clear = async (timeout = 60_000, role: PushFixtureRole = "primary") => {
       const start = runtime.now();
       await fixture("answer", role);
       const current = await snapshot(s => !s.inputRequired, role);
       await wait("authoritative clear", async () => (await runtime.observe(current, "attention", "private")).count === 0 ? true : undefined, timeout);
-      metrics.clearMs += Math.round(runtime.now() - start);
+      metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - start);
     };
     const delivered = async (session: SessionMetadata, kind: "attention" | "activity_stop" = "attention", detail: PushDetailLevel = "session", timeout = 60_000) => {
       // Caller-issued/overlapping asks have no unique send window and cannot authorize re-arm.
@@ -487,6 +621,11 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
     const delivery = async (detail: PushDetailLevel, kind: "attention" | "activity_stop" = "attention", arm = true, timeout = 60_000, existingWindow?: QualificationLogWindow) => {
       if (arm) { await runtime.detail(detail); await runtime.closePwa(); await runtime.lock(); }
       const window = arm ? await runtime.beginDeliveryTelemetry?.(activePhase) : existingWindow;
+      const owner = await runtime.snapshot(progress.epoch);
+      lateDelivery = owner === undefined ? undefined : lateDeliveryObserver(() => checkedDelivery(runtime, owner, kind, detail, () => {
+        throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase,
+          class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: phaseElapsed(), observations: {} });
+      }), runtime.now, runtime.now(), metrics);
       if (arm) await fixture("ask");
       const session = await snapshot(s => kind === "attention" ? s.inputRequired : s.busy === false);
       const start = runtime.now();
@@ -504,20 +643,24 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
             return telemetry?.clearAcknowledged === true && telemetry.requestAlias === old.qualificationPushAlias &&
               (await runtime.observe(settled, "attention", detail)).count === 0 ? true : undefined;
           }, timeout);
-          metrics.clearMs += Math.round(runtime.now() - clearing);
+          metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - clearing);
           const nextWindow = await runtime.beginDeliveryTelemetry?.(activePhase);
-          await fixture("ask");
+          lateDelivery = lateDeliveryObserver(() => checkedDelivery(runtime, settled, "attention", detail, () => {
+            throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase,
+              class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: phaseElapsed(), observations: {} });
+          }), runtime.now, runtime.now(), metrics);
+          await fixture("ask", "primary", old);
           const fresh = await snapshot(s => s.inputRequired && s.ask?.requestId !== old.ask?.requestId);
           return { session: fresh, ...(nextWindow === undefined ? {} : { window: nextWindow }) };
         } } : {}) });
-      return { session: observed, milliseconds: runtime.now() - start };
+      return { session: observed, milliseconds: pushMilliseconds(runtime.now() - start) };
     };
     const attempt = async (phase: AndroidPushPhase, action: () => Promise<void>): Promise<void> => {
       activePhase = phase; phaseStarted = runtime.now(); metrics = emptyPushDeliveryMetrics();
       for (let index = 0; index < 2; index += 1) {
-        try { await runtime.beginNotificationPhase(progress.epoch, phase); await action(); return; }
+        try { await runtime.beginNotificationPhase(progress.epoch, phase); requireExecution(); await action(); requireExecution(); return; }
         catch (error) {
-          progress.results[phase] = { ...progress.results[phase], ...metrics, phaseElapsedMs: runtime.now() - phaseStarted };
+          progress.results[phase] = { ...progress.results[phase], ...metrics, phaseElapsedMs: phaseElapsed() };
           await save();
           if (!everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
           if (index !== 0) throw error;
@@ -738,6 +881,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
           const observation = await runtime.observe(forced, "attention", "private");
           if (observation.count > 1 || observation.forbiddenFound || (observation.count === 1 && (!observation.titleMatches || !observation.bodyMatches))) throw assertion("Android Push force-stop privacy failure");
+          requireExecution();
           whileStopped ||= observation.count === 1; await runtime.pause(500);
         }
         await runtime.openPwa(); await clear(); await delivery("private"); await clear();
@@ -748,6 +892,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         const denied = await snapshot(s => s.inputRequired);
         for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
           if ((await runtime.observe(denied, "attention", "private")).count !== 0) throw assertion("Android Push permission revocation did not suppress notification");
+          requireExecution();
           await runtime.pause(500);
         }
         await fixture("answer"); await snapshot(s => !s.inputRequired);
@@ -776,6 +921,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         const offline = await snapshot(s => s.inputRequired);
         for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
           if ((await runtime.observe(offline, "attention", "private")).count !== 0) throw assertion("Android Push delivered while offline");
+          requireExecution();
           await runtime.pause(500);
         }
         if (offlineWindow !== undefined) await runtime.deliveryTelemetry?.(offlineWindow);
@@ -793,16 +939,19 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
           const observation = await runtime.observe(sleeping, "attention", "private");
           if (observation.count > 1 || observation.forbiddenFound || (observation.count === 1 && (!observation.titleMatches || !observation.bodyMatches))) throw assertion("Android Push Doze privacy failure");
+          requireExecution();
           duringDoze ||= observation.count === 1; await runtime.pause(500);
         }
         await runtime.doze(false);
         // Forced Doze is an observed variant, never a delivery guarantee (ADR-031): FCM has held a push
         // for minutes after Doze ended. Privacy holds for anything that arrives; the ask is settled either way.
         let afterExit = false;
-        const deadline = runtime.now() + 60_000;
-        while (!duringDoze && !afterExit && runtime.now() < deadline) {
+        const observationStart = runtime.now();
+        while (!duringDoze && !afterExit && !pushBudgetExpired(runtime, input.execution, observationStart, 60_000)) {
           const observed = await runtime.observe(sleeping, "attention", "private");
           if (observed.count > 1 || observed.forbiddenFound || (observed.count === 1 && (!observed.titleMatches || !observed.bodyMatches))) throw assertion("Android Push Doze recovery privacy failure");
+          requireExecution();
+          if (pushBudgetExpired(runtime, input.execution, observationStart, 60_000)) break;
           afterExit = observed.count === 1;
           if (!afterExit) await runtime.pause(500);
         }
@@ -822,10 +971,10 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         const sinks = await runtime.sinks(progress.epoch);
         if (sinks.gatewayStructuredLogsSafe !== true) throw new QualificationFailure({
           id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "harness", reason: "invalid_evidence",
-          operation: "read_only", elapsedMs: Math.round(runtime.now() - phaseStarted), observations: {} });
+          operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {} });
         if (sinks.clean !== true || sinks.detectable !== true || sinks.gatewayLogsDiscarded !== true) throw new QualificationFailure({
           id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "product", reason: "privacy_failed",
-          operation: "read_only", elapsedMs: Math.round(runtime.now() - phaseStarted), observations: {} });
+          operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {} });
         await finish("forbidden_sinks_verified", sinks);
       });
       await finish("evidence_complete", { passed: !progress.results.network_verified?.blocked });

@@ -202,6 +202,10 @@ still clean recorded pending Mac effects and must not reopen already completed c
 | Restart admission | Cloud holds and typed Windows admission errors produce campaign-owned terminal summaries/outcomes without failing passed lanes; restarted publication clears not-started metadata |
 | Readiness finality | Passing receipts reject running readiness; failed log preparation does not publish a collectible owner; Windows admission uses the receipt failure allocator |
 | Manual compatibility | Historical schema-3 receipts remain readable; manual readiness attempt zero gains no automatic authority; unbound later attempts refuse |
+| Terminal owner reconciliation | Pending/passed/running direct failure owners finalize to valid failed receipts; relay-stop failure leaves an authorized preserved publication proof unchanged |
+| Execution and artifact binding | Foreign HEAD and later bound preflight ordinals refuse before admission/outcome writes; candidate tag/source/digest mismatch never overwrites receipt identity |
+| Remote ownership fence | Unproved remote termination dispatches no destructive Mac cleanup; collateral references its teardown root; success/nonzero/early-HUP owners survive until acknowledged settlement |
+| Readiness persistence failure | Baseline, mutation and restoration write failures still run every Pixel restore; outer sidecar failure and final lane-catch persistence retain typed evidence and poisoning |
 
 The retained-Mac `ompPublication` lane adds the shared
 [lifecycle runner](../scripts/omp-lifecycle-qualification.ts) after every live-session consumer

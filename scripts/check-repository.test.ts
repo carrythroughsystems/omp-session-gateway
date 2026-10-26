@@ -53,6 +53,11 @@ test.each(["plain", "signal"] as const)("Windows guarded %s egress callback admi
     return fetch("https://api.ipify.org", { signal: ${signal} });
   });`;
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toEqual([]);
+  if (shape === "signal") {
+    const bound = source.replace("  });", "  }, execution ?? {});");
+    expect(checkProviderReads("scripts/windows-qualification-runtime.ts", bound)).toEqual([]);
+    expect(checkProviderReads("scripts/windows-qualification-runtime.ts", bound.replace("{ signal:", '{ method: "POST", signal:'))).toHaveLength(1);
+  }
   for (const unsafe of [
     source.replace("assertWindowsExecution(execution);", ""),
     source.replace("assertWindowsExecution(execution);", "unknownGuard(execution);"),
@@ -293,8 +298,10 @@ test("document-context web sources schedule timers only through window or an inj
   }
 });
 test("council491 Windows dispatcher forwards cancellation without permitting write replay", () => {
-  const source = 'const send = (readSignal: AbortSignal = signal) => fetch(url, { method, signal: readSignal });\n' +
-    'const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();';
+  const source = 'const send = (readSignal: AbortSignal = signal) => {\nassertWindowsExecution(execution);\n' +
+    'return fetch(url, { method, headers: {}, signal: readSignal });\n};\ntry {\n' +
+    'const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();\n' +
+    '} finally { clearTimeout(timer); }';
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toEqual([]);
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace('method === "GET"', 'method !== "DELETE"'))).toHaveLength(1);
   expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source.replace(': await send();', ': await readProvider(send);'))).toHaveLength(1);

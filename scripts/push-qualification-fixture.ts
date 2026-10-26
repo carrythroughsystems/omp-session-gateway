@@ -25,10 +25,12 @@ export async function commandPushFixture(
   location: PushFixtureLocation,
   operation: "start" | PushFixtureCommand,
   execute: FixtureExecutor = executeFixture,
+  guardSession = false,
 ): Promise<void> {
   const result = await execute([
     location.bun, join(location.scripts, "push-qualification-fixture.ts"), operation,
     location.root, location.epoch, location.binary, location.scripts,
+    ...(guardSession ? ["guard-session"] : []),
   ]);
   if (result.exitCode !== 0) throw new Error(`Push fixture ${operation} failed`);
 }
@@ -55,13 +57,20 @@ async function waitForAcknowledgement(root: string, epoch: string, sequence: num
   throw new Error("fixture acknowledgement timed out");
 }
 
-async function control(root: string, epoch: string, operation: PushFixtureCommand): Promise<void> {
+async function control(root: string, epoch: string, operation: PushFixtureCommand, guardSession = false): Promise<void> {
   if (await readFile(join(root, "owner"), "utf8") !== epoch) throw new Error("fixture ownership changed");
   const prior: unknown = JSON.parse(await readFile(join(root, "ack.json"), "utf8"));
   if (typeof prior !== "object" || prior === null || !("epoch" in prior) || prior.epoch !== epoch || !("sequence" in prior) || typeof prior.sequence !== "number" ||
     !Number.isSafeInteger(prior.sequence) || prior.sequence < 0) throw new Error("invalid fixture sequence");
   const sequence = prior.sequence + 1;
-  await writeFile(join(root, "command.json.tmp"), JSON.stringify({ epoch, sequence, operation }), { mode: 0o600 });
+  let expectedSessionId: string | undefined;
+  if (guardSession) {
+    if (operation !== "ask" || !("sessionId" in prior) || typeof prior.sessionId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/u.test(prior.sessionId)) throw new Error("fixture session ownership unavailable");
+    expectedSessionId = prior.sessionId;
+  }
+  await writeFile(join(root, "command.json.tmp"), JSON.stringify({ epoch, sequence, operation,
+    ...(expectedSessionId === undefined ? {} : { expectedSessionId }) }), { mode: 0o600 });
   await rename(join(root, "command.json.tmp"), join(root, "command.json"));
   await waitForAcknowledgement(root, epoch, sequence);
 }
@@ -93,12 +102,13 @@ _, status = os.waitpid(child, 0)
 sys.exit(os.waitstatus_to_exitcode(status))
 `;
 
-export async function runFixtureOperation(location: PushFixtureLocation, operation: "start" | PushFixtureCommand, execute: FixtureExecutor = executeFixture): Promise<void> {
+export async function runFixtureOperation(location: PushFixtureLocation, operation: "start" | PushFixtureCommand, execute: FixtureExecutor = executeFixture, guardSession = false): Promise<void> {
   const { root, epoch, binary, scripts } = location;
   if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/u.test(epoch) || root !== resolve(root) || root.includes("collab-hosts")) {
     throw new Error("invalid fixture location");
   }
   const holder = join(root, "hold.py");
+  if (guardSession && operation !== "ask") throw new Error("only fixture asks accept a session guard");
   if (operation === "start") {
     await mkdir(dirname(root), { recursive: true, mode: 0o700 });
     await mkdir(root, { mode: 0o700 });
@@ -158,16 +168,17 @@ export async function runFixtureOperation(location: PushFixtureLocation, operati
     if (processes.exitCode !== 0 || processes.stdout.includes(join(root, "fixture.yml")) || processes.stdout.includes(holder)) throw new Error("owned fixture process remained active");
     await rm(root, { recursive: true });
   } else {
-    await control(root, epoch, operation);
+    await control(root, epoch, operation, guardSession);
   }
 }
 
 if (import.meta.main) {
-  const [operation, root, epoch, binary, scripts] = process.argv.slice(2);
+  const [operation, root, epoch, binary, scripts, guard, ...extra] = process.argv.slice(2);
   try {
     if (operation === undefined || root === undefined || epoch === undefined || binary === undefined || scripts === undefined ||
-      (operation !== "start" && !PUSH_FIXTURE_COMMANDS.includes(operation as PushFixtureCommand))) throw new Error("invalid fixture arguments");
-    await runFixtureOperation({ root, epoch, binary, scripts, bun: process.execPath }, operation as "start" | PushFixtureCommand);
+      (operation !== "start" && !PUSH_FIXTURE_COMMANDS.includes(operation as PushFixtureCommand)) ||
+      extra.length > 0 || guard !== undefined && guard !== "guard-session") throw new Error("invalid fixture arguments");
+    await runFixtureOperation({ root, epoch, binary, scripts, bun: process.execPath }, operation as "start" | PushFixtureCommand, executeFixture, guard !== undefined);
     console.log(JSON.stringify({ completed: true }));
   } catch {
     console.error("Push fixture operation failed");

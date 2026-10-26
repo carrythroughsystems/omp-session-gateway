@@ -8,6 +8,50 @@ import type { WindowsTransportProbe } from "./windows-stable-qualification";
 import { assertWindowsAllocation, windowsFailure, windowsRemaining } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
 
+test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructure retry authority", async method => {
+  const original = globalThis.fetch;
+  const controller = new AbortController();
+  let sends = 0;
+  globalThis.fetch = (async (_url, options) => {
+    sends += 1;
+    return new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Response.json({ accepted: true })), 150);
+      options?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(options.signal!.reason); }, { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    const result = winrmRuntime.request("https://synthetic.invalid", {}, method, undefined,
+      { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 31 }).catch(error => error);
+    setTimeout(() => controller.abort(new Error("synthetic cancellation")), 20);
+    const error = await result;
+    expect(error).toBeInstanceOf(QualificationFailure);
+    if (!(error instanceof QualificationFailure)) throw new Error("expected typed provider cancellation");
+    expect(error.evidence).toMatchObject({ id: 31, class: "harness", operation: method === "GET" ? "read_only" : "unknown" });
+    expect(sends).toBe(1);
+  } finally { globalThis.fetch = original; }
+});
+
+test.each([false, true])("council491 allocation budget cancels an owned POST with execution=%s", async bound => {
+  const original = globalThis.fetch;
+  const controller = new AbortController();
+  let sends = 0;
+  globalThis.fetch = (async (_url, options) => {
+    sends += 1;
+    return new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Response.json({ accepted: true })), 150);
+      options?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(options.signal!.reason); }, { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    const execution = bound ? { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 41 } : undefined;
+    const error = await winrmRuntime.request("https://synthetic.invalid", {}, "POST", {}, execution, performance.now() + 20).catch(error => error);
+    expect(error).toBeInstanceOf(QualificationFailure);
+    if (!(error instanceof QualificationFailure)) throw new Error("expected typed allocation cancellation");
+    expect(error.evidence).toMatchObject({ class: "harness", operation: "unknown" });
+    expect(controller.signal.aborted).toBe(false);
+    expect(sends).toBe(1);
+  } finally { globalThis.fetch = original; }
+});
 const transportResult = (condition = "connection_timeout") => ({
   exitCode: -1, stdout: "", diagnostic: "private text ignored",
   failure: { kind: "transport", stage: "connection", condition, httpStatus: null, disposition: "not_started" },

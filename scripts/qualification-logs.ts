@@ -49,7 +49,6 @@ export function pushDeliveryTelemetry(events: readonly QualificationLogEvent[]):
 const remoteScript = `import os,sys,stat,json
 p,expected,op=sys.argv[1:]
 if not os.path.isabs(p) or os.path.normpath(p)!=p: raise ValueError('unsafe path')
-if os.path.lexists(p+'.unhealthy'): raise ValueError('sticky failure')
 if op=='prepare':
  q='/'
  for part in os.path.dirname(p).split('/')[1:]:
@@ -66,6 +65,15 @@ while True:
  if os.path.dirname(q)==q: break
  q=os.path.dirname(q)
 if op=='prepare': print('{}');sys.exit(0)
+if op=='claim':
+ fd=os.open(os.path.join(p,'claim'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ try:
+  if os.write(fd,b'collector\\n')!=10: raise ValueError('claim write failed')
+  os.fsync(fd)
+ finally: os.close(fd)
+ fd=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ try: os.fsync(fd)
+ finally: os.close(fd)
 def read_private(n,limit):
  fd=os.open(os.path.join(p,n),os.O_RDONLY|os.O_NOFOLLOW)
  try:
@@ -77,19 +85,37 @@ def read_private(n,limit):
  finally: os.close(fd)
 try: before=read_private('health',64)
 except FileNotFoundError: before=None
+try: writer_before=read_private('writer',16)
+except FileNotFoundError: writer_before=None
 names=os.listdir(p)
-files=sorted(n for n in names if n!='health')
+try: claim=read_private('claim',16)
+except FileNotFoundError: claim=None
+if claim not in [None,'writer\\n','collector\\n']: raise ValueError('invalid claim')
+files=sorted(n for n in names if n not in ['health','writer','claim'])
 if len(files)>4 or files!=['events.%d.jsonl'%i for i in range(len(files))]: raise ValueError('rotation gap')
 texts=[read_private(n,262144) for n in reversed(files)]
 try: after=read_private('health',64)
 except FileNotFoundError: after=None
-stable=before==after and before is not None and before.startswith('[') and before.endswith('\\n')
+try: writer_after=read_private('writer',16)
+except FileNotFoundError: writer_after=None
+stable=before==after and before is not None and before.startswith('[') and before.endswith('\\n') and writer_before==writer_after and writer_after in ['active\\n','closed\\n']
 if op=='remove':
- if names and (not stable or after!=expected): raise ValueError('retained snapshot changed')
- if os.path.lexists(p+'.unhealthy'): raise ValueError('sticky failure')
- for n in names: os.unlink(os.path.join(p,n))
+ if claim!='collector\\n': raise ValueError('collector claim missing')
+ if names!=['claim'] and (not stable or after!=expected or writer_after!='closed\\n'): raise ValueError('retained snapshot changed')
+ retired=p+'.retired'
+ try: os.lstat(retired)
+ except FileNotFoundError: pass
+ else: raise ValueError('retired destination exists')
+ os.rename(p,retired)
+ p=retired
+ fd=os.open(os.path.dirname(p),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ try: os.fsync(fd)
+ finally: os.close(fd)
+ for n in names:
+  if n!='claim': os.unlink(os.path.join(p,n))
+ os.unlink(os.path.join(p,'claim'))
  os.rmdir(p)
-print(json.dumps({'healthy':stable and 'events.0.jsonl' in names,'health':after,'texts':texts,'empty':len(names)==0}))
+print(json.dumps({'healthy':stable and 'events.0.jsonl' in names,'health':after,'writer':writer_after,'texts':texts,'empty':not any(n!='claim' for n in names)}))
 `;
 
 export function createQualificationLogs(options: { execute: FixtureExecutor; remoteDirectory: string; jobDirectory: string }): QualificationLogs {
@@ -97,12 +123,12 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
   let ordinal = 0;
   const windows = new Map<QualificationLogWindow, QualificationLogEvent[]>();
   let retainedBytes = 0;
-  const remote = async (operation: "prepare" | "read" | "remove", expected = "") => {
+  const remote = async (operation: "prepare" | "read" | "claim" | "remove", expected = "") => {
     const result = await options.execute(["python3", "-c", remoteScript, options.remoteDirectory, expected, operation]);
     if (result.exitCode !== 0 || Buffer.byteLength(result.stdout) > 2 * 1024 * 1024) throw new Error("qualification log inspection failed");
     return JSON.parse(result.stdout) as unknown;
   };
-  const readState = async () => {
+  const readState = async (requireClosed = false) => {
     let value = await remote("read");
     // A pending writer or any changed health state invalidates the entire bracketed read.
     for (let attempt = 0; attempt < 2 && typeof value === "object" && value !== null && "healthy" in value && value.healthy === false; attempt++) {
@@ -112,6 +138,8 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
     if (typeof value !== "object" || value === null || !("healthy" in value) || value.healthy !== true || !("texts" in value) ||
       !Array.isArray(value.texts) || value.texts.some(text => typeof text !== "string")) throw new Error("qualification logging unhealthy");
     if (!("health" in value) || typeof value.health !== "string") throw new Error("qualification health missing");
+    if (!("writer" in value) || !["active\n", "closed\n"].includes(String(value.writer)) ||
+      requireClosed && value.writer !== "closed\n") throw new Error("qualification writer was not closed");
     const [index, first] = parseQualificationLogHealth(value.health);
     const events = parseQualificationLogs(value.texts, first);
     if (index !== (events.at(-1)?.index ?? 0)) throw new Error("qualification health sequence differs");
@@ -154,13 +182,15 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
     },
     async healthy() { try { await read(); return true; } catch { return false; } },
     async collect() {
-      const state = await remote("read");
+      // Claim before reading/copying; a writer cannot restart between retention and unlink.
+      // Any failed retention deliberately leaves the claim and all remote evidence intact.
+      const state = await remote("claim");
       if (typeof state === "object" && state !== null && "empty" in state && state.empty === true && windows.size === 0) {
         // A prepared destination whose daemon never started has no telemetry to claim or retain.
         await remote("remove");
         return { files: 0, events: 0 };
       }
-      const { events, health } = await readState();
+      const { events, health } = await readState(true);
       persist("gateway-structured.jsonl", events);
       for (const [window, slice] of windows) persist(`gateway-${window.lane}-${window.phase}-${window.ordinal}.jsonl`, slice);
       const directory = openSync(options.jobDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);

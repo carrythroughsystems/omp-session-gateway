@@ -691,10 +691,15 @@ export async function waitForDevtoolsEndpoint(
   throw new Error(`DevTools endpoint never accepted a connection${code}`, { cause: lastError });
 }
 
-/**
- * Opens a CDP session against Chrome on the device, hands it to `run`, and always tears down the
- * owned tab and the adb forward — including on failure, so a crashed run leaves no device state.
- */
+/** Resource ownership that could not be discharged, without device identities in its evidence. */
+export class AndroidBrowserCleanupError extends AggregateError {
+  readonly pixelUnrestored = true;
+  constructor(errors: readonly unknown[], readonly remainingResources: number) {
+    super(errors, "Android browser containment unproven");
+  }
+}
+
+/** Drive real Android Chrome; unproven target/forward cleanup poisons device containment. */
 export async function withAndroidChrome<T>(
   run: (driver: AndroidChromeDriver) => Promise<T>,
   options: { readonly port?: number; readonly launchBrowser?: boolean;
@@ -737,7 +742,8 @@ export async function withAndroidChrome<T>(
     );
     socket = new WebSocket(webSocketDebuggerUrl);
   } catch (error) {
-    await runAdb(serial, ["forward", "--remove", "tcp:" + port], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
+    try { await runAdb(serial, ["forward", "--remove", "tcp:" + port], execution === undefined ? {} : { timeoutMs: 10_000 }); }
+    catch (cleanup) { throw new AndroidBrowserCleanupError([error, cleanup], 1); }
     throw error;
   }
   const pending = new Map<
@@ -748,6 +754,7 @@ export async function withAndroidChrome<T>(
   let sessionId: string | undefined;
   let targetId: string | undefined;
   let ownsTarget = false;
+  let unresolvedTarget = false;
   const eventListeners = new Set<(method: string, parameters: Record<string, unknown>) => void>();
   let cleaning = false;
   let rejectOpening: ((error: Error) => void) | undefined;
@@ -796,6 +803,9 @@ export async function withAndroidChrome<T>(
       const frame: Record<string, unknown> = { id, method, params: parameters };
       const destination = explicitSession ?? (useSession ? sessionId : undefined);
       if (destination !== undefined) frame.sessionId = destination;
+      // A lost create acknowledgement is an unresolved mutation, even after its bounded
+      // response route expires. Never pretend that deleting the route removed the target.
+      if (method === "Target.createTarget") unresolvedTarget = true;
       try { socket.send(JSON.stringify(frame)); }
       catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
     });
@@ -807,6 +817,8 @@ export async function withAndroidChrome<T>(
     targetId = undefined; sessionId = undefined; ownsTarget = false;
   };
   let primaryFailure: unknown, cleanupFailure: unknown, failed = false;
+  const cleanupFailures: unknown[] = [];
+  let remainingResources = 0;
   let result!: T;
   try {
     await new Promise<void>((resolve, reject) => {
@@ -841,6 +853,7 @@ export async function withAndroidChrome<T>(
           }
           targetId = created.targetId;
           ownsTarget = true;
+          unresolvedTarget = false;
           try {
             const attached = await send("Target.attachToTarget", { targetId, flatten: true }, false);
             if (typeof attached.sessionId !== "string" || attached.sessionId === "") {
@@ -918,11 +931,15 @@ export async function withAndroidChrome<T>(
       try { await closeTarget(true); cleanupFailure = undefined; }
       catch (error) { cleanupFailure = error; }
     }
-    socket.close();
-    await runAdb(serial, ["forward", "--remove", `tcp:${port}`], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
+    if (cleanupFailure !== undefined) { cleanupFailures.push(cleanupFailure); remainingResources++; }
+    if (unresolvedTarget) { cleanupFailures.push(new Error("Android target creation outcome unresolved")); remainingResources++; }
+    try { socket.close(); }
+    catch (error) { cleanupFailures.push(error); remainingResources++; }
+    try { await runAdb(serial, ["forward", "--remove", `tcp:${port}`], execution === undefined ? {} : { timeoutMs: 10_000 }); }
+    catch (error) { cleanupFailures.push(error); remainingResources++; }
   }
-  if (cleanupFailure !== undefined) throw Object.assign(new AggregateError(
-    failed ? [primaryFailure, cleanupFailure] : [cleanupFailure], "Android browser target cleanup failed"), { pixelUnrestored: true });
+  if (cleanupFailures.length > 0) throw new AndroidBrowserCleanupError(
+    failed ? [primaryFailure, ...cleanupFailures] : cleanupFailures, remainingResources);
   if (failed) throw primaryFailure;
   return result;
 }

@@ -17,6 +17,17 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Recovery binds opaque qualification aliases to the exact fixture ask before mutation. Bracketed log
   reads, committed rotation boundaries, durable local retention and sticky search-permission failures
   preserve evidence; bounded nested Android operations retain late-created targets and readiness late posts.
+  An in-directory writer lease rejects unclosed histories even when failure writes are impossible.
+  Unproven CDP target/forward cleanup blocks Pixel release; task restoration cannot reopen CDP.
+  Re-arm rechecks generation before mutation, metadata timeouts retain late sampling, and post-evidence
+  deadline checks plus bounded integer phase durations prevent stale delivery success.
+  Writer/collector exclusion and atomic log-directory retirement close retention races; forced HTTP
+  shutdown drains admitted handlers before releasing the durable writer claim. Readiness checks both
+  delivery and clear budgets after awaited evidence, every persisted duration is a bounded integer,
+  and network fallbacks preserve containment failures. Cleanup checks source-scoped v2 triage stores;
+  guarded fixture asks reject a changed acknowledged session at the extension boundary. Portable
+  fixture regressions prove Windows permission refusal without relaxing POSIX admission; bounded CLI
+  startup failures retain fixed diagnostic booleans without extending the two-second exit assertion.
 - Automatic same-candidate qualification retries for validated, fully contained infrastructure
   failures: attempts 0–2, persisted 60/120-second backoff, immutable failed-attempt evidence,
   exact-owner lease retention and privacy-safe tracking comments. Product, harness, unknown,
@@ -39,6 +50,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Fence fresh retry ordinals, validate every persisted receipt, preserve admission failure ownership,
   restore poisoned resources despite checkpoint failures, and reap remote fixture process groups
   before cleanup. Readiness and provider cancellation retain one failure allocator and terminal proof.
+  Fence every retained-Mac command path after unproved termination, retain command owners through
+  settlement, preserve passed publication proofs on relay teardown failure, validate execution and
+  artifact bindings before writes, and restore every readiness owner despite persistence failures.
 - Structured Windows transport failure evidence, bounded read-only reconnects, deadline-aware
   subprocess reaping, and interrupted-upload reconciliation without write replay. Cleanup skips
   confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,

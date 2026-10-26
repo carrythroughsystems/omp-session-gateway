@@ -368,12 +368,17 @@ Fresh unbound effectful campaigns require attempt zero. Later ordinals require t
 receipt digest or an immutable effect-free prior preflight outcome and digest, never just an execution
 file. Both routes consume authority durably before admission. Renewed admission failures belong to `campaign/admission`,
 preserving typed classifications without attaching a failure to a pending or previously passed lane.
+Execution source must match HEAD before admission or outcome writes; standalone bound `--preflight`
+accepts only attempt zero. Verified artifact identities are checked against the execution before
+replacing receipt fields, so a rejected candidate cannot corrupt later terminal persistence.
 
 Consumer failure does not cancel healthy siblings. The shared OMP host and relay tunnel live until
 their consumers settle; the tunnel stops before the independent publication lifecycle runs.
 Publication failure has a terminal timestamp, never an invented pass. Every normally returned
 campaign failure finalizes all started lanes and the campaign. Hard process death or failed storage
 remains an interrupted attempt, not authority to relaunch.
+Relay-stop failure belongs to `campaign/teardown`, not an already-passed publication proof. Finalization
+reconciles every typed lane owner with its terminal verdict before validating the complete graph.
 
 Execution cancellation carries a monotonic deadline to owned reads, subprocesses and waits. The
 owner aborts and awaits termination before cleanup; no timed-out promise is abandoned. Cleanup
@@ -387,6 +392,11 @@ Remote commands record a private process-group owner outside gateway installatio
 uses a fresh bounded SSH command to terminate that group and await absence, not merely kill the local
 SSH client. A private cancellation tombstone fences delayed admission; unproved termination refuses
 all later effects on that retained host, including destructive cleanup.
+The fence also covers direct SSH, local Mac-script wrappers, publication and tunnel startup:
+refused cleanup records `remote_unsettled` collateral referencing the authored teardown root.
+Process-group identity is published before work; exit (including early HUP) publishes completion,
+and a separate bounded settle/stop acknowledgement removes the owner directory. Ordinary nonzero
+exits are reconciled too; delayed-admission tombstones are retained rather than reopening a launch race.
 
 Read-only admission is distinct from effectful rig readiness. After lease acquisition and verified
 candidate/predecessor bytes, readiness stages a disposable candidate/stock-OMP fixture, measures
@@ -400,6 +410,9 @@ summary must represent it, and unresolved restoration cannot coexist with proven
 passed readiness. Every receipt write validates the full schema, and restarting lanes clears
 not-started reasons as well as stale failure evidence. Restarting a root invalidates the
 entire prior standalone failure graph before persistence, including dependent collateral.
+Readiness retains its baseline in memory before attempting sidecar writes. Restoration attempts
+every owner even if every checkpoint fails; typed `persistenceFailed` evidence and Pixel poisoning
+survive both restoration and the lane catch's final receipt write.
 Transport failures at an ordinary lane's explicit `cleanup` step do not authorize automatic retry.
 Private receipt, readiness-baseline and outcome persistence belongs to the POSIX Studio driver:
 file data and parent directories are fsynced; Windows refuses those writes before filesystem

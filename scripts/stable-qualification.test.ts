@@ -12,6 +12,10 @@ import {
   assertProtectedFilesUnchanged,
   assertDeviceCloudResumeEligible,
   assertCampaignRetryEligible,
+  assertRetainedMacCommandsSettled,
+  bindVerifiedReleaseIdentities,
+  cleanupMac,
+  restoreRigReadinessPixel,
   cleanExternalLane,
   preflightStableQualification,
   withConsumedCampaignRetry,
@@ -57,6 +61,7 @@ import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } f
 import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
 import { readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution } from "./qualification-outcome.ts";
 import { QualificationFailure, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
+import { pixelUnrestored } from "./restoration.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
 // Derived exactly as the orchestrator derives it, so this suite cannot pass against a predecessor
@@ -1658,6 +1663,132 @@ function summarizedReceipt() {
   return receipt;
 }
 
+test.each(["sourceCommit", "archiveSha256", "tag"] as const)("council498 artifact %s mismatch never poisons the receipt", field => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.execution = receiptExecution();
+  const original = structuredClone(receipt);
+  const candidate = { tag: TAG, sourceCommit: COMMIT, archiveSha256: "b".repeat(64),
+    [field]: field === "tag" ? PREVIOUS_TAG : "e".repeat(field === "sourceCommit" ? 40 : 64) };
+  const predecessor = { tag: PREVIOUS_TAG, sourceCommit: COMMIT, archiveSha256: "c".repeat(64) };
+  expect(() => bindVerifiedReleaseIdentities(receipt, candidate, predecessor)).toThrow(QualificationFailure);
+  expect(receipt).toEqual(original);
+  validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+});
+
+test.each(["pending", "passed", "running"] as const)("council498 finalization reconciles a %s direct failure owner", status => {
+  const receipt = summarizedReceipt();
+  receipt.lanes.relay = { status, attempts: status === "pending" ? 0 : 1,
+    ...(status === "pending" ? { notStartedReason: "dependency_failed" as const } : {}) };
+  const error = new QualificationFailure({ id: 21, lane: "relay", step: "setup", reason: "deadline_exceeded",
+    class: "harness", elapsedMs: 90_000, operation: "unknown", observations: { controllerDeadline: true } });
+  return finalizeCampaignFailure(receipt, error, async () => {
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, resumeModules).then(() => {
+    expect(receipt.status).toBe("failed");
+    expect(receipt.lanes.relay.status).toBe("failed");
+    expect(receipt.lanes.relay.completedAt).toBeDefined();
+    expect(receipt.lanes.relay.notStartedReason).toBeUndefined();
+  });
+});
+
+test("council498 relay-stop failure preserves authorized publication proof", async () => {
+  const receipt = summarizedReceipt();
+  const publication = structuredClone(receipt.lanes.ompPublication);
+  const error = await finishLiveQualification([], receipt, async () => {},
+    async () => { throw new Error("synthetic relay stop failure"); },
+    async () => { throw new Error("preserved lifecycle must not rerun"); }, true).catch(error => error);
+  await finalizeCampaignFailure(receipt, error, async () => {
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, resumeModules);
+  expect(receipt.lanes.ompPublication).toEqual(publication);
+  expect(receipt.failureSummary?.failures.some(item => item.lane === "ompPublication")).toBe(false);
+});
+
+test.each([true, false])("council498 cleanup storage failure preserves typed evidence and Pixel poisoning (final write fails: %s)", async finalWriteFails => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  const primary = Object.assign(new QualificationFailure({ id: 41, lane: "cleanup", step: "containment",
+    reason: "containment_unproven", class: "harness", elapsedMs: 0, operation: "unknown", observations: {} }), { pixelUnrestored: true });
+  let writes = 0;
+  const error = await executeReceiptLane(receipt, "cleanup", async () => { if (++writes === 1 || finalWriteFails) throw new Error("synthetic disk failure"); },
+    async () => { throw primary; }).catch(error => error);
+  expect(pixelUnrestored(error)).toBe(true);
+  expect(normalizeQualificationFailures(error).some(item => item.observations.persistenceFailed === true)).toBe(true);
+  expect(receipt.lanes.cleanup.status).toBe("failed");
+});
+
+test("council498 unresolved remote ownership refuses every destructive Mac cleanup action", async () => {
+  const target = { sshDestination: "unsettled-mac-fixture.invalid", sudoPassword: "" };
+  let id = 50, dispatched = 0;
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => ++id };
+  const remote = remoteExecutor(target, async () => ({ exitCode: 125, stdout: "", stderr: "" }));
+  const root = await remote(["/bin/true"], { execution }).catch(error => error);
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  const proof = 'gateway pids:                          0\\nplist present:                         no\\ngui job:                               absent\\nlisteners:                             0\\n"liveOmpHosts":0,"binaryPresent":false,"sourcePresent":false';
+  const runtime = {
+    command: async () => { dispatched += 1; return { exitCode: 0, stdout: "", stderr: "" }; },
+    script: async () => { dispatched += 1; return proof.replaceAll("\\n", "\n"); },
+  };
+  const error = await executeReceiptLane(receipt, "cleanup", async () => {}, () =>
+    cleanupMac({ target, environment: { OMP_MAC_HOST: target.sshDestination } }, undefined, execution, runtime)).catch(error => error);
+  expect(dispatched).toBe(0);
+  expect(receipt.lanes.cleanup.status).toBe("failed");
+  const failures = normalizeQualificationFailures(new AggregateError([root, error]));
+  expect(failures.some(item => item.class === "collateral" && item.reason === "remote_unsettled")).toBe(true);
+});
+
+test("council498 readiness preserves the shared remote root while attempting all restoration owners", async () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  const target = { sshDestination: "qualifier@readiness-unsettled-fixture.invalid", sudoPassword: "" };
+  const binding = receiptExecution().binding;
+  receipt.execution = { ...receiptExecution(), binding: { ...binding, macHostSha256: digest(target.sshDestination) } };
+  receipt.macHost = target.sshDestination;
+  receipt.candidate = { tag: TAG, sourceCommit: COMMIT, archiveSha256: binding.archiveSha256 };
+  receipt.predecessor = availabilityReceipt().predecessor!;
+  let id = 60;
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => ++id };
+  const remote = remoteExecutor(target, async () => ({ exitCode: 125, stdout: "", stderr: "" }));
+  const owners: string[] = [];
+  const error = await runRigReadiness(receipt, async () => {}, {
+    prepare: async () => { await remote(["/bin/true"], { execution }); },
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    restorePixel: async () => { owners.push("pixel"); assertRetainedMacCommandsSettled(target.sshDestination); },
+    restoreMac: async () => { owners.push("mac"); await executeReceiptLane(receipt, "cleanup", async () => {}, async () => {
+      assertRetainedMacCommandsSettled(target.sshDestination); return { restored: true };
+    }); },
+  }).catch(error => error);
+  expect(owners).toEqual(["pixel", "mac"]);
+  const failures = normalizeQualificationFailures(error);
+  expect(failures.some(item => item.reason === "remote_unsettled")).toBe(true);
+  expect(failures.some(item => item.lane === "campaign" && item.step === "teardown")).toBe(true);
+  await finalizeCampaignFailure(receipt, error, async () => {
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, resumeModules);
+  expect(receipt.lanes.cleanup.status).toBe("failed");
+});
+
+test.skipIf(process.platform === "win32").each([
+  { mode: "preflight", fault: "source" }, { mode: "campaign", fault: "source" }, { mode: "preflight", fault: "ordinal" },
+] as const)("council498 %s refuses foreign execution before admission or outcome persistence", async ({ mode, fault }) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "preflight-execution-fence-")));
+  try {
+    const initial = receiptExecution();
+    const execution: QualificationExecution = fault === "source" ?
+      { ...initial, binding: { ...initial.binding, orchestratorCommit: "f".repeat(40) } } :
+      { ...initial, campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+    const path = join(root, "execution.json"), outcome = join(root, "outcome.json");
+    await writeFile(path, JSON.stringify(execution), { mode: 0o600 });
+    const fixture = await preflightFixture(root);
+    let admitted = false;
+    await expect(runStableQualification(["--tag", TAG, "--execution-file", path, ...(mode === "preflight" ? ["--preflight"] : [])], {
+      ...fixture, environment: { ...fixture.environment, OMP_STABLE_OUTCOME_FILE: outcome },
+      executable: () => { admitted = true; return null; },
+    }, admissionLanes())).rejects.toThrow();
+    expect(admitted).toBe(false);
+    expect(await Bun.file(outcome).exists()).toBe(false);
+    expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test.skipIf(process.platform === "win32").each([1, 2] as const)("council491 fresh campaign refuses attempt %i before admission", async campaignAttempt => {
   const root = await mkdtemp(join(tmpdir(), "fresh-retry-authority-"));
   try {
@@ -1830,6 +1961,43 @@ test("council491 failed SSH transport also reconciles its remote command owner",
   expect((await remote(["/bin/true"])).exitCode).toBe(255);
   expect(calls).toBe(2);
 });
+
+test.skipIf(process.platform === "win32").each([0, 7, "early-hup"] as const)(
+  "council498 remote owner survives exit %s until acknowledged settlement", async exit => {
+    const root = await mkdtemp(join(tmpdir(), "remote-owner-settlement-"));
+    const owners = join(root, ".local/state/omp-qualification/command-owners");
+    let calls = 0, published = false, done = false, ownerCount = 0;
+    const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async argv => {
+      calls += 1;
+      const primary = calls === 1;
+      const script = primary && exit === "early-hup" ? argv.at(-1)!.replace("set -m", () => "kill -HUP $$\nset -m") : argv.at(-1)!;
+      const child = Bun.spawn(["/bin/bash", "-c", script], {
+        env: { ...process.env, HOME: root }, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+      });
+      const exitCode = await child.exited;
+      if (primary) {
+        const directories = await readdir(owners);
+        ownerCount = directories.length;
+        if (directories[0] !== undefined) {
+          const owner = join(owners, directories[0]);
+          published = await Bun.file(join(owner, "pgid")).exists();
+          done = await Bun.file(join(owner, "done")).exists();
+        }
+      }
+      return { exitCode, stdout: "", stderr: "" };
+    };
+    try {
+      const remote = remoteExecutor({ sshDestination: `settlement-${exit}.invalid`, sudoPassword: "" }, execute);
+      const result = await remote(["/bin/bash", "-c", 'for owner in "$HOME"/.local/state/omp-qualification/command-owners/*; do [ -s "$owner/pgid" ] || exit 77; done; exit "$1"', "--",
+        String(exit === "early-hup" ? 0 : exit)]).catch(error => error);
+      expect(ownerCount).toBe(1);
+      expect(done).toBe(true);
+      expect(published).toBe(exit !== "early-hup");
+      expect(calls).toBe(2);
+      expect(result.exitCode).toBe(exit === "early-hup" ? 125 : exit);
+      expect(await readdir(owners)).toEqual([]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }, 20_000);
 
 test.skipIf(process.platform === "win32")("council491 remote cancellation reaps a real distinct process group", async () => {
   const root = await mkdtemp(join(tmpdir(), "remote-command-owner-"));
@@ -2505,6 +2673,28 @@ describe("resource-owning lanes", () => {
     };
     return { identity, pixel: createPixelLease(() => {}) };
   }
+
+  test("council498 readiness Pixel restore continues after every sidecar write fails", async () => {
+    const restored: number[] = [];
+    let progress: unknown = { cleanupRequired: true };
+    const module: ExternalLaneModule<import("./stable-qualification.ts").RetainedMacLaneContext> = {
+      preflight: async () => {}, run: async () => ({}),
+      needsCleanup: value => (value as { cleanupRequired: boolean }).cleanupRequired,
+      cleanup: async ({ checkpoint }) => {
+        for (let step = 0; step < 3; step += 1) { await checkpoint({ cleanupRequired: true, step }); restored.push(step); }
+        await checkpoint({ cleanupRequired: false }); return { restored: true };
+      },
+    };
+    const error = await restoreRigReadinessPixel(module, {
+      ...await laneContext(), progress, origin: "https://fixture.invalid", sessionLabel: "synthetic",
+      mac: async () => { throw new Error("unexpected remote effect"); },
+      execution: { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => 71 },
+      checkpoint: async value => { progress = value; throw new Error("synthetic sidecar failure"); },
+    }, () => progress).catch(error => error);
+    expect(restored).toEqual([0, 1, 2]);
+    expect(normalizeQualificationFailures(error).some(item => item.observations.persistenceFailed === true)).toBe(true);
+    expect(module.needsCleanup(progress)).toBe(false);
+  });
 
   test("council491 successful owned cleanup retires its stale in-lane cleanup failure", async () => {
     const receipt = summarizedReceipt();
