@@ -213,9 +213,23 @@ async function existingAccess(epoch: string): Promise<Access | undefined> {
 /** Failure text is independent of HTTP bodies, which can contain credentials and identifiers. */
 async function request<T>(url: string, headers: Record<string, string>, method = "GET", body?: unknown): Promise<T | undefined> {
   const send = () => fetch(url, { method, headers: { ...headers, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60_000) });
-  let response: Response;
-  try { response = method === "GET" ? await readProvider(send) : await send(); }
+  try {
+    const response = method === "GET" ? await readProvider(send) : await send();
+    if (response.status === 404) return undefined;
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (method === "GET" && (response.status === 429 || response.status >= 500)) {
+        throw windowsFailure("retryable_service_failure", "connection", "read_only", { httpStatus: response.status });
+      }
+      throw windowsFailure(response.status === 401 || response.status === 403 ? "authentication_failed" : "helper_failed",
+        "connection", method === "GET" ? "read_only" : "unknown", { httpStatus: response.status });
+    }
+    const text = response.status === 204 ? "" : await response.text();
+    try { return text === "" ? undefined : JSON.parse(text) as T; }
+    catch { throw windowsFailure("helper_failed", "output", method === "GET" ? "read_only" : "unknown"); }
+  }
   catch (error) {
+    if (error instanceof QualificationFailure) throw error;
     const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
     if (method === "GET") {
       if (code === "ECONNRESET") throw windowsFailure("connection_reset", "connection", "read_only", { transportFailure: true });
@@ -224,18 +238,6 @@ async function request<T>(url: string, headers: Record<string, string>, method =
     }
     throw windowsFailure(method === "GET" ? "helper_failed" : "mutation_unconfirmed", "connection", method === "GET" ? "read_only" : "unknown");
   }
-  if (response.status === 404) return undefined;
-  if (!response.ok) {
-    await response.body?.cancel();
-    if (method === "GET" && (response.status === 429 || response.status >= 500)) {
-      throw windowsFailure("retryable_service_failure", "connection", "read_only", { httpStatus: response.status });
-    }
-    throw windowsFailure(response.status === 401 || response.status === 403 ? "authentication_failed" : "helper_failed",
-      "connection", method === "GET" ? "read_only" : "unknown", { httpStatus: response.status });
-  }
-  const text = response.status === 204 ? "" : await response.text();
-  try { return text === "" ? undefined : JSON.parse(text) as T; }
-  catch { throw new Error("qualification provider response is malformed"); }
 }
 
 /** Checks stale View and Control independently and discards launch values before returning. */
