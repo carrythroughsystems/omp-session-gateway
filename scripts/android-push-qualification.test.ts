@@ -214,7 +214,7 @@ test.each(["unknown", "accepted", "ambiguous", "privacy", "late", "transient", "
     try {
       await waitForPushDelivery({ runtime: host.runtime, session, detail: "private", kind: "attention", phase: "private_verified", timeout: 60_000,
         metrics, window, onTimeout: value => { lateObserver = value; }, rearm: async (_old, late) => {
-          expect(lateObserver).toBeUndefined();
+          expect(lateObserver).toBeDefined();
           await late(); rearms++;
           return { session: { ...session, ask: { requestId: "SYNTHETIC-NEW", since: "2026-01-01T00:01:01.000Z" } }, window };
         } });
@@ -262,6 +262,144 @@ test.each(["baseline", "mutation", "restoration"] as const)(
     expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
   });
 
+test.each(["fixture", "telemetry", "invalid-clock"] as const)("500 readiness restores after pre-ask %s failure", async stage => {
+  const host = fake(), now = host.runtime.now, fixture = host.runtime.fixture;
+  host.runtime.now = () => 1_000_000_000 + now();
+  const failure = new QualificationFailure({ id: 1, lane: "androidPush", step: "private_verified",
+    class: "harness", reason: "invalid_evidence", elapsedMs: 0, operation: "read_only", observations: {} });
+  host.runtime.fixture = async (...args) => {
+    await fixture(...args);
+    if (args[0] === "start" && stage !== "telemetry") {
+      await host.runtime.pause(stage === "invalid-clock" ? 86_400_001 : 11);
+      throw failure;
+    }
+  };
+  host.runtime.beginDeliveryTelemetry = async () => { await host.runtime.pause(11); throw failure; };
+  let surfaced: unknown;
+  try { await runAndroidPushReadiness(host.input); } catch (error) { surfaced = error; }
+  expect(host.cleanup).toHaveLength(7);
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  if (stage === "invalid-clock") expect(surfaced).toBeInstanceOf(AggregateError);
+  else expect(surfaced).toMatchObject({ evidence: { lane: "rigReadiness", reason: "invalid_evidence", elapsedMs: 11 } });
+});
+
+test.each([false, true])("500 request attestation preserves containment after expiry (aggregate=%s)", async aggregate => {
+  const host = fake(), controller = new AbortController(), metrics = emptyPushDeliveryMetrics();
+  await host.runtime.fixture("start", "epoch"); await host.runtime.fixture("ask", "epoch");
+  const session = (await host.runtime.snapshot("epoch"))!;
+  const contained = Object.assign(new Error("synthetic unresolved target"), { pixelUnrestored: true });
+  const failure = aggregate ? new AggregateError([contained], "synthetic nested containment") : contained;
+  metrics.deliveryRearmCount = 1;
+  host.runtime.deliveryRequestMatches = async () => { controller.abort(); throw failure; };
+  await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "session", kind: "attention",
+    phase: "private_verified", timeout: 60_000,
+    execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } })).rejects.toBe(failure);
+});
+
+test.each(["readiness-error", "readiness-deadline", "qualification-error", "qualification-deadline"])(
+  "500 metadata preserves the actual %s failure", async scenario => {
+    const host = fake(), snapshot = host.runtime.snapshot, controller = new AbortController();
+    const failure = new Error("synthetic snapshot transport failure");
+    host.runtime.beginDeliveryTelemetry = async phase => ({ lane: phase === "readiness" ? "rigReadiness" : "androidPush", phase, after: 0, ordinal: 1 });
+    host.runtime.snapshot = async (...args) => {
+      const session = await snapshot(...args);
+      if (session?.inputRequired) {
+        if (scenario.endsWith("error")) throw failure;
+        controller.abort(); return undefined;
+      }
+      return session;
+    };
+    const input = { ...host.input, execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } };
+    const run = scenario.startsWith("readiness") ? runAndroidPushReadiness(input) : runAndroidPush(input);
+    if (scenario.endsWith("error")) await expect(run).rejects.toBe(failure);
+    else await expect(run).rejects.toMatchObject({ evidence: { reason: "delivery_timeout" } });
+    expect(host.cleanup).toHaveLength(7);
+  });
+
+test.each(["normal", "rearm", "doze"] as const)("500 %s clear includes metadata in its original budget", async stage => {
+  const host = fake(), fixture = host.runtime.fixture, snapshot = host.runtime.snapshot, observe = host.runtime.observe;
+  let phase: string | undefined, clearing = false, delayed = false, asks = 0;
+  host.runtime.beginNotificationPhase = async (_epoch, value) => { phase = value; };
+  host.runtime.fixture = async (...args) => {
+    await fixture(...args);
+    if (args[0] === "ask") asks++;
+    if (args[0] === "answer" && phase === (stage === "doze" ? "doze_verified" : "private_verified")) clearing = true;
+  };
+  host.runtime.snapshot = async (...args) => {
+    if (clearing && !delayed) { delayed = true; await host.runtime.pause(60_001); }
+    return snapshot(...args);
+  };
+  if (stage === "rearm") {
+    host.runtime.observe = async (...args) => asks === 1 && !clearing ?
+      { count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false } : observe(...args);
+    host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
+    host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1,
+      retryable: true, httpStatus: 503, requestAlias: 1, clearAcknowledged: true });
+    host.runtime.deliveryRequestMatches = async () => true;
+  }
+  await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { reason: "delivery_timeout" } });
+  expect(delayed).toBe(true);
+  expect(host.cleanup).toHaveLength(7);
+  if (stage !== "doze") expect(asks).toBe(1);
+});
+
+test("500 timed-out ask keeps its sampler until rearm clear settlement", async () => {
+  const host = fake(), metrics = emptyPushDeliveryMetrics();
+  await host.runtime.fixture("start", "epoch"); await host.runtime.fixture("ask", "epoch");
+  const session = (await host.runtime.snapshot("epoch"))!;
+  let arrived = false, sample: (() => Promise<void>) | undefined;
+  host.runtime.observe = async () => ({ count: arrived ? 1 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1,
+    retryable: true, httpStatus: 503, requestAlias: 1 });
+  const failure = new Error("synthetic clear failure");
+  await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention",
+    phase: "private_verified", timeout: 1, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
+    onTimeout: value => { sample = value; }, rearm: async () => { throw failure; } })).rejects.toBe(failure);
+  expect(sample).toBeDefined();
+  arrived = true; await sample?.();
+  expect(metrics.latePostCount).toBe(1);
+});
+
+test("500 delivered ask disarms its pre-ask sampler before telemetry", async () => {
+  const host = fake(), metrics = emptyPushDeliveryMetrics();
+  await host.runtime.fixture("start", "epoch"); await host.runtime.fixture("ask", "epoch");
+  const session = (await host.runtime.snapshot("epoch"))!;
+  let sample: (() => Promise<void>) | undefined = async () => {};
+  host.runtime.deliveryTelemetry = async () => { throw new Error("synthetic telemetry failure"); };
+  await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "session", kind: "attention",
+    phase: "private_verified", timeout: 60_000, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
+    onTimeout: value => { sample = value; } })).rejects.toMatchObject({ evidence: { reason: "invalid_evidence" } });
+  expect(sample).toBeUndefined();
+});
+
+test("500 expiry after a settled rearm cannot reinstate the old ask sampler", async () => {
+  const host = fake(), metrics = emptyPushDeliveryMetrics(), controller = new AbortController();
+  await host.runtime.fixture("start", "epoch"); await host.runtime.fixture("ask", "epoch");
+  const session = (await host.runtime.snapshot("epoch"))!;
+  let sample: (() => Promise<void>) | undefined;
+  const freshSampler = async () => {};
+  host.runtime.observe = async () => ({ count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: 0, failures: 1,
+    retryable: true, httpStatus: 503, requestAlias: 1 });
+  await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention",
+    phase: "private_verified", timeout: 1, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
+    execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 },
+    onTimeout: value => { sample = value; }, rearm: async () => {
+      sample = freshSampler; controller.abort();
+      return { session: { ...session, ask: { requestId: "fresh", since: session.ask!.since } } };
+    } })).rejects.toMatchObject({ evidence: { reason: "delivery_timeout" } });
+  expect(sample).toBe(freshSampler);
+});
+
+test("500 overlap retry discards ambiguous late attribution without resetting its rearm budget", async () => {
+  const host = fake({ overlaps: 1 });
+  let phases = 0;
+  const failure = new Error("synthetic overlap recovery failure");
+  host.runtime.beginNotificationPhase = async () => { if (++phases === 2) throw failure; };
+  await expect(runAndroidPush(host.input)).rejects.toBe(failure);
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results.private_verified).toMatchObject({ latePostCount: 0, deliveryRearmCount: 0 });
+  expect(host.cleanup).toHaveLength(7);
+});
 test.each(["telemetry", "ownership", "answer", "clear"] as const)(
   "495 round2 readiness rejects its expired delivery budget after %s awaits", async stage => {
     const host = fake();
@@ -313,6 +451,7 @@ test.each(["metadata", "phase"] as const)("495 round2 qualification checks the %
     .rejects.toMatchObject({ evidence: { class: "harness", reason: stage === "metadata" ? "delivery_metadata_timeout" : "delivery_timeout" } });
   expect(host.cleanup).toHaveLength(7);
 });
+
 test("R1 fractional monotonic measurements remain typed and R4 telemetry errors retain late sampling", async () => {
   const host = fake(), metrics = emptyPushDeliveryMetrics();
   await host.runtime.fixture("start", "synthetic"); await host.runtime.fixture("ask", "synthetic");
@@ -422,7 +561,9 @@ test.each(["telemetry", "request"] as const)("495 R6 cancellation during %s cann
     timeout: 60_000, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
     execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 },
     onTimeout: value => { sample = value; } })).rejects.toMatchObject({ evidence: { reason: "delivery_timeout", class: "harness" } });
-  expect(sample).toBeDefined();
+  // The post arrived within budget; later cancellation must not reclassify it as late.
+  expect(sample).toBeUndefined();
+  expect(metrics.latePostCount).toBe(0);
 });
 
 test.each(["instance", "generation"] as const)("495 R4 %s changes after clearing stop before the next ask", async variant => {
