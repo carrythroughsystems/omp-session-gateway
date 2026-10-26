@@ -530,7 +530,7 @@ export class StudioDriver implements DriverPort {
     else {
       if (await this.anyCampaignWorkerRunning(state)) throw new Error("a candidate campaign worker is still active");
       const failure = await this.completedCampaignFailure(bound);
-      if (failure.outcome.receipt?.sha256 !== digest) throw new Error("failed campaign receipt changed before retirement");
+      if (failure.outcome.receipt?.sha256 !== digest || failure.outcome.receipt.cleanupDisposition !== "restored") throw new Error("failed campaign receipt changed or is not restored before retirement");
       this.campaignCleanupComplete(JSON.parse(bytes), bound);
     }
     return digest;

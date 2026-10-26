@@ -68,7 +68,7 @@ test("routine controls normalize generated versions but retain policy and depend
 import { assertFailedCampaignCleanup, botEnvironment, campaignAvailabilityObservation, campaignWorkerArguments, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
 import { applyDecisionPatch, campaignAttempt, campaignExecution, parseCampaignRetryPlan, compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, parseCampaignInfrastructureHold, REPOSITORY, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
 import type { CampaignFailureObservation, CampaignInfrastructureHold, Decision, DriverPort, DriverState, JobObservation, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
-import { assertCampaignCleanupComplete, assertCampaignRetryEligible, createStableQualificationReceipt } from "./stable-qualification.ts";
+import { assertCampaignCleanupComplete, assertCampaignRetryEligible, createStableQualificationReceipt, withConsumedCampaignRetry } from "./stable-qualification.ts";
 import type { ExternalLaneModule, StableQualificationLaneModules, StableQualificationReceipt } from "./stable-qualification.ts";
 import { readDeviceCloudOutcomeFile, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
 import { writeQualificationOutcomeFile } from "./qualification-outcome.ts";
@@ -860,6 +860,25 @@ async function completedAutomaticJob(root: string, withReceipt = false) {
 }
 
 describe("automatic retry runtime revalidation", () => {
+  test("shared authorization consumes before effects and leaves passed lane proofs byte-for-byte", async () => {
+    const root = await mkdtemp(join(tmpdir(), "driver-automatic-consumption-"));
+    try {
+      const { next, receipt } = await completedAutomaticJob(root, true);
+      const passed = Object.entries(receipt!.lanes).filter(([, lane]) => lane.status === "passed").map(([name, lane]) => [name, JSON.stringify(lane)] as const);
+      const order: string[] = [];
+      await withConsumedCampaignRetry(receipt!, next.qualificationExecution!, async () => {
+        expect(receipt!.execution).toEqual(next.qualificationExecution);
+        expect(receipt!.failureSummary).toBeUndefined();
+        order.push("persist");
+      }, async () => {
+        expect(order).toEqual(["persist"]);
+        expect(receipt!.lanes.windows.status).toBe("pending");
+        order.push("run");
+      });
+      expect(order).toEqual(["persist", "run"]);
+      for (const [name, bytes] of passed) expect(JSON.stringify(receipt!.lanes[name as keyof StableQualificationReceipt["lanes"]])).toBe(bytes);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   test.each([false, true])("scheduling revalidates immutable evidence without changing lease or passed proof (receipt=%s)", async withReceipt => {
     const root = await mkdtemp(join(tmpdir(), "driver-automatic-proof-"));
     try {
