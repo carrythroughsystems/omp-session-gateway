@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -826,6 +826,7 @@ class AutomaticRuntime extends StudioDriver {
   }
 }
 async function completedAutomaticJob(root: string, withReceipt = false) {
+  root = await realpath(root);
   const runtime = new AutomaticRuntime(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
   runtime.receiptPath = join(root, "stable-qualification.json");
   const selected = runtime.current;
