@@ -4,6 +4,8 @@ import { nextReleaseVersion, parseReleaseClass, RoutineHoldError, routineRelease
 import type { ReleaseClass, RoutineAuthority, RoutineEvidence, RoutineHoldReason } from "./release-policy.ts";
 import type { DeviceCloudHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet } from "./device-cloud-outcome.ts";
+import { parseQualificationExecution, parseQualificationOutcome, qualificationExecutionsMatch, qualificationOutcomeExitCode, type QualificationExecution, type QualificationOutcome } from "./qualification-outcome.ts";
+import type { StableQualificationLane } from "./stable-qualification.ts";
 
 export const REPOSITORY = "carrythroughsystems/omp-session-gateway";
 // The delivery App's bot opens an order from a branch under this prefix.
@@ -48,12 +50,12 @@ export type Phase = "selected" | "order-updated" | "order-ready" | "order-landed
   | "prepare-open" | "prepared" | "candidate-tagged" | "candidate-published" | "candidate-verified"
   | "qualifying" | "qualified" | "approve-open" | "approve-checking" | "approval-required"
   | "approved" | "stable-tagged" | "stable-published" | "stable-verified" | "smoking" | "smoked"
-  | "record-open" | "recorded" | "closed" | "diagnostic-required" | "infrastructure-held" | "stopped";
+  | "record-open" | "recorded" | "closed" | "diagnostic-required" | "infrastructure-held" | "retry-pending" | "stopped";
 export type Operation = "select" | "hold" | "stop" | "update-order" | "update-release-pr" | "ready-order" | "merge-order"
   | "open-prepare" | "merge-prepare" | "tag-candidate" | "observe-candidate" | "verify-candidate"
   | "start-campaign" | "finish-campaign" | "open-approve" | "start-approve-checks" | "finish-approve-checks"
   | "merge-approve" | "accept-approval" | "tag-stable" | "observe-stable" | "verify-stable" | "start-smoke"
-  | "finish-smoke" | "open-record" | "merge-record" | "close" | "rerequest" | "hold-device-cloud";
+  | "finish-smoke" | "open-record" | "merge-record" | "close" | "rerequest" | "hold-device-cloud" | "schedule-campaign-retry";
 export interface DriverState {
   schemaVersion: 1;
   sequence: number;
@@ -83,6 +85,10 @@ export interface DriverState {
   retired?: { candidate: string; reason: string; at: string; issue: number; preparePr?: number; failedMain?: string }[];
   /** Attempt zero preserves the original job paths. Each authorized retry gets a new ordinal. */
   campaignAttempt?: number | undefined;
+  qualificationExecution?: QualificationExecution | undefined;
+  retryPlan?: CampaignRetryPlan | undefined;
+  /** Absolute UTC epoch milliseconds; allocated once in the persisted scheduling intent. */
+  retryNotBefore?: number | undefined;
   resumeDeviceCloud?: boolean | undefined;
   /** Bound in the immutable campaign specification, never retargeted from operator CLI ambient env. */
   macHost?: string | undefined;
@@ -108,6 +114,74 @@ export interface JobObservation {
   status: "absent" | "running" | "passed" | "failed" | "infrastructure-hold";
   detail?: string;
   availabilityHold?: CampaignInfrastructureHold;
+  campaignFailure?: CampaignFailureObservation;
+}
+
+export interface CampaignFailureObservation {
+  readonly outcome: QualificationOutcome;
+  /** Hash of the exact immutable spec, result, exit, outcome and optional receipt snapshot bytes. */
+  readonly jobSha256: string;
+  readonly restartLanes: readonly StableQualificationLane[];
+}
+export interface CampaignRetryPlan extends CampaignFailureObservation {
+  readonly formatVersion: 1;
+  readonly nextAttempt: 1 | 2;
+}
+const RETRY_LANES: readonly StableQualificationLane[] = [
+  "artifacts", "debian", "macos", "ompPublication", "android", "androidPush", "androidPushCleanup",
+  "deviceCloud", "deviceCloudCleanup", "relay", "cleanup", "windows", "windowsCleanup",
+];
+export function campaignExecution(state: DriverState): QualificationExecution {
+  const attempt = campaignAttempt(state);
+  if (state.macHost === undefined || !/^[A-Za-z_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*$/u.test(state.macHost)) throw new Error("campaign retained Mac binding is missing");
+  return parseQualificationExecution({
+    formatVersion: 1, campaignAttempt: attempt,
+    binding: { candidateTag: state.candidate, sourceCommit: state.candidateCommit, archiveSha256: state.candidateDigest,
+      previousTag: state.previousStable, orchestratorCommit: state.candidateCommit, policySha256: state.authorityPolicy,
+      macHostSha256: createHash("sha256").update(state.macHost).digest("hex") },
+    ...(attempt === 0 ? {} : { retryPlanSha256: state.retryPlan === undefined ? undefined : campaignRetryPlanDigest(state.retryPlan) }),
+  });
+}
+export function parseCampaignFailureObservation(value: unknown, state: DriverState): CampaignFailureObservation {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid campaign failure observation");
+  const raw = value as Record<string, unknown>;
+  if (Object.keys(raw).sort().join(",") !== "jobSha256,outcome,restartLanes" ||
+    typeof raw.jobSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(raw.jobSha256) ||
+    !Array.isArray(raw.restartLanes) || raw.restartLanes.some(lane => !RETRY_LANES.includes(lane)) ||
+    new Set(raw.restartLanes).size !== raw.restartLanes.length) throw new Error("invalid campaign failure observation");
+  const expected = campaignExecution(state);
+  if (!qualificationExecutionsMatch(state.qualificationExecution, expected)) throw new Error("campaign has no bound execution");
+  const outcome = parseQualificationOutcome(raw.outcome, expected);
+  if (outcome.scope === "preflight" && raw.restartLanes.length !== 0) throw new Error("invalid preflight restart lanes");
+  return { outcome, jobSha256: raw.jobSha256, restartLanes: [...raw.restartLanes] };
+}
+export function campaignRetryPlanDigest(plan: CampaignRetryPlan): string {
+  return createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+}
+/** Parse against the allocated next attempt; prior execution supplies only the old plan identity. */
+export function parseCampaignRetryPlan(value: unknown, state: DriverState): CampaignRetryPlan {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid campaign retry plan");
+  const raw = value as Record<string, unknown>;
+  if (Object.keys(raw).sort().join(",") !== "formatVersion,jobSha256,nextAttempt,outcome,restartLanes" ||
+    raw.formatVersion !== 1 || (raw.nextAttempt !== 1 && raw.nextAttempt !== 2) ||
+    raw.nextAttempt !== campaignAttempt(state)) throw new Error("invalid campaign retry plan");
+  const outcome = parseQualificationOutcome(raw.outcome);
+  const expected = parseQualificationExecution({ ...outcome.execution, binding: campaignExecutionBinding(state) });
+  if (outcome.execution.campaignAttempt !== raw.nextAttempt - 1 ||
+    !qualificationExecutionsMatch(outcome.execution, expected) || qualificationOutcomeExitCode(outcome, expected) !== 75 ||
+    typeof raw.jobSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(raw.jobSha256) ||
+    !Array.isArray(raw.restartLanes) || raw.restartLanes.some(lane => !RETRY_LANES.includes(lane)) ||
+    new Set(raw.restartLanes).size !== raw.restartLanes.length ||
+    (outcome.scope === "preflight" && raw.restartLanes.length !== 0)) throw new Error("invalid campaign retry plan");
+  return { formatVersion: 1, outcome, jobSha256: raw.jobSha256, restartLanes: [...raw.restartLanes], nextAttempt: raw.nextAttempt };
+}
+function campaignExecutionBinding(state: DriverState): QualificationExecution["binding"] {
+  return campaignExecution({ ...state, campaignAttempt: 0, retryPlan: undefined }).binding;
+}
+function retrySummary(evidence: CampaignFailureObservation): string {
+  const summary = evidence.outcome.failureSummary;
+  return summary.failures.map(failure => `${failure.lane}:${failure.class}:${failure.reason}`).join(", ") +
+    `; elapsedMs=${summary.timings.attemptMs}; cleanupMs=${summary.timings.cleanupMs}`;
 }
 
 export function campaignAttempt(state: DriverState): number {
@@ -155,6 +229,8 @@ export interface RepositorySnapshot {
   smoke?: JobObservation;
   /** True unless the failed lease is absent or its completed cleanup permits owner-only recovery. */
   hostRecoveryRequired?: boolean;
+  /** Read-only revalidation failed; a pending retry must not spin or acquire fresh authority. */
+  campaignRetryInvalid?: boolean;
 }
 export interface DriverConfig { bot: string; founder: string }
 export interface Decision {
@@ -167,7 +243,8 @@ export interface Decision {
   /** JSON preserves deletion intent; assigning undefined in a persisted patch does not. */
   clear?: (keyof Pick<DriverState, "preparePr" | "orderPr" | "updatedHead" | "candidateCommit" | "candidateDigest" |
     "approvePr" | "approvedHead" | "approvedTree" | "stableCommit" | "stableDigest" | "publicationRun" |
-    "recordPr" | "failedMain" | "holdReason" | "holdCommit" | "infrastructureHold" | "resumeDeviceCloud" | "macHost">)[];
+    "recordPr" | "failedMain" | "holdReason" | "holdCommit" | "infrastructureHold" | "resumeDeviceCloud" | "macHost" |
+    "qualificationExecution" | "retryPlan" | "retryNotBefore">)[];
   holdReason?: RoutineHoldReason;
 }
 export function applyDecisionPatch(state: DriverState, step: Pick<Decision, "patch" | "clear">): DriverState {
@@ -229,7 +306,7 @@ export function promotionHold(state: DriverState, repo: RepositorySnapshot, conf
   });
   return reason ?? (merged && repo.approve?.mergeCommit !== state.stableCommit ? "merge-missing" : undefined);
 }
-export function nextStep(state: DriverState | undefined, repo: RepositorySnapshot, config: DriverConfig, date = new Date().toISOString().slice(0, 10)): Decision | Idle {
+export function nextStep(state: DriverState | undefined, repo: RepositorySnapshot, config: DriverConfig, date = new Date().toISOString().slice(0, 10), now = Date.now()): Decision | Idle {
   if (state?.intent !== undefined) return state.intent;
   if (state?.phase === "infrastructure-held") return idle("device-cloud infrastructure held; explicit retry-device-cloud authorization required; no automatic retry");
   if (repo.authorityFailure !== undefined) return routineHold(repo.authorityFailure);
@@ -272,7 +349,20 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       campaignAttempt: 0,
     }, clear: ["preparePr", "orderPr", "updatedHead", "candidateCommit", "candidateDigest", "approvePr",
       "approvedHead", "approvedTree", "stableCommit", "stableDigest", "publicationRun", "recordPr",
-      "failedMain", "holdReason", "holdCommit", "infrastructureHold", "resumeDeviceCloud", "macHost"] });
+      "failedMain", "holdReason", "holdCommit", "infrastructureHold", "resumeDeviceCloud", "macHost", "qualificationExecution", "retryPlan", "retryNotBefore"] });
+  }
+  if (state.phase === "retry-pending") {
+    try {
+      parseCampaignRetryPlan(state.retryPlan, state);
+      if (!qualificationExecutionsMatch(state.qualificationExecution, campaignExecution(state))) throw new Error("invalid retry execution");
+      if (!Number.isSafeInteger(state.retryNotBefore) || state.retryNotBefore! < 0) throw new Error("invalid retry deadline");
+    } catch { return failure("campaign harness:invalid_evidence"); }
+    if (repo.campaignRetryInvalid) return failure("campaign harness:binding_mismatch");
+    if (state.approvePr !== undefined || state.stableCommit !== undefined || repo.tags.includes(`v${state.version}`) ||
+      compareVersions(repo.latestStable, state.version) >= 0) return failure("campaign harness:binding_mismatch");
+    if (repo.authority !== undefined && repo.authority.policy !== state.authorityPolicy) return routineHold("policy-changed");
+    if (now < state.retryNotBefore!) return idle(`campaign attempt=${campaignAttempt(state)}; backoff pending`);
+    return decision("start-campaign", "qualifying", `campaign attempt=${campaignAttempt(state)}; start`);
   }
   if (["selected", "order-updated", "order-ready", "order-landed", "held"].includes(state.phase)) {
     const comparison = compareVersions(repo.upstreamTag, requestVersion(state.issue)!);
@@ -309,11 +399,12 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
     return decision(candidate ? "observe-candidate" : "observe-stable", candidate ? "candidate-published" : "stable-published", "signed-release.yml passed");
   }
   if (state.phase === "candidate-published") return decision("verify-candidate", "candidate-verified", `verify all six assets and provenance of ${state.candidate}`);
-  if (state.phase === "candidate-verified") return decision("start-campaign", "qualifying", `preflight then detached qualification of ${state.candidate}`);
+  if (state.phase === "candidate-verified") return decision("start-campaign", "qualifying", `campaign attempt=${campaignAttempt(state)}; start`);
   if (state.phase === "qualifying" || state.phase === "approve-checking" || state.phase === "smoking") {
     const job = state.phase === "qualifying" ? repo.campaign : state.phase === "smoking" ? repo.smoke : repo.approveChecks;
     if (job?.status === "infrastructure-hold") {
       if (state.phase !== "qualifying") return failure("unexpected infrastructure hold outside candidate qualification");
+      if (state.qualificationExecution !== undefined) return failure("campaign harness:invalid_evidence");
       try {
         const hold = parseCampaignInfrastructureHold(job.availabilityHold, state);
         return decision("hold-device-cloud", "infrastructure-held", "candidate device-cloud availability held; no automatic retry", { patch: { infrastructureHold: hold } });
@@ -325,9 +416,31 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
       if (repo.authority?.policy !== state.authorityPolicy) return routineHold("policy-changed");
       return decision("start-approve-checks", "approve-checking", "resume only the same-subject local checks; no device/cloud action is replayed", { pr });
     }
-    if (job?.status === "failed" || job?.status === "absent") return failure(job.detail ?? `${state.phase} process disappeared; inspect private job logs; no retry`);
+    if (state.phase === "qualifying" && job?.status === "failed" && job.campaignFailure !== undefined) {
+      try {
+        const evidence = parseCampaignFailureObservation(job.campaignFailure, state);
+        const attempt = campaignAttempt(state);
+        if (qualificationOutcomeExitCode(evidence.outcome, campaignExecution(state)) !== 75) {
+          return failure(`campaign attempt=${attempt}; ${retrySummary(evidence)}`);
+        }
+        if (attempt === 2) return failure(`campaign attempt=2; retry exhausted; ${retrySummary(evidence)}`);
+        if (state.approvePr !== undefined || state.stableCommit !== undefined || repo.tags.includes(`v${state.version}`) ||
+          compareVersions(repo.latestStable, state.version) >= 0) return failure("campaign harness:binding_mismatch");
+        const nextAttempt = (attempt + 1) as 1 | 2, delay = nextAttempt * 60_000;
+        const retryPlan: CampaignRetryPlan = { formatVersion: 1, ...evidence, nextAttempt };
+        const allocated = { ...state, campaignAttempt: nextAttempt, retryPlan };
+        return decision("schedule-campaign-retry", "retry-pending",
+          `campaign attempt=${attempt}; ${retrySummary(evidence)}; nextAttempt=${nextAttempt}; delayMs=${delay}`, {
+            patch: { campaignAttempt: nextAttempt, retryPlan, retryNotBefore: now + delay, qualificationExecution: campaignExecution(allocated) },
+            clear: ["infrastructureHold", "resumeDeviceCloud"],
+          });
+      } catch { return failure("campaign harness:invalid_evidence"); }
+    }
+    if (job?.status === "failed" || job?.status === "absent") return failure(
+      state.phase === "qualifying" && state.qualificationExecution !== undefined ? "campaign harness:invalid_evidence" :
+        job.detail ?? `${state.phase} process disappeared; inspect private job logs; no retry`);
     if (job?.status !== "passed") return idle(`waiting for detached ${state.phase}`);
-    if (state.phase === "qualifying") return decision("finish-campaign", "qualified", "all candidate qualification lanes passed");
+    if (state.phase === "qualifying") return decision("finish-campaign", "qualified", `campaign attempt=${campaignAttempt(state)}; all candidate qualification lanes passed`);
     if (state.phase === "smoking") return decision("finish-smoke", "smoked", "published-byte smoke passed with --force-reinstall and --rebuild-omp");
     const pr = repo.approve;
     const invalid = refuse(pr, config, "approve");

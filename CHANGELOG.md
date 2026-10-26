@@ -11,6 +11,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Qualification-only private rotating structured gateway logs and bounded Push send/ack evidence.
   Push recovery permits one evidence-backed fresh ask per phase, preserves existing delivery bounds,
   records late posts and phase timings, and stops unexplained timeouts without retry.
+- Automatic same-candidate qualification retries for validated, fully contained infrastructure
+  failures: attempts 0–2, persisted 60/120-second backoff, immutable failed-attempt evidence,
+  exact-owner lease retention and privacy-safe tracking comments. Product, harness, unknown,
+  mixed, dirty and exhausted failures stop; historical device-cloud holds remain manual.
 - Closed qualification failure and machine-outcome contracts, private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and

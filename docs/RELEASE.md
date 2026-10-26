@@ -425,7 +425,9 @@ result and exit file under `jobs/`. Campaign receipts remain at
 `~/.local/share/omp-session-gateway/qualification/<candidate>/stable-qualification.json`.
 Qualification and smoke use their existing shared release-host lease (including its durable failed
 owner); the driver never deletes or replaces the database or steals a foreign/live owner.
-An ordinary failed/missing device/cloud job enters diagnostic-required and reports non-passed lanes.
+A missing worker or an ordinary/non-retryable device/cloud failure enters diagnostic-required.
+New-format, fully contained infrastructure failures use the bounded automatic retry contract below;
+neither a raw timeout nor exit 75/143 proves eligibility.
 A missing local approve-check
 worker can resume only at the same head/tree and policy; no device, cloud or publication action
 is replayed. Passed/failed results are never overwritten to invent a retry. The saved intent and
@@ -536,7 +538,65 @@ Availability holds are never automatically retried by this mechanism. An initial
 operator-authorized semantics below; availability encountered after an ordinary failed first
 journey remains a mixed diagnostic failure, not fresh availability-only authorization.
 
-### Device-cloud availability holds
+### Automatic same-candidate campaign retries
+
+New candidates containing the version-1 execution/outcome implementation use `campaignAttempt`
+as the complete retry budget: initial attempt **0**, then retries **1** and **2**, never a third.
+Only validated infrastructure roots (and collateral pointing to those roots), with current
+cleanup, reconciled allocations and no unknown mutation, can authorize another attempt.
+Product, harness, unknown, mixed, collateral-only, malformed and dirty evidence stops immediately.
+An unexplained Push timeout or raw Windows exit 143 is not infrastructure evidence.
+
+`schedule-campaign-retry` persists `retry-pending`, a bound plan and `retryNotBefore` before
+advancement. The first retry waits **60 seconds**, the second **120 seconds**; ticks before that
+deadline are idle. This is a minimum delay, not a change to the launchd tick interval. Each plan
+binds the failed/next ordinal, candidate tag/source/archive digest, predecessor, orchestrator
+commit, authority policy, retained Mac, immutable prior job digest, exact failed-receipt digest,
+closed failure summary, restart lanes and preflight/readiness/campaign scope.
+
+Before scheduling and before an unclaimed launch, the driver checks the completed job/result/exit,
+unchanged receipt bytes and candidate publication, unchanged reviewed authority, no approval or
+stable publication, no active candidate worker from any attempt, and no foreign/live host owner.
+Failed receipt bytes are preserved as `failed-qualification.json` in the completed job before the
+working receipt can advance. The job also retains its immutable specification, machine outcome,
+result and exit. Never modify or delete them to force recovery.
+
+The next worker consumes the previous receipt's eligibility durably **before admission or setup**.
+Passed qualification lanes and complete publication proofs are preserved byte-for-byte. Failed
+Push/Windows/cloud journeys restart on fresh resource epochs; unstarted lanes run normally.
+Incomplete collateral publication restarts the full lifecycle on an isolated OMP host. Artifacts
+are reverified without replacing a passed proof; readiness runs again and final Mac cleanup reopens
+before setup effects. No provider/guest mutation is blindly replayed.
+
+The release-host owner stays exactly `qualification:<candidate>:<receipt path>` across attempts.
+Automatic retry never calls lease clear: the same owner reacquires the SQLite OS lock. A live or
+foreign holder blocks work; final success clears ownership normally. `recoverFailedCampaign()`
+remains only for retiring a failed candidate after a source fix.
+
+Job names remain `jobs/<issue>-<candidate>-campaign/` for zero and
+`jobs/<issue>-<candidate>-campaign-retry-<n>/` thereafter. A spec-only tmux launch failure reuses
+the allocated ordinal and exact specification. A `started` claim is a hard no-relaunch fence even
+if tmux disappears; inspect and recover manually rather than deleting it. Intent/outbox replay
+does not allocate another attempt or duplicate issue comments. Attempt starts, failed-attempt
+scheduling, exhaustion and success are announced with fixed classes/reasons/lane names and numeric
+ordinal/timing/delay fields; raw errors, host/device identifiers and provider bodies are excluded.
+
+After attempt 2 fails, `diagnostic-required` retains the exhaustion summary and owning lease.
+Repair/reconcile the exact failed owner. The existing successful same-version request plus a main
+source fix can retire that candidate and select a new prealpha; **only new-candidate selection**
+resets the automatic budget. Approval, signing, provenance, runtime comparison, publication and
+published-byte smoke gates remain unchanged after eventual success.
+
+**Rollout:** re-pin only after disabling/unloading the driver and draining workers, intents and
+comment outboxes as described under Studio installation. Preserve state, jobs, receipts and both
+SQLite files; run offline checks and read-only plan/status on the reviewed pin, review dry-run
+before arming, and start a new candidate containing the new implementation. Never retarget an
+existing job to new orchestrator code. Old schema-3 receipts stay readable, but missing new
+execution/outcome evidence cannot authorize automatic retry. Rollback to an older driver requires
+draining all new-format work first. `retry-device-cloud` is refused for new-format jobs and cannot
+bypass their two-retry budget.
+
+### Legacy device-cloud availability holds
 
 Only validated no-free pinned-device observations are availability. Authentication, malformed
 catalogs, transport/queue ambiguity, allocation mismatch, exhausted journey retries, audit errors
@@ -553,7 +613,7 @@ and final Mac cleanup must pass. A cleanup or lifecycle error combined with avai
 resumption. A preflight-only hold creates no cloud session, tunnel, fixture or qualification
 receipt and may instead be retried as an effects-free campaign start.
 
-The driver's `infrastructure-held` phase never retries automatically, even after devices become
+For legacy jobs only, the driver's `infrastructure-held` phase never retries automatically, even after devices become
 free or a later observation passes. First inspect the private completed job and receipt, confirm
 equipment availability, then authorize exactly the displayed candidate and attempt:
 
