@@ -34,7 +34,7 @@ import {
   stageRuntimePayload,
 } from "./installation.ts";
 import { OmpHostReader, OmpLaunchResolver, startHostPoller } from "./omp-registry.ts";
-import { SafeLogger } from "./logger.ts";
+import { assertQualificationLogDirectory, QualificationLogSink, SafeLogger } from "./logger.ts";
 import { PushService } from "./push.ts";
 import { SessionCreationService } from "./tern-creation.ts";
 import { SessionRegistry } from "./registry.ts";
@@ -124,13 +124,13 @@ function optionValues(arguments_: ParsedArguments, name: string): readonly strin
 }
 
 const COMMAND_OPTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
-  serve: new Set(["--dev-localhost", "--port", "--origin", "--readiness-instance"]),
-  install: new Set(["--origin", "--allow", "--port", "--no-start"]),
+  serve: new Set(["--dev-localhost", "--port", "--origin", "--readiness-instance", "--qualification-log-dir"]),
+  install: new Set(["--origin", "--allow", "--port", "--no-start", "--qualification-log-dir"]),
   uninstall: new Set(["--no-stop"]),
-  rollback: new Set(["--to"]),
+  rollback: new Set(["--to", "--qualification-log-dir"]),
   status: new Set(),
   doctor: new Set(["--bundle", "--output"]),
-  "rotate-readiness-token": new Set(),
+  "rotate-readiness-token": new Set(["--qualification-log-dir"]),
   "serve-guidance": new Set(),
   help: new Set(),
   "--help": new Set(),
@@ -182,7 +182,9 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
   const token = await loadOrCreateReadinessToken(config);
   const webRoot = resolve(fileURLToPath(new URL("../../web/dist/", import.meta.url)));
   const staticAssets = await StaticAssetStore.load(webRoot);
-  const logger = new SafeLogger();
+  const logDirectory = oneOption(arguments_, "--qualification-log-dir");
+  const sink = logDirectory === undefined ? undefined : new QualificationLogSink(logDirectory);
+  const logger = new SafeLogger(sink);
   const registry = new SessionRegistry({
     ttlSeconds: config.registry.ttlSeconds,
     maxSessions: config.registry.maxSessions,
@@ -215,6 +217,9 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
   };
   let http: Bun.Server<undefined> | undefined;
   let sweeper: ReturnType<typeof setInterval> | undefined;
+  const loggingHealth = sink === undefined ? undefined : setInterval(() => {
+    if (!sink.healthy) { process.exitCode = 1; stop(); }
+  }, 1_000);
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
@@ -241,6 +246,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     clearInterval(sweeper);
+    clearInterval(loggingHealth);
     poller.stop();
     try {
       http?.stop(true);
@@ -296,6 +302,8 @@ async function waitForGateway(
 }
 
 async function runInstall(arguments_: ParsedArguments): Promise<void> {
+  const logDirectory = oneOption(arguments_, "--qualification-log-dir");
+  if (logDirectory !== undefined) assertQualificationLogDirectory(logDirectory);
   const origin = oneOption(arguments_, "--origin");
   const allowedLogins = optionValues(arguments_, "--allow");
   if (origin === undefined) throw new Error("install requires --origin https://host.tailnet.ts.net");
@@ -369,7 +377,7 @@ async function runInstall(arguments_: ParsedArguments): Promise<void> {
     runtime = await stageRuntimePayload(config);
     serviceAttempted = true;
     const readinessInstance = randomBytes(32).toString("base64url");
-    const definition = await installUserService(config, activate, runtime.cliPath, readinessInstance);
+    const definition = await installUserService(config, activate, runtime.cliPath, readinessInstance, undefined, logDirectory);
     if (activate) await waitForGateway(config, readinessToken, readinessInstance);
     await activateRuntime(config, runtime);
     console.log(
@@ -396,7 +404,7 @@ async function runInstall(arguments_: ParsedArguments): Promise<void> {
           const priorToken = await loadReadinessToken(restoredConfig);
           const rollbackInstance =
             priorRuntime.readinessProtocol === "instance-v1" ? randomBytes(32).toString("base64url") : undefined;
-          await installUserService(restoredConfig, priorService.active, priorRuntime.cliPath, rollbackInstance);
+          await installUserService(restoredConfig, priorService.active, priorRuntime.cliPath, rollbackInstance, undefined, logDirectory);
           if (priorService.active) {
             await waitForGateway(
               restoredConfig,
@@ -435,6 +443,8 @@ async function runUninstall(arguments_: ParsedArguments): Promise<void> {
 }
 
 async function runRollback(arguments_: ParsedArguments): Promise<void> {
+  const logDirectory = oneOption(arguments_, "--qualification-log-dir");
+  if (logDirectory !== undefined) assertQualificationLogDirectory(logDirectory);
   const requested = oneOption(arguments_, "--to");
   const config = await loadGatewayConfig();
   const service = await userServiceStatus(config);
@@ -479,7 +489,7 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
     // only advances once the predecessor has proven readiness. See `activationState`.
     const readinessInstance =
       target.runtime.readinessProtocol === "instance-v1" ? randomBytes(32).toString("base64url") : undefined;
-    const definition = await installUserService(config, service.active, target.runtime.cliPath, readinessInstance);
+    const definition = await installUserService(config, service.active, target.runtime.cliPath, readinessInstance, undefined, logDirectory);
     if (service.active) {
       await waitForGateway(config, readinessToken, readinessInstance, target.runtime.readinessProtocol === "legacy");
     }
@@ -505,7 +515,7 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
       if (authoritative === undefined) throw new Error("current.json no longer names a verified installed runtime");
       const repairInstance =
         authoritative.readinessProtocol === "instance-v1" ? randomBytes(32).toString("base64url") : undefined;
-      await installUserService(config, service.active, authoritative.cliPath, repairInstance);
+      await installUserService(config, service.active, authoritative.cliPath, repairInstance, undefined, logDirectory);
       if (service.active) {
         await waitForGateway(config, readinessToken, repairInstance, authoritative.readinessProtocol === "legacy");
       }
@@ -570,7 +580,9 @@ async function runDoctor(arguments_: ParsedArguments): Promise<void> {
   if (Object.values(report.checks).some(value => !value)) process.exitCode = 1;
 }
 
-async function runRotateToken(): Promise<void> {
+async function runRotateToken(arguments_: ParsedArguments): Promise<void> {
+  const logDirectory = oneOption(arguments_, "--qualification-log-dir");
+  if (logDirectory !== undefined) assertQualificationLogDirectory(logDirectory);
   const config = await loadGatewayConfig();
   await assertUserServiceOwnership(config);
   const service = await userServiceStatus(config);
@@ -586,7 +598,7 @@ async function runRotateToken(): Promise<void> {
     const readinessInstance =
       runtime.readinessProtocol === "instance-v1" ? randomBytes(32).toString("base64url") : undefined;
     try {
-      await installUserService(config, true, runtime.cliPath, readinessInstance);
+      await installUserService(config, true, runtime.cliPath, readinessInstance, undefined, logDirectory);
       await waitForGateway(config, readinessToken, readinessInstance, runtime.readinessProtocol === "legacy");
     } catch (error) {
       try {
@@ -651,7 +663,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   else if (parsed.command === "rollback") await runRollback(parsed);
   else if (parsed.command === "status") await runStatus();
   else if (parsed.command === "doctor") await runDoctor(parsed);
-  else if (parsed.command === "rotate-readiness-token") await runRotateToken();
+  else if (parsed.command === "rotate-readiness-token") await runRotateToken(parsed);
   else if (parsed.command === "serve-guidance") await runServeGuidance();
   else if (parsed.command === "help" || parsed.command === "--help") printHelp();
   else throw new Error(`unknown command: ${parsed.command}`);

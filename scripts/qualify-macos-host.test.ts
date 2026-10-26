@@ -13,6 +13,16 @@ const scriptPath = join(repositoryRoot, "scripts/qualify-macos-host.sh");
 const ompScriptPath = join(repositoryRoot, "scripts/qualify-macos-omp.sh");
 const sudoPassword = "mac-sudo-'argv-canary";
 
+test.skipIf(!POSIX)("Mac install forwards only the explicit qualification log option through its restart", async () => {
+  const result = await runHarness('source "$1"; remote() { cat; }; DNS_NAME=synthetic.invalid; lane_install', [], {
+    ...environment("a".repeat(64)), OMP_MAC_QUALIFICATION_LOG_DIR: "/private/qualification-logs/synthetic",
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain('qualification_log_args=(--qualification-log-dir "/private/qualification-logs/synthetic")');
+  expect(result.stdout).toContain('install --origin "https://synthetic.invalid" --allow "$LOGIN" "${qualification_log_args[@]}"');
+  expect(result.stdout).toContain('rotate-readiness-token "${qualification_log_args[@]}"');
+});
+
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }

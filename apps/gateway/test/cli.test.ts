@@ -45,6 +45,14 @@ test("rejects missing option values before mutation", async () => {
   );
 });
 
+test("qualification logging is explicit and refuses unsafe paths before install effects", async () => {
+  await expect(main(["install", "--qualification-log-dir", "relative", "--origin", "https://synthetic.example.test"])).rejects.toThrow("unsafe qualification log directory");
+  await expect(main(["install", "--qualification-log-dir"])).rejects.toThrow("--qualification-log-dir requires a value");
+  const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+  expect(source).not.toContain("process.env.OMP_MAC_QUALIFICATION_LOG_DIR");
+  expect(source).toContain("new SafeLogger(sink)");
+});
+
 test("exits promptly and closes staged resources when HTTP startup fails", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-cli-startup-"));
   const occupied = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("occupied") });

@@ -122,6 +122,13 @@ readonly LOGIN="${OMP_MAC_LOGIN:-}"
 readonly EXPECTED_ARCHIVE_SHA256="${OMP_MAC_ARCHIVE_SHA256:-}"
 readonly SESSION_LABEL="${OMP_MAC_SESSION_LABEL:-omp-stable-pixel-qualification}"
 readonly REPO_SLUG="${OMP_MAC_REPO:-carrythroughsystems/omp-session-gateway}"
+# Explicit qualification-only option; never written into ordinary gateway configuration.
+readonly QUALIFICATION_LOG_DIR="${OMP_MAC_QUALIFICATION_LOG_DIR:-}"
+case "$QUALIFICATION_LOG_DIR" in
+  "") ;;
+  /*) case "$QUALIFICATION_LOG_DIR" in *[!A-Za-z0-9_./-]* | */../* | */.. | */./* | */.) die "unsafe qualification log directory" ;; esac ;;
+  *) die "qualification log directory must be absolute" ;;
+esac
 
 # Published under alphastorm through v0.7.5 (2026-10-08T16:38:49Z), captured 2026-10-09.
 # Exact published tags only: future tags cannot reuse the former owner identity.
@@ -380,6 +387,8 @@ show() { printf '   %-38s %s\n' "\$1:" "\$2"; }
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:\$HOME/.bun/bin:\$HOME/go/bin"
 CLI="\$HOME/qual/\$(cd ~/qual && ls -d omp-session-gateway-*-bun)/apps/gateway/src/cli.js"
 TS="\$([ -x /usr/local/bin/tailscale ] && echo /usr/local/bin/tailscale || command -v tailscale || echo "\$HOME/go/bin/tailscale")"
+qualification_log_args=()
+[ -z "$QUALIFICATION_LOG_DIR" ] || qualification_log_args=(--qualification-log-dir "$QUALIFICATION_LOG_DIR")
 
 # The operator grant matters: doctor runs as this user and shells out to \`tailscale\`, so without it
 # the tailscale checks fail for a permission reason that looks like a gateway fault.
@@ -387,7 +396,7 @@ TS="\$([ -x /usr/local/bin/tailscale ] && echo /usr/local/bin/tailscale || comma
   S "\$TS" set --operator="\$(whoami)" >/dev/null 2>&1 ||
   true
 
-bun "\$CLI" install --origin "https://$DNS_NAME" --allow "\$LOGIN" >/dev/null 2>&1 ||
+bun "\$CLI" install --origin "https://$DNS_NAME" --allow "\$LOGIN" "\${qualification_log_args[@]}" >/dev/null 2>&1 ||
   { echo "   install FAILED"; exit 1; }
 show "install" "completed for https://$DNS_NAME"
 show "status" "\$(bun "\$CLI" status)"
@@ -422,7 +431,7 @@ show "doctor exit" "\$rc"
 
 before="\$(lsof -nP -iTCP:\$PORT -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print \$2}')"
 digest_before="\$(shasum -a 256 ~/.config/omp-session-gateway/readiness-token | cut -c1-12)"
-bun "\$CLI" rotate-readiness-token >/dev/null 2>&1
+bun "\$CLI" rotate-readiness-token "\${qualification_log_args[@]}" >/dev/null 2>&1
 sleep 3
 after="\$(lsof -nP -iTCP:\$PORT -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print \$2}')"
 digest_after="\$(shasum -a 256 ~/.config/omp-session-gateway/readiness-token | cut -c1-12)"

@@ -188,7 +188,7 @@ async function loadOrCreatePushState(config: GatewayConfig, path: string): Promi
 function statusCode(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null || !("statusCode" in error)) return undefined;
   const value = error.statusCode;
-  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599 ? value : undefined;
 }
 
 /**
@@ -236,6 +236,7 @@ export class PushService {
   readonly #deliveryChains = new Map<string, Promise<void>>();
   #subscriptions: readonly StoredPushSubscription[];
   #mutationTail = Promise.resolve();
+  #deliverySequence = 0;
   #unsubscribeRegistry: (() => void) | undefined;
   #unsubscribeActivityStops: (() => void) | undefined;
   #stopped = false;
@@ -398,9 +399,9 @@ export class PushService {
     const requestId = session.ask?.requestId;
     if (requestId === undefined) return;
     const pendingAskCount = this.#pendingAskCount();
-    this.#queueDelivery(session.instanceId, async () => {
+    this.#queueDelivery(session.instanceId, "attention", async sequence => {
       await this.#deliver(
-        session.instanceId,
+        sequence,
         subscription => {
           const body = sessionNotificationBody(session, subscription.detailLevel);
           return {
@@ -421,7 +422,7 @@ export class PushService {
 
   #queueActivityStop(event: SessionActivityStopEvent): void {
     const { instanceId, generation } = event.session;
-    this.#queueDelivery(instanceId, async () => {
+    this.#queueDelivery(instanceId, "activity_stop", async sequence => {
       // A later ask, resume, unreadable poll, or replacement invalidates this edge even if the
       // session has already returned to the same stopped metadata while delivery was queued.
       const pendingAskCount = this.#pendingAskCount();
@@ -430,7 +431,7 @@ export class PushService {
       const { session } = current;
       if (!session.canView || session.busy !== false || session.inputRequired || session.ask !== undefined) return;
       if (!this.#registry.isCurrentActivityStop(event)) return;
-      await this.#deliver(instanceId, subscription => {
+      await this.#deliver(sequence, subscription => {
         const body = sessionNotificationBody(session, subscription.detailLevel === "private" ? "private" : "session");
         return {
           version: PUSH_API_VERSION,
@@ -447,8 +448,8 @@ export class PushService {
 
   #queueClear(instanceId: string, requestId: string): void {
     const pendingAskCount = this.#pendingAskCount();
-    this.#queueDelivery(instanceId, async () => {
-      await this.#deliver(instanceId, () => ({
+    this.#queueDelivery(instanceId, "clear", async sequence => {
+      await this.#deliver(sequence, () => ({
         version: PUSH_API_VERSION,
         type: "clear",
         instanceId,
@@ -458,10 +459,12 @@ export class PushService {
     });
   }
 
-  #queueDelivery(instanceId: string, send: () => Promise<void>): void {
+  #queueDelivery(instanceId: string, kind: AttentionPushMessage["type"], send: (sequence: number) => Promise<void>): void {
+    const sequence = ++this.#deliverySequence;
+    this.#logger.event("info", "push.queue_accepted", { sequence, attention: kind === "attention", clear: kind === "clear", activity_stop: kind === "activity_stop" });
     const prior = this.#deliveryChains.get(instanceId) ?? Promise.resolve();
     const delivery = prior
-      .then(send)
+      .then(() => send(sequence))
       .catch(() => {
         this.#logger.event("warn", "push.delivery_failed");
       })
@@ -472,7 +475,7 @@ export class PushService {
   }
 
   async #deliver(
-    instanceId: string,
+    sequence: number,
     messageFor: (subscription: StoredPushSubscription) => AttentionPushMessage,
     selectedSubscriptions?: readonly StoredPushSubscription[],
   ): Promise<void> {
@@ -483,26 +486,35 @@ export class PushService {
     const stale: StoredPushSubscription[] = [];
     await Promise.all(
       subscriptions.map(async subscription => {
+        const message = messageFor(subscription);
+        const start = performance.now();
+        this.#logger.event("info", "push.send_started", { sequence, attention: message.type === "attention", clear: message.type === "clear",
+          activity_stop: message.type === "activity_stop", subscriptions: subscriptions.length });
         try {
-          await this.#transport.send(subscription, JSON.stringify(messageFor(subscription)), {
+          await this.#transport.send(subscription, JSON.stringify(message), {
             subject: VAPID_SUBJECT,
             publicKey: this.#vapid.publicKey,
             privateKey: this.#vapid.privateKey,
             ttlSeconds: PUSH_TTL_SECONDS,
           });
+          this.#logger.event("info", "push.send_acknowledged", { sequence, elapsed_ms: performance.now() - start });
         } catch (error) {
           const code = statusCode(error);
+          this.#logger.event("warn", "push.send_failed", { sequence, elapsed_ms: performance.now() - start, status: code });
           if (code === 404 || code === 410) stale.push(subscription);
-          else this.#logger.event("warn", "push.delivery_failed", { ...(code === undefined ? {} : { status: code }) });
         }
       }),
     );
     if (stale.length > 0) {
-      await this.#mutateSubscriptions(current =>
-        current.filter(
+      let removed = 0;
+      await this.#mutateSubscriptions(current => {
+        const next = current.filter(
           subscription => !stale.some(failed => isSameDeliveryTarget(subscription, failed)),
-        ),
-      );
+        );
+        removed = current.length - next.length;
+        return next;
+      });
+      if (removed > 0) this.#logger.event("info", "push.subscription_evicted", { sequence, count: removed });
     }
   }
 
