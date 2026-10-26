@@ -14,6 +14,36 @@ const summary = (): QualificationFailureSummary => ({ failures: [root(), collate
   containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } });
 const secret = "SYNTHETIC_PRIVATE_FAILURE_SENTINEL";
 
+test("509 council private diagnostics bound UTF-8 messages stacks and complete output with explicit flags", () => {
+  const huge = new Error("界".repeat(100_000));
+  huge.stack = "界".repeat(100_000);
+  const entries = privateQualificationFailureDiagnostic(new AggregateError(Array.from({ length: 80 }, () => new Error(huge.message, { cause: huge })), "many errors"));
+  expect(Buffer.byteLength(JSON.stringify({ privateQualificationFailure: entries }))).toBeLessThanOrEqual(262_144);
+  for (const entry of entries) {
+    expect(Buffer.byteLength(entry.message)).toBeLessThanOrEqual(4096);
+    expect(Buffer.byteLength(entry.stack)).toBeLessThanOrEqual(16_384);
+  }
+  expect(entries.some(entry => entry.truncated)).toBe(true);
+  const full = privateQualificationFailureDiagnostic(new AggregateError(Array.from({ length: 100 }, () => {
+    const error = new Error("bounded developer message\n".repeat(100));
+    error.stack = "    at syntheticSource (scripts/synthetic.ts:1:1)\n".repeat(200);
+    return error;
+  }), "bounded entries exceed aggregate budget"));
+  expect(full.at(-1)?.message).toBe("private diagnostic byte limit reached");
+  expect(Buffer.byteLength(JSON.stringify({ privateQualificationFailure: full }))).toBeLessThanOrEqual(262_144);
+});
+
+test("509 council provider response canaries are withheld even when copied into CDP message and stack", () => {
+  const providerBody = JSON.stringify({ responseBody: "https://relay.invalid/#synthetic-room." + "z".repeat(43), metadata: secret });
+  const error = new Error(`CDP Runtime.evaluate: ${providerBody}`);
+  error.stack = `Error: ${error.message}\\n at syntheticProvider`;
+  const entries = privateQualificationFailureDiagnostic(error);
+  const text = JSON.stringify(entries);
+  expect(text).not.toContain(providerBody);
+  expect(text).not.toContain(secret);
+  expect(entries[0]?.redacted).toBe(true);
+});
+
 test("private diagnostics retain typed causes and aggregate stacks without changing receipt evidence", () => {
   const cause = new Error("CDP Runtime.evaluate: Cannot find default execution context");
   cause.stack = `${cause.name}: ${cause.message}\n    at browserContext (scripts/android-push-runtime.ts:343:35)`;

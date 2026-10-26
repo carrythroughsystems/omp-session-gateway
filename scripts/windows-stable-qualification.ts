@@ -451,7 +451,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       if (error instanceof QualificationFailure) {
         const failure = new QualificationFailure(parseLaneFailure({ ...error.evidence,
           ...(error.evidence.lane === "windows" ? { step: phase } : {}), elapsedMs: runtime.now() - start }),
-          error.cause === undefined ? undefined : { cause: error.cause });
+          { cause: error });
         if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
         failure.message = error.message; throw failure;
       }
@@ -629,7 +629,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
       id: input.execution?.nextFailureId() ?? ++standaloneFailureId, lane: "windowsCleanup", step: "containment",
       class: "harness", reason: "containment_unproven",
       operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false, ...(name === "checkpoint" ? { persistenceFailed: true } : {}) },
-    }));
+    }), { cause: error });
     if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
     causes.push(failure);
   };
@@ -749,9 +749,9 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   // controller dies afterward, the committed false checkpoint lets cleanup finish without
   // attempting Pixel restoration from a vault that may already be absent.
   try { assertWindowsExecution(input.execution); await runtime.removeAccess(progress.epoch); }
-  catch { throw new QualificationFailure(parseLaneFailure({ id: input.execution?.nextFailureId() ?? ++standaloneFailureId,
+  catch (error) { throw new QualificationFailure(parseLaneFailure({ id: input.execution?.nextFailureId() ?? ++standaloneFailureId,
     lane: "windowsCleanup", step: "vault", reason: "containment_unproven", class: "harness",
-    elapsedMs: 0, operation: "unknown", observations: {} })); }
+    elapsedMs: 0, operation: "unknown", observations: {} }), { cause: error }); }
   progress.retirementPending = false; await save();
   if (failures.length) throw new AggregateError(causes, `Windows retirement failed: ${failures.join(", ")}`);
   return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,

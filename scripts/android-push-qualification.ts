@@ -447,10 +447,12 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       try { progress.browser = await runtime.browser(); }
       catch (error) {
         rethrowPushSafetyFailure(error);
-        requireBudget();
-        throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "browser_capture",
+        const failure = new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "browser_capture",
           class: "harness", reason: "browser_baseline_failed", operation: "unknown",
           elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted), observations: {} }, { cause: error });
+        try { requireBudget(); }
+        catch (deadline) { throw new AggregateError([failure, deadline], "Push baseline failed at readiness deadline"); }
+        throw failure;
       }
       requireBudget();
       await runtime.beforeEffect(); requireBudget();
@@ -538,11 +540,11 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
           if (evidence.reason === "browser_baseline_failed") primary = new QualificationFailure({
             ...common, step: PUSH_BROWSER_STEPS.find(step => step === evidence.step) ?? "browser_capture",
             class: "harness", reason: "browser_baseline_failed" }, { cause: error });
-          else if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
-          else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" });
-          else if (evidence.reason === "delivery_timeout") primary = new QualificationFailure({ ...common, class: "harness", reason: "delivery_timeout" });
+          else if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" }, { cause: error });
+          else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" }, { cause: error });
+          else if (evidence.reason === "delivery_timeout") primary = new QualificationFailure({ ...common, class: "harness", reason: "delivery_timeout" }, { cause: error });
           else if (evidence.reason === "deadline_exceeded") primary = new QualificationFailure({ ...common, class: "harness", reason: "deadline_exceeded" }, { cause: error });
-          else primary = new QualificationFailure({ ...common, class: "harness", reason: "invalid_evidence" });
+          else primary = new QualificationFailure({ ...common, class: "harness", reason: "invalid_evidence" }, { cause: error });
         }
       } catch (normalizationError) {
         // Evidence construction must never bypass restoration of an already-mutated fixture.
@@ -556,7 +558,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       try { await sampleLate(); }
       catch (error) {
         if (primary instanceof QualificationFailure) primary = new QualificationFailure({ ...primary.evidence,
-          observations: { ...primary.evidence.observations, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } });
+          observations: { ...primary.evidence.observations, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } }, { cause: primary });
         primary = new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness and late observation failed");
         sampleLate = undefined;
       }

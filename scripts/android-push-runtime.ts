@@ -265,16 +265,18 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     (options.execute ?? executeFixture)(argv) : options.executeWithContext(argv, execution);
   const checkExecution = () => {
     if (execution === undefined) return;
-    execution.signal.throwIfAborted();
-    if (performance.now() >= execution.deadline) throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
-      reason: "deadline_exceeded", class: "harness", operation: "unknown", elapsedMs: 0, observations: { controllerDeadline: true } });
+    if (execution.signal.aborted) rethrowPushSafetyFailure(execution.signal.reason);
+    if (execution.signal.aborted || performance.now() >= execution.deadline) throw new QualificationFailure({
+      id: nextFailureId(), lane: "androidPush", step: phase, reason: "deadline_exceeded", class: "harness",
+      operation: "unknown", elapsedMs: 0, observations: { controllerDeadline: true } },
+      execution.signal.aborted ? { cause: execution.signal.reason } : undefined);
   };
   const privacyFailure = () => new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
     class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: 0, observations: {} });
   const logEvidence = async <T>(read: () => Promise<T>): Promise<T> => {
     try { return await read(); }
     catch (error) { rethrowPushSafetyFailure(error); throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
-      class: "harness", reason: "invalid_evidence", operation: "read_only", elapsedMs: 0, observations: {} }); }
+      class: "harness", reason: "invalid_evidence", operation: "read_only", elapsedMs: 0, observations: {} }, { cause: error }); }
   };
   // Neither root's label is a prefix of the other's: notification bodies carry the label.
   const location = (epoch: string, role: PushFixtureRole = "primary"): PushFixtureLocation => ({
@@ -445,13 +447,25 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         return result;
       }
       catch (error) {
+        let failure: Error;
+        try {
+          rethrowPushSafetyFailure(error);
+          failure = new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: baseline.step,
+            reason: "browser_baseline_failed", class: "harness", operation: "unknown",
+            elapsedMs: Math.round(runtime.now() - started), observations: {} }, { cause: error });
+        } catch (safetyError) { failure = safetyError as Error; }
         try { await options.browserFailure?.(baseline.step, error, Math.round(runtime.now() - started)); }
-        catch (retentionError) { error = new AggregateError([error, retentionError], "Push browser diagnostic retention failed"); }
-        rethrowPushSafetyFailure(error);
-        checkExecution();
-        throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: baseline.step,
-          reason: "browser_baseline_failed", class: "harness", operation: "unknown",
-          elapsedMs: Math.round(runtime.now() - started), observations: {} }, { cause: error });
+        catch (retentionError) {
+          // Private diagnostic failure cannot manufacture a new sanitized failure leaf.
+          failure.cause = new AggregateError(failure.cause === undefined ? [retentionError] : [failure.cause, retentionError],
+            "Push browser diagnostic retention failed");
+        }
+        if (failure instanceof QualificationFailure && failure.evidence.reason === "deadline_exceeded") throw failure;
+        try { checkExecution(); }
+        catch (deadline) {
+          if (deadline !== failure) throw new AggregateError([failure, deadline], "Push browser failed at execution deadline");
+        }
+        throw failure;
       }
     },
     async subscriptionCount() {

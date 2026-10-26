@@ -94,15 +94,15 @@ function nextReceiptFailureId(receipt: StableQualificationReceipt): number {
 function laneFailure(error: unknown, lane: QualificationFailureLane, nextFailureId: () => number): unknown {
   if (error instanceof QualificationFailure) return pixelUnrestored(error) ? Object.assign(new QualificationFailure(parseLaneFailure({
     ...error.evidence, observations: { ...error.evidence.observations, cleanupVerified: false },
-  }), { cause: error.cause }), { pixelUnrestored: true }) : error;
-  if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(child => laneFailure(child, lane, nextFailureId)), "qualification failures"),
+  }), { cause: error }), { pixelUnrestored: true }) : error;
+  if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(child => laneFailure(child, lane, nextFailureId)), "qualification failures", { cause: error }),
     pixelUnrestored(error) ? { pixelUnrestored: true } : {});
   const holds = deviceCloudHolds(error);
   if (holds !== undefined) {
     const failures = holds.map(hold => new QualificationFailure(parseLaneFailure({
       id: nextFailureId(), lane: "deviceCloud", step: hold.stage, class: "infra_transient", reason: "pinned_pool_busy",
       elapsedMs: hold.waitedMs, operation: "not_started", observations: { waitedMs: hold.waitedMs },
-    })));
+    }), { cause: error }));
     return failures.length === 1 ? failures[0] : new AggregateError(failures, "qualification availability holds");
   }
   return Object.assign(new QualificationFailure({
@@ -813,9 +813,10 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
   delete lane.notStartedReason;
   const cleanup = name === "cleanup" || Object.values(CLEANUP_LANES).includes(name as typeof CLEANUP_LANES[keyof typeof CLEANUP_LANES]);
   let persistenceFailed = false;
+  const persistenceErrors: unknown[] = [];
   const checkpointPersist = async () => {
     try { await persist(); }
-    catch (error) { if (!cleanup) throw error; persistenceFailed = true; }
+    catch (error) { if (!cleanup) throw error; persistenceFailed = true; persistenceErrors.push(error); }
   };
   await checkpointPersist();
   const checkpoint: Checkpoint = async evidence => {
@@ -828,7 +829,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
       lane.evidence = { ...lane.evidence, ...evidence, persistenceFailed: true };
       throw new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: name,
         step: "containment", reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0,
-        observations: { persistenceFailed: true } }));
+        observations: { persistenceFailed: true } }), { cause: new AggregateError(persistenceErrors, "receipt persistence failed") });
     }
     lane.status = "passed";
     lane.completedAt = now();
@@ -839,9 +840,10 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
     catch (error) {
       if (!cleanup) throw error;
       persistenceFailed = true;
+      persistenceErrors.push(error);
       throw new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: name,
         step: "containment", reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0,
-        observations: { persistenceFailed: true } }));
+        observations: { persistenceFailed: true } }), { cause: error });
     }
     return evidence;
   } catch (error) {
@@ -868,13 +870,13 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
       if (own.length > 0 && own.every(item => item.class !== "collateral")) lane.failure = own;
     }
     try { await persist(); }
-    catch { persistenceFailed = true; }
+    catch (error) { persistenceFailed = true; persistenceErrors.push(error); }
     if (persistenceFailed) {
       lane.evidence = { ...lane.evidence, persistenceFailed: true };
       if (!normalizeQualificationFailures(failure).some(item => item.observations.persistenceFailed === true)) {
         const storageFailure = new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: name,
           step: cleanup ? "containment" : FAILURE_STEPS[name][0], reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0,
-          observations: { persistenceFailed: true } }));
+          observations: { persistenceFailed: true } }), { cause: new AggregateError(persistenceErrors, "receipt persistence failed") });
         failure = new AggregateError([failure, storageFailure], "cleanup and receipt persistence failed");
       }
     }
@@ -2792,10 +2794,10 @@ export async function completeOmpPublicationLifecycle(
   }
   const checkpoint = async () => {
     try { await persist(); }
-    catch {
+    catch (error) {
       lane.evidence = { ...lane.evidence, persistenceFailed: true };
       throw new QualificationFailure(parseLaneFailure({ id: nextFailureId(), lane: "ompPublication", step: "cleanup",
-        reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true } }));
+        reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true } }), { cause: error });
     }
   };
   try {
@@ -2890,7 +2892,7 @@ export async function runRigReadiness(
   await persist();
   const failures: unknown[] = [];
   const ownedFailure = (error: unknown): unknown => {
-    if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(ownedFailure), "readiness failures"),
+    if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(ownedFailure), "readiness failures", { cause: error }),
       pixelUnrestored(error) ? { pixelUnrestored: true } : {});
     if (error instanceof QualificationFailure) {
       const evidence = error.evidence;
@@ -2901,7 +2903,7 @@ export async function runRigReadiness(
       return Object.assign(new QualificationFailure(parseLaneFailure({ ...evidence, lane: "rigReadiness",
         step: evidence.reason === "browser_baseline_failed" ? evidence.step : receipt.rigReadiness?.phase ?? "fixture", reason,
         observations: { ...evidence.observations, ...(pixelUnrestored(error) || qualificationContainmentUnproven([evidence]) ? { cleanupVerified: false } : {}) },
-        class: FAILURE_REASONS.rigReadiness[reason as keyof typeof FAILURE_REASONS.rigReadiness] })),
+        class: FAILURE_REASONS.rigReadiness[reason as keyof typeof FAILURE_REASONS.rigReadiness] }), { cause: error }),
       pixelUnrestored(error) ? { pixelUnrestored: true } : {});
     }
     return laneFailure(error, "rigReadiness", () => nextReceiptFailureId(receipt));
@@ -2988,18 +2990,19 @@ export async function restoreRigReadinessPixel(
   latestProgress: () => unknown,
 ): Promise<void> {
   let persistenceFailed = false;
+  const persistenceErrors: unknown[] = [];
   const failures: unknown[] = [];
   try {
     await module.cleanup({ ...context, checkpoint: async value => {
       try { await context.checkpoint(value); }
-      catch { persistenceFailed = true; }
+      catch (error) { persistenceFailed = true; persistenceErrors.push(error); }
     } });
   } catch (error) { failures.push(error); }
   if (module.needsCleanup(latestProgress())) failures.push(new Error("rig readiness Pixel restoration is unproven"));
   if (persistenceFailed) failures.push(new QualificationFailure(parseLaneFailure({
     id: context.execution?.nextFailureId() ?? ++standaloneMacFailureId, lane: "rigReadiness", step: "cleanup",
     reason: "invalid_evidence", class: "harness", operation: "unknown", elapsedMs: 0, observations: { persistenceFailed: true },
-  })));
+  }), { cause: new AggregateError(persistenceErrors, "readiness restoration persistence failed") }));
   if (failures.length > 0) throw new AggregateError(failures, "rig readiness Pixel restoration failed");
 }
 
@@ -3497,7 +3500,7 @@ async function runReceiptStableQualification(
       catch (error) {
         const cleanupError = error instanceof QualificationFailure || error instanceof AggregateError ? error :
           new QualificationFailure(parseLaneFailure({ id: nextReceiptFailureId(receipt), lane: "campaign", step: "teardown",
-            reason: "unclassified_failure", class: "harness", operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false } }));
+            reason: "unclassified_failure", class: "harness", operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false } }), { cause: error });
         primaryError = primaryError === undefined ? cleanupError : new AggregateError([primaryError, cleanupError], "qualification and live-session cleanup failed");
       }
     }
@@ -3595,7 +3598,7 @@ if (import.meta.main) {
     const hold = recognizedDeviceCloudOutcome(error);
     if (hold !== undefined) console.error("stable qualification held: pinned device-cloud pools are busy; explicit operator retry required");
     else console.error("stable qualification failed; inspect the private receipt and outcome");
-    console.error(JSON.stringify({ privateQualificationFailure: privateQualificationFailureDiagnostic(error) }, null, 2));
+    console.error(JSON.stringify({ privateQualificationFailure: privateQualificationFailureDiagnostic(error) }));
     process.exitCode = hold === undefined ? 1 : 75;
     try {
       const options = parseStableQualificationArgs(Bun.argv.slice(2));

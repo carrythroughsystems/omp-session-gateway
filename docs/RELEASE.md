@@ -1073,6 +1073,12 @@ by the release driver as `qualification-err.log`. Readiness also writes an exclu
 identifier/capability redaction applies, arbitrary error properties are excluded, and neither file
 is receipt evidence or a public release artifact. Inspect both when the receipt names only a typed
 browser failure; a diagnostic write failure preserves the original error rather than replacing it.
+Lane/readiness remapping preserves private causes. A concurrent browser deadline remains a sibling
+typed failure, while diagnostic-retention errors remain cause-only and do not add receipt failures.
+Private messages are limited to 4 KiB and stacks to 16 KiB; oversized fields are withheld before
+scanning, with `truncated: true`. Redaction is flagged with `redacted: true`. The complete compact
+stderr diagnostic and browser file each stay within the driver's 256-KiB retention ceiling, with
+an explicit terminal marker when the cause graph exceeds its byte budget.
 
 Windows readiness reuses credential, inventory, image, plan and toolchain admission and requires
 remaining per-tag creation allowance with no unreconciled qualification resources. Unsupported

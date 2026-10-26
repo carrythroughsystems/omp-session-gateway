@@ -273,16 +273,19 @@ test("506 council readiness cannot substitute a posted record for lock-screen pr
 
 test.each(["elapsed", "typed"] as const)("506 council readiness preserves %s browser deadline attribution", async variant => {
   const host = fake();
-  const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+  let id = 0;
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
   host.runtime.browser = async () => {
     execution.deadline = 0;
     if (variant === "typed") throw new QualificationFailure({ id: 1, lane: "androidPush", step: "browser_forward",
       reason: "deadline_exceeded", class: "harness", elapsedMs: 1, operation: "unknown", observations: { controllerDeadline: true } });
     throw new Error("synthetic elapsed browser execution");
   };
-  await expect(runAndroidPushReadiness({ ...host.input, execution })).rejects.toMatchObject({
-    evidence: { lane: "rigReadiness", reason: variant === "typed" ? "deadline_exceeded" : "delivery_timeout" },
-  });
+  const error = await runAndroidPushReadiness({ ...host.input, execution }).catch(error => error);
+  expect(normalizeQualificationFailures(error)).toContainEqual(expect.objectContaining({
+    lane: "rigReadiness", reason: variant === "typed" ? "deadline_exceeded" : "delivery_timeout",
+  }));
+  if (variant === "elapsed") expect(normalizeQualificationFailures(error)).toContainEqual(expect.objectContaining({ reason: "browser_baseline_failed" }));
   expect(host.cleanup).toHaveLength(7);
 });
 

@@ -61,7 +61,7 @@ import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-
 import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
 import { readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution } from "./qualification-outcome.ts";
-import { QualificationFailure, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
+import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import { AndroidBrowserCleanupError } from "./android-device.ts";
 import { pushBrowserCleanupFailure } from "./android-push-runtime.ts";
@@ -1305,19 +1305,29 @@ describe("campaign terminal evidence and readiness", () => {
     expect(Object.values(receipt.lanes).every(lane => lane.status === "pending")).toBe(true);
   });
 
-  test("readiness ownership preserves the browser baseline substep after cleanup", async () => {
+  test("509 council readiness ownership preserves the browser cause through aggregate and lane owners", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const cause = new Error("CDP Runtime.evaluate: synthetic context missing");
+    const aggregateCause = new Error("synthetic aggregate context");
     const error = await runRigReadiness(receipt, async () => {}, {
       prepare: async () => {}, windows: async () => ({}), macos: async () => ({}),
-      push: async () => { throw new QualificationFailure({
+      push: async () => { throw new AggregateError([new QualificationFailure({
         id: 1, lane: "rigReadiness", step: "browser_forward", reason: "browser_baseline_failed",
         class: "harness", operation: "unknown", elapsedMs: 19_000, observations: {},
-      }); },
+      }, { cause })], "synthetic readiness aggregate", { cause: aggregateCause }); },
       restorePixel: async () => {}, restoreMac: async () => {},
     }).catch(error => error);
     expect(normalizeQualificationFailures(error)).toMatchObject([
       { lane: "rigReadiness", step: "browser_forward", reason: "browser_baseline_failed" },
     ]);
+    const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+    expect(messages).toContain(cause.message);
+    expect(messages).toContain(aggregateCause.message);
+    receipt.execution = receiptExecution();
+    const laneError = await executeReceiptLane(receipt, "androidPush", async () => {}, async () => {
+      throw Object.assign(error, { pixelUnrestored: true });
+    }).catch(error => error);
+    expect(privateQualificationFailureDiagnostic(laneError).map(entry => entry.message)).toContain(cause.message);
     expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "restored", observations: { baselineRestored: true } });
   });
 

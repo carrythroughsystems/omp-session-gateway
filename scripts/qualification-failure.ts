@@ -249,32 +249,59 @@ export class QualificationFailure extends Error {
   toJSON(): LaneFailure { return parseLaneFailure(this.evidence); }
 }
 
+export const PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES = 262_144;
+export interface PrivateQualificationDiagnostic {
+  readonly path: string;
+  readonly message: string;
+  readonly stack: string;
+  readonly truncated?: true;
+  readonly redacted?: true;
+}
 /** Private operator diagnostics only; never use these strings as receipt or retry evidence. */
-export function privateQualificationFailureDiagnostic(error: unknown): readonly { path: string; message: string; stack: string }[] {
-  const entries: { path: string; message: string; stack: string }[] = [], seen = new Set<Error>();
-  let exhausted = false;
-  const redact = (text: string): string => text.split("\n").map(line => {
-    if (findCapabilityLeaks(line).length > 0) return "[capability-bearing diagnostic withheld]";
-    // Source-scanner opt-outs cannot waive redaction of a runtime exception.
-    for (const finding of findIdentifierLeaks(line.replaceAll("identifier-leak-allow", ""))) {
-      line = line.replaceAll(finding.match, `[redacted ${finding.label}]`);
+export function privateQualificationFailureDiagnostic(error: unknown): readonly PrivateQualificationDiagnostic[] {
+  const entries: PrivateQualificationDiagnostic[] = [], seen = new Set<Error>();
+  let exhausted = false, bytes = 0;
+  const add = (entry: PrivateQualificationDiagnostic): void => {
+    const size = Buffer.byteLength(JSON.stringify(entry)) + 1;
+    // Reserve room for the envelope and an explicit terminal marker.
+    if (bytes + size > PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES - 1024) {
+      entries.push({ path: "error", message: "private diagnostic byte limit reached", stack: "", truncated: true });
+      exhausted = true;
+      return;
     }
-    return line;
-  }).join("\n");
+    entries.push(entry); bytes += size;
+  };
   const visit = (current: unknown, path: string, depth: number): void => {
     if (exhausted) return;
     if (entries.length >= FAILURE_LIMITS.nodes || depth > FAILURE_LIMITS.depth) {
-      entries.push({ path, message: "private diagnostic traversal limit reached", stack: "" });
+      add({ path, message: "private diagnostic traversal limit reached", stack: "", truncated: true });
       exhausted = true;
       return;
     }
     if (!(current instanceof Error) || seen.has(current)) {
-      entries.push({ path, message: current instanceof Error ? "already reported error" : "non-Error cause withheld", stack: "" });
+      add({ path, message: current instanceof Error ? "already reported error" : "non-Error cause withheld", stack: "" });
       return;
     }
     seen.add(current);
-    const message = typeof current.message === "string" ? redact(current.message) : "non-string Error message withheld";
-    entries.push({ path, message, stack: typeof current.stack === "string" ? redact(current.stack) : message });
+    let truncated = false, redacted = false;
+    const redact = (text: string, limit: number): string => {
+      // Do not cut a secret at a byte boundary or run unbounded regexes on a provider body.
+      if (Buffer.byteLength(text) > limit) { truncated = true; return "[oversized private diagnostic withheld]"; }
+      const safe = text.split("\n").map(line => {
+        if (findCapabilityLeaks(line).length > 0) { redacted = true; return "[capability-bearing diagnostic withheld]"; }
+        // Source-scanner opt-outs cannot waive runtime redaction.
+        for (const finding of findIdentifierLeaks(line.replaceAll("identifier-leak-allow", ""))) {
+          redacted = true;
+          line = line.replaceAll(finding.match, `[redacted ${finding.label}]`);
+        }
+        return line;
+      }).join("\n");
+      if (Buffer.byteLength(safe) > limit) { truncated = true; return "[oversized redacted diagnostic withheld]"; }
+      return safe;
+    };
+    const message = typeof current.message === "string" ? redact(current.message, 4096) : "non-string Error message withheld";
+    const stack = typeof current.stack === "string" ? redact(current.stack, 16_384) : message;
+    add({ path, message, stack, ...(truncated ? { truncated: true } : {}), ...(redacted ? { redacted: true } : {}) });
     if (current.cause !== undefined) visit(current.cause, `${path}.cause`, depth + 1);
     if (current instanceof AggregateError) {
       if (!Array.isArray(current.errors)) visit(current.errors, `${path}.errors`, depth + 1);

@@ -491,6 +491,11 @@ failed browser step, error message, CDP method and elapsed time. Both use the re
 and capability rules to redact private identifiers and withhold capability-bearing lines, never
 serialize arbitrary error properties, and never enter receipts, gateway logs or public artifacts.
 Repeated/cyclic errors and traversal-limit exhaustion are marked explicitly rather than recursed.
+Message/stack ceilings are 4/16 KiB respectively; oversized fields are withheld without retaining
+partial secrets or scanning unbounded provider bodies. Redaction/truncation is explicit and the
+complete serialized diagnostic is capped below 256 KiB. Diagnostic-retention failures stay in
+private causes, not the sanitized failure graph; concurrent execution expiry cannot replace a
+browser failure or discard its cause.
 
 Qualification explicitly supplies `--qualification-log-dir`; an environment variable alone never
 enables daemon retention. Ordinary installations are unchanged. The sink accepts only closed event

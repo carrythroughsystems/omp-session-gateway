@@ -2,7 +2,7 @@ import { constants, closeSync, fstatSync, fsyncSync, openSync, readFileSync, wri
 import { join } from "node:path";
 import { assertQualificationLogDirectory, parseQualificationLogFiles, parseQualificationLogHealth, type QualificationLogEvent } from "../apps/gateway/src/logger.ts";
 import type { FixtureExecutor } from "./push-qualification-fixture.ts";
-import { FAILURE_STEPS, PUSH_BROWSER_STEPS, privateQualificationFailureDiagnostic, type PushBrowserStep, type QualificationFailureLane } from "./qualification-failure.ts";
+import { FAILURE_STEPS, PUSH_BROWSER_STEPS, PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES, privateQualificationFailureDiagnostic, type PushBrowserStep, type QualificationFailureLane } from "./qualification-failure.ts";
 
 export interface QualificationLogWindow { readonly lane: QualificationFailureLane; readonly phase: string; readonly after: number; readonly ordinal: number }
 export interface PushDeliveryTelemetry { readonly sufficient: boolean; readonly subscriptionCount: number; readonly sends: number; readonly acknowledgements: number; readonly failures: number; readonly retryable: boolean; readonly httpStatus: number; readonly clearAcknowledged?: boolean; readonly requestAlias?: number }
@@ -198,8 +198,11 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
       const chain = privateQualificationFailureDiagnostic(error);
       const method = /^CDP (?:timeout: )?([A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*)(?::|$)/u;
       const cause = chain.find(entry => method.test(entry.message)) ?? chain[0]!;
-      persist("browser-substep.json", JSON.stringify({ substep, message: cause.message,
-        cdpMethod: method.exec(cause.message)?.[1] ?? null, elapsedMs }) + "\n");
+      const bytes = JSON.stringify({ substep, message: cause.message,
+        cdpMethod: method.exec(cause.message)?.[1] ?? null, elapsedMs,
+        ...(cause.truncated ? { truncated: true } : {}), ...(cause.redacted ? { redacted: true } : {}) }) + "\n";
+      if (Buffer.byteLength(bytes) > PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES) throw new Error("private browser diagnostic exceeds byte limit");
+      persist("browser-substep.json", bytes);
       const directory = openSync(options.jobDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
       try { fsyncSync(directory); } finally { closeSync(directory); }
     },

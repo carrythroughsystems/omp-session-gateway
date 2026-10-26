@@ -17,6 +17,7 @@ test.skipIf(process.platform === "win32")("private browser diagnostic preserves 
   const logs = createQualificationLogs({ execute: async () => { throw new Error("diagnostic must stay local"); },
     remoteDirectory: qualificationLogDirectory(root, randomUUID()), jobDirectory: root });
   const cause = new Error("CDP Runtime.evaluate: Cannot find default execution context");
+  cause.stack = `Error: ${cause.message}\n    at syntheticContext (scripts/synthetic.ts:1:1)`;
   try {
     await logs.browserFailure("browser_context", new Error("browser wrapper", { cause }), 2606);
     const path = join(root, "browser-substep.json");
@@ -28,6 +29,23 @@ test.skipIf(process.platform === "win32")("private browser diagnostic preserves 
     expect(readdirSync(root)).toEqual(["browser-substep.json"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test.skipIf(process.platform === "win32").each(["huge", "provider-body"] as const)(
+  "509 council browser sink bounds and redacts %s diagnostics", async variant => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-browser-bound-")); chmodSync(root, 0o700);
+    const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory: qualificationLogDirectory(root, randomUUID()), jobDirectory: root });
+    const body = JSON.stringify({ providerBody: "https://relay.invalid/#synthetic-room." + "z".repeat(43), privateBody: "synthetic-provider-response" });
+    const error = new Error("CDP Runtime.evaluate: " + (variant === "huge" ? "界".repeat(100_000) : body));
+    try {
+      await logs.browserFailure("browser_context", error, 1);
+      const bytes = readFileSync(join(root, "browser-substep.json"), "utf8"), value = JSON.parse(bytes);
+      expect(Buffer.byteLength(bytes)).toBeLessThanOrEqual(262_144);
+      expect(Buffer.byteLength(value.message)).toBeLessThanOrEqual(4096);
+      expect(value[variant === "huge" ? "truncated" : "redacted"]).toBe(true);
+      expect(bytes).not.toContain(body);
+      expect(bytes).not.toContain("synthetic-provider-response");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 
 test.skipIf(process.platform === "win32").each(["symlink", "public-directory"] as const)(
   "private browser diagnostic refuses %s destinations", async variant => {
