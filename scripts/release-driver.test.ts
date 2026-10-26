@@ -790,7 +790,7 @@ describe("automatic same-candidate campaign retry state machine", () => {
     expect(() => campaignWorkerArguments(next, "/private/execution.json", true)).toThrow("before admission");
     const preflightRetry = campaignRetryLaunchState(scheduledRetry(first).next);
     expect(campaignWorkerArguments(preflightRetry, "/private/execution.json")).toEqual([
-      "--execution-file", "/private/execution.json", "--retry-outcome-file", "/private/retry-preflight-outcome.json",
+      "--execution-file", "/private/execution.json", "--retry-outcome-file", join("/private", "retry-preflight-outcome.json"),
       "--retry-outcome-sha256", preflightRetry.retryPlan!.outcomeSha256,
     ]);
     expect(campaignWorkerArguments({ ...heldCampaign().selected, resumeDeviceCloud: true }, "")).toEqual(["--resume-device-cloud"]);
