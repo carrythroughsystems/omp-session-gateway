@@ -14,6 +14,79 @@ test("cloud transport may retry only GET, and record DELETE is never replayed", 
   expect(checkProviderReads("scripts/browserstack.ts", deletion.replace("await fetch", "await readProvider(() => fetch"))).toHaveLength(1);
 });
 
+test.each(["plain", "signal"] as const)("Windows guarded %s dispatcher retains exact GET-only retry admission", shape => {
+  const parameters = shape === "plain" ? "()" : "(readSignal: AbortSignal = signal)";
+  const localGuard = shape === "plain" ? 'if (deadline !== undefined) windowsRemaining(started, deadline, performance.now(), execution, "not_started");' : "";
+  const read = shape === "plain" ? "readProvider(send)" : "readProvider(send, { signal, deadline: operationDeadline })";
+  const source = `const send = ${parameters} => {
+    assertWindowsExecution(execution);
+    ${localGuard}
+    return fetch(url, { method, headers: {} });
+  };
+  const response = method === "GET" ? await ${read} : await send();`;
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toEqual([]);
+  for (const unsafe of [
+    source.replace("assertWindowsExecution(execution);", ""),
+    source.replace("assertWindowsExecution(execution);", "unknownGuard(execution);"),
+    source.replace("return fetch", "mutate(); return fetch"),
+    ...(shape === "plain" ? [source.replace(localGuard, "")] : []),
+    source.replace('method === "GET"', 'method !== "DELETE"'),
+    source.replace(": await send();", ": await readProvider(send);"),
+    source.replace("{ method,", '{ method: "POST",'),
+    source.replace("fetch(url,", "fetch(otherUrl,"),
+  ]) expect(checkProviderReads("scripts/windows-qualification-runtime.ts", unsafe)).toHaveLength(1);
+  expect(checkProviderReads("scripts/other-runtime.ts", source)).toHaveLength(1);
+});
+test.each(["plain", "signal"] as const)("Windows guarded %s egress callback admits only the reviewed target and read options", shape => {
+  const parameters = shape === "plain" ? "()" : "(signal)";
+  const signal = shape === "plain" ? "AbortSignal.timeout(15_000)" : "AbortSignal.any([signal, AbortSignal.timeout(15_000)])";
+  const source = `const external = await readProvider(${parameters} => {
+    assertWindowsExecution(execution);
+    return fetch("https://api.ipify.org", { signal: ${signal} });
+  });`;
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toEqual([]);
+  for (const unsafe of [
+    source.replace("assertWindowsExecution(execution);", ""),
+    source.replace("assertWindowsExecution(execution);", "unknownGuard(execution);"),
+    source.replace("return fetch", "mutate(); return fetch"),
+    source.replace("https://api.ipify.org", "https://synthetic.invalid"),
+    source.replace("{ signal:", '{ method: "POST", signal:'),
+    source.replace("{ signal:", "{ ...options, signal:"),
+    source.replace("readProvider(", "("),
+  ]) expect(checkProviderReads("scripts/windows-qualification-runtime.ts", unsafe)).toHaveLength(1);
+  expect(checkProviderReads("scripts/other-runtime.ts", source)).toHaveLength(1);
+});
+test.each((["plain", "signal"] as const).flatMap(shape =>
+  (["spread", "computed", "override", "unrelated-gate", "nested-gate"] as const).map(variant => [shape, variant] as const)))(
+  "499 R1 %s dispatcher rejects %s", (shape, variant) => {
+  const parameters = shape === "plain" ? "()" : "(readSignal: AbortSignal = signal)";
+  const guard = shape === "plain" ? 'if (deadline !== undefined) windowsRemaining(started, deadline, performance.now(), execution, "not_started");' : "";
+  const read = shape === "plain" ? "readProvider(send)" : "readProvider(send, { signal, deadline: operationDeadline })";
+  const source = `const send = ${parameters} => {
+    assertWindowsExecution(execution);
+    ${guard}
+    return fetch(url, { method, headers: {}, signal: AbortSignal.timeout(60_000) });
+  };
+  const response = method === "GET" ? await ${read} : await send();`;
+  const options = {
+    spread: '{ method, headers: {}, ...{ method: "POST" }, signal: AbortSignal.timeout(60_000) }',
+    computed: '{ method, headers: {}, ["method"]: "POST", signal: AbortSignal.timeout(60_000) }',
+    override: '{ method, headers: {}, method: "POST", signal: AbortSignal.timeout(60_000) }',
+  };
+  const unsafe = variant === "unrelated-gate"
+    ? source.replace(`const response = method === "GET" ? await ${read} : await send();`,
+      `const response = await readProvider(send);\nfunction other() { const response = method === "GET" ? await ${read} : await send(); }`)
+    : variant === "nested-gate"
+      ? source.replace('const response = method === "GET"', 'function other() { const response = method === "GET"') + "}"
+      : source.replace("{ method, headers: {}, signal: AbortSignal.timeout(60_000) }", options[variant]);
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", unsafe)).toHaveLength(1);
+});
+test("499 R1 unguarded concise Windows dispatcher is no longer admitted", () => {
+  const source = 'const send = () => fetch(url, { method, headers: {} });\n' +
+    'const response = method === "GET" ? await readProvider(send) : await send();';
+  expect(checkProviderReads("scripts/windows-qualification-runtime.ts", source)).toHaveLength(1);
+});
+
 test("reports both abrupt completions through nested blocks without leaking past finally", () => {
   const source = [
     "try { return work(); } finally {",

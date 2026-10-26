@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One stdin JSON request, one bounded JSON response. Never put payloads in argv."""
 import base64
+import errno
 import json
 import re
 import signal
@@ -10,7 +11,16 @@ import traceback
 from collections import deque
 from urllib.parse import quote
 
-from winrm.protocol import Protocol
+try:
+    from winrm.protocol import Protocol
+    from requests.exceptions import ConnectTimeout, ReadTimeout, ConnectionError as RequestsConnectionError
+    from urllib3.exceptions import ProtocolError, MaxRetryError
+    from winrm.exceptions import InvalidCredentialsError, WinRMTransportError
+    IMPORT_ERROR = None
+except ImportError as error:
+    # Import/encoding faults are helper failures, never transport evidence.
+    IMPORT_ERROR = error
+    ConnectTimeout = ReadTimeout = RequestsConnectionError = ProtocolError = MaxRetryError = InvalidCredentialsError = WinRMTransportError = ()
 
 # The remote command line is constant. The script and its input travel on the encrypted
 # WinRS input stream, not -EncodedCommand, environment variables, or temporary scripts.
@@ -99,26 +109,81 @@ def credentials(request):
     return username, password
 
 
+def failure_detail(error, stage, disposition):
+    status = getattr(error, 'code', None)
+    status = status if type(status) is int and 100 <= status <= 599 else None
+    kind, condition = 'helper', 'helper_failure'
+    if isinstance(error, InvalidCredentialsError) or (isinstance(error, WinRMTransportError) and status in (401, 403)):
+        kind, condition = 'transport', 'authentication'
+    elif isinstance(error, ConnectTimeout):
+        kind, condition = 'transport', 'connection_timeout'
+    elif isinstance(error, ReadTimeout):
+        kind, condition = 'transport', 'read_timeout'
+    elif connection_reset(error):
+        kind, condition = 'transport', 'connection_reset'
+    elif isinstance(error, WinRMTransportError) and (status == 429 or (status is not None and status >= 500)):
+        kind, condition = 'transport', 'retryable_http'
+    return {'kind': kind, 'stage': stage, 'condition': condition,
+            'httpStatus': status, 'disposition': disposition}
+
+
+def connection_reset(error):
+    """requests/urllib3 wrap socket resets in exception args, never classify their text."""
+    pending, seen = [error], set()
+    for _ in range(16):
+        if not pending:
+            break
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ConnectionResetError) or (isinstance(current, OSError) and current.errno == errno.ECONNRESET):
+            return True
+        if not (isinstance(current, ConnectionError) or isinstance(current, RequestsConnectionError) or
+                isinstance(current, ProtocolError) or isinstance(current, MaxRetryError)):
+            continue
+        nested = list(current.args)
+        if current.__cause__ is not None:
+            nested.append(current.__cause__)
+        elif not current.__suppress_context__:
+            nested.append(current.__context__)
+        if isinstance(current, MaxRetryError):
+            nested.append(current.reason)
+        pending.extend(item for item in nested if isinstance(item, BaseException))
+    return False
+
+
 def main(request=None):
     if request is None:
         request = json.loads(sys.stdin.buffer.read(1024 * 1024))
-    username, password = credentials(request)
-    protocol = Protocol(
-        endpoint='http://' + request['host'] + ':5985/wsman',
-        transport='ntlm', username=username, password=password,
-        message_encryption='always', read_timeout_sec=60, operation_timeout_sec=45,
-    )
-    shell = protocol.open_shell()
-    command = None
+    protocol = shell = command = None
+    stage, disposition = 'connection', 'not_started'
+    teardown = {'commandAttempted': False, 'commandStopped': False,
+                'shellAttempted': False, 'shellClosed': False}
+    result = None
     try:
+        username, password = credentials(request)
+        if IMPORT_ERROR is not None:
+            raise IMPORT_ERROR
+        protocol = Protocol(
+            endpoint='http://' + request['host'] + ':5985/wsman',
+            transport='ntlm', username=username, password=password,
+            message_encryption='always', read_timeout_sec=60, operation_timeout_sec=45,
+        )
+        shell = protocol.open_shell()
         if request.get('observeTransport') is True:
             # Fixed metadata only: no host, credential, payload, or diagnostic text.
             print('WINRM_FIRST_RESPONSE ' + str(time.time_ns() // 1_000_000), file=sys.stderr, flush=True)
+        stage = 'command'
+        # A lost run-command response may have started the command without returning its ID.
+        disposition = 'read_only' if request.get('readOnly') is True else 'unknown'
         command = protocol.run_command(shell, 'powershell.exe', [
             '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
             base64.b64encode(BOOTSTRAP.encode('utf-16-le')).decode('ascii'),
         ], console_mode_stdin=False)
         upload = request.get('upload')
+        if upload:
+            stage = 'upload'
         header = {'kind': 'upload', 'path': upload['destinationPath']} if upload else {'kind': 'script', 'script': request['script'], 'input': request.get('input')}
         frame = (json.dumps(header) + '\n').encode('utf-8')
         for offset in range(0, len(frame), 32768):
@@ -129,23 +194,52 @@ def main(request=None):
                 while chunk := source.read(65536):
                     protocol.send_command_input(shell, command, base64.b64encode(chunk) + b'\n')
             protocol.send_command_input(shell, command, b'', end=True)
+        stage = 'output'
         stdout, stderr, code = protocol.get_command_output(shell, command)
+        disposition = 'confirmed'
         if len(stdout) > 1024 * 1024 or len(stderr) > 65536:
             raise ValueError('response exceeds bound')
         # No raw stderr: an external program can include its argv or other private data.
         diagnostic = re.search(rb'guest execution failed at line [0-9]+: [A-Za-z0-9]+(?:; (?:native command failed: [A-Za-z0-9_.-]+ exit -?[0-9]+|status mismatch: [A-Za-z]+(?:,[A-Za-z]+)*|name resolution failed: [A-Za-z0-9.-]+))?', stderr)
         result = {'exitCode': code, 'stdout': stdout.decode('utf-8-sig') if code == 0 else '',
-                  'diagnostic': diagnostic.group().decode('ascii') if diagnostic else ''}
+                  'diagnostic': diagnostic.group().decode('ascii') if diagnostic else '',
+                  'failure': None if code == 0 else {'kind': 'guest', 'stage': stage, 'condition': 'guest_failure',
+                                                   'httpStatus': None, 'disposition': disposition}}
+    except (Exception, SystemExit) as error:
+        result = {'exitCode': -1, 'stdout': '', 'diagnostic': type(error).__name__,
+                  'failure': failure_detail(error, stage, disposition),
+                  'exception': exception_detail(error, request), 'teardown': teardown}
+        error.winrm_result = result
+        if isinstance(error, SystemExit):
+            # Print only after teardown; the controller still owns deadline attribution.
+            result.pop('exception')
+        raise
     finally:
         # A guest whose WinRM service is still settling can finish the command and then refuse the
         # teardown. The response stays the only line on stdout, and the error that ended the command,
         # if any, is the one reported; the service expires an abandoned shell on its own.
-        try:
-            if command is not None:
+        interruption = None
+        if command is not None:
+            teardown['commandAttempted'] = True
+            try:
                 protocol.cleanup_command(shell, command)
-            protocol.close_shell(shell)
-        except Exception:
-            pass
+                teardown['commandStopped'] = True
+            except BaseException as error:
+                if not isinstance(error, Exception):
+                    interruption = error
+        if shell is not None:
+            teardown['shellAttempted'] = True
+            try:
+                protocol.close_shell(shell)
+                teardown['shellClosed'] = True
+            except BaseException as error:
+                if not isinstance(error, Exception) and interruption is None:
+                    interruption = error
+        if result is not None:
+            result['teardown'] = teardown
+        if interruption is not None:
+            interruption.winrm_result = result
+            raise interruption
     print(json.dumps(result))
 
 
@@ -157,11 +251,12 @@ if __name__ == '__main__':
     try:
         request = json.loads(sys.stdin.buffer.read(1024 * 1024))
         main(request)
-    except Exception as error:
-        code = getattr(error, 'code', None)
-        code_text = ' HTTP ' + str(code) if isinstance(code, int) else ''
-        fault = getattr(error, 'wsman_fault_code', None)
-        fault_text = ' fault ' + str(fault) if isinstance(fault, int) else ''
-        print(json.dumps({'exitCode': -1, 'stdout': '', 'diagnostic': type(error).__name__ + code_text + fault_text,
-                          'exception': exception_detail(error, request)}))
-        sys.exit(1)
+    except (Exception, SystemExit) as error:
+        print(json.dumps(getattr(error, 'winrm_result', {
+            'exitCode': -1, 'stdout': '', 'diagnostic': type(error).__name__,
+            'failure': failure_detail(error, 'connection', 'not_started'),
+            'exception': exception_detail(error, request),
+            'teardown': {'commandAttempted': False, 'commandStopped': False,
+                         'shellAttempted': False, 'shellClosed': False},
+        })))
+        sys.exit(143 if isinstance(error, SystemExit) else 1)

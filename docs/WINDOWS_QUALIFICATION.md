@@ -111,7 +111,14 @@ sets every up adapter to `1.1.1.1` and `8.8.8.8`, clears the DNS cache, and prov
 `name resolution failed: <host>` otherwise. On 2026-10-02 the Vultr-assigned resolver answered
 SERVFAIL for the Tailscale names and their CloudFront target while `github.com` resolved, which
 failed two v0.7.2 campaign attempts with a bare `WebException` at the Tailscale MSI download.
-Allocation and authenticated WinRM admission share one 12-minute deadline. Admission requires
+Allocation and authenticated WinRM admission share one 12-minute deadline, durably set before
+firewall creation; firewall/VM creation and provider allocation consume that same budget.
+The same allocation-and-execution guard runs after awaited checkpoints/inventory reads and
+immediately before each creation POST and each firewall-rule POST after its ownership refetch;
+an expired budget cannot begin a new allocation or authorize another rule.
+Creation-counter persistence is also guarded before it can consume the local allowance.
+Admission and creation-cap refusals use the current execution's failure-ID allocator.
+Subsequent transport probes use bounded reconnect, not another allocation window. Admission requires
 three consecutive read-only successes spanning at least 60 seconds; a transport error resets
 both the count and window, while a guest assertion failure aborts immediately. The observed
 `transportStabilitySamples` and `transportStabilityDurationMs` are receipt facts. Mutations are
@@ -119,13 +126,77 @@ not retried by this readiness boundary.
 
 Each authenticated probe has at most **180 seconds**, capped by the remaining combined deadline,
 to accommodate a fresh instance's first WinRM exchange. The controller sends SIGTERM at that bound;
-the helper still attempts owned WinRM shell teardown before exiting. A subprocess deadline remains
-a failed probe, not a successful observation or an automatic mutation retry.
+the helper independently attempts command cleanup and shell closure before exiting. If it does not
+exit within five seconds, the controller sends SIGKILL, awaits exit, and drains both pipes before
+reporting failure. A subprocess deadline remains a failed probe, not a successful observation or an
+automatic mutation retry.
+Cancellation and termination ownership are installed before the first asynchronous probe checkpoint.
+The execution and local command budget are checked again immediately before spawning, so cancellation
+or expiry during that checkpoint cannot start a helper. WinRM preparation, stability probes, and
+reconnects use one positive-remainder guard; an exhausted budget is never clamped to a 1-ms command.
+The final synchronous guest-dispatch guard also checks the resource lifetime after vault/provider
+reads and the last checkpoint, even when the provider returns an unchanged address. Cleanup uses
+its independent execution guard instead of the expired primary resource lifetime.
+
+### Transport recovery and failure evidence
+
+The helper reports a closed failure kind (`transport`, `guest`, or `helper`), stage
+(`connection`, `command`, `output`, or `upload`), recognized condition, HTTP status when present,
+and command disposition. Exception types and status fields supply classification; diagnostic
+messages never do. Controller-authored product assertions remain `product`. Invalid credentials,
+encoding/import failures, malformed guest JSON, arbitrary guest failures, and unexplained process
+exit 143 remain `harness`. A recognized connection/reset/read timeout or retryable HTTP status
+during a declared read-only operation is `infra_transient`. Only a controller-owned deadline
+while its read-only connection probe is pending produces `probe_deadline`. A timer clipped by the
+execution deadline retains controller origin but produces `deadline_exceeded`, not a transient
+probe failure; numeric exit/signal/timeout observations survive projection. Rejected, already-started
+mutations recheck execution expiry and retain unknown disposition. External cancellation and raw
+exit 143 cannot acquire probe-deadline authority. These are lane failure records, not campaign retry authority.
+
+After the unchanged initial authenticated stability window, read-only operations share a reconnect
+helper with delays of **2, 4, 8, and 16 seconds**, at most five calls, inside a **90-second**
+operational budget that includes time already spent executing probes. Process teardown remains
+mandatory on expiry. Cleanup uses this reconnect path, never another 12-minute allocation window.
+Mutating guest actions and upload streams are never replayed.
+Reconnect and readiness/RDP/allocation polls reject both successful and rejected observations at or
+after their local deadline. An in-budget rejection keeps its original classification; a late rejection
+reports controller expiry rather than whichever error the action happened to throw.
+Admission persists the actual stability sample count and duration before the phase checkpoint;
+a resumed admission reuses those observations only after reconnect. A legacy boolean marker
+without observations must re-observe the stability window within the original allocation budget.
+Validated completed admission is not subjected to that old allocation deadline again; it uses
+only the reconnect and current execution budgets. Reconnect checks remaining time before every
+probe, including after delayed backoff. Local/shared expiry is `deadline_exceeded`, never the
+last transient transport failure, with controller origin and numeric timeout/wait observations.
+
+An interrupted upload is reconciled by existence and SHA-256 after read-only connection recovery.
+Only a recognized helper-reported transport interruption permits that reconciliation; a raw process
+exit, controller kill, or otherwise unknown termination remains terminal even if matching bytes exist.
+The inspector must exclusively open the file, proving that its writer no longer owns it, before
+hashing or permitting removal. Complete matching bytes are reused; a partial file is removed only
+after that proof, and the failed upload remains terminal rather than starting another stream.
+Unknown writer disposition, authentication, or helper faults do not become successful recovery.
+Each upload records a private durable `started` claim before work and a `complete` checkpoint only
+after success. An incomplete claim refuses development re-entry in the same epoch; it cannot stream
+the upload again. A completed upload is reused only after checking its bytes again.
+Only a phase that has never entered staging grants fresh upload authority. Upload completion
+does not prove Tailscale join, unpack, build, or upgrade disposition. Every mutating guest
+action and its nested PowerShell commands have durable single-shot `started`/`complete`
+claims; RDP logons are claimed too. Unsettled mutating phases, including legacy phases
+without claims, cannot resume. Even a completed command claim is not permission to repeat
+the surrounding unsettled phase. Clean the retained epoch instead of manufacturing claims.
+Development repair may resume read-only phases without repeating completed mutations.
+Private helper diagnostics retain only the existing redacted, source-free exception context;
+typed failures contain closed codes and numeric/boolean observations, not that diagnostic text.
+
+Read-only admission also reports remaining per-tag creation allowance. Provider quota metadata is
+explicitly marked unobservable; admission neither assumes unlimited capacity nor allocates a probe VM.
 
 The Windows progress and completed result retain `transportProbes`: one metadata-only row per
 authenticated probe, checkpointed at invocation start, first authenticated response, controller
 SIGTERM (if sent), and process exit. `startedAt`, `signalAt`, and `exitedAt` are UTC epoch
 milliseconds; `timeoutMs` records the applied bound and `exitCode` the subprocess outcome.
+New observations may additionally record `controllerDeadline` and the SIGKILL timestamp `killAt`.
 `firstResponseLatencyMs` measures from invocation start to the helper's first authenticated
 `open_shell` reply, not completion of the guest command or shell teardown. Unobserved events are
 `null`, so a timeout during teardown differs from no observed authenticated reply. Only the helper's
@@ -149,6 +220,12 @@ existing app's launcher intent, not a non-exported Chrome activity; cleanup clos
 ordinary Chrome pages and restores that baseline after a crash. A failed restore carries
 `pixelUnrestored: true` to fence the production lease. Development retains its exact-epoch lock
 until cleanup proves restoration; another lane's lock is never broken.
+Automatic development cleanup may inherit its own retained lease only after the original action
+settles and only when the in-memory claim, exact owner file, epoch and process still agree.
+Sharing a PID without that claim is not authority. A different live process remains excluded;
+explicit cleanup may recover the same epoch only after its previous process has exited. Acquisition
+and backoff use the fresh cleanup execution deadline, not a new independent one-hour wait. Release
+rechecks ownership after restoration proof, and an owner change blocks deletion.
 
 **Post-mutation status.** `install`, `rollback` and `rotate-readiness-token` return once the gateway
 proves readiness, but on this two-vCPU guest one immediate `status` read has still failed after them
@@ -203,20 +280,59 @@ OMP version, commit and tree and pins Bun/Tailscale artifacts. Both preflight an
 tests reject divergence from `UPSTREAM.lock.json`; an upstream refresh must refresh these
 Windows pins too. No upstream lock/schema change is needed for the separate lane-owned pins.
 
-On a stable-campaign failure, cleanup still attempts guest teardown, Serve reset, logout, exact-label tailnet
-deletion, instance deletion, firewall deletion and vault removal. Once the Administrator has
+On a stable-campaign failure, cleanup first reconciles the exact vault-bound instance and its
+epoch-labelled inventory. Confirmed absence skips guest commands. A live guest gets one bounded
+reconnect before guest teardown, Serve reset and logout; failed reconnect skips those commands
+instead of spending four full command timeouts against an unreachable VM. Exact-label tailnet
+deletion, instance deletion, firewall deletion and vault removal still run. Once the Administrator has
 handed Tailscale over, the gateway uninstall, Serve reset and logout run as the standard account:
 Windows refuses the Administrator's Tailscale CLI while another account holds it. Each provider deletion
 refetches ownership and applies the positive prefix and protected-resource checks. Lost create
 responses are recoverable by the exact epoch-derived label even without a vault. Cleanup polls
 for deletion and requires zero `omp-winqual-*` instances and firewall groups account-wide.
+Guest-command failures become diagnostic counts only after the exact owned VM is confirmed gone.
+They never excuse failed firewall/tailnet absence, Pixel restoration, or safe vault-removal proofs.
+Instance and firewall IDs are retained privately so a changed ownership label cannot masquerade as
+absence. Changed/protected owners, missing Pixel recovery state, and unresolved absence remain
+blocking, retain recovery state, and prohibit automatic campaign retry. Paid infrastructure cleanup
+does not wait behind another lane's Pixel lease.
+Final instance/firewall inventories and every containment proof precede the durable cleanup-complete
+checkpoint, which precedes vault removal. A crash after unlink can therefore resume from committed
+completion without missing Pixel recovery state; a missing vault without that completion stays
+blocked. A failed guest command after reconnect skips the remaining guest mutations and proceeds
+directly to independent containment.
+A firewall-only vault does not imply a bound guest identity. Cleanup skips guest commands,
+destroys its owned firewall and any instance matching the epoch creation label, and does not
+turn the absent guest identity into an ownership-change veto. Foreign ownership still blocks.
+The final inventories are taken after a five-second settling interval, matching the provider
+lookup-absence policy. A firewall that becomes visible during that interval blocks completion
+and retains recovery state; cleanup must reconcile it before the epoch can be retired.
+Development `run`/`artifacts` also retire a cleanup-complete epoch's remaining vault before
+removing its old progress and replacing `identity.json`. Completed containment alone does not
+authorize overwriting the identity while its vault may still exist.
+Once `cleanupRequired=false` is committed it never flips back to true. Failures while
+rechecking containment or deleting the remaining vault keep `retirementPending=true`;
+retry retirement without attempting Pixel restoration from an already removed vault.
 Provider reads retry a transient 5xx. A lookup that answers missing, or a Vultr listing without its
 array, is final only when a second read five seconds later agrees: on 2026-09-29 one listing did so
 while the lane polled for allocation, failing an attempt whose VM was still booting.
 A stable interrupted attempt is reconciled, never blindly replayed; start a fresh epoch
-afterwards. For development only, a code failure after guest access retains the VM for immediate
-repair: rerunning `run` resumes that epoch, skips completed phases, and checks staging
-postconditions rather than replacing the VM. `cleanup` is explicit after an abandoned attempt.
+afterwards. For an initial development attempt only, a typed Windows `product`/`assertion_failed`
+failure with a known operation disposition after guest access may retain the VM for immediate
+repair inside its three-hour lease. Infrastructure/transient failures, authentication refusals,
+harness or unknown errors, unknown operation dispositions, and controller/probe expiry always enter
+containment; diagnostic text cannot authorize retention. Rerunning `run` resumes only read-only
+phases and skips completed phases. Any unsettled
+mutating phase refuses resume regardless of completed upload claims. `cleanup` is explicit
+after an abandoned attempt.
+Outer cancellation or deadline always runs containment, including development mode; only
+repairable code failures on an initial development attempt may retain the guest. Once retained
+progress is accepted, every failing re-entry—including mutation refusal and preflight failure—
+uses independent containment. That cleanup owner exists before preflight and receives a fresh
+cleanup deadline when containment begins. The runtime switches to that cleanup owner for provider,
+guest, helper, tailnet, and Pixel dispatch instead of capturing the failed primary's cancellation.
+FreeRDP ownership covers stdin write/end as well as readiness observation: cancellation is armed
+before input, and every failure terminates and awaits the child.
 Failed phase resumes are counted in evidence; repair time is not called successful phase time.
 Development resume is refused after three hours, and every VM must be destroyed within four
 hours of creation. The current development campaign permits six total VM creations, one at a
