@@ -50,11 +50,19 @@ export function botEnvironment(config: RuntimeConfig, ambient: NodeJS.ProcessEnv
   for (const key of Object.keys(env)) if (/^GIT_CONFIG_(KEY|VALUE)_/u.test(key)) delete env[key];
   return env;
 }
-async function command(argv: string[], cwd: string, env: NodeJS.ProcessEnv, allowedFailure = false): Promise<{ code: number; out: string; err: string }> {
+async function command(argv: string[], cwd: string, env: NodeJS.ProcessEnv, allowedFailure = false,
+  captureOutput?: (out: Buffer, err: Buffer) => void): Promise<{ code: number; out: string; err: string }> {
   const child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).arrayBuffer(), new Response(child.stderr).arrayBuffer(), child.exited]);
+  const outBytes = Buffer.from(stdout), errBytes = Buffer.from(stderr);
+  captureOutput?.(outBytes, errBytes);
+  const out = outBytes.toString(), err = errBytes.toString();
   if (code !== 0 && !allowedFailure) throw new Error(`${argv[0]} ${argv[1] ?? ""} exited ${code}; inspect the private release-driver job logs`, { cause: { out: out.slice(-262144), err: err.slice(-262144) } });
   return { code, out: out.trim(), err };
+}
+function commandOutputTail(previous: Buffer, bytes: Buffer): Buffer {
+  const tail = bytes.subarray(-262_144);
+  return Buffer.concat([previous.subarray(Math.max(0, previous.length + tail.length - 262_144)), tail]);
 }
 async function jsonFile<T>(path: string): Promise<T | undefined> {
   try { return JSON.parse(await readFile(path, "utf8")) as T; }
@@ -87,6 +95,11 @@ async function immutableJobBytes(path: string, bytes: Buffer): Promise<boolean> 
   const parent = await open(dirname(path), "r");
   try { await parent.sync(); } finally { await parent.close(); }
   return true;
+}
+async function retainQualificationOutput(directory: string, out: Buffer, err: Buffer): Promise<void> {
+  for (const [name, bytes] of [["qualification-out.log", out], ["qualification-err.log", err]] as const) {
+    if (!await immutableJobBytes(join(directory, name), bytes)) throw new Error("qualification output already exists");
+  }
 }
 async function privateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
@@ -513,7 +526,7 @@ export class StudioDriver implements DriverPort {
     }
     const hash = createHash("sha256");
     for (const [name, bytes] of files) hash.update(`${name}:${bytes.length}:`).update(bytes);
-    for (const name of ["out.log", "err.log"]) {
+    for (const name of ["out.log", "err.log", "qualification-out.log", "qualification-err.log"]) {
       const path = join(directory, name), info = await lstat(path);
       if (!info.isFile() || info.isSymbolicLink()) throw new Error("invalid completed campaign log");
       hash.update(`${name}:${info.size}:`);
@@ -1206,6 +1219,7 @@ export class StudioDriver implements DriverPort {
       if (spec.kind !== "approve" || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
     let observedCampaignExit: number | undefined, exitCode = 1;
+    let qualificationOut: Buffer = Buffer.alloc(0), qualificationErr: Buffer = Buffer.alloc(0);
     let terminal: JobObservation & { evidence?: RoutineEvidence } = { status: "failed",
       detail: spec.kind === "campaign" ? "campaign harness:unclassified_failure" : `${spec.kind} failed; inspect private job logs; no retry` };
     try {
@@ -1242,7 +1256,11 @@ export class StudioDriver implements DriverPort {
             if (error.code === "ENOENT") return undefined;
             throw error;
           }) !== undefined) throw new Error("stable machine outcome already exists in this immutable job phase");
-          const result = await command([process.execPath, "run", "qualify:stable", "--", "--tag", state.candidate, ...flags], checkout, { ...env, OMP_STABLE_OUTCOME_FILE: outcomePath }, true);
+          const result = await command([process.execPath, "run", "qualify:stable", "--", "--tag", state.candidate, ...flags], checkout, { ...env, OMP_STABLE_OUTCOME_FILE: outcomePath }, true,
+            (out, err) => {
+              qualificationOut = commandOutputTail(qualificationOut, out);
+              qualificationErr = commandOutputTail(qualificationErr, err);
+            });
           if (result.code !== 0) observedCampaignExit = result.code;
           if (result.code !== 0 && state.qualificationExecution !== undefined) {
             const expected = campaignExecution(state), outcome = await readQualificationOutcomeFile(outcomePath, expected);
@@ -1330,6 +1348,10 @@ export class StudioDriver implements DriverPort {
       }
     } finally {
       process.exitCode = exitCode;
+      if (spec.kind === "campaign") {
+        // Preserve exact child bytes across preflight and campaign before publishing any terminal marker.
+        await retainQualificationOutput(directory, qualificationOut, qualificationErr);
+      }
       // A terminal result is the publication marker: its durable exit must already exist.
       await atomicJson(join(directory, "exit"), exitCode);
       await atomicJson(join(directory, "result.json"), terminal);

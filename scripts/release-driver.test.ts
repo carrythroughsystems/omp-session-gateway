@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -893,6 +893,8 @@ async function completedAutomaticJob(root: string, withReceipt: boolean | "readi
   await writeFile(join(directory, "exit"), "75\n", { mode: 0o600 });
   await writeFile(join(directory, "out.log"), "fixed stdout fixture\n", { mode: 0o600 });
   await writeFile(join(directory, "err.log"), "fixed stderr fixture\n", { mode: 0o600 });
+  await writeFile(join(directory, "qualification-out.log"), "fixed qualification stdout fixture\n", { mode: 0o600 });
+  await writeFile(join(directory, "qualification-err.log"), "fixed qualification stderr fixture\n", { mode: 0o600 });
   await writeQualificationOutcomeFile(join(directory, "failure-outcome.json"), evidence.outcome);
   if (receipt !== undefined) await writeFile(join(directory, "failed-qualification.json"), await readFile(runtime.receiptPath), { mode: 0o600 });
   const observed = await runtime.completedCampaignFailure(selected);
@@ -986,7 +988,18 @@ process.exitCode = ${exitCode};\n`);
   await writeFile(join(directory, "spec.json"), JSON.stringify({ kind: "campaign", state: selected, root: join(import.meta.dir, "..") }));
   await writeFile(join(directory, "out.log"), "", { mode: 0o600 });
   await writeFile(join(directory, "err.log"), "", { mode: 0o600 });
-  return { runtime, directory, original };
+  return { runtime, directory, original, checkout };
+}
+
+async function qualificationFixtureOutput(runtime: AutomaticRuntime, checkout: string, flags: string[]) {
+  const child = Bun.spawn([process.execPath, "run", "qualify:stable", "--", "--tag", runtime.current.candidate, ...flags], {
+    cwd: checkout, env: { ...process.env, OMP_STABLE_OUTCOME_FILE: join(checkout, "reference-outcome.json") },
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  const [out, err, code] = await Promise.all([
+    new Response(child.stdout).arrayBuffer(), new Response(child.stderr).arrayBuffer(), child.exited,
+  ]);
+  return { out: Buffer.from(out), err: Buffer.from(err), code };
 }
 
 describe.skipIf(process.platform === "win32")("council R1 retry runtime counterexamples", () => {
@@ -1040,22 +1053,106 @@ process.exitCode = 1;\n`);
       const { runtime, directory, original } = await automaticWorkerFixture(root, 75);
       await runtime.worker(join(directory, "spec.json"));
       expect(await readFile(join(directory, "failure-outcome.json"), "utf8")).toBe(original);
+      expect(await readFile(join(directory, "diagnostic.json"), "utf8")).toBe(
+        JSON.stringify({ failureSummary: JSON.parse(original).failureSummary }, null, 2) + "\n");
     } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
   });
-  test("worker commits the observed exit before terminal result publication", async () => {
+  test.each([false, true])("failed worker retains exact private child bytes with bounded=%s and unchanged diagnostics", async bounded => {
+    const root = await mkdtemp(join(tmpdir(), "qualification-output-bytes-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory, checkout } = await automaticWorkerFixture(root, 1);
+      const out = Buffer.concat([Buffer.alloc(bounded ? 300_000 : 2, 0xff), Buffer.from("  PRIVATE-QUALIFICATION-STDOUT-CANARY \r\n\0 ")]),
+        err = Buffer.concat([Buffer.alloc(bounded ? 300_000 : 2, 0xfe), Buffer.from("  Error: PRIVATE-QUALIFICATION-ERROR-CANARY\nCaused by: raw child failure \r\n\0 ")]);
+      const fixture = join(checkout, "fixture.ts");
+      await writeFile(fixture, `await Bun.write(Bun.stdout, Buffer.from(${JSON.stringify(out.toString("base64"))}, "base64"));
+await Bun.write(Bun.stderr, Buffer.from(${JSON.stringify(err.toString("base64"))}, "base64"));
+${await readFile(fixture, "utf8")}`);
+      const expected = await qualificationFixtureOutput(runtime, checkout, campaignWorkerArguments(runtime.current, join(directory, "execution.json"), true));
+      expect(expected.code).toBe(1);
+      expect(expected.out).toEqual(out);
+      expect(expected.err.includes(err)).toBe(true);
+      await runtime.worker(join(directory, "spec.json"));
+      for (const [name, bytes] of [["qualification-out.log", expected.out], ["qualification-err.log", expected.err]] as const) {
+        expect(await readFile(join(directory, name))).toEqual(bytes.subarray(-262_144));
+        expect((await lstat(join(directory, name))).mode & 0o777).toBe(0o600);
+      }
+      expect(await readFile(join(directory, "diagnostic.json"), "utf8")).toBe('{\n  "class": "harness",\n  "reason": "unclassified_failure"\n}\n');
+      expect(await readFile(join(directory, "result.json"), "utf8")).not.toContain("CANARY");
+      expect((await runtime.job("campaign", runtime.current)).campaignFailure).toBeUndefined();
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test.each([false, true])("successful campaign retains preflight and campaign bytes for retry=%s", async retry => {
+    const root = await mkdtemp(join(tmpdir(), "qualification-output-passed-")), previousExit = process.exitCode;
+    try {
+      const selected = retry ? campaignRetryLaunchState((await completedAutomaticJob(root)).next) : automaticCampaign();
+      const { runtime, directory, checkout } = await automaticWorkerFixture(root, 0, selected);
+      const receipt = receiptScopedCampaign(selected).receipt;
+      receipt.status = "passed"; receipt.execution = campaignExecution(selected);
+      receipt.lanes.deviceCloud.status = "passed";
+      delete receipt.lanes.deviceCloud.evidence!.availabilityHold;
+      await writeFile(join(checkout, "fixture.ts"), `import { writeFile } from "node:fs/promises";
+const phase = process.argv.includes("--preflight") ? "preflight" : "campaign";
+await Bun.write(Bun.stdout, "  " + phase + " stdout \\r\\n\\0 ");
+await Bun.write(Bun.stderr, "  " + phase + " stderr \\r\\n\\0 ");
+if (phase === "campaign") await writeFile(${JSON.stringify(runtime.receiptPath)}, ${JSON.stringify(JSON.stringify(receipt))}, { mode: 0o600 });\n`);
+      const flags = [
+        ...(!retry ? [campaignWorkerArguments(selected, join(directory, "execution.json"), true)] : []),
+        campaignWorkerArguments(selected, join(directory, "execution.json")),
+      ];
+      const expected = [];
+      for (const args of flags) expected.push(await qualificationFixtureOutput(runtime, checkout, args));
+      await rm(runtime.receiptPath);
+      await runtime.worker(join(directory, "spec.json"));
+      expect(await readFile(join(directory, "qualification-out.log"))).toEqual(Buffer.concat(expected.map(output => output.out)));
+      expect(await readFile(join(directory, "qualification-err.log"))).toEqual(Buffer.concat(expected.map(output => output.err)));
+      expect(JSON.parse(await readFile(join(directory, "result.json"), "utf8"))).toEqual({ status: "passed" });
+      expect(await Bun.file(join(directory, "diagnostic.json")).exists()).toBe(false);
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test("campaign failure before spawning qualification retains empty private logs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qualification-output-unstarted-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory } = await automaticWorkerFixture(root, 1);
+      runtime.authenticate = async () => { throw new Error("PRIVATE-AUTHENTICATION-ERROR-CANARY"); };
+      await runtime.worker(join(directory, "spec.json"));
+      for (const name of ["qualification-out.log", "qualification-err.log"]) {
+        expect(await readFile(join(directory, name))).toEqual(Buffer.alloc(0));
+        expect((await lstat(join(directory, name))).mode & 0o777).toBe(0o600);
+      }
+      expect(await readFile(join(directory, "diagnostic.json"), "utf8")).toBe('{\n  "class": "harness",\n  "reason": "unclassified_failure"\n}\n');
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["exit", "result.json"])("worker commits qualification logs before %s publication", async publication => {
     const root = await mkdtemp(join(tmpdir(), "retry-result-publication-")), previousExit = process.exitCode;
     try {
       const { runtime, directory } = await automaticWorkerFixture(root, 75);
-      await mkdir(join(directory, "result.json"));
+      await mkdir(join(directory, publication));
       await expect(runtime.worker(join(directory, "spec.json"))).rejects.toThrow();
-      expect(await readFile(join(directory, "exit"), "utf8")).toBe("75\n");
+      expect(await readFile(join(directory, "qualification-out.log"))).toEqual(Buffer.alloc(0));
+      expect((await readFile(join(directory, "qualification-err.log"), "utf8")).length).toBeGreaterThan(0);
+      if (publication === "result.json") expect(await readFile(join(directory, "exit"), "utf8")).toBe("75\n");
+      else expect(await Bun.file(join(directory, "result.json")).exists()).toBe(false);
     } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
   });
-  test.each(["out.log", "err.log"])("retry authority includes original %s bytes", async name => {
+  test.each(["qualification-out.log", "qualification-err.log"])("worker never replaces immutable %s bytes", async name => {
+    const root = await mkdtemp(join(tmpdir(), "qualification-output-immutable-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory } = await automaticWorkerFixture(root, 75);
+      await writeFile(join(directory, name), "existing private evidence", { mode: 0o600 });
+      await expect(runtime.worker(join(directory, "spec.json"))).rejects.toThrow();
+      expect(await readFile(join(directory, name), "utf8")).toBe("existing private evidence");
+      expect(await Bun.file(join(directory, "exit")).exists()).toBe(false);
+      expect(await Bun.file(join(directory, "result.json")).exists()).toBe(false);
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["out.log", "err.log", "qualification-out.log", "qualification-err.log"])("retry authority includes original %s bytes", async name => {
     const root = await mkdtemp(join(tmpdir(), "retry-log-digest-"));
     try {
       const { runtime, next, step, directory } = await completedAutomaticJob(root);
       await writeFile(join(directory, name), "changed diagnostic bytes\n");
+      const changed = await runtime.completedCampaignFailure(runtime.current);
+      expect(changed.jobSha256).not.toBe(next.retryPlan!.jobSha256);
+      expect(changed.outcomeSha256).toBe(next.retryPlan!.outcomeSha256);
       await expect(runtime.perform(step, next)).rejects.toThrow();
     } finally { await rm(root, { recursive: true, force: true }); }
   });
