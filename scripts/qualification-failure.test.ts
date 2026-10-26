@@ -111,9 +111,13 @@ describe("closed qualification failure contracts", () => {
     }
     expect(() => parseLaneFailure({ ...root(), lane: "androidPush", step: "network_verified", reason: "delivery_timeout", class: "infra_transient" })).toThrow();
   });
-  test.each([["androidPush", "network_verified"], ["rigReadiness", "pixel_push"]] as const)(
-    "delivery metadata timeout stays harness in %s", (lane, step) => {
-      const value = { ...root(), lane, step, reason: "delivery_metadata_timeout", class: "harness", observations: { timeoutMs: 1_000 } };
+  test.each([
+    { id: 1, lane: "androidPush", step: "network_verified", reason: "delivery_metadata_timeout", class: "harness",
+      elapsedMs: 90_000, operation: "read_only", observations: { timeoutMs: 1_000 } },
+    { id: 1, lane: "rigReadiness", step: "pixel_push", reason: "delivery_metadata_timeout", class: "harness",
+      elapsedMs: 90_000, operation: "read_only", observations: { timeoutMs: 1_000 } },
+  ] as const satisfies readonly LaneFailure[])(
+    "delivery metadata timeout stays harness (%#)", value => {
       const failure = parseLaneFailure(value);
       expect(failure).toEqual(value);
       const error = new QualificationFailure(failure, { cause: new Error(secret) });
