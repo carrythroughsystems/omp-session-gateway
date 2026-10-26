@@ -10,8 +10,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 - Closed qualification failure and machine-outcome contracts, private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
-  closed phases. Unknown, mixed, unresolved or unbound failures remain non-retryable; this change
-  does not enable automatic recovery or reinterpret historical failures.
+  closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
+  containment-consistent outcomes fail closed; resumed attempts clear stale failure authority.
+  Unknown, mixed, unresolved or unbound failures remain non-retryable; this change does not
+  enable automatic recovery or reinterpret historical failures.
 
 ## [v0.9.0] — 2026-10-25
 

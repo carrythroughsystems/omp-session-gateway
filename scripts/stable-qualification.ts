@@ -18,7 +18,7 @@ import { deviceCloudHolds, type DeviceCloudHold } from "./device-cloud-availabil
 import { parseDeviceCloudHoldSet, recognizedDeviceCloudOutcome, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
-import { FAILURE_LIMITS, parseLaneFailure, parseLaneTimings, parseQualificationFailureSummary, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
+import { FAILURE_LIMITS, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
 import { parseQualificationExecution, parseRigReadinessReceipt, type QualificationExecution, type RigReadinessReceipt } from "./qualification-outcome.ts";
 
 const REPOSITORY = "carrythroughsystems/omp-session-gateway";
@@ -486,8 +486,15 @@ export function validateStableQualificationReceipt(
 /** Validate new authority-bearing fields without rewriting or upgrading historical schema-3 receipts. */
 function validateReceiptExecution(receipt: StableQualificationReceipt): void {
   const execution = receipt.execution === undefined ? undefined : parseQualificationExecution(receipt.execution);
+  const activeLanes = LANE_NAMES.filter(name => {
+    const lane = receipt.lanes[name];
+    return lane.status !== "pending" || lane.attempts !== 0 || lane.evidence !== undefined || lane.failure !== undefined;
+  });
   if (execution !== undefined) {
     const binding = execution.binding;
+    if (activeLanes.some(name => name !== "artifacts") && (receipt.candidate === undefined || receipt.macHost === undefined)) {
+      throw new Error("qualification receipt active execution identity is incomplete");
+    }
     if (binding.candidateTag !== receipt.tag || binding.previousTag !== receipt.previousTag ||
       binding.orchestratorCommit !== receipt.orchestratorCommit ||
       (receipt.candidate !== undefined && (receipt.candidate.tag !== binding.candidateTag ||
@@ -506,10 +513,13 @@ function validateReceiptExecution(receipt: StableQualificationReceipt): void {
       throw new Error("qualification receipt readiness attempt is unbound");
     }
   }
-  const ids = new Set<number>();
+  const failuresById = new Map<number, LaneFailure>();
   for (const name of LANE_NAMES) {
     const lane = receipt.lanes[name];
     if (lane.timings !== undefined) parseLaneTimings(name, lane.timings);
+    if (summary !== undefined && lane.status === "failed" && lane.failure === undefined) {
+      throw new Error("qualification receipt summary omits a failed lane");
+    }
     if (lane.failure === undefined) continue;
     if (execution === undefined || lane.status !== "failed" || !Array.isArray(lane.failure) ||
       lane.failure.length < 1 || lane.failure.length > FAILURE_LIMITS.records) {
@@ -517,8 +527,8 @@ function validateReceiptExecution(receipt: StableQualificationReceipt): void {
     }
     const failures = lane.failure.map(parseLaneFailure);
     for (const failure of failures) {
-      if (failure.lane !== name || ids.has(failure.id)) throw new Error("qualification receipt lane failure identity is invalid");
-      ids.add(failure.id);
+      if (failure.lane !== name || failuresById.has(failure.id)) throw new Error("qualification receipt lane failure identity is invalid");
+      failuresById.set(failure.id, failure);
       if (summary !== undefined) {
         const recorded = summary.failures.find(item => item.id === failure.id);
         if (recorded === undefined || !isDeepStrictEqual(recorded, failure)) {
@@ -527,7 +537,40 @@ function validateReceiptExecution(receipt: StableQualificationReceipt): void {
       }
     }
   }
-  if (ids.size > FAILURE_LIMITS.records) throw new Error("qualification receipt failure count is invalid");
+  if (failuresById.size > FAILURE_LIMITS.records) throw new Error("qualification receipt failure count is invalid");
+  if (summary === undefined) {
+    if (failuresById.size > 0) parseLaneFailures([...failuresById.values()]);
+    return;
+  }
+  for (const failure of summary.failures) {
+    if (failure.lane === "rigReadiness") {
+      if (receipt.rigReadiness?.status !== "failed" || receipt.rigReadiness.campaignAttempt !== execution?.campaignAttempt) {
+        throw new Error("qualification receipt readiness failure has no failed owner");
+      }
+    } else if (failure.lane === "campaign") {
+      if (failure.class !== "harness") throw new Error("qualification receipt campaign failure must remain harness evidence");
+    } else if (failure.lane === "preflight") {
+      if (activeLanes.length > 0 || (receipt.rigReadiness !== undefined &&
+        (receipt.rigReadiness.status !== "pending" || receipt.rigReadiness.epoch !== undefined)) ||
+        !qualificationPreflightFailuresEffectFree([failure])) {
+        throw new Error("qualification receipt preflight failure records effects");
+      }
+    } else if (receipt.lanes[failure.lane].status !== "failed" ||
+      !isDeepStrictEqual(failuresById.get(failure.id), failure)) {
+      throw new Error("qualification receipt summary failure has no matching failed lane");
+    }
+  }
+}
+
+/** Starting another attempt invalidates the prior attempt's whole failure graph, not passed proofs. */
+function clearReceiptFailureEvidence(receipt: StableQualificationReceipt): void {
+  delete receipt.failureSummary;
+  for (const lane of Object.values(receipt.lanes)) delete lane.failure;
+}
+
+function clearLaneFailureEvidence(receipt: StableQualificationReceipt, lane: LaneReceipt): void {
+  if (receipt.failureSummary !== undefined) clearReceiptFailureEvidence(receipt);
+  else delete lane.failure;
 }
 
 function assertNoSecretFields(value: unknown, path = "receipt"): void {
@@ -587,6 +630,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
 ): Promise<T> {
   const lane = receipt.lanes[name];
   if (!force && lane.status === "passed") return (lane.evidence ?? {}) as T;
+  clearLaneFailureEvidence(receipt, lane);
   lane.status = "running";
   lane.attempts += 1;
   lane.startedAt = now();
@@ -732,6 +776,7 @@ export async function withConsumedDeviceCloudHold<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   if (receipt.lanes.deviceCloud.evidence !== undefined) delete receipt.lanes.deviceCloud.evidence.availabilityHold;
+  clearReceiptFailureEvidence(receipt);
   await persist();
   try { return await run(); }
   catch (error) {
@@ -2083,6 +2128,7 @@ export function markMacCleanupRequired(receipt: StableQualificationReceipt, macH
   receipt.macHost = macHost;
   const cleanup = receipt.lanes.cleanup;
   if (cleanup.status !== "passed") return newlyBound;
+  clearLaneFailureEvidence(receipt, cleanup);
   cleanup.status = "pending";
   delete cleanup.startedAt;
   delete cleanup.completedAt;
@@ -2093,10 +2139,12 @@ export function markMacCleanupRequired(receipt: StableQualificationReceipt, macH
 
 /** Commit the publication verdict only after the complete, repeatable lifecycle has finished. */
 export async function completeOmpPublicationLifecycle(
-  lane: LaneReceipt,
+  receipt: StableQualificationReceipt,
   persist: () => Promise<void>,
   run: () => Promise<OmpLifecycleEvidence>,
 ): Promise<void> {
+  const lane = receipt.lanes.ompPublication;
+  clearLaneFailureEvidence(receipt, lane);
   lane.status = "running";
   delete lane.completedAt;
   delete lane.error;
@@ -2125,7 +2173,7 @@ export async function completeOmpPublicationLifecycle(
 /** A pure availability failure must not discard publication proof that can still finish safely. */
 export async function finishLiveQualification(
   failures: readonly unknown[],
-  publication: LaneReceipt,
+  receipt: StableQualificationReceipt,
   persist: () => Promise<void>,
   stopRelay: () => Promise<void>,
   lifecycle: () => Promise<OmpLifecycleEvidence>,
@@ -2135,7 +2183,7 @@ export async function finishLiveQualification(
   if (failure !== undefined && deviceCloudHolds(failure) === undefined) throw failure;
   try {
     await stopRelay();
-    if (!preservePublication) await completeOmpPublicationLifecycle(publication, persist, lifecycle);
+    if (!preservePublication) await completeOmpPublicationLifecycle(receipt, persist, lifecycle);
   } catch (error) {
     if (failure !== undefined) throw new AggregateError([failure, error], "device availability and publication completion failed");
     throw error;
@@ -2213,6 +2261,7 @@ async function runReceiptStableQualification(
   persist: () => Promise<void>,
 ): Promise<Record<string, unknown>> {
   const resumeIdentity = { tag: options.tag, previousTag: options.previousTag, orchestratorCommit, macHost: options.macHost };
+  clearReceiptFailureEvidence(receipt);
   receipt.status = "running";
   delete receipt.completedAt;
   delete receipt.error;
@@ -2343,6 +2392,7 @@ async function runReceiptStableQualification(
       const publicationLane = receipt.lanes.ompPublication;
       const preservePublication = options.resumeDeviceCloud === true && publicationLane.status === "passed";
       if (!preservePublication) {
+        clearLaneFailureEvidence(receipt, publicationLane);
         publicationLane.status = "running";
         publicationLane.attempts += 1;
         publicationLane.startedAt = now();
@@ -2416,7 +2466,7 @@ async function runReceiptStableQualification(
       }
       const settled = await Promise.allSettled(pending);
       const failures = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-      await finishLiveQualification(failures.map(result => result.reason), publicationLane, persist, async () => {
+      await finishLiveQualification(failures.map(result => result.reason), receipt, persist, async () => {
         await stopSubprocess(tunnelProcess);
         tunnelProcess = undefined;
       }, () => runOmpLifecycle({
@@ -2511,6 +2561,7 @@ async function runReceiptStableQualification(
     }
     throw await recordDeviceCloudCampaignFailure(receipt, primaryError, resumeIdentity, persist, lanes, options.outcomeFile);
   }
+  clearReceiptFailureEvidence(receipt);
   receipt.status = "passed";
   receipt.completedAt = now();
   delete receipt.error;
