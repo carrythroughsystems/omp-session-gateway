@@ -13,6 +13,8 @@
  * - read/writeQualificationOutcomeFile use a bounded, duplicate-key-rejecting private atomic
  *   channel at OMP_STABLE_OUTCOME_FILE. Errors never include file paths, raw input or causes.
  *   Legacy device-cloud files are not upgraded; their parsers and manual recovery remain separate.
+ *   File data is synced on every platform; parent-directory sync is POSIX-only. Windows retains
+ *   atomic rename and all validation without claiming POSIX directory-sync durability.
  *   Supply a physical path: every ancestor is checked for symlinks, and size/metadata changes
  *   during reading are refused. Cleanup disposition must agree with the containment summary.
  * - RigReadinessReceipt and its parser define additive schema-3 readiness observations only;
@@ -215,8 +217,10 @@ export async function writeQualificationOutcomeFile(path: string, value: Qualifi
     await validateDestination(destination);
     await rename(temporary, destination);
     temporary = undefined;
-    const directory = await open(parent, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { await directory.sync(); } finally { await directory.close(); }
+    if (process.platform !== "win32") {
+      const directory = await open(parent, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
   } catch { throw fileError(); }
   finally { if (temporary !== undefined) await unlink(temporary).catch(() => {}); }
 }
