@@ -52,7 +52,6 @@ test.each([false, true])("council491 allocation budget cancels an owned POST wit
     expect(sends).toBe(1);
   } finally { globalThis.fetch = original; }
 });
-
 const transportResult = (condition = "connection_timeout") => ({
   exitCode: -1, stdout: "", diagnostic: "private text ignored",
   failure: { kind: "transport", stage: "connection", condition, httpStatus: null, disposition: "not_started" },
