@@ -1127,7 +1127,7 @@ describe("publication lifecycle receipt", () => {
       async () => { events.push("relay stopped"); },
       async () => { events.push("lifecycle"); return structuredClone(lifecycleEvidence); })).rejects.toThrow("consumers failed");
     expect(events).toEqual(["relay finished", "relay stopped", "lifecycle"]);
-    expect(publication.status).toBe("passed");
+    expect(publication).toMatchObject({ status: "passed" });
     expect(receipt.lanes.relay.status).toBe("passed");
     expect(Object.values(receipt.lanes).some(lane => lane.status === "running")).toBe(false);
   });
@@ -1811,7 +1811,7 @@ test("council R3 bound cloud retry consumes summary before admission persists", 
     await createReceiptPersister(path, receipt)();
     const priorDigest = digest(await readFile(path, "utf8"));
     const executionPath = join(root, "execution.json");
-    const next = { ...receiptExecution(), campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+    const next: QualificationExecution = { ...receiptExecution(), campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
     await writeFile(executionPath, JSON.stringify(next), { mode: 0o600 });
     let admitted = false;
     const runtime = await preflightFixture(root);

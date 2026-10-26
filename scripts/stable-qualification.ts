@@ -2553,10 +2553,10 @@ export async function completeOmpPublicationLifecycle(
     lane.status = "failed";
     lane.error = reason;
     lane.completedAt = now();
-    const failure = error instanceof QualificationFailure ? error : new QualificationFailure({
-      id: nextFailureId(), lane: "ompPublication", step: error instanceof OmpLifecycleFailure ? error.step : "cleanup",
+    const failure = error instanceof QualificationFailure ? error : new QualificationFailure(parseLaneFailure({
+      id: nextFailureId(), lane: "ompPublication", step: error instanceof OmpLifecycleFailure ? error.step.replaceAll(" ", "_") : "cleanup",
       class: "harness", reason: "lifecycle_unconfirmed", operation: "unknown", elapsedMs: 0, observations: {},
-    }, { cause: error });
+    }), { cause: error });
     if (receipt.execution !== undefined && failure.evidence.lane === "ompPublication" && failure.evidence.class !== "collateral") {
       lane.failure = [failure.evidence];
     }
