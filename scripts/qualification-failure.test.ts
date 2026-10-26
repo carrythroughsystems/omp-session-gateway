@@ -111,6 +111,21 @@ describe("closed qualification failure contracts", () => {
     }
     expect(() => parseLaneFailure({ ...root(), lane: "androidPush", step: "network_verified", reason: "delivery_timeout", class: "infra_transient" })).toThrow();
   });
+  test.each([["androidPush", "network_verified"], ["rigReadiness", "pixel_push"]] as const)(
+    "delivery metadata timeout stays harness in %s", (lane, step) => {
+      const value = { ...root(), lane, step, reason: "delivery_metadata_timeout", class: "harness", observations: { timeoutMs: 1_000 } };
+      const failure = parseLaneFailure(value);
+      expect(failure).toEqual(value);
+      const error = new QualificationFailure(failure, { cause: new Error(secret) });
+      expect(JSON.parse(JSON.stringify(error))).toEqual(value);
+      expect(normalizeQualificationFailures(error)).toEqual([value]);
+      expect(qualificationRetryEligible({ ...summary(), failures: [failure] }, true)).toBe(false);
+      for (const classification of ["product", "infra_transient"]) {
+        expect(() => parseLaneFailure({ ...value, class: classification })).toThrow();
+      }
+      expect(() => parseLaneFailure({ ...root(), class: "harness", reason: value.reason })).toThrow();
+    },
+  );
   test("closed keys reject secrets and identifiers without echoing them", () => {
     for (const change of [{ detail: secret }, { cause: { message: secret } }, { host: "private.example.ts.net" },
       { observations: { [secret]: true } }, { observations: { transportFailure: secret } }, { reason: secret }, { step: secret }]) {
