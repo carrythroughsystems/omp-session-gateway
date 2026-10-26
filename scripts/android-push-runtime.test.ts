@@ -79,7 +79,7 @@ test("R2 device discovery uses the runtime cancellation context", async () => {
   const stream = new ReadableStream<Uint8Array>({ start(value) { value.enqueue(new TextEncoder().encode("List of devices attached\nsynthetic device\n")); value.close(); } });
   const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
     stdout: stream, stderr: new ReadableStream({ start(value) { value.close(); } }), exited: exited.promise, kill() { killed = true; },
-  })) as typeof Bun.spawn);
+  })) as unknown as typeof Bun.spawn);
   try {
     const runtime = createAndroidPushRuntime(identity, { execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } });
     const pending = runtime.preflight({ origin: identity.origin }).catch(() => {});
@@ -96,7 +96,7 @@ test("R2 nested keyguard shell refuses a cancelled execution before spawning", a
   const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
     stdout: new ReadableStream({ start(value) { value.close(); } }), stderr: new ReadableStream({ start(value) { value.close(); } }),
     exited: Promise.resolve(0), stdin: { write() {}, end() {} }, kill() {},
-  })) as typeof Bun.spawn);
+  })) as unknown as typeof Bun.spawn);
   try {
     await expect(unlockAndroidKeyguard("synthetic", async () => new TextEncoder().encode("1234"), undefined,
       { signal: controller.signal, deadline: performance.now() + 1_000 })).rejects.toThrow();
