@@ -13,7 +13,7 @@ export async function completeBrowserRun(
     const text = await readFile(path, "utf8");
     if (Buffer.byteLength(text) > 8 * 1_024 * 1_024) throw new Error("oversized report");
     const report = parseBrowserFlakeReport(JSON.parse(text));
-    for (const key of ["runId", "runAttempt", "sha", "lane"] as const) {
+    for (const key of ["runId", "runAttempt", "sha", "lane", "dispatchTargetSha"] as const) {
       if (report[key] !== metadata[key]) throw new Error("foreign report");
     }
     if (summaryPath !== undefined) await appendFile(summaryPath, browserFlakeSummary(report));

@@ -5,6 +5,7 @@ import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const BROWSER_REPORT_PATH = "test-results/browser-flakes/browser-flake-report.json";
+export const BROWSER_REPORT_VERSION = 2;
 export const BROWSER_PROJECTS = {
   "browser-notifications": ["pixel-10-pro-411x816", "synthetic-narrow-390x844"],
   "browser-core": ["desktop-chromium", "desktop-firefox", "desktop-webkit", "iphone-webkit"],
@@ -12,18 +13,21 @@ export const BROWSER_PROJECTS = {
 export type BrowserLane = keyof typeof BROWSER_PROJECTS;
 export type BrowserProject = typeof BROWSER_PROJECTS[BrowserLane][number];
 export interface BrowserReportMetadata {
-  formatVersion: 1;
+  formatVersion: 2;
   runId: string;
   runAttempt: number;
   /** Exact checkout tested, including GitHub's PR merge commit when applicable. */
   sha: string;
   lane: BrowserLane;
+  /** Non-null only when the workflow's exact fleet-target validation is active. */
+  dispatchTargetSha: string | null;
 }
 export interface BrowserTestLocation { file: string; line: number; column: number }
 export interface BrowserTestExecution {
   project: BrowserProject;
   location: BrowserTestLocation;
   identity: string;
+  expectedStatus: "passed" | "failed" | "timedOut" | "skipped" | "interrupted";
   attempts: { ordinal: number; status: "passed" | "failed" | "timedOut" | "skipped" | "interrupted"; durationMs: number }[];
   outcome: "expected" | "unexpected" | "flaky" | "skipped";
 }
@@ -44,9 +48,29 @@ export function browserReportMetadata(env: NodeJS.ProcessEnv, lane: BrowserLane)
   const runId = env.GITHUB_RUN_ID ?? (ci ? "" : "0");
   const runAttempt = Number(env.GITHUB_RUN_ATTEMPT ?? (ci ? "" : "1"));
   const sha = env.OMP_BROWSER_TEST_SHA ?? (ci ? "" : "0".repeat(40));
+  const dispatchTargetSha = env.OMP_BROWSER_DISPATCH_TARGET_SHA || null;
   if (!/^(?:0|[1-9][0-9]{0,19})$/u.test(runId) || (ci && runId === "0") || !integer(runAttempt, 1) || !isCommitSha(sha)) invalid();
-  return { formatVersion: 1, runId, runAttempt, sha, lane };
+  if (dispatchTargetSha !== null && (!isCommitSha(dispatchTargetSha) || dispatchTargetSha !== sha)) invalid();
+  return { formatVersion: BROWSER_REPORT_VERSION, runId, runAttempt, sha, lane, dispatchTargetSha };
 }
+
+/** Mirrors computeTestCaseOutcome in pinned Playwright 1.62.1, including interruptions. */
+export function browserTestOutcome(expectedStatus: BrowserTestExecution["expectedStatus"], attempts: BrowserTestExecution["attempts"]): BrowserTestExecution["outcome"] {
+  let expected = 0;
+  let unexpected = 0;
+  let skipped = 0;
+  for (const attempt of attempts) {
+    if (attempt.status === "interrupted") continue;
+    if (attempt.status === "skipped") { if (expectedStatus === "skipped") skipped++; }
+    else if (attempt.status === expectedStatus) expected++;
+    else unexpected++;
+  }
+  if (expected === 0 && unexpected === 0) return "skipped";
+  if (unexpected === 0) return "expected";
+  return expected === 0 && skipped === 0 ? "unexpected" : "flaky";
+}
+
+export const wasBrowserTestExecuted = (test: BrowserTestExecution): boolean => test.attempts.some(attempt => attempt.status !== "skipped");
 
 function identity(project: string, location: BrowserTestLocation, occurrence: number): string {
   // Location alone is not unique for parameterized test declarations. Suite order supplies a
@@ -59,14 +83,15 @@ function occurrenceKey(project: string, location: BrowserTestLocation): string {
 
 /** Validate exact keys before a report can become an artifact, summary, or budget input. */
 export function parseBrowserFlakeReport(value: unknown): BrowserFlakeReport {
-  const report = object(value, ["formatVersion", "runId", "runAttempt", "sha", "lane", "tests"]);
-  if (report.formatVersion !== 1 || typeof report.runId !== "string" || !/^(?:0|[1-9][0-9]{0,19})$/u.test(report.runId) ||
+  const report = object(value, ["formatVersion", "runId", "runAttempt", "sha", "lane", "dispatchTargetSha", "tests"]);
+  if (report.formatVersion !== BROWSER_REPORT_VERSION || typeof report.runId !== "string" || !/^(?:0|[1-9][0-9]{0,19})$/u.test(report.runId) ||
     !integer(report.runAttempt, 1) || !isCommitSha(report.sha) ||
+    (report.dispatchTargetSha !== null && (!isCommitSha(report.dispatchTargetSha) || report.dispatchTargetSha !== report.sha)) ||
     (report.lane !== "browser-core" && report.lane !== "browser-notifications") ||
-    !Array.isArray(report.tests) || report.tests.length > 20_000) invalid();
+    !Array.isArray(report.tests) || report.tests.length === 0 || report.tests.length > 20_000) invalid();
   const occurrences = new Map<string, number>();
   const tests: BrowserTestExecution[] = report.tests.map((input: unknown) => {
-    const test = object(input, ["project", "location", "identity", "attempts", "outcome"]);
+    const test = object(input, ["project", "location", "identity", "expectedStatus", "attempts", "outcome"]);
     if (typeof test.project !== "string" || !(BROWSER_PROJECTS[report.lane as BrowserLane] as readonly string[]).includes(test.project)) invalid();
     const location = object(test.location, ["file", "line", "column"]);
     if (typeof location.file !== "string" || location.file.length > 240 ||
@@ -76,23 +101,26 @@ export function parseBrowserFlakeReport(value: unknown): BrowserFlakeReport {
     const key = occurrenceKey(test.project, safeLocation);
     const occurrence = occurrences.get(key) ?? 0;
     occurrences.set(key, occurrence + 1);
+    const statuses = ["passed", "failed", "timedOut", "skipped", "interrupted"];
     if (test.identity !== identity(test.project, safeLocation, occurrence) || !Array.isArray(test.attempts) || test.attempts.length > 2 ||
+      typeof test.expectedStatus !== "string" || !statuses.includes(test.expectedStatus) ||
       typeof test.outcome !== "string" || !["expected", "unexpected", "flaky", "skipped"].includes(test.outcome)) invalid();
     const attempts = test.attempts.map((input: unknown, ordinal: number) => {
       const attempt = object(input, ["ordinal", "status", "durationMs"]);
-      if (attempt.ordinal !== ordinal || typeof attempt.status !== "string" || !["passed", "failed", "timedOut", "skipped", "interrupted"].includes(attempt.status) ||
+      if (attempt.ordinal !== ordinal || typeof attempt.status !== "string" || !statuses.includes(attempt.status) ||
         !integer(attempt.durationMs)) invalid();
       return { ordinal, status: attempt.status as BrowserTestExecution["attempts"][number]["status"], durationMs: attempt.durationMs };
     });
-    if (test.outcome === "flaky" && (attempts.length !== 2 || attempts[0]?.status === attempts[1]?.status)) invalid();
-    if (test.outcome === "skipped" && attempts.some(attempt => attempt.status !== "skipped")) invalid();
-    if (test.outcome !== "skipped" && (attempts.length === 0 || attempts.every(attempt => attempt.status === "skipped"))) invalid();
+    const expectedStatus = test.expectedStatus as BrowserTestExecution["expectedStatus"];
+    const outcome = browserTestOutcome(expectedStatus, attempts);
+    if (test.outcome !== outcome) invalid();
     return {
       project: test.project as BrowserProject, location: safeLocation, identity: test.identity,
-      attempts, outcome: test.outcome as BrowserTestExecution["outcome"],
+      expectedStatus, attempts, outcome,
     };
   });
-  return { formatVersion: 1, runId: report.runId, runAttempt: report.runAttempt, sha: report.sha, lane: report.lane, tests };
+  if (!tests.some(wasBrowserTestExecuted)) invalid();
+  return { formatVersion: BROWSER_REPORT_VERSION, runId: report.runId, runAttempt: report.runAttempt, sha: report.sha, lane: report.lane, dispatchTargetSha: report.dispatchTargetSha, tests };
 }
 
 export function createBrowserFlakeReport(metadata: BrowserReportMetadata, tests: readonly TestCase[], repositoryRoot = root): BrowserFlakeReport {
@@ -107,6 +135,7 @@ export function createBrowserFlakeReport(metadata: BrowserReportMetadata, tests:
       occurrences.set(key, occurrence + 1);
       return {
         project, location, identity: identity(project, location, occurrence),
+        expectedStatus: test.expectedStatus,
         attempts: test.results.map(result => ({ ordinal: result.retry, status: result.status, durationMs: result.duration })),
         outcome: test.outcome(),
       };
@@ -129,7 +158,8 @@ export function browserFlakeSummary(input: BrowserFlakeReport): string {
   for (const project of BROWSER_PROJECTS[report.lane]) {
     const tests = report.tests.filter(test => test.project === project);
     const count = (outcome: BrowserTestExecution["outcome"]): number => tests.filter(test => test.outcome === outcome).length;
-    lines.push(`- ${project}: executions=${tests.length - count("skipped")} flaky=${count("flaky")} unexpected=${count("unexpected")} skipped=${count("skipped")}`);
+    const executions = tests.filter(wasBrowserTestExecuted).length;
+    lines.push(`- ${project}: executions=${executions} flaky=${count("flaky")} unexpected=${count("unexpected")} skipped=${tests.length - executions}`);
     for (const test of tests.filter(test => test.outcome === "flaky" || test.outcome === "unexpected")) {
       lines.push(`  - ${test.outcome}: ${test.location.file}:${test.location.line}:${test.location.column}`);
     }

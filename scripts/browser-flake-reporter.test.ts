@@ -12,11 +12,12 @@ import { completeBrowserRun } from "./test-browser.ts";
 
 const root = resolve(import.meta.dir, "..");
 const metadata: BrowserReportMetadata = {
-  formatVersion: 1, runId: "123", runAttempt: 2, sha: "a".repeat(40), lane: "browser-notifications",
+  formatVersion: 2, runId: "123", runAttempt: 2, sha: "a".repeat(40), lane: "browser-notifications", dispatchTargetSha: null,
 };
 const secret = "synthetic-private-reporter-value";
-function testcase(statuses: string[], outcome = "expected", line = 12): TestCase {
+function testcase(statuses: string[], outcome = "expected", line = 12, expectedStatus = "passed"): TestCase {
   return {
+    expectedStatus,
     title: secret, id: secret, annotations: [{ type: secret, description: secret }],
     location: { file: join(root, "apps/web/e2e/trays.e2e.ts"), line, column: 3 },
     parent: { project: () => ({ name: "pixel-10-pro-411x816" }) },
@@ -32,7 +33,7 @@ test("reporter distinguishes clean, flaky, exhausted, skipped and expected failu
   const report = createBrowserFlakeReport(metadata, [
     testcase(["passed"]), testcase(["failed", "passed"], "flaky"),
     testcase(["failed", "failed"], "unexpected"), testcase(["skipped"], "skipped"),
-    testcase(["failed"]),
+    testcase(["failed"], "expected", 12, "failed"),
   ], root);
   expect(report.tests.map(value => value.outcome)).toEqual(["expected", "flaky", "unexpected", "skipped", "expected"]);
   expect(report.tests[1]?.attempts).toEqual([
@@ -67,6 +68,22 @@ test("closed report schema refuses unknown fields, invalid locations, identities
   expect(() => createBrowserFlakeReport(metadata, [
     { ...testcase(["passed"]), location: { file: join(root, "private.ts"), line: 1, column: 1 } } as TestCase,
   ], root)).toThrow("invalid browser flake report");
+});
+
+test("attempt evidence, not the supplied outcome label, determines flaky accounting", () => {
+  const report = createBrowserFlakeReport(metadata, [testcase(["failed", "passed"], "flaky")], root);
+  for (const outcome of ["expected", "unexpected", "skipped"]) {
+    expect(() => parseBrowserFlakeReport({ ...report, tests: [{ ...report.tests[0], outcome }] })).toThrow();
+  }
+});
+
+test("empty and all-unexecuted reports cannot satisfy evidence coverage; interrupted outcomes follow Playwright", () => {
+  const report = createBrowserFlakeReport(metadata, [testcase(["passed"])], root);
+  expect(() => parseBrowserFlakeReport({ ...report, tests: [] })).toThrow();
+  expect(() => createBrowserFlakeReport(metadata, [testcase(["skipped"], "skipped")], root)).toThrow();
+  const interrupted = createBrowserFlakeReport(metadata, [testcase(["interrupted"], "skipped")], root);
+  expect(interrupted.tests[0]?.outcome).toBe("skipped");
+  expect(interrupted.tests[0]?.attempts[0]?.status).toBe("interrupted");
 });
 
 test("CI metadata is required only for true or 1 and must bind a valid run and sha", () => {

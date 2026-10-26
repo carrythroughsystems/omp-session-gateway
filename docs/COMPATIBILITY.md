@@ -32,7 +32,9 @@ Browser **Tested** evidence distinguishes a clean first pass from a flaky retry 
 sanitized per-attempt JSON report for 14 days, and summarize counts and repository test locations;
 local runs have zero retries. Weekly/manual `browser-flake-budget` maintenance enforces at most
 1% flaky logical executions per lane/project and no test/project flaky more than twice over seven
-days, with missing reporter-enabled evidence failing coverage. This containment changes no
+days, with missing reporter-enabled browser-job evidence failing coverage. Cancelled jobs and
+selective reruns of only sibling jobs owe no new report; outcomes are derived from expected
+status and attempts rather than trusted labels. This containment changes no
 assertion, deadline, browser project, or physical/signed-candidate qualification claim. Prepare
 PRs execute required checks on their own exact checkout, even for a version-only bump; main's
 green results cannot be reused. See [browser evidence policy](TEST_PLAN.md#browser-retries-evidence-and-harness-readiness).

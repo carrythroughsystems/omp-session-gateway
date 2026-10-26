@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createBrowserFlakeReport, type BrowserFlakeReport, type BrowserLane } from "./browser-flake-reporter.ts";
 import {
-  browserReportingEnabled, collectBrowserFlakeRuns, evaluateBrowserFlakeBudget, validateReportSubject, type BrowserBudgetRun,
+  browserFleetDispatchEnforced, browserReportingEnabled, collectBrowserFlakeRuns, evaluateBrowserFlakeBudget, validateReportSubject, type BrowserBudgetRun,
 } from "./browser-flake-budget.ts";
 import type { TestCase } from "@playwright/test/reporter";
 import { join, resolve } from "node:path";
@@ -9,15 +9,16 @@ import { join, resolve } from "node:path";
 const root = resolve(import.meta.dir, "..");
 const now = Date.parse("2026-10-25T20:00:00Z");
 function run(id = "123", flaky = 1, total = 100, lane: BrowserLane = "browser-notifications"): BrowserBudgetRun {
-  const metadata = { formatVersion: 1 as const, runId: id, runAttempt: 1, sha: "a".repeat(40), lane };
+  const metadata = { formatVersion: 2 as const, runId: id, runAttempt: 1, sha: "a".repeat(40), lane, dispatchTargetSha: null };
   const cases = Array.from({ length: total }, (_, index) => ({
+    expectedStatus: "passed",
     location: { file: join(root, "apps/web/e2e/trays.e2e.ts"), line: index + 1, column: 1 },
     parent: { project: () => ({ name: lane === "browser-core" ? "desktop-firefox" : "pixel-10-pro-411x816" }) },
     results: (index < flaky ? ["failed", "passed"] : ["passed"]).map((status, retry) => ({ status, retry, duration: 10 })),
     outcome: () => index < flaky ? "flaky" : "expected",
   })) as unknown as TestCase[];
   return {
-    runId: id, runAttempt: 1, sha: metadata.sha, lane, completedAt: new Date(now - 1_000).toISOString(),
+    runId: id, runAttempt: 1, sha: metadata.sha, dispatchTargetSha: null, lane, completedAt: new Date(now - 1_000).toISOString(),
     reporterEnabled: true, report: createBrowserFlakeReport(metadata, cases, root),
   };
 }
@@ -72,12 +73,17 @@ test("malformed artifacts fail closed and skipped cases cannot dilute the denomi
   expect(evaluateBrowserFlakeBudget([{ ...entry, report }], now).projects[0]).toMatchObject({ executions: 1, flaky: 1 });
   expect(evaluateBrowserFlakeBudget([{ ...entry, report }], now).ok).toBe(false);
   expect(() => evaluateBrowserFlakeBudget([{ ...entry, report: { ...report, error: "synthetic-private-value" } }], now)).toThrow();
+  expect(() => evaluateBrowserFlakeBudget([{ ...entry, report: { ...report, tests: [] } }], now)).toThrow();
+  const mislabeled = structuredClone(entry.report) as BrowserFlakeReport;
+  mislabeled.tests[0]!.outcome = "expected";
+  expect(() => evaluateBrowserFlakeBudget([{ ...entry, report: mislabeled }], now)).toThrow();
 });
 
 test("reporting cohorts follow the job marker at the workflow revision, not run age or branch", () => {
   expect(browserReportingEnabled("jobs:\n  browser-core:\n    steps: []\n", "browser-core")).toBe(false);
-  expect(browserReportingEnabled('jobs:\n  browser-core:\n    env:\n      OMP_BROWSER_REPORT_VERSION: "1"\n', "browser-core")).toBe(true);
-  expect(() => browserReportingEnabled('jobs:\n  browser-core:\n    env:\n      OMP_BROWSER_REPORT_VERSION: "2"\n', "browser-core")).toThrow();
+  expect(browserReportingEnabled('jobs:\n  browser-core:\n    env:\n      OMP_BROWSER_REPORT_VERSION: "1"\n', "browser-core")).toBe(false);
+  expect(browserReportingEnabled('jobs:\n  browser-core:\n    env:\n      OMP_BROWSER_REPORT_VERSION: "2"\n', "browser-core")).toBe(true);
+  expect(() => browserReportingEnabled('jobs:\n  browser-core:\n    env:\n      OMP_BROWSER_REPORT_VERSION: "3"\n', "browser-core")).toThrow();
   expect(() => browserReportingEnabled("not: [valid", "browser-core")).toThrow();
 });
 
@@ -97,20 +103,22 @@ test("collector reads revision cohorts and all completed attempts, even when the
   const entry = run("123", 0);
   const head = entry.sha;
   const calls: string[] = [];
-  const metadata = { id: 123, run_attempt: 1, status: "completed", head_sha: head, event: "push", path: ".github/workflows/ci.yml", updated_at: entry.completedAt };
+  const metadata = { id: 123, run_attempt: 1, status: "completed", conclusion: "success", head_sha: head, event: "push", path: ".github/workflows/ci.yml", updated_at: entry.completedAt };
+  const browser = { run_id: 123, run_attempt: 1, name: "browser-notifications", status: "completed", conclusion: "success", started_at: entry.completedAt, completed_at: entry.completedAt, steps: [] };
   const artifact = { name: "browser-flake-browser-notifications-123-1", workflow_run: { id: 123, head_sha: head } };
   const source = {
     read(endpoint: string): unknown {
       calls.push(endpoint);
       if (endpoint.endsWith("/attempts/1")) return metadata;
       if (endpoint.endsWith("/attempts/2")) return { ...metadata, run_attempt: 2, status: "in_progress" };
-      if (endpoint.includes("/contents/")) return { encoding: "base64", content: Buffer.from('jobs:\n  browser-notifications:\n    env:\n      OMP_BROWSER_REPORT_VERSION: "1"\n').toString("base64") };
+      if (endpoint.includes("/contents/")) return { encoding: "base64", content: Buffer.from('jobs:\n  browser-notifications:\n    env:\n      OMP_BROWSER_REPORT_VERSION: "2"\n').toString("base64") };
       throw new Error("unexpected offline endpoint");
     },
     list(endpoint: string): Record<string, unknown>[] {
       if (endpoint.endsWith("/ci.yml/runs")) return [{ ...metadata, run_attempt: 2 }];
       if (endpoint.endsWith("/compatibility.yml/runs")) return [];
       if (endpoint.endsWith("/artifacts")) return [artifact];
+      if (endpoint.endsWith("/jobs")) return [browser];
       throw new Error("unexpected offline endpoint");
     },
     async report(): Promise<BrowserFlakeReport> { return entry.report as BrowserFlakeReport; },
@@ -120,6 +128,10 @@ test("collector reads revision cohorts and all completed attempts, even when the
   expect(evaluateBrowserFlakeBudget(entries, now).ok).toBe(true);
   expect(calls.some(endpoint => endpoint.endsWith("/attempts/2"))).toBe(true);
   expect(calls.some(endpoint => endpoint.endsWith(`?ref=${head}`))).toBe(true);
+  const selective = await collectBrowserFlakeRuns("synthetic/repository", now, {
+    ...source, read: endpoint => endpoint.endsWith("/attempts/2") ? { ...metadata, run_attempt: 2, conclusion: "failure" } : source.read(endpoint),
+  });
+  expect(selective).toHaveLength(1);
   const missing = await collectBrowserFlakeRuns("synthetic/repository", now, {
     ...source, list: endpoint => endpoint.endsWith("/artifacts") ? [] : source.list(endpoint),
   });
@@ -130,4 +142,50 @@ test("collector reads revision cohorts and all completed attempts, even when the
   await expect(collectBrowserFlakeRuns("synthetic/repository", now, {
     ...source, report: async () => ({ ...(entry.report as BrowserFlakeReport), sha: "b".repeat(40) }),
   })).rejects.toThrow("invalid browser flake budget evidence");
+});
+
+test("cancelled workflows and selective reruns without a current-attempt browser execution owe no report", async () => {
+  const entry = run("123", 0);
+  const metadata = { id: 123, run_attempt: 1, status: "completed", conclusion: "success", head_sha: entry.sha, event: "push", path: ".github/workflows/ci.yml", updated_at: entry.completedAt };
+  const browser = { run_id: 123, run_attempt: 1, name: "browser-notifications", status: "completed", conclusion: "success", started_at: entry.completedAt, completed_at: entry.completedAt, steps: [] };
+  for (const [conclusion, jobs] of [
+    ["cancelled", [browser]],
+    ["success", []],
+    ["success", [{ ...browser, conclusion: "cancelled" }]],
+  ] as const) {
+    const entries = await collectBrowserFlakeRuns("synthetic/repository", now, {
+      read: endpoint => endpoint.includes("/contents/") ? { encoding: "base64", content: Buffer.from('jobs:\n  browser-notifications:\n    env:\n      OMP_BROWSER_REPORT_VERSION: "2"\n').toString("base64") } : { ...metadata, conclusion },
+      list: endpoint => endpoint.endsWith("/ci.yml/runs") ? [metadata] : endpoint.endsWith("/jobs") ? [...jobs] : [],
+      report: async () => entry.report as BrowserFlakeReport,
+    });
+    expect(entries).toHaveLength(0);
+  }
+});
+
+test("fleet dispatches may test a different pinned target only under workflow and executed-step enforcement", async () => {
+  const workflow = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
+  expect(browserFleetDispatchEnforced(workflow, "browser-notifications")).toBe(true);
+  expect(browserFleetDispatchEnforced(workflow.replaceAll('test "$(git rev-parse HEAD)" = "$TARGET_SHA"', "true"), "browser-notifications")).toBe(false);
+  const entry = run("123", 0);
+  const target = "b".repeat(40);
+  const report = { ...(entry.report as BrowserFlakeReport), sha: target, dispatchTargetSha: target };
+  const metadata = { id: 123, run_attempt: 1, status: "completed", conclusion: "success", head_sha: entry.sha, event: "workflow_dispatch", path: ".github/workflows/ci.yml", updated_at: entry.completedAt };
+  const steps = ["Validate bounded gateway dispatch", "Verify exact dispatch target"].map(name => ({ name, status: "completed", conclusion: "success" }));
+  const browser = { run_id: 123, run_attempt: 1, name: "browser-notifications", status: "completed", conclusion: "success", started_at: entry.completedAt, completed_at: entry.completedAt, steps };
+  const source = {
+    read: (endpoint: string): unknown => endpoint.includes("/contents/") ? { encoding: "base64", content: Buffer.from(workflow).toString("base64") } : metadata,
+    list: (endpoint: string): Record<string, unknown>[] => endpoint.endsWith("/ci.yml/runs") ? [metadata] : endpoint.endsWith("/jobs") ? [browser] : endpoint.endsWith("/artifacts") ? [{ name: "browser-flake-browser-notifications-123-1", workflow_run: { id: 123, head_sha: entry.sha } }] : [],
+    report: async (): Promise<BrowserFlakeReport> => report,
+  };
+  const collected = await collectBrowserFlakeRuns("synthetic/repository", now, source);
+  expect(collected[0]).toMatchObject({ sha: target, dispatchTargetSha: target });
+  expect(evaluateBrowserFlakeBudget(collected, now).ok).toBe(true);
+  for (const conclusion of ["skipped", "failure"]) {
+    await expect(collectBrowserFlakeRuns("synthetic/repository", now, {
+      ...source, list: endpoint => endpoint.endsWith("/jobs") ? [{ ...browser, steps: steps.map(step => ({ ...step, conclusion })) }] : source.list(endpoint),
+    })).rejects.toThrow();
+  }
+  await expect(collectBrowserFlakeRuns("synthetic/repository", now, {
+    ...source, report: async () => ({ ...report, dispatchTargetSha: null }),
+  })).rejects.toThrow();
 });

@@ -14,6 +14,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
   retries and prepare PRs still execute their own required checks. Reject response-completion,
   request-finished and network-idle readiness waits in e2e; the delayed-resume tray race now waits
   for an applied local row transition while its remote snapshot remains held.
+- Derive browser flake outcomes from attempt/expected-status evidence, bind HTTP-assertion lint
+  exemptions to the same lexical response, and assess coverage from actually executed browser
+  jobs so cancellation/selective reruns do not invent missing evidence. Validate explicitly pinned
+  fleet targets separately from workflow heads; version-2 cohorts exclude pre-contract reports.
+  The delayed-resume regression also waits for remote generation reconciliation before asserting
+  that the mounted foreground shell was not superseded.
 
 ## [v0.9.0] — 2026-10-25
 

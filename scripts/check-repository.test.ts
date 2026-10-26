@@ -241,6 +241,36 @@ test("e2e readiness ignores comments and inert strings and permits explicit HTTP
   expect(checkE2EReadiness("apps/web/test/example.test.ts", "response.finished()")).toEqual([]);
 });
 
+test("HTTP assertion exemptions never cross scopes, shadowing or a response reassignment", () => {
+  for (const source of [
+    'test("a", async () => { const response = await page.waitForResponse(url); }); test("b", () => { const response = other; expect(response.status()).toBe(200); });',
+    'async function scenario() { const response = await page.waitForResponse(url); { const response = other; expect(response.status()).toBe(200); } }',
+    'async function scenario() { let response = await page.waitForResponse(url); response = other; expect(response.status()).toBe(200); }',
+    'async function scenario() { const response = await page.waitForResponse(url); function later(response) { expect(response.status()).toBe(200); } }',
+    'async function scenario() { const response = await page.waitForResponse(url); const later = response => expect(response.status()).toBe(200); }',
+    'async function scenario() { var response = await page.waitForResponse(url); var response = other; expect(response.status()).toBe(200); }',
+  ]) expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", source)).toHaveLength(1);
+});
+
+test("race-free response contracts support destructuring, promise aliases, annotations and inline awaits", () => {
+  for (const source of [
+    'const [response] = await Promise.all([page.waitForResponse(url), page.click("#go")]); expect(response.status()).toBe(200);',
+    'const [, response] = await Promise.all([page.click("#go"), page.waitForResponse(url)]); expect(response.status()).toBe(200);',
+    'const pending = page.waitForResponse(url); await page.click("#go"); const response = await pending; expect(response.status()).toBe(200);',
+    'const pending = page.waitForResponse(url); await page.click("#go"); expect((await pending).status()).toBe(200);',
+    'const response: Response = await page.waitForResponse(url); expect(response.status()).toBe(200);',
+    'expect((await page.waitForResponse(url)).status()).toBe(200);',
+    'const response = await page.waitForResponse(url); expect(response.status()).not.toBe(500);',
+  ]) expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", source)).toEqual([]);
+});
+
+test("completion access cannot hide a literal behind nested parentheses", () => {
+  for (const source of [
+    'await response[("finished")]();', 'await response?.[((("finished")))]?.();',
+    'const completion = response[((`finished`))];',
+  ]) expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", source)).toHaveLength(1);
+});
+
 test("startup-retry browser regressions install and freeze their clock before first navigation", async () => {
   for (const [file, title] of [
     ["availability-lifecycle.e2e.ts", "await page.clock.install({ time });"],

@@ -485,11 +485,17 @@ test("request lifecycle: delayed bfcache resume yields to a foreground launch", 
   away.configureFleet("Away", [], [home.origin]);
   const intercepted = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const delivered = Promise.withResolvers<void>();
+  const hiddenRemoteCount = () => page.evaluate(() => {
+    const records: unknown = JSON.parse(localStorage.getItem("omp.sessions.dismissed.v2") ?? "[]");
+    return Array.isArray(records) ? records.length : 0;
+  });
   try {
     await installSyntheticProductFixture(context, key);
     await page.goto(home.origin);
     await expect(page.locator(".working-row")).toHaveCount(2);
+    // A real remote Hide is reconciled only when that source's authoritative snapshot applies.
+    await page.getByRole("button", { name: `Hide ${INITIAL_SESSIONS[1]!.title} on this device`, exact: true }).click();
+    await expect.poll(hiddenRemoteCount).toBe(1);
     await page.locator(".action-request").click();
     await expect(page.locator("#tray #root .sh-app")).toHaveCount(1);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
@@ -499,21 +505,22 @@ test("request lifecycle: delayed bfcache resume yields to a foreground launch", 
       intercepted.resolve();
       await release.promise;
       await route.fulfill({ response }).catch(() => undefined);
-      delivered.resolve();
     });
     // The resumed local snapshot must be applied, not merely received. Keep the remote held
     // while observing this row transition, so the foreground intent still races its continuation.
     home.upsert({ ...working, title: "Foreground choice refreshed" });
+    away.upsert({ ...INITIAL_SESSIONS[1]!, generation: INITIAL_SESSIONS[1]!.generation + 1 });
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
     await intercepted.promise;
     await expect(page.getByRole("button", { name: "View Foreground choice refreshed", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View Foreground choice refreshed", exact: true }).click();
     await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice refreshed");
     const foregroundRoot = await page.locator("#root").elementHandle();
+    expect(await hiddenRemoteCount()).toBe(1);
     release.resolve();
-    await delivered.promise;
-    // The resumed snapshot and its continuation settle before checking that no POST was sent.
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    // The mounted shell intentionally does not render directory rows. Observe the app's
+    // generation reconciliation instead, not response completion or a fixed frame count.
+    await expect.poll(hiddenRemoteCount).toBe(0);
     expect(home.launchRequests.map(request => request.instanceId)).toEqual([GATEWAY_WAITING.instanceId, working.instanceId]);
     await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice refreshed");
     expect(await foregroundRoot!.evaluate(element => element === document.querySelector("#root"))).toBe(true);

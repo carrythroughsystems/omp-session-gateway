@@ -3,7 +3,7 @@ import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  isCommitSha, parseBrowserFlakeReport, type BrowserFlakeReport, type BrowserLane,
+  BROWSER_REPORT_VERSION, isCommitSha, parseBrowserFlakeReport, wasBrowserTestExecuted, type BrowserFlakeReport, type BrowserLane,
   type BrowserProject, type BrowserTestLocation,
 } from "./browser-flake-reporter.ts";
 
@@ -14,6 +14,7 @@ export interface BrowserBudgetRun {
   runAttempt: number;
   /** Tested subject, independently validated against the GitHub run before aggregation. */
   sha: string;
+  dispatchTargetSha: string | null;
   lane: BrowserLane;
   completedAt: string;
   reporterEnabled: boolean;
@@ -40,6 +41,13 @@ function timestamp(value: unknown): number {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) invalid();
   return Date.parse(value);
 }
+function completedEvidence(status: unknown, conclusion: unknown): boolean {
+  if (["queued", "in_progress", "waiting", "pending", "requested"].includes(String(status))) return false;
+  if (status !== "completed") invalid();
+  if (conclusion === null || ["cancelled", "skipped", "neutral", "action_required", "stale", "startup_failure"].includes(String(conclusion))) return false;
+  if (!["success", "failure", "timed_out"].includes(String(conclusion))) invalid();
+  return true;
+}
 
 /** A workflow revision, not an arbitrary rollout date, defines reporting coverage. */
 export function browserReportingEnabled(source: string, lane: BrowserLane): boolean {
@@ -51,12 +59,51 @@ export function browserReportingEnabled(source: string, lane: BrowserLane): bool
   if (env === undefined) return false;
   const version = record(env).OMP_BROWSER_REPORT_VERSION;
   if (version === undefined) return false;
-  if (version !== "1") invalid();
+  // Format 1 predates independently derived outcome and exact-attempt coverage evidence.
+  if (version === "1") return false;
+  if (version !== String(BROWSER_REPORT_VERSION)) invalid();
   return true;
 }
 
-export function validateReportSubject(event: string, head: string, tested: string, parents: readonly string[]): boolean {
+const FLEET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && inputs.runner == 'gateway-ci' && startsWith(inputs.routing_label, 'gateway-ci-linux-x64-') && inputs.target_sha != '' }}";
+const FLEET_CHECKOUT = "${{ github.event_name == 'workflow_dispatch' && inputs.runner == 'gateway-ci' && startsWith(inputs.routing_label, 'gateway-ci-linux-x64-') && inputs.target_sha != '' && inputs.target_sha || github.sha }}";
+const FLEET_TARGET = "${{ github.event_name == 'workflow_dispatch' && inputs.runner == 'gateway-ci' && startsWith(inputs.routing_label, 'gateway-ci-linux-x64-') && inputs.target_sha != '' && inputs.target_sha || '' }}";
+
+/** The workflow revision, not a report's claim, must enforce a fleet input and verify checkout. */
+export function browserFleetDispatchEnforced(source: string, lane: BrowserLane): boolean {
+  if (lane !== "browser-notifications") return false;
+  const job = record(record(record(Bun.YAML.parse(source)).jobs)[lane]);
+  if (!Array.isArray(job.steps) || record(job.env).OMP_BROWSER_DISPATCH_TARGET_SHA !== FLEET_TARGET) return false;
+  const steps = job.steps.map(record);
+  const validate = steps.filter(step => step.name === "Validate bounded gateway dispatch");
+  const verify = steps.filter(step => step.name === "Verify exact dispatch target");
+  const checkout = steps.filter(step => typeof step.uses === "string" && step.uses.startsWith("actions/checkout@"));
+  const execute = steps.findIndex(step => step.run === "bun run test:browser");
+  if (validate.length !== 1 || verify.length !== 1 || checkout.length !== 1 || execute < 0) return false;
+  const validation = validate[0]!;
+  const verification = verify[0]!;
+  if (validation.if !== FLEET_CONDITION || verification.if !== FLEET_CONDITION ||
+    record(checkout[0]!.with).ref !== FLEET_CHECKOUT ||
+    record(validation.env).TARGET_SHA !== "${{ inputs.target_sha }}" ||
+    record(verification.env).TARGET_SHA !== "${{ inputs.target_sha }}" ||
+    verification.run !== 'test "$(git rev-parse HEAD)" = "$TARGET_SHA"' || typeof validation.run !== "string") return false;
+  const predicates = [
+    '[[ "$ROUTING_LABEL" =~ ^gateway-ci-linux-x64-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || fail routing_label',
+    '[[ "$TARGET_SHA" =~ ^[a-f0-9]{40}$ ]] || fail target_sha',
+    '[[ "$RUNNER_NAME" =~ ^gateway-ci-(nyc|sf)-[1-3]$ ]] || fail runner_name',
+    '[[ ! -S /var/run/docker.sock ]] || fail docker_socket',
+  ];
+  const validationRun = validation.run;
+  return predicates.every(predicate => validationRun.includes(predicate)) &&
+    steps.indexOf(validation) < steps.indexOf(checkout[0]!) && steps.indexOf(checkout[0]!) < steps.indexOf(verification) && steps.indexOf(verification) < execute;
+}
+
+export function validateReportSubject(
+  event: string, head: string, tested: string, parents: readonly string[],
+  dispatch: { targetSha: string | null; verified: boolean } = { targetSha: null, verified: false },
+): boolean {
   if (!isCommitSha(head) || !isCommitSha(tested)) return false;
+  if (dispatch.targetSha !== null) return event === "workflow_dispatch" && dispatch.verified && isCommitSha(dispatch.targetSha) && tested === dispatch.targetSha;
   if (head === tested) return true;
   // Actions' head_sha is the PR source head; checkout github.sha tests its temporary merge.
   return event === "pull_request" && parents.length === 2 && parents.every(isCommitSha) && parents[1] === head;
@@ -84,7 +131,8 @@ export function evaluateBrowserFlakeBudget(runs: readonly BrowserBudgetRun[], no
     coverage.expected++;
     if (run.report === undefined) { coverage.missing++; continue; }
     const report = parseBrowserFlakeReport(run.report);
-    if (report.runId !== run.runId || report.runAttempt !== run.runAttempt || report.sha !== run.sha || report.lane !== run.lane) invalid();
+    if (report.runId !== run.runId || report.runAttempt !== run.runAttempt || report.sha !== run.sha || report.lane !== run.lane ||
+      report.dispatchTargetSha !== run.dispatchTargetSha) invalid();
     coverage.reports++;
     for (const test of report.tests) {
       const projectKey = `${report.lane}:${test.project}`;
@@ -93,7 +141,7 @@ export function evaluateBrowserFlakeBudget(runs: readonly BrowserBudgetRun[], no
         budget = { lane: report.lane, project: test.project, executions: 0, flaky: 0 };
         projects.set(projectKey, budget);
       }
-      if (test.outcome === "skipped") continue;
+      if (!wasBrowserTestExecuted(test)) continue;
       budget.executions++;
       if (test.outcome !== "flaky") continue;
       budget.flaky++;
@@ -149,7 +197,7 @@ export async function collectBrowserFlakeRuns(
 ): Promise<BrowserBudgetRun[]> {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) invalid();
   const entries: BrowserBudgetRun[] = [];
-  const revisions = new Map<string, boolean>();
+  const revisions = new Map<string, { enabled: boolean; fleetEnforced: boolean }>();
   for (const [workflow, lane] of [["ci.yml", "browser-notifications"], ["compatibility.yml", "browser-core"]] as const) {
     // No created-at filter: an older run may have been rerun during the current seven-day window.
     const runs = source.list(`repos/${repository}/actions/workflows/${workflow}/runs`, "workflow_runs");
@@ -162,21 +210,38 @@ export async function collectBrowserFlakeRuns(
       for (let attempt = 1; attempt <= count; attempt++) {
         const run = record(source.read(`repos/${repository}/actions/runs/${id}/attempts/${attempt}`));
         if (run.id !== id || run.run_attempt !== attempt) invalid();
-        if (run.status !== "completed") continue;
+        // Cancelled/incomplete attempts are not completed browser evidence, even if superseded
+        // workflows retain earlier artifacts. Selective reruns are inspected job by job below.
+        if (!completedEvidence(run.status, run.conclusion)) continue;
         const completed = timestamp(run.updated_at);
         if (completed < now - WINDOW_MS || completed > now) continue;
         const head = run.head_sha;
         if (!isCommitSha(head) || typeof run.event !== "string" || typeof run.path !== "string" || run.path.split("@")[0] !== `.github/workflows/${workflow}`) invalid();
         const revisionKey = `${workflow}:${head}`;
-        let enabled = revisions.get(revisionKey);
-        if (enabled === undefined) {
+        let revision = revisions.get(revisionKey);
+        if (revision === undefined) {
           // Missing/unreadable revision is an evidence error, never a pre-reporting assumption.
           const content = record(source.read(`repos/${repository}/contents/.github/workflows/${workflow}?ref=${head}`));
           if (content.encoding !== "base64" || typeof content.content !== "string") invalid();
-          enabled = browserReportingEnabled(Buffer.from(content.content, "base64").toString("utf8"), lane);
-          revisions.set(revisionKey, enabled);
+          const workflowSource = Buffer.from(content.content, "base64").toString("utf8");
+          const enabled = browserReportingEnabled(workflowSource, lane);
+          revision = { enabled, fleetEnforced: enabled && lane === "browser-notifications" && browserFleetDispatchEnforced(workflowSource, lane) };
+          revisions.set(revisionKey, revision);
         }
-        if (!enabled) continue;
+        if (!revision.enabled) continue;
+        const jobs = source.list(`repos/${repository}/actions/runs/${id}/attempts/${attempt}/jobs`, "jobs");
+        const browserJobs = jobs.filter(job => job.name === lane);
+        for (const job of browserJobs) {
+          if (job.run_id !== id || positive(job.run_attempt) > attempt) invalid();
+        }
+        const candidates = browserJobs.filter(job => job.run_attempt === attempt);
+        if (candidates.length > 1) invalid();
+        const job = candidates[0];
+        if (job === undefined) continue; // A selective rerun of sibling jobs owes no new report.
+        if (!completedEvidence(job.status, job.conclusion)) continue;
+        timestamp(job.started_at);
+        const jobCompleted = timestamp(job.completed_at);
+        if (jobCompleted < now - WINDOW_MS || jobCompleted > now) continue;
         artifacts ??= source.list(`repos/${repository}/actions/runs/${id}/artifacts`, "artifacts");
         const matches = artifacts.filter(artifact => artifact.name === `browser-flake-${lane}-${id}-${attempt}`);
         if (matches.length > 1) invalid();
@@ -196,9 +261,14 @@ export async function collectBrowserFlakeRuns(
               return sha;
             });
           }
-          if (!validateReportSubject(run.event, head, report.sha, parents)) invalid();
+          const steps = Array.isArray(job.steps) ? job.steps.map(record) : [];
+          const fleetVerified = revision.fleetEnforced && ["Validate bounded gateway dispatch", "Verify exact dispatch target"].every(name => {
+            const matches = steps.filter(step => step.name === name);
+            return matches.length === 1 && matches[0]?.status === "completed" && matches[0]?.conclusion === "success";
+          });
+          if (!validateReportSubject(run.event, head, report.sha, parents, { targetSha: report.dispatchTargetSha, verified: fleetVerified })) invalid();
         }
-        entries.push({ runId: String(id), runAttempt: attempt, sha: report?.sha ?? head, lane, completedAt: new Date(completed).toISOString(), reporterEnabled: true, report });
+        entries.push({ runId: String(id), runAttempt: attempt, sha: report?.sha ?? head, dispatchTargetSha: report?.dispatchTargetSha ?? null, lane, completedAt: new Date(jobCompleted).toISOString(), reporterEnabled: true, report });
       }
     }
   }

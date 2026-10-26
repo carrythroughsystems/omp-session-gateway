@@ -841,10 +841,12 @@ may be reused, not check outcomes.
 `test-results/browser-flakes/browser-flake-report.json`, and preserves Playwright's nonzero exit.
 Missing/invalid required CI evidence fails even an otherwise green run. Both jobs always append
 sanitized per-project counts and flaky/unexpected repository locations to the job summary and
-upload only that JSON with 14-day retention. The closed version-1 report contains run/attempt,
+upload only that JSON with 14-day retention. The closed version-2 report contains run/attempt,
 tested SHA, lane/project, relative source location, location/project-derived identity (with a
-deterministic occurrence for parameterized declarations), attempt ordinals/status/duration and
-final outcome. It never copies titles, errors, stdout/stderr, attachments, source excerpts, URLs,
+deterministic occurrence for parameterized declarations), expected status, attempt
+ordinals/status/duration and independently derived final outcome. Interruptions follow pinned
+Playwright's outcome rules; empty/all-unexecuted reports cannot satisfy coverage.
+It never copies titles, errors, stdout/stderr, attachments, source excerpts, URLs,
 or fixture values. Automatic traces, video, and screenshots are disabled in these two configs;
 the separate synthetic visual lane retains its own guarded policy.
 
@@ -852,17 +854,28 @@ The weekly/manual budget counts each executed test once per workflow attempt, re
 Playwright retries; skipped tests do not dilute the denominator. Flaky executions must be at most
 1% **per lane/project**, and no test/project may flake more than twice in seven days. Reports are
 bound to GitHub run/attempt and tested commit metadata (a PR merge must have exactly two parents,
-with the source head as its second parent). The `OMP_BROWSER_REPORT_VERSION: "1"` job marker at
+with the source head as its second parent). A fleet dispatch may instead test its explicit
+`dispatchTargetSha`: the workflow revision must pin checkout to `inputs.target_sha`, validate
+the bounded fleet dispatch, and verify that checkout; both validation steps must have actually
+succeeded in that attempt's browser job. An arbitrary dispatch/report target is never accepted.
+The `OMP_BROWSER_REPORT_VERSION: "2"` job marker at
 the run's source-head workflow revision defines the reporting cohort, not a date cutoff.
 Unreadable revisions, malformed/foreign artifacts, and missing reports for completed
-reporter-enabled attempts fail evidence coverage; historical unmarked revisions are excluded.
-Workflow reruns are separate executions; duplicate observations of one attempt count only once.
+reporter-enabled browser jobs fail evidence coverage. Cancelled/non-completed jobs and
+selective reruns that did not execute that browser job have no new report obligation; attempt-specific
+job metadata is authoritative. Historical unmarked/version-1 revisions are pre-v2 evidence,
+not current coverage; unknown future versions fail closed. Executed workflow reruns are separate
+executions; duplicate observations of one attempt count only once.
 
 `check:repository` scans the entire e2e tree: no `.finished` access (including optional/computed
 literal access), request-finished readiness listeners/waits, or `networkidle` navigation/load
-waits. `waitForResponse()` is reserved for an explicit HTTP-contract assertion, never proof that
+waits. `waitForResponse()` is reserved for an explicit HTTP-contract assertion on that response
+binding in the same lexical scope (including Promise.all/destructured or awaited-promise forms), never proof that
 the UI applied a response. Observe an application-state transition instead; the delayed-bfcache
 tray regression changes a local synthetic row label while keeping its remote response held.
+After the foreground shell mounts, it waits for application-owned remote Hide reconciliation
+on a new generation before checking no stale-resume launch occurred; receipt of the response or
+a fixed animation-frame count is not sufficient.
 For **startup-retry** scenarios, install and freeze the clock **before navigation**, so setup
 cannot start a retry that freezing aborts. Repository regression tests pin that ordering in the
 startup availability/network cases. Intentional post-navigation clock advances that exercise

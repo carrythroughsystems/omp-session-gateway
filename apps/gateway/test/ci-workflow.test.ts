@@ -175,7 +175,7 @@ test("both required browser lanes execute their exact checkout with bounded retr
     const job = workflow.jobs[lane]!;
     expect(job["timeout-minutes"]).toBe(20);
     expect(job["continue-on-error"]).toBeUndefined();
-    expect(job.env).toMatchObject({ OMP_BROWSER_REPORT_VERSION: "1" });
+    expect(job.env).toMatchObject({ OMP_BROWSER_REPORT_VERSION: "2" });
     const checkout = job.steps.find(step => step.uses?.startsWith("actions/checkout@"))!;
     expect(checkout.with?.ref).toContain("github.sha");
     expect(checkout.with?.["persist-credentials"]).toBe(false);
