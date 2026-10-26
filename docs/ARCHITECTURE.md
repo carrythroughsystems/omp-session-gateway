@@ -389,6 +389,9 @@ summary must represent it, and unresolved restoration cannot coexist with proven
 `restored` requires an explicit `baselineRestored: true`. Restarting a root invalidates the
 entire prior standalone failure graph before persistence, including dependent collateral.
 Transport failures at an ordinary lane's explicit `cleanup` step do not authorize automatic retry.
+Private receipt, readiness-baseline and outcome persistence belongs to the POSIX Studio driver:
+file data and parent directories are fsynced; Windows refuses those writes before filesystem
+effects. Pure receipt/graph parsing and in-memory state-machine tests remain portable.
 
 ## 4. Why not process scanning or terminal automation?
 
