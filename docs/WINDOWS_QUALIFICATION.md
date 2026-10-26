@@ -119,13 +119,45 @@ not retried by this readiness boundary.
 
 Each authenticated probe has at most **180 seconds**, capped by the remaining combined deadline,
 to accommodate a fresh instance's first WinRM exchange. The controller sends SIGTERM at that bound;
-the helper still attempts owned WinRM shell teardown before exiting. A subprocess deadline remains
-a failed probe, not a successful observation or an automatic mutation retry.
+the helper independently attempts command cleanup and shell closure before exiting. If it does not
+exit within five seconds, the controller sends SIGKILL, awaits exit, and drains both pipes before
+reporting failure. A subprocess deadline remains a failed probe, not a successful observation or an
+automatic mutation retry.
+
+### Transport recovery and failure evidence
+
+The helper reports a closed failure kind (`transport`, `guest`, or `helper`), stage
+(`connection`, `command`, `output`, or `upload`), recognized condition, HTTP status when present,
+and command disposition. Exception types and status fields supply classification; diagnostic
+messages never do. Controller-authored product assertions remain `product`. Invalid credentials,
+encoding/import failures, malformed guest JSON, arbitrary guest failures, and unexplained process
+exit 143 remain `harness`. A recognized connection/reset/read timeout or retryable HTTP status
+during a declared read-only operation is `infra_transient`. Only a controller-owned deadline
+while its read-only connection probe is pending produces `probe_deadline`; external cancellation
+cannot acquire that classification. These are lane failure records, not campaign retry authority.
+
+After the unchanged initial authenticated stability window, read-only operations share a reconnect
+helper with delays of **2, 4, 8, and 16 seconds**, at most five calls, inside a **90-second**
+operational budget that includes time already spent executing probes. Process teardown remains
+mandatory on expiry. Cleanup uses this reconnect path, never another 12-minute allocation window.
+Mutating guest actions and upload streams are never replayed.
+
+An interrupted upload is reconciled by existence and SHA-256 after read-only connection recovery.
+The inspector must exclusively open the file, proving that its writer no longer owns it, before
+hashing or permitting removal. Complete matching bytes are reused; a partial file is removed only
+after that proof, and the failed upload remains terminal rather than starting another stream.
+Unknown writer disposition, authentication, or helper faults do not become successful recovery.
+Private helper diagnostics retain only the existing redacted, source-free exception context;
+typed failures contain closed codes and numeric/boolean observations, not that diagnostic text.
+
+Read-only admission also reports remaining per-tag creation allowance. Provider quota metadata is
+explicitly marked unobservable; admission neither assumes unlimited capacity nor allocates a probe VM.
 
 The Windows progress and completed result retain `transportProbes`: one metadata-only row per
 authenticated probe, checkpointed at invocation start, first authenticated response, controller
 SIGTERM (if sent), and process exit. `startedAt`, `signalAt`, and `exitedAt` are UTC epoch
 milliseconds; `timeoutMs` records the applied bound and `exitCode` the subprocess outcome.
+New observations may additionally record `controllerDeadline` and the SIGKILL timestamp `killAt`.
 `firstResponseLatencyMs` measures from invocation start to the helper's first authenticated
 `open_shell` reply, not completion of the guest command or shell teardown. Unobserved events are
 `null`, so a timeout during teardown differs from no observed authenticated reply. Only the helper's
@@ -203,13 +235,22 @@ OMP version, commit and tree and pins Bun/Tailscale artifacts. Both preflight an
 tests reject divergence from `UPSTREAM.lock.json`; an upstream refresh must refresh these
 Windows pins too. No upstream lock/schema change is needed for the separate lane-owned pins.
 
-On a stable-campaign failure, cleanup still attempts guest teardown, Serve reset, logout, exact-label tailnet
-deletion, instance deletion, firewall deletion and vault removal. Once the Administrator has
+On a stable-campaign failure, cleanup first reconciles the exact vault-bound instance and its
+epoch-labelled inventory. Confirmed absence skips guest commands. A live guest gets one bounded
+reconnect before guest teardown, Serve reset and logout; failed reconnect skips those commands
+instead of spending four full command timeouts against an unreachable VM. Exact-label tailnet
+deletion, instance deletion, firewall deletion and vault removal still run. Once the Administrator has
 handed Tailscale over, the gateway uninstall, Serve reset and logout run as the standard account:
 Windows refuses the Administrator's Tailscale CLI while another account holds it. Each provider deletion
 refetches ownership and applies the positive prefix and protected-resource checks. Lost create
 responses are recoverable by the exact epoch-derived label even without a vault. Cleanup polls
 for deletion and requires zero `omp-winqual-*` instances and firewall groups account-wide.
+Guest-command failures become diagnostic counts only after the exact owned VM is confirmed gone.
+They never excuse failed firewall/tailnet absence, Pixel restoration, or safe vault-removal proofs.
+Instance and firewall IDs are retained privately so a changed ownership label cannot masquerade as
+absence. Changed/protected owners, missing Pixel recovery state, and unresolved absence remain
+blocking, retain recovery state, and prohibit automatic campaign retry. Paid infrastructure cleanup
+does not wait behind another lane's Pixel lease.
 Provider reads retry a transient 5xx. A lookup that answers missing, or a Vultr listing without its
 array, is final only when a second read five seconds later agrees: on 2026-09-29 one listing did so
 while the lane polled for allocation, failing an attempt whose VM was still booting.
