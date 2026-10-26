@@ -318,7 +318,7 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
     const arguments_ = tokens.slice(after + 1, end);
     if (["waitForEvent", "on", "once", "addListener"].includes(member ?? "") && arguments_[0]?.literal === "requestfinished") {
       violations.push(`${relativePath}:${token.line}: request-finished events are not e2e readiness; observe application state`);
-    } else if (["goto", "reload", "goBack", "goForward", "waitForNavigation", "waitForLoadState"].includes(member ?? "") &&
+    } else if (["goto", "reload", "goBack", "goForward", "setContent", "waitForURL", "waitForNavigation", "waitForLoadState"].includes(member ?? "") &&
       arguments_.some(argument => argument.literal === "networkidle")) {
       violations.push(`${relativePath}:${token.line}: networkidle is not e2e readiness; observe application state`);
     } else if (member === "waitForResponse") {

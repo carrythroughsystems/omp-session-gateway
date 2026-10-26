@@ -220,6 +220,7 @@ test("e2e readiness forbids completion access, request-finished events and netwo
     'await page.waitForEvent("requestfinished");', 'await page["waitForEvent"]("requestfinished");',
     'await page?.waitForEvent?.(`requestfinished`);', 'page.on("requestfinished", done);',
     'await page.goto(url, { waitUntil: "networkidle" });', 'await page.waitForLoadState("networkidle");',
+    'await page.waitForURL(url, { waitUntil: "networkidle" });', 'await page.setContent(html, { waitUntil: "networkidle" });',
     'await page["waitForLoadState"]?.("networkidle");',
   ]) expect(checkE2EReadiness("apps/web/e2e/nested/example.e2e.ts", source)).toHaveLength(1);
   expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", "// response.finished()\nawait response?.finished();")[0]).toContain(":2:");
