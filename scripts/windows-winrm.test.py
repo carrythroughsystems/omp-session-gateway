@@ -29,6 +29,15 @@ class WinRMTransportError(Exception):
         self.code = code
 
 
+class ProtocolError(Exception):
+    pass
+
+
+class MaxRetryError(Exception):
+    def __init__(self, reason):
+        self.reason = reason
+
+
 def modules():
     protocol = types.ModuleType('winrm.protocol')
     protocol.Protocol = Transport
@@ -37,7 +46,9 @@ def modules():
     requests.ConnectionError = ConnectionError
     exceptions = types.ModuleType('winrm.exceptions')
     exceptions.InvalidCredentialsError, exceptions.WinRMTransportError = InvalidCredentialsError, WinRMTransportError
-    return {'winrm.protocol': protocol, 'requests.exceptions': requests, 'winrm.exceptions': exceptions}
+    urllib = types.ModuleType('urllib3.exceptions')
+    urllib.ProtocolError, urllib.MaxRetryError = ProtocolError, MaxRetryError
+    return {'winrm.protocol': protocol, 'requests.exceptions': requests, 'winrm.exceptions': exceptions, 'urllib3.exceptions': urllib}
 
 
 class Transport:
@@ -350,6 +361,29 @@ class WinrmFramingTests(unittest.TestCase):
             result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
                                          'password': 'synthetic-only', 'script': 'synthetic'})
         self.assertEqual(result['failure']['kind'], 'helper')
+
+    def test_r2_transport_wrappers_cannot_traverse_arbitrary_nested_helper_exceptions(self):
+        for nested in (LookupError('synthetic codec', ConnectionResetError()), ValueError(ConnectionResetError())):
+            with patch.object(Transport, 'open_shell', side_effect=ConnectionError('synthetic', nested)):
+                result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                             'password': 'synthetic-only', 'script': 'synthetic'})
+            self.assertEqual(result['failure']['kind'], 'helper')
+
+    def test_r2_suppressed_context_cannot_supply_a_transport_reset(self):
+        error = ConnectionError('synthetic')
+        error.__context__ = ConnectionResetError()
+        error.__suppress_context__ = True
+        with patch.object(Transport, 'open_shell', side_effect=error):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic'})
+        self.assertEqual(result['failure']['kind'], 'helper')
+
+    def test_r2_recognized_transport_wrappers_still_reach_a_socket_reset(self):
+        error = ConnectionError(MaxRetryError(ProtocolError(ConnectionResetError())))
+        with patch.object(Transport, 'open_shell', side_effect=error):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                         'password': 'synthetic-only', 'script': 'synthetic'})
+        self.assertEqual(result['failure']['condition'], 'connection_reset')
 
 
 if __name__ == '__main__':

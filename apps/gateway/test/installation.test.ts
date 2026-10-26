@@ -302,6 +302,7 @@ test("stages immutable content-addressed runtimes and atomically advances the cu
     expect(first.previous).toBeUndefined();
     expect(basename(first.directory)).toMatch(new RegExp(`^${GATEWAY_VERSION.replaceAll(".", "\\.")}-[0-9a-f]{12}$`, "u"));
     expect(first.readinessProtocol).toBe("instance-v1");
+    expect(first.qualificationLogProtocol).toBe("structured-v1");
     expect((await lstat(first.cliPath)).isFile()).toBe(true);
     expect(await readdir(first.directory)).not.toContain("patches");
     expect((await lstat(join(first.directory, "bun.lock"))).isFile()).toBe(true);
@@ -314,6 +315,7 @@ test("stages immutable content-addressed runtimes and atomically advances the cu
       directory: first.directory,
       cliPath: first.cliPath,
       readinessProtocol: "instance-v1",
+      qualificationLogProtocol: "structured-v1",
     });
 
     const duplicate = await stageRuntimePayload(gatewayConfig, source);
@@ -646,6 +648,12 @@ test("refuses a runtime manifest that is unsafe, mismatched, or names an unknown
     await expect(currentInstalledRuntime(gatewayConfig)).rejects.toThrow(
       "invalid installed runtime readiness protocol",
     );
+
+    await writeFile(manifestPath, `${JSON.stringify({ ...manifest, qualificationLogProtocol: "structured-v2" })}\n`);
+    await expect(currentInstalledRuntime(gatewayConfig)).rejects.toThrow("invalid installed runtime qualification log protocol");
+    const { qualificationLogProtocol: _protocol, ...legacy } = manifest as typeof manifest & { qualificationLogProtocol?: string };
+    await writeFile(manifestPath, `${JSON.stringify(legacy)}\n`);
+    expect((await currentInstalledRuntime(gatewayConfig))?.qualificationLogProtocol).toBeUndefined();
 
     await writeFile(manifestPath, `${JSON.stringify({ ...manifest, padding: "x".repeat(1_024) })}\n`);
     await expect(currentInstalledRuntime(gatewayConfig)).rejects.toThrow("unsafe installed runtime manifest");
