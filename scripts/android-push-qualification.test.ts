@@ -258,6 +258,22 @@ test("overlap recovery cannot reset the phase's consumed delivery re-arm budget"
   });
 });
 
+test("a post arriving during timeout cleanup is recorded but never turns the missed ask into a pass", async () => {
+  const host = fake();
+  const cleanup = host.runtime.cleanup;
+  let late = false;
+  host.runtime.observe = async () => ({ count: late ? 1 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.cleanup = async (...args) => {
+    if (args[0] === "fixtureAsk") { await host.runtime.pause(1_500); late = true; }
+    await cleanup(...args);
+  };
+  await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { class: "harness", reason: "delivery_timeout" } });
+  const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+  expect(progress.results.private_verified).toMatchObject({ firstDeliveryMs: 60_000, latePostCount: 1, latePostMs: 61_500, deliveryRearmCount: 0 });
+  expect(progress.results.private_verified?.delivered).toBeUndefined();
+  expect(progress.cleanupRequired).toBe(false);
+});
+
 test.each(["surface", "surface-unavailable", "pin", "credential"] as const)("notification authentication accepts dismissal during %s observation without application input", async boundary => {
   let locked = true, revealed = false, credentialAttempts = 0, applicationInput = false;
   let waits = 0;

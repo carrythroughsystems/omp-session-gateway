@@ -70,3 +70,15 @@ test.skipIf(process.platform === "win32")("invalid remote telemetry and destinat
     expect(existsSync(remoteDirectory)).toBe(true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test.skipIf(process.platform === "win32")("a never-started gateway's empty directory can be disposed without fabricated telemetry", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-empty-")); chmodSync(root, 0o700);
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory, jobDirectory: root });
+  try {
+    await logs.prepare();
+    expect(await logs.healthy()).toBe(false);
+    expect(await logs.collect()).toEqual({ files: 0, events: 0 });
+    expect(existsSync(remoteDirectory)).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

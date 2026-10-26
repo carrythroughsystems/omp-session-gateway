@@ -66,7 +66,7 @@ export async function waitForPushDelivery(options: {
     metrics.sends += telemetry?.sends ?? 0;
     metrics.acknowledgements += telemetry?.acknowledgements ?? 0;
     if (delivered) {
-      if (attempt > 0 && (runtime.deliveryRequestMatches === undefined || !await runtime.deliveryRequestMatches(session))) fail("invalid_evidence", elapsed);
+      if (metrics.deliveryRearmCount > 0 && (runtime.deliveryRequestMatches === undefined || !await runtime.deliveryRequestMatches(session))) fail("invalid_evidence", elapsed);
       options.onTimeout?.(undefined);
       return session;
     }
@@ -461,8 +461,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
     const attempt = async (phase: AndroidPushPhase, action: () => Promise<void>): Promise<void> => {
       activePhase = phase; phaseStarted = runtime.now(); metrics = emptyPushDeliveryMetrics();
       for (let index = 0; index < 2; index += 1) {
-        await runtime.beginNotificationPhase(progress.epoch, phase);
-        try { await action(); return; }
+        try { await runtime.beginNotificationPhase(progress.epoch, phase); await action(); return; }
         catch (error) {
           progress.results[phase] = { ...progress.results[phase], ...metrics, phaseElapsedMs: runtime.now() - phaseStarted };
           await save();

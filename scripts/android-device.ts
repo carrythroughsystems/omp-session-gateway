@@ -699,8 +699,9 @@ export async function withAndroidChrome<T>(
   let webSocketDebuggerUrl: string;
   try {
     const endpointResponse = await waitForDevtoolsEndpoint("http://127.0.0.1:" + port + "/json/version",
-      url => { check(); return fetch(url, execution === undefined ? {} : {
-        signal: AbortSignal.any([execution.signal, AbortSignal.timeout(Math.max(1, execution.deadline - performance.now()))]) }); });
+      () => { check(); return fetch("http://127.0.0.1:" + port + "/json/version", execution === undefined ? {} : {
+        signal: AbortSignal.any([execution.signal, AbortSignal.timeout(Math.max(1, execution.deadline - performance.now()))]) }); },
+      { now: () => performance.now(), sleep: async milliseconds => { check(); await Bun.sleep(milliseconds); check(); } });
     if (!endpointResponse.ok) throw new Error("DevTools endpoint metadata request failed");
     // Deliberately outside the retry: a well-formed reply from the wrong browser is a hard failure,
     // never a transient. Desktop Chrome on this workstation answers remote-debugging ports too.
@@ -711,7 +712,7 @@ export async function withAndroidChrome<T>(
       port,
     );
   } catch (error) {
-    await runAdb(serial, ["forward", "--remove", "tcp:" + port]).catch(() => {});
+    await runAdb(serial, ["forward", "--remove", "tcp:" + port], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
     throw error;
   }
   const socket = new WebSocket(webSocketDebuggerUrl);
@@ -870,7 +871,7 @@ export async function withAndroidChrome<T>(
       await send("Target.closeTarget", { targetId }, false).catch(() => {});
     }
     socket.close();
-    await runAdb(serial, ["forward", "--remove", `tcp:${port}`]).catch(() => {});
+    await runAdb(serial, ["forward", "--remove", `tcp:${port}`], execution === undefined ? {} : { timeoutMs: 10_000 }).catch(() => {});
   }
 }
 

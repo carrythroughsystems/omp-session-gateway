@@ -64,6 +64,8 @@ async function walk(dir: string): Promise<string[]> {
 const nonProviderFetches: Readonly<Record<string, readonly string[]>> = {
   "android-acceptance.ts": ['"/api/v1/sessions/" + id + "/launch"', '"/api/v1/sessions"', 'new URL("/api/v1/sessions"'],
   "android-collab-smoke.ts": ['`${options.origin}/api/v1/sessions`'],
+  // The caller's owned adb-forwarded Chrome endpoint, never a provider request.
+  "android-device.ts": ['"http://127.0.0.1:" + port + "/json/version"'],
   "android-leak-sweep.ts": ['origin + "/api/v1/sessions"'],
   "android-push-runtime.ts": ['`${identity.origin}/api/v1/sessions`', "'/api/v1/sessions'", "'/api/v1/sessions/'+${JSON.stringify(fixture.instanceId)}+'/launch'"],
   "browser-journey.ts": ['"/api/v1/sessions"', '"/api/v1/sessions/" + target.instanceId + "/launch"'],
