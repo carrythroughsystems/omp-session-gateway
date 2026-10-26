@@ -28,6 +28,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Check allocation expiry immediately before creation POSTs, settle firewall-only recovery vaults
   without false ownership vetoes, contain cancelled development attempts, and reject late poll
   success. FreeRDP input failures reap their child; resumed admission retains stability evidence.
+  Retained-state refusals and preflight failures enter independent containment; expired local
+  budgets carry typed controller-deadline evidence. Completed admission resumes under reconnect
+  bounds, and expired creation authority cannot consume the private creation counter.
 
 ### Fixed
 
