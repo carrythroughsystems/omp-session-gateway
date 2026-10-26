@@ -16,15 +16,17 @@ export function windowsFailure(reason: keyof typeof FAILURE_REASONS.windows, ste
   return new QualificationFailure(parseLaneFailure({ id: execution?.nextFailureId() ?? ++standaloneFailureId,
     lane: "windows", step, reason, class: FAILURE_REASONS.windows[reason], operation, observations, elapsedMs }));
 }
-export function assertWindowsExecution(execution?: WindowsExecutionContext): void {
-  if (execution?.signal.aborted || (execution && performance.now() >= execution.deadline)) {
-    throw windowsFailure("deadline_exceeded", "command", "not_started", { controllerDeadline: true }, execution);
+export function assertWindowsExecution(execution?: WindowsExecutionContext, operation: OperationDisposition = "not_started"): void {
+  if (execution === undefined) return;
+  const expired = performance.now() >= execution.deadline;
+  if (execution.signal.aborted || expired) {
+    throw windowsFailure("deadline_exceeded", "command", operation, { controllerDeadline: expired }, execution);
   }
 }
 /** One snapshot decides whether any positive millisecond of this local budget remains. */
 export function windowsRemaining(started: number, deadline: number, now: number, execution?: WindowsExecutionContext,
   operation: OperationDisposition = "read_only"): number {
-  assertWindowsExecution(execution);
+  assertWindowsExecution(execution, operation);
   const remaining = Math.floor(deadline - now);
   if (remaining <= 0) {
     const elapsedMs = Math.min(FAILURE_LIMITS.elapsedMs, Math.max(0, now - started));
@@ -96,6 +98,8 @@ export interface WindowsProvider {
 export interface WindowsContext {
   readonly epoch: string;
   readonly identity: WindowsIdentity;
+  /** No await may separate this resource/execution admission from guest dispatch. */
+  readonly assertEffect: () => void;
   readonly beforeEffect: () => Promise<void>;
   /** Durable single-shot claims for qualification; cleanup supplies its idempotent owner. */
   readonly mutation: <T>(key: string, action: () => Promise<T>) => Promise<T>;
@@ -178,7 +182,7 @@ export interface WindowsLaneInput {
   readonly identity: WindowsIdentity;
   readonly progress: unknown;
   readonly checkpoint: (progress: Record<string, unknown>) => Promise<void>;
-  readonly pixel: <T>(owner: string, action: () => Promise<T>) => Promise<T>;
+  readonly pixel: <T>(owner: string, action: () => Promise<T>, execution?: WindowsExecutionContext) => Promise<T>;
   readonly runtime?: WindowsRuntime;
   readonly execution?: WindowsExecutionContext;
 }
@@ -385,7 +389,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   if (resumed && !admissionComplete && PHASES.indexOf(resumed.phase) <= PHASES.indexOf("transport_ready") && progress.allocationDeadline === undefined) {
     throw windowsFailure("mutation_unconfirmed", resumed.phase, "unknown", {}, input.execution);
   }
-  const context: WindowsContext = { epoch: progress.epoch, identity: input.identity,
+  const context: WindowsContext = { epoch: progress.epoch, identity: input.identity, assertEffect,
     freshStaging: resumed === undefined || PHASES.indexOf(resumed.phase) < PHASES.indexOf("toolchain_staged"),
     get allocationDeadline() { return progress.allocationDeadline; },
     ...(durableAdmission === undefined ? {} : { transportAdmission: durableAdmission }),
@@ -401,7 +405,14 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       if (claims[claim] !== undefined) throw windowsFailure("mutation_unconfirmed", progress.phase, "unknown", {}, input.execution);
       await context.beforeEffect();
       claims[claim] = "started"; await save(); assertEffect();
-      const result = await action();
+      let result;
+      try { result = await action(); }
+      catch (error) {
+        if (!(error instanceof QualificationFailure && ["deadline_exceeded", "ownership_changed"].includes(error.evidence.reason))) {
+          assertWindowsExecution(input.execution, "unknown");
+        }
+        throw error;
+      }
       claims[claim] = "complete"; await save(); assertEffect();
       return result;
     },
@@ -428,6 +439,9 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     const start = runtime.now();
     try { assertEffect(maximumAge); await action(); }
     catch (error) {
+      if (!(error instanceof QualificationFailure && ["deadline_exceeded", "ownership_changed"].includes(error.evidence.reason))) {
+        assertWindowsExecution(input.execution, "unknown");
+      }
       if (error instanceof QualificationFailure) {
         const failure = new QualificationFailure(parseLaneFailure({ ...error.evidence, id: input.execution?.nextFailureId() ?? error.evidence.id,
           ...(error.evidence.lane === "windows" ? { step: phase } : {}), elapsedMs: runtime.now() - start }),
@@ -520,7 +534,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       requireProduct(launch.viewStatus === 200 && launch.controlStatus === 200 && launch.staleViewStatus === 409 && launch.staleControlStatus === 409 && launch.noStore === true, "generation/launch contract failed"); facts(launch);
     });
     await step("pixel_verified", async () => {
-      const result = await input.pixel("windows", () => { assertEffect(2 * 60 * 60_000); return runtime.pixel(context); });
+      const result = await input.pixel("windows", () => { assertEffect(2 * 60 * 60_000); return runtime.pixel(context); }, input.execution);
       for (const key of ["pixelIdentityAccepted", "viewReadOnly", "controlWritable", "promptAccepted", "returnedToDirectory"]) requireProduct(result[key] === true, `Pixel ${key} failed`);
       facts(result);
     });
@@ -620,6 +634,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   // disk must be reported, but must not prevent destruction of the owned VM.
   const beforeEffect = async () => { await save(); assertWindowsExecution(input.execution); };
   const context: WindowsContext = { epoch: progress.epoch, identity: input.identity, beforeEffect,
+    assertEffect: () => assertWindowsExecution(input.execution),
     mutation: async (_key, action) => { await beforeEffect(); return action(); },
     ...(input.execution === undefined ? {} : { execution: input.execution }) };
   const attempt = async (name: string, action: () => Promise<void>) => {
@@ -703,7 +718,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
     });
     // Device recovery can wait for another lane's lease; paid infrastructure must not.
     if (PHASES.indexOf(progress.phase) >= PHASES.indexOf("pixel_verified")) {
-      await attempt("pixelRestore", () => input.pixel("windows-cleanup", () => { assertWindowsExecution(input.execution); return runtime.restorePixel(context); }));
+      await attempt("pixelRestore", () => input.pixel("windows-cleanup", () => { assertWindowsExecution(input.execution); return runtime.restorePixel(context); }, input.execution));
     }
   } else {
     progress.retirementPending = true; await save();

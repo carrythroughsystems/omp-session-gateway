@@ -66,6 +66,19 @@ test("external cancellation reaps the subprocess but cannot become a probe deadl
   expect(error.controllerDeadline).toBe(false);
   expect(classifyWindowsCommandFailure(error, true, true).evidence.class).toBe("harness");
 });
+test.each([false, true])("499 R1 execution-clipped helper timer retains controller origin (readOnly=%s)", async readOnly => {
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 100, nextFailureId: () => 1 };
+  const probes: WindowsTransportProbe[] = [];
+  const failure = await command([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+    timeoutMs: 30_000, execution, transportProbe: async probe => { probes.push(probe); },
+  }).catch(error => error);
+  expect(failure.controllerDeadline).toBe(true);
+  expect(probes.at(-1)?.controllerDeadline).toBe(true);
+  expect(classifyWindowsCommandFailure(failure, readOnly, readOnly, execution).evidence).toMatchObject({
+    reason: "deadline_exceeded", class: "harness", operation: readOnly ? "read_only" : "unknown",
+    observations: { controllerDeadline: true, exitCode: failure.exitCode, signal: failure.signal },
+  });
+});
 test.each(["abort", "execution-expiry", "command-expiry"] as const)("496 R2 %s during the initial checkpoint refuses helper spawn", async kind => {
   const controller = new AbortController();
   const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
@@ -312,7 +325,7 @@ test("an encoding/helper failure cannot be disguised as successful upload reconc
 });
 test("R1 unowned upload termination stays terminal even when inspection could find matching bytes", async () => {
   let inspected = false;
-  const failure = classifyWindowsCommandFailure(new winrmRuntime.WindowsCommandFailure(143, false, 0, 10, 100), false, false);
+  const failure = classifyWindowsCommandFailure(new winrmRuntime.WindowsCommandFailure(143, null, 0, 10, 100), false, false);
   await expect(reconcileWindowsUpload({
     stream: async () => { throw failure; },
     inspect: async () => { inspected = true; return { exists: true, matches: true, writerEnded: true }; },
