@@ -4,6 +4,7 @@ import { classifyWindowsCommandFailure, command, reconnectWindowsTransport, reco
 import { QualificationFailure } from "./qualification-failure";
 import type { WindowsTransportProbe } from "./windows-stable-qualification";
 import { windowsFailure } from "./windows-stable-qualification";
+import * as winrmRuntime from "./windows-qualification-runtime";
 
 const transportResult = (condition = "connection_timeout") => ({
   exitCode: -1, stdout: "", diagnostic: "private text ignored",
@@ -81,7 +82,7 @@ test("reconnect uses exactly the four backoffs and refuses late success or untyp
 test("interrupted upload reconciles matching bytes without replay; a locked writer blocks removal", async () => {
   const events: string[] = [];
   const run = (matches: boolean, writerEnded: boolean) => reconcileWindowsUpload({
-    stream: async () => { events.push("stream"); throw windowsFailure("mutation_unconfirmed", "upload", "unknown"); },
+    stream: async () => { events.push("stream"); return windowsWinrmResult(transportResult("connection_reset"), false, undefined, true); },
     inspect: async () => { events.push("inspect"); return { exists: true, matches, writerEnded }; },
     remove: async () => { events.push("remove"); },
   });
@@ -102,6 +103,71 @@ test("an encoding/helper failure cannot be disguised as successful upload reconc
     remove: async () => {},
   })).rejects.toBe(failure);
   expect(reads).toBe(0);
+});
+test("R1 unowned upload termination stays terminal even when inspection could find matching bytes", async () => {
+  let inspected = false;
+  const failure = classifyWindowsCommandFailure(new winrmRuntime.WindowsCommandFailure(143, false, 0, 10, 100), false, false);
+  await expect(reconcileWindowsUpload({
+    stream: async () => { throw failure; },
+    inspect: async () => { inspected = true; return { exists: true, matches: true, writerEnded: true }; },
+    remove: async () => {},
+  })).rejects.toBe(failure);
+  expect(inspected).toBe(false);
+});
+test("R1 a started upload is single-shot across development re-entry", async () => {
+  expect(typeof winrmRuntime.windowsUploadOnce).toBe("function");
+  let state: "started" | "complete" | undefined; let streams = 0;
+  const operations = {
+    state: async () => state,
+    checkpoint: async (next: "started" | "complete") => { state = next; },
+    upload: async () => { streams += 1; throw windowsFailure("mutation_unconfirmed", "upload", "unknown"); },
+    verify: async () => true,
+  };
+  await expect(winrmRuntime.windowsUploadOnce(operations)).rejects.toBeInstanceOf(QualificationFailure);
+  await expect(winrmRuntime.windowsUploadOnce(operations)).rejects.toBeInstanceOf(QualificationFailure);
+  expect(streams).toBe(1);
+});
+test.each(["cancel", "expire"] as const)("R1 reconnect rejects %s after a successful probe", async kind => {
+  const controller = new AbortController();
+  const execution = { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 };
+  await expect(reconnectWindowsTransport(async () => {
+    if (kind === "cancel") controller.abort(); else execution.deadline = performance.now() - 1;
+    return { ready: true };
+  }, { now: () => 0, sleep: async () => {} }, execution)).rejects.toThrow("deadline_exceeded");
+});
+test("R1 cancelled transient probe cannot start backoff and long backoff observes cancellation promptly", async () => {
+  const controller = new AbortController(); let slept = 0;
+  const execution = { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 };
+  await expect(reconnectWindowsTransport(async () => {
+    controller.abort(); return windowsWinrmResult(transportResult(), true);
+  }, { now: () => 0, sleep: async ms => { slept += ms; } }, execution)).rejects.toThrow("deadline_exceeded");
+  expect(slept).toBe(0);
+});
+test("R1 cancellation during backoff settles the owned sleep before refusing another probe", async () => {
+  const controller = new AbortController(); let sleeps = 0; let probes = 0;
+  await expect(reconnectWindowsTransport(async () => { probes += 1; return windowsWinrmResult(transportResult(), true); },
+    { now: () => 0, sleep: async ms => { expect(ms).toBeLessThanOrEqual(100); sleeps += 1; controller.abort(); } },
+    { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 })).rejects.toThrow("deadline_exceeded");
+  expect(sleeps).toBe(1); expect(probes).toBe(1);
+});
+test("R1 cancellation after process exit but before checkpoint settlement cannot return success", async () => {
+  const controller = new AbortController();
+  await expect(command([process.execPath, "-e", "process.stdout.write('ok')"], {
+    execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 },
+    transportProbe: async probe => { if (probe.exitedAt !== null) controller.abort(); },
+  })).rejects.toThrow("deadline_exceeded");
+});
+test("R1 typed helper conversion retains bounded redacted diagnostics only in its in-memory cause", () => {
+  let failure: unknown;
+  try { windowsWinrmResult({ ...transportResult(), diagnostic: "LookupError",
+    failure: { ...transportResult().failure, kind: "helper", condition: "helper_failure" },
+    exception: { type: "LookupError", message: "unknown encoding: synthetic-codec; [REDACTED]", uploadStep: null,
+      frames: [{ file: "protocol.py", line: 197, function: "open_shell" }] },
+  }, true); } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(QualificationFailure);
+  expect((failure as Error).cause).toBeInstanceOf(Error);
+  expect(((failure as Error).cause as Error).message).toContain("synthetic-codec");
+  expect(JSON.stringify(failure)).not.toContain("synthetic-codec");
 });
 
 test("WinRM failures preserve legacy classification and actionable sanitized helper evidence", () => {
