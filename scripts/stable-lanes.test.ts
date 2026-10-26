@@ -32,7 +32,7 @@ test("council491 log ownership is not returned before remote preparation succeed
   const root = await mkdtemp(join(tmpdir(), "qualification-log-owner-"));
   let calls = 0;
   const mac: RemoteExecutor = async () => ++calls === 1 ?
-    { exitCode: 0, stdout: "/Users/synthetic", stderr: "" } : { exitCode: 1, stdout: "", stderr: "" };
+    { exitCode: 0, stdout: "/fixture-home", stderr: "" } : { exitCode: 1, stdout: "", stderr: "" };
   try { await expect(retainedMacLogs(mac, "11111111-2222-4333-8444-555555555555", root)).rejects.toThrow(); }
   finally { await rm(root, { recursive: true, force: true }); }
 });
