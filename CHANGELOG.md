@@ -18,7 +18,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
   containment before deleting recovery state; fence incomplete same-epoch uploads, unknown process
   exits, legacy staging without upload claims, and cancellation races instead of recovering them
   as successful work. Retire the old epoch vault before replacing development identity, and require
-  settled provider inventory before cleanup completion.
+  settled provider inventory before cleanup completion. Fence every guest mutation with durable
+  single-shot claims, preserve committed containment during retirement failures, and share one
+  allocation/admission deadline from before firewall creation. Refuse cancelled final evidence
+  and contradictory transport status; keep POSIX signal-escalation coverage off Windows runners.
 
 ## [v0.9.0] — 2026-10-25
 

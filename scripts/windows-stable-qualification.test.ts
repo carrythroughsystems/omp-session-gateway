@@ -225,6 +225,71 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; li
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test.each(["stage", "upgrade"] as const)("493 R1 completed uploads cannot authorize replaying an unsettled %s mutation", async action => {
+    const f = fixture({ development: true, fail: action });
+    await expect(f.run()).rejects.toThrow();
+    await windowsRuntime.windowsUploadOnce({ allowFresh: false, state: async () => "complete",
+      checkpoint: async () => { throw new Error("completed archive must not change"); },
+      upload: async () => { throw new Error("completed archive must not stream"); }, verify: async () => true });
+    f.events.length = 0;
+    await expect(runWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime }))
+      .rejects.toThrow("mutation_unconfirmed");
+    expect(f.events).toEqual([]);
+  });
+  test("493 R1 each nested guest mutation checkpoints started and complete before another mutation", async () => {
+    const f = fixture({ development: true }); const original = f.runtime.guest;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action !== "stage") return original(context, action, principal);
+      await context.mutation!("ps:administrator:join", async () => {
+        expect((f.progress as { mutationClaims: Record<string, string> }).mutationClaims["toolchain_staged:ps:administrator:join"]).toBe("started");
+      });
+      expect((f.progress as { mutationClaims: Record<string, string> }).mutationClaims["toolchain_staged:ps:administrator:join"]).toBe("complete");
+      await context.mutation!("ps:administrator:build", async () => { throw new Error("synthetic interrupted mutation"); });
+      return {};
+    };
+    await expect(f.run()).rejects.toThrow();
+    expect((f.progress as { mutationClaims: Record<string, string> }).mutationClaims).toMatchObject({
+      "toolchain_staged:ps:administrator:join": "complete", "toolchain_staged:ps:administrator:build": "started",
+    });
+  });
+  test.each(["cancel", "expire"] as const)("493 R1 %s during final settled checkpoint cannot return success", async kind => {
+    const f = fixture({ development: true }); const controller = new AbortController();
+    const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 };
+    await expect(runWindows({ identity, runtime: f.runtime, pixel: f.pixel, execution,
+      checkpoint: async progress => {
+        await f.checkpoint(progress);
+        if (progress.phase === "evidence_complete" && progress.settled === true) {
+          if (kind === "cancel") controller.abort(); else execution.deadline = performance.now() - 1;
+        }
+      },
+    })).rejects.toThrow("deadline_exceeded");
+  });
+  test("493 R1 cached completed evidence refuses an already cancelled execution", async () => {
+    const f = fixture(); await f.run(); const controller = new AbortController(); controller.abort();
+    await expect(runWindows({ identity, progress: f.progress, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint,
+      execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 },
+    })).rejects.toThrow("deadline_exceeded");
+  });
+  test("493 R1 firewall and VM creation consume the shared twelve-minute admission budget", async () => {
+    const f = fixture(); const firewall = f.runtime.provider.createFirewall, instance = f.runtime.provider.createInstance;
+    f.runtime.provider.createFirewall = async (...args) => { await f.runtime.sleep(700_000); return firewall(...args); };
+    f.runtime.provider.createInstance = async (...args) => { await f.runtime.sleep(30_000); return instance(...args); };
+    await expect(f.run()).rejects.toThrow("deadline_exceeded");
+    expect(f.events).not.toContain("transport");
+  });
+  test.each(["tailnet", "inventory"] as const)("493 R1 %s retirement failure preserves committed cleanup and its retry does not restore Pixel", async kind => {
+    const f = fixture(); await f.run(); await f.clean();
+    const tailnet = f.runtime.deleteTailnet, inventory = f.runtime.provider.instances;
+    if (kind === "tailnet") f.runtime.deleteTailnet = async () => { throw new Error("synthetic transient failure"); };
+    else f.runtime.provider.instances = async () => { throw new Error("synthetic transient failure"); };
+    await expect(windowsRuntime.retireWindowsDevelopmentEpoch({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime })).rejects.toThrow();
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
+    expect((f.progress as { retirementPending: boolean }).retirementPending).toBe(true);
+    f.runtime.deleteTailnet = tailnet; f.runtime.provider.instances = inventory;
+    f.runtime.restorePixel = async () => { throw new Error("committed cleanup must not restore Pixel again"); };
+    await windowsRuntime.retireWindowsDevelopmentEpoch({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime });
+    expect((f.progress as { retirementPending: boolean }).retirementPending).toBe(false);
+  });
   test("R2 resumed unsettled legacy staging refuses before another guest mutation", async () => {
     const f = fixture({ development: true, fail: "stage" });
     await expect(f.run()).rejects.toThrow();
@@ -437,14 +502,13 @@ describe("Windows qualification ownership and failure paths", () => {
     const invalid = { ...f.progress as Record<string, unknown>, timings: {} };
     await expect(runWindows({ identity, progress: invalid, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime })).rejects.toThrow("phase history");
   });
-  test("development repair with completed upload claims resumes the same guest and records the failed phase attempt", async () => {
-    const f = fixture({ development: true, fail: "stage" });
+  test("development repair resumes read-only prelogin observations without repeating completed mutations", async () => {
+    const f = fixture({ development: true, fail: "prelogin" });
     await expect(f.run()).rejects.toThrow("unclassified_failure");
     expect(f.instances).toHaveLength(1); expect(windowsNeedsCleanup(f.progress)).toBe(true);
-    f.runtime.stagingUploadsComplete = async () => true;
     const original = f.runtime.guest;
     f.runtime.guest = async (context, action, principal) => {
-      if (action === "stage") { expect(context.freshStaging).toBe(false); return {}; }
+      if (action === "prelogin") return { taskPresent: true, taskRunning: false, gatewayProcesses: 0, listeners: 0, ...doctorState };
       return original(context, action, principal);
     };
     const result = await runWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime });
