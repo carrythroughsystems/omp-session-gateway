@@ -674,7 +674,7 @@ describe("automatic same-candidate campaign retry state machine", () => {
       const selected = automaticCampaign(), failure = automaticFailure(selected);
       const summary = { ...failure.outcome.failureSummary, failures: [...failure.outcome.failureSummary.failures] };
       const harness = { id: 2, lane: "campaign", step: "execution", class: "harness", reason: "unclassified_failure",
-        operation: "unknown", elapsedMs: 0, observations: {} } as const;
+        operation: "read_only", elapsedMs: 0, observations: {} } as const;
       if (kind === "product") summary.failures = [{ ...harness, lane: "androidPush", step: "private_verified", class: "product", reason: "assertion_failed" }];
       if (kind === "harness") summary.failures = [harness];
       if (kind === "unknown") summary.failures = [{ ...harness, class: "unrecognized" } as never];
@@ -685,8 +685,12 @@ describe("automatic same-candidate campaign retry state machine", () => {
         const collateral = { ...harness, class: "collateral", reason: "dependency_failed", originIds: [99] } as const;
         summary.failures = kind === "collateral-only" ? [collateral] : [...summary.failures, collateral];
       }
-      const step = nextStep(selected, snapshot({ campaign: { status: "failed", campaignFailure: automaticFailure(selected, summary) } }), config);
+      const campaignFailure = { ...failure, outcome: { ...failure.outcome, scope: "campaign" as const, failureSummary: summary,
+        receipt: { sha256: "b".repeat(64), cleanupDisposition: kind === "dirty" || kind === "mutation" ? "unresolved" as const : "restored" as const } } };
+      const step = nextStep(selected, snapshot({ campaign: { status: "failed", campaignFailure } }), config);
       expect(step.operation).toBe("stop");
+      if (kind === "product") expect(step.detail).toContain("androidPush:product:assertion_failed");
+      if (kind === "harness" || kind === "mixed") expect(step.detail).toContain("campaign:harness:unclassified_failure");
       if (step.operation !== "idle") expect(step.patch?.campaignAttempt).toBeUndefined();
     },
   );
