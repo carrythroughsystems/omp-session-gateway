@@ -80,6 +80,19 @@ describe("general qualification machine outcome", () => {
       }
     }
   });
+  test("506 council passed readiness requires positive matching counts and presentation/clear proofs", () => {
+    const observations: Record<string, boolean | number> = { baselineRestored: true, pixelReachable: true, pushSent: true,
+      pushAcknowledged: true, pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 2, ackCount: 2 };
+    const base = { status: "passed", campaignAttempt: 0, timings: {}, cleanupDisposition: "restored" };
+    expect(parseRigReadinessReceipt({ ...base, observations }).status).toBe("passed");
+    for (const key of ["subscriptionCount", "sendCount", "ackCount", "pixelReachable", "pushSent", "pushAcknowledged", "pushPresented", "pushCleared"]) {
+      const missing = { ...observations };
+      delete missing[key];
+      expect(() => parseRigReadinessReceipt({ ...base, observations: missing })).toThrow();
+      expect(() => parseRigReadinessReceipt({ ...base, observations: { ...observations, [key]: key.endsWith("Count") ? 0 : false } })).toThrow();
+    }
+    expect(() => parseRigReadinessReceipt({ ...base, observations: { ...observations, ackCount: 1 } })).toThrow();
+  });
   test("council U1 complete outcomes reject duplicate and escaped-equivalent keys through portable parsing and POSIX file reads", async () => {
     const root = process.platform === "win32" ? undefined : await mkdtemp(join(privateTmpdir, "qualification-duplicate-"));
     try {

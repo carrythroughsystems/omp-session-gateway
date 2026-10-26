@@ -244,6 +244,48 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
 });
 
+test("506 council readiness returns counters from the final acknowledged snapshot", async () => {
+  const host = fake();
+  let reads = 0;
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ++reads === 1 ?
+    { sufficient: false, subscriptionCount: 0, sends: 0, acknowledgements: 0, failures: 0, retryable: false, httpStatus: 0 } :
+    { sufficient: true, subscriptionCount: 2, sends: 2, acknowledgements: 2, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
+  expect(await runAndroidPushReadiness(host.input)).toMatchObject({
+    delivered: true, acknowledged: true, subscriptionCount: 2, sendCount: 2, ackCount: 2,
+  });
+  expect(reads).toBe(2);
+});
+
+test("506 council readiness cannot substitute a posted record for lock-screen presentation", async () => {
+  const host = fake();
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1,
+    failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
+  let presented = false;
+  host.runtime.presentation = async () => { presented = true; return false; };
+  await expect(runAndroidPushReadiness(host.input)).rejects.toMatchObject({
+    evidence: { lane: "rigReadiness", reason: "assertion_failed", class: "product" },
+  });
+  expect(presented).toBe(true);
+  expect(host.cleanup).toHaveLength(7);
+});
+
+test.each(["elapsed", "typed"] as const)("506 council readiness preserves %s browser deadline attribution", async variant => {
+  const host = fake();
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
+  host.runtime.browser = async () => {
+    execution.deadline = 0;
+    if (variant === "typed") throw new QualificationFailure({ id: 1, lane: "androidPush", step: "browser_forward",
+      reason: "deadline_exceeded", class: "harness", elapsedMs: 1, operation: "unknown", observations: { controllerDeadline: true } });
+    throw new Error("synthetic elapsed browser execution");
+  };
+  await expect(runAndroidPushReadiness({ ...host.input, execution })).rejects.toMatchObject({
+    evidence: { lane: "rigReadiness", reason: variant === "typed" ? "deadline_exceeded" : "delivery_timeout" },
+  });
+  expect(host.cleanup).toHaveLength(7);
+});
+
 test("readiness refuses stale subscriptions before any fixture ask and restores the baseline", async () => {
   const host = fake(), fixture = host.runtime.fixture;
   host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });

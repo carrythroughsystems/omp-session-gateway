@@ -12,6 +12,24 @@ const flags = { request_alias: 1, attention: true, clear: false, activity_stop: 
 const send = [event(1, "push.queue_accepted", { sequence: 1, ...flags }), event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 1 }),
   event(3, "push.send_failed", { sequence: 1, elapsed_ms: 1, status: 503 })];
 
+test.each(["reversed-queues", "interleaved-completion"] as const)("506 council telemetry rejects %s ordering", variant => {
+  const events = variant === "reversed-queues" ? [
+    event(1, "push.queue_accepted", { sequence: 2, ...flags }),
+    event(2, "push.send_started", { sequence: 2, ...flags, subscriptions: 1 }),
+    event(3, "push.send_acknowledged", { sequence: 2, elapsed_ms: 1 }),
+    event(4, "push.queue_accepted", { sequence: 1, ...flags }),
+    event(5, "push.send_started", { sequence: 1, ...flags, subscriptions: 1 }),
+    event(6, "push.send_acknowledged", { sequence: 1, elapsed_ms: 1 }),
+  ] : [
+    event(1, "push.queue_accepted", { sequence: 1, ...flags }),
+    event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 2 }),
+    event(3, "push.send_acknowledged", { sequence: 1, elapsed_ms: 1 }),
+    event(4, "push.send_started", { sequence: 1, ...flags, subscriptions: 2 }),
+    event(5, "push.send_acknowledged", { sequence: 1, elapsed_ms: 1 }),
+  ];
+  expect(pushDeliveryTelemetry(events)).toMatchObject({ sufficient: false, retryable: false, clearAcknowledged: false });
+});
+
 test("readiness fan-out requires complete acknowledgement of every send for one alias", () => {
   const fanout = [
     event(1, "push.queue_accepted", { sequence: 1, ...flags }),

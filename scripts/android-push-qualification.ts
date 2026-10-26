@@ -447,6 +447,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       try { progress.browser = await runtime.browser(); }
       catch (error) {
         rethrowPushSafetyFailure(error);
+        requireBudget();
         throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "browser_capture",
           class: "harness", reason: "browser_baseline_failed", operation: "unknown",
           elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted), observations: {} }, { cause: error });
@@ -504,6 +505,15 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
         ownedAlias !== telemetry.requestAlias) throw new QualificationFailure({
         id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push", class: "harness", reason: "invalid_evidence",
         elapsedMs: roundTripMs, operation: "read_only", observations: {} });
+      // This cumulative window, not the earlier delivery poll, owns the final receipt counters.
+      metrics.subscriptionCount = telemetry.subscriptionCount;
+      metrics.sendCount = telemetry.sends;
+      metrics.ackCount = telemetry.acknowledgements;
+      const presented = await runtime.presentation(session, "private");
+      requireBudget();
+      if (!presented) throw new QualificationFailure({
+        id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push", class: "product", reason: "assertion_failed",
+        elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted), operation: "read_only", observations: {} });
       const start = runtime.now();
       budgetStart = start;
       await runtime.fixture("answer", progress.epoch); requireBudget();
@@ -531,6 +541,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
           else if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
           else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" });
           else if (evidence.reason === "delivery_timeout") primary = new QualificationFailure({ ...common, class: "harness", reason: "delivery_timeout" });
+          else if (evidence.reason === "deadline_exceeded") primary = new QualificationFailure({ ...common, class: "harness", reason: "deadline_exceeded" }, { cause: error });
           else primary = new QualificationFailure({ ...common, class: "harness", reason: "invalid_evidence" });
         }
       } catch (normalizationError) {

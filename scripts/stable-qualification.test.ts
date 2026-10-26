@@ -2217,6 +2217,18 @@ test("council R2 readiness roots require their failed readiness owner", () => {
   expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
 });
 
+test("506 council campaign validation rejects a readiness pass without delivery or presentation proof", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.rigReadiness = { campaignAttempt: 0, status: "passed", cleanupDisposition: "restored", timings: {},
+    observations: { baselineRestored: true, pixelReachable: true, pushSent: true, pushAcknowledged: true,
+      pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 1, ackCount: 1 } };
+  expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+  for (const observations of [{ sendCount: 0 }, { ackCount: 0 }, { pushPresented: false }, { pushCleared: false }]) {
+    const invalid = { ...receipt, rigReadiness: { ...receipt.rigReadiness, observations: { ...receipt.rigReadiness.observations, ...observations } } };
+    expect(() => validateStableQualificationReceipt(invalid, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+  }
+});
+
 test.each(["failed owner omitted", "unresolved containment", "passed with failed owner"] as const)(
   "council P2 readiness receipt rejects %s", variant => {
     const receipt = summarizedReceipt();

@@ -265,7 +265,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   const checkExecution = () => {
     if (execution === undefined) return;
     execution.signal.throwIfAborted();
-    if (performance.now() >= execution.deadline) throw new Error("Android Push execution deadline");
+    if (performance.now() >= execution.deadline) throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
+      reason: "deadline_exceeded", class: "harness", operation: "unknown", elapsedMs: 0, observations: { controllerDeadline: true } });
   };
   const privacyFailure = () => new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
     class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: 0, observations: {} });
@@ -437,9 +438,14 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     },
     async browser() {
       const baseline: { step: PushBrowserStep } = { step: "browser_capture" }, started = runtime.now();
-      try { return await page(browserState, true, baseline); }
+      try {
+        const result = await page(browserState, true, baseline);
+        checkExecution();
+        return result;
+      }
       catch (error) {
         rethrowPushSafetyFailure(error);
+        checkExecution();
         throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: baseline.step,
           reason: "browser_baseline_failed", class: "harness", operation: "unknown",
           elapsedMs: Math.round(runtime.now() - started), observations: {} }, { cause: error });

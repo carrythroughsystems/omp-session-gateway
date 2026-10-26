@@ -34,14 +34,15 @@ export function pushDeliveryTelemetry(events: readonly QualificationLogEvent[]):
   const groups = new Map<number, { started: number; completed: number; expected: number }>();
   let attributable = queues.length > 0 && sends.length > 0 &&
     typeof requestAlias === "number" && Number.isSafeInteger(requestAlias) && requestAlias > 0;
-  let previousIndex = 0;
+  let previousIndex = 0, previousQueue = 0;
   for (const event of push) {
     if (event.request_alias !== requestAlias || typeof event.sequence !== "number" || !Number.isSafeInteger(event.sequence) ||
       event.sequence < 1 || event.index <= previousIndex) { attributable = false; break; }
     previousIndex = event.index;
     const group = groups.get(event.sequence);
     if (event.event === "push.queue_accepted") {
-      if (group !== undefined || event.subscription_replay !== false) { attributable = false; break; }
+      if (group !== undefined || event.sequence <= previousQueue || event.subscription_replay !== false) { attributable = false; break; }
+      previousQueue = event.sequence;
       groups.set(event.sequence, { started: 0, completed: 0, expected: 0 });
     } else if (event.event === "push.send_started") {
       if (group === undefined || event.subscription_replay !== false || typeof event.subscriptions !== "number" ||
@@ -53,7 +54,7 @@ export function pushDeliveryTelemetry(events: readonly QualificationLogEvent[]):
       subscriptionCount = Math.max(subscriptionCount, event.subscriptions);
       group.started++;
     } else if (event.event === "push.send_acknowledged" || event.event === "push.send_failed") {
-      if (group === undefined || group.completed >= group.started) { attributable = false; break; }
+      if (group === undefined || group.started !== group.expected || group.completed >= group.started) { attributable = false; break; }
       group.completed++;
     } else {
       attributable = false;

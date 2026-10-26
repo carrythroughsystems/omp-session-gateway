@@ -10,6 +10,23 @@ import { normalizeQualificationFailures, parseLaneFailures, qualificationRetryEl
 import { notificationTopicDigest } from "./android-notification.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
 
+test.each(["before", "during"] as const)("506 council browser deadline elapsed %s capture retains deadline attribution", async when => {
+  const execution = { signal: new AbortController().signal, deadline: when === "before" ? 0 : performance.now() + 60_000, nextFailureId: () => 1 };
+  const wake = spyOn(deviceOperations, "wakeAndroidDisplay").mockImplementation(async () => {
+    execution.deadline = 0;
+    throw new Error("synthetic elapsed browser execution");
+  });
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockImplementation(async command => {
+    if (when === "before") await command!("devices");
+    return "synthetic";
+  });
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execution });
+    runtime.beforeEffect = async () => {};
+    await expect(runtime.browser()).rejects.toMatchObject({ evidence: { reason: "deadline_exceeded", class: "harness" } });
+  } finally { select.mockRestore(); wake.mockRestore(); }
+});
+
 test.each(["browser_wake", "browser_webapk", "browser_forward", "browser_target", "browser_attach",
   "browser_context", "browser_navigation", "browser_notification_state"] as const)(
   "browser baseline identifies the bounded %s failure without leaking its CDP message", async step => {

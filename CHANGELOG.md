@@ -88,7 +88,8 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 55 changel
 - Accept fully acknowledged Push fan-out for one request alias, retain bounded recipient/send/ack
   counts, and refuse stale retained-rig subscriptions before the readiness ask. Attribute browser
   baseline failures to closed browser/CDP substeps while preserving restoration and operator-only
-  subscription recovery.
+  subscription recovery. Bind readiness counters to the final snapshot, require lock-screen
+  presentation and clear proofs, reject out-of-order telemetry, and preserve execution deadlines.
 - Retain bounded, byte-exact qualification child stdout/stderr in immutable private release-driver
   job logs for successful and failed campaigns, retries and preflights before terminal publication.
   Bind both logs into the retry plan's job digest without changing sanitized diagnostics or public

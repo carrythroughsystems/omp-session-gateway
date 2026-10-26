@@ -138,6 +138,10 @@ export function parseRigReadinessReceipt(value: unknown): RigReadinessReceipt {
   if ((readiness.cleanupDisposition === "restored" && observations.baselineRestored !== true) ||
     (observations.baselineRestored === true && readiness.cleanupDisposition === "unresolved") ||
     (observations.baselineRestored === false && readiness.cleanupDisposition !== "unresolved")) invalid();
+  if (readiness.status === "passed" &&
+    (["pixelReachable", "pushSent", "pushAcknowledged", "pushPresented", "pushCleared"].some(key => observations[key] !== true) ||
+      ["subscriptionCount", "sendCount", "ackCount"].some(key => typeof observations[key] !== "number" || observations[key] < 1) ||
+      observations.sendCount !== observations.ackCount)) invalid();
   return { ...readiness, observations: { ...observations }, timings: parseLaneTimings("rigReadiness", readiness.timings) } as unknown as RigReadinessReceipt;
 }
 

@@ -524,7 +524,8 @@ synchronously before showing the ask. This detects a session switch, not a same-
 rotation between the runtime's check and the extension's mutation; the cross-process check is not atomic.
 Provider acknowledgement is acceptance, not phone presentation. Collector windows use event indices
 and one exact request alias; every queue's declared fan-out must have all sends acknowledged before
-delivery telemetry is sufficient. Multiple acknowledged recipients are legitimate. Missing completions,
+delivery telemetry is sufficient. Queue sequences must increase, and every send in a queue must start
+before its first completion. Multiple acknowledged recipients are legitimate. Missing completions,
 foreign aliases, rotation gaps and invalid telemetry never establish success by time proximity.
 Retry authority remains narrower: only the existing single-send explicit retryable failure permits
 re-arm; a partially acknowledged fan-out never does. Request identities remain volatile.

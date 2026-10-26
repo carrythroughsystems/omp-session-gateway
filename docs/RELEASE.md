@@ -1023,8 +1023,10 @@ refuses admission as a missing prerequisite. This read exposes no endpoints, key
 the harness never guesses which subscription is stale or deletes someone else's subscription.
 Push telemetry separately accepts legitimate fan-out only when every send for the fixture's request
 alias is acknowledged, and records finite integer `subscriptionCount` (largest recipient cohort),
-`sendCount` and `ackCount` observations. Provider acceptance still cannot replace Pixel presentation
-or authoritative clear.
+`sendCount` and `ackCount` observations from the final complete telemetry snapshot. A passed receipt
+requires positive matching send/ack counts and affirmative Pixel reachability, send, acknowledgement,
+presentation and clear observations. Provider acceptance and a posted notification record cannot
+replace the owned lock-screen presentation check or authoritative clear.
 
 To recover a `stale_subscriptions` refusal, keep the driver disabled and first finish Pixel/Mac
 restoration. `qualify-macos-host.sh omp-clean uninstall` removes the fixture and service, **not**
@@ -1063,6 +1065,7 @@ The Push owner persists `push-progress.json` before browser baseline capture. Ca
 typed `browser_baseline_failed` with a bounded browser substep (wake, WebAPK, CDP forward/connect,
 target inventory, attachment, execution context, navigation or notification-state read), rather than
 an unclassified raw CDP error. Cleanup/containment failures retain their stronger disposition.
+Expired execution deadlines retain deadline attribution rather than becoming browser baseline errors.
 
 Windows readiness reuses credential, inventory, image, plan and toolchain admission and requires
 remaining per-tag creation allowance with no unreconciled qualification resources. Unsupported
