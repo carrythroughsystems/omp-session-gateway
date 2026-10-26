@@ -197,10 +197,12 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
       if (!PUSH_BROWSER_STEPS.includes(substep) || !Number.isSafeInteger(elapsedMs) || elapsedMs < 0) throw new Error("invalid private browser diagnostic");
       const chain = privateQualificationFailureDiagnostic(error);
       const method = /^CDP (?:timeout: )?([A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*)(?::|$)/u;
-      const cause = chain.find(entry => method.test(entry.message)) ?? chain[0]!;
+      const cause = chain.filter(entry => method.test(entry.message)).reduce((deepest, entry) =>
+        entry.path.split(".").length >= deepest.path.split(".").length ? entry : deepest, chain[0]!);
       const bytes = JSON.stringify({ substep, message: cause.message,
         cdpMethod: method.exec(cause.message)?.[1] ?? null, elapsedMs,
-        ...(cause.truncated ? { truncated: true } : {}), ...(cause.redacted ? { redacted: true } : {}) }) + "\n";
+        ...(chain.some(entry => entry.truncated) ? { truncated: true } : {}),
+        ...(chain.some(entry => entry.redacted) ? { redacted: true } : {}) }) + "\n";
       if (Buffer.byteLength(bytes) > PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES) throw new Error("private browser diagnostic exceeds byte limit");
       persist("browser-substep.json", bytes);
       const directory = openSync(options.jobDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);

@@ -497,6 +497,14 @@ complete serialized diagnostic is capped below 256 KiB. Diagnostic-retention fai
 private causes, not the sanitized failure graph; concurrent execution expiry cannot replace a
 browser failure or discard its cause.
 
+These are access-restricted local diagnostics (0700 parent directory, 0600 files), not sanitized
+publication surfaces. Producer-authored Error messages are the authorship boundary: producers
+must not embed secrets or unreviewed response bodies. Identifier/capability scanning is defense
+in depth, not a general-purpose body classifier. A short capability-free response body copied
+into an Error message is retained in these private sinks; it must never enter receipt evidence,
+gateway structured telemetry or public artifacts. Operators must inspect and redact private
+diagnostics before sharing them.
+
 Qualification explicitly supplies `--qualification-log-dir`; an environment variable alone never
 enables daemon retention. Ordinary installations are unchanged. The sink accepts only closed event
 names/fields, finite numbers and booleans (plus the fixed envelope timestamp/level/name), and retains

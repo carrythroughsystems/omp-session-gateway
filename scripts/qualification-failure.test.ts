@@ -14,6 +14,21 @@ const summary = (): QualificationFailureSummary => ({ failures: [root(), collate
   containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } });
 const secret = "SYNTHETIC_PRIVATE_FAILURE_SENTINEL";
 
+test.each(["interrupted", "nested"] as const)("509 round2 strips %s opt-outs before scanning and emitting identifiers", variant => {
+  const marker = "identifier-leak-allow";
+  const nested = marker.slice(0, 10) + marker + marker.slice(10);
+  const home = "/" + ["Users", "syntheticoperator"].join("/");
+  const input = variant === "interrupted" ? home.slice(0, 8) + marker + home.slice(8) : nested + " " + home;
+  const error = new Error(input); error.stack = input;
+  const [entry] = privateQualificationFailureDiagnostic(error);
+  expect(entry?.redacted).toBe(true);
+  for (const field of [entry?.message, entry?.stack]) {
+    expect(field).not.toContain(marker);
+    expect(field).not.toContain("syntheticoperator");
+    expect(field).toContain("redacted absolute home path");
+  }
+});
+
 test("509 council private diagnostics bound UTF-8 messages stacks and complete output with explicit flags", () => {
   const huge = new Error("界".repeat(100_000));
   huge.stack = "界".repeat(100_000);

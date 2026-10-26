@@ -14,7 +14,7 @@ import { withDevelopmentPixelLease } from "./android-pixel-lease.ts";
 import { runFixtureOperation, type FixtureExecutor } from "./push-qualification-fixture.ts";
 import { authenticateAndroidNotification, awaitPageExecutionContext, isPushNotificationRoute, holdAndroidNotificationDenial, ownedPushForwards, observePushLaunch } from "./android-push-runtime.ts";
 import { pixelUnrestored } from "./restoration.ts";
-import { QualificationFailure, normalizeQualificationFailures } from "./qualification-failure.ts";
+import { QualificationFailure, normalizeQualificationFailures, privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
 
 const identity: AndroidPushIdentity = { tag: "v0.6.0-prealpha.1", candidate: { tag: "v0.6.0-prealpha.1", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64), archivePath: "synthetic.tar" },
   omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "c".repeat(40), sourceTree: "d".repeat(40), nativeTarballSha256: "e".repeat(64), nativeBinarySha256: "f".repeat(64) }, origin: "https://gateway.example.test" };
@@ -244,6 +244,55 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
 });
 
+test.each(["poll", "telemetry", "ownership", "request"] as const)("509 round2 ordinary %s failures survive expiry and conversion", async stage => {
+  const host = fake(), metrics = emptyPushDeliveryMetrics(), controller = new AbortController();
+  const raw = new Error(`synthetic private ${stage} failure`);
+  const session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
+    startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z" };
+  const fail = async (): Promise<never> => { controller.abort(); throw raw; };
+  host.runtime.observe = stage === "poll" ? fail : async () => ({
+    count: stage === "ownership" ? 0 : 1, titleMatches: true, bodyMatches: true, forbiddenFound: false,
+  });
+  host.runtime.deliveryTelemetry = stage === "telemetry" ? fail : async () => ({
+    sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0, failures: 1, retryable: true, httpStatus: 503, requestAlias: 1,
+  });
+  if (stage === "ownership") host.runtime.deliveryOwnership = fail;
+  if (stage === "request") { metrics.deliveryRearmCount = 1; host.runtime.deliveryRequestMatches = fail; }
+  const error = await waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention",
+    phase: "private_verified", timeout: 1, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
+    execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } }).catch(error => error);
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "delivery_timeout" }]);
+});
+
+test.each(["browser", "restoration"] as const)("509 round2 readiness remaps nested %s failures and attaches final metrics", async stage => {
+  const host = fake(), raw = new Error("synthetic aggregate provenance");
+  const typed = new QualificationFailure({ id: 70, lane: "androidPush", step: "browser_context", reason: "browser_baseline_failed",
+    class: "harness", operation: "unknown", elapsedMs: 1, observations: {} }, { cause: raw });
+  const deadline = new QualificationFailure({ id: 71, lane: "androidPush", step: "baseline_captured", reason: "deadline_exceeded",
+    class: "harness", operation: "unknown", elapsedMs: 1, observations: { controllerDeadline: true } });
+  const aggregate = new AggregateError([typed, new AggregateError([deadline])]);
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1,
+    failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
+  if (stage === "browser") host.runtime.browser = async () => { throw aggregate; };
+  else {
+    const cleanup = host.runtime.cleanup;
+    host.runtime.cleanup = async (...args) => { await cleanup(...args); if (args[0] === "browser") throw aggregate; };
+  }
+  const error = await runAndroidPushReadiness(host.input).catch(error => error);
+  const leaves = normalizeQualificationFailures(error);
+  expect(leaves).toHaveLength(2);
+  for (const leaf of leaves) expect(leaf).toMatchObject({ lane: "rigReadiness", observations: {
+    subscriptionCount: stage === "browser" ? 0 : 1, sendCount: stage === "browser" ? 0 : 1,
+    ackCount: stage === "browser" ? 0 : 1, latePostCount: 0, latePostMs: 0,
+  } });
+  expect(leaves[0]?.step).toBe("browser_context");
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+  expect(host.cleanup).toHaveLength(7);
+  expect(pixelUnrestored(error)).toBe(stage === "restoration");
+});
+
 test("506 council readiness returns counters from the final acknowledged snapshot", async () => {
   const host = fake();
   let reads = 0;
@@ -334,6 +383,7 @@ test.each(["baseline", "mutation", "restoration"] as const)(
     expect(host.cleanup).toEqual(["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"]);
     expect(host.state()).toMatchObject({ started: false, asking: false, browser: browserBaseline, device: baseline });
     expect(normalizeQualificationFailures(error).some(item => item.observations.persistenceFailed === true)).toBe(true);
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain("synthetic checkpoint failure");
     expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(true);
   });
 

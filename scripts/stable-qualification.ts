@@ -57,7 +57,15 @@ export async function withQualificationDeadline<T>(
     execution.signal.throwIfAborted();
     return result;
   } catch (error) {
-    if (execution.signal.aborted && error !== execution.signal.reason) {
+    const containsAbort = (value: unknown, seen = new Set<unknown>()): boolean => {
+      if (value === execution.signal.reason) return true;
+      if (value instanceof QualificationFailure && execution.signal.reason instanceof QualificationFailure &&
+        value.evidence.id === execution.signal.reason.evidence.id && value.evidence.reason === "deadline_exceeded") return true;
+      if (!(value instanceof AggregateError) || seen.has(value)) return false;
+      seen.add(value);
+      return value.errors.some(child => containsAbort(child, seen));
+    };
+    if (execution.signal.aborted && !containsAbort(error)) {
       throw new AggregateError([execution.signal.reason, error], "qualification deadline and owner failed");
     }
     throw error;
@@ -1481,7 +1489,7 @@ export async function runPixelRestoringChild(command: readonly string[], options
   try {
     return await runCommand(command, options);
   } catch (error) {
-    throw Object.assign(error instanceof Error ? error : new Error("Pixel child failed"), { pixelUnrestored: true });
+    throw Object.assign(error instanceof Error ? error : new Error("Pixel child failed", { cause: error }), { pixelUnrestored: true });
   }
 }
 
@@ -1655,21 +1663,25 @@ function remoteOwnerCommand(mode: "run" | "settle", owner: string, argv: readonl
 
 async function settleMacCommand(target: MacTarget, owner: string, execute: typeof runCommand = runCommand,
   execution?: QualificationExecutionContext): Promise<void> {
-  let settled = false;
+  let settled = false, cause: unknown;
   try { settled = (await execute(macSshCommand(target, remoteOwnerCommand("settle", owner)),
-    { allowFailure: true, timeoutMs: 45_000 })).exitCode === 0; } catch { /* Independent control has its own bound. */ }
+    { allowFailure: true, timeoutMs: 45_000 })).exitCode === 0; } catch (error) { cause = error; }
   if (settled) return;
-  throw markUnsettledMac(target, execution);
+  throw markUnsettledMac(target, execution, cause);
 }
 
-function markUnsettledMac(target: MacTarget, execution?: QualificationExecutionContext): QualificationFailure {
+function markUnsettledMac(target: MacTarget, execution?: QualificationExecutionContext, cause?: unknown): QualificationFailure {
   const existing = unsettledRemoteTargets.get(target.sshDestination);
-  if (existing !== undefined) return existing.failure;
+  if (existing !== undefined) {
+    if (cause !== undefined) existing.failure.cause = new AggregateError(
+      [...(existing.failure.cause === undefined ? [] : [existing.failure.cause]), cause], "retained Mac settlement diagnostics");
+    return existing.failure;
+  }
   const nextFailureId = execution?.nextFailureId ?? macFailureAllocators.get(target.sshDestination) ?? (() => ++standaloneMacFailureId);
   const failure = new QualificationFailure(parseLaneFailure({
     id: nextFailureId(), lane: "campaign", step: "teardown", reason: "unclassified_failure", class: "harness",
     operation: "unknown", elapsedMs: 0, observations: { cleanupVerified: false, mutationReconciled: false },
-  }));
+  }), cause === undefined ? undefined : { cause });
   unsettledRemoteTargets.set(target.sshDestination, { failure, nextFailureId });
   return failure;
 }
@@ -1978,12 +1990,12 @@ const defaultPreflightRuntime: StablePreflightRuntime = {
   loadMacTarget: loadConfiguredMacTarget,
 };
 
-/** Discard raw probe errors: SSH, adb and credential tools can include private identifiers or secrets. */
+/** Public-facing text stays fixed; the original probe error is private cause-only evidence. */
 async function prerequisite<T>(description: string, probe: () => Promise<T>): Promise<T> {
   try {
     return await probe();
-  } catch {
-    throw new Error("Stable preflight: " + description);
+  } catch (error) {
+    throw new Error("Stable preflight: " + description, { cause: error });
   }
 }
 
@@ -2235,13 +2247,13 @@ export async function runMacScript(environment: Record<string, string>, lanes: r
   } catch (error) { errors.push(error); }
   let owners: string[];
   try { owners = await readdir(journal); }
-  catch { throw new AggregateError([...errors, markUnsettledMac(target, execution)], "retained Mac owner inventory is unproven"); }
+  catch (error) { throw new AggregateError([...errors, markUnsettledMac(target, execution, error)], "retained Mac owner inventory is unproven"); }
   for (const owner of owners) {
     try { await settleMacCommand(target, owner, execute, execution); await rm(join(journal, owner)); }
     catch (error) { errors.push(error); }
   }
   try { if ((await readdir(journal)).length === 0) await rm(journal, { recursive: true }); }
-  catch { errors.push(markUnsettledMac(target, execution)); }
+  catch (error) { errors.push(markUnsettledMac(target, execution, error)); }
   if (errors.length > 0) throw new AggregateError(errors, "retained Mac script or remote settlement failed");
   execution?.signal.throwIfAborted();
   return `${result!.stdout}${result!.stderr}`;

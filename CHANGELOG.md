@@ -88,7 +88,9 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 56 changel
 - Retain redacted qualification cause chains and stacks on private CLI stderr, plus an exclusive
   private readiness browser-substep diagnostic with the CDP method, without changing receipts.
   Preserve causes across lane ownership and deadlines, bound private bytes, and keep diagnostic
-  retention failures outside the sanitized failure graph.
+  retention failures outside the sanitized failure graph. Preserve ordinary caught errors and
+  aggregate readiness metrics, redact nested opt-out markers before emission, and propagate
+  whole-chain diagnostic flags without duplicating abort roots.
 - Accept fully acknowledged Push fan-out for one request alias, retain bounded recipient/send/ack
   counts, and refuse stale retained-rig subscriptions before the readiness ask. Attribute browser
   baseline failures to closed browser/CDP substeps while preserving restoration and operator-only

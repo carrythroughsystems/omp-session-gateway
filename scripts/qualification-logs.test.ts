@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { QualificationLogSink, SafeLogger } from "../apps/gateway/src/logger.ts";
 import { createQualificationLogs, parseQualificationLogs, pushDeliveryTelemetry, qualificationLogDirectory } from "./qualification-logs.ts";
 import { executeFixture } from "./push-qualification-fixture.ts";
+import { QualificationFailure, normalizeQualificationFailures, privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
 const event = (index: number, name: string, fields: Record<string, number | boolean>) => ({ timestamp: "2026-01-01T00:00:00.000Z", level: "info" as const, event: name, request_alias: 1, ...fields, index });
 const flags = { request_alias: 1, attention: true, clear: false, activity_stop: false, subscription_replay: false };
 const send = [event(1, "push.queue_accepted", { sequence: 1, ...flags }), event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 1 }),
@@ -18,8 +19,9 @@ test.skipIf(process.platform === "win32")("private browser diagnostic preserves 
     remoteDirectory: qualificationLogDirectory(root, randomUUID()), jobDirectory: root });
   const cause = new Error("CDP Runtime.evaluate: Cannot find default execution context");
   cause.stack = `Error: ${cause.message}\n    at syntheticContext (scripts/synthetic.ts:1:1)`;
+  const wrapper = new Error("browser wrapper", { cause }); wrapper.stack = "Error: browser wrapper";
   try {
-    await logs.browserFailure("browser_context", new Error("browser wrapper", { cause }), 2606);
+    await logs.browserFailure("browser_context", wrapper, 2606);
     const path = join(root, "browser-substep.json");
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
       substep: "browser_context", message: cause.message, cdpMethod: "Runtime.evaluate", elapsedMs: 2606,
@@ -27,6 +29,46 @@ test.skipIf(process.platform === "win32")("private browser diagnostic preserves 
     expect(statSync(path).mode & 0o777).toBe(0o600);
     await expect(logs.browserFailure("browser_context", cause, 1)).rejects.toThrow();
     expect(readdirSync(root)).toEqual(["browser-substep.json"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("509 round2 browser sink selects deepest CDP cause and flags the complete chain", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-browser-chain-")); chmodSync(root, 0o700);
+  const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory: qualificationLogDirectory(root, randomUUID()), jobDirectory: root });
+  const deep = new Error("CDP Runtime.evaluate: deepest synthetic context");
+  deep.stack = "Error: deepest synthetic context";
+  const shallow = new Error("CDP Target.attachToTarget: synthetic wrapper", { cause: deep }); shallow.stack = shallow.message;
+  const oversized = new Error("x".repeat(5000)); oversized.stack = "";
+  const privateIdentifier = new Error("/" + ["Users", "syntheticoperator"].join("/")); privateIdentifier.stack = "";
+  const chain = new AggregateError([new Error("nested", { cause: shallow }), oversized, privateIdentifier], "browser wrapper");
+  try {
+    await logs.browserFailure("browser_context", chain, 1);
+    expect(JSON.parse(readFileSync(join(root, "browser-substep.json"), "utf8"))).toMatchObject({
+      message: deep.message, cdpMethod: "Runtime.evaluate", truncated: true, redacted: true,
+    });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("509 round2 capability-free producer body stays private and cannot enter sanitized surfaces", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-browser-authorship-")); chmodSync(root, 0o700);
+  const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory: qualificationLogDirectory(root, randomUUID()), jobDirectory: root });
+  const body = '{"synthetic_response":"short capability-free body"}';
+  const cause = new Error(`CDP Runtime.evaluate: ${body}`); cause.stack = cause.message;
+  const typed = new QualificationFailure({ id: 1, lane: "rigReadiness", step: "browser_context",
+    reason: "browser_baseline_failed", class: "harness", operation: "unknown", elapsedMs: 1, observations: {} }, { cause });
+  try {
+    await logs.browserFailure("browser_context", typed, 1);
+    const path = join(root, "browser-substep.json");
+    expect(JSON.parse(readFileSync(path, "utf8")).message).toContain(body);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(privateQualificationFailureDiagnostic(typed).some(entry => entry.message.includes(body))).toBe(true);
+    expect(JSON.stringify(typed)).not.toContain("synthetic_response");
+    expect(JSON.stringify(normalizeQualificationFailures(typed))).not.toContain("synthetic_response");
+    const publicLines: string[] = [];
+    const logger = new SafeLogger({ write: line => { publicLines.push(line); } });
+    expect(() => logger.event("error", "http.request_failed", { response_body: body } as never)).toThrow("unsafe log field value");
+    logger.event("error", "http.request_failed");
+    expect(publicLines.join("\n")).not.toContain("synthetic_response");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

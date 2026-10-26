@@ -288,9 +288,13 @@ export function privateQualificationFailureDiagnostic(error: unknown): readonly 
       // Do not cut a secret at a byte boundary or run unbounded regexes on a provider body.
       if (Buffer.byteLength(text) > limit) { truncated = true; return "[oversized private diagnostic withheld]"; }
       const safe = text.split("\n").map(line => {
+        // Remove nested opt-outs to a fixed point, then scan and emit that same text.
+        while (line.includes("identifier-leak-allow")) {
+          line = line.replaceAll("identifier-leak-allow", "");
+          redacted = true;
+        }
         if (findCapabilityLeaks(line).length > 0) { redacted = true; return "[capability-bearing diagnostic withheld]"; }
-        // Source-scanner opt-outs cannot waive runtime redaction.
-        for (const finding of findIdentifierLeaks(line.replaceAll("identifier-leak-allow", ""))) {
+        for (const finding of findIdentifierLeaks(line)) {
           redacted = true;
           line = line.replaceAll(finding.match, `[redacted ${finding.label}]`);
         }

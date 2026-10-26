@@ -1079,6 +1079,12 @@ Private messages are limited to 4 KiB and stacks to 16 KiB; oversized fields are
 scanning, with `truncated: true`. Redaction is flagged with `redacted: true`. The complete compact
 stderr diagnostic and browser file each stay within the driver's 256-KiB retention ceiling, with
 an explicit terminal marker when the cause graph exceeds its byte budget.
+The browser file selects the deepest retained CDP cause and carries redaction/truncation flags
+from the entire chain, including omitted siblings. Ordinary errors remain privately reachable
+through deadline, persistence and containment conversions. Nested readiness failures receive the
+same lane remapping and final delivery counters as single failures. These mode-0600 diagnostics
+are not a general body sanitizer: producer-authored messages remain an authorship boundary;
+inspect them before sharing, as described in `docs/SECURITY.md`.
 
 Windows readiness reuses credential, inventory, image, plan and toolchain admission and requires
 remaining per-tag creation allowance with no unreconciled qualification resources. Unsupported

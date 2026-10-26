@@ -12,15 +12,17 @@ import { pixelUnrestored } from "./restoration.ts";
 export interface WindowsExecutionContext { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
 let standaloneFailureId = 0;
 export function windowsFailure(reason: keyof typeof FAILURE_REASONS.windows, step: LaneStep<"windows">,
-  operation: OperationDisposition, observations: FailureObservations = {}, execution?: WindowsExecutionContext, elapsedMs = 0): QualificationFailure {
+  operation: OperationDisposition, observations: FailureObservations = {}, execution?: WindowsExecutionContext, elapsedMs = 0,
+  options?: ErrorOptions): QualificationFailure {
   return new QualificationFailure(parseLaneFailure({ id: execution?.nextFailureId() ?? ++standaloneFailureId,
-    lane: "windows", step, reason, class: FAILURE_REASONS.windows[reason], operation, observations, elapsedMs }));
+    lane: "windows", step, reason, class: FAILURE_REASONS.windows[reason], operation, observations, elapsedMs }), options);
 }
 export function assertWindowsExecution(execution?: WindowsExecutionContext, operation: OperationDisposition = "not_started"): void {
   if (execution === undefined) return;
   const expired = performance.now() >= execution.deadline;
   if (execution.signal.aborted || expired) {
-    throw windowsFailure("deadline_exceeded", "command", operation, { controllerDeadline: expired }, execution);
+    throw windowsFailure("deadline_exceeded", "command", operation, { controllerDeadline: expired }, execution, 0,
+      execution.signal.aborted ? { cause: execution.signal.reason } : undefined);
   }
 }
 /** One snapshot decides whether any positive millisecond of this local budget remains. */
@@ -316,7 +318,14 @@ async function waitFor(runtime: WindowsRuntime, action: () => Promise<boolean>, 
     remaining();
     let succeeded: boolean;
     try { succeeded = await action(); }
-    catch (error) { remaining(); throw error; }
+    catch (error) {
+      try { remaining(); }
+      catch (expiry) {
+        if (expiry instanceof Error) expiry.cause = new AggregateError([error, ...(expiry.cause === undefined ? [] : [expiry.cause])], "Windows poll expired");
+        throw expiry;
+      }
+      throw error;
+    }
     const budget = remaining();
     if (succeeded) return;
     await runtime.sleep(Math.min(5_000, budget));
@@ -395,7 +404,10 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     if (deadlineFailure(error) || (error instanceof AggregateError && error.errors.some(deadlineFailure))) return error;
     try { assertWindowsExecution(input.execution, "unknown"); }
     catch (expiry) {
-      if (!(error instanceof QualificationFailure) && !(error instanceof AggregateError) && !pixelUnrestored(error)) return expiry;
+      if (!(error instanceof QualificationFailure) && !(error instanceof AggregateError) && !pixelUnrestored(error)) {
+        if (expiry instanceof Error) expiry.cause = new AggregateError([error, ...(expiry.cause === undefined ? [] : [expiry.cause])], "Windows operation expired");
+        return expiry;
+      }
       const failure = new AggregateError([error, expiry], "Windows operation and execution deadline failed");
       if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
       return failure;
@@ -456,7 +468,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
         failure.message = error.message; throw failure;
       }
       if (error instanceof AggregateError) throw error;
-      const failure = windowsFailure("unclassified_failure", phase, "unknown", {}, input.execution, runtime.now() - start);
+      const failure = windowsFailure("unclassified_failure", phase, "unknown", {}, input.execution, runtime.now() - start, { cause: error });
       if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
       throw failure;
     }
@@ -617,7 +629,9 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   const label = windowsCampaignLabel(progress.epoch);
   const failures: string[] = [];
   const causes: Error[] = [];
-  let guestFailures = 0, instanceAbsent = false, guestCommandsSkipped = true, ownershipChanged = false;
+  const guestErrors: unknown[] = [];
+  const checkpointErrors: unknown[] = [];
+  let instanceAbsent = false, guestCommandsSkipped = true, ownershipChanged = false;
   const failed = (name: string, error: unknown) => {
     if (error instanceof QualificationFailure && error.evidence.reason === "ownership_changed") ownershipChanged = true;
     failures.push(name);
@@ -636,6 +650,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   const save = async () => {
     try { await input.checkpoint(structuredClone(progress)); }
     catch (error) {
+      checkpointErrors.push(error);
       if (!failures.includes("checkpoint")) {
         failed("checkpoint", error);
       }
@@ -680,7 +695,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
       try { await beforeEffect(); await runtime.guest(context, action, owner); return true; }
       catch (error) {
         if (error instanceof QualificationFailure && error.evidence.reason === "ownership_changed") failed(action, error);
-        else guestFailures += 1;
+        else guestErrors.push(error);
         return false;
       }
     };
@@ -740,11 +755,13 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   await runtime.sleep(5_000);
   await attempt("instanceResidue", async () => { requireFact(!(await runtime.provider.instances()).some(item => item.label?.startsWith(QUAL_LABEL_PREFIX)), "instance residue"); });
   await attempt("firewallResidue", async () => { requireFact(!(await runtime.provider.firewalls()).some(item => item.description?.startsWith(QUAL_LABEL_PREFIX)), "firewall residue"); });
-  if (guestFailures > 0 && !instanceAbsent) failed("guestContainment", undefined);
+  if (guestErrors.length > 0 && !instanceAbsent) failed("guestContainment",
+    new Error("Windows guest containment failed", { cause: new AggregateError(guestErrors) }));
   if (!containmentCommitted) progress.cleanupRequired = failures.length > 0;
   if (!progress.cleanupRequired) progress.retirementPending = true;
   await save();
-  if (failures.length) throw new AggregateError(causes, `Windows cleanup failed: ${failures.join(", ")}`);
+  if (failures.length) throw new AggregateError(causes, `Windows cleanup failed: ${failures.join(", ")}`,
+    { cause: new AggregateError([...guestErrors, ...checkpointErrors], "Windows cleanup diagnostics") });
   // Completion is durable before deleting the last recovery state. If unlink fails or the
   // controller dies afterward, the committed false checkpoint lets cleanup finish without
   // attempting Pixel restoration from a vault that may already be absent.
@@ -753,9 +770,10 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
     lane: "windowsCleanup", step: "vault", reason: "containment_unproven", class: "harness",
     elapsedMs: 0, operation: "unknown", observations: {} }), { cause: error }); }
   progress.retirementPending = false; await save();
-  if (failures.length) throw new AggregateError(causes, `Windows retirement failed: ${failures.join(", ")}`);
+  if (failures.length) throw new AggregateError(causes, `Windows retirement failed: ${failures.join(", ")}`,
+    { cause: new AggregateError(checkpointErrors, "Windows retirement diagnostics") });
   return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,
-    guestCleanupFailures: guestFailures, guestCommandsSkipped };
+    guestCleanupFailures: guestErrors.length, guestCommandsSkipped };
 }
 
 if (import.meta.main) {

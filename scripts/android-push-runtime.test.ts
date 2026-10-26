@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import * as deviceOperations from "./android-device.ts";
 import * as webApkOperations from "./android-webapk.ts";
+import * as notificationOperations from "./android-notification.ts";
 import { AndroidBrowserCleanupError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
 import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
@@ -9,6 +10,32 @@ import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qua
 import { privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
 import { notificationTopicDigest } from "./android-notification.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
+
+test("509 round2 runtime privacy conversion preserves ordinary notification errors", async () => {
+  const raw = new Error("synthetic notification identity changed");
+  const session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
+    startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
+    ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
+  let reads = 0;
+  const spies = [
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [session] }),
+      { preconnect: globalThis.fetch.preconnect })),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++reads === 1 ? [] : [{
+      key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
+      title: "OMP session needs attention", body: "", text: "",
+    }]),
+    spyOn(notificationOperations, "trackUnchangedNotificationPost").mockImplementation(() => { throw raw; }),
+  ];
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.dndOff = async () => true;
+    await runtime.beginNotificationPhase("synthetic", "private_verified");
+    const error = await runtime.observe(session, "attention", "private").catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "privacy_failed" }]);
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+  } finally { for (const spy of spies) spy.mockRestore(); }
+});
 
 test.each(["before", "during"] as const)("509 council browser deadline elapsed %s capture retains deadline and original cause", async when => {
   let id = 0;

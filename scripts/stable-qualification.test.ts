@@ -1288,6 +1288,23 @@ describe("campaign terminal evidence and readiness", () => {
     expect(events).toEqual(["aborted", "reaped", "cleanup"]);
   });
 
+  test.each(["original", "remapped"] as const)("509 round2 deadline does not duplicate its %s abort root inside a returned aggregate", async variant => {
+    let id = 0, owned: AggregateError | undefined;
+    const error = await withQualificationDeadline("androidPush", 5, () => ++id, async execution => {
+      await new Promise<void>(resolve => execution.signal.addEventListener("abort", () => resolve(), { once: true }));
+      const evidence = (execution.signal.reason as QualificationFailure).evidence;
+      if (evidence.reason !== "deadline_exceeded") throw new Error("expected controller deadline");
+      const reason = variant === "original" ? execution.signal.reason : new QualificationFailure({
+        ...evidence, lane: "rigReadiness", step: "pixel_push",
+      }, { cause: execution.signal.reason });
+      owned = new AggregateError([new AggregateError([reason], "nested owner")], "owner settled");
+      throw owned;
+    }).catch(error => error);
+    expect(error).toBe(owned);
+    expect(normalizeQualificationFailures(error)).toHaveLength(1);
+    expect(normalizeQualificationFailures(error)[0]?.reason).toBe("deadline_exceeded");
+  });
+
   test.each(["prepare", "windows", "macos", "push"] as const)("readiness %s failure restores Pixel then Mac and never passes a qualification lane", async phase => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     const events: string[] = [];
