@@ -109,8 +109,9 @@ export function checkProviderReads(rel: string, text: string): string[] {
     // This dispatcher shares a closure but replays it ONLY for GET. Match the gate as well
     // as the target, so removing the read retry or retrying writes fails repository admission.
     if ((rel === "scripts/windows-qualification-runtime.ts" && target === "url") &&
-      /const send = \(\) => $/u.test(before) &&
-      text.includes('const response = method === "GET" ? await readProvider(send) : await send();')) continue;
+      /const send = \((?:readSignal: AbortSignal = signal)?\) => $/u.test(before) &&
+      (text.includes('const response = method === "GET" ? await readProvider(send) : await send();') ||
+        text.includes('const response = method === "GET" ? await readProvider(send, { signal, ...(execution === undefined ? {} : { deadline: execution.deadline }) }) : await send();'))) continue;
     failures.push(rel + ":" + (before.split("\n").length) + ": unreviewed direct fetch; use readProvider for idempotent provider reads or document the exact non-provider target");
   }
   return failures;

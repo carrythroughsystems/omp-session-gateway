@@ -89,6 +89,7 @@ export type WindowsGuestAction = "transport" | "reconnect" | "stage" | "installP
 /** The Windows account a guest action or RDP logon runs as. */
 export type WindowsPrincipal = "administrator" | "standard";
 export interface WindowsRuntime {
+  setExecution?(execution?: WindowsExecutionContext): void;
   /** Development CLI only: retain a healthy guest for immediate repair inside its lease. */
   readonly development?: boolean;
   readonly environment: Readonly<Record<string, string | undefined>>;
@@ -273,6 +274,7 @@ function evidence(progress: Progress, identity: WindowsIdentity): Record<string,
 export async function runWindows(input: WindowsLaneInput): Promise<Record<string, unknown>> {
   const digest = binding(input.identity);
   const runtime = input.runtime ?? await createWindowsRuntime(input.execution === undefined ? {} : { execution: input.execution });
+  runtime.setExecution?.(input.execution);
   let resumed: Progress | undefined;
   if (input.progress !== undefined) {
     const prior = parseProgress(input.progress, digest);
@@ -479,6 +481,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   if (input.progress === undefined) return { noAttempt: true };
   const progress = parseProgress(input.progress, binding(input.identity));
   const runtime = input.runtime ?? await createWindowsRuntime();
+  runtime.setExecution?.(input.execution);
   const label = windowsCampaignLabel(progress.epoch);
   const failures: string[] = [];
   const causes: Error[] = [];

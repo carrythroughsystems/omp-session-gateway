@@ -364,6 +364,10 @@ orchestrator, policy, retained Mac and attempt. A completed attempt's job and ex
 are immutable; only the candidate's working receipt advances. Consuming a retry removes the old
 failure authorization durably before admission or setup. Passed product proofs remain unchanged,
 while failed resource-owning lanes start on fresh epochs after current cleanup proof.
+Fresh unbound effectful campaigns require attempt zero. Later ordinals require the exact terminal-failed
+receipt digest or an immutable effect-free prior preflight outcome and digest, never just an execution
+file. Both routes consume authority durably before admission. Renewed admission failures belong to `campaign/admission`,
+preserving typed classifications without attaching a failure to a pending or previously passed lane.
 
 Consumer failure does not cancel healthy siblings. The shared OMP host and relay tunnel live until
 their consumers settle; the tunnel stops before the independent publication lifecycle runs.
@@ -375,8 +379,14 @@ Execution cancellation carries a monotonic deadline to owned reads, subprocesses
 owner aborts and awaits termination before cleanup; no timed-out promise is abandoned. Cleanup
 serializes per resource owner, not globally: Pixel restoration stays under its lease, Windows
 destruction does not queue behind unrelated Pixel work, and retained-Mac destructive cleanup waits
-for Mac consumers and their fixture restoration. A poisoned Pixel refuses subsequent work with
-collateral references to its originating failures.
+for Mac consumers and their fixture restoration. A poisoned Pixel refuses subsequent measurements
+with collateral references to its originating failures, but always admits restoration under the same
+lease. Failed persistence cannot skip owned cleanup; `persistenceFailed` blocks a clean verdict.
+Successful later cleanup retires stale cleanup-owner failures without inventing a primary pass.
+Remote commands record a private process-group owner outside gateway installation state. Cancellation
+uses a fresh bounded SSH command to terminate that group and await absence, not merely kill the local
+SSH client. A private cancellation tombstone fences delayed admission; unproved termination refuses
+all later effects on that retained host, including destructive cleanup.
 
 Read-only admission is distinct from effectful rig readiness. After lease acquisition and verified
 candidate/predecessor bytes, readiness stages a disposable candidate/stock-OMP fixture, measures
@@ -386,7 +396,9 @@ Manual attempt-zero readiness is diagnostic evidence, not a synthesized policy b
 retry authorization.
 Failed or unresolved readiness is a failure-graph owner, never a passing receipt: its terminal
 summary must represent it, and unresolved restoration cannot coexist with proven cleanup.
-`restored` requires an explicit `baselineRestored: true`. Restarting a root invalidates the
+`restored` requires an explicit `baselineRestored: true`; passing campaigns also require terminal
+passed readiness. Every receipt write validates the full schema, and restarting lanes clears
+not-started reasons as well as stale failure evidence. Restarting a root invalidates the
 entire prior standalone failure graph before persistence, including dependent collateral.
 Transport failures at an ordinary lane's explicit `cleanup` step do not authorize automatic retry.
 Private receipt, readiness-baseline and outcome persistence belongs to the POSIX Studio driver:

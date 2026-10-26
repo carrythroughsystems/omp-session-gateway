@@ -215,33 +215,42 @@ async function existingAccess(epoch: string): Promise<Access | undefined> {
 }
 
 /** Failure text is independent of HTTP bodies, which can contain credentials and identifiers. */
-async function request<T>(url: string, headers: Record<string, string>, method = "GET", body?: unknown): Promise<T | undefined> {
-  const send = () => fetch(url, { method, headers: { ...headers, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60_000) });
+export async function request<T>(url: string, headers: Record<string, string>, method = "GET", body?: unknown, execution?: WindowsExecutionContext): Promise<T | undefined> {
+  assertWindowsExecution(execution);
+  const owner = new AbortController();
+  const signal = execution === undefined ? owner.signal : AbortSignal.any([owner.signal, execution.signal]);
+  const timer = execution === undefined ? undefined : setTimeout(() => owner.abort(), Math.max(0, execution.deadline - performance.now()));
+  const send = (readSignal: AbortSignal = signal) => fetch(url, { method, headers: { ...headers, "content-type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.any([readSignal, AbortSignal.timeout(60_000)]) });
   try {
-    const response = method === "GET" ? await readProvider(send) : await send();
-    if (response.status === 404) return undefined;
+    const response = method === "GET" ? await readProvider(send, { signal, ...(execution === undefined ? {} : { deadline: execution.deadline }) }) : await send();
+    if (response.status === 404) { await response.body?.cancel(); return undefined; }
     if (!response.ok) {
       await response.body?.cancel();
       if (method === "GET" && (response.status === 429 || response.status >= 500)) {
-        throw windowsFailure("retryable_service_failure", "connection", "read_only", { httpStatus: response.status });
+        throw windowsFailure("retryable_service_failure", "connection", "read_only", { httpStatus: response.status }, execution);
       }
       throw windowsFailure(response.status === 401 || response.status === 403 ? "authentication_failed" : "helper_failed",
-        "connection", method === "GET" ? "read_only" : "unknown", { httpStatus: response.status });
+        "connection", method === "GET" ? "read_only" : "unknown", { httpStatus: response.status }, execution);
     }
     const text = response.status === 204 ? "" : await response.text();
+    signal.throwIfAborted();
     try { return text === "" ? undefined : JSON.parse(text) as T; }
-    catch { throw windowsFailure("helper_failed", "output", method === "GET" ? "read_only" : "unknown"); }
+    catch { throw windowsFailure("helper_failed", "output", method === "GET" ? "read_only" : "unknown", {}, execution); }
   }
   catch (error) {
+    if (signal.aborted || (execution !== undefined && performance.now() >= execution.deadline)) {
+      throw windowsFailure("deadline_exceeded", "connection", method === "GET" ? "read_only" : "unknown", {}, execution);
+    }
     if (error instanceof QualificationFailure) throw error;
     const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
     if (method === "GET") {
-      if (code === "ECONNRESET") throw windowsFailure("connection_reset", "connection", "read_only", { transportFailure: true });
-      if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") throw windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true });
-      if (error instanceof DOMException && error.name === "TimeoutError") throw windowsFailure("read_timeout", "connection", "read_only", { transportFailure: true });
+      if (code === "ECONNRESET") throw windowsFailure("connection_reset", "connection", "read_only", { transportFailure: true }, execution);
+      if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") throw windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true }, execution);
+      if (error instanceof DOMException && error.name === "TimeoutError") throw windowsFailure("read_timeout", "connection", "read_only", { transportFailure: true }, execution);
     }
-    throw windowsFailure(method === "GET" ? "helper_failed" : "mutation_unconfirmed", "connection", method === "GET" ? "read_only" : "unknown");
-  }
+    throw windowsFailure(method === "GET" ? "helper_failed" : "mutation_unconfirmed", "connection", method === "GET" ? "read_only" : "unknown", {}, execution);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
 /** Same launch predicates as the shared verifier, with typed Windows assertion boundaries. */
@@ -478,8 +487,9 @@ export async function windowsUploadStep<T>(step: WindowsUploadStep, action: (ste
 }
 
 export async function createWindowsRuntime(options: { development?: boolean; execution?: WindowsExecutionContext } = {}): Promise<WindowsRuntime> {
+  let execution = options.execution;
   const hostCommand = (argv: readonly string[], settings: Parameters<typeof command>[1] = {}) =>
-    command(argv, { ...settings, ...(options.execution === undefined ? {} : { execution: options.execution }) });
+    command(argv, { ...settings, ...(execution === undefined ? {} : { execution }) });
   const environment: Record<string, string | undefined> = { ...process.env };
   const vultrKey = (await privateFile(join(homedir(), ".vultr-apikey"))).trim();
   let joinValue = ""; let apiValue = "";
@@ -493,7 +503,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
   if (!joinValue || !apiValue) throw new Error("tagged join credential and tailnet API credential are required");
   const headers = { Authorization: `Bearer ${vultrKey}` };
   const tsHeaders = { Authorization: `Bearer ${apiValue}` };
-  const api = <T>(path: string, method = "GET", body?: unknown) => request<T>(`https://api.vultr.com/v2/${path}`, headers, method, body);
+  const api = <T>(path: string, method = "GET", body?: unknown, owner = execution) => request<T>(`https://api.vultr.com/v2/${path}`, headers, method, body, owner);
   const list = async <T>(path: string, key: string): Promise<T[]> => {
     let cursor = ""; const items: T[] = [];
     do {
@@ -503,7 +513,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       const page = await confirmAbsence(async () => {
         const read = await api<Record<string, unknown>>(url);
         return read !== undefined && Array.isArray(read[key]) ? read : undefined;
-      });
+      }, execution ?? {});
       if (!page) throw new Error("invalid provider listing");
       items.push(...page[key] as T[]);
       cursor = ((page.meta as { links?: { next?: string } } | undefined)?.links?.next ?? "");
@@ -515,12 +525,12 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
   const provider = {
     instances: () => list<WindowsInstance>("instances", "instances"),
     firewalls: () => list<WindowsFirewall>("firewalls", "firewall_groups"),
-    instance: (id: string) => confirmAbsence(async () => (await api<{ instance: WindowsInstance }>(`instances/${encodeURIComponent(id)}`))?.instance),
-    firewall: (id: string) => confirmAbsence(async () => (await api<{ firewall_group: WindowsFirewall }>(`firewalls/${encodeURIComponent(id)}`))?.firewall_group),
-    async createFirewall(label: string, execution?: WindowsExecutionContext) {
+    instance: (id: string) => confirmAbsence(async () => (await api<{ instance: WindowsInstance }>(`instances/${encodeURIComponent(id)}`))?.instance, execution ?? {}),
+    firewall: (id: string, owner = execution) => confirmAbsence(async () => (await api<{ firewall_group: WindowsFirewall }>(`firewalls/${encodeURIComponent(id)}`, "GET", undefined, owner))?.firewall_group, owner ?? {}),
+    async createFirewall(label: string, owner = execution) {
       if (!egress) throw new Error("Windows preflight was not performed");
-      assertWindowsExecution(execution ?? options.execution);
-      const item = await api<{ firewall_group: WindowsFirewall }>("firewalls", "POST", { description: label });
+      assertWindowsExecution(owner);
+      const item = await api<{ firewall_group: WindowsFirewall }>("firewalls", "POST", { description: label }, owner);
       if (!item) throw new Error("firewall create response lost");
       // Preserve the exact ID before configuring it; a later label change must not become absence.
       await atomicPrivate(vaultPath(label.slice(QUAL_LABEL_PREFIX.length)), { firewall: item.firewall_group.id });
@@ -533,8 +543,8 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
         await api(`firewalls/${id}/rules`, "POST", { ip_type: "v4", protocol: "tcp", subnet: egress, subnet_size: 32, port, notes: "qualification operator" });
       }
     },
-    async createInstance(label: string, firewall: string, execution?: WindowsExecutionContext) {
-      const group = await provider.firewall(firewall);
+    async createInstance(label: string, firewall: string, owner = execution) {
+      const group = await provider.firewall(firewall, owner);
       if (!group || group.description !== label || !firewallEligibility(group.id, group.description, environment).eligible) throw new Error("attached firewall ownership changed");
       const counterPath = join(devRoot, `creations-${activeTag}.json`);
       let creations = 0;
@@ -542,8 +552,8 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       const creationLimit = options.development ? 6 : 4;
       if (!Number.isInteger(creations) || creations < 0 || creations >= creationLimit) throw new Error("Windows creation cap reached");
       await atomicPrivate(counterPath, creations + 1);
-      assertWindowsExecution(execution ?? options.execution);
-      const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false });
+      assertWindowsExecution(owner);
+      const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false }, owner);
       if (!item) throw new Error("instance create response lost"); return item.instance;
     },
     async destroyInstance(id: string, label: string) {
@@ -707,10 +717,11 @@ if ($exists) {
   };
   return {
     development: options.development === true, environment, provider, now: Date.now, sleep: Bun.sleep, uuid: randomUUID,
+    setExecution: owner => { execution = owner; },
     async admit(input: WindowsPreflightInput): Promise<WindowsAdmission> {
       if (process.platform !== "darwin" || Bun.version !== pins.bunVersion) throw new Error("Windows controller requires macOS and pinned Bun");
       activeTag = input.identity?.tag ?? "preflight";
-      const external = await readProvider(() => fetch("https://api.ipify.org", { signal: AbortSignal.timeout(15_000) }));
+      const external = await readProvider(signal => fetch("https://api.ipify.org", { signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) }), execution ?? {});
       egress = (await external.text()).trim();
       if (!/^(?:\d{1,3}\.){3}\d{1,3}$/u.test(egress) || egress.split(".").some(part => Number(part) > 255)) throw new Error("operator IPv4 egress unavailable");
       if (environment.OMP_STABLE_WINDOWS_OPERATOR_CIDR && environment.OMP_STABLE_WINDOWS_OPERATOR_CIDR !== `${egress}/32`) throw new Error("operator egress no longer matches admitted /32");
@@ -729,7 +740,7 @@ if ($exists) {
       const rdpVersion = await hostCommand(["sdl-freerdp", "/version"]);
       if (!rdpVersion.includes(`version ${pins.freerdpVersion} `)) throw new Error("FreeRDP version mismatch");
       await requireSingleDevice(); // Read-only device enumeration; navigation is behind pixel().
-      const tailnet = await request<{ devices: unknown[] }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders);
+      const tailnet = await request<{ devices: unknown[] }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, execution);
       if (!tailnet || !Array.isArray(tailnet.devices)) throw new Error("qualification tailnet admission failed");
       if (input.identity) for (const artifact of [input.identity.candidate, input.identity.predecessor]) {
         const info = await lstat(artifact.archivePath);
@@ -929,16 +940,17 @@ if ($exists) {
     },
     restorePixel,
     async deleteTailnet(context) {
-      const listing = await request<{ devices: Array<{ id: string; hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders);
+      const owner = context.execution ?? execution;
+      const listing = await request<{ devices: Array<{ id: string; hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, owner);
       if (!listing) throw new Error("tailnet listing failed");
       const matches = listing.devices.filter(item => item.hostname === windowsCampaignLabel(context.epoch));
       for (const match of matches) {
-        const fresh = await confirmAbsence(() => request<{ id: string; hostname: string }>(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders));
+        const fresh = await confirmAbsence(() => request<{ id: string; hostname: string }>(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "GET", undefined, owner), owner ?? {});
         if (!fresh) continue;
         if (fresh.hostname !== windowsCampaignLabel(context.epoch)) throw new Error("tailnet ownership changed");
-        await context.beforeEffect(); await request(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "DELETE");
+        await context.beforeEffect(); await request(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "DELETE", undefined, owner);
       }
-      const after = await request<{ devices: Array<{ hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders);
+      const after = await request<{ devices: Array<{ hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, owner);
       if (!after || after.devices.some(item => item.hostname === windowsCampaignLabel(context.epoch))) throw new Error("tailnet node remains");
     },
   };

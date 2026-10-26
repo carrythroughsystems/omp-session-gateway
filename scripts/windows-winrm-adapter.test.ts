@@ -6,6 +6,28 @@ import type { WindowsTransportProbe } from "./windows-stable-qualification";
 import { windowsFailure } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
 
+test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructure retry authority", async method => {
+  const original = globalThis.fetch;
+  const controller = new AbortController();
+  let sends = 0;
+  globalThis.fetch = (async (_url, options) => {
+    sends += 1;
+    return new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Response.json({ accepted: true })), 150);
+      options?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(options.signal!.reason); }, { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    const result = winrmRuntime.request("https://synthetic.invalid", {}, method, undefined,
+      { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 31 }).catch(error => error);
+    setTimeout(() => controller.abort(new Error("synthetic cancellation")), 20);
+    const error = await result;
+    expect(error).toBeInstanceOf(QualificationFailure);
+    expect(error.evidence).toMatchObject({ id: 31, class: "harness", operation: method === "GET" ? "read_only" : "unknown" });
+    expect(sends).toBe(1);
+  } finally { globalThis.fetch = original; }
+});
+
 const transportResult = (condition = "connection_timeout") => ({
   exitCode: -1, stdout: "", diagnostic: "private text ignored",
   failure: { kind: "transport", stage: "connection", condition, httpStatus: null, disposition: "not_started" },

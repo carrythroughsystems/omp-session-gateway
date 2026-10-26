@@ -12,6 +12,8 @@ import {
   assertProtectedFilesUnchanged,
   assertDeviceCloudResumeEligible,
   assertCampaignRetryEligible,
+  cleanExternalLane,
+  preflightStableQualification,
   withConsumedCampaignRetry,
   withQualificationDeadline,
   finalizeCampaignFailure,
@@ -36,6 +38,8 @@ import {
   runAndroidAcceptance,
   runPixelRestoringChild,
   runStableQualification,
+  remoteExecutor,
+  waitForTunnelReady,
   receiptNeedsMacCleanup,
   validateStableQualificationReceipt,
   verifyLaunchContracts,
@@ -51,7 +55,7 @@ import {
 import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-qualification.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
-import { readQualificationOutcomeFile, type QualificationExecution } from "./qualification-outcome.ts";
+import { readQualificationOutcomeFile, writeQualificationOutcomeFile, type QualificationExecution } from "./qualification-outcome.ts";
 import { QualificationFailure, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
@@ -1654,6 +1658,209 @@ function summarizedReceipt() {
   return receipt;
 }
 
+test.skipIf(process.platform === "win32").each([1, 2] as const)("council491 fresh campaign refuses attempt %i before admission", async campaignAttempt => {
+  const root = await mkdtemp(join(tmpdir(), "fresh-retry-authority-"));
+  try {
+    const execution = { ...receiptExecution(), campaignAttempt, retryPlanSha256: "d".repeat(64) };
+    const path = join(root, "execution.json");
+    await writeFile(path, JSON.stringify(execution), { mode: 0o600 });
+    const runtime = await preflightFixture(root);
+    let probed = false;
+    await expect(runStableQualification(["--tag", TAG, "--execution-file", path], {
+      ...runtime, executable: () => { probed = true; return null; },
+    }, admissionLanes())).rejects.toThrow("fresh campaign requires attempt zero");
+    expect(probed).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32").each(["valid", "digest", "binding", "ordinal", "product"] as const)(
+  "council491 receiptless preflight retry requires exact %s authority", async kind => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "preflight-retry-authority-")));
+  try {
+    const prior = receiptExecution();
+    const next: QualificationExecution = { ...prior, campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+    const executionPath = join(root, "execution.json"), outcomePath = join(root, "prior-outcome.json");
+    await writeFile(executionPath, JSON.stringify(next), { mode: 0o600 });
+    await writeQualificationOutcomeFile(outcomePath, {
+      formatVersion: 1, outcome: "qualification-failed", scope: "preflight",
+      execution: kind === "ordinal" ? next : kind === "binding" ? { ...prior, binding: { ...prior.binding, policySha256: "e".repeat(64) } } : prior,
+      failureSummary: { failures: [kind === "product" ?
+        { id: 1, lane: "windows", step: "preflight", class: "product", reason: "assertion_failed", operation: "read_only", elapsedMs: 1, observations: {} } :
+        { id: 1, lane: "preflight", step: "admission", class: "infra_transient", reason: "connection_timeout", operation: "read_only", elapsedMs: 1, observations: { transportFailure: true } }],
+        timings: { attemptMs: 1, cleanupMs: 0 }, containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } },
+    });
+    const priorDigest = digest(await readFile(outcomePath, "utf8"));
+    const runtime = await preflightFixture(root);
+    let admitted = false;
+    const error = await runStableQualification(["--tag", TAG, "--execution-file", executionPath,
+      "--retry-outcome-file", outcomePath, "--retry-outcome-sha256", kind === "digest" ? "f".repeat(64) : priorDigest], {
+      ...runtime, executable: () => {
+        admitted = true;
+        const consumed = JSON.parse(readFileSync(join(root, "stable-qualification.json"), "utf8"));
+        expect(consumed.execution).toEqual(next);
+        return null;
+      },
+    }, admissionLanes()).catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(admitted).toBe(kind === "valid");
+    expect(digest(await readFile(outcomePath, "utf8"))).toBe(priorDigest);
+    if (kind !== "valid") expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("council491 receipt persistence rejects stale not-started metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "invalid-receipt-write-"));
+  try {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    receipt.lanes.ompPublication.status = "running";
+    receipt.lanes.ompPublication.notStartedReason = "readiness_failed";
+    await expect(createReceiptPersister(join(root, "receipt.json"), receipt)()).rejects.toThrow("not-started");
+    expect(await readdir(root)).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("council491 publication restart clears its previous not-started reason", async () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.lanes.ompPublication.notStartedReason = "readiness_failed";
+  await completeOmpPublicationLifecycle(receipt, async () => {
+    validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+  }, async () => structuredClone(lifecycleEvidence));
+  expect(receipt.lanes.ompPublication.notStartedReason).toBeUndefined();
+});
+
+test("council491 poisoned Pixel still admits cleanup and preserves caller identity", async () => {
+  const pixel = createPixelLease(() => {});
+  const root = Object.assign(new DeviceCloudAvailabilityHold({
+    kind: "device-cloud-availability", stage: "preflight", target: "iphone", vendors: ["testingbot"],
+    reason: "pinned-pool-busy", waitedMs: 0,
+  }), { pixelUnrestored: true });
+  const first = await pixel("deviceCloud", async () => { throw root; }).catch(error => error);
+  let restored = false;
+  await pixel("deviceCloud-cleanup", async () => { restored = true; });
+  expect(restored).toBe(true);
+  const refused = await pixel("androidPush-readiness", async () => ({})).catch(error => error);
+  expect(refused).toBeInstanceOf(QualificationFailure);
+  expect(refused.evidence.lane).toBe("rigReadiness");
+  const evidence = normalizeQualificationFailures(new AggregateError([first, refused]));
+  expect(evidence.find(item => item.class === "collateral")?.originIds).not.toContain(refused.evidence.id);
+  expect(evidence.some(item => item.class === "harness")).toBe(false);
+});
+
+test.each(["initial", "progress", "final"] as const)("council491 cleanup survives a failed %s receipt write", async stage => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  let writes = 0, cleaned = false;
+  const module: ExternalLaneModule = {
+    preflight: async () => {}, run: async () => ({}), needsCleanup: () => false,
+    cleanup: async ({ checkpoint }) => {
+      if (stage === "progress") await checkpoint({ epoch: "11111111-2222-4333-8444-555555555555" });
+      cleaned = true; return { released: true };
+    },
+  };
+  const identity = { tag: TAG, previousTag: PREVIOUS_TAG, orchestratorCommit: COMMIT, receiptRoot: "/synthetic",
+    candidate: { tag: TAG, sourceCommit: COMMIT, archiveSha256: "b".repeat(64), archivePath: "/synthetic" },
+    predecessor: { tag: PREVIOUS_TAG, sourceCommit: COMMIT, archiveSha256: "c".repeat(64), archivePath: "/synthetic" },
+    omp: parseQualificationPins(await readFile(join(REPOSITORY_ROOT, "UPSTREAM.lock.json"), "utf8")) };
+  await expect(cleanExternalLane(receipt, "windows", async () => { if (++writes === (stage === "initial" ? 1 : 2)) throw new Error("persistence unavailable"); },
+    module, { identity, pixel: createPixelLease(() => {}) })).rejects.toThrow();
+  expect(cleaned).toBe(true);
+  expect(receipt.lanes.windowsCleanup.evidence?.persistenceFailed).toBe(true);
+});
+
+test("council491 a passing campaign refuses running readiness", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.status = "passed";
+  receipt.rigReadiness = { status: "running", campaignAttempt: 0, cleanupDisposition: "restored",
+    observations: { baselineRestored: true }, timings: {} };
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow();
+});
+
+test("council491 preflight preserves typed admission classifications", async () => {
+  const root = await mkdtemp(join(tmpdir(), "typed-admission-"));
+  try {
+    const runtime = await preflightFixture(root);
+    const error = new QualificationFailure({ id: 1, lane: "windows", step: "preflight",
+      class: "infra_transient", reason: "connection_timeout", operation: "read_only", elapsedMs: 1,
+      observations: { transportFailure: true } });
+    const lanes = admissionLanes();
+    await expect(preflightStableQualification(parseStableQualificationArgs(["--tag", TAG], runtime.environment),
+      runtime, { ...lanes, windows: { ...lanes.windows, preflight: async () => { throw error; } } })).rejects.toBe(error);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("council491 tunnel cancellation settles its pending health read", async () => {
+  const controller = new AbortController();
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async () => {
+    await Bun.sleep(150); return Response.json({ healthy: true });
+  } });
+  try {
+    const result = waitForTunnelReady(server.port!, () => true,
+      { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 });
+    setTimeout(() => controller.abort(new Error("synthetic cancellation")), 20);
+    await expect(result).rejects.toThrow("synthetic cancellation");
+  } finally { server.stop(true); }
+});
+
+test("council491 SSH cancellation terminates its remote command group before returning", async () => {
+  const controller = new AbortController();
+  const commands: string[][] = [];
+  const execute: Parameters<typeof remoteExecutor>[1] = async (argv, options) => {
+    commands.push([...argv]);
+    if (options?.execution !== undefined) {
+      await new Promise<void>(resolve => options.execution!.signal.addEventListener("abort", () => resolve(), { once: true }));
+      throw options.execution.signal.reason;
+    }
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  const remote = remoteExecutor({ sshDestination: "synthetic.invalid" } as Parameters<typeof remoteExecutor>[0], execute);
+  const result = remote(["/bin/sh", "-c", "sleep 60"], {
+    execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 },
+  });
+  controller.abort(new Error("synthetic cancellation"));
+  await expect(result).rejects.toThrow("synthetic cancellation");
+  expect(commands).toHaveLength(2);
+  expect(commands[1]!.at(-1)).toContain("kill");
+  expect(commands[1]!.at(-1)).toContain("pgid");
+});
+
+test("council491 failed SSH transport also reconciles its remote command owner", async () => {
+  let calls = 0;
+  const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async () =>
+    ({ exitCode: ++calls === 1 ? 255 : 0, stdout: "", stderr: "" });
+  const remote = remoteExecutor({ sshDestination: "failed-transport.invalid" } as Parameters<typeof remoteExecutor>[0], execute);
+  expect((await remote(["/bin/true"])).exitCode).toBe(255);
+  expect(calls).toBe(2);
+});
+
+test.skipIf(process.platform === "win32")("council491 remote cancellation reaps a real distinct process group", async () => {
+  const root = await mkdtemp(join(tmpdir(), "remote-command-owner-"));
+  const controller = new AbortController();
+  const ready = join(root, "ready");
+  const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async (argv, options) => {
+    const child = Bun.spawn(["/bin/bash", "-c", argv.at(-1)!], {
+      env: { ...process.env, HOME: root }, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    });
+    const stop = () => child.kill("SIGKILL"); // Local SSH disappearing does not stop its remote group.
+    options?.execution?.signal.addEventListener("abort", stop, { once: true });
+    try {
+      const exitCode = await child.exited;
+      options?.execution?.signal.throwIfAborted();
+      return { exitCode, stdout: "", stderr: "" };
+    } finally { options?.execution?.signal.removeEventListener("abort", stop); }
+  };
+  try {
+    const remote = remoteExecutor({ sshDestination: "local-process-group.invalid" } as Parameters<typeof remoteExecutor>[0], execute);
+    const result = remote(["/bin/bash", "-c", 'printf "%s" "$$" > "$1"; sleep 30', "--", ready],
+      { execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 } });
+    result.catch(() => {});
+    const deadline = performance.now() + 2_000;
+    while (!await Bun.file(ready).exists() && performance.now() < deadline) await Bun.sleep(10);
+    const pgid = Number(await readFile(ready, "utf8"));
+    controller.abort(new Error("synthetic remote cancellation"));
+    await expect(result).rejects.toThrow("synthetic remote cancellation");
+    expect(() => process.kill(-pgid, 0)).toThrow();
+  } finally { controller.abort(); await rm(root, { recursive: true, force: true }); }
+}, 25_000);
+
 test.skipIf(process.platform === "win32")("bound read-only preflight failure writes an effect-free outcome without creating a receipt", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "stable-bound-preflight-")));
   try {
@@ -1807,8 +2014,8 @@ test("council R3 publication restart and reopened Mac cleanup invalidate prior a
   expect(validateStableQualificationReceipt(pending, TAG, COMMIT, PREVIOUS_TAG)).toBe(pending);
 });
 
-test.skipIf(process.platform === "win32")("council R3 bound cloud retry consumes summary before admission persists", async () => {
-  const root = await mkdtemp(join(tmpdir(), "stable-summary-resume-"));
+test.skipIf(process.platform === "win32").each(["unknown", "pool", "windows"] as const)("council491 bound retry owns renewed %s admission and terminal outcome", async kind => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "stable-summary-resume-")));
   const path = join(root, "stable-qualification.json"), receipt = summarizedReceipt();
   try {
     receipt.completedAt = new Date().toISOString();
@@ -1820,21 +2027,33 @@ test.skipIf(process.platform === "win32")("council R3 bound cloud retry consumes
     const next: QualificationExecution = { ...receiptExecution(), campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
     await writeFile(executionPath, JSON.stringify(next), { mode: 0o600 });
     let admitted = false;
-    const runtime = await preflightFixture(root);
+    const fixture = await preflightFixture(root);
+    const outcomePath = join(root, "outcome.json");
+    const runtime = { ...fixture, environment: { ...fixture.environment, OMP_STABLE_OUTCOME_FILE: outcomePath } };
     const modules = { ...resumeModules, deviceCloud: { ...resumeModules.deviceCloud, preflight: async () => {
       const saved = JSON.parse(await readFile(path, "utf8"));
       expect(saved.failureSummary).toBeUndefined();
       expect(saved.lanes.deviceCloud.failure).toBeUndefined();
       admitted = true;
+      if (kind === "pool") throw new DeviceCloudAvailabilityHold({ kind: "device-cloud-availability", stage: "preflight",
+        target: "iphone", vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0 });
+      if (kind === "windows") throw new QualificationFailure({ id: 47, lane: "windows", step: "preflight",
+        class: "infra_transient", reason: "connection_timeout", operation: "read_only", elapsedMs: 1,
+        observations: { transportFailure: true } });
       throw new Error("synthetic admission stop");
     } } };
     await expect(runStableQualification(["--tag", TAG, "--execution-file", executionPath,
-      "--retry-receipt-sha256", priorDigest], runtime, modules)).rejects.toThrow("real-device cloud lane admission failed");
+      "--retry-receipt-sha256", priorDigest], runtime, modules)).rejects.toThrow("campaign admission failed");
     expect(admitted).toBe(true);
     const saved = validateStableQualificationReceipt(JSON.parse(await readFile(path, "utf8")), TAG, COMMIT, PREVIOUS_TAG);
     expect(saved.execution).toEqual(next);
-    expect(saved.failureSummary?.failures).toMatchObject([{ class: "harness", reason: "unclassified_failure" }]);
+    expect(saved.failureSummary?.failures).toMatchObject([{ lane: "campaign", step: "admission",
+      class: kind === "unknown" ? "harness" : "infra_transient",
+      reason: kind === "pool" ? "pinned_pool_busy" : kind === "windows" ? "connection_timeout" : "unclassified_failure" }]);
     expect(saved.lanes.deviceCloud.failure).toBeUndefined();
+    expect(saved.lanes.windows.status).toBe("passed");
+    expect(await readQualificationOutcomeFile(outcomePath, next)).toMatchObject({ scope: "campaign",
+      receipt: { sha256: digest(await readFile(path, "utf8")) }, failureSummary: saved.failureSummary });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -2286,6 +2505,30 @@ describe("resource-owning lanes", () => {
     };
     return { identity, pixel: createPixelLease(() => {}) };
   }
+
+  test("council491 successful owned cleanup retires its stale in-lane cleanup failure", async () => {
+    const receipt = summarizedReceipt();
+    receipt.status = "running";
+    delete receipt.failureSummary;
+    for (const lane of Object.values(receipt.lanes)) delete lane.failure;
+    receipt.lanes.windows = { status: "pending", attempts: 0 };
+    const module: ExternalLaneModule = {
+      preflight: async () => {}, needsCleanup: () => false,
+      run: async ({ checkpoint }) => {
+        await checkpoint({ epoch: "11111111-2222-4333-8444-555555555555" });
+        throw new QualificationFailure({ id: 37, lane: "windowsCleanup", step: "containment", class: "harness",
+          reason: "containment_unproven", operation: "unknown", elapsedMs: 0, observations: {} });
+      },
+      cleanup: async () => ({ released: true }),
+    };
+    const error = await runExternalLane(receipt, "windows", async () => {}, module, await laneContext()).catch(error => error);
+    expect(receipt.lanes.windowsCleanup.status).toBe("passed");
+    expect(normalizeQualificationFailures(error).some(item => item.lane === "windowsCleanup")).toBe(false);
+    await finalizeCampaignFailure(receipt, error, async () => {
+      validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
+    }, { ...resumeModules, windows: module });
+    expect(receipt.failureSummary?.failures.some(item => item.lane === "windows")).toBe(true);
+  });
 
   test("passes only with a cleanup bound to the attempt it released", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
