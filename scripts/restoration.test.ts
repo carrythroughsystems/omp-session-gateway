@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { everyError, runWithRestoration } from "./restoration.ts";
+import { everyError, pixelUnrestored, runWithRestoration } from "./restoration.ts";
+import { QualificationFailure, normalizeQualificationFailures } from "./qualification-failure.ts";
 
 test("a successful body returns its value after ordered restoration", async () => {
   const order: string[] = [];
@@ -56,4 +57,17 @@ test("recovery classification rejects an aggregate containing another restoratio
   expect(everyError(new AggregateError([new AggregateError([new Recoverable()])]), matches)).toBe(true);
   expect(everyError(new AggregateError([new Recoverable(), new Error("restoration failed")]), matches)).toBe(false);
   expect(everyError(new AggregateError([]), matches)).toBe(false);
+});
+
+test("typed roots survive cleanup aggregation without losing Pixel poisoning or identity", async () => {
+  const root = new QualificationFailure({ id: 1, lane: "windows", step: "transport_ready", reason: "connection_timeout",
+    class: "infra_transient", elapsedMs: 90_000, operation: "read_only", observations: { transportFailure: true } });
+  const cleanup = Object.assign(new QualificationFailure({ id: 2, lane: "windowsCleanup", step: "pixelRestore",
+    reason: "containment_unproven", class: "harness", elapsedMs: 1, operation: "unknown", observations: {} }), { pixelUnrestored: true });
+  const error = await runWithRestoration("typed", () => { throw root; }, [() => { throw cleanup; }]).catch((error: unknown) => error);
+  expect((error as AggregateError).errors[0]).toBe(root);
+  expect((error as AggregateError).errors[1]).toBe(cleanup);
+  expect(everyError(error, leaf => leaf instanceof QualificationFailure)).toBe(true);
+  expect(pixelUnrestored(error)).toBe(true);
+  expect(normalizeQualificationFailures(error).map(leaf => leaf.class)).toEqual(["infra_transient", "harness"]);
 });

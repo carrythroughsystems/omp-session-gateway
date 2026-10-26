@@ -42,6 +42,8 @@ export const ROUTINE_AUTHORITY_PATHS: Readonly<Record<string, string>> = {
   "scripts/post-release-smoke.ts": "Verifies signatures and produces published-byte smoke evidence.",
   "scripts/stable-qualification.ts": "Defines campaign receipt, admission and settlement gates; not an individual lane.",
   "scripts/stable-lanes.ts": "Binds the cleanup predicates that authorize release-host custody retirement.",
+  "scripts/qualification-failure.ts": "Defines closed failure classification and infrastructure retry eligibility.",
+  "scripts/qualification-outcome.ts": "Binds machine failure evidence to exact campaign and authority inputs.",
   "scripts/build-release.ts": "Constructs the signed release archive and release identity.",
   "scripts/evidence-schema.ts": "Defines accepted release evidence shapes.",
   "scripts/provider-read.ts": "Bounds authoritative provider reads, including immutable release state.",

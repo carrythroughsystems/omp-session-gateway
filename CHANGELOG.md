@@ -6,6 +6,15 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
+  and additive schema-3 receipt validation, including paired private readiness owner epochs and
+  closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and
+  containment-consistent outcomes fail closed; resumed attempts clear stale failure authority.
+  Unknown, mixed, unresolved or unbound failures remain non-retryable; this change does not
+  enable automatic recovery or reinterpret historical failures.
+
 ### Fixed
 
 - Contain browser CI flakes with one CI-only retry across both mobile Chromium and cross-engine
