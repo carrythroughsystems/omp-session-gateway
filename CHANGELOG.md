@@ -34,6 +34,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Retain an initial Windows development guest only for a typed, known-disposition product assertion;
+  contain infrastructure, authentication, harness, unknown, and expired attempts. Guard firewall-rule
+  POSTs after refetch, helper spawns after checkpoints, and every owned effect boundary; reject late
+  successful or failed observations with one positive-budget guard instead of launching 1-ms probes.
+  Arm subprocess cancellation before work and switch provider/guest/Pixel dispatch to the cleanup owner.
 - Contain browser CI flakes with one CI-only retry across both mobile Chromium and cross-engine
   core suites, closed privacy-safe attempt reports and summaries retained for 14 days, and a
   weekly/manual seven-day flake budget with fail-closed evidence coverage. Local runs keep zero

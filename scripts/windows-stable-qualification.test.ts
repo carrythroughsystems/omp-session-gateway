@@ -75,6 +75,13 @@ test("a probe is capped by remaining admission time and a late success cannot pa
   expect(limits).toEqual([90_000]);
   expect(now).toBe(90_000);
 });
+test("496 R2 stability uses one positive clock snapshot before dispatch, never a clamped expired budget", async () => {
+  let now = -60;
+  const dispatched: number[][] = [];
+  await expect(waitForStableWindowsTransport(async budget => { dispatched.push([now, budget]); return {}; },
+    { now: () => (now += 60), sleep: async ms => { now += ms; } }, 100)).rejects.toThrow("deadline_exceeded");
+  expect(dispatched).toEqual([[60, 40]]);
+});
 test("transport command checkpoints first response before exit without copying stream contents", async () => {
   const probes: WindowsTransportProbe[] = [];
   const script = `process.stderr.write("synthetic-private-output-never-real\\n" + "x".repeat(200) + "\\n");
@@ -166,7 +173,7 @@ test("Pixel restoration treats a screensaver as the task beneath it", () => {
   // Awake, asleep and dozing Pixels keep the resumed activity, which stays the launcher's while dozing.
   expect(windowsPixelForeground([home[0], home[1], `      topResumedActivity=ActivityRecord{d3 u0 ${launcher} t2}`, home[3]].join("\n"))).toBe(launcher);
 });
-function fixture(options: { development?: boolean; fail?: WindowsGuestAction; listener?: boolean; neverStarts?: boolean; vaultFails?: boolean; lostCreate?: boolean; protected?: boolean; unlabelled?: boolean; stale?: number } = {}) {
+function fixture(options: { development?: boolean; fail?: WindowsGuestAction; productFailure?: boolean; listener?: boolean; neverStarts?: boolean; vaultFails?: boolean; lostCreate?: boolean; protected?: boolean; unlabelled?: boolean; stale?: number } = {}) {
   let now = 1_800_000_000_000;
   let progress: unknown;
   const events: string[] = [];
@@ -198,7 +205,8 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; li
     removeAccess: async () => { events.push("vaultRemoved"); },
     guest: async (_context: WindowsContext, action: WindowsGuestAction, principal?: WindowsPrincipal) => {
       now += 1_000; events.push(principal === "standard" ? `${action}@standard` : action);
-      if (options.fail === action) throw new Error("guest operation failed");
+      if (options.fail === action) throw options.productFailure
+        ? windowsFailure("assertion_failed", "output", "confirmed") : new Error("guest operation failed");
       if (action === "uninstall" && principal === "standard") standardUninstalled = true;
       return {
         ready: !options.neverStarts, taskPresent: !(action === "state" && standardUninstalled), taskRunning: false, gatewayProcesses: 0, listeners: options.listener ? 1 : 0,
@@ -225,8 +233,67 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; li
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test.each([
+    ["transport", () => windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true })],
+    ["authentication", () => windowsFailure("authentication_failed", "connection", "read_only")],
+    ["helper", () => windowsFailure("helper_failed", "command", "read_only")],
+    ["unknown mutation", () => windowsFailure("mutation_unconfirmed", "command", "unknown")],
+    ["unknown product disposition", () => windowsFailure("assertion_failed", "output", "unknown")],
+    ["raw error", () => new Error("synthetic unknown failure")],
+    ["controller deadline", () => windowsFailure("deadline_exceeded", "connection", "read_only", { controllerDeadline: true })],
+    ["probe deadline", () => windowsFailure("probe_deadline", "connection", "read_only", { controllerDeadline: true, readOnlyProbe: true })],
+  ] as const)("496 R2 initial development %s failure contains rather than retaining resources", async (_name, failure) => {
+    const f = fixture({ development: true }), original = f.runtime.guest;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "transport") throw failure();
+      return original(context, action, principal);
+    };
+    await expect(f.run()).rejects.toThrow();
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
+  });
+  test("496 R2 a confirmed initial product assertion remains available for bounded development repair", async () => {
+    const f = fixture({ development: true, listener: true });
+    await expect(f.run()).rejects.toThrow("pre-login");
+    expect(f.instances).toHaveLength(1); expect(f.firewalls).toHaveLength(1);
+    expect(windowsNeedsCleanup(f.progress)).toBe(true);
+    await f.clean();
+  });
+  test("496 R2 rejected late startup observations are typed controller expiry", async () => {
+    const f = fixture({ development: true }), original = f.runtime.guest;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "ready") { await f.runtime.sleep(180_001); throw new Error("synthetic late startup refusal"); }
+      return original(context, action, principal);
+    };
+    const failure = await f.run().catch(error => error);
+    expect(failure).toBeInstanceOf(QualificationFailure);
+    expect(failure.evidence).toMatchObject({ reason: "deadline_exceeded", observations: { controllerDeadline: true, timeoutMs: 180_000 } });
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+  });
+  test("496 R2 containment replaces the cancelled runtime owner before provider destruction", async () => {
+    const f = fixture({ development: true }), controller = new AbortController();
+    const primary = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 };
+    let current: typeof primary | undefined;
+    const owners: Array<typeof primary | undefined> = [];
+    f.runtime.setExecution = owner => { current = owner; owners.push(owner); };
+    const guest = f.runtime.guest, destroy = f.runtime.provider.destroyInstance;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "stage") controller.abort();
+      return guest(context, action, principal);
+    };
+    f.runtime.provider.destroyInstance = async (...args) => {
+      expect(current).not.toBe(primary);
+      expect(current?.signal.aborted).toBe(false);
+      expect(current!.deadline).toBeGreaterThan(performance.now());
+      await destroy(...args);
+    };
+    await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint, execution: primary }))
+      .rejects.toThrow("deadline_exceeded");
+    expect(owners).toHaveLength(2); expect(owners[0]).toBe(primary);
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+  });
   test.each(["unsettled", "preflight", "cancel", "expire"] as const)("496 R1 retained %s exit uses independent containment before returning", async kind => {
-    const f = fixture({ development: true, fail: kind === "preflight" ? "prelogin" : "stage" });
+    const f = fixture({ development: true, fail: kind === "preflight" ? "prelogin" : "stage", productFailure: true });
     await expect(f.run()).rejects.toThrow();
     const controller = new AbortController();
     const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 };
@@ -239,7 +306,7 @@ describe("Windows qualification ownership and failure paths", () => {
     expect(windowsNeedsCleanup(f.progress)).toBe(false);
   });
   test("496 R1 admitted transport resume uses reconnect after the original allocation deadline", async () => {
-    const f = fixture({ development: true, fail: "transport" });
+    const f = fixture({ development: true, fail: "transport", productFailure: true });
     await expect(f.run()).rejects.toThrow();
     await f.runtime.sleep(720_001);
     const admission = Object.freeze({ transportStabilitySamples: 3, transportStabilityDurationMs: 60_000 });
@@ -250,7 +317,7 @@ describe("Windows qualification ownership and failure paths", () => {
       .toMatchObject(admission);
   });
   test("496 R1 sealed predecessor boolean admission cannot substitute for stability observations", async () => {
-    const f = fixture({ development: true, fail: "transport" });
+    const f = fixture({ development: true, fail: "transport", productFailure: true });
     await expect(f.run()).rejects.toThrow();
     const predecessorVault = Object.freeze({ transportAdmitted: true });
     f.runtime.transportAdmission = async () => predecessorVault;
@@ -306,7 +373,7 @@ describe("Windows qualification ownership and failure paths", () => {
     expect(f.events).not.toContain("reconnect"); expect(f.events).toContain("firewallDestroyed");
     expect(f.firewalls).toEqual([]); expect(windowsNeedsCleanup(f.progress)).toBe(false);
   });
-  test("493 R2 durable stability observations survive an interrupted settled-phase checkpoint", async () => {
+  test("493 R2 interrupted settled-phase checkpoint preserves stability evidence but contains the harness failure", async () => {
     const f = fixture({ development: true }); const original = f.runtime.guest;
     let admission: ReturnType<typeof windowsRuntime.windowsTransportStability>; let failed = false;
     f.runtime.guest = async (context, action, principal) => {
@@ -324,8 +391,9 @@ describe("Windows qualification ownership and failure paths", () => {
         await f.checkpoint(progress);
       },
     })).rejects.toThrow("synthetic checkpoint interruption");
-    const result = await runWindows({ identity, progress: f.progress, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint });
-    expect(result.observations).toMatchObject({ transportStabilitySamples: 3, transportStabilityDurationMs: 60_000 });
+    expect((f.progress as { facts: Record<string, unknown> }).facts).toMatchObject({ transportStabilitySamples: 3, transportStabilityDurationMs: 60_000 });
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
   });
   test.each(["cancel", "expire"] as const)("493 R2 development %s cleans retained resources instead of offering repair", async kind => {
     const f = fixture({ development: true }); const controller = new AbortController();
@@ -351,7 +419,7 @@ describe("Windows qualification ownership and failure paths", () => {
     await expect(f.run()).rejects.toThrow("automatic LogonTrigger startup timed out");
   });
   test.each(["stage", "upgrade"] as const)("493 R1 completed uploads cannot authorize replaying an unsettled %s mutation", async action => {
-    const f = fixture({ development: true, fail: action });
+    const f = fixture({ development: true, fail: action, productFailure: true });
     await expect(f.run()).rejects.toThrow();
     await windowsRuntime.windowsUploadOnce({ allowFresh: false, state: async () => "complete",
       checkpoint: async () => { throw new Error("completed archive must not change"); },
@@ -417,7 +485,7 @@ describe("Windows qualification ownership and failure paths", () => {
     expect((f.progress as { retirementPending: boolean }).retirementPending).toBe(false);
   });
   test("R2 resumed unsettled legacy staging refuses before another guest mutation", async () => {
-    const f = fixture({ development: true, fail: "stage" });
+    const f = fixture({ development: true, fail: "stage", productFailure: true });
     await expect(f.run()).rejects.toThrow();
     const prior = f.progress; f.events.length = 0;
     f.runtime.guest = async () => ({});
@@ -630,8 +698,8 @@ describe("Windows qualification ownership and failure paths", () => {
     await expect(runWindows({ identity, progress: invalid, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime })).rejects.toThrow("phase history");
   });
   test("development repair resumes read-only prelogin observations without repeating completed mutations", async () => {
-    const f = fixture({ development: true, fail: "prelogin" });
-    await expect(f.run()).rejects.toThrow("unclassified_failure");
+    const f = fixture({ development: true, fail: "prelogin", productFailure: true });
+    await expect(f.run()).rejects.toThrow("assertion_failed");
     expect(f.instances).toHaveLength(1); expect(windowsNeedsCleanup(f.progress)).toBe(true);
     const original = f.runtime.guest;
     f.runtime.guest = async (context, action, principal) => {
