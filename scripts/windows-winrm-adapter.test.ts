@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { classifyWindowsCommandFailure, command, reconnectWindowsTransport, reconcileWindowsUpload, windowsUploadStep, windowsWinrmDiagnostic, windowsWinrmResult } from "./windows-qualification-runtime";
 import { QualificationFailure } from "./qualification-failure";
 import type { WindowsTransportProbe } from "./windows-stable-qualification";
@@ -165,6 +167,35 @@ test("493 R2 firewall-only vault is not guest access", () => {
   expect(winrmRuntime.windowsGuestAccessAvailable({ firewall: "synthetic-firewall" })).toBe(false);
   expect(winrmRuntime.windowsGuestAccessAvailable({ instance: "synthetic-owned" })).toBe(false);
   expect(winrmRuntime.windowsGuestAccessAvailable({ instance: "synthetic-owned", password: "synthetic-only" })).toBe(true);
+});
+test("496 R1 delayed reconnect backoff cannot start an expired probe", async () => {
+  let now = 0, attempts = 0;
+  await expect(reconnectWindowsTransport(async () => { attempts += 1; return windowsWinrmResult(transportResult(), true); },
+    { now: () => now, sleep: async () => { now = 90_001; } })).rejects.toThrow("deadline_exceeded");
+  expect(attempts).toBe(1);
+});
+test.each(["allocation", "stability-probe", "stability-sleep"])("496 R1 %s expiry has typed controller origin, never last transient", async origin => {
+  let now = 0;
+  const clock = { now: () => now, sleep: async () => { now = 100; } };
+  const operation = origin === "allocation"
+    ? winrmRuntime.pollWindows(async () => { now = 100; return false; }, 100, "provider Windows allocation", undefined, clock)
+    : winrmRuntime.waitForStableWindowsTransport(async () => {
+      if (origin === "stability-probe") now = 100;
+      return windowsWinrmResult(transportResult(), true);
+    }, clock, 100);
+  const failure = await operation.catch(error => error);
+  expect(failure.evidence).toMatchObject({ class: "harness", reason: "deadline_exceeded",
+    observations: { controllerDeadline: true, readOnlyProbe: true, timeoutMs: 100 } });
+});
+test("496 R1 expired creation authority cannot consume the private creation counter", async () => {
+  const root = await mkdtemp(join(tmpdir(), "windows-counter-"));
+  const path = join(root, "counter.json");
+  try {
+    await writeFile(path, "2", { mode: 0o600 });
+    expect(typeof winrmRuntime.windowsCreationClaim).toBe("function");
+    await expect(winrmRuntime.windowsCreationClaim(path, 2, undefined, Date.now() - 1)).rejects.toThrow("deadline_exceeded");
+    expect(await readFile(path, "utf8")).toBe("2");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 test("reconnect uses exactly the four backoffs and refuses late success or untyped errors", async () => {
   let now = 0; const sleeps: number[] = [];

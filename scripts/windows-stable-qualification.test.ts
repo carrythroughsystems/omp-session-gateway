@@ -43,7 +43,7 @@ test("transport instability cannot extend the allocation deadline", async () => 
   await expect(waitForStableWindowsTransport(async () => {
     if (now >= 75_000) throw new Error("probe started after allocation deadline");
     throw windowsFailure("connection_timeout", "connection", "read_only", { transportFailure: true });
-  }, { now: () => now, sleep: async ms => { now += ms; } }, 75_000)).rejects.toThrow("connection_timeout");
+  }, { now: () => now, sleep: async ms => { now += ms; } }, 75_000)).rejects.toThrow("deadline_exceeded");
   expect(now).toBe(75_000);
 });
 test("guest rejection is not treated as transient transport instability", async () => {
@@ -225,6 +225,48 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; li
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test.each(["unsettled", "preflight", "cancel", "expire"] as const)("496 R1 retained %s exit uses independent containment before returning", async kind => {
+    const f = fixture({ development: true, fail: kind === "preflight" ? "prelogin" : "stage" });
+    await expect(f.run()).rejects.toThrow();
+    const controller = new AbortController();
+    const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 };
+    if (kind === "cancel") controller.abort();
+    if (kind === "expire") execution.deadline = performance.now() - 1;
+    if (kind === "preflight") f.runtime.admit = async () => { throw new Error("synthetic preflight refusal"); };
+    await expect(runWindows({ identity, progress: f.progress, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint, execution }))
+      .rejects.toThrow();
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+    expect(windowsNeedsCleanup(f.progress)).toBe(false);
+  });
+  test("496 R1 admitted transport resume uses reconnect after the original allocation deadline", async () => {
+    const f = fixture({ development: true, fail: "transport" });
+    await expect(f.run()).rejects.toThrow();
+    await f.runtime.sleep(720_001);
+    const admission = Object.freeze({ transportStabilitySamples: 3, transportStabilityDurationMs: 60_000 });
+    f.runtime.transportAdmission = async () => admission;
+    const original = f.runtime.guest;
+    f.runtime.guest = async (context, action, principal) => action === "transport" ? { ...admission } : original(context, action, principal);
+    expect((await runWindows({ identity, progress: f.progress, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint })).observations)
+      .toMatchObject(admission);
+  });
+  test("496 R1 sealed predecessor boolean admission cannot substitute for stability observations", async () => {
+    const f = fixture({ development: true, fail: "transport" });
+    await expect(f.run()).rejects.toThrow();
+    const predecessorVault = Object.freeze({ transportAdmitted: true });
+    f.runtime.transportAdmission = async () => predecessorVault;
+    let samples = 0; let observed: Record<string, unknown> | undefined;
+    const original = f.runtime.guest;
+    f.runtime.guest = async (context, action, principal) => {
+      if (action !== "transport") return original(context, action, principal);
+      if (observed) return observed;
+      expect(context.transportAdmission).toBeUndefined();
+      observed = await waitForStableWindowsTransport(async () => { samples += 1; return {}; }, f.runtime, context.allocationDeadline!);
+      return observed;
+    };
+    const result = await runWindows({ identity, progress: f.progress, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint });
+    expect(samples).toBeGreaterThanOrEqual(3);
+    expect(result.observations).toMatchObject({ transportStabilitySamples: 3, transportStabilityDurationMs: 60_000 });
+  });
   test("493 R2 allocation expiry during the firewall checkpoint prevents creation", async () => {
     const f = fixture(); let expired = false;
     await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, pixel: f.pixel,
@@ -317,7 +359,8 @@ describe("Windows qualification ownership and failure paths", () => {
     f.events.length = 0;
     await expect(runWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime }))
       .rejects.toThrow("mutation_unconfirmed");
-    expect(f.events).toEqual([]);
+    expect(f.events).not.toContain(action);
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
   });
   test("493 R1 each nested guest mutation checkpoints started and complete before another mutation", async () => {
     const f = fixture({ development: true }); const original = f.runtime.guest;
@@ -379,7 +422,8 @@ describe("Windows qualification ownership and failure paths", () => {
     const prior = f.progress; f.events.length = 0;
     f.runtime.guest = async () => ({});
     await expect(runWindows({ identity, progress: prior, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime })).rejects.toThrow("mutation_unconfirmed");
-    expect(f.events).toEqual([]);
+    expect(f.events).not.toContain("stage");
+    expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
   });
   test("R2 development retires a cleanup-complete epoch vault before replacing identity", async () => {
     expect(typeof windowsRuntime.retireWindowsDevelopmentEpoch).toBe("function");
@@ -699,7 +743,8 @@ describe("Windows qualification ownership and failure paths", () => {
     };
     const failure = await f.run().catch(error => error);
     expect(failure).toBeInstanceOf(QualificationFailure);
-    expect(failure.evidence.reason).toBe("probe_deadline");
+    expect(failure.evidence.reason).toBe("deadline_exceeded");
+    expect(failure.evidence.observations.controllerDeadline).toBe(true);
     expect(budgets).toEqual([180_000, 180_000, 180_000, 180_000, 180_000, 180_000, 94_402, 4_031]);
     expect(cleanupBudgets).toEqual([90_000, 28_000]); expect(now - cleanupStart).toBe(90_000);
     expect((f.progress as Record<string, unknown>).transportProbes).toHaveLength(8);

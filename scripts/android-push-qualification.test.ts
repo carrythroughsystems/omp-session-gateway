@@ -334,6 +334,99 @@ test("R2 readiness preserves a late delivery observed during restoration", async
   });
 });
 
+test.each(["telemetry", "request"] as const)("495 R6 cancellation during %s cannot finish a delivery", async stage => {
+  const host = fake(), metrics = emptyPushDeliveryMetrics(), controller = new AbortController();
+  await host.runtime.fixture("start", "synthetic"); await host.runtime.fixture("ask", "synthetic");
+  const session = (await host.runtime.snapshot("synthetic"))!;
+  host.runtime.observe = async () => ({ count: 1, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.deliveryTelemetry = async () => {
+    if (stage === "telemetry") controller.abort();
+    return { sufficient: true, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 };
+  };
+  host.runtime.deliveryRequestMatches = async () => { controller.abort(); return true; };
+  if (stage === "request") metrics.deliveryRearmCount = 1;
+  let sample: (() => Promise<void>) | undefined;
+  await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention", phase: "private_verified",
+    timeout: 60_000, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
+    execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 },
+    onTimeout: value => { sample = value; } })).rejects.toMatchObject({ evidence: { reason: "delivery_timeout", class: "harness" } });
+  expect(sample).toBeDefined();
+});
+
+test.each(["instance", "generation"] as const)("495 R4 %s changes after clearing stop before the next ask", async variant => {
+  const host = fake(), fixture = host.runtime.fixture, snapshot = host.runtime.snapshot;
+  let asks = 0, answered = false;
+  host.runtime.fixture = async (...args) => {
+    if (args[0] === "ask") asks++;
+    if (args[0] === "answer") answered = true;
+    await fixture(...args);
+  };
+  host.runtime.snapshot = async (...args) => {
+    const session = await snapshot(...args);
+    return session === undefined || !answered ? session : { ...session,
+      ...(variant === "instance" ? { instanceId: "foreign-instance" } : { generation: session.generation + 1 }) };
+  };
+  host.runtime.observe = async () => ({ count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, sends: 1, acknowledgements: answered ? 1 : 0,
+    failures: answered ? 0 : 1, retryable: !answered, httpStatus: 503, clearAcknowledged: answered, requestAlias: 1 });
+  await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { class: "harness", reason: "invalid_evidence" } });
+  expect(asks).toBe(1);
+});
+
+test.each(["readiness", "qualification"] as const)("495 R5 %s metadata timeout retains late-post evidence", async lane => {
+  const host = fake(), snapshot = host.runtime.snapshot, cleanup = host.runtime.cleanup;
+  let late = false;
+  host.runtime.snapshot = async (...args) => {
+    const session = await snapshot(...args);
+    return session?.inputRequired ? undefined : session;
+  };
+  host.runtime.observe = async () => ({ count: late ? 1 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.beginDeliveryTelemetry = async phase => ({ lane: phase === "readiness" ? "rigReadiness" : "androidPush", phase, after: 0, ordinal: 1 });
+  host.runtime.cleanup = async (...args) => {
+    await cleanup(...args);
+    if (args[0] === "fixtureAsk") { late = true; await host.runtime.pause(500); }
+  };
+  const failure = lane === "readiness" ? runAndroidPushReadiness(host.input) : runAndroidPush(host.input);
+  await expect(failure).rejects.toMatchObject({ evidence: { reason: "delivery_metadata_timeout", class: "harness" } });
+  if (lane === "readiness") await expect(failure).rejects.toMatchObject({ evidence: { observations: { latePostCount: 1, latePostMs: 90_500 } } });
+  else expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results.private_verified).toMatchObject({ latePostCount: 1, latePostMs: 90_500 });
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+});
+
+test("495 A1 readiness late-observer failure cannot skip subsequent restoration owners", async () => {
+  const host = fake(), cleanup = host.runtime.cleanup;
+  let cleaning = false;
+  host.runtime.observe = async () => {
+    if (cleaning) throw new Error("synthetic late observer failure");
+    return { count: 0, titleMatches: true, bodyMatches: true, forbiddenFound: false };
+  };
+  host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, sends: 0, acknowledgements: 0, failures: 0, retryable: false, httpStatus: 0 });
+  host.runtime.cleanup = async (...args) => { cleaning = true; await cleanup(...args); };
+  let failure: unknown;
+  try { await runAndroidPushReadiness(host.input); } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect(host.cleanup).toEqual(["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"]);
+  expect(pixelUnrestored(failure)).toBe(false);
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+});
+
+test("495 R7 phase durations are bounded integer observations on write and read", async () => {
+  const host = fake(), now = host.runtime.now;
+  let fraction = 0;
+  host.runtime.now = () => now() + fraction++ / 1_000;
+  await runAndroidPush(host.input);
+  const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+  for (const phase of Object.values(progress.results)) {
+    expect(Number.isSafeInteger(phase.phaseElapsedMs)).toBe(true);
+    expect(phase.phaseElapsedMs as number).toBeLessThanOrEqual(86_400_000);
+  }
+  for (const phaseElapsedMs of [0.125, -1, 86_400_001, Number.MAX_SAFE_INTEGER + 1]) {
+    expect(() => parseAndroidPushProgress({ ...progress, results: { private_verified: { phaseElapsedMs } } })).toThrow();
+  }
+});
+
 test("R3 each delivery keeps its own first and second timing in a multi-delivery phase", async () => {
   const host = fake(), metrics = emptyPushDeliveryMetrics();
   await host.runtime.fixture("start", "synthetic"); await host.runtime.fixture("ask", "synthetic");

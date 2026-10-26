@@ -493,9 +493,12 @@ four files of at most 256 KiB. The existing absolute destination must be current
 Unsafe startup fails. Each synchronous burst durably invalidates the existing private health inode
 before touching log data; its microtask commit flushes the bounded current file and commits the exact
 event index and first retained index. Rotation flushes the file being moved; per-event appends do not require per-event fsync.
-An interrupted or failed burst never publishes success. Later failure is sticky even when the
-directory cannot unlink files or loses search permission: a private sibling failure marker survives
-permission restoration. It is never automatically reset or repaired. Restart and collection require
+An interrupted or failed burst never publishes success. A private in-directory writer lease is
+durably marked active before logging begins; it remains active if any write or failure-marker write
+fails, even when all destination writes are denied. Graceful daemon teardown closes it only after all
+event producers stop and the final health commit succeeds. Restart and final collection reject an
+active or malformed lease: abrupt death requires explicit reset, never automatic repair. All state
+stays inside the accepted service writable location. Restart and collection require
 contiguous records in oldest-to-newest file order, beginning at index 1 unless the committed rotation
 boundary explains the prefix. Missing/truncated retained files and record reordering are failures.
 Rate-limited IPC events use the same closed vocabulary. Raw daemon
@@ -511,6 +514,8 @@ in the same job. The existing authenticated read-only session list exposes the o
 `qualificationPushAlias` only for the exact current ask; ordinary responses omit it. Before any re-arm,
 the runtime re-fetches the owned fixture snapshot and requires its alias to match queue, send and
 failure evidence. The matching outbound clear acknowledgement is required before issuing the new ask.
+Immediately before that mutation, a fresh snapshot must still have the original instance and
+generation, controllability, and no active ask.
 Provider acknowledgement is acceptance, not phone presentation. Collector windows
 use event indices and require a unique queue/send; simultaneous sends, rotation gaps, missing or
 invalid telemetry never authorize recovery by time proximity. Request identities remain volatile.
@@ -521,7 +526,13 @@ uses a new window. Re-arm requires both phone clear and outbound clear acknowled
 A late post cannot satisfy a fresh ask: the existing worker must attest its exact request and the
 authoritative snapshot must retain its generation.
 Deadline expiry installs late-post sampling before returning a typed unexplained timeout; readiness
-also samples restoration and retains any late delivery in its failure observations.
+also samples restoration and retains any late delivery in its failure observations. Ask-metadata
+waits install their sampler before waiting and fail as harness `delivery_metadata_timeout`.
+Late-sampler failure is retained without skipping device restoration. Execution deadlines are
+rechecked after telemetry and request verification; phase durations are bounded safe integers.
+Unacknowledged target creation remains unresolved after its bounded response route expires.
+Target/forward cleanup failure blocks Pixel release with a harness root and causally linked
+containment collateral; final task restoration uses ADB without reopening CDP.
 At most one evidence-backed fresh ask is allowed per phase, separate from overlap recovery; all
 privacy assertions and the 60/160-second bounds remain unchanged. The forbidden-sink proof requires
 both raw-stream discard and validated structured-log safety.
@@ -529,7 +540,7 @@ Per-phase `deliveryTimings` retains ordered first/second millisecond pairs for e
 without overwriting earlier observations; the phase-wide one-re-arm budget remains independent.
 
 Logs live outside fixture-cleanup directories. Reads bracket event files with health reads and retry
-any changed or pending health state; a torn snapshot never becomes evidence. After the daemon stops,
+any changed or pending health/lease state; a torn snapshot never becomes evidence. After the daemon stops,
 collection validates bounded records into private, exclusively-created immutable job files and
 lane/phase slices, fsyncs the files and their directory, and rechecks the retained health state before
 removing remote copies. Failed validation or retention leaves remote evidence intact and fails closed.

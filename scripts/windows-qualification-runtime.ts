@@ -298,15 +298,30 @@ export async function verifyWindowsStaleLaunch(origin: string, session: Record<s
   return { staleViewStatus: 409, staleControlStatus: 409 };
 }
 
+function windowsLocalDeadline(timeoutMs: number, waitedMs: number, execution?: WindowsExecutionContext): QualificationFailure {
+  return windowsFailure("deadline_exceeded", "connection", "read_only", {
+    controllerDeadline: true, readOnlyProbe: true, timeoutMs, waitedMs,
+  }, execution, waitedMs);
+}
+
+export async function windowsCreationClaim(counterPath: string, creations: number, execution: WindowsExecutionContext | undefined, allocationDeadline: number | undefined): Promise<void> {
+  assertWindowsAllocation(execution, allocationDeadline);
+  await atomicPrivate(counterPath, creations + 1);
+}
+
 export async function waitForStableWindowsTransport(
   probe: (timeoutMs: number) => Promise<Record<string, unknown>>,
   clock: Pick<WindowsRuntime, "now" | "sleep">,
   deadline: number,
+  execution?: WindowsExecutionContext,
 ): Promise<Record<string, unknown>> {
-  let samples = 0; let firstSuccess = 0; let last: QualificationFailure | undefined;
+  const started = clock.now(), budget = Math.max(0, deadline - started);
+  let samples = 0; let firstSuccess = 0;
   while (clock.now() < deadline) {
+    assertWindowsExecution(execution);
     try {
       const observation = await probe(Math.max(1, Math.min(180_000, deadline - clock.now())));
+      assertWindowsExecution(execution);
       const observedAt = clock.now();
       if (observedAt >= deadline) break;
       if (samples === 0) firstSuccess = observedAt;
@@ -315,13 +330,13 @@ export async function waitForStableWindowsTransport(
         return { ...observation, transportStabilitySamples: samples, transportStabilityDurationMs: observedAt - firstSuccess };
       }
     } catch (error) {
+      if (clock.now() >= deadline) throw windowsLocalDeadline(budget, Math.max(0, clock.now() - started), execution);
       if (!(error instanceof QualificationFailure) || error.evidence.class !== "infra_transient") throw error;
-      last = error;
       samples = 0; firstSuccess = 0;
     }
     await clock.sleep(Math.min(30_000, Math.max(0, deadline - clock.now())));
   }
-  throw last ?? windowsFailure("deadline_exceeded", "connection", "read_only");
+  throw windowsLocalDeadline(budget, Math.max(0, clock.now() - started), execution);
 }
 
 /** A legacy admitted boolean is not a durable observation of the stability window. */
@@ -339,7 +354,7 @@ export function windowsGuestAccessAvailable(value: unknown): boolean {
 
 export async function pollWindows(action: () => Promise<boolean>, ms: number, name: string, execution?: WindowsExecutionContext,
   clock: Pick<WindowsRuntime, "now" | "sleep"> = { now: performance.now, sleep: Bun.sleep }): Promise<void> {
-  const deadline = clock.now() + ms;
+  const started = clock.now(), deadline = started + ms;
   while (clock.now() < deadline) {
     assertWindowsExecution(execution);
     const succeeded = await action();
@@ -349,7 +364,8 @@ export async function pollWindows(action: () => Promise<boolean>, ms: number, na
     if (succeeded) return;
     await clock.sleep(Math.min(5_000, remaining));
   }
-  throw new Error(`${name} timed out`);
+  const failure = windowsLocalDeadline(ms, Math.max(0, clock.now() - started), execution);
+  failure.message = `${name} timed out`; throw failure;
 }
 
 /** Own the child from its first stdin operation until exit, including write/end rejection. */
@@ -448,23 +464,26 @@ export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?
 
 export async function reconnectWindowsTransport<T>(probe: (timeoutMs: number) => Promise<T>,
   clock: Pick<WindowsRuntime, "now" | "sleep">, execution?: WindowsExecutionContext): Promise<T> {
-  const deadline = clock.now() + 90_000;
+  const started = clock.now(), deadline = started + 90_000;
   const delays = [2_000, 4_000, 8_000, 16_000];
   const assertExecution = () => {
     if (execution?.signal.aborted || (execution && performance.now() >= execution.deadline)) {
-      throw windowsFailure("deadline_exceeded", "connection", "read_only", {}, execution);
+      throw windowsLocalDeadline(90_000, Math.max(0, clock.now() - started), execution);
     }
   };
   for (let attempt = 0; ; attempt += 1) {
     assertExecution();
+    const remaining = Math.min(deadline - clock.now(), (execution?.deadline ?? Infinity) - performance.now());
+    if (remaining <= 0) throw windowsLocalDeadline(90_000, Math.max(0, clock.now() - started), execution);
     try {
-      const result = await probe(Math.max(1, Math.min(deadline - clock.now(), (execution?.deadline ?? Infinity) - performance.now())));
+      const result = await probe(remaining);
       assertExecution();
-      if (clock.now() >= deadline) throw windowsFailure("deadline_exceeded", "connection", "read_only", {}, execution);
+      if (clock.now() >= deadline) throw windowsLocalDeadline(90_000, Math.max(0, clock.now() - started), execution);
       return result;
     }
     catch (error) {
       assertExecution();
+      if (clock.now() >= deadline) throw windowsLocalDeadline(90_000, Math.max(0, clock.now() - started), execution);
       if (!(error instanceof QualificationFailure) || error.evidence.class !== "infra_transient") throw error;
       const delay = delays[attempt];
       if (delay === undefined || clock.now() + delay >= deadline) throw error;
@@ -611,7 +630,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       try { creations = JSON.parse(await privateFile(counterPath)) as number; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const creationLimit = options.development ? 6 : 4;
       if (!Number.isInteger(creations) || creations < 0 || creations >= creationLimit) throw new Error("Windows creation cap reached");
-      await atomicPrivate(counterPath, creations + 1);
+      await windowsCreationClaim(counterPath, creations, owner, allocationDeadline);
       assertWindowsAllocation(owner, allocationDeadline);
       const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false }, owner, deadline);
       if (!item) throw new Error("instance create response lost"); return item.instance;
@@ -811,6 +830,7 @@ if ($exists) {
     },
     async removeAccess(epoch) { await rm(vaultPath(epoch), { force: true }); },
     async hasAccess(epoch) { return windowsGuestAccessAvailable(await existingAccess(epoch)); },
+    async transportAdmission(epoch) { return windowsTransportStability((await existingAccess(epoch))?.transportAdmission); },
     async cleanupInstance(epoch) {
       const access = await existingAccess(epoch);
       if (!access?.instance) return undefined;
@@ -861,7 +881,7 @@ if ($exists) {
           { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution);
       }
       if (action === "transport") {
-        const admitted = windowsTransportStability(access.transportAdmission);
+        const admitted = windowsTransportStability(context.transportAdmission) ?? windowsTransportStability(access.transportAdmission);
         if (admitted) {
           const current = await reconnectWindowsTransport(timeoutMs => ps(context, "transport", {}, timeoutMs),
             { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution);
@@ -869,7 +889,7 @@ if ($exists) {
         }
         if (context.allocationDeadline === undefined) throw windowsFailure("helper_failed", "connection", "not_started", {}, context.execution);
         const remaining = context.allocationDeadline - Date.now();
-        if (remaining <= 0) throw windowsFailure("deadline_exceeded", "connection", "not_started", {}, context.execution);
+        if (remaining <= 0) throw windowsLocalDeadline(12 * 60_000, 12 * 60_000 - remaining, context.execution);
         const deadline = performance.now() + remaining;
         // Creation can return a provisional address. Wait for provider allocation,
         // then authenticate the guest at that freshly observed address.
@@ -882,7 +902,7 @@ if ($exists) {
         }, Math.max(0, deadline - performance.now()), "provider Windows allocation", context.execution ?? options.execution);
         const observed = await waitForStableWindowsTransport(
           timeoutMs => ps(context, "transport", {}, timeoutMs),
-          { now: performance.now, sleep: Bun.sleep }, deadline,
+          { now: performance.now, sleep: Bun.sleep }, deadline, context.execution ?? options.execution,
         );
         await context.beforeEffect(); await save({ transportAdmission: windowsTransportStability(observed) });
         return observed;

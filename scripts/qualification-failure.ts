@@ -14,6 +14,7 @@
  *   Receipt absence, unknown operation disposition, or missing proof never imply safety.
  *   Cleanup transport failures remain harness evidence; negative containment/reconciliation
  *   observations and mutating infrastructure dispositions block eligibility.
+ *   Push/readiness delivery metadata timeouts are harness evidence, not proof of an outage.
  * - qualificationPreflightFailuresEffectFree permits only read-only/not-started admission
  *   surfaces, not later resource observations mislabeled as preflight.
  * - FAILURE_STEPS and parseLaneTimings also govern additive receipt step timings. No raw
@@ -44,7 +45,8 @@ export const FAILURE_REASONS = {
     push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient" },
   preflight: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness" },
   rigReadiness: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness", assertion_failed: "product",
-    push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient", delivery_timeout: "harness" },
+    push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient",
+    delivery_timeout: "harness", delivery_metadata_timeout: "harness" },
   artifacts: { ...commonReasons, ...transportReasons, signature_failed: "harness", digest_mismatch: "harness" },
   debian: { ...commonReasons, ...transportReasons, assertion_failed: "product", workflow_unknown: "harness" },
   macos: { ...commonReasons, ...transportReasons, assertion_failed: "product", prerequisite_failed: "harness" },
@@ -52,7 +54,8 @@ export const FAILURE_REASONS = {
   relay: { ...commonReasons, ...transportReasons, assertion_failed: "product" },
   android: { ...commonReasons, ...transportReasons, assertion_failed: "product", device_outage: "infra_transient", prerequisite_failed: "harness" },
   androidPush: { ...commonReasons, ...transportReasons, assertion_failed: "product", privacy_failed: "product",
-    delivery_timeout: "harness", push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient" },
+    delivery_timeout: "harness", delivery_metadata_timeout: "harness",
+    push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient" },
   windows: { ...commonReasons, ...transportReasons, probe_deadline: "infra_transient", allocation_rejected: "infra_transient",
     assertion_failed: "product", authentication_failed: "harness", helper_failed: "harness", mutation_unconfirmed: "harness", ownership_changed: "harness" },
   deviceCloud: { ...commonReasons, pinned_pool_busy: "infra_transient", journey_failed: "product", audit_failed: "product",

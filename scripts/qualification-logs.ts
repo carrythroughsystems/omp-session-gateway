@@ -49,7 +49,6 @@ export function pushDeliveryTelemetry(events: readonly QualificationLogEvent[]):
 const remoteScript = `import os,sys,stat,json
 p,expected,op=sys.argv[1:]
 if not os.path.isabs(p) or os.path.normpath(p)!=p: raise ValueError('unsafe path')
-if os.path.lexists(p+'.unhealthy'): raise ValueError('sticky failure')
 if op=='prepare':
  q='/'
  for part in os.path.dirname(p).split('/')[1:]:
@@ -77,19 +76,22 @@ def read_private(n,limit):
  finally: os.close(fd)
 try: before=read_private('health',64)
 except FileNotFoundError: before=None
+try: writer_before=read_private('writer',16)
+except FileNotFoundError: writer_before=None
 names=os.listdir(p)
-files=sorted(n for n in names if n!='health')
+files=sorted(n for n in names if n not in ['health','writer'])
 if len(files)>4 or files!=['events.%d.jsonl'%i for i in range(len(files))]: raise ValueError('rotation gap')
 texts=[read_private(n,262144) for n in reversed(files)]
 try: after=read_private('health',64)
 except FileNotFoundError: after=None
-stable=before==after and before is not None and before.startswith('[') and before.endswith('\\n')
+try: writer_after=read_private('writer',16)
+except FileNotFoundError: writer_after=None
+stable=before==after and before is not None and before.startswith('[') and before.endswith('\\n') and writer_before==writer_after and writer_after in ['active\\n','closed\\n']
 if op=='remove':
- if names and (not stable or after!=expected): raise ValueError('retained snapshot changed')
- if os.path.lexists(p+'.unhealthy'): raise ValueError('sticky failure')
+ if names and (not stable or after!=expected or writer_after!='closed\\n'): raise ValueError('retained snapshot changed')
  for n in names: os.unlink(os.path.join(p,n))
  os.rmdir(p)
-print(json.dumps({'healthy':stable and 'events.0.jsonl' in names,'health':after,'texts':texts,'empty':len(names)==0}))
+print(json.dumps({'healthy':stable and 'events.0.jsonl' in names,'health':after,'writer':writer_after,'texts':texts,'empty':len(names)==0}))
 `;
 
 export function createQualificationLogs(options: { execute: FixtureExecutor; remoteDirectory: string; jobDirectory: string }): QualificationLogs {
@@ -102,7 +104,7 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
     if (result.exitCode !== 0 || Buffer.byteLength(result.stdout) > 2 * 1024 * 1024) throw new Error("qualification log inspection failed");
     return JSON.parse(result.stdout) as unknown;
   };
-  const readState = async () => {
+  const readState = async (requireClosed = false) => {
     let value = await remote("read");
     // A pending writer or any changed health state invalidates the entire bracketed read.
     for (let attempt = 0; attempt < 2 && typeof value === "object" && value !== null && "healthy" in value && value.healthy === false; attempt++) {
@@ -112,6 +114,8 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
     if (typeof value !== "object" || value === null || !("healthy" in value) || value.healthy !== true || !("texts" in value) ||
       !Array.isArray(value.texts) || value.texts.some(text => typeof text !== "string")) throw new Error("qualification logging unhealthy");
     if (!("health" in value) || typeof value.health !== "string") throw new Error("qualification health missing");
+    if (!("writer" in value) || !["active\n", "closed\n"].includes(String(value.writer)) ||
+      requireClosed && value.writer !== "closed\n") throw new Error("qualification writer was not closed");
     const [index, first] = parseQualificationLogHealth(value.health);
     const events = parseQualificationLogs(value.texts, first);
     if (index !== (events.at(-1)?.index ?? 0)) throw new Error("qualification health sequence differs");
@@ -160,7 +164,7 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
         await remote("remove");
         return { files: 0, events: 0 };
       }
-      const { events, health } = await readState();
+      const { events, health } = await readState(true);
       persist("gateway-structured.jsonl", events);
       for (const [window, slice] of windows) persist(`gateway-${window.lane}-${window.phase}-${window.ordinal}.jsonl`, slice);
       const directory = openSync(options.jobDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);

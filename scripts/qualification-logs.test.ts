@@ -113,7 +113,7 @@ test.skipIf(process.platform === "win32")("R2 retained files and their directory
   const original = fs.fsyncSync;
   let syncing: ReturnType<typeof spyOn> | undefined;
   try {
-    await logs.prepare(); new QualificationLogSink(remoteDirectory);
+    await logs.prepare(); new QualificationLogSink(remoteDirectory).close();
     syncing = spyOn(fs, "fsyncSync").mockImplementation(fd => {
       if (fs.fstatSync(fd).isDirectory()) directorySynced = true; else fileSynced = true;
       original(fd);
@@ -121,6 +121,22 @@ test.skipIf(process.platform === "win32")("R2 retained files and their directory
     await logs.collect();
     expect(existsSync(remoteDirectory)).toBe(false);
   } finally { syncing?.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("495 R1 final collection refuses a matching commit from an unclosed writer", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-unclosed-")); chmodSync(root, 0o700);
+  const job = mkdtempSync(join(root, "job-")); chmodSync(job, 0o700);
+  const remoteDirectory = qualificationLogDirectory(root, randomUUID());
+  const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory, jobDirectory: job });
+  try {
+    await logs.prepare();
+    new SafeLogger(new QualificationLogSink(remoteDirectory)).event("info", "http.listening", { port: 4317 });
+    await Promise.resolve();
+    expect(await logs.healthy()).toBe(true);
+    await expect(logs.collect()).rejects.toThrow();
+    expect(existsSync(remoteDirectory)).toBe(true);
+    expect(readdirSync(job)).toHaveLength(0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test.skipIf(process.platform === "win32").each(["file", "directory"] as const)("R2 failed %s fsync preserves remote evidence", async stage => {
@@ -131,7 +147,7 @@ test.skipIf(process.platform === "win32").each(["file", "directory"] as const)("
   const original = fs.fsyncSync;
   let syncing: ReturnType<typeof spyOn> | undefined;
   try {
-    await logs.prepare(); new QualificationLogSink(remoteDirectory);
+    await logs.prepare(); new QualificationLogSink(remoteDirectory).close();
     syncing = spyOn(fs, "fsyncSync").mockImplementation(fd => {
       if (fs.fstatSync(fd).isDirectory() === (stage === "directory")) throw new Error("synthetic retention failure");
       original(fd);
@@ -148,13 +164,14 @@ test.skipIf(process.platform === "win32")("collector validates real private path
   const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory, jobDirectory: job });
   try {
     await logs.prepare();
-    const logger = new SafeLogger(new QualificationLogSink(remoteDirectory));
+    const sink = new QualificationLogSink(remoteDirectory), logger = new SafeLogger(sink);
     const window = await logs.begin("androidPush", "private_verified");
     logger.event("info", "push.queue_accepted", { sequence: 1, ...flags });
     logger.event("info", "push.send_started", { sequence: 1, ...flags, subscriptions: 1 });
     logger.event("warn", "push.send_failed", { sequence: 1, request_alias: 1, elapsed_ms: 10, status: 503 });
     expect(await logs.end(window)).toMatchObject({ sufficient: true, retryable: true });
     expect(await logs.healthy()).toBe(true);
+    sink.close();
     expect(await logs.collect()).toEqual({ files: 2, events: 3 });
     expect(existsSync(remoteDirectory)).toBe(false);
     for (const name of readdirSync(job)) {
@@ -170,7 +187,7 @@ test.skipIf(process.platform === "win32")("invalid remote telemetry and destinat
   const remoteDirectory = qualificationLogDirectory(root, randomUUID());
   const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory, jobDirectory: job });
   try {
-    await logs.prepare(); new QualificationLogSink(remoteDirectory);
+    await logs.prepare(); new QualificationLogSink(remoteDirectory).close();
     writeFileSync(join(remoteDirectory, "events.0.jsonl"), '{"payload":"SYNTHETIC-SECRET"}\n');
     expect(await logs.healthy()).toBe(false);
     await expect(logs.collect()).rejects.toThrow();
