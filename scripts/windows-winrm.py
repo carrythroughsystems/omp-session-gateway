@@ -14,12 +14,13 @@ from urllib.parse import quote
 try:
     from winrm.protocol import Protocol
     from requests.exceptions import ConnectTimeout, ReadTimeout, ConnectionError as RequestsConnectionError
+    from urllib3.exceptions import ProtocolError, MaxRetryError
     from winrm.exceptions import InvalidCredentialsError, WinRMTransportError
     IMPORT_ERROR = None
 except ImportError as error:
     # Import/encoding faults are helper failures, never transport evidence.
     IMPORT_ERROR = error
-    ConnectTimeout = ReadTimeout = RequestsConnectionError = InvalidCredentialsError = WinRMTransportError = ()
+    ConnectTimeout = ReadTimeout = RequestsConnectionError = ProtocolError = MaxRetryError = InvalidCredentialsError = WinRMTransportError = ()
 
 # The remote command line is constant. The script and its input travel on the encrypted
 # WinRS input stream, not -EncodedCommand, environment variables, or temporary scripts.
@@ -128,9 +129,6 @@ def failure_detail(error, stage, disposition):
 
 def connection_reset(error):
     """requests/urllib3 wrap socket resets in exception args, never classify their text."""
-    if not (isinstance(error, ConnectionError) or isinstance(error, RequestsConnectionError) or
-            (isinstance(error, OSError) and error.errno == errno.ECONNRESET)):
-        return False
     pending, seen = [error], set()
     for _ in range(16):
         if not pending:
@@ -141,7 +139,17 @@ def connection_reset(error):
         seen.add(id(current))
         if isinstance(current, ConnectionResetError) or (isinstance(current, OSError) and current.errno == errno.ECONNRESET):
             return True
-        pending.extend(item for item in (*current.args, current.__cause__, current.__context__) if isinstance(item, BaseException))
+        if not (isinstance(current, ConnectionError) or isinstance(current, RequestsConnectionError) or
+                isinstance(current, ProtocolError) or isinstance(current, MaxRetryError)):
+            continue
+        nested = list(current.args)
+        if current.__cause__ is not None:
+            nested.append(current.__cause__)
+        elif not current.__suppress_context__:
+            nested.append(current.__context__)
+        if isinstance(current, MaxRetryError):
+            nested.append(current.reason)
+        pending.extend(item for item in nested if isinstance(item, BaseException))
     return False
 
 
