@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,7 +51,7 @@ import {
 import { OmpLifecycleFailure, type OmpLifecycleEvidence } from "./omp-lifecycle-qualification.ts";
 import { DeviceCloudAvailabilityHold, deviceCloudHolds, parseDeviceCloudHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
-import type { QualificationExecution } from "./qualification-outcome.ts";
+import { readQualificationOutcomeFile, type QualificationExecution } from "./qualification-outcome.ts";
 import { QualificationFailure, normalizeQualificationFailures, type LaneFailure } from "./qualification-failure.ts";
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
@@ -325,7 +325,7 @@ describe("resumed relay qualification proof", () => {
       await expect(runStableQualification(["--tag", TAG], guarded, admissionLanes())).rejects.toThrow("relay evidence");
       const persisted = JSON.parse(await readFile(path, "utf8"));
       expect(persisted.status).toBe("failed");
-      expect(persisted.completedAt).toBeUndefined();
+      expect(persisted.completedAt).toBeDefined();
       expect(persisted.lanes.relay).toEqual(receipt.lanes.relay);
       expect(persisted.lanes.cleanup).toEqual(receipt.lanes.cleanup);
       expect(externalProbe).toBe(false);
@@ -444,7 +444,13 @@ describe("Mac receipt host ownership", () => {
         windows: lane, androidPush: lane, deviceCloud: lane, createPixelLease: () => createPixelLease(() => {}),
       })).rejects.toThrow("Mac hardware mismatch: expected Mac17,14, measured Mac14,3");
       expect({ targetLoads, cleanupCalls, cleanupProbes, sshProbes }).toEqual({ targetLoads: 1, cleanupCalls: 0, cleanupProbes: 0, sshProbes: 1 });
-      if (resumed) expect(await readFile(path, "utf8")).toBe(original);
+      if (resumed) {
+        const refused = JSON.parse(await readFile(path, "utf8"));
+        expect(refused.status).toBe("failed");
+        expect(refused.completedAt).toBeDefined();
+        expect(Object.values(refused.lanes).every((lane: any) => lane.status === "pending" &&
+          lane.attempts === 0 && lane.notStartedReason === "admission_failed")).toBe(true);
+      }
       else expect(await readdir(root)).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1208,6 +1214,27 @@ describe("campaign terminal evidence and readiness", () => {
     expect(() => assertCampaignRetryEligible(receipt, receiptExecution(), resumeModules)).toThrow();
   });
 
+  test("poisoned Pixel consumers persist only closed graphs and finalize as collateral", async () => {
+    const receipt = failedReceipt();
+    receipt.lanes.windows.status = "pending";
+    delete receipt.lanes.windows.failure;
+    receipt.lanes.android.status = "pending";
+    let sequence = 200, ranQueued = false;
+    const pixel = createPixelLease(() => {}, () => ++sequence);
+    const persist = async () => { validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG); };
+    const settled = await Promise.allSettled([
+      executeReceiptLane(receipt, "windows", persist, () => pixel("windows", async () => {
+        throw Object.assign(new QualificationFailure(transient()), { pixelUnrestored: true });
+      })),
+      executeReceiptLane(receipt, "android", persist, () => pixel("android", async () => { ranQueued = true; return {}; })),
+    ]);
+    await finalizeCampaignFailure(receipt, new AggregateError(settled.flatMap(result =>
+      result.status === "rejected" ? [result.reason] : [])), persist, resumeModules);
+    expect(ranQueued).toBe(false);
+    expect(receipt.lanes.android.failure).toMatchObject([{ class: "collateral", originIds: [101] }]);
+    expect(Object.values(receipt.lanes).some(lane => lane.status === "running")).toBe(false);
+  });
+
   test("retry consumption persists its ordinal before admission and leaves prior snapshot/passes immutable", async () => {
     const receipt = failedReceipt();
     await finalizeCampaignFailure(receipt, new QualificationFailure(transient()), async () => {}, resumeModules);
@@ -1263,6 +1290,20 @@ describe("campaign terminal evidence and readiness", () => {
     })).rejects.toThrow();
     expect(macRestored).toBe(true);
     expect(receipt.rigReadiness).toMatchObject({ status: "failed", cleanupDisposition: "unresolved" });
+  });
+
+  test("a readiness cleanup checkpoint failure never skips either resource owner", async () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const restored: string[] = [];
+    await expect(runRigReadiness(receipt, async () => {
+      if (receipt.rigReadiness?.phase === "cleanup") throw new Error("persistence unavailable");
+    }, {
+      prepare: async () => { throw new Error("probe failed"); },
+      windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+      restorePixel: async () => { restored.push("Pixel"); }, restoreMac: async () => { restored.push("Mac"); },
+    })).rejects.toThrow("rig readiness failed");
+    expect(restored).toEqual(["Pixel", "Mac"]);
+    expect(receipt.rigReadiness?.status).toBe("failed");
   });
 
   test("manual readiness attempt zero is diagnostic only and cannot synthesize retry authority", () => {
@@ -1605,6 +1646,25 @@ function summarizedReceipt() {
   return receipt;
 }
 
+test("bound read-only preflight failure writes an effect-free outcome without creating a receipt", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "stable-bound-preflight-")));
+  try {
+    const execution = receiptExecution(), executionPath = join(root, "execution.json"), outcomePath = join(root, "outcome.json");
+    await writeFile(executionPath, JSON.stringify(execution), { mode: 0o600 });
+    const fixture = await preflightFixture(root);
+    const runtime = { ...fixture, environment: { ...fixture.environment, OMP_STABLE_OUTCOME_FILE: outcomePath },
+      executable: () => null };
+    await expect(runStableQualification(["--tag", TAG, "--preflight", "--execution-file", executionPath],
+      runtime, admissionLanes())).rejects.toThrow();
+    const outcome = await readQualificationOutcomeFile(outcomePath, execution);
+    expect(outcome).toMatchObject({ scope: "preflight", failureSummary: {
+      failures: [{ lane: "preflight", class: "harness", operation: "not_started" }],
+      containment: { proven: true, cleanupComplete: true, unresolvedMutation: false },
+    } });
+    expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test.each(["missing lane record", "passed root owner", "unrepresented failed lane", "extra summary root"] as const)(
   "council R2 receipt graph rejects %s", variant => {
     const receipt = summarizedReceipt();
@@ -1710,11 +1770,18 @@ test("council R3 publication restart and reopened Mac cleanup invalidate prior a
   expect(validateStableQualificationReceipt(pending, TAG, COMMIT, PREVIOUS_TAG)).toBe(pending);
 });
 
-test("council R3 real cloud resume consumes summary before admission persists", async () => {
+test("council R3 bound cloud retry consumes summary before admission persists", async () => {
   const root = await mkdtemp(join(tmpdir(), "stable-summary-resume-"));
   const path = join(root, "stable-qualification.json"), receipt = summarizedReceipt();
   try {
+    receipt.completedAt = new Date().toISOString();
+    receipt.lanes.deviceCloud.evidence!.progress = { epoch: "11111111-2222-4333-8444-555555555555",
+      cleanupRequired: false, resources: [], results: {} };
     await createReceiptPersister(path, receipt)();
+    const priorDigest = digest(await readFile(path, "utf8"));
+    const executionPath = join(root, "execution.json");
+    const next = { ...receiptExecution(), campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+    await writeFile(executionPath, JSON.stringify(next), { mode: 0o600 });
     let admitted = false;
     const runtime = await preflightFixture(root);
     const modules = { ...resumeModules, deviceCloud: { ...resumeModules.deviceCloud, preflight: async () => {
@@ -1724,10 +1791,13 @@ test("council R3 real cloud resume consumes summary before admission persists", 
       admitted = true;
       throw new Error("synthetic admission stop");
     } } };
-    await expect(runStableQualification(["--tag", TAG, "--resume-device-cloud"], runtime, modules)).rejects.toThrow();
+    await expect(runStableQualification(["--tag", TAG, "--execution-file", executionPath,
+      "--retry-receipt-sha256", priorDigest], runtime, modules)).rejects.toThrow("real-device cloud lane admission failed");
     expect(admitted).toBe(true);
     const saved = validateStableQualificationReceipt(JSON.parse(await readFile(path, "utf8")), TAG, COMMIT, PREVIOUS_TAG);
-    expect(saved.failureSummary).toBeUndefined();
+    expect(saved.execution).toEqual(next);
+    expect(saved.failureSummary?.failures).toMatchObject([{ class: "harness", reason: "unclassified_failure" }]);
+    expect(saved.lanes.deviceCloud.failure).toBeUndefined();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

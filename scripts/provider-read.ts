@@ -11,6 +11,7 @@ export interface ProviderReadOptions {
 
 /** An owned timer, not a race which leaves a sleeping or reading operation behind. */
 export function abortablePause(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) return Bun.sleep(milliseconds);
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(signal?.reason); };

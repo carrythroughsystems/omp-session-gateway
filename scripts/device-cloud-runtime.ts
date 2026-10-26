@@ -105,8 +105,8 @@ export function tunnelIdentifier(epoch: string): string {
 export interface DeviceCloudAdmissionDependencies {
   javaRuns(environment: Environment): boolean;
   credentials(environment: Environment): Promise<TestingBotCredentials>;
-  api(credentials: TestingBotCredentials): Pick<TestingBotApi, "devices">;
-  fallbackReady(environment: Environment, target: "ipad" | "android"): Promise<void>;
+  api(credentials: TestingBotCredentials, signal?: AbortSignal): Pick<TestingBotApi, "devices">;
+  fallbackReady(environment: Environment, target: "ipad" | "android", signal?: AbortSignal): Promise<void>;
 }
 
 const admissionDependencies: DeviceCloudAdmissionDependencies = {
@@ -115,10 +115,10 @@ const admissionDependencies: DeviceCloudAdmissionDependencies = {
     catch { return false; }
   },
   credentials: environment => readTestingBotCredentials(serviceAccountTokenFile(environment)),
-  api: credentials => new TestingBotApi(credentials),
-  fallbackReady: async (environment, target) => {
+  api: (credentials, signal) => new TestingBotApi(credentials, signal),
+  fallbackReady: async (environment, target, signal) => {
     requireBrowserStackRosetta();
-    const api = new BrowserStackApi(await readBrowserStackCredentials(serviceAccountTokenFile(environment)));
+    const api = new BrowserStackApi(await readBrowserStackCredentials(serviceAccountTokenFile(environment)), signal);
     await api.plan();
     if ((await api.devices(target)).length === 0) throw new Error(`BrowserStack offers no pinned ${target} model`);
   },
@@ -128,7 +128,9 @@ export async function admitDeviceCloud(
   environment: Environment,
   mode: "catalog" | "free",
   dependencies: DeviceCloudAdmissionDependencies = admissionDependencies,
+  signal?: AbortSignal,
 ): Promise<TestingBotCredentials> {
+  signal?.throwIfAborted();
   let javaRuns = false;
   try {
     javaRuns = dependencies.javaRuns(environment);
@@ -137,7 +139,8 @@ export async function admitDeviceCloud(
   }
   if (!javaRuns) throw new Error("the TestingBot tunnel needs Java; install openjdk@17 or set OMP_STABLE_JAVA");
   const credentials = await dependencies.credentials(environment);
-  const api = dependencies.api(credentials);
+  signal?.throwIfAborted();
+  const api = dependencies.api(credentials, signal);
   const catalog = await api.devices("all");
   for (const target of DEVICE_CLOUD_TARGETS) {
     const profile = DEVICE_CLOUD_PROFILES[target];
@@ -151,7 +154,7 @@ export async function admitDeviceCloud(
     for (const target of DEVICE_CLOUD_TARGETS) {
       if (!free.some(device => eligibleDevice(DEVICE_CLOUD_PROFILES[target], device))) {
         if (target !== "iphone") {
-          try { await dependencies.fallbackReady(environment, target); }
+          try { await dependencies.fallbackReady(environment, target, signal); }
           catch (error) { failures.push(error); }
           continue;
         }
@@ -606,7 +609,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     now: Date.now,
     pause: ms => abortablePause(ms, execution?.signal),
     admit: async () => {
-      await admitDeviceCloud(options.environment, "catalog");
+      await admitDeviceCloud(options.environment, "catalog", admissionDependencies, execution?.signal);
     },
     fixture: async (operation, epoch) => {
       const prepared = await prepareFixture();

@@ -99,6 +99,12 @@ function laneFailure(error: unknown, lane: QualificationFailureLane, nextFailure
   } as LaneFailure, { cause: error }), pixelUnrestored(error) ? { pixelUnrestored: true } : {});
 }
 
+function preflightFailures(error: unknown): readonly LaneFailure[] {
+  return normalizeQualificationFailures(error).map(item => item.class === "harness" ?
+    parseLaneFailure({ ...item, ...(item.lane === "campaign" ? { lane: "preflight", step: "admission" } : {}),
+      operation: "not_started" }) : item);
+}
+
 const REPOSITORY = "carrythroughsystems/omp-session-gateway";
 const ESCAPED_VERSION = VERSION.replaceAll(".", "\\.");
 const CANDIDATE_TAG_PATTERN = new RegExp(`^v${ESCAPED_VERSION}-prealpha\\.[1-9][0-9]*$`, "u");
@@ -774,11 +780,12 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
     }
     const failure = receipt.execution === undefined ? error : laneFailure(error, name, () => nextReceiptFailureId(receipt));
     if (receipt.execution !== undefined) {
-      // Collateral references are validated against the full campaign graph at finalization.
+      // A queued owner can settle before its root owner's catch persists. Defer collateral
+      // records until finalization can atomically persist the complete, closed failure graph.
       const leaves = (value: unknown): LaneFailure[] => value instanceof QualificationFailure ? [value.evidence] :
         value instanceof AggregateError ? value.errors.flatMap(leaves) : [];
       const own = leaves(failure).filter(item => item.lane === name);
-      if (own.length > 0) lane.failure = own;
+      if (own.length > 0 && own.every(item => item.class !== "collateral")) lane.failure = own;
     }
     await persist();
     throw failure;
@@ -942,6 +949,7 @@ export function assertCampaignCleanupComplete(
   validateStableQualificationReceipt(receipt, execution.binding.candidateTag, execution.binding.orchestratorCommit, execution.binding.previousTag);
   if (!qualificationExecutionsMatch(receipt.execution, execution) || receipt.status !== "failed" || receipt.completedAt === undefined ||
     receipt.failureSummary?.containment.proven !== true || receipt.failureSummary.containment.cleanupComplete !== true ||
+    receipt.failureSummary.containment.unresolvedMutation !== false ||
     Object.values(receipt.lanes).some(lane => lane.status === "running")) {
     throw new Error("campaign cleanup lacks terminal bound containment evidence");
   }
@@ -1728,7 +1736,7 @@ export interface StablePreflightRuntime {
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly executable: (name: string) => string | null;
   readonly output: (command: readonly string[]) => Promise<string>;
-  readonly adb: (serial: string | undefined, args: readonly string[]) => Promise<string>;
+  readonly adb: (serial: string | undefined, args: readonly string[], signal?: AbortSignal) => Promise<string>;
   readonly loadMacTarget: (options: StableQualificationOptions) => Promise<MacTarget>;
 }
 
@@ -1740,7 +1748,7 @@ const defaultPreflightRuntime: StablePreflightRuntime = {
   environment: process.env,
   executable: Bun.which,
   output: command => commandOutput(command, { timeoutMs: 15_000 }),
-  adb: (serial, args) => runAdb(serial, args, { timeoutMs: 15_000 }),
+  adb: (serial, args, signal) => runAdb(serial, args, { timeoutMs: 15_000, ...(signal === undefined ? {} : { signal }) }),
   loadMacTarget: loadConfiguredMacTarget,
 };
 
@@ -1895,7 +1903,8 @@ function macEnvironment(
   candidate: CandidateIdentity,
 ): Record<string, string> {
   return {
-    ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] =>
+      entry[1] !== undefined && entry[0] !== "OMP_MAC_QUALIFICATION_LOG_DIR")),
     OMP_MAC_HOST: target.sshDestination,
     OMP_MAC_TAG: options.tag,
     OMP_MAC_PREVIOUS_TAG: options.previousTag,
@@ -2243,8 +2252,9 @@ export async function runAndroidAcceptance(
   execution?: QualificationExecutionContext,
 ): Promise<Record<string, unknown>> {
   // A read-only refusal is not an unrestored child: no potentially mutating process ran.
-  const admittedSerial = await requireSingleDevice((...args) => runtime.adb(undefined, args));
-  await requireAndroidGatewayReachability(context.publicOrigin, (...args) => runtime.adb(admittedSerial, args));
+  execution?.signal.throwIfAborted();
+  const admittedSerial = await requireSingleDevice((...args) => runtime.adb(undefined, args, execution?.signal));
+  await requireAndroidGatewayReachability(context.publicOrigin, (...args) => runtime.adb(admittedSerial, args, execution?.signal));
   const browser = resolveAndroidBrowserTarget();
   const androidEnvironment = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
@@ -2265,10 +2275,11 @@ export async function runAndroidAcceptance(
   }
   const serial = summary.serial;
   if (typeof serial !== "string" || serial === "") throw new Error("physical Android acceptance did not identify its device");
+  const property = (name: string) => runAdb(serial, ["shell", "getprop", name], {
+    timeoutMs: 120_000, ...(execution === undefined ? {} : { signal: execution.signal }),
+  }).then(value => value.trim());
   const [model, androidRelease, buildId] = await Promise.all([
-    runAdb(serial, ["shell", "getprop", "ro.product.model"], { timeoutMs: 120_000 }).then(value => value.trim()),
-    runAdb(serial, ["shell", "getprop", "ro.build.version.release"], { timeoutMs: 120_000 }).then(value => value.trim()),
-    runAdb(serial, ["shell", "getprop", "ro.build.id"], { timeoutMs: 120_000 }).then(value => value.trim()),
+    property("ro.product.model"), property("ro.build.version.release"), property("ro.build.id"),
   ]);
   if (!model.startsWith("Pixel ") || androidRelease === "" || buildId === "") {
     throw new Error("physical Android acceptance did not run on an identified Pixel build");
@@ -2500,7 +2511,7 @@ export async function completeOmpPublicationLifecycle(
   receipt: StableQualificationReceipt,
   persist: () => Promise<void>,
   run: () => Promise<OmpLifecycleEvidence>,
-  nextFailureId: () => number = () => 1,
+  nextFailureId: () => number = () => nextReceiptFailureId(receipt),
 ): Promise<void> {
   const lane = receipt.lanes.ompPublication;
   clearLaneFailureEvidence(receipt, lane);
@@ -2524,11 +2535,15 @@ export async function completeOmpPublicationLifecycle(
     lane.status = "failed";
     lane.error = reason;
     lane.completedAt = now();
-    await persist();
-    throw error instanceof QualificationFailure ? error : new QualificationFailure({
+    const failure = error instanceof QualificationFailure ? error : new QualificationFailure({
       id: nextFailureId(), lane: "ompPublication", step: error instanceof OmpLifecycleFailure ? error.step : "cleanup",
       class: "harness", reason: "lifecycle_unconfirmed", operation: "unknown", elapsedMs: 0, observations: {},
     }, { cause: error });
+    if (receipt.execution !== undefined && failure.evidence.lane === "ompPublication" && failure.evidence.class !== "collateral") {
+      lane.failure = [failure.evidence];
+    }
+    await persist();
+    throw failure;
   }
 }
 
@@ -2540,7 +2555,7 @@ export async function finishLiveQualification(
   stopRelay: () => Promise<void>,
   lifecycle: () => Promise<OmpLifecycleEvidence>,
   preservePublication = false,
-  nextFailureId: () => number = () => 1,
+  nextFailureId: () => number = () => nextReceiptFailureId(receipt),
 ): Promise<void> {
   const publication = receipt.lanes.ompPublication;
   const failure = failures.length === 0 ? undefined : new AggregateError(failures, "live qualification consumers failed");
@@ -2747,8 +2762,7 @@ export async function runStableQualification(
         await writeQualificationOutcomeFile(options.outcomeFile, {
           formatVersion: 1, outcome: "qualification-failed", scope: "preflight", execution,
           failureSummary: {
-            failures: normalizeQualificationFailures(error).map(item => item.class === "harness" ?
-              { ...item, operation: "not_started" } : item),
+            failures: preflightFailures(error),
             timings: { attemptMs: 0, cleanupMs: 0 },
             containment: { proven: true, cleanupComplete: true, unresolvedMutation: false },
           },
@@ -2787,7 +2801,7 @@ export async function runStableQualification(
       if (execution !== undefined && options.outcomeFile !== undefined) await writeQualificationOutcomeFile(options.outcomeFile, {
         formatVersion: 1, outcome: "qualification-failed", scope: "preflight", execution,
         failureSummary: {
-          failures: normalizeQualificationFailures(error).map(item => item.class === "harness" ? { ...item, operation: "not_started" } : item),
+          failures: preflightFailures(error),
           timings: { attemptMs: 0, cleanupMs: 0 }, containment: { proven: true, cleanupComplete: true, unresolvedMutation: false },
         },
       });
@@ -2826,7 +2840,7 @@ async function runOwnedStableQualification(
   assertMacHostBinding(receipt, options.macHost);
   const resumeIdentity = { tag: options.tag, previousTag: options.previousTag, orchestratorCommit, macHost: options.macHost };
   if (options.resumeDeviceCloud) assertDeviceCloudResumeEligible(receipt, resumeIdentity, lanes);
-  else if (receipt.lanes.deviceCloud.evidence?.availabilityHold !== undefined) {
+  else if (execution === undefined && receipt.execution === undefined && receipt.lanes.deviceCloud.evidence?.availabilityHold !== undefined) {
     let eligible = false;
     try { assertDeviceCloudResumeEligible(receipt, resumeIdentity, lanes); eligible = true; } catch { /* Other failures retain normal cleanup recovery. */ }
     if (eligible) throw new Error("this availability-held receipt requires explicit --resume-device-cloud");
