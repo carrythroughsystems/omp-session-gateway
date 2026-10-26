@@ -182,6 +182,8 @@ export interface SessionAskMetadata {
 export interface SessionMetadata {
   readonly instanceId: string;
   readonly generation: number;
+  /** Qualification-only opaque append-index alias for this exact current ask. */
+  readonly qualificationPushAlias?: number;
   readonly title?: string;
   readonly cwdLabel?: string;
   readonly model?: string;

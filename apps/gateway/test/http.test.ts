@@ -2,16 +2,16 @@ import { createHmac } from "node:crypto";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { SecretCapability, type ObservedSessionInput } from "@omp-session-gateway/protocol";
 import type { GatewayConfig } from "../src/config.ts";
 import { requestHasTrustedDashboardContext, requestHasValidMutationContext } from "../src/auth.ts";
-import { createHttpHandler } from "../src/http.ts";
+import { createHttpHandler, startHttpServer } from "../src/http.ts";
 import { finalizeHttpResponse } from "../src/http-policy.ts";
-import { SafeLogger } from "../src/logger.ts";
+import { QualificationLogSink, SafeLogger } from "../src/logger.ts";
 import { PushService } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { StaticAssetStore } from "../src/static.ts";
@@ -161,6 +161,29 @@ function launchRequest(
     identity,
   );
 }
+
+test.skipIf(process.platform === "win32")("495 round2 HTTP shutdown settles admitted handlers before closing structured logs", async () => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), "http-shutdown-"));
+  const sink = new QualificationLogSink(root);
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const server = startHttpServer({ config: { ...config(), http: { ...config().http, port: 0 } },
+    registry: populatedRegistry(), staticAssets: assets, logger: new SafeLogger(sink), readinessToken: "synthetic-readiness",
+    launchResolver: { async resolve() { entered.resolve(); await release.promise; throw new Error("synthetic handler failure"); } } });
+  let settled = false;
+  const req = launchRequest();
+  const response = fetch(new URL("/api/v1/sessions/http-instance-000001/launch", server.url), {
+    method: "POST", headers: req.headers, body: await req.text(),
+  }).catch(() => undefined);
+  try {
+    await entered.promise;
+    const stopping = server.stop(true).then(() => { settled = true; });
+    await Bun.sleep(10);
+    expect(settled).toBe(false);
+    release.resolve(); await stopping;
+    sink.close();
+    expect(await readFile(join(root, "events.0.jsonl"), "utf8")).toContain('"event":"http.request_failed"');
+  } finally { release.resolve(); await server.stop(true); await response; await rm(root, { recursive: true, force: true }); }
+});
 
 async function readSseEvent(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
   const decoder = new TextDecoder();
@@ -1074,6 +1097,48 @@ describe("HTTP boundary", () => {
     expect(state).not.toContain("PROMPT_CONTENT_CANARY");
     await pushService.stop();
     await rm(root, { recursive: true, force: true });
+  });
+
+  test.skipIf(process.platform === "win32")("R2 authenticated current asks expose only their qualification log alias", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-http-alias-")));
+    const logs = join(root, "logs"); await mkdir(logs, { mode: 0o700 });
+    const base = config();
+    const gatewayConfig = { ...base, paths: { ...base.paths, stateDir: join(root, "state"), configDir: join(root, "config"), runtimeDir: join(root, "run") } };
+    const registry = populatedRegistry();
+    const logger = new SafeLogger(new QualificationLogSink(logs));
+    const pushService = await PushService.open({ config: gatewayConfig, registry, logger,
+      transport: { async send() { throw Object.assign(new Error("SYNTHETIC-PROVIDER-BODY"), { statusCode: 503 }); } } });
+    try {
+      await pushService.subscribe("allowed@example.com", { version: 2, detailLevel: "private", subscription: {
+        endpoint: "https://push.example.test/send/fixture", expirationTime: null, keys: { p256dh: "P".repeat(88), auth: "A".repeat(22) },
+      } });
+      registry.reconcile({ observed: [observedSession("http-instance-000001", true)], retained: new Set() });
+      await pushService.flush();
+      const handler = createTestHttpHandler({ config: gatewayConfig, registry, staticAssets: assets, pushService, logger });
+      const response = await handler(request("/api/v1/sessions"), peer);
+      const body = await response.json();
+      const current = body.sessions[0];
+      expect(Number.isSafeInteger(current.qualificationPushAlias)).toBe(true);
+      expect(current.qualificationPushAlias).toBeGreaterThan(0);
+      expect(pushService.qualificationAlias({ ...current, generation: current.generation + 1 })).toBeUndefined();
+      expect(pushService.qualificationAlias({ ...current, ask: { ...current.ask, requestId: "foreign-request-0001" } })).toBeUndefined();
+      expect(pushService.qualificationAlias({ ...current, instanceId: "foreign-instance-0001" })).toBeUndefined();
+      expect(validateSessionList(body)).toBe(true);
+      expect((await handler(request("/api/v1/sessions", {}, ""), peer)).status).toBe(403);
+      const ordinary = createTestHttpHandler({ config: gatewayConfig, registry, staticAssets: assets, logger });
+      expect((await (await ordinary(request("/api/v1/sessions"), peer)).json()).sessions[0].qualificationPushAlias).toBeUndefined();
+      const text = await readFile(join(logs, "events.0.jsonl"), "utf8");
+      for (const name of ["push.queue_accepted", "push.send_started", "push.send_failed"]) {
+        expect(text.trimEnd().split("\n").map(line => JSON.parse(line)).find(event => event.event === name)?.request_alias).toBe(current.qualificationPushAlias);
+      }
+      for (const forbidden of [current.instanceId, current.ask.requestId, "SYNTHETIC-PROVIDER-BODY", "push.example.test"]) expect(text).not.toContain(forbidden);
+      registry.reconcile({ observed: [observedSession("http-instance-000001", false)], retained: new Set() });
+      registry.reconcile({ observed: [observedSession("http-instance-000001", true)], retained: new Set() });
+      await pushService.flush();
+      const fresh = (await (await handler(request("/api/v1/sessions"), peer)).json()).sessions[0];
+      expect(fresh.qualificationPushAlias).toBeGreaterThan(current.qualificationPushAlias);
+      expect(pushService.qualificationAlias(current)).toBeUndefined();
+    } finally { await pushService.stop(); await rm(root, { recursive: true, force: true }); }
   });
 
   test("isolates push DELETE mutations by authenticated identity for same and other endpoints", async () => {

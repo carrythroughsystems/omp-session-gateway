@@ -1,18 +1,20 @@
-import { basename, join, resolve } from "node:path";
+import { basename, join, posix, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { parseSessionListResponse } from "../packages/protocol/src/validation.ts";
 import { PUSH_API_VERSION, type PushDetailLevel, type SessionMetadata } from "../packages/protocol/src/types.ts";
-import { withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget,
-  runAdb, wakeAndroidDisplay, unlockAndroidKeyguard, showAndroidPinBouncer, type AndroidAdbCommand, type AndroidChromeDriver } from "./android-device.ts";
+import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget,
+  runAdb, wakeAndroidDisplay, unlockAndroidKeyguard, showAndroidPinBouncer, type AndroidAdbCommand, type AndroidChromeDriver, type AndroidExecution } from "./android-device.ts";
 import { closeWebApk, openWebApk, requireWebApk, webApkTasks } from "./android-webapk.ts";
 import { readAndroidUi, findAndroidNotification, tapAndroidNotification, readAndroidNotificationRecords, notificationMatchesDigest, trackUnchangedNotificationPost, NotificationOverlapError, type AndroidUiNode, type NotificationExpectation } from "./android-notification.ts";
 import { commandPushFixture, executeFixture, type FixtureExecutor, type PushFixtureLocation } from "./push-qualification-fixture.ts";
 import { PUSH_FIXTURE_ASK_BODY, PUSH_FIXTURE_ASK_TITLE } from "./fixtures/push-qualification-extension.ts";
 import { PAGE_PRELUDE } from "./android-leak-probe.ts";
-import type { AndroidPushIdentity, AndroidPushRuntime, PushBrowserBaseline, PushDeviceBaseline, PushFixtureRole, PushTapObservation, TriageObservation } from "./android-push-qualification.ts";
-import { everyError, runWithRestoration } from "./restoration.ts";
+import type { AndroidPushIdentity, AndroidPushPhase, AndroidPushRuntime, PushBrowserBaseline, PushDeviceBaseline, PushExecution, PushFixtureRole, PushTapObservation, TriageObservation } from "./android-push-qualification.ts";
+import { everyError, pixelUnrestored, runWithRestoration } from "./restoration.ts";
+import type { QualificationLogs } from "./qualification-logs.ts";
+import { QualificationFailure } from "./qualification-failure.ts";
 
 export interface AndroidPushRuntimeOptions {
   readonly fixtureBase?: string;
@@ -20,7 +22,67 @@ export interface AndroidPushRuntimeOptions {
   readonly fixtureBun?: string;
   readonly fixtureScripts?: string;
   readonly execute?: FixtureExecutor;
+  readonly executeWithContext?: (argv: readonly string[], execution: PushExecution | undefined) => ReturnType<FixtureExecutor>;
   readonly gatewayLogsDiscarded?: () => Promise<boolean>;
+  readonly qualificationLogs?: Pick<QualificationLogs, "begin" | "end" | "healthy">;
+  readonly execution?: PushExecution;
+}
+
+export async function gatewayRawLogsDiscarded(execute: FixtureExecutor): Promise<boolean> {
+  const home = await execute(["python3", "-c", "import os; print(os.path.expanduser('~'))"]);
+  const directory = home.stdout.trim();
+  if (home.exitCode !== 0 || !/^\/[^\r\n\0]+$/u.test(directory) || directory.length > 4096) return false;
+  const plist = posix.join(directory, "Library/LaunchAgents/omp-session-gateway.plist");
+  const stdout = await execute(["plutil", "-extract", "StandardOutPath", "raw", "-o", "-", plist]);
+  const stderr = await execute(["plutil", "-extract", "StandardErrorPath", "raw", "-o", "-", plist]);
+  return stdout.exitCode === 0 && stderr.exitCode === 0 && stdout.stdout.trim() === "/dev/null" && stderr.stdout.trim() === "/dev/null";
+}
+
+export function matchesPushDeliverySnapshot(session: SessionMetadata, candidates: readonly (SessionMetadata | undefined)[]): boolean {
+  return session.ask !== undefined && candidates.some(current => current?.instanceId === session.instanceId &&
+    current.generation === session.generation && current.ask?.requestId === session.ask?.requestId);
+}
+
+export function qualificationPushAliasFor(session: SessionMetadata, candidates: readonly (SessionMetadata | undefined)[]): number | undefined {
+  const matches = candidates.filter(current => current !== undefined && current.inputRequired && current.canControl &&
+    matchesPushDeliverySnapshot(session, [current]));
+  const alias = matches.length === 1 ? matches[0]?.qualificationPushAlias : undefined;
+  return typeof alias === "number" && Number.isSafeInteger(alias) && alias > 0 ? alias : undefined;
+}
+
+/** Diagnostic/fallback paths must not turn typed failures or unresolved cleanup into success. */
+export function rethrowPushSafetyFailure(error: unknown): void {
+  if (pixelUnrestored(error) || !everyError(error, nested =>
+    !(nested instanceof QualificationFailure) && !(nested instanceof NotificationOverlapError))) throw error;
+}
+
+/** An independent cleanup failure is a harness root; only its containment consequence is collateral. */
+export function pushBrowserCleanupFailure(error: AndroidBrowserCleanupError, nextFailureId: () => number): AggregateError {
+  const observations = { remainingResources: error.remainingResources, cleanupVerified: false, mutationReconciled: false };
+  const origin = new QualificationFailure({ id: nextFailureId(), lane: "androidPushCleanup", step: "browser",
+    class: "harness", reason: "containment_unproven", operation: "unknown", elapsedMs: 0, observations });
+  const collateral = new QualificationFailure({ id: nextFailureId(), lane: "androidPushCleanup", step: "containment",
+    class: "collateral", reason: "dependency_failed", originIds: [origin.evidence.id], operation: "unknown", elapsedMs: 0, observations });
+  return Object.assign(new AggregateError([...error.errors, origin, collateral], "Android Push browser containment unproven"), { pixelUnrestored: true });
+}
+
+/** Reads only an existing worker; no page navigation or fabricated notification can satisfy this. */
+export async function observePushDeliveryRequest(driver: Pick<AndroidChromeDriver, "browserSend" | "sessionSend">,
+  origin: string, session: SessionMetadata): Promise<boolean> {
+  if (session.ask === undefined) return false;
+  const inventory = await driver.browserSend("Target.getTargets");
+  const workers = Array.isArray(inventory.targetInfos) ? inventory.targetInfos.filter((target: Record<string, unknown>) =>
+    target.type === "service_worker" && typeof target.url === "string" && target.url.startsWith(`${origin}/`)) : [];
+  if (workers.length !== 1 || typeof workers[0].targetId !== "string") return false;
+  const attached = await driver.browserSend("Target.attachToTarget", { targetId: workers[0].targetId, flatten: true });
+  if (typeof attached.sessionId !== "string") return false;
+  try {
+    const response = await driver.sessionSend(attached.sessionId, "Runtime.evaluate", {
+      expression: `(async()=>{const ns=await self.registration.getNotifications({tag:${JSON.stringify(`omp-attention-${session.instanceId}`)}});return ns.length===1&&ns[0].data?.type==='attention'&&ns[0].data?.instanceId===${JSON.stringify(session.instanceId)}&&ns[0].data?.requestId===${JSON.stringify(session.ask.requestId)};})()`,
+      awaitPromise: true, returnByValue: true,
+    });
+    return response.exceptionDetails === undefined && typeof response.result === "object" && response.result !== null && "value" in response.result && response.result.value === true;
+  } finally { await driver.browserSend("Target.detachFromTarget", { sessionId: attached.sessionId }); }
 }
 
 export function isPushNotificationRoute(value: unknown, origin: string): boolean {
@@ -43,7 +105,7 @@ export function observePushLaunch(session: Pick<SessionMetadata, "generation" | 
     modeMatches: "mode" in body && body.mode === (kind === "attention" ? "control" : "view") };
 }
 
-type PermissionConnection = (run: (driver: Pick<AndroidChromeDriver, "browserSend">) => Promise<void>) => Promise<void>;
+type PermissionConnection = (run: (driver: Pick<AndroidChromeDriver, "browserSend">) => Promise<void>, execution?: AndroidExecution) => Promise<void>;
 
 export function ownedPushForwards(list: string, serial: string, socket: string): string[] {
   const forwards: string[] = [];
@@ -79,8 +141,9 @@ export async function awaitPageExecutionContext(
 }
 // Chrome removes CDP permission overrides when their browser connection closes.
 // Keep this browser-only connection (no page target) alive for the negative window.
-export async function holdAndroidNotificationDenial(origin: string, connect: PermissionConnection = run =>
-  withAndroidChrome(run, { port: 9237, launchBrowser: false })): Promise<() => Promise<void>> {
+export async function holdAndroidNotificationDenial(origin: string, connect: PermissionConnection = (run, execution) =>
+  withAndroidChrome(run, { port: 9237, launchBrowser: false, ...(execution === undefined ? {} : { execution }) }),
+  execution?: AndroidExecution): Promise<() => Promise<void>> {
   const ready = Promise.withResolvers<() => Promise<void>>();
   const release = Promise.withResolvers<void>();
   const session = connect(async driver => {
@@ -89,8 +152,13 @@ export async function holdAndroidNotificationDenial(origin: string, connect: Per
     ready.resolve(() => closing ??= runWithRestoration("Android notification permission", async () => {
       await driver.browserSend("Browser.getVersion");
     }, [async () => { release.resolve(); await session; }]));
-    await release.promise;
-  });
+    const cancel = () => release.resolve();
+    execution?.signal.addEventListener("abort", cancel, { once: true });
+    const timer = execution === undefined ? undefined : setTimeout(cancel, Math.max(1, execution.deadline - performance.now()));
+    if (execution?.signal.aborted) cancel();
+    try { await release.promise; }
+    finally { clearTimeout(timer); execution?.signal.removeEventListener("abort", cancel); }
+  }, execution);
   void session.catch(error => ready.reject(error));
   return ready.promise;
 }
@@ -110,7 +178,7 @@ export async function authenticateAndroidNotification(runtime: NotificationAuthe
     if (!await locked()) return;
     let nodes: AndroidUiNode[];
     try { nodes = await readAndroidUi(runtime.command); }
-    catch (error) { if (!await locked()) return; throw error; }
+    catch (error) { rethrowPushSafetyFailure(error); if (!await locked()) return; throw error; }
     // Authentication can finish while UIAutomator is capturing the old bouncer.
     return await locked() ? nodes : undefined;
   };
@@ -143,7 +211,7 @@ const TRIAGE_CONTROLS = {
   showAll: "aside.dismissed-control > button",
 } as const;
 /** The app's Hold and Hide stores (apps/web/src/app.ts); records carry instance IDs, never capabilities. */
-const LOCAL_TRIAGE_KEYS = ["omp.sessions.held-asks.v1", "omp.sessions.dismissed.v1"];
+const LOCAL_TRIAGE_KEYS = ["omp.sessions.held-asks.v1", "omp.sessions.dismissed.v1", "omp.sessions.held-asks.v2", "omp.sessions.dismissed.v2"];
 const DIRECTORY_STATE = `(() => {
   const ids = selector => [...document.querySelectorAll(selector)].map(element => element.dataset.instanceId ?? "");
   const pill = document.querySelector("#directory-count");
@@ -180,27 +248,65 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   let releasePermission: (() => Promise<void>) | undefined;
   let baselineRecords = new Map<string, number>();
   const observedPosts = new Map<string, { key: string; postedAt: number }>();
-  const execute = options.execute ?? executeFixture;
+  let execution = options.execution;
+  let phase: AndroidPushPhase = "baseline_captured";
+  let failureId = 0;
+  const localFailureId = () => ++failureId;
+  const nextFailureId = () => (execution?.nextFailureId ?? localFailureId)();
+  const chrome: typeof withAndroidChrome = async (run, context) => {
+    try { return await withAndroidChrome(run, context); }
+    catch (error) {
+      if (error instanceof AndroidBrowserCleanupError) throw pushBrowserCleanupFailure(error, nextFailureId);
+      throw error;
+    }
+  };
+  const execute: FixtureExecutor = argv => options.executeWithContext === undefined ?
+    (options.execute ?? executeFixture)(argv) : options.executeWithContext(argv, execution);
+  const checkExecution = () => {
+    if (execution === undefined) return;
+    execution.signal.throwIfAborted();
+    if (performance.now() >= execution.deadline) throw new Error("Android Push execution deadline");
+  };
+  const privacyFailure = () => new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
+    class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: 0, observations: {} });
+  const logEvidence = async <T>(read: () => Promise<T>): Promise<T> => {
+    try { return await read(); }
+    catch (error) { rethrowPushSafetyFailure(error); throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
+      class: "harness", reason: "invalid_evidence", operation: "read_only", elapsedMs: 0, observations: {} }); }
+  };
   // Neither root's label is a prefix of the other's: notification bodies carry the label.
   const location = (epoch: string, role: PushFixtureRole = "primary"): PushFixtureLocation => ({
     root: join(base, role === "primary" ? `omp-push-${epoch}` : `omp-push-b-${epoch}`), epoch,
     bun: options.fixtureBun ?? process.execPath,
     binary: options.fixtureBinary ?? process.env.OMP_PUSH_FIXTURE_BINARY ?? "",
     scripts: options.fixtureScripts ?? resolve(import.meta.dir) });
-  const command: AndroidAdbCommand = async (...args) => {
-    serial ??= await requireSingleDevice();
-    return runAdb(serial, args);
+  const boundedAdb = (device: string | undefined, args: readonly string[]) => {
+    checkExecution();
+    const current = execution;
+    return runAdb(device, args, current === undefined ? {} : {
+      timeoutMs: Math.max(1, current.deadline - performance.now()),
+      signal: current.signal,
+    });
   };
+  const selectDevice = async () => serial ??= await requireSingleDevice((...args) => boundedAdb(undefined, args));
+  const command: AndroidAdbCommand = async (...args) => boundedAdb(await selectDevice(), args);
   const mutate: AndroidAdbCommand = async (...args) => { await runtime.beforeEffect(); return command(...args); };
   const wake = async () => {
-    serial ??= await requireSingleDevice();
-    if (await wakeAndroidDisplay(mutate, milliseconds => Bun.sleep(milliseconds), () => unlockAndroidKeyguard(serial!)) !== "Awake") {
+    await selectDevice();
+    if (await wakeAndroidDisplay(mutate, milliseconds => runtime.pause(milliseconds), () => unlockAndroidKeyguard(serial!, undefined, undefined, execution)) !== "Awake") {
       throw new Error("Android Push display did not unlock");
     }
   };
   const wait = async (test: () => Promise<boolean>, name: string, milliseconds = 60_000) => {
-    const deadline = Date.now() + milliseconds;
-    while (Date.now() < deadline) { if (await test()) return; await Bun.sleep(500); }
+    const deadline = performance.now() + milliseconds;
+    while (performance.now() < deadline) {
+      checkExecution();
+      const passed = await test();
+      checkExecution();
+      if (performance.now() >= deadline) break;
+      if (passed) return;
+      await runtime.pause(500);
+    }
     throw new Error(`Android Push ${name} unavailable`);
   };
   const targetForOrigin = async (driver: AndroidChromeDriver): Promise<string | undefined> => {
@@ -215,14 +321,14 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   const navigateRoot = async (driver: AndroidChromeDriver) => {
     await runtime.beforeEffect();
     try { await driver.navigate(`${identity.origin}/`); }
-    catch { throw new Error("Android Push directory did not load"); }
+    catch (error) { rethrowPushSafetyFailure(error); throw new Error("Android Push directory did not load"); }
   };
   const page = async <T>(action: (driver: AndroidChromeDriver) => Promise<T>, navigate = false): Promise<T> => {
     await wake();
     packageName ??= await requireWebApk(command, identity.origin);
     await openWebApk(mutate, packageName);
     await runtime.beforeEffect();
-    return withAndroidChrome(async driver => {
+    return chrome(async driver => {
       let target: string | undefined;
       await wait(async () => { target = await targetForOrigin(driver); return target !== undefined; }, "WebAPK target");
       await driver.attachTab(target!);
@@ -233,7 +339,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const document = await driver.evaluate<{ href: string; secure: boolean }>("({ href: location.href, secure: window.isSecureContext })");
       if (navigate || !document.href.startsWith(`${identity.origin}/`) || !document.secure) await navigateRoot(driver);
       return action(driver);
-    }, { port: 9238, launchBrowser: false });
+    }, { port: 9238, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
   };
   const browserState = async (driver: AndroidChromeDriver): Promise<PushBrowserBaseline> => {
     await wait(async () => driver.evaluate<boolean>('!["checking", undefined].includes(document.querySelector("#notify")?.dataset.state)'), "notification controls");
@@ -250,7 +356,10 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     forbidden: [PUSH_FIXTURE_ASK_BODY, PUSH_FIXTURE_ASK_TITLE, "Qualification benign activity canary"], originHost: new URL(identity.origin).host,
   });
   const snapshot = async (epoch: string, role: PushFixtureRole = "primary") => {
-    const response = await fetch(`${identity.origin}/api/v1/sessions`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    checkExecution();
+    const signal = execution === undefined ? AbortSignal.timeout(15_000) :
+      AbortSignal.any([execution.signal, AbortSignal.timeout(Math.max(1, Math.min(15_000, execution.deadline - performance.now())))]);
+    const response = await fetch(`${identity.origin}/api/v1/sessions`, { cache: "no-store", signal });
     if (!response.ok) throw new Error("Android Push gateway snapshot refused");
     const list = parseSessionListResponse(await response.json());
     const matches = list.sessions.filter(session => session.cwdLabel === basename(location(epoch, role).root));
@@ -265,18 +374,33 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     return records;
   };
   const runtime: AndroidPushRuntime = {
-    now: Date.now,
-    pause: milliseconds => Bun.sleep(milliseconds),
+    now: () => performance.now(),
+    pause: async milliseconds => {
+      checkExecution();
+      if (execution === undefined) { await Bun.sleep(milliseconds); return; }
+      await new Promise<void>((resolve, reject) => {
+        const signal = execution!.signal;
+        const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(new Error("Android Push execution cancelled")); };
+        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, Math.min(milliseconds, Math.max(1, execution!.deadline - performance.now())));
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      });
+      checkExecution();
+    },
     beforeEffect: async () => { throw new Error("Push runtime has no checkpoint owner"); },
+    beginCleanup(context) {
+      execution = context ?? { signal: new AbortController().signal, deadline: performance.now() + 15 * 60_000,
+        nextFailureId: options.execution?.nextFailureId ?? localFailureId };
+    },
     async preflight(input) {
       if (input.origin !== identity.origin) throw new Error("Push preflight origin differs from its runtime");
       const selected = resolveAndroidBrowserTarget(), stock = resolveAndroidBrowserTarget({});
       if (selected.packageName !== stock.packageName || selected.activity !== stock.activity || selected.devtoolsSocket !== stock.devtoolsSocket) throw new Error("Android Push requires the stock Chrome browser target");
-      serial = await requireSingleDevice();
+      serial = await requireSingleDevice((...args) => boundedAdb(undefined, args));
       if (ownedPushForwards(await command("forward", "--list"), serial, selected.devtoolsSocket).length > 0) throw new Error("Android Push debug forward is occupied; clean up its owning attempt first");
       await requireAndroidDevicePreconditions(command, { switchesRadios: true, needsNotifications: true });
       packageName = await requireWebApk(command, identity.origin);
-      const pin = await readAndroidQualificationPin(serial);
+      const pin = await readAndroidQualificationPin(serial, undefined, execution);
       pin.fill(0);
       const model = (await command("shell", "getprop", "ro.product.model")).trim();
       const android = (await command("shell", "getprop", "ro.build.version.release")).trim();
@@ -301,7 +425,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         webApkNotificationsAllowed: /android.permission.POST_NOTIFICATIONS: granted=true/u.test(await command("shell", "dumpsys", "package", packageName)) };
     },
     browser: () => page(browserState, true),
-    async fixture(operation, epoch, role = "primary") {
+    async fixture(operation, epoch, role = "primary", expectedOwner) {
       currentEpoch = epoch;
       if (operation === "start") {
         const host = location(epoch, role);
@@ -317,10 +441,21 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if (version.exitCode !== 0 || version.stdout.trim() !== `omp/${identity.omp.version}`) throw new Error("Push fixture OMP does not match the exact pin");
       }
       await runtime.beforeEffect();
-      await commandPushFixture(location(epoch, role), operation, execute);
+      if (expectedOwner !== undefined) {
+        const current = await snapshot(epoch, role);
+        checkExecution();
+        if (operation !== "ask" || current === undefined || !current.canControl || current.inputRequired ||
+          current.instanceId !== expectedOwner.instanceId || current.generation !== expectedOwner.generation ||
+          current.ask?.requestId !== expectedOwner.ask?.requestId || current.qualificationPushAlias !== expectedOwner.qualificationPushAlias) {
+          throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
+            class: "harness", reason: "invalid_evidence", operation: "read_only", elapsedMs: 0, observations: {} });
+        }
+      }
+      await commandPushFixture(location(epoch, role), operation, execute, expectedOwner !== undefined);
     },
     snapshot,
-    async beginNotificationPhase(epoch) {
+    async beginNotificationPhase(epoch, currentPhase) {
+      if (currentPhase !== undefined) phase = currentPhase;
       const [primary, secondary] = [await snapshot(epoch), await snapshot(epoch, "secondary")];
       if (primary === undefined) throw new Error("Push fixture missing before notification phase");
       packageName ??= await requireWebApk(command, identity.origin);
@@ -330,6 +465,21 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     },
     async assertNotificationOwnership() {
       await phaseRecords();
+    },
+    ...(options.qualificationLogs === undefined ? {} : {
+      beginDeliveryTelemetry: (phase: Parameters<NonNullable<AndroidPushRuntime["beginDeliveryTelemetry"]>>[0]) =>
+        logEvidence(() => options.qualificationLogs!.begin(phase === "readiness" ? "rigReadiness" : "androidPush", phase)),
+      deliveryTelemetry: (window: Parameters<QualificationLogs["end"]>[0]) => logEvidence(() => options.qualificationLogs!.end(window)),
+    }),
+    async deliveryOwnership(session) {
+      if (currentEpoch === undefined) return undefined;
+      return qualificationPushAliasFor(session, [await snapshot(currentEpoch), await snapshot(currentEpoch, "secondary")]);
+    },
+    async deliveryRequestMatches(session) {
+      if (currentEpoch === undefined) return false;
+      if (!matchesPushDeliverySnapshot(session, [await snapshot(currentEpoch), await snapshot(currentEpoch, "secondary")])) return false;
+      return chrome(driver => observePushDeliveryRequest(driver, identity.origin, session),
+        { port: 9238, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
     },
     async detail(level) {
       await page(async driver => {
@@ -370,7 +520,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const owned = records[0];
       if (records.length === 1 && owned !== undefined) {
         if (owned.postedAt <= (baselineRecords.get(owned.key) ?? 0)) throw new Error("owned notification did not advance from its record baseline");
-        trackUnchangedNotificationPost(observedPosts, session, kind, owned);
+        try { trackUnchangedNotificationPost(observedPosts, session, kind, owned); } catch { throw privacyFailure(); }
       }
       return { count: records.length, titleMatches: records.length === 1 && owned?.title === expected.title,
         bodyMatches: records.length === 1 && owned?.body === expected.body,
@@ -393,18 +543,20 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         title: texts.some(text => text.includes(title("attention"))),
         detail: level === "private" ? privateHidden : texts.some(text => text.includes(body)),
         privacy: !texts.some(text => expected.forbidden.some(value => text.includes(value))) };
-      if (!Object.values(checked).every(Boolean)) throw new Error(`Android Push lock-screen mismatch: ${JSON.stringify(checked)}`);
+      if (!Object.values(checked).every(Boolean)) throw privacyFailure();
       return true;
     },
     async tap(session, kind, stale) {
       await runtime.assertNotificationOwnership();
       await runtime.lock();
-      const observation: PushTapObservation = await withAndroidChrome(async driver => {
+      const observation: PushTapObservation = await chrome(async driver => {
         let attached: Promise<void> | undefined;
         let attachedError = false;
         let observerFailure = "none";
+        let observerSafetyFailure: unknown;
         const recordFailure = (error: unknown) => {
           attachedError = true;
+          try { rethrowPushSafetyFailure(error); } catch { observerSafetyFailure ??= error; }
           const message = error instanceof Error ? error.message : "";
           const method = ["Page.enable", "Runtime.enable", "Network.enable", "Target.setAutoAttach", "Runtime.runIfWaitingForDebugger", "Page.addScriptToEvaluateOnNewDocument"].find(item => message.includes(item)) ?? "other";
           observerFailure = `${method}:${message.includes("timeout") ? "timeout" : message.includes("wasn't found") ? "unsupported" : "failed"}`;
@@ -514,8 +666,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           // Authenticate the bouncer created by the tap, without another dismiss request.
           try {
             await authenticateAndroidNotification({ command, revealPin: () => showAndroidPinBouncer(mutate),
-              unlock: async () => { await runtime.beforeEffect(); await unlockAndroidKeyguard(serial!); }, wait });
+              unlock: async () => { await runtime.beforeEffect(); await unlockAndroidKeyguard(serial!, undefined, undefined, execution); }, wait });
           } catch (error) {
+            rethrowPushSafetyFailure(error);
             const nodes = await readAndroidUi(command);
             const remaining = (await readAndroidNotificationRecords(command, packageName!)).filter(record => record.tag.endsWith(`omp-attention-${session.instanceId}`)).length;
             throw new Error(`notification authentication unavailable (owned records: ${remaining}; secure inputs: ${nodes.filter(node => node.systemInput).length})`, { cause: error });
@@ -548,6 +701,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           return { launches, successful, currentGeneration, currentRequest, scrubbedBeforeNetwork: routeObserved && routeScrubbed && apiScrubbed && metadataObserved && surface.scrubbed,
             writable: surface.writable, readOnly: surface.readOnly, expired: surface.expired };
         } catch (error) {
+          if (observerSafetyFailure !== undefined) throw observerSafetyFailure;
+          rethrowPushSafetyFailure(error);
           if (everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
           // Already-observed closed values only: secondary device reads must not mask the cause.
           const diagnostics = { observerFailure, tabsSeen, pagesSeen, pausedTabs, pausedPages, launches, successful,
@@ -557,7 +712,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           stopListening();
           // withAndroidChrome closes the owned CDP connection, detaching its auto-attached targets.
         }
-      }, { port: 9238, launchBrowser: false });
+      }, { port: 9238, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
       await runtime.assertNotificationOwnership();
       return observation;
     },
@@ -626,6 +781,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           return records.length === 1 && records[0]!.postedAt > before && records[0]!.title === expected.title && records[0]!.body === expected.body;
         }, "replayed notification", 15_000);
       } catch (error) {
+        rethrowPushSafetyFailure(error);
         // The closed values the wait saw, so a missing replay names what the device did show.
         const seen = (await posted()).map(record => ({ tag: record.tag.slice(-48), title: record.title, body: record.body, postedAfterBaseline: record.postedAt > before }));
         throw new Error(`${error instanceof Error ? error.message : "Android Push replayed notification unavailable"} (expected title ${JSON.stringify(expected.title)}, body ${JSON.stringify(expected.body)}; records ${JSON.stringify(seen)})`, { cause: error });
@@ -645,7 +801,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     },
     async answer() {
       await wake();
-      await withAndroidChrome(async driver => {
+      await chrome(async driver => {
         const target = await targetForOrigin(driver);
         if (target === undefined) throw new Error("authoritative Control target unavailable");
         await driver.attachTab(target);
@@ -658,7 +814,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         await wait(async () => driver.evaluate<boolean>('document.querySelector(".sh-ask-send") instanceof HTMLButtonElement && !document.querySelector(".sh-ask-send").disabled'), "selected answer submission");
         await runtime.beforeEffect();
         await driver.evaluate('document.querySelector(".sh-ask-send").click()');
-      }, { port: 9238, launchBrowser: false });
+      }, { port: 9238, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
     },
     async forceStop() { await runtime.closePwa(); await mutate("shell", "am", "force-stop", "com.android.chrome"); },
     async permission(value) {
@@ -667,7 +823,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         // and releasing the retained override connection at the end of the window.
         if (value === "denied" && releasePermission === undefined) {
           await runtime.beforeEffect();
-          releasePermission = await holdAndroidNotificationDenial(identity.origin);
+          releasePermission = await holdAndroidNotificationDenial(identity.origin, (run, context) =>
+            chrome(run, { port: 9237, launchBrowser: false, ...(context === undefined ? {} : { execution: context }) }), execution);
         } else if (value !== "denied" && releasePermission !== undefined) {
           await runtime.beforeEffect();
           const release = releasePermission; releasePermission = undefined;
@@ -708,7 +865,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           await wait(async () => driver.evaluate<boolean>(`fetch('/api/v1/sessions', {cache:'no-store', signal:AbortSignal.timeout(4000)}).then(r=>r.ok).catch(()=>false)`), "tailnet network", 45_000);
         }, true);
         return true;
-      } catch { return false; }
+      } catch (error) { rethrowPushSafetyFailure(error); return false; }
     },
     async sinks(epoch) {
       const fixture = await snapshot(epoch);
@@ -742,13 +899,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         await scanSinks(value=>typeof value==='string'&&needles.some(needle=>value.includes(needle)),sink=>hits.push(sink));
         return {detectable:required.every(sink=>found.has(sink)),clean:hits.length===0&&residual.length===0,sinks:required.length,findings:hits.length};
       })()`), true);
-      const gatewayLogsDiscarded = options.gatewayLogsDiscarded ?? (async () => {
-        const plist = join(homedir(), "Library/LaunchAgents/omp-session-gateway.plist");
-        const stdout = await executeFixture(["plutil", "-extract", "StandardOutPath", "raw", "-o", "-", plist]);
-        const stderr = await executeFixture(["plutil", "-extract", "StandardErrorPath", "raw", "-o", "-", plist]);
-        return stdout.exitCode === 0 && stderr.exitCode === 0 && stdout.stdout.trim() === "/dev/null" && stderr.stdout.trim() === "/dev/null";
-      });
-      return { ...result, gatewayLogsDiscarded: await gatewayLogsDiscarded() };
+      const gatewayLogsDiscarded = options.gatewayLogsDiscarded ?? (() => gatewayRawLogsDiscarded(execute));
+      return { ...result, gatewayLogsDiscarded: await gatewayLogsDiscarded(),
+        gatewayStructuredLogsSafe: options.qualificationLogs === undefined ? false : await options.qualificationLogs.healthy() };
     },
     async cleanup(step, progress) {
       currentEpoch = progress.epoch;
@@ -773,8 +926,16 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             if (digests.length > 0) await wait(async () => driver.evaluate<boolean>(`(async()=>{
               const owned = ${JSON.stringify(digests)};
               const digest = async tag => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(tag)))].map(byte => byte.toString(16).padStart(2,'0')).join('');
-              const records = ${JSON.stringify(LOCAL_TRIAGE_KEYS)}.flatMap(key => { try { const value = JSON.parse(localStorage.getItem(key) ?? '[]'); return Array.isArray(value) ? value : []; } catch { return []; } });
-              for (const record of records) if (owned.includes(await digest('omp-attention-' + record?.instanceId))) return false;
+              for (const key of ${JSON.stringify(LOCAL_TRIAGE_KEYS)}) {
+                let records;
+                try { records = JSON.parse(localStorage.getItem(key) ?? '[]'); } catch { return false; }
+                if (!Array.isArray(records) || records.length > 1024) return false;
+                for (const record of records) {
+                  if (!record || typeof record.instanceId !== 'string' ||
+                    key.endsWith('.v2') && (typeof record.sourceId !== 'string' || typeof record.sourceOrigin !== 'string')) return false;
+                  if (owned.includes(await digest('omp-attention-' + record.instanceId))) return false;
+                }
+              }
               return true;
             })()`), "owned local triage records cleanup");
             await driver.evaluate(`(async()=>{
@@ -806,8 +967,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           }, [async () => {
             // A killed driver loses the permission override but may leave its adb listener.
             // Fresh-process cleanup removes only this lane's exact device/socket forwards.
-            serial ??= await requireSingleDevice();
-            const ports = ownedPushForwards(await command("forward", "--list"), serial, resolveAndroidBrowserTarget().devtoolsSocket);
+            const selected = await selectDevice();
+            const ports = ownedPushForwards(await command("forward", "--list"), selected, resolveAndroidBrowserTarget().devtoolsSocket);
             await runWithRestoration("Android Push debug forwards", () => undefined, ports.map(port => () => mutate("forward", "--remove", port)));
           }]);
           break;
@@ -819,7 +980,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           break;
         }
         case "task":
-          if (progress.device.webApkTask) await runtime.openPwa(); else await runtime.closePwa();
+          // Restore the task through ADB only: browser cleanup has already contained CDP.
+          if (progress.device.webApkTask) {
+            packageName ??= await requireWebApk(command, identity.origin);
+            await openWebApk(mutate, packageName);
+          } else await runtime.closePwa();
           if (progress.device.locked || !progress.device.awake) await runtime.lock(); else await wake();
           if (progress.device.awake && progress.device.locked) await mutate("shell", "input", "keyevent", "224");
           {

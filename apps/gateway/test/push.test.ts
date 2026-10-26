@@ -117,6 +117,36 @@ async function createRoot(): Promise<string> {
 }
 
 describe("Web Push service", () => {
+  test.each([undefined, 503, 410])("emits bounded transport evidence without notification or subscription data (%s)", async status => {
+    const root = await createRoot();
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
+    const transport = new RecordingTransport();
+    transport.statusCode = status;
+    const lines: string[] = [];
+    const service = await PushService.open({ config: config(root), registry, transport, logger: new SafeLogger({ write: line => lines.push(line) }) });
+    await service.subscribe("dev-localhost", parsePushSubscriptionRequest({ version: PUSH_API_VERSION, detailLevel: "preview", subscription }));
+    registry.reconcile({ observed: [observedSession(false)], retained: new Set() });
+    registry.reconcile({ observed: [observedSession(true)], retained: new Set() });
+    await service.flush();
+    await service.subscribe("dev-localhost", parsePushSubscriptionRequest({ version: PUSH_API_VERSION, detailLevel: "preview", subscription }));
+    await service.flush(); await service.stop();
+    expect(service.qualificationAlias(registry.snapshot().sessions[0]!)).toBeUndefined();
+    const events = lines.map(line => JSON.parse(line));
+    expect(events.some(event => event.event === "push.queue_accepted")).toBe(true);
+    expect(events.some(event => event.event === "push.send_started")).toBe(true);
+    expect(events.some(event => event.event === "push.send_started" && event.subscription_replay === true)).toBe(true);
+    expect(events.some(event => event.event === "push.send_started" && event.subscription_replay === false)).toBe(true);
+    expect(events.some(event => event.event === (status === undefined ? "push.send_acknowledged" : "push.send_failed"))).toBe(true);
+    if (status === 410) expect(events.some(event => event.event === "push.subscription_evicted")).toBe(true);
+    for (const forbidden of [endpoint, subscription.keys.auth, subscription.keys.p256dh, "PROMPT_CONTENT_CANARY", "OPTION_CONTENT_CANARY", "push-instance-000001", "dev-localhost"]) {
+      expect(lines.join("\n")).not.toContain(forbidden);
+    }
+    for (const event of events) for (const [key, value] of Object.entries(event)) {
+      if (["event", "level", "timestamp"].includes(key)) continue;
+      expect(typeof value === "boolean" || typeof value === "number" && Number.isFinite(value)).toBe(true);
+    }
+  });
+
   test("persists private VAPID and subscription state without session content", async () => {
     const root = await createRoot();
     const gatewayConfig = config(root);

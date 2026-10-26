@@ -614,7 +614,7 @@ function parseSessionMetadata(value: unknown): SessionMetadata {
   requireExactKeys(
     record,
     ["instanceId", "generation", "startedAt", "lastSeenAt", "canView", "canControl"],
-    ["title", "cwdLabel", "model", "inputRequired", "ask", "busy"],
+    ["title", "cwdLabel", "model", "inputRequired", "ask", "busy", "qualificationPushAlias"],
   );
   if (
     typeof record.canView !== "boolean" ||
@@ -645,6 +645,8 @@ function parseSessionMetadata(value: unknown): SessionMetadata {
   if ((inputRequired && ask === undefined) || (!inputRequired && ask !== undefined)) {
     throw new ProtocolValidationError();
   }
+  if (Object.hasOwn(record, "qualificationPushAlias") && ask === undefined) throw new ProtocolValidationError();
+  const qualificationPushAlias = Object.hasOwn(record, "qualificationPushAlias") ? requireInteger(record.qualificationPushAlias, 1) : undefined;
   return {
     instanceId: requireInstanceId(record.instanceId),
     generation: requireInteger(record.generation, 1),
@@ -658,6 +660,7 @@ function parseSessionMetadata(value: unknown): SessionMetadata {
     inputRequired,
     ...(record.busy === undefined ? {} : { busy: record.busy as boolean }),
     ...(ask === undefined ? {} : { ask }),
+    ...(qualificationPushAlias === undefined ? {} : { qualificationPushAlias }),
   };
 }
 

@@ -9,10 +9,153 @@ import type { OmpPins } from "./stable-qualification.ts";
 import type { PushDetailLevel, SessionMetadata } from "../packages/protocol/src/types.ts";
 import type { PushFixtureCommand } from "./fixtures/push-qualification-extension.ts";
 import { NotificationOverlapError, notificationTopicDigest, type NotificationObservation } from "./android-notification.ts";
-import { createAndroidPushRuntime } from "./android-push-runtime.ts";
+import { createAndroidPushRuntime, rethrowPushSafetyFailure } from "./android-push-runtime.ts";
 import { withDevelopmentPixelLease } from "./android-pixel-lease.ts";
 import { executeFixture } from "./push-qualification-fixture.ts";
 import { everyError, pixelUnrestored } from "./restoration.ts";
+import { FAILURE_LIMITS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
+import type { QualificationLogWindow, PushDeliveryTelemetry } from "./qualification-logs.ts";
+
+export interface PushExecution { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
+export interface PushDeliveryMetrics {
+  firstDeliveryMs: number; secondDeliveryMs: number; deliveryRearmCount: number; deliveryRearmReason: number;
+  sends: number; acknowledgements: number; latePostCount: number; latePostMs: number; clearMs: number;
+  /** Ordered [first, second] millisecond pairs, one pair per delivery; zero second means no re-arm. */
+  deliveryTimings: number[];
+}
+export function emptyPushDeliveryMetrics(): PushDeliveryMetrics {
+  return { firstDeliveryMs: 0, secondDeliveryMs: 0, deliveryRearmCount: 0, deliveryRearmReason: 0, sends: 0, acknowledgements: 0, latePostCount: 0, latePostMs: 0, clearMs: 0, deliveryTimings: [] };
+}
+
+/** Every success boundary checks both the execution budget and its own observation window. */
+function pushBudgetExpired(runtime: AndroidPushRuntime, execution: PushExecution | undefined, start?: number, timeout = Infinity): boolean {
+  return execution !== undefined && (execution.signal.aborted || performance.now() >= execution.deadline) ||
+    start !== undefined && runtime.now() - start >= timeout;
+}
+
+function pushMilliseconds(value: number): number {
+  const elapsed = Math.round(value);
+  if (!Number.isSafeInteger(elapsed) || elapsed < 0 || elapsed > FAILURE_LIMITS.elapsedMs) throw new Error("invalid bounded Push duration");
+  return elapsed;
+}
+
+async function checkedDelivery(runtime: AndroidPushRuntime, session: SessionMetadata, kind: "attention" | "activity_stop",
+  detail: PushDetailLevel, privacyFailed: () => never): Promise<NotificationObservation> {
+  await runtime.assertNotificationOwnership();
+  const observed = await runtime.observe(session, kind, detail);
+  if (observed.count > 1 || observed.forbiddenFound || observed.count === 1 && (!observed.titleMatches || !observed.bodyMatches)) privacyFailed();
+  return observed;
+}
+
+function lateDeliveryObserver(observe: () => Promise<NotificationObservation>, now: () => number,
+  started: number, metrics: PushDeliveryMetrics, seen = false): () => Promise<void> {
+  return async () => {
+    if ((await observe()).count === 1 && !seen) {
+      seen = true; metrics.latePostCount++; metrics.latePostMs = pushMilliseconds(now() - started);
+    }
+  };
+}
+
+/** A fresh ask is issued only after a typed service failure and an authoritative old-ask clear. */
+export async function waitForPushDelivery(options: {
+  runtime: AndroidPushRuntime; session: SessionMetadata; detail: PushDetailLevel; kind: "attention" | "activity_stop";
+  phase: AndroidPushPhase; timeout: number; metrics: PushDeliveryMetrics; window?: QualificationLogWindow;
+  rearm?: (old: SessionMetadata, late: () => Promise<void>) => Promise<{ session: SessionMetadata; window?: QualificationLogWindow }>;
+  execution?: PushExecution;
+  onTimeout?: (sample: (() => Promise<void>) | undefined) => void;
+}): Promise<SessionMetadata> {
+  const { runtime, metrics } = options;
+  let session = options.session, window = options.window;
+  const fail = (reason: "privacy_failed" | "delivery_timeout" | "invalid_evidence" | "push_service_failure", elapsedMs: number, status = 0): never => {
+    const common = { id: options.execution?.nextFailureId() ?? 1, lane: "androidPush" as const, step: options.phase, elapsedMs: pushMilliseconds(elapsedMs),
+      operation: "read_only" as const, observations: { firstDeliveryMs: metrics.firstDeliveryMs, secondDeliveryMs: metrics.secondDeliveryMs,
+        rearmCount: metrics.deliveryRearmCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs, clearMs: metrics.clearMs } };
+    if (reason === "privacy_failed") throw new QualificationFailure({ ...common, reason, class: "product" });
+    if (reason === "push_service_failure") throw new QualificationFailure({ ...common, reason, class: "infra_transient",
+      observations: { ...common.observations, pushServiceFailure: true, retryableStatus: true, httpStatus: status } });
+    if (reason === "invalid_evidence") throw new QualificationFailure({ ...common, reason, class: "harness" });
+    throw new QualificationFailure({ ...common, reason: "delivery_timeout", class: "harness" });
+  };
+  const checked = (target: SessionMetadata) => checkedDelivery(runtime, target, options.kind, options.detail, () => fail("privacy_failed", 0));
+  const timing = metrics.deliveryTimings.length;
+  if (timing >= 128) fail("invalid_evidence", 0);
+  metrics.deliveryTimings.push(0, 0);
+  const exhausted = () => pushBudgetExpired(runtime, options.execution);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const start = runtime.now();
+    let delivered = false;
+    try {
+      while (!pushBudgetExpired(runtime, options.execution, start, options.timeout)) {
+        if ((await checked(session)).count === 1 && !pushBudgetExpired(runtime, options.execution, start, options.timeout)) {
+          delivered = true;
+          options.onTimeout?.(undefined);
+          break;
+        }
+        await runtime.pause(Math.min(500, Math.max(0, options.timeout - (runtime.now() - start))));
+      }
+    } catch (error) {
+      rethrowPushSafetyFailure(error);
+      if (!exhausted() || error instanceof QualificationFailure || error instanceof NotificationOverlapError) throw error;
+    }
+    const elapsed = pushMilliseconds(runtime.now() - start);
+    metrics.deliveryTimings[timing + attempt] = elapsed;
+    if (attempt === 0 && timing === 0) metrics.firstDeliveryMs = elapsed;
+    if (attempt === 1) metrics.secondDeliveryMs = elapsed;
+    const timedOutSession = session;
+    const late = lateDeliveryObserver(() => checked(timedOutSession), runtime.now, start, metrics, delivered);
+    const requireTime = () => {
+      if (!pushBudgetExpired(runtime, options.execution, start, options.timeout)) return;
+      const duration = pushMilliseconds(runtime.now() - start);
+      metrics.deliveryTimings[timing + attempt] = duration;
+      if (attempt === 0 && timing === 0) metrics.firstDeliveryMs = duration;
+      if (attempt === 1) metrics.secondDeliveryMs = duration;
+      options.onTimeout?.(delivered ? undefined : late);
+      fail("delivery_timeout", duration);
+    };
+    if (!delivered) {
+      options.onTimeout?.(late);
+      // Register cleanup sampling before telemetry I/O can fail.
+      if (exhausted()) fail("delivery_timeout", elapsed);
+      await late();
+    }
+    let telemetry: PushDeliveryTelemetry | undefined;
+    try { telemetry = window === undefined || runtime.deliveryTelemetry === undefined ? undefined : await runtime.deliveryTelemetry(window); }
+    catch (error) { rethrowPushSafetyFailure(error); if (exhausted()) requireTime(); return fail("invalid_evidence", elapsed); }
+    metrics.sends += telemetry?.sends ?? 0;
+    metrics.acknowledgements += telemetry?.acknowledgements ?? 0;
+    if (delivered) {
+      if (options.kind === "attention" && metrics.deliveryRearmCount > 0) {
+        let matches = false;
+        try { matches = await runtime.deliveryRequestMatches?.(session) ?? false; }
+        catch (error) { rethrowPushSafetyFailure(error); if (exhausted()) requireTime(); throw error; }
+        requireTime();
+        if (!matches) fail("invalid_evidence", elapsed);
+      }
+      requireTime();
+      options.onTimeout?.(undefined);
+      return session;
+    }
+    if (telemetry === undefined || !telemetry.sufficient) return fail("delivery_timeout", elapsed);
+    if (!telemetry.retryable) fail("delivery_timeout", elapsed);
+    let ownedAlias: number | undefined;
+    await checked(session);
+    try {
+      ownedAlias = await runtime.deliveryOwnership?.(session);
+    } catch (error) { rethrowPushSafetyFailure(error); if (exhausted()) requireTime(); return fail("invalid_evidence", elapsed); }
+    if (exhausted()) requireTime();
+    if (ownedAlias === undefined || ownedAlias !== telemetry.requestAlias) return fail("invalid_evidence", elapsed);
+    if (metrics.deliveryRearmCount !== 0 || attempt !== 0 || options.rearm === undefined) return fail("push_service_failure", elapsed, telemetry.httpStatus);
+    metrics.deliveryRearmCount = 1; metrics.deliveryRearmReason = 1; // 1 = provider 429/retryable 5xx
+    const fresh = await options.rearm({ ...session, qualificationPushAlias: ownedAlias }, late);
+    // Rearm settled the old ask and may have installed the fresh ask's sampler; do not
+    // overwrite that observer with the old timed-out request on a late return.
+    if (exhausted()) fail("delivery_timeout", runtime.now() - start);
+    if (fresh.session.instanceId !== session.instanceId || fresh.session.generation !== session.generation ||
+      fresh.session.ask === undefined || fresh.session.ask.requestId === session.ask?.requestId) fail("invalid_evidence", elapsed);
+    session = fresh.session; window = fresh.window;
+  }
+  throw new Error("unreachable push recovery state");
+}
 
 export interface AndroidPushIdentity {
   readonly tag: string;
@@ -56,14 +199,19 @@ export interface AndroidPushRuntime {
   now(): number;
   pause(milliseconds: number): Promise<void>;
   beforeEffect: () => Promise<void>;
+  beginCleanup?(execution?: PushExecution): void;
   preflight(input: AndroidPushPreflightInput): Promise<AndroidPushAdmission>;
   dndOff(): Promise<boolean>;
   device(): Promise<PushDeviceBaseline>;
   browser(): Promise<PushBrowserBaseline>;
-  fixture(operation: "start" | PushFixtureCommand, epoch: string, role?: PushFixtureRole): Promise<void>;
+  fixture(operation: "start" | PushFixtureCommand, epoch: string, role?: PushFixtureRole, expectedOwner?: SessionMetadata): Promise<void>;
   snapshot(epoch: string, role?: PushFixtureRole): Promise<SessionMetadata | undefined>;
-  beginNotificationPhase(epoch: string): Promise<void>;
+  beginNotificationPhase(epoch: string, phase?: AndroidPushPhase): Promise<void>;
   assertNotificationOwnership(): Promise<void>;
+  beginDeliveryTelemetry?(phase: AndroidPushPhase | "readiness"): Promise<QualificationLogWindow>;
+  deliveryTelemetry?(window: QualificationLogWindow): Promise<PushDeliveryTelemetry>;
+  deliveryOwnership?(session: SessionMetadata): Promise<number | undefined>;
+  deliveryRequestMatches?(session: SessionMetadata): Promise<boolean>;
   detail(level: PushDetailLevel): Promise<void>;
   closePwa(): Promise<void>;
   openPwa(): Promise<void>;
@@ -111,16 +259,18 @@ export interface AndroidPushProgress extends Record<string, unknown> {
   notificationTopicDigest: string | null;
   /** The secondary host's topic, for cleanup of an interrupted triage or expiry check. */
   secondaryNotificationTopicDigest: string | null;
-  results: Record<string, Record<string, boolean | number | string>>;
+  results: Record<string, Record<string, boolean | number | string | number[]>>;
 }
 interface LaneInput {
   readonly identity: AndroidPushIdentity; readonly progress: unknown;
   readonly checkpoint: (progress: Record<string, unknown>) => Promise<void>;
   readonly pixel: <T>(owner: string, action: () => Promise<T>) => Promise<T>;
   readonly runtime?: AndroidPushRuntime;
+  readonly execution?: PushExecution;
 }
 const PROGRESS_KEYS = "binding,browser,cleanupRequired,device,epoch,lane,notificationTopicDigest,phase,results,secondaryNotificationTopicDigest";
 const CLEANUP_STEPS: readonly PushCleanupStep[] = ["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"];
+const DELIVERY_FIELDS = Object.keys(emptyPushDeliveryMetrics()).filter(key => key !== "deliveryTimings");
 const RESULT_FIELDS: Partial<Record<AndroidPushPhase, readonly string[]>> = {
   subscription_ready: ["enabled"],
   private_verified: ["delivered", "locked", "singleNotification", "detailMatched", "elapsedMs"],
@@ -135,7 +285,7 @@ const RESULT_FIELDS: Partial<Record<AndroidPushPhase, readonly string[]>> = {
   force_stop_verified: ["variant", "freshDelivery"],
   permission_verified: ["suppressed", "freshDelivery"], lock_resume_verified: ["lockedDelivery", "resumed"],
   doze_verified: ["variant"], network_verified: ["blocked", "wifiDelivery", "cellularDelivery", "airplaneSuppressed", "recovered"],
-  forbidden_sinks_verified: ["clean", "detectable", "sinks", "findings", "gatewayLogsDiscarded"], evidence_complete: ["passed"],
+  forbidden_sinks_verified: ["clean", "detectable", "sinks", "findings", "gatewayLogsDiscarded", "gatewayStructuredLogsSafe"], evidence_complete: ["passed"],
 };
 
 function validateOrigin(origin: string): void {
@@ -178,13 +328,22 @@ export function parseAndroidPushProgress(value: unknown): AndroidPushProgress {
   for (const [phase, result] of Object.entries(p.results)) {
     if (!ANDROID_PUSH_PHASES.includes(phase as AndroidPushPhase) || typeof result !== "object" || result === null || Array.isArray(result)) throw new Error("invalid Android Push result phase");
     for (const [key, item] of Object.entries(result)) {
+      if (key === "deliveryTimings") {
+        if (!Array.isArray(item) || item.length > 128 || item.length % 2 !== 0 ||
+          item.some(value => !Number.isSafeInteger(value) || value < 0 || value > 86_400_000)) throw new Error("invalid per-delivery timing evidence");
+        continue;
+      }
       if ((key === "dndOff" && item !== true) || (key === "rearmCount" && item !== 1) ||
-        (key === "rearmReason" && item !== "unowned_notification_overlap") || (key === "phaseElapsedMs" && typeof item !== "number")) throw new Error("invalid Android Push phase observation");
-      if ((!["dndOff", "phaseElapsedMs", "rearmCount", "rearmReason"].includes(key) && !RESULT_FIELDS[phase as AndroidPushPhase]?.includes(key)) || !/^[a-z][A-Za-z]{0,47}$/u.test(key) || /(capability|password|secret|authKey|token|bearer)/iu.test(key) ||
-        (typeof item !== "boolean" && !(typeof item === "number" && Number.isFinite(item) && item >= 0) &&
+        (key === "rearmReason" && item !== "unowned_notification_overlap") ||
+        (key === "phaseElapsedMs" && (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0 || item > FAILURE_LIMITS.elapsedMs))) throw new Error("invalid Android Push phase observation");
+      if ((!["dndOff", "phaseElapsedMs", "rearmCount", "rearmReason", ...DELIVERY_FIELDS].includes(key) && !RESULT_FIELDS[phase as AndroidPushPhase]?.includes(key)) || !/^[a-z][A-Za-z]{0,47}$/u.test(key) || /(capability|password|secret|authKey|token|bearer)/iu.test(key) ||
+        (typeof item !== "boolean" && !(typeof item === "number" && Number.isSafeInteger(item) && item >= 0 && item <= FAILURE_LIMITS.elapsedMs) &&
           ["delivered_while_force_stopped", "suppressed_until_relaunch", "delivered_during_doze", "delivered_after_doze_exit", "undelivered_after_doze_exit", "cellular_path_unavailable", "unowned_notification_overlap"].includes(String(item)) === false)) throw new Error("unsafe Android Push evidence");
     }
     const recorded = result as Record<string, unknown>;
+    if (DELIVERY_FIELDS.some(key => recorded[key] !== undefined && (typeof recorded[key] !== "number" || !Number.isSafeInteger(recorded[key]) || (recorded[key] as number) < 0 || (recorded[key] as number) > FAILURE_LIMITS.elapsedMs)) ||
+      (recorded.deliveryRearmCount !== undefined && ![0, 1].includes(recorded.deliveryRearmCount as number)) ||
+      (recorded.deliveryRearmReason !== undefined && ![0, 1].includes(recorded.deliveryRearmReason as number))) throw new Error("invalid delivery timing evidence");
     if ((recorded.rearmCount === undefined) !== (recorded.rearmReason === undefined)) throw new Error("incomplete Android Push re-arm observation");
   }
   if ((p.phase === "restored") === p.cleanupRequired) throw new Error("inconsistent Android Push cleanup state");
@@ -195,6 +354,10 @@ export function androidPushNeedsCleanup(progress: unknown): boolean {
   return progress !== undefined && parseAndroidPushProgress(progress).cleanupRequired;
 }
 
+async function checkpointPushProgress(input: LaneInput, progress: AndroidPushProgress): Promise<void> {
+  await input.checkpoint(structuredClone(parseAndroidPushProgress(progress)));
+}
+
 export async function preflightAndroidPush(input: AndroidPushPreflightInput, runtime?: AndroidPushRuntime): Promise<AndroidPushAdmission> {
   validateOrigin(input.origin);
   const host = runtime ?? createAndroidPushRuntime({ origin: input.origin,
@@ -202,16 +365,18 @@ export async function preflightAndroidPush(input: AndroidPushPreflightInput, run
   return host.preflight(input);
 }
 
-async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: AndroidPushProgress): Promise<Record<string, unknown>> {
+async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: AndroidPushProgress, sampleLate?: () => Promise<void>): Promise<Record<string, unknown>> {
   const failures: string[] = [];
-  runtime.beforeEffect = async () => { await input.checkpoint(structuredClone(progress)); };
+  const errors: unknown[] = [];
+  runtime.beforeEffect = async () => { await checkpointPushProgress(input, progress); };
   for (const step of CLEANUP_STEPS) {
-    try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch { failures.push(step); }
+    try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch (error) { failures.push(step); errors.push(error); }
+    if (["fixtureAsk", "doze", "network"].includes(step)) await sampleLate?.();
   }
-  if (failures.length > 0) throw Object.assign(new Error(`Android Push cleanup failed: ${failures.join(", ")}`), { pixelUnrestored: true });
+  if (failures.length > 0) throw Object.assign(new AggregateError(errors, `Android Push cleanup failed: ${failures.join(", ")}`), { pixelUnrestored: true });
   progress.cleanupRequired = false;
   progress.phase = "restored";
-  await input.checkpoint(structuredClone(progress));
+  await checkpointPushProgress(input, progress);
   return { epoch: progress.epoch, restored: true, deviceRestored: true, browserRestored: true, fixtureStopped: true };
 }
 
@@ -219,8 +384,134 @@ export async function cleanupAndroidPush(input: LaneInput): Promise<Record<strin
   const progress = parseAndroidPushProgress(input.progress);
   if (progress.binding !== binding(input.identity)) throw new Error("Android Push progress belongs to a different candidate or origin");
   if (!progress.cleanupRequired) return { epoch: progress.epoch, restored: true };
-  const runtime = input.runtime ?? createAndroidPushRuntime(input.identity);
+  const runtime = input.runtime ?? createAndroidPushRuntime(input.identity, input.execution === undefined ? {} : { execution: input.execution });
+  runtime.beginCleanup?.(input.execution);
   return input.pixel("androidPush-cleanup", () => restore(input, runtime, progress));
+}
+
+/** Effectful readiness only: this does not manufacture any qualification phase pass. */
+export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<string, unknown>> {
+  const runtime = input.runtime ?? createAndroidPushRuntime(input.identity, input.execution === undefined ? {} : { execution: input.execution });
+  await preflightAndroidPush({ origin: input.identity.origin }, runtime);
+  return input.pixel("androidPush-readiness", async () => {
+    const progress: AndroidPushProgress = { lane: "androidPush", epoch: randomUUID(), binding: binding(input.identity), phase: "baseline_captured",
+      cleanupRequired: true, device: await runtime.device(), browser: null, notificationTopicDigest: null, secondaryNotificationTopicDigest: null, results: {} };
+    runtime.beforeEffect = () => checkpointPushProgress(input, progress);
+    let primary: unknown, delivered = false, roundTripMs = 0, deliveryStarted = runtime.now();
+    let sampleLate: (() => Promise<void>) | undefined;
+    const metrics = emptyPushDeliveryMetrics();
+    let budgetStart: number | undefined;
+    const requireBudget = () => {
+      if (!pushBudgetExpired(runtime, input.execution, budgetStart, PUSH_RECOVERY_MS)) return;
+      throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
+        class: "harness", reason: "delivery_timeout", operation: "read_only",
+        elapsedMs: budgetStart === undefined ? 0 : pushMilliseconds(runtime.now() - budgetStart),
+        observations: { latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } });
+    };
+    const waitSnapshot = async (predicate: (session: SessionMetadata) => boolean) => {
+      const start = runtime.now(), deadline = start + 90_000;
+      while (runtime.now() < deadline) {
+        requireBudget();
+        const session = await runtime.snapshot(progress.epoch);
+        requireBudget();
+        if (pushBudgetExpired(runtime, input.execution, start, 90_000)) break;
+        if (session !== undefined && predicate(session)) return session;
+        await runtime.pause(500);
+      }
+      requireBudget();
+      throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
+        class: "harness", reason: "delivery_metadata_timeout", operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - start),
+        observations: { timeoutMs: 90_000 } });
+    };
+    try {
+      await runtime.beforeEffect(); requireBudget();
+      progress.browser = await runtime.browser(); requireBudget();
+      await runtime.beforeEffect(); requireBudget();
+      if (progress.browser.permission !== "granted") throw new Error("Push readiness permission prerequisite");
+      await runtime.fixture("start", progress.epoch); requireBudget();
+      const published = await waitSnapshot(session => session.canView && session.canControl && !session.inputRequired);
+      progress.notificationTopicDigest = notificationTopicDigest(`omp-attention-${published.instanceId}`);
+      await runtime.beforeEffect(); requireBudget();
+      await runtime.beginNotificationPhase(progress.epoch, "private_verified"); requireBudget();
+      await runtime.detail("private"); requireBudget();
+      await runtime.closePwa(); requireBudget();
+      await runtime.lock(); requireBudget();
+      const window = await runtime.beginDeliveryTelemetry?.("readiness");
+      requireBudget();
+      if (window === undefined) throw new Error("Push readiness telemetry unavailable");
+      deliveryStarted = runtime.now();
+      budgetStart = deliveryStarted;
+      sampleLate = lateDeliveryObserver(() => checkedDelivery(runtime, published, "attention", "private", () => {
+        throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push",
+          class: "product", reason: "assertion_failed", operation: "read_only", elapsedMs: 0, observations: {} });
+      }), runtime.now, deliveryStarted, metrics);
+      await runtime.fixture("ask", progress.epoch, "primary", published); requireBudget();
+      const session = await waitSnapshot(session => session.inputRequired);
+      const remaining = PUSH_RECOVERY_MS - (runtime.now() - deliveryStarted);
+      await waitForPushDelivery({ runtime, session, detail: "private", kind: "attention", phase: "private_verified",
+        timeout: Math.max(0, remaining), metrics, window, onTimeout: sample => { sampleLate = sample; },
+        ...(input.execution === undefined ? {} : { execution: input.execution }) });
+      requireBudget();
+      const telemetry = await runtime.deliveryTelemetry?.(window);
+      requireBudget();
+      const ownedAlias = await runtime.deliveryOwnership?.(session);
+      requireBudget();
+      roundTripMs = pushMilliseconds(runtime.now() - deliveryStarted);
+      if (telemetry?.sufficient !== true || telemetry.acknowledgements !== 1 || ownedAlias === undefined ||
+        ownedAlias !== telemetry.requestAlias) throw new QualificationFailure({
+        id: input.execution?.nextFailureId() ?? 1, lane: "rigReadiness", step: "pixel_push", class: "harness", reason: "invalid_evidence",
+        elapsedMs: roundTripMs, operation: "read_only", observations: {} });
+      const start = runtime.now();
+      budgetStart = start;
+      await runtime.fixture("answer", progress.epoch); requireBudget();
+      const settled = await waitSnapshot(session => !session.inputRequired);
+      while (true) {
+        const observed = await runtime.observe(settled, "attention", "private");
+        requireBudget();
+        if (observed.count === 0) break;
+        await runtime.pause(500);
+        requireBudget();
+      }
+      metrics.clearMs = pushMilliseconds(runtime.now() - start);
+      requireBudget();
+      delivered = true;
+    } catch (error) {
+      primary = error;
+      try {
+        if (error instanceof QualificationFailure && error.evidence.lane === "androidPush") {
+          const evidence = error.evidence;
+          const common = { id: evidence.id, lane: "rigReadiness" as const, step: "pixel_push" as const, elapsedMs: pushMilliseconds(runtime.now() - deliveryStarted),
+            operation: evidence.operation, observations: evidence.observations };
+          if (evidence.class === "product") primary = new QualificationFailure({ ...common, class: "product", reason: "assertion_failed" });
+          else if (evidence.reason === "push_service_failure") primary = new QualificationFailure({ ...common, class: "infra_transient", reason: "push_service_failure" });
+          else if (evidence.reason === "delivery_timeout") primary = new QualificationFailure({ ...common, class: "harness", reason: "delivery_timeout" });
+          else primary = new QualificationFailure({ ...common, class: "harness", reason: "invalid_evidence" });
+        }
+      } catch (normalizationError) {
+        // Evidence construction must never bypass restoration of an already-mutated fixture.
+        primary = new AggregateError([error, normalizationError], "Push readiness evidence normalization failed");
+      }
+    }
+    runtime.beginCleanup?.();
+    let cleanup: Record<string, unknown>;
+    try { cleanup = await restore(input, runtime, progress, async () => {
+      if (sampleLate === undefined) return;
+      try { await sampleLate(); }
+      catch (error) {
+        if (primary instanceof QualificationFailure) primary = new QualificationFailure({ ...primary.evidence,
+          observations: { ...primary.evidence.observations, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } });
+        primary = new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness and late observation failed");
+        sampleLate = undefined;
+      }
+    }); }
+    catch (error) {
+      throw Object.assign(new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness restoration failed"), { pixelUnrestored: true });
+    }
+    if (primary instanceof QualificationFailure) throw new QualificationFailure({ ...primary.evidence,
+      observations: { ...primary.evidence.observations, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } });
+    if (primary !== undefined) throw primary;
+    return { delivered, acknowledged: true, elapsedMs: roundTripMs, clearMs: metrics.clearMs, cleanup };
+  });
 }
 
 export async function runAndroidPush(input: LaneInput): Promise<Record<string, unknown>> {
@@ -230,73 +521,151 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
     if (previous.binding !== bind) throw new Error("Android Push progress belongs to a different candidate or origin");
     if (previous.cleanupRequired) throw new Error("Android Push attempt requires cleanup before a fresh run");
   }
-  const runtime = input.runtime ?? createAndroidPushRuntime(input.identity);
+  const runtime = input.runtime ?? createAndroidPushRuntime(input.identity, input.execution === undefined ? {} : { execution: input.execution });
   const admission = await preflightAndroidPush({ origin: input.identity.origin }, runtime);
   return input.pixel("androidPush", async () => {
     const progress: AndroidPushProgress = { lane: "androidPush", epoch: randomUUID(), binding: bind, phase: "baseline_captured", cleanupRequired: true,
       device: await runtime.device(), browser: null, notificationTopicDigest: null, secondaryNotificationTopicDigest: null, results: {} };
-    const save = async () => { await input.checkpoint(structuredClone(progress)); };
+    const save = async () => { await checkpointPushProgress(input, progress); };
     runtime.beforeEffect = save;
     await save();
     let primary: unknown;
     let phaseStarted = runtime.now();
-    const wait = async <T>(name: string, observe: () => Promise<T | undefined>, timeout = 60_000): Promise<T> => {
-      const deadline = runtime.now() + timeout;
+    let activePhase: AndroidPushPhase = "subscription_ready";
+    let metrics = emptyPushDeliveryMetrics();
+    let lateDelivery: (() => Promise<void>) | undefined;
+    const phaseElapsed = () => {
+      try { return pushMilliseconds(runtime.now() - phaseStarted); }
+      catch { throw new QualificationFailure({
+          id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "harness", reason: "invalid_evidence",
+          elapsedMs: 0, operation: "read_only", observations: {} }); }
+    };
+    const requireExecution = () => {
+      if (pushBudgetExpired(runtime, input.execution)) throw new QualificationFailure({
+        id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "harness", reason: "delivery_timeout",
+        elapsedMs: phaseElapsed(), operation: "read_only", observations: {} });
+    };
+    const assertion = (message: string) => Object.assign(new QualificationFailure({
+      id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "product",
+      reason: "assertion_failed", operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {},
+    }), { message });
+    const wait = async <T>(name: string, observe: () => Promise<T | undefined>, timeout = 60_000, start = runtime.now()): Promise<T> => {
+      const deadline = start + timeout;
       while (runtime.now() < deadline) {
+        requireExecution();
         const result = await observe();
+        requireExecution();
+        if (pushBudgetExpired(runtime, input.execution, start, timeout)) break;
         if (result !== undefined) return result;
         await runtime.pause(500);
       }
-      throw new Error(`Android Push ${name} timed out`);
+      requireExecution();
+      const evidence = { id: input.execution?.nextFailureId() ?? 1, lane: "androidPush" as const, step: activePhase,
+        class: "harness" as const, operation: "read_only" as const,
+        elapsedMs: pushMilliseconds(runtime.now() - start), observations: { timeoutMs: timeout } };
+      if (name === "metadata") throw new QualificationFailure({ ...evidence, reason: "delivery_metadata_timeout" });
+      throw new QualificationFailure({ ...evidence, reason: "delivery_timeout" });
     };
     const snapshot = async (predicate: (s: SessionMetadata) => boolean, role: PushFixtureRole = "primary") => wait("metadata", async () => {
       const session = await runtime.snapshot(progress.epoch, role);
       return session !== undefined && predicate(session) ? session : undefined;
     }, 90_000);
     const assertDndOff = async () => { if (!await runtime.dndOff()) throw new Error("turn Do Not Disturb off on the Pixel for the qualification window"); };
-    const fixture = async (operation: "start" | PushFixtureCommand, role: PushFixtureRole = "primary") => {
+    const fixture = async (operation: "start" | PushFixtureCommand, role: PushFixtureRole = "primary", expectedOwner?: SessionMetadata) => {
       if (!["answer", "stop"].includes(operation)) await assertDndOff();
-      await save(); await runtime.fixture(operation, progress.epoch, role);
+      await save();
+      requireExecution();
+      let verifiedOwner: SessionMetadata | undefined;
+      if (expectedOwner !== undefined) {
+        const owner = await runtime.snapshot(progress.epoch, role);
+        requireExecution();
+        if (owner === undefined || owner.instanceId !== expectedOwner.instanceId || owner.generation !== expectedOwner.generation ||
+          owner.inputRequired || !owner.canControl) throw new QualificationFailure({
+          id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "harness", reason: "invalid_evidence",
+          operation: "read_only", elapsedMs: phaseElapsed(), observations: {} });
+        verifiedOwner = owner;
+      }
+      await runtime.fixture(operation, progress.epoch, role, verifiedOwner);
+      requireExecution();
     };
     const finish = async (phase: AndroidPushPhase, result: Record<string, boolean | number | string>) => {
       await assertDndOff();
+      requireExecution();
       if (phase !== "subscription_ready" && phase !== "evidence_complete") await runtime.assertNotificationOwnership();
+      requireExecution();
       const now = runtime.now();
-      progress.phase = phase; progress.results[phase] = { ...progress.results[phase], ...result, dndOff: true, phaseElapsedMs: now - phaseStarted };
-      phaseStarted = now; await save();
+      progress.phase = phase; progress.results[phase] = { ...progress.results[phase], ...metrics, ...result, dndOff: true, phaseElapsedMs: phaseElapsed() };
+      phaseStarted = now; await save(); requireExecution();
     };
     const clear = async (timeout = 60_000, role: PushFixtureRole = "primary") => {
+      const start = runtime.now();
       await fixture("answer", role);
-      const current = await snapshot(s => !s.inputRequired, role);
-      await wait("authoritative clear", async () => (await runtime.observe(current, "attention", "private")).count === 0 ? true : undefined, timeout);
+      await wait("authoritative clear", async () => {
+        const current = await runtime.snapshot(progress.epoch, role);
+        if (current === undefined || current.inputRequired) return undefined;
+        return (await runtime.observe(current, "attention", "private")).count === 0 ? true : undefined;
+      }, timeout, start);
+      metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - start);
     };
     const delivered = async (session: SessionMetadata, kind: "attention" | "activity_stop" = "attention", detail: PushDetailLevel = "session", timeout = 60_000) => {
-      const seen = await wait("notification delivery", async () => {
-        const observation = await runtime.observe(session, kind, detail);
-        if (observation.count > 1 || observation.forbiddenFound) throw new Error("Android Push duplicate or forbidden notification");
-        return observation.count === 1 ? observation : undefined;
-      }, timeout);
-      if (!seen.titleMatches || !seen.bodyMatches) throw new Error("Android Push notification detail mismatch");
+      // Caller-issued/overlapping asks have no unique send window and cannot authorize re-arm.
+      await waitForPushDelivery({ runtime, session, kind, detail, timeout, phase: activePhase, metrics,
+        onTimeout: sample => { lateDelivery = sample; },
+        ...(input.execution === undefined ? {} : { execution: input.execution }) });
     };
-    const delivery = async (detail: PushDetailLevel, kind: "attention" | "activity_stop" = "attention", arm = true, timeout = 60_000) => {
+    const delivery = async (detail: PushDetailLevel, kind: "attention" | "activity_stop" = "attention", arm = true, timeout = 60_000, existingWindow?: QualificationLogWindow) => {
       if (arm) { await runtime.detail(detail); await runtime.closePwa(); await runtime.lock(); }
+      const window = arm ? await runtime.beginDeliveryTelemetry?.(activePhase) : existingWindow;
+      const owner = await runtime.snapshot(progress.epoch);
+      lateDelivery = owner === undefined ? undefined : lateDeliveryObserver(() => checkedDelivery(runtime, owner, kind, detail, () => {
+        throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase,
+          class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: phaseElapsed(), observations: {} });
+      }), runtime.now, runtime.now(), metrics);
       if (arm) await fixture("ask");
       const session = await snapshot(s => kind === "attention" ? s.inputRequired : s.busy === false);
       const start = runtime.now();
-      await delivered(session, kind, detail, timeout);
-      return { session, milliseconds: runtime.now() - start };
+      const observed = await waitForPushDelivery({ runtime, session, kind, detail, timeout, phase: activePhase, metrics,
+        onTimeout: sample => { lateDelivery = sample; },
+        ...(window === undefined ? {} : { window }), ...(input.execution === undefined ? {} : { execution: input.execution }),
+        ...((arm || existingWindow !== undefined) && kind === "attention" ? { rearm: async (old: SessionMetadata, late: () => Promise<void>) => {
+          const clearing = runtime.now();
+          const clearWindow = await runtime.beginDeliveryTelemetry?.(activePhase);
+          await fixture("answer");
+          const settled = await wait("authoritative clear before re-arm", async () => {
+            await late();
+            const current = await runtime.snapshot(progress.epoch);
+            if (current === undefined || current.inputRequired) return undefined;
+            const telemetry = clearWindow === undefined ? undefined : await runtime.deliveryTelemetry?.(clearWindow);
+            return telemetry?.clearAcknowledged === true && telemetry.requestAlias === old.qualificationPushAlias &&
+              (await runtime.observe(current, "attention", detail)).count === 0 ? current : undefined;
+          }, timeout, clearing);
+          lateDelivery = undefined;
+          metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - clearing);
+          const nextWindow = await runtime.beginDeliveryTelemetry?.(activePhase);
+          lateDelivery = lateDeliveryObserver(() => checkedDelivery(runtime, settled, "attention", detail, () => {
+            throw new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase,
+              class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: phaseElapsed(), observations: {} });
+          }), runtime.now, runtime.now(), metrics);
+          await fixture("ask", "primary", old);
+          const fresh = await snapshot(s => s.inputRequired && s.ask?.requestId !== old.ask?.requestId);
+          return { session: fresh, ...(nextWindow === undefined ? {} : { window: nextWindow }) };
+        } } : {}) });
+      return { session: observed, milliseconds: pushMilliseconds(runtime.now() - start) };
     };
     const attempt = async (phase: AndroidPushPhase, action: () => Promise<void>): Promise<void> => {
+      activePhase = phase; phaseStarted = runtime.now(); metrics = emptyPushDeliveryMetrics();
       for (let index = 0; index < 2; index += 1) {
-        await runtime.beginNotificationPhase(progress.epoch);
-        try { await action(); return; }
+        try { await runtime.beginNotificationPhase(progress.epoch, phase); requireExecution(); await action(); requireExecution(); return; }
         catch (error) {
-          if (!everyError(error, nested => nested instanceof NotificationOverlapError)) throw new Error(`Android Push ${phase}: ${error instanceof Error ? error.message : "phase failed"}`, { cause: error });
+          progress.results[phase] = { ...progress.results[phase], ...metrics, phaseElapsedMs: phaseElapsed() };
+          await save();
+          if (!everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
           if (index !== 0) throw error;
-          progress.results[phase] = { rearmCount: 1, rearmReason: "unowned_notification_overlap" };
+          lateDelivery = undefined;
+          progress.results[phase] = { ...progress.results[phase], rearmCount: 1, rearmReason: "unowned_notification_overlap" };
           await save();
           // Re-arm only for an observed foreign post, never for a missing required event.
-          await runtime.beginNotificationPhase(progress.epoch);
+          await runtime.beginNotificationPhase(progress.epoch, phase);
           await runtime.doze(false);
           if (!await runtime.network("wifi")) throw new Error("Android Push overlap recovery needs the Wi-Fi tailnet path");
           await runtime.permission("granted");
@@ -304,14 +673,16 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           // Settle every owned ask and let its authoritative clear land, then dismiss what remains: an
           // activity-stop notice has no clear, so waiting for its tag to empty never ends.
           for (const role of ["primary", "secondary"] as const) {
+            const clearing = runtime.now();
             const host = await runtime.snapshot(progress.epoch, role);
             if (host === undefined) continue;
             if (host.inputRequired) await fixture("answer", role);
-            const settled = await snapshot(s => !s.inputRequired && s.busy === false, role);
             await wait("authoritative clear", async () => {
+              const settled = await runtime.snapshot(progress.epoch, role);
+              if (settled === undefined || settled.inputRequired || settled.busy !== false) return undefined;
               const observation = await runtime.observe(settled, "attention", "private");
               return observation.count === 0 || !observation.titleMatches ? true : undefined;
-            }, PUSH_RECOVERY_MS);
+            }, PUSH_RECOVERY_MS, clearing);
           }
           await runtime.dismissOwned();
           await runtime.closePwa();
@@ -331,10 +702,10 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       for (const level of ["private", "session", "preview"] as const) {
         await attempt(`${level}_verified`, async () => {
           const observed = await delivery(level);
-          if (!await runtime.presentation(observed.session, level)) throw new Error("Android Push lock-screen presentation did not match selected detail");
+          if (!await runtime.presentation(observed.session, level)) throw assertion("Android Push lock-screen presentation did not match selected detail");
           await runtime.pause(21_000);
           const duplicate = await runtime.observe(observed.session, "attention", level);
-          if (duplicate.count !== 1 || !duplicate.titleMatches || !duplicate.bodyMatches || duplicate.forbiddenFound) throw new Error("Android Push repeated delivery changed presentation");
+          if (duplicate.count !== 1 || !duplicate.titleMatches || !duplicate.bodyMatches || duplicate.forbiddenFound) throw assertion("Android Push repeated delivery changed presentation");
           await clear();
           await finish(`${level}_verified`, { delivered: true, locked: true, singleNotification: true, detailMatched: true, elapsedMs: observed.milliseconds });
         });
@@ -343,7 +714,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         const attention = await delivery("session");
         const tapped = await runtime.tap(attention.session, "attention", false);
         if (tapped.launches !== 1 || tapped.successful !== 1 || !tapped.currentGeneration || !tapped.currentRequest || !tapped.scrubbedBeforeNetwork || !tapped.writable) {
-          throw new Error(`Android Push attention tap did not revalidate into Control: ${JSON.stringify({ launches: tapped.launches, successful: tapped.successful, generation: tapped.currentGeneration, request: tapped.currentRequest, scrubbed: tapped.scrubbedBeforeNetwork, control: tapped.writable })}`);
+          throw assertion("Android Push attention tap did not revalidate into Control");
         }
         await runtime.answer(); await snapshot(s => !s.inputRequired); await clear();
         await finish("attention_tap_verified", { control: true, revalidated: true, scrubbed: true });
@@ -356,7 +727,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         await runtime.pause(21_000);
         await wait("second known-busy poll", async () => {
           const continued = await runtime.snapshot(progress.epoch);
-          if (continued?.busy !== true || continued.generation !== busy.generation) throw new Error("Android Push busy changed before a second poll");
+          if (continued?.busy !== true || continued.generation !== busy.generation) throw assertion("Android Push busy changed before a second poll");
           return continued.lastSeenAt !== busy.lastSeenAt ? true : undefined;
         }, 90_000);
         await fixture("release");
@@ -365,22 +736,22 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       await attempt("activity_stop_verified", async () => {
         const stopped = await stop();
         const stopTap = await runtime.tap(stopped.session, "activity_stop", false);
-        if (stopTap.launches !== 1 || stopTap.successful !== 1 || !stopTap.currentGeneration || !stopTap.scrubbedBeforeNetwork || !stopTap.readOnly || stopTap.writable) throw new Error("Android Push stop tap did not open View only");
+        if (stopTap.launches !== 1 || stopTap.successful !== 1 || !stopTap.currentGeneration || !stopTap.scrubbedBeforeNetwork || !stopTap.readOnly || stopTap.writable) throw assertion("Android Push stop tap did not open View only");
         await finish("activity_stop_verified", { knownBusyPolls: 2, viewOnly: true });
       });
       await attempt("stale_generation_verified", async () => {
         const old = await stop(); await fixture("replace");
         const replacement = await snapshot(s => s.generation === old.session.generation + 1);
-        if (replacement.instanceId !== old.session.instanceId) throw new Error("Android Push replacement changed instance");
+        if (replacement.instanceId !== old.session.instanceId) throw assertion("Android Push replacement changed instance");
         const stale = await runtime.tap(old.session, "activity_stop", true);
-        if (stale.launches !== 0 || !stale.scrubbedBeforeNetwork || !stale.expired || stale.writable || stale.readOnly) throw new Error("Android Push stale tap did not fail closed");
+        if (stale.launches !== 0 || !stale.scrubbedBeforeNetwork || !stale.expired || stale.writable || stale.readOnly) throw assertion("Android Push stale tap did not fail closed");
         await finish("stale_generation_verified", { sameInstance: true, generationIncrement: 1, launches: 0, scrubbed: true });
       });
       await attempt("clear_verified", async () => {
         await delivery("private"); await clear();
         const rearmed = await delivery("private");
         await runtime.pause(21_000);
-        if ((await runtime.observe(rearmed.session, "attention", "private")).count !== 1) throw new Error("Android Push fresh request did not remain visible");
+        if ((await runtime.observe(rearmed.session, "attention", "private")).count !== 1) throw assertion("Android Push fresh request did not remain visible");
         await clear();
         await finish("clear_verified", { authoritativeClear: true, freshRequestRetained: true });
       });
@@ -422,43 +793,43 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           return left?.ask?.requestId === first.ask?.requestId && right?.ask?.requestId === second.ask?.requestId;
         };
         view = await runtime.triage();
-        if (!same(view.waiting, [first.instanceId, second.instanceId]) || view.pending !== 2 || view.heldCount !== 0) throw new Error("Android Push directory did not queue asks in arrival order");
+        if (!same(view.waiting, [first.instanceId, second.instanceId]) || view.pending !== 2 || view.heldCount !== 0) throw assertion("Android Push directory did not queue asks in arrival order");
         view = await runtime.triage({ kind: "hold", instanceId: first.instanceId });
-        if (!same(view.waiting, [second.instanceId]) || !same(view.held, [first.instanceId]) || view.pending !== 2 || view.heldCount !== 1 || view.mutations !== 0) throw new Error("Android Push Hold did not advance the queue on this device alone");
-        if (!await pending()) throw new Error("Android Push Hold changed the authoritative asks");
+        if (!same(view.waiting, [second.instanceId]) || !same(view.held, [first.instanceId]) || view.pending !== 2 || view.heldCount !== 1 || view.mutations !== 0) throw assertion("Android Push Hold did not advance the queue on this device alone");
+        if (!await pending()) throw assertion("Android Push Hold changed the authoritative asks");
         await wait("held notification close", async () => (await runtime.observe(first, "attention", "session")).count === 0 ? true : undefined, 15_000);
-        if ((await runtime.observe(second, "attention", "session")).count !== 1) throw new Error("Android Push Hold closed another ask's notification");
+        if ((await runtime.observe(second, "attention", "session")).count !== 1) throw assertion("Android Push Hold closed another ask's notification");
         view = await runtime.triage({ kind: "requeue", instanceId: first.instanceId });
-        if (!same(view.waiting, [first.instanceId, second.instanceId]) || view.held.length !== 0 || view.mutations !== 0) throw new Error("Android Push requeue did not restore arrival order");
+        if (!same(view.waiting, [first.instanceId, second.instanceId]) || view.held.length !== 0 || view.mutations !== 0) throw assertion("Android Push requeue did not restore arrival order");
         view = await runtime.triage({ kind: "hold", instanceId: first.instanceId });
         view = await runtime.triage({ kind: "hold", instanceId: second.instanceId });
-        if (!view.allHeld || view.waiting.length !== 0 || !same(view.held, [first.instanceId, second.instanceId]) || view.pending !== 2 || view.heldCount !== 2 || view.mutations !== 0) throw new Error("Android Push Hold-all did not report a held queue");
-        if (!await pending()) throw new Error("Android Push Hold-all changed the authoritative asks");
+        if (!view.allHeld || view.waiting.length !== 0 || !same(view.held, [first.instanceId, second.instanceId]) || view.pending !== 2 || view.heldCount !== 2 || view.mutations !== 0) throw assertion("Android Push Hold-all did not report a held queue");
+        if (!await pending()) throw assertion("Android Push Hold-all changed the authoritative asks");
         // A replaced request is a new ask: only its stale hold goes.
         await clear(60_000, "secondary");
         await fixture("ask", "secondary");
         const renewed = await snapshot(s => s.inputRequired && s.ask !== undefined && s.ask.requestId !== second.ask?.requestId, "secondary");
         await delivered(renewed);
         view = await runtime.triage();
-        if (!same(view.waiting, [renewed.instanceId]) || !same(view.held, [first.instanceId]) || view.pending !== 2 || view.heldCount !== 1) throw new Error("Android Push replaced request kept its stale hold");
+        if (!same(view.waiting, [renewed.instanceId]) || !same(view.held, [first.instanceId]) || view.pending !== 2 || view.heldCount !== 1) throw assertion("Android Push replaced request kept its stale hold");
         await runtime.triage({ kind: "requeue", instanceId: first.instanceId });
         await clear(); await clear(60_000, "secondary");
         // Hide is device-local: Undo inside its window, then no mutation when the window expires.
         view = await runtime.triage({ kind: "hide", instanceId: first.instanceId });
         // The live total still counts the hidden row: the OMP process keeps running.
-        if (view.working.includes(first.instanceId) || view.hidden !== 1 || !view.toast || view.live !== view.working.length + 1 || view.mutations !== 0) throw new Error("Android Push Hide did not hide the row on this device alone");
+        if (view.working.includes(first.instanceId) || view.hidden !== 1 || !view.toast || view.live !== view.working.length + 1 || view.mutations !== 0) throw assertion("Android Push Hide did not hide the row on this device alone");
         view = await runtime.triage({ kind: "undo" });
-        if (!view.working.includes(first.instanceId) || view.hidden !== 0 || view.toast || view.mutations !== 0) throw new Error("Android Push Undo did not restore the hidden row");
+        if (!view.working.includes(first.instanceId) || view.hidden !== 0 || view.toast || view.mutations !== 0) throw assertion("Android Push Undo did not restore the hidden row");
         view = await runtime.triage({ kind: "hide", instanceId: first.instanceId, settleMs: 6_500 });
-        if (view.working.includes(first.instanceId) || view.hidden !== 1 || view.toast || view.live !== view.working.length + 1 || view.mutations !== 0) throw new Error("Android Push expired Undo window changed state");
+        if (view.working.includes(first.instanceId) || view.hidden !== 1 || view.toast || view.live !== view.working.length + 1 || view.mutations !== 0) throw assertion("Android Push expired Undo window changed state");
         await fixture("ask");
         const returned = await snapshot(s => s.inputRequired);
         view = await runtime.triage();
-        if (!same(view.waiting, [returned.instanceId]) || view.hidden !== 0) throw new Error("Android Push attention did not restore the hidden row");
+        if (!same(view.waiting, [returned.instanceId]) || view.hidden !== 0) throw assertion("Android Push attention did not restore the hidden row");
         await clear();
         await runtime.triage({ kind: "hide", instanceId: secondary.instanceId });
         view = await runtime.triage({ kind: "showAll" });
-        if (owned.some(id => !view.working.includes(id)) || view.hidden !== 0 || view.mutations !== 0) throw new Error("Android Push Show all did not restore hidden rows");
+        if (owned.some(id => !view.working.includes(id)) || view.hidden !== 0 || view.mutations !== 0) throw assertion("Android Push Show all did not restore hidden rows");
         await runtime.closePwa();
         await finish("triage_verified", { fifo: true, holdAdvanced: true, heldNotificationClosed: true, pendingRetained: true, requeued: true, allHeld: true,
           staleHoldReleased: true, undoRestored: true, undoExpired: true, attentionRestored: true, shownAll: true, mutations: 0 });
@@ -469,7 +840,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         const staleTap = async (stale: SessionMetadata, cause: string) => {
           await runtime.replay(stale);
           const tapped = await runtime.tap(stale, "attention", true);
-          if (tapped.launches !== 0 || !tapped.scrubbedBeforeNetwork || !tapped.expired || tapped.writable || tapped.readOnly) throw new Error(`Android Push ${cause} request tap did not fail closed`);
+          if (tapped.launches !== 0 || !tapped.scrubbedBeforeNetwork || !tapped.expired || tapped.writable || tapped.readOnly) throw assertion(`Android Push ${cause} request tap did not fail closed`);
         };
         const resolved = await delivery("session"); await clear();
         await staleTap(resolved.session, "resolved");
@@ -487,7 +858,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         const replaced = await delivery("session"); await clear();
         await fixture("replace");
         const replacement = await snapshot(s => s.generation === replaced.session.generation + 1);
-        if (replacement.instanceId !== replaced.session.instanceId) throw new Error("Android Push replacement changed instance");
+        if (replacement.instanceId !== replaced.session.instanceId) throw assertion("Android Push replacement changed instance");
         await newer(replaced.session);
         await staleTap(replaced.session, "replaced-generation");
         await clear();
@@ -509,7 +880,8 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         let whileStopped = false;
         for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
           const observation = await runtime.observe(forced, "attention", "private");
-          if (observation.count > 1 || observation.forbiddenFound || (observation.count === 1 && (!observation.titleMatches || !observation.bodyMatches))) throw new Error("Android Push force-stop privacy failure");
+          if (observation.count > 1 || observation.forbiddenFound || (observation.count === 1 && (!observation.titleMatches || !observation.bodyMatches))) throw assertion("Android Push force-stop privacy failure");
+          requireExecution();
           whileStopped ||= observation.count === 1; await runtime.pause(500);
         }
         await runtime.openPwa(); await clear(); await delivery("private"); await clear();
@@ -519,7 +891,8 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         await runtime.permission("denied"); await runtime.closePwa(); await fixture("ask");
         const denied = await snapshot(s => s.inputRequired);
         for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
-          if ((await runtime.observe(denied, "attention", "private")).count !== 0) throw new Error("Android Push permission revocation did not suppress notification");
+          if ((await runtime.observe(denied, "attention", "private")).count !== 0) throw assertion("Android Push permission revocation did not suppress notification");
+          requireExecution();
           await runtime.pause(500);
         }
         await fixture("answer"); await snapshot(s => !s.inputRequired);
@@ -543,18 +916,19 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         }
         // Missing cellular service blocks that sub-phase, not the independent offline/recovery proof.
         if (!await runtime.network("airplane")) throw new Error("Android Push Airplane state unavailable");
+        const offlineWindow = await runtime.beginDeliveryTelemetry?.(activePhase);
         await fixture("ask");
         const offline = await snapshot(s => s.inputRequired);
         for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
-          if ((await runtime.observe(offline, "attention", "private")).count !== 0) throw new Error("Android Push delivered while offline");
+          if ((await runtime.observe(offline, "attention", "private")).count !== 0) throw assertion("Android Push delivered while offline");
+          requireExecution();
           await runtime.pause(500);
         }
+        if (offlineWindow !== undefined) await runtime.deliveryTelemetry?.(offlineWindow);
         if (!await runtime.network("wifi")) throw new Error("Android Push restored Wi-Fi tailnet path unavailable");
-        await wait("Airplane recovery", async () => {
-          const observed = await runtime.observe(offline, "attention", "private");
-          if (observed.count > 1 || observed.forbiddenFound || (observed.count === 1 && (!observed.titleMatches || !observed.bodyMatches))) throw new Error("Android Push Airplane recovery privacy failure");
-          return observed.count === 1 ? true : undefined;
-        }, PUSH_RECOVERY_MS);
+        // Restoring the WebAPK may replay its subscription; that is not the original send.
+        const restoredWindow = await runtime.beginDeliveryTelemetry?.(activePhase);
+        await delivery("private", "attention", false, PUSH_RECOVERY_MS, restoredWindow);
         await clear(PUSH_RECOVERY_MS);
         await finish("network_verified", { wifiDelivery: true, ...(cellular ? { cellularDelivery: true } : { blocked: "cellular_path_unavailable" }), airplaneSuppressed: true, recovered: true });
       });
@@ -564,17 +938,20 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         let duringDoze = false;
         for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
           const observation = await runtime.observe(sleeping, "attention", "private");
-          if (observation.count > 1 || observation.forbiddenFound || (observation.count === 1 && (!observation.titleMatches || !observation.bodyMatches))) throw new Error("Android Push Doze privacy failure");
+          if (observation.count > 1 || observation.forbiddenFound || (observation.count === 1 && (!observation.titleMatches || !observation.bodyMatches))) throw assertion("Android Push Doze privacy failure");
+          requireExecution();
           duringDoze ||= observation.count === 1; await runtime.pause(500);
         }
         await runtime.doze(false);
         // Forced Doze is an observed variant, never a delivery guarantee (ADR-031): FCM has held a push
         // for minutes after Doze ended. Privacy holds for anything that arrives; the ask is settled either way.
         let afterExit = false;
-        const deadline = runtime.now() + 60_000;
-        while (!duringDoze && !afterExit && runtime.now() < deadline) {
+        const observationStart = runtime.now();
+        while (!duringDoze && !afterExit && !pushBudgetExpired(runtime, input.execution, observationStart, 60_000)) {
           const observed = await runtime.observe(sleeping, "attention", "private");
-          if (observed.count > 1 || observed.forbiddenFound || (observed.count === 1 && (!observed.titleMatches || !observed.bodyMatches))) throw new Error("Android Push Doze recovery privacy failure");
+          if (observed.count > 1 || observed.forbiddenFound || (observed.count === 1 && (!observed.titleMatches || !observed.bodyMatches))) throw assertion("Android Push Doze recovery privacy failure");
+          requireExecution();
+          if (pushBudgetExpired(runtime, input.execution, observationStart, 60_000)) break;
           afterExit = observed.count === 1;
           if (!afterExit) await runtime.pause(500);
         }
@@ -582,23 +959,40 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         // prealpha.3 campaigns an ask or clear waited minutes, until another lane opened Chrome. The
         // variant above is observed with the app closed; resuming it once lets a deferred ask or clear
         // run here rather than on the owner's phone after the lane. Doze is therefore the last delivery phase.
+        const clearing = runtime.now();
         await fixture("answer");
-        const settled = await snapshot(s => !s.inputRequired);
+        const settled = await wait("authoritative clear after Doze", async () => {
+          const current = await runtime.snapshot(progress.epoch);
+          return current !== undefined && !current.inputRequired ? current : undefined;
+        }, 60_000, clearing);
         await runtime.openPwa();
-        await wait("authoritative clear after Doze", async () => (await runtime.observe(settled, "attention", "private")).count === 0 ? true : undefined);
+        await wait("authoritative clear after Doze", async () => (await runtime.observe(settled, "attention", "private")).count === 0 ? true : undefined, 60_000, clearing);
         await runtime.closePwa();
         await finish("doze_verified", { variant: duringDoze ? "delivered_during_doze" : afterExit ? "delivered_after_doze_exit" : "undelivered_after_doze_exit" });
       });
       await attempt("forbidden_sinks_verified", async () => {
         await runtime.network("wifi");
         const sinks = await runtime.sinks(progress.epoch);
-        if (sinks.clean !== true || sinks.detectable !== true || sinks.gatewayLogsDiscarded !== true) throw new Error("Android Push forbidden-sink proof failed");
+        if (sinks.gatewayStructuredLogsSafe !== true) throw new QualificationFailure({
+          id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "harness", reason: "invalid_evidence",
+          operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {} });
+        if (sinks.clean !== true || sinks.detectable !== true || sinks.gatewayLogsDiscarded !== true) throw new QualificationFailure({
+          id: input.execution?.nextFailureId() ?? 1, lane: "androidPush", step: activePhase, class: "product", reason: "privacy_failed",
+          operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {} });
         await finish("forbidden_sinks_verified", sinks);
       });
       await finish("evidence_complete", { passed: !progress.results.network_verified?.blocked });
     } catch (error) { primary = error; }
     let cleanup: Record<string, unknown>;
-    try { cleanup = await restore(input, runtime, progress); }
+    runtime.beginCleanup?.();
+    try { cleanup = await restore(input, runtime, progress, async () => {
+      if (lateDelivery === undefined) return;
+      try { await lateDelivery(); } catch (error) {
+        primary = new AggregateError(primary === undefined ? [error] : [primary, error], "Push delivery and late observation failed");
+        lateDelivery = undefined;
+      }
+      progress.results[activePhase] = { ...progress.results[activePhase], ...metrics };
+    }); }
     catch (error) {
       const failure = new AggregateError(primary === undefined ? [error] : [primary, error], "Android Push run/cleanup failed");
       if (pixelUnrestored(error)) Object.assign(failure, { pixelUnrestored: true });
@@ -654,8 +1048,7 @@ if (import.meta.main) {
     await writeFile(join(directory, "tested-evidence.json"), JSON.stringify({ development: true, qualified: false, gatewayVersion: release.version, result }), { mode: 0o600 });
     console.log(JSON.stringify({ development: true, qualified: false, gatewayVersion: release.version, result }));
   } catch (error) {
-    if (error instanceof AggregateError) console.error(error.errors.map(item => item instanceof Error ? item.message : "Push run failed").join("; "));
-    else console.error(error instanceof Error ? error.message : "Push run failed");
+    console.error(JSON.stringify({ failures: normalizeQualificationFailures(error) }));
     process.exitCode = 1;
   }
 }

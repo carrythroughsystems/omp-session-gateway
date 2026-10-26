@@ -485,6 +485,88 @@ Allowed at normal verbosity:
 All gateway log fields are numeric or boolean. Never attach string-valued identifiers, hashes,
 paths, error messages, metadata, or serialized query objects.
 
+Qualification explicitly supplies `--qualification-log-dir`; an environment variable alone never
+enables daemon retention. Ordinary installations are unchanged. The sink accepts only closed event
+names/fields, finite numbers and booleans (plus the fixed envelope timestamp/level/name), and retains
+four files of at most 256 KiB. The existing absolute destination must be current-user-owned, mode
+0700, with no symlink components; files are single-link, current-user-owned 0600 regular files.
+Unsafe startup fails. Each synchronous burst durably invalidates the existing private health inode
+before touching log data; its microtask commit flushes the bounded current file and commits the exact
+event index and first retained index. Rotation flushes the file being moved; per-event appends do not require per-event fsync.
+An interrupted or failed burst never publishes success. Writer startup and final collection acquire
+the same exclusive private in-directory claim. The writer makes its claim durable before logging;
+a failed close retains it even if a closed-looking lease write reached the cache and every health
+invalidation fails. Graceful teardown drains admitted HTTP handlers (not just sockets) and every other
+event producer, then fsyncs final health, closed lease and directory state. Claim unlink is the last
+fallible close step. Restart and collection reject any held claim; abrupt death or a claim unlink
+that did not survive a crash requires explicit reset, never automatic repair. Writes after close are
+discarded with a bounded in-memory drop count, not thrown into a late handler. All state
+stays inside the accepted service writable location. Restart and collection require
+contiguous records in oldest-to-newest file order, beginning at index 1 unless the committed rotation
+boundary explains the prefix. Missing/truncated retained files and record reordering are failures.
+Rate-limited IPC events use the same closed vocabulary. Raw daemon
+stdout/stderr remain discarded independently of structured retention, proven on the gateway's host.
+Install/rollback/repair only forward the logging option to runtimes advertising `structured-v1`;
+older installed runtimes omit it rather than receiving an unsupported command-line option.
+
+Push events retain only numeric sequence and opaque request alias, kind flags, subscription counts,
+durations, and HTTP status. Qualification-only aliases are allocated from the next retained-log append
+index and mapped to exact session/generation/request tuples only in process memory. They are not
+identity encodings, hashes, or keys, and retained append indices prevent reuse across daemon restarts
+in the same job. The existing authenticated read-only session list exposes the optional
+`qualificationPushAlias` only for the exact current ask; ordinary responses omit it. Before any re-arm,
+the runtime re-fetches the owned fixture snapshot and requires its alias to match queue, send and
+failure evidence. The matching outbound clear acknowledgement is required before issuing the new ask.
+Immediately before transport, a fresh snapshot must still have the original instance and generation,
+controllability, no active ask, and matching request/alias state. The existing private fixture
+acknowledgement carries its OMP session ID into a guarded command; the extension checks that ID
+synchronously before showing the ask. This detects a session switch, not a same-session host-generation
+rotation between the runtime's check and the extension's mutation; the cross-process check is not atomic.
+Provider acknowledgement is acceptance, not phone presentation. Collector windows
+use event indices and require a unique queue/send; simultaneous sends, rotation gaps, missing or
+invalid telemetry never authorize recovery by time proximity. Request identities remain volatile.
+Subscription replay provenance is a required boolean on queue/send events; omission cannot mean a fresh
+send. Subscription replays cannot authorize a fresh-ask retry. Radio
+restoration closes the original window before reopening the WebAPK; post-restoration observation
+uses a new window. Re-arm requires both phone clear and outbound clear acknowledgement.
+A late post cannot satisfy a fresh ask: the existing worker must attest its exact request and the
+authoritative snapshot must retain its generation.
+Deadline expiry installs late-post sampling before returning a typed unexplained timeout; readiness
+also samples restoration and retains any late delivery in its failure observations. Ask-metadata
+waits install their sampler before waiting; only exhaustion of the metadata window is
+`delivery_metadata_timeout`. Snapshot errors retain their original identity, and an expired execution
+budget is `delivery_timeout`. Readiness starts its failure clock before mutation; even an error
+normalizing failure evidence cannot skip restoration. Containment errors take precedence over an
+expired delivery budget, including request attestation after a recovered delivery.
+Late samplers remain armed through the old ask's clear settlement, are replaced for a fresh ask,
+and are disarmed immediately on in-budget delivery or an ambiguous overlap retry.
+Late-sampler failure is retained without skipping device restoration. Execution deadlines are
+rechecked after asynchronous observations and before success, including readiness telemetry,
+ownership and clear verification. Every persisted duration/count is a bounded safe integer;
+monotonic durations are rounded before persistence. Readiness retains separate 160-second delivery
+and clear windows. Ordinary, re-arm, overlap and Doze clear budgets start before their answer and
+metadata work; entering the final phone observation never grants a new window.
+Unacknowledged target creation remains unresolved after its bounded response route expires.
+Target/forward cleanup failure blocks Pixel release with a harness root and causally linked
+containment collateral, including failures inside network fallback and diagnostic paths; final task
+restoration uses ADB without reopening CDP. Notification cleanup inspects both v1 and source-scoped
+v2 Hold/Hide stores and does not treat malformed records as evidence of absence.
+At most one evidence-backed fresh ask is allowed per phase, separate from overlap recovery; all
+privacy assertions and the 60/160-second bounds remain unchanged. The forbidden-sink proof requires
+both raw-stream discard and validated structured-log safety.
+Per-phase `deliveryTimings` retains ordered first/second millisecond pairs for each delivery,
+without overwriting earlier observations; the phase-wide one-re-arm budget remains independent.
+
+Logs live outside fixture-cleanup directories. Reads bracket event files with health reads and retry
+any changed or pending health/lease state; a torn snapshot never becomes evidence. After the daemon stops,
+collection holds the exclusive claim while validating bounded records into private, exclusively-created immutable job files and
+lane/phase slices, fsyncs the files and their directory, and rechecks the retained health state before
+atomically retiring the remote directory. Only the retired directory is unlinked; startup refuses
+claimed/retired destinations. Failed validation or retention leaves remote evidence and its claim
+intact; a deletion failure leaves the remaining evidence in the retired directory.
+No raw errors, endpoints, real identifiers or identifier hashes, notification text, payloads, capabilities,
+tokens, or provider bodies are retained in these artifacts.
+
 Forbidden:
 
 - capabilities or substrings;

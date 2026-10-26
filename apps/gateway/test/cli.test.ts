@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, createHmac } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -45,6 +45,17 @@ test("rejects missing option values before mutation", async () => {
   );
 });
 
+test("qualification logging is explicit and refuses unsafe paths before install effects", async () => {
+  await expect(main(["install", "--qualification-log-dir", "relative", "--origin", "https://synthetic.example.test"])).rejects.toThrow("unsafe qualification log directory");
+  await expect(main(["install", "--qualification-log-dir"])).rejects.toThrow("--qualification-log-dir requires a value");
+  const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+  expect(source).not.toContain("process.env.OMP_MAC_QUALIFICATION_LOG_DIR");
+  expect(source).toContain("new SafeLogger(sink)");
+  for (const runtime of ["runtime", "priorRuntime", "target.runtime", "authoritative"]) {
+    expect(source).toContain(`${runtime}.qualificationLogProtocol === "structured-v1" ? logDirectory : undefined`);
+  }
+});
+
 test("exits promptly and closes staged resources when HTTP startup fails", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-cli-startup-"));
   const occupied = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("occupied") });
@@ -64,10 +75,13 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
       cwd: fileURLToPath(new URL("../../..", import.meta.url)),
       env: sandboxEnvironment(root),
       stdin: "ignore",
-      stdout: "ignore",
+      stdout: "pipe",
       stderr: "pipe",
     },
   );
+  const stdout = new Response(subprocess.stdout).text();
+  const stderr = new Response(subprocess.stderr).text();
+  const occupiedError = /address already in use|port \d+ in use/iu;
   try {
     const result = await Promise.race([
       subprocess.exited.then(exitCode => ({ kind: "exit" as const, exitCode })),
@@ -75,10 +89,13 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
     ]);
     if (result.kind === "timeout") {
       subprocess.kill(9);
-      throw new Error("gateway remained alive after HTTP startup failed");
+      await subprocess.exited;
+      // Distinguish a retained handle after bind refusal from a process that never reached it.
+      // Keep the original two-second bound and emit only fixed diagnostic booleans, not output.
+      throw new Error(`gateway remained alive after HTTP startup failed (bindRefused=${occupiedError.test(await stderr)}, listening=${(await stdout).includes('"event":"http.listening"')})`);
     }
     expect(result.exitCode).not.toBe(0);
-    expect(await new Response(subprocess.stderr).text()).toMatch(/address already in use|port \d+ in use/iu);
+    expect(await stderr).toMatch(occupiedError);
   } finally {
     occupied.stop(true);
     if (subprocess.exitCode === null) subprocess.kill(9);
@@ -135,6 +152,41 @@ test("development serve flags still load authored fleet and speech from the defa
     await rm(root, { recursive: true, force: true });
   }
 }, 75_000);
+
+test.skipIf(process.platform === "win32")("495 R1 graceful daemon shutdown closes the private writer lease before restart", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-cli-log-lease-")));
+  const logs = join(root, "logs"); await mkdir(logs, { mode: 0o700 });
+  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
+  const port = reservation.port!; reservation.stop(true);
+  const origin = `http://127.0.0.1:${port}`;
+  let lastIndex = 0;
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const child = Bun.spawn([process.execPath, GATEWAY_CLI, "serve", "--dev-localhost", "--port", String(port), "--origin", origin,
+        "--qualification-log-dir", logs], { cwd: REPOSITORY_ROOT, env: sandboxEnvironment(root), stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+      try {
+        let ready = false;
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline && child.exitCode === null) {
+          try { ready = (await fetch(`${origin}/api/v1/client-config`, { signal: AbortSignal.timeout(500) })).ok; }
+          catch { /* The isolated daemon has not bound its loopback listener yet. */ }
+          if (ready) break;
+          await Bun.sleep(20);
+        }
+        expect(ready).toBe(true);
+        expect(await readFile(join(logs, "writer"), "utf8")).toBe("active\n");
+        child.kill("SIGTERM");
+        expect(await Promise.race([child.exited, Bun.sleep(2_000).then(() => -1)])).toBe(0);
+        expect(await readFile(join(logs, "writer"), "utf8")).toBe("closed\n");
+        const [index] = JSON.parse(await readFile(join(logs, "health"), "utf8")) as [number, number];
+        expect(index).toBeGreaterThan(lastIndex); lastIndex = index;
+      } finally {
+        if (child.exitCode === null) child.kill(9);
+        await child.exited;
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 30_000);
 
 /**
  * The option table in `cli.ts` is the whole guard between a mistyped operator command and a

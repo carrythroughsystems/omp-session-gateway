@@ -372,6 +372,16 @@ describe("strict protocol validation", () => {
       ProtocolValidationError,
     );
   });
+
+  test("R2 accepts an optional positive safe qualification alias only on an active ask", () => {
+    const active = { inputRequired: true, ask: { requestId: "synthetic-request-0001", since: "2026-01-01T00:00:00.000Z" } };
+    const parse = (qualificationPushAlias: unknown) => parseSessionListResponse({ revision: 1, sessions: [metadata({ ...active, qualificationPushAlias })] });
+    expect(parse(1).sessions[0]?.qualificationPushAlias).toBe(1);
+    expect(parse(Number.MAX_SAFE_INTEGER).sessions[0]?.qualificationPushAlias).toBe(Number.MAX_SAFE_INTEGER);
+    for (const invalid of [0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1, "1", null]) expect(() => parse(invalid)).toThrow();
+    expect(() => parseSessionListResponse({ revision: 1, sessions: [metadata({ qualificationPushAlias: 1 })] })).toThrow();
+    expect(Object.hasOwn(parseSessionListResponse({ revision: 1, sessions: [metadata(active)] }).sessions[0]!, "qualificationPushAlias")).toBe(false);
+  });
   test("validates strict capability-free Web Push contracts", () => {
     const subscription = {
       endpoint: "https://push.example.test/send/subscription-1",
