@@ -288,7 +288,7 @@ function passedRelayReceipt(durationSeconds = 1_800) {
 }
 
 describe("resumed relay qualification proof", () => {
-  test.each([
+  test.skipIf(process.platform === "win32").each([
     ["historical sixty-second pass", (receipt: ReturnType<typeof passedRelayReceipt>) => {
       receipt.lanes.relay = passedRelayReceipt(60).lanes.relay;
     }],
@@ -334,7 +334,7 @@ describe("resumed relay qualification proof", () => {
     }
   });
 
-  test("binds resume to the requested duration without rejecting longer valid evidence", async () => {
+  test.skipIf(process.platform === "win32")("binds resume to the requested duration without rejecting longer valid evidence", async () => {
     const root = await mkdtemp(join(tmpdir(), "stable-relay-duration-"));
     try {
       const path = join(root, "stable-qualification.json");
@@ -386,7 +386,7 @@ describe("Mac receipt host ownership", () => {
     }
   });
 
-  test("persists the configured Mac host before the first effect and preserves schema 3", async () => {
+  test.skipIf(process.platform === "win32")("persists the configured Mac host before the first effect and preserves schema 3", async () => {
     const root = await mkdtemp(join(tmpdir(), "stable-mac-first-effect-"));
     try {
       const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
@@ -413,7 +413,7 @@ describe("Mac receipt host ownership", () => {
     }
   });
 
-  test.each([false, true])("model refusal never cleans a host with no recorded effects (resumed=%s)", async resumed => {
+  test.skipIf(process.platform === "win32").each([false, true])("model refusal never cleans a host with no recorded effects (resumed=%s)", async resumed => {
     const root = await mkdtemp(join(tmpdir(), "stable-mac-unowned-"));
     try {
       const path = join(root, "stable-qualification.json");
@@ -1000,7 +1000,7 @@ describe("explicit same-receipt cloud resumption", () => {
     expect(receipt.lanes.deviceCloudCleanup.attempts).toBe(2);
     expect(receipt.lanes.deviceCloud.evidence?.availabilityHold).toBeUndefined();
   });
-  test.each(["prepareMacFixture", "waitForPublishedSession", "verifyLaunchContracts", "startTunnel", "teardown", "protected-file guard"] as const)(
+  test.skipIf(process.platform === "win32").each(["prepareMacFixture", "waitForPublishedSession", "verifyLaunchContracts", "startTunnel", "teardown", "protected-file guard"] as const)(
     "%s failure after consuming a hold cannot retain same-receipt eligibility", async stage => {
       const receipt = availabilityReceipt();
       const publication = structuredClone(receipt.lanes.ompPublication);
@@ -1032,7 +1032,7 @@ describe("explicit same-receipt cloud resumption", () => {
       } finally { await rm(root, { recursive: true, force: true }); }
     },
   );
-  test.each([2, 3])("a fresh all-hold admission failure records all %i leaves on the same receipt", async count => {
+  test.skipIf(process.platform === "win32").each([2, 3])("a fresh all-hold admission failure records all %i leaves on the same receipt", async count => {
     const receipt = availabilityReceipt();
     const before = structuredClone(receipt.lanes);
     const holds = (["iphone", "ipad", "android"] as const).slice(3 - count).map(target => new DeviceCloudAvailabilityHold({
@@ -1051,7 +1051,7 @@ describe("explicit same-receipt cloud resumption", () => {
       for (const name of Object.keys(before) as (keyof typeof before)[]) if (name !== "deviceCloud") expect(receipt.lanes[name]).toEqual(before[name]);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
-  test.each(["ordinary", "two holds", "three holds"] as const)("the real resume entry consumes eligibility before %s admission", async kind => {
+  test.skipIf(process.platform === "win32").each(["ordinary", "two holds", "three holds"] as const)("the real resume entry consumes eligibility before %s admission", async kind => {
     const root = await mkdtemp(join(tmpdir(), "stable-cloud-resume-admission-"));
     const path = join(root, "stable-qualification.json");
     const receipt = availabilityReceipt(), publication = structuredClone(receipt.lanes.ompPublication);
@@ -1422,7 +1422,7 @@ async function macLifecycleFixture(model = MAC_ENV.OMP_STABLE_MAC_MODEL, version
   return { pins, candidate, output };
 }
 
-test.each([["Mac14,3", "26.6.1"], ["Mac17,14", "27.0.1"], ["VirtualMac2,1", "27.0.1"]])("Mac %s lifecycle persists measured schema-3 evidence and refuses failures", async (model, version) => {
+test.skipIf(process.platform === "win32").each([["Mac14,3", "26.6.1"], ["Mac17,14", "27.0.1"], ["VirtualMac2,1", "27.0.1"]])("Mac %s lifecycle persists measured schema-3 evidence and refuses failures", async (model, version) => {
   const { pins, candidate, output } = await macLifecycleFixture(model, version);
   const evidence = {
     hardware: model, doctor: "18/18", rollbackInvariants: "23/23", os: `macOS ${version} arm64`,
@@ -1528,6 +1528,14 @@ lane_persistence
 });
 
 describe("resumable receipt lanes", () => {
+  test.skipIf(process.platform !== "win32")("Windows refuses private receipt persistence before filesystem effects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qualification-receipt-unsupported-"));
+    try {
+      await expect(createReceiptPersister(join(root, "job", "receipt.json"),
+        createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG))()).rejects.toThrow("requires a POSIX host");
+      expect(await readdir(root)).toEqual([]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   test("availability remains failed with additive closed schema-3 evidence", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     const hold = new DeviceCloudAvailabilityHold({
@@ -1581,7 +1589,7 @@ describe("resumable receipt lanes", () => {
       error: "lane execution failed; inspect the qualification process output",
     });
   });
-  test("serializes concurrent Android and relay receipt checkpoints", async () => {
+  test.skipIf(process.platform === "win32")("serializes concurrent Android and relay receipt checkpoints", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "omp-stable-receipt-concurrency-"));
     const receiptPath = join(temporaryRoot, "stable-qualification.json");
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
@@ -1646,7 +1654,7 @@ function summarizedReceipt() {
   return receipt;
 }
 
-test("bound read-only preflight failure writes an effect-free outcome without creating a receipt", async () => {
+test.skipIf(process.platform === "win32")("bound read-only preflight failure writes an effect-free outcome without creating a receipt", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "stable-bound-preflight-")));
   try {
     const execution = receiptExecution(), executionPath = join(root, "execution.json"), outcomePath = join(root, "outcome.json");
@@ -1664,7 +1672,6 @@ test("bound read-only preflight failure writes an effect-free outcome without cr
     expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
-
 test.each(["missing lane record", "passed root owner", "unrepresented failed lane", "extra summary root"] as const)(
   "council R2 receipt graph rejects %s", variant => {
     const receipt = summarizedReceipt();
@@ -1732,7 +1739,6 @@ test("council P2 restarting a standalone root clears its dependent graph before 
     validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
   }, async () => ({}));
 });
-
 test("council R2 campaign pseudo roots are terminal harness evidence only", () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   receipt.execution = receiptExecution(); receipt.status = "failed";
@@ -1801,7 +1807,7 @@ test("council R3 publication restart and reopened Mac cleanup invalidate prior a
   expect(validateStableQualificationReceipt(pending, TAG, COMMIT, PREVIOUS_TAG)).toBe(pending);
 });
 
-test("council R3 bound cloud retry consumes summary before admission persists", async () => {
+test.skipIf(process.platform === "win32")("council R3 bound cloud retry consumes summary before admission persists", async () => {
   const root = await mkdtemp(join(tmpdir(), "stable-summary-resume-"));
   const path = join(root, "stable-qualification.json"), receipt = summarizedReceipt();
   try {
@@ -1832,7 +1838,7 @@ test("council R3 bound cloud retry consumes summary before admission persists", 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("schema-3 additive fields round trip without changing passed historical proofs", async () => {
+test.skipIf(process.platform === "win32")("schema-3 additive fields round trip without changing passed historical proofs", async () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   const failure: LaneFailure = { id: 1, lane: "windows", step: "transport_ready", class: "infra_transient",
     reason: "connection_timeout", elapsedMs: 90_000, operation: "read_only", observations: { transportFailure: true } };
@@ -2426,7 +2432,7 @@ describe("resource-owning lanes", () => {
   });
 });
 
-test("a resumed campaign that fails admission still destroys the Windows VM it recorded", async () => {
+test.skipIf(process.platform === "win32")("a resumed campaign that fails admission still destroys the Windows VM it recorded", async () => {
   const root = await mkdtemp(join(tmpdir(), "stable-windows-orphan-"));
   try {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);

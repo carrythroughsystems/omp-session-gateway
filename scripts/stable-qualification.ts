@@ -708,6 +708,7 @@ async function saveReceipt(path: string, receipt: StableQualificationReceipt): P
 }
 
 async function writePrivateJson(path: string, value: unknown): Promise<void> {
+  if (process.platform === "win32") throw new Error("qualification receipt persistence requires a POSIX host");
   const bytes = `${JSON.stringify(value, undefined, 2)}\n`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const metadata = await lstat(dirname(path));

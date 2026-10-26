@@ -13,6 +13,8 @@
  * - read/writeQualificationOutcomeFile use a bounded, duplicate-key-rejecting private atomic
  *   channel at OMP_STABLE_OUTCOME_FILE. Errors never include file paths, raw input or causes.
  *   Legacy device-cloud files are not upgraded; their parsers and manual recovery remain separate.
+ *   Persistence is POSIX-only for the Studio driver: file data and parent directory are synced.
+ *   Windows refuses persistence before filesystem effects; schema and JSON parsing stay portable.
  *   Supply a physical path: every ancestor is checked for symlinks, and size/metadata changes
  *   during reading are refused. Cleanup disposition must agree with the containment summary.
  * - RigReadinessReceipt and its parser define additive schema-3 readiness observations only;
@@ -203,6 +205,7 @@ async function validateDestination(path: string): Promise<void> {
 
 /** Private job directories are owned by this user; hostile same-uid directory replacement is out of scope. */
 export async function writeQualificationOutcomeFile(path: string, value: QualificationOutcome): Promise<void> {
+  if (process.platform === "win32") throw new Error("qualification outcome persistence requires a POSIX host");
   const outcome = parseQualificationOutcome(value);
   const bytes = Buffer.from(`${JSON.stringify(outcome)}\n`);
   if (bytes.length > OUTCOME_MAX_BYTES) throw fileError();
@@ -225,6 +228,7 @@ export async function writeQualificationOutcomeFile(path: string, value: Qualifi
 }
 
 export async function readQualificationOutcomeFile(path: string, expected?: QualificationExecution): Promise<QualificationOutcome> {
+  if (process.platform === "win32") throw new Error("qualification outcome persistence requires a POSIX host");
   try {
     const destination = resolve(path);
     await privateDirectory(dirname(destination), false);
