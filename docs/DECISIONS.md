@@ -1927,3 +1927,48 @@ schema 3 remains additive and old receipts remain readable, but missing new evid
 non-retryable. Rollout requires a drained reviewed driver re-pin and a new candidate containing
 the execution/outcome implementation; rollback must first drain new-format work. Offline tests
 are not claims of a successful real-rig retry or qualification.
+
+---
+
+## ADR-045 — CI-only browser retries with closed flake evidence
+
+**Status:** Accepted
+
+**Date:** 2026-10-25
+
+**Context:** Prepare PRs encountered unrelated browser harness races and an unreproduced Firefox
+navigation timeout. Bounded CI retries must not hide persistent regressions, weaken timing/product
+assertions, or turn unrestricted Playwright diagnostics into capability-bearing artifacts.
+
+**Decision:**
+
+- Both non-visual Playwright configurations retry once only when `CI` is exactly `"true"` or
+  `"1"`; all other values retain zero retries. Workers, projects, assertions and deadlines stay
+  unchanged. A retry pass is reported as flaky; exhausted retries still fail.
+- Alongside the line reporter, retain only a closed, versioned report of run/attempt, actual
+  tested SHA, lane/project, repository location, location/project-derived identity, expected
+  status, attempt ordinal/status/duration and independently derived final outcome. Never copy titles, errors, output, attachments,
+  source excerpts, URLs or fixture values. Disable automatic trace/video/screenshot capture.
+  Required reporting failure cannot produce a green CI run; existing test failure exits survive.
+- Both browser jobs always summarize counts/locations and upload only that JSON for 14 days.
+  Weekly/manual maintenance evaluates the preceding seven days: at most 1% flaky logical
+  executions per lane/project and no test/project flaky more than twice. Retries count as one
+  execution; skipped cases do not dilute it. Validate GitHub run/attempt and tested-subject
+  binding, identify the cohort by the workflow-revision reporter marker, and fail coverage on
+  missing or invalid reporter-enabled evidence rather than inventing zero flakes. Format/marker
+  2 begins this closed outcome/coverage contract; version-1 revisions remain historical pre-v2
+  evidence, while unknown future versions fail closed. Empty/all-unexecuted reports are not coverage.
+  A cancelled job or selective rerun without that browser job owes no new report. Fleet dispatch
+  targets may differ from workflow head only when the workflow pins/verifies the target and
+  attempt-specific validation steps succeeded; retain that exact target in the report.
+- E2e readiness observes application state, not response `.finished`, request-finished events
+  or `networkidle`. `waitForResponse()` is reserved for explicit HTTP-contract assertions.
+  Startup-retry tests install/freeze their clock before navigation; intentional post-navigation
+  lifecycle advances remain in place.
+- Every prepare PR executes its own exact-subject required checks, including version-only bumps.
+  Reuse dependency/browser caches, never main's green outcomes.
+
+**Consequences:** Browser flakiness becomes visible and bounded without altering product behavior
+or signed-release gates. Maintenance is not a substitute for required PR checks or exact physical
+qualification. Clean and retried browser evidence remain distinct under ADR-030; no historical
+or emulated result acquires a new qualification claim.

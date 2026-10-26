@@ -164,3 +164,48 @@ test("local visual failure fails the job while upload failure is advisory with r
   expect(artifact.if).toBe("${{ always() }}");
   expect(artifact.with?.path).toBe("test-results/visual-diagnostics/");
 });
+
+test("both required browser lanes execute their exact checkout with bounded retries and only sanitized always-run uploads", async () => {
+  for (const [file, lane, command] of [
+    ["ci.yml", "browser-notifications", "bun run test:browser"],
+    ["compatibility.yml", "browser-core", "bun run test:browser:compat"],
+  ] as const) {
+    const source = await readFile(join(import.meta.dir, "../../../.github/workflows", file), "utf8");
+    const workflow = Bun.YAML.parse(source) as VisualWorkflow;
+    const job = workflow.jobs[lane]!;
+    expect(job["timeout-minutes"]).toBe(20);
+    expect(job["continue-on-error"]).toBeUndefined();
+    expect(job.env).toMatchObject({ OMP_BROWSER_REPORT_VERSION: "2" });
+    const checkout = job.steps.find(step => step.uses?.startsWith("actions/checkout@"))!;
+    expect(checkout.with?.ref).toContain("github.sha");
+    expect(checkout.with?.["persist-credentials"]).toBe(false);
+    const execute = job.steps.find(step => step.run === command)!;
+    expect(execute.if).toBeUndefined();
+    expect(execute["continue-on-error"]).toBeUndefined();
+    const artifacts = job.steps.filter(step => step.uses?.startsWith("actions/upload-artifact@"));
+    expect(artifacts).toHaveLength(1);
+    const artifact = artifacts[0]!;
+    expect(artifact.if).toBe("${{ always() }}");
+    expect(artifact.with?.path).toBe("test-results/browser-flakes/browser-flake-report.json");
+    expect(artifact.with?.["retention-days"]).toBe(14);
+    expect(artifact.with?.["if-no-files-found"]).toBe("error");
+    expect(artifact.with?.name).toBe(`browser-flake-${lane}-\${{ github.run_id }}-\${{ github.run_attempt }}`);
+    const summary = job.steps.find(step => step.name === "Summarize sanitized browser flakes")!;
+    expect(summary.if).toBe("${{ always() }}");
+    expect(summary.run).toBe(`bun scripts/test-browser.ts --summary-only${lane === "browser-core" ? " --compat" : ""}`);
+    expect(JSON.stringify(job)).not.toMatch(/main.*(?:green|skip)|paths-ignore/u);
+  }
+});
+
+test("weekly browser flake maintenance is manual/scheduled, seven-day, read-only and not a release gate", async () => {
+  const source = await readFile(join(import.meta.dir, "../../../.github/workflows/browser-flake-budget.yml"), "utf8");
+  const workflow = Bun.YAML.parse(source) as VisualWorkflow & { on: Record<string, unknown>; permissions: Record<string, string> };
+  expect(Object.keys(workflow.on).sort()).toEqual(["schedule", "workflow_dispatch"]);
+  expect(workflow.on.schedule).toHaveLength(1);
+  expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
+  const budget = workflow.jobs["browser-flake-budget"]!;
+  expect(budget["runs-on"]).toBe("ubuntu-24.04");
+  expect(budget["timeout-minutes"]).toBe(20);
+  expect(budget.steps.some(step => step.run === "bun run check:browser-flakes")).toBe(true);
+  expect(source).not.toContain("actions/upload-artifact");
+});

@@ -119,9 +119,22 @@ export function checkProviderReads(rel: string, text: string): string[] {
 interface SourceToken {
   value: string;
   line: number;
+  literal?: string;
 }
 
-function* sourceTokens(source: string): Generator<SourceToken> {
+function decodeSourceLiteral(raw: string): string {
+  return raw.replace(/\\(?:\r\n|[\n\r\u2028\u2029]|u\{[a-f0-9]+\}|u[a-f0-9]{4}|x[a-f0-9]{2}|.)/giu, escaped => {
+    const value = escaped.slice(1);
+    if (/^[\n\r\u2028\u2029]/u.test(value)) return "";
+    if (/^[ux]/u.test(value)) {
+      const code = Number.parseInt(value.startsWith("u{") ? value.slice(2, -1) : value.slice(1), 16);
+      return Number.isFinite(code) && code <= 0x10ffff ? String.fromCodePoint(code) : escaped;
+    }
+    return ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", "0": "\0" } as Record<string, string>)[value] ?? value;
+  });
+}
+
+function* sourceTokens(source: string, retainLiterals = false): Generator<SourceToken> {
   let offset = 0;
   let line = 1;
   const advance = (): string => {
@@ -163,22 +176,29 @@ function* sourceTokens(source: string): Generator<SourceToken> {
       }
       const tokenLine = line;
       let value: string;
+      let literal: string | undefined;
       if (char === "'" || char === '"') {
+        const start = offset;
         quoted(char);
+        if (retainLiterals) literal = decodeSourceLiteral(source.slice(start + 1, offset - 1));
         value = "<literal>";
       } else if (char === "\x60") {
         advance();
-        yield { value: "<literal>", line: tokenLine };
+        const start = offset;
+        let interpolated = false;
         while (offset < source.length) {
           const templateChar = advance();
           if (templateChar === "\\") advance();
           else if (templateChar === "\x60") break;
           else if (templateChar === "$" && source[offset] === "{") {
+            if (!interpolated) yield { value: "<literal>", line: tokenLine };
+            interpolated = true;
             advance();
             yield { value: "{", line };
             yield* code(true);
           }
         }
+        if (retainLiterals && !interpolated) literal = decodeSourceLiteral(source.slice(start, offset - 1));
         value = "<literal>";
       } else if (char === "/" && regexAllowed) {
         advance();
@@ -201,7 +221,7 @@ function* sourceTokens(source: string): Generator<SourceToken> {
         value = advance();
         if (["=>", "?.", "++", "--", "&&", "||", "??"].includes(value + (source[offset] ?? ""))) value += advance();
       }
-      yield { value, line: tokenLine };
+      yield { value, line: tokenLine, ...(literal === undefined ? {} : { literal }) };
       if (value === "{") depth++;
       if (value === "}" && depth-- === 0 && interpolation) return;
       if (value === "(") controlParens.push(/^(?:if|while|for|with|switch|catch)$/u.test(previous));
@@ -270,6 +290,178 @@ export function checkDocumentTimers(relativePath: string, source: string): strin
   return violations;
 }
 
+/** Network completion is not application readiness. Keep HTTP-contract assertions explicit. */
+export function checkE2EReadiness(relativePath: string, source: string): string[] {
+  if (!/^apps\/web\/e2e\/.+\.ts$/u.test(relativePath)) return [];
+  const tokens = [...sourceTokens(source, true)];
+  const violations: string[] = [];
+  const pairs = new Map<number, number>();
+  const delimiters: number[] = [];
+  const scopes: number[] = [];
+  const blocks = [-1];
+  for (const [index, token] of tokens.entries()) {
+    scopes[index] = blocks.at(-1)!;
+    if (["(", "[", "{"].includes(token.value)) delimiters.push(index);
+    else if ([")", "]", "}"].includes(token.value)) {
+      const open = delimiters.pop();
+      if (open !== undefined) { pairs.set(open, index); pairs.set(index, open); }
+    }
+    if (token.value === "{") blocks.push(index);
+    else if (token.value === "}") blocks.pop();
+  }
+  // Expression-bodied arrows have function scopes too, even without a brace to stop a scan.
+  for (const [index, token] of tokens.entries()) {
+    if (token.value !== "=>" || tokens[index + 1]?.value === "{") continue;
+    const parent = scopes[index];
+    let end = index + 1;
+    for (; end < tokens.length && ![";", ",", ")", "]", "}"].includes(tokens[end]?.value ?? ""); end++) {
+      if (["(", "[", "{"].includes(tokens[end]?.value ?? "")) end = pairs.get(end) ?? end;
+    }
+    for (let cursor = index + 1; cursor < end; cursor++) {
+      if (scopes[cursor] === parent) scopes[cursor] = index;
+    }
+  }
+  type Span = { start: number; end: number }; // end is exclusive.
+  const unwrap = (input: Span): Span => {
+    let { start, end } = input;
+    while (start < end) {
+      if (tokens[start]?.value === "await") start++;
+      else if (tokens[start]?.value === "(" && pairs.get(start) === end - 1) { start++; end--; }
+      else break;
+    }
+    return { start, end };
+  };
+  const expressions = (start: number, end: number): Span[] => {
+    const values: Span[] = [];
+    let first = start;
+    for (let cursor = start; cursor < end; cursor++) {
+      if (tokens[cursor]?.value === ",") { values.push({ start: first, end: cursor }); first = cursor + 1; }
+      else if (["(", "[", "{"].includes(tokens[cursor]?.value ?? "")) cursor = pairs.get(cursor) ?? cursor;
+    }
+    values.push({ start: first, end });
+    return values;
+  };
+  const expressionStart = (last: number): number => {
+    let start = [")", "]"].includes(tokens[last]?.value ?? "") ? pairs.get(last) ?? last : last;
+    while (start > 1 && [".", "?."].includes(tokens[start - 1]?.value ?? "")) {
+      const before = start - 2;
+      start = [")", "]"].includes(tokens[before]?.value ?? "") ? pairs.get(before) ?? before : before;
+    }
+    return start;
+  };
+  const memberAt = (index: number): { name: string; after: number; receiver: number } | undefined => {
+    const token = tokens[index]!;
+    const previous = tokens[index - 1]?.value ?? "";
+    if (token.value === "[") {
+      const close = pairs.get(index);
+      if (close === undefined || !/^(?:[$\p{ID_Continue}]+|[)\]]|\?\.)$/u.test(previous)) return undefined;
+      const literal = unwrap({ start: index + 1, end: close });
+      const name = literal.end === literal.start + 1 ? tokens[literal.start]?.literal : undefined;
+      if (name !== undefined) return { name, after: close + 1, receiver: index - (previous === "?." ? 2 : 1) };
+    } else if (previous === "." || previous === "?.") return { name: token.value, after: index + 1, receiver: index - 2 };
+    return undefined;
+  };
+  interface Binding { name: string; at: number; scope: number; initializer: Span; slot?: number }
+  const bindings: Binding[] = [];
+  for (const [index, token] of tokens.entries()) {
+    if (!["const", "let", "var"].includes(token.value)) continue;
+    const pattern = index + 1;
+    const array = tokens[pattern]?.value === "[";
+    const patternEnd = array ? (pairs.get(pattern) ?? pattern) + 1 : pattern + 1;
+    if (!array && !/^[$_\p{ID_Start}][\p{ID_Continue}$]*$/u.test(tokens[pattern]?.value ?? "")) continue;
+    let equal = patternEnd;
+    // A type annotation does not change the binding; its nested type literal is not a block.
+    for (; equal < tokens.length && !["=", ";", "}"].includes(tokens[equal]?.value ?? ""); equal++) {
+      if (["(", "[", "{"].includes(tokens[equal]?.value ?? "")) equal = pairs.get(equal) ?? equal;
+    }
+    if (tokens[equal]?.value !== "=") continue;
+    let end = equal + 1;
+    for (; end < tokens.length && ![";", ",", "}"].includes(tokens[end]?.value ?? ""); end++) {
+      if (["(", "[", "{"].includes(tokens[end]?.value ?? "")) end = pairs.get(end) ?? end;
+    }
+    const initializer = { start: equal + 1, end };
+    const names = array ? expressions(pattern + 1, patternEnd - 1) : [{ start: pattern, end: patternEnd }];
+    for (const [slot, name] of names.entries()) {
+      if (name.end !== name.start + 1 || !/^[$_\p{ID_Start}][\p{ID_Continue}$]*$/u.test(tokens[name.start]?.value ?? "")) continue;
+      bindings.push({ name: tokens[name.start]!.value, at: name.start, scope: scopes[index]!, initializer, ...(array ? { slot } : {}) });
+    }
+  }
+  const httpAsserted = (origin: number, callOpen: number, callEnd: number, receiver: number): boolean => {
+    const scope = scopes[origin]!;
+    const callStart = expressionStart(receiver);
+    const resolveBinding = (name: string, at: number): Binding | undefined =>
+      bindings.filter(binding => binding.scope === scope && binding.name === name && binding.at < at).at(-1);
+    const unmodified = (binding: Binding, until: number): boolean => {
+      for (let cursor = binding.at + 1; cursor < until; cursor++) {
+        if (scopes[cursor] === scope && tokens[cursor]?.value === binding.name &&
+          ![".", "?."].includes(tokens[cursor - 1]?.value ?? "") && tokens[cursor + 1]?.value === "=") return false;
+      }
+      return true;
+    };
+    const refersToResponse = (input: Span, at: number, seen = new Set<Binding>()): boolean => {
+      const span = unwrap(input);
+      if (span.start === callStart && span.end === callEnd + 1) return true;
+      if (span.end !== span.start + 1) return false;
+      const binding = resolveBinding(tokens[span.start]?.value ?? "", at);
+      if (binding === undefined || seen.has(binding) || !unmodified(binding, at)) return false;
+      seen.add(binding);
+      let value = unwrap(binding.initializer);
+      if (binding.slot !== undefined) {
+        // Promise.all preserves the correspondence between destructured variables and inputs.
+        if (tokens[value.start]?.value !== "Promise" || tokens[value.start + 1]?.value !== "." ||
+          tokens[value.start + 2]?.value !== "all" || tokens[value.start + 3]?.value !== "(" ||
+          tokens[value.start + 4]?.value !== "[") return false;
+        const close = pairs.get(value.start + 4);
+        if (close === undefined) return false;
+        const item = expressions(value.start + 5, close)[binding.slot];
+        if (item === undefined) return false;
+        value = item;
+      }
+      return refersToResponse(value, binding.at, seen);
+    };
+    const boundary = scope === -1 ? tokens.length : pairs.get(scope) ?? tokens.length;
+    // Inline expect((await page.waitForResponse(...)).status()) starts before the response call.
+    for (let cursor = 0; cursor < boundary; cursor++) {
+      if (scopes[cursor] !== scope || tokens[cursor]?.value !== "expect" || tokens[cursor + 1]?.value !== "(") continue;
+      const close = pairs.get(cursor + 1);
+      if (close === undefined || close <= callOpen) continue;
+      let matcher = close + 1;
+      if (tokens[matcher]?.value !== ".") continue;
+      matcher++;
+      if (tokens[matcher]?.value === "not") matcher += 2;
+      if (!tokens[matcher]?.value.startsWith("to")) continue;
+      for (let position = cursor + 2; position < close; position++) {
+        if (scopes[position] !== scope) continue;
+        const member = memberAt(position);
+        if (member === undefined || !["status", "ok", "headers", "headerValue", "json", "body", "text"].includes(member.name)) continue;
+        const reference = { start: expressionStart(member.receiver), end: member.receiver + 1 };
+        if (refersToResponse(reference, position)) return true;
+      }
+    }
+    return false;
+  };
+  for (const [index, token] of tokens.entries()) {
+    const member = memberAt(index);
+    if (member === undefined) continue;
+    if (member.name === "finished") {
+      violations.push(`${relativePath}:${token.line}: response completion access is not e2e readiness; observe application state`);
+      continue;
+    }
+    let after = member.after;
+    if (tokens[after]?.value === "?.") after++;
+    if (tokens[after]?.value !== "(") continue;
+    const end = pairs.get(after) ?? tokens.length;
+    const arguments_ = tokens.slice(after + 1, end);
+    if (["waitForEvent", "on", "once", "addListener"].includes(member.name) && arguments_[0]?.literal === "requestfinished") {
+      violations.push(`${relativePath}:${token.line}: request-finished events are not e2e readiness; observe application state`);
+    } else if (["goto", "reload", "goBack", "goForward", "setContent", "waitForURL", "waitForNavigation", "waitForLoadState"].includes(member.name) &&
+      arguments_.some(argument => argument.literal === "networkidle")) {
+      violations.push(`${relativePath}:${token.line}: networkidle is not e2e readiness; observe application state`);
+    } else if (member.name === "waitForResponse" && !httpAsserted(index, after, end, member.receiver)) violations.push(`${relativePath}:${token.line}: waitForResponse requires an explicit HTTP-contract assertion, not UI readiness`);
+  }
+  return violations;
+}
+
 async function main(): Promise<void> {
   const errors: string[] = [];
   for (const rel of required) {
@@ -290,6 +482,7 @@ async function main(): Promise<void> {
     errors.push(...checkProviderReads(rel, text));
     errors.push(...checkUnsafeFinally(rel, text));
     errors.push(...checkDocumentTimers(rel, text));
+    errors.push(...checkE2EReadiness(rel, text));
     if (rel === "scripts/check-repository.ts") continue;
     // adb argv must be constructed only by its redacting, exit-checking owner, including calls
     // routed through generic subprocess wrappers. The one executable-prerequisite list is not argv.

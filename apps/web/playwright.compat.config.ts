@@ -15,8 +15,9 @@ export default defineConfig({
   // One worker: breadth across engines matters here, not throughput, and core tests keep the deep
   // lane's timing bounds.
   workers: 1,
-  reporter: [["line"]],
-  use: { serviceWorkers: "allow" },
+  retries: process.env.CI === "true" || process.env.CI === "1" ? 1 : 0,
+  reporter: [["line"], [fileURLToPath(new URL("../../scripts/browser-flake-reporter.ts", import.meta.url)), { lane: "browser-core" }]],
+  use: { serviceWorkers: "allow", trace: "off", video: "off", screenshot: "off" },
   projects: [
     { name: "desktop-chromium", use: { browserName: "chromium", ...desktop } },
     { name: "desktop-firefox", use: { browserName: "firefox", ...desktop } },
