@@ -22,12 +22,12 @@ describe("general qualification machine outcome", () => {
   test("readiness owner epoch and phase round trip together through every closed phase", () => {
     for (const phase of FAILURE_STEPS.rigReadiness) {
       const readiness = { status: "running", campaignAttempt: 0, observations: {}, timings: {},
-        cleanupDisposition: "unresolved", epoch: "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b", phase };
+        cleanupDisposition: "unresolved", epoch: "0b8a2f64-3c1d-4e5f-9a7b-2c4d6e8f0a1b", phase } as const;
       expect(parseRigReadinessReceipt(JSON.parse(JSON.stringify(readiness)))).toEqual(readiness);
     }
   });
   test("readiness without an owner pair remains readable", () => {
-    const readiness = { status: "pending", campaignAttempt: 0, observations: {}, timings: {}, cleanupDisposition: "not_required" };
+    const readiness = { status: "pending", campaignAttempt: 0, observations: {}, timings: {}, cleanupDisposition: "not_required" } as const;
     expect(parseRigReadinessReceipt(readiness)).toEqual(readiness);
   });
   test("readiness owner pairs reject incomplete, foreign, malformed and secret values without echo", () => {
