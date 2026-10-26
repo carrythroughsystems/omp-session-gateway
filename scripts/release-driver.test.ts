@@ -825,7 +825,7 @@ class AutomaticRuntime extends StudioDriver {
       ] } : this.published ? { exists: true } : undefined) as T | undefined;
   }
 }
-async function completedAutomaticJob(root: string, withReceipt = false) {
+async function completedAutomaticJob(root: string, withReceipt: boolean | "readiness" = false) {
   root = await realpath(root);
   const runtime = new AutomaticRuntime(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
   runtime.receiptPath = join(root, "stable-qualification.json");
@@ -833,17 +833,33 @@ async function completedAutomaticJob(root: string, withReceipt = false) {
   let evidence = automaticFailure(selected);
   let receipt: StableQualificationReceipt | undefined;
   if (withReceipt) {
-    receipt = receiptScopedCampaign(selected).receipt;
+    receipt = withReceipt === "readiness" ?
+      createStableQualificationReceipt(selected.candidate, selected.candidateCommit!, selected.previousStable!) : receiptScopedCampaign(selected).receipt;
+    receipt.status = "failed";
     receipt.execution = selected.qualificationExecution!;
     receipt.completedAt = "2026-10-25T00:01:00.000Z";
-    receipt.lanes.deviceCloud.status = "passed";
-    delete receipt.lanes.deviceCloud.evidence!.availabilityHold;
-    receipt.lanes.windows.status = "failed";
-    const failure = { id: 1, lane: "windows", step: "transport_ready", class: "infra_transient", reason: "probe_deadline",
+    const windowsFailure = { id: 1, lane: "windows", step: "transport_ready", class: "infra_transient", reason: "probe_deadline",
       elapsedMs: 50, operation: "read_only", observations: { controllerDeadline: true, readOnlyProbe: true } } as const;
-    receipt.failureSummary = { ...evidence.outcome.failureSummary, failures: [failure] };
-    receipt.lanes.windows.failure = [failure];
-    evidence = { ...evidence, outcome: { ...evidence.outcome, scope: "campaign", failureSummary: receipt.failureSummary,
+    if (withReceipt === "readiness") {
+      receipt.macHost = selected.macHost!;
+      receipt.candidate = { tag: selected.candidate, sourceCommit: selected.candidateCommit!, archiveSha256: selected.candidateDigest! };
+      receipt.predecessor = { tag: selected.previousStable!, sourceCommit: "c".repeat(40), archiveSha256: "d".repeat(64) };
+      receipt.lanes.artifacts = { status: "passed", attempts: 1, evidence: {} };
+      receipt.rigReadiness = { status: "failed", campaignAttempt: 0, observations: { baselineRestored: true }, timings: { macos: 50 },
+        cleanupDisposition: "restored", epoch: "11111111-2222-4333-8444-555555555555", phase: "macos" };
+      receipt.failureSummary = { ...evidence.outcome.failureSummary, failures: [{
+        id: 1, lane: "rigReadiness", step: "macos", class: "infra_transient", reason: "connection_timeout",
+        elapsedMs: 50, operation: "read_only", observations: { transportFailure: true },
+      }] };
+      receipt.lanes.cleanup = { status: "passed", attempts: 1, evidence: { restored: true } };
+    } else {
+      receipt.lanes.deviceCloud.status = "passed";
+      delete receipt.lanes.deviceCloud.evidence!.availabilityHold;
+      receipt.lanes.windows.status = "failed";
+      receipt.lanes.windows.failure = [windowsFailure];
+      receipt.failureSummary = { ...evidence.outcome.failureSummary, failures: [windowsFailure] };
+    }
+    evidence = { ...evidence, outcome: { ...evidence.outcome, scope: withReceipt === "readiness" ? "rigReadiness" : "campaign", failureSummary: receipt.failureSummary,
       receipt: { sha256: createHash("sha256").update(JSON.stringify(receipt) + "\n").digest("hex"), cleanupDisposition: "restored" } } };
     runtime.owner = `qualification:${selected.candidate}:${runtime.receiptPath}`;
     await writeFile(runtime.receiptPath, JSON.stringify(receipt) + "\n", { mode: 0o600 });
@@ -860,6 +876,18 @@ async function completedAutomaticJob(root: string, withReceipt = false) {
 }
 
 describe("automatic retry runtime revalidation", () => {
+  test("restored readiness can retry or retire without inventing passes for unstarted expensive lanes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "driver-readiness-retirement-"));
+    try {
+      const { runtime, next, step, receipt } = await completedAutomaticJob(root, "readiness");
+      expect(next.retryPlan!.outcome.scope).toBe("rigReadiness");
+      expect(next.retryPlan!.restartLanes).toContain("debian");
+      expect(receipt!.lanes.debian.status).toBe("pending");
+      expect(await runtime.failedCampaignCleanup(runtime.current)).toBe(next.retryPlan!.outcome.receipt!.sha256);
+      await runtime.perform(step, next);
+      expect(receipt!.lanes.debian.attempts).toBe(0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   test("shared authorization consumes before effects and leaves passed lane proofs byte-for-byte", async () => {
     const root = await mkdtemp(join(tmpdir(), "driver-automatic-consumption-"));
     try {
