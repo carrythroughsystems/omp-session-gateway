@@ -16,6 +16,11 @@ export function windowsFailure(reason: keyof typeof FAILURE_REASONS.windows, ste
   return new QualificationFailure(parseLaneFailure({ id: execution?.nextFailureId() ?? ++standaloneFailureId,
     lane: "windows", step, reason, class: FAILURE_REASONS.windows[reason], operation, observations, elapsedMs }));
 }
+export function assertWindowsExecution(execution?: WindowsExecutionContext): void {
+  if (execution?.signal.aborted || (execution && performance.now() >= execution.deadline)) {
+    throw windowsFailure("deadline_exceeded", "command", "not_started", {}, execution);
+  }
+}
 
 export interface WindowsArtifact {
   readonly tag: string;
@@ -63,9 +68,9 @@ export interface WindowsProvider {
   firewalls(): Promise<WindowsFirewall[]>;
   instance(id: string): Promise<WindowsInstance | undefined>;
   firewall(id: string): Promise<WindowsFirewall | undefined>;
-  createFirewall(label: string): Promise<WindowsFirewall>;
+  createFirewall(label: string, execution?: WindowsExecutionContext): Promise<WindowsFirewall>;
   configureFirewall(id: string, label: string): Promise<void>;
-  createInstance(label: string, firewall: string): Promise<WindowsInstance>;
+  createInstance(label: string, firewall: string, execution?: WindowsExecutionContext): Promise<WindowsInstance>;
   destroyInstance(id: string, label: string): Promise<void>;
   destroyFirewall(id: string, label: string): Promise<void>;
 }
@@ -75,6 +80,8 @@ export interface WindowsContext {
   readonly beforeEffect: () => Promise<void>;
   readonly transportProbe?: (probe: WindowsTransportProbe) => Promise<void>;
   readonly execution?: WindowsExecutionContext;
+  /** True only when this invocation enters staging for the first time in this epoch. */
+  readonly freshStaging?: boolean;
 }
 export type WindowsGuestAction = "transport" | "reconnect" | "stage" | "installPredecessor" | "upgrade" | "doctor" | "reboot" |
   "prelogin" | "ready" | "publish" | "launch" | "stopOmp" | "revoked" | "rotate" | "rollback" | "restore" |
@@ -93,6 +100,7 @@ export interface WindowsRuntime {
   saveAccess(epoch: string, instance: WindowsInstance): Promise<void>;
   removeAccess(epoch: string): Promise<void>;
   hasAccess?(epoch: string): Promise<boolean>;
+  stagingUploadsComplete?(epoch: string): Promise<boolean>;
   /** Refetch the vault-bound ID even if the provider changed its label. */
   cleanupInstance?(epoch: string): Promise<WindowsInstance | undefined>;
   cleanupFirewall?(epoch: string): Promise<WindowsFirewall | undefined>;
@@ -269,7 +277,12 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   if (input.progress !== undefined) {
     const prior = parseProgress(input.progress, digest);
     if (prior.phase === "evidence_complete" && prior.settled) return evidence(prior, input.identity);
-    if (runtime.development && prior.cleanupRequired && runtime.now() - prior.startedAt < 3 * 60 * 60_000) resumed = prior;
+    if (runtime.development && prior.cleanupRequired && runtime.now() - prior.startedAt < 3 * 60 * 60_000) {
+      if (prior.phase === "toolchain_staged" && !prior.settled && await runtime.stagingUploadsComplete?.(prior.epoch) !== true) {
+        throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, input.execution);
+      }
+      resumed = prior;
+    }
     else {
       // Stable campaigns reconcile interrupted effects instead of replaying mutations.
       await cleanupWindows({ ...input, runtime });
@@ -281,6 +294,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     phase: "intent_checkpointed", settled: true, cleanupRequired: true, startedAt: runtime.now(), timings: {}, facts: {}, transportProbes: [] };
   const save = async () => { parseProgress(progress, digest); await input.checkpoint(structuredClone(progress)); };
   const context: WindowsContext = { epoch: progress.epoch, identity: input.identity,
+    freshStaging: resumed === undefined || PHASES.indexOf(resumed.phase) < PHASES.indexOf("toolchain_staged"),
     ...(input.execution === undefined ? {} : { execution: input.execution }),
     beforeEffect: async () => {
       if (input.execution?.signal.aborted || (input.execution && performance.now() >= input.execution.deadline)) {
@@ -288,6 +302,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
       }
       requireFact(runtime.now() - progress.startedAt < 3 * 60 * 60_000, "Windows resource lifetime bound reached");
       await save();
+      assertWindowsExecution(input.execution);
     },
     transportProbe: async probe => {
       requireFact(!progress.settled, "transport observation outside active step");
@@ -310,7 +325,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     requireFact(runtime.now() - progress.startedAt < maximumAge, "Windows resource lifetime bound reached");
     progress.phase = phase; progress.settled = false; await save();
     const start = runtime.now();
-    try { await action(); }
+    try { assertWindowsExecution(input.execution); await action(); }
     catch (error) {
       if (error instanceof QualificationFailure) {
         const failure = new QualificationFailure(parseLaneFailure({ ...error.evidence, id: input.execution?.nextFailureId() ?? error.evidence.id,
@@ -354,7 +369,8 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   try {
     let firewall: WindowsFirewall | undefined = resumed ? (await runtime.provider.firewalls()).find(item => item.description === label) : undefined;
     await step("firewall_created", async () => {
-      firewall = await runtime.provider.createFirewall(label);
+      assertWindowsExecution(input.execution);
+      firewall = await runtime.provider.createFirewall(label, input.execution);
       const fresh = await runtime.provider.firewall(firewall.id);
       requireFact(fresh, "created firewall missing"); assertFirewall(fresh, label, runtime);
       await save(); await runtime.provider.configureFirewall(fresh.id, label);
@@ -362,7 +378,8 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     await step("instance_created", async () => {
       requireFact(firewall, "firewall is missing");
       requireFact((await runtime.provider.instances()).every(item => !item.label?.startsWith(QUAL_LABEL_PREFIX)), "another Windows qualification instance exists");
-      const instance = await runtime.provider.createInstance(label, firewall.id);
+      assertWindowsExecution(input.execution);
+      const instance = await runtime.provider.createInstance(label, firewall.id, input.execution);
       assertInstance(instance, label, runtime);
       // A failed write reaches finally cleanup, which independently lists/refetches the exact label.
       await save();
@@ -574,6 +591,9 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   } else {
     await attempt("tailnetDelete", () => runtime.deleteTailnet(context));
   }
+  // Provider listings may lag accepted creates/deletes; final containment requires a new
+  // inventory after the same five-second settling interval used for confirmed lookup absence.
+  await runtime.sleep(5_000);
   await attempt("instanceResidue", async () => { requireFact(!(await runtime.provider.instances()).some(item => item.label?.startsWith(QUAL_LABEL_PREFIX)), "instance residue"); });
   await attempt("firewallResidue", async () => { requireFact(!(await runtime.provider.firewalls()).some(item => item.description?.startsWith(QUAL_LABEL_PREFIX)), "firewall residue"); });
   if (guestFailures > 0 && !instanceAbsent) failed("guestContainment", undefined);

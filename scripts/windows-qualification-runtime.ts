@@ -3,10 +3,10 @@ import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/pr
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import pins from "./windows-qualification-pins.json";
-import { cleanupWindows, preflightWindows, runWindows, windowsCampaignLabel, windowsFailure, windowsNeedsCleanup } from "./windows-stable-qualification.ts";
-import type { WindowsAdmission, WindowsArtifact, WindowsContext, WindowsExecutionContext, WindowsFirewall, WindowsIdentity, WindowsInstance, WindowsPreflightInput, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
+import { assertWindowsExecution, cleanupWindows, preflightWindows, runWindows, windowsCampaignLabel, windowsFailure, windowsNeedsCleanup } from "./windows-stable-qualification.ts";
+import type { WindowsAdmission, WindowsArtifact, WindowsContext, WindowsExecutionContext, WindowsFirewall, WindowsIdentity, WindowsInstance, WindowsLaneInput, WindowsPreflightInput, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
 import { QualificationFailure } from "./qualification-failure.ts";
-import { parseCandidateTagArgs, parseQualificationPins, releaseArchivePath, verifyLaunchContracts, verifyRelease, waitForPublishedSession, waitForRevocation } from "./stable-qualification.ts";
+import { parseCandidateTagArgs, parseQualificationPins, releaseArchivePath, verifyRelease, waitForPublishedSession, waitForRevocation } from "./stable-qualification.ts";
 import { windowsHostScript } from "./upstream-canary.ts";
 import { OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
 import { runAdb, parseKeyguardShowing, requireSingleDevice, withAndroidChrome } from "./android-device.ts";
@@ -244,22 +244,43 @@ async function request<T>(url: string, headers: Record<string, string>, method =
   }
 }
 
+/** Same launch predicates as the shared verifier, with typed Windows assertion boundaries. */
+async function observeWindowsLaunch(origin: string, session: Record<string, unknown>, expected: "live" | "stale",
+  fetcher: (url: string, options: RequestInit) => Promise<Response>): Promise<void> {
+  if (typeof session.instanceId !== "string" || typeof session.generation !== "number") throw windowsFailure("helper_failed", "output", "read_only");
+  const assertion = () => {
+    const failure = windowsFailure("assertion_failed", "output", "confirmed");
+    failure.message = expected === "stale" ? "stale generation did not fail closed with 409" : "OMP launch contract failed";
+    return failure;
+  };
+  for (const mode of ["view", "control"] as const) {
+    let response: Response;
+    try {
+      response = await fetcher(`${origin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
+        method: "POST", headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
+        body: JSON.stringify({ mode, generation: session.generation + (expected === "stale" ? 1 : 0) }),
+        cache: "no-store", signal: AbortSignal.timeout(expected === "stale" ? 30_000 : 10_000),
+      });
+    } catch { throw windowsFailure("helper_failed", "connection", "read_only"); }
+    if (response.status !== (expected === "stale" ? 409 : 200) || !response.headers.get("cache-control")?.includes("no-store")) {
+      try { await response.body?.cancel(); } finally { throw assertion(); }
+    }
+    let payload: unknown;
+    try { payload = await response.json(); } catch { throw windowsFailure("helper_failed", "output", "read_only"); }
+    if (!object(payload)) throw windowsFailure("helper_failed", "output", "read_only");
+    const released = Object.hasOwn(payload, "capability");
+    const valuePresent = typeof payload.capability === "string" && payload.capability !== "";
+    delete payload.capability;
+    if (expected === "stale" ? released || payload.code !== "generation_mismatch"
+      : !valuePresent || payload.mode !== mode || payload.generation !== session.generation) throw assertion();
+  }
+}
+export async function verifyWindowsLaunchContracts(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch): Promise<void> {
+  await observeWindowsLaunch(origin, session, "live", fetcher);
+}
 /** Checks stale View and Control independently and discards launch values before returning. */
 export async function verifyWindowsStaleLaunch(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch): Promise<Record<string, unknown>> {
-  if (typeof session.instanceId !== "string" || typeof session.generation !== "number") throw new Error("invalid published identity");
-  for (const mode of ["view", "control"] as const) {
-    const response = await fetcher(`${origin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
-      method: "POST", headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
-      body: JSON.stringify({ mode, generation: session.generation + 1 }), cache: "no-store", signal: AbortSignal.timeout(30_000),
-    });
-    const payload = await response.json() as Record<string, unknown>;
-    const released = Object.hasOwn(payload, "capability");
-    delete payload.capability;
-    if (response.status !== 409 || released || !response.headers.get("cache-control")?.includes("no-store")) {
-      const failure = windowsFailure("assertion_failed", "output", "confirmed");
-      failure.message = "stale generation did not fail closed with 409"; throw failure;
-    }
-  }
+  await observeWindowsLaunch(origin, session, "stale", fetcher);
   return { staleViewStatus: 409, staleControlStatus: 409 };
 }
 
@@ -320,6 +341,8 @@ export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?
     Object.keys(value.teardown).sort().join(",") !== "commandAttempted,commandStopped,shellAttempted,shellClosed" ||
     Object.values(value.teardown).some(item => typeof item !== "boolean")) throw invalid();
   if (value.exitCode === 0 && value.failure === null) {
+    // Both attempts imply that open_shell and run_command returned real identities.
+    if (value.teardown.commandAttempted !== true || value.teardown.shellAttempted !== true) throw invalid();
     try {
       const observation: unknown = JSON.parse(value.stdout);
       if (!object(observation)) throw invalid();
@@ -413,6 +436,7 @@ export async function reconcileWindowsUpload(operations: {
 
 /** A durable started claim fences same-epoch development re-entry, including unknown exits. */
 export async function windowsUploadOnce(operations: {
+  allowFresh: boolean;
   state: () => Promise<"started" | "complete" | undefined>;
   checkpoint: (state: "started" | "complete") => Promise<void>;
   upload: () => Promise<void>;
@@ -425,6 +449,7 @@ export async function windowsUploadOnce(operations: {
     if (await operations.verify()) return;
     throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, execution);
   }
+  if (operations.allowFresh !== true) throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, execution);
   await operations.checkpoint("started");
   await operations.upload();
   await operations.checkpoint("complete");
@@ -490,8 +515,9 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
     firewalls: () => list<WindowsFirewall>("firewalls", "firewall_groups"),
     instance: (id: string) => confirmAbsence(async () => (await api<{ instance: WindowsInstance }>(`instances/${encodeURIComponent(id)}`))?.instance),
     firewall: (id: string) => confirmAbsence(async () => (await api<{ firewall_group: WindowsFirewall }>(`firewalls/${encodeURIComponent(id)}`))?.firewall_group),
-    async createFirewall(label: string) {
+    async createFirewall(label: string, execution?: WindowsExecutionContext) {
       if (!egress) throw new Error("Windows preflight was not performed");
+      assertWindowsExecution(execution ?? options.execution);
       const item = await api<{ firewall_group: WindowsFirewall }>("firewalls", "POST", { description: label });
       if (!item) throw new Error("firewall create response lost");
       // Preserve the exact ID before configuring it; a later label change must not become absence.
@@ -505,7 +531,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
         await api(`firewalls/${id}/rules`, "POST", { ip_type: "v4", protocol: "tcp", subnet: egress, subnet_size: 32, port, notes: "qualification operator" });
       }
     },
-    async createInstance(label: string, firewall: string) {
+    async createInstance(label: string, firewall: string, execution?: WindowsExecutionContext) {
       const group = await provider.firewall(firewall);
       if (!group || group.description !== label || !firewallEligibility(group.id, group.description, environment).eligible) throw new Error("attached firewall ownership changed");
       const counterPath = join(devRoot, `creations-${activeTag}.json`);
@@ -514,6 +540,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       const creationLimit = options.development ? 6 : 4;
       if (!Number.isInteger(creations) || creations < 0 || creations >= creationLimit) throw new Error("Windows creation cap reached");
       await atomicPrivate(counterPath, creations + 1);
+      assertWindowsExecution(execution ?? options.execution);
       const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false });
       if (!item) throw new Error("instance create response lost"); return item.instance;
     },
@@ -609,6 +636,7 @@ if ($exists) {
         { path: destinationPath }, undefined, undefined, true, "administrator", undefined, step));
     };
     await windowsUploadOnce({
+      allowFresh: context.freshStaging === true,
       state: async () => (await loadAccess(context.epoch)).uploads?.[name],
       checkpoint: async state => {
         await context.beforeEffect();
@@ -719,6 +747,11 @@ if ($exists) {
     },
     async removeAccess(epoch) { await rm(vaultPath(epoch), { force: true }); },
     async hasAccess(epoch) { return await existingAccess(epoch) !== undefined; },
+    async stagingUploadsComplete(epoch) {
+      const access = await existingAccess(epoch);
+      return access?.toolsReady === true && ["candidate.tar", "predecessor.tar", "source.tar"].every(name =>
+        access.uploads?.[name as "candidate.tar" | "predecessor.tar" | "source.tar"] === "complete");
+    },
     async cleanupInstance(epoch) {
       const access = await existingAccess(epoch);
       if (!access?.instance) return undefined;
@@ -829,7 +862,7 @@ if ($exists) {
       }
       if (action === "launch") {
         const session = await waitForPublishedSession(String(access.origin), sessionLabel);
-        await verifyLaunchContracts(String(access.origin), session);
+        await verifyWindowsLaunchContracts(String(access.origin), session);
         return { viewStatus: 200, controlStatus: 200, noStore: true, ...await verifyWindowsStaleLaunch(String(access.origin), session) };
       }
       if (action === "revoked") { await waitForRevocation(String(access.origin), sessionLabel); return { revoked: true }; }
@@ -918,6 +951,13 @@ async function verifiedDevelopmentArtifact(tag: string, stable: boolean, ghToken
   return { tag, sourceCommit: release.sourceCommit, archivePath, archiveSha256: release.archiveSha256 };
 }
 
+/** Retire the old epoch even when only vault removal remains after durable containment. */
+export async function retireWindowsDevelopmentEpoch(input: WindowsLaneInput): Promise<void> {
+  if (input.progress === undefined) return;
+  if (windowsNeedsCleanup(input.progress)) throw windowsFailure("mutation_unconfirmed", "preflight", "unknown", {}, input.execution);
+  await cleanupWindows(input);
+}
+
 export async function windowsDevelopmentCli(args: readonly string[]): Promise<void> {
   const [mode = "", ...rest] = args;
   const usage = "usage: bun scripts/windows-stable-qualification.ts preflight|cleanup, or artifacts|run --tag vX.Y.Z-prealpha.N";
@@ -931,6 +971,12 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
   const progressPath = join(devRoot, "progress.json"); const identityPath = join(devRoot, "identity.json");
   let progress: unknown;
   try { progress = JSON.parse(await privateFile(progressPath)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (mode !== "cleanup" && progress !== undefined && !windowsNeedsCleanup(progress)) {
+    const priorIdentity = JSON.parse(await privateFile(identityPath)) as WindowsIdentity;
+    await retireWindowsDevelopmentEpoch({ identity: priorIdentity, progress, checkpoint, pixel, runtime });
+    await rm(progressPath);
+    progress = undefined;
+  }
   if (mode === "artifacts" && windowsNeedsCleanup(progress)) throw new Error("cannot replace artifact inputs while a Windows attempt needs cleanup");
   let identity: WindowsIdentity;
   if (mode === "cleanup" || windowsNeedsCleanup(progress)) {
@@ -947,8 +993,8 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
     console.log(JSON.stringify({ candidate: identity.candidate.tag, predecessor: identity.predecessor.tag, verified: true }));
     return;
   }
-  const checkpoint = async (next: Record<string, unknown>) => { progress = next; await atomicPrivate(progressPath, next); };
-  const pixel = async <T>(_owner: string, action: () => Promise<T>): Promise<T> => {
+  async function checkpoint(next: Record<string, unknown>): Promise<void> { progress = next; await atomicPrivate(progressPath, next); }
+  async function pixel<T>(_owner: string, action: () => Promise<T>): Promise<T> {
     const lock = "/tmp/omp-gw-pixel.lock"; const deadline = Date.now() + 60 * 60_000;
     const epoch = (progress as { epoch: string }).epoch;
     while (true) {
@@ -975,7 +1021,7 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
       // this exact epoch's lease after the owning controller process has exited.
       if (!(await existingAccess(epoch))?.pixelState) await rm(lock, { recursive: true });
     }
-  };
+  }
   if (mode === "cleanup") { console.log(JSON.stringify(await cleanupWindows({ identity, progress, checkpoint, pixel, runtime }))); return; }
   const result = await runWindows({ identity, progress, checkpoint, pixel, runtime });
   const cleanup = await cleanupWindows({ identity, progress, checkpoint, pixel, runtime });

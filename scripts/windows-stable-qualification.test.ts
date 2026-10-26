@@ -5,6 +5,7 @@ import pins from "./windows-qualification-pins.json";
 import type { WindowsContext, WindowsFirewall, WindowsGuestAction, WindowsIdentity, WindowsInstance, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
 import { command as windowsCommand, reconnectWindowsTransport, verifyWindowsStaleLaunch, windowsPixelForeground, windowsPixelLauncher, waitForStableWindowsTransport } from "./windows-qualification-runtime.ts";
 import { QualificationFailure } from "./qualification-failure.ts";
+import * as windowsRuntime from "./windows-qualification-runtime.ts";
 import { firewallEligibility } from "./vultr-target.ts";
 import { parseQualificationPins } from "./stable-qualification.ts";
 
@@ -224,6 +225,61 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; li
 }
 
 describe("Windows qualification ownership and failure paths", () => {
+  test("R2 resumed unsettled legacy staging refuses before another guest mutation", async () => {
+    const f = fixture({ development: true, fail: "stage" });
+    await expect(f.run()).rejects.toThrow();
+    const prior = f.progress; f.events.length = 0;
+    f.runtime.guest = async () => ({});
+    await expect(runWindows({ identity, progress: prior, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime })).rejects.toThrow("mutation_unconfirmed");
+    expect(f.events).toEqual([]);
+  });
+  test("R2 development retires a cleanup-complete epoch vault before replacing identity", async () => {
+    expect(typeof windowsRuntime.retireWindowsDevelopmentEpoch).toBe("function");
+    const f = fixture(); await f.run(); await f.clean(); f.events.length = 0;
+    await windowsRuntime.retireWindowsDevelopmentEpoch({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime });
+    f.events.push("identityReplaced");
+    expect(f.events.indexOf("vaultRemoved")).toBeGreaterThanOrEqual(0);
+    expect(f.events.indexOf("vaultRemoved")).toBeLessThan(f.events.indexOf("identityReplaced"));
+  });
+  test("R2 failed vault retirement cannot authorize replacing identity", async () => {
+    const f = fixture(); await f.run(); await f.clean(); f.events.length = 0;
+    f.runtime.removeAccess = async () => { throw new Error("synthetic unlink failure"); };
+    await expect(windowsRuntime.retireWindowsDevelopmentEpoch({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime })
+      .then(() => { f.events.push("identityReplaced"); })).rejects.toThrow();
+    expect(f.events).not.toContain("identityReplaced");
+  });
+  test("R2 dirty epochs cannot use the development retirement path", async () => {
+    const f = fixture(); await f.run(); f.events.length = 0;
+    await expect(windowsRuntime.retireWindowsDevelopmentEpoch({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime }))
+      .rejects.toThrow("mutation_unconfirmed");
+    expect(f.events).toEqual([]);
+  });
+  test.each(["firewall_created", "instance_created"] as const)("R2 cancellation at %s checkpoint prevents allocation", async phase => {
+    const f = fixture(); const controller = new AbortController();
+    await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, pixel: f.pixel,
+      checkpoint: async progress => { await f.checkpoint(progress); if (progress.phase === phase && progress.settled === false) controller.abort(); },
+      execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 },
+    })).rejects.toThrow();
+    expect(f.events).not.toContain(phase === "firewall_created" ? "firewallCreated" : "instanceCreated");
+  });
+  test("R2 cancellation during the pre-allocation inventory prevents the VM create", async () => {
+    const f = fixture(); const controller = new AbortController();
+    f.runtime.provider.instances = async () => {
+      if (f.events.includes("firewallConfigured")) controller.abort();
+      return f.instances;
+    };
+    await expect(runWindows({ identity, progress: undefined, runtime: f.runtime, pixel: f.pixel, checkpoint: f.checkpoint,
+      execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 100 },
+    })).rejects.toThrow();
+    expect(f.events).not.toContain("instanceCreated");
+  });
+  test("R2 delayed firewall visibility is sampled after a settle window before committing completion", async () => {
+    const f = fixture(); await f.run(); const start = f.runtime.now();
+    f.runtime.provider.firewalls = async () => f.runtime.now() - start >= 5_000 ? f.firewalls : [];
+    f.runtime.guest = async () => ({});
+    await expect(f.clean()).rejects.toThrow("firewallResidue");
+    expect(f.events).not.toContain("vaultRemoved"); expect(windowsNeedsCleanup(f.progress)).toBe(true);
+  });
   test("R1 late firewall residue retains vault and dirty checkpoint", async () => {
     const f = fixture(); await f.run();
     let listings = 0;
@@ -381,12 +437,16 @@ describe("Windows qualification ownership and failure paths", () => {
     const invalid = { ...f.progress as Record<string, unknown>, timings: {} };
     await expect(runWindows({ identity, progress: invalid, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime })).rejects.toThrow("phase history");
   });
-  test("development repair resumes the same guest and records the failed phase attempt", async () => {
+  test("development repair with completed upload claims resumes the same guest and records the failed phase attempt", async () => {
     const f = fixture({ development: true, fail: "stage" });
     await expect(f.run()).rejects.toThrow("unclassified_failure");
     expect(f.instances).toHaveLength(1); expect(windowsNeedsCleanup(f.progress)).toBe(true);
+    f.runtime.stagingUploadsComplete = async () => true;
     const original = f.runtime.guest;
-    f.runtime.guest = async (context, action, principal) => action === "stage" ? {} : original(context, action, principal);
+    f.runtime.guest = async (context, action, principal) => {
+      if (action === "stage") { expect(context.freshStaging).toBe(false); return {}; }
+      return original(context, action, principal);
+    };
     const result = await runWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, pixel: f.pixel, runtime: f.runtime });
     expect((result.observations as Record<string, unknown>).failedPhaseAttempts).toBe(1);
     expect(f.events.filter(event => event === "instanceCreated")).toHaveLength(1);
@@ -546,6 +606,16 @@ describe("Windows qualification ownership and failure paths", () => {
 });
 
 describe("Windows stale launch HTTP boundary", () => {
+  test("R2 wrong stale status is a product assertion before malformed body decoding", async () => {
+    const failure = await verifyWindowsStaleLaunch("https://synthetic.invalid", { instanceId: "synthetic-session", generation: 1 },
+      async () => new Response("not-json", { status: 500 })).catch(error => error);
+    expect(failure.evidence).toMatchObject({ class: "product", reason: "assertion_failed" });
+  });
+  test("R2 expected stale status with malformed JSON remains a harness failure", async () => {
+    const failure = await verifyWindowsStaleLaunch("https://synthetic.invalid", { instanceId: "synthetic-session", generation: 1 },
+      async () => new Response("not-json", { status: 409, headers: { "cache-control": "no-store" } })).catch(error => error);
+    expect(failure.evidence).toMatchObject({ class: "harness", reason: "helper_failed" });
+  });
   test("R1 a stale-launch contract violation is typed product evidence", async () => {
     const failure = await verifyWindowsStaleLaunch("https://synthetic.invalid", { instanceId: "synthetic-session", generation: 1 },
       async () => new Response("{}", { status: 200 })).catch(error => error);
@@ -554,7 +624,7 @@ describe("Windows stale launch HTTP boundary", () => {
   });
   test("both modes refuse a stale generation without releasing a value", async () => {
     const modes: string[] = [];
-    const fake = async (_url: string, options: RequestInit) => { modes.push(JSON.parse(String(options.body)).mode); return new Response('{"error":"generation_mismatch"}', { status: 409, headers: { "cache-control": "no-store" } }); };
+    const fake = async (_url: string, options: RequestInit) => { modes.push(JSON.parse(String(options.body)).mode); return new Response('{"code":"generation_mismatch"}', { status: 409, headers: { "cache-control": "no-store" } }); };
     expect(await verifyWindowsStaleLaunch("https://synthetic.invalid", { instanceId: "synthetic-session", generation: 1 }, fake)).toEqual({ staleViewStatus: 409, staleControlStatus: 409 });
     expect(modes).toEqual(["view", "control"]);
   });

@@ -16,7 +16,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   confirmed-absent guests and treats guest-command failures as diagnostic only after VM destruction,
   while retaining independent firewall, tailnet, Pixel, and vault containment requirements. Commit
   containment before deleting recovery state; fence incomplete same-epoch uploads, unknown process
-  exits, and cancellation races instead of recovering them as successful work.
+  exits, legacy staging without upload claims, and cancellation races instead of recovering them
+  as successful work. Retire the old epoch vault before replacing development identity, and require
+  settled provider inventory before cleanup completion.
 
 ## [v0.9.0] — 2026-10-25
 
