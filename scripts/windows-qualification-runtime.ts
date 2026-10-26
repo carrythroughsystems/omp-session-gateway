@@ -3,13 +3,13 @@ import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/pr
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import pins from "./windows-qualification-pins.json";
-import { assertWindowsAllocation, assertWindowsExecution, cleanupWindows, preflightWindows, runWindows, windowsCampaignLabel, windowsFailure, windowsNeedsCleanup } from "./windows-stable-qualification.ts";
+import { assertWindowsAllocation, assertWindowsExecution, cleanupWindows, preflightWindows, runWindows, windowsCampaignLabel, windowsFailure, windowsNeedsCleanup, windowsRemaining } from "./windows-stable-qualification.ts";
 import type { WindowsAdmission, WindowsArtifact, WindowsContext, WindowsExecutionContext, WindowsFirewall, WindowsIdentity, WindowsInstance, WindowsLaneInput, WindowsPreflightInput, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
 import { QualificationFailure } from "./qualification-failure.ts";
 import { parseCandidateTagArgs, parseQualificationPins, releaseArchivePath, verifyRelease, waitForPublishedSession, waitForRevocation } from "./stable-qualification.ts";
 import { windowsHostScript } from "./upstream-canary.ts";
 import { OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
-import { runAdb, parseKeyguardShowing, requireSingleDevice, withAndroidChrome } from "./android-device.ts";
+import { runAdb as androidAdb, parseKeyguardShowing, requireSingleDevice as androidDevice, withAndroidChrome } from "./android-device.ts";
 import { runAndroidCollabSmoke } from "./android-collab-smoke.ts";
 import { releaseVersion } from "./release-policy.ts";
 import { firewallEligibility, instanceEligibility, QUAL_LABEL_PREFIX } from "./vultr-target.ts";
@@ -118,9 +118,14 @@ export async function command(argv: readonly string[], options: {
   terminationGraceMs?: number;
 } = {}): Promise<string> {
   const started = performance.now(), timeoutMs = options.timeoutMs ?? 120_000;
-  if (options.execution?.signal.aborted || (options.execution && started >= options.execution.deadline)) {
-    throw windowsFailure("deadline_exceeded", "command", "not_started", {}, options.execution);
-  }
+  assertWindowsExecution(options.execution);
+  const budgetDeadline = Math.min(started + timeoutMs, options.execution?.deadline ?? Infinity);
+  const initialBudget = windowsRemaining(started, budgetDeadline, started, options.execution, "not_started");
+  let stopChild: ((owned: boolean) => void) | undefined;
+  const deadline = setTimeout(() => stopChild?.(!options.execution || started + timeoutMs < options.execution.deadline), initialBudget);
+  const abort = () => stopChild?.(false);
+  options.execution?.signal.addEventListener("abort", abort, { once: true });
+  try {
   let probe: WindowsTransportProbe | undefined = options.transportProbe === undefined ? undefined : {
     startedAt: Date.now(), timeoutMs: options.timeoutMs ?? 120_000, firstResponseLatencyMs: null, signalAt: null, exitedAt: null, exitCode: null,
   };
@@ -134,6 +139,8 @@ export async function command(argv: readonly string[], options: {
       if (!checkpointFailed) { checkpointFailed = true; checkpointFailure = error; }
     });
   };
+  // The checkpoint owns an await: neither cancellation nor its elapsed budget permits spawn.
+  windowsRemaining(started, budgetDeadline, performance.now(), options.execution, "not_started");
   const proc = Bun.spawn([...argv], { cwd: options.cwd ?? root, stdin: options.input === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe" });
   let controllerDeadline = false, sentSignal = 0, grace: ReturnType<typeof setTimeout> | undefined;
   const terminate = (ownedDeadline: boolean) => {
@@ -148,10 +155,7 @@ export async function command(argv: readonly string[], options: {
       sentSignal = 9; proc.kill("SIGKILL"); record({ killAt: Date.now() });
     }, options.terminationGraceMs ?? 5_000);
   };
-  const remaining = Math.max(0, Math.min(timeoutMs, (options.execution?.deadline ?? Infinity) - started) - (performance.now() - started));
-  const deadline = setTimeout(() => terminate(!options.execution || started + timeoutMs < options.execution.deadline), remaining);
-  const abort = () => terminate(false);
-  options.execution?.signal.addEventListener("abort", abort, { once: true });
+  stopChild = terminate;
   if (options.execution?.signal.aborted) abort();
   const exited = proc.exited.then(code => { clearTimeout(deadline); clearTimeout(grace); return { code, at: Date.now() }; });
   // Start drains before writing stdin, including when writing input itself fails.
@@ -173,15 +177,16 @@ export async function command(argv: readonly string[], options: {
     if (inputFailed || sentSignal !== 0 || !(options.allowedExitCodes ?? [0]).includes(exit.code)) {
       throw new WindowsCommandFailure(exit.code, controllerDeadline, sentSignal, performance.now() - started, timeoutMs);
     }
-    if (options.execution?.signal.aborted || (options.execution && performance.now() >= options.execution.deadline)) {
-      throw windowsFailure("deadline_exceeded", "command", "unknown", {}, options.execution);
-    }
+    assertWindowsExecution(options.execution);
     return out.trim();
   } finally {
     terminate(false);
     await exited;
     await drained.catch(() => {});
     clearTimeout(deadline); clearTimeout(grace);
+  }
+  } finally {
+    clearTimeout(deadline);
     options.execution?.signal.removeEventListener("abort", abort);
   }
 }
@@ -215,8 +220,13 @@ async function existingAccess(epoch: string): Promise<Access | undefined> {
 }
 
 /** Failure text is independent of HTTP bodies, which can contain credentials and identifiers. */
-async function request<T>(url: string, headers: Record<string, string>, method = "GET", body?: unknown): Promise<T | undefined> {
-  const send = () => fetch(url, { method, headers: { ...headers, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60_000) });
+async function request<T>(url: string, headers: Record<string, string>, method = "GET", body?: unknown, execution?: WindowsExecutionContext, deadline?: number): Promise<T | undefined> {
+  const started = performance.now();
+  const send = () => {
+    assertWindowsExecution(execution);
+    if (deadline !== undefined) windowsRemaining(started, deadline, performance.now(), execution, "not_started");
+    return fetch(url, { method, headers: { ...headers, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60_000) });
+  };
   try {
     const response = method === "GET" ? await readProvider(send) : await send();
     if (response.status === 404) return undefined;
@@ -246,7 +256,7 @@ async function request<T>(url: string, headers: Record<string, string>, method =
 
 /** Same launch predicates as the shared verifier, with typed Windows assertion boundaries. */
 async function observeWindowsLaunch(origin: string, session: Record<string, unknown>, expected: "live" | "stale",
-  fetcher: (url: string, options: RequestInit) => Promise<Response>): Promise<void> {
+  fetcher: (url: string, options: RequestInit) => Promise<Response>, execution?: WindowsExecutionContext): Promise<void> {
   if (typeof session.instanceId !== "string" || typeof session.generation !== "number") throw windowsFailure("helper_failed", "output", "read_only");
   const assertion = () => {
     const failure = windowsFailure("assertion_failed", "output", "confirmed");
@@ -256,12 +266,13 @@ async function observeWindowsLaunch(origin: string, session: Record<string, unkn
   for (const mode of ["view", "control"] as const) {
     let response: Response;
     try {
+      assertWindowsExecution(execution);
       response = await fetcher(`${origin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
         method: "POST", headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
         body: JSON.stringify({ mode, generation: session.generation + (expected === "stale" ? 1 : 0) }),
         cache: "no-store", signal: AbortSignal.timeout(expected === "stale" ? 30_000 : 10_000),
       });
-    } catch { throw windowsFailure("helper_failed", "connection", "read_only"); }
+    } catch (error) { if (error instanceof QualificationFailure) throw error; throw windowsFailure("helper_failed", "connection", "read_only", {}, execution); }
     if (response.status !== (expected === "stale" ? 409 : 200) || !response.headers.get("cache-control")?.includes("no-store")) {
       const failure = assertion();
       try { await response.body?.cancel(); } catch { throw failure; }
@@ -277,24 +288,44 @@ async function observeWindowsLaunch(origin: string, session: Record<string, unkn
       : !valuePresent || payload.mode !== mode || payload.generation !== session.generation) throw assertion();
   }
 }
-export async function verifyWindowsLaunchContracts(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch): Promise<void> {
-  await observeWindowsLaunch(origin, session, "live", fetcher);
+export async function verifyWindowsLaunchContracts(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch, execution?: WindowsExecutionContext): Promise<void> {
+  await observeWindowsLaunch(origin, session, "live", fetcher, execution);
 }
 /** Checks stale View and Control independently and discards launch values before returning. */
-export async function verifyWindowsStaleLaunch(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch): Promise<Record<string, unknown>> {
-  await observeWindowsLaunch(origin, session, "stale", fetcher);
+export async function verifyWindowsStaleLaunch(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch, execution?: WindowsExecutionContext): Promise<Record<string, unknown>> {
+  await observeWindowsLaunch(origin, session, "stale", fetcher, execution);
   return { staleViewStatus: 409, staleControlStatus: 409 };
-}
-
-function windowsLocalDeadline(timeoutMs: number, waitedMs: number, execution?: WindowsExecutionContext): QualificationFailure {
-  return windowsFailure("deadline_exceeded", "connection", "read_only", {
-    controllerDeadline: true, readOnlyProbe: true, timeoutMs, waitedMs,
-  }, execution, waitedMs);
 }
 
 export async function windowsCreationClaim(counterPath: string, creations: number, execution: WindowsExecutionContext | undefined, allocationDeadline: number | undefined): Promise<void> {
   assertWindowsAllocation(execution, allocationDeadline);
   await atomicPrivate(counterPath, creations + 1);
+}
+
+/** Both admission and creation use the current owner's closed refusal and ID allocator. */
+export function windowsCreationAllowance(creations: number, limit: number, execution?: WindowsExecutionContext): number {
+  assertWindowsExecution(execution);
+  if (!Number.isSafeInteger(creations) || creations < 0 || creations >= limit) {
+    throw windowsFailure("helper_failed", "preflight", "not_started", {}, execution);
+  }
+  return limit - creations;
+}
+
+export async function configureWindowsFirewallRules(options: {
+  id: string; label: string; environment: Readonly<Record<string, string | undefined>>;
+  read: () => Promise<WindowsFirewall | undefined>; post: (port: string) => Promise<void>;
+  execution?: WindowsExecutionContext | undefined; allocationDeadline?: number | undefined; now?: () => number;
+}): Promise<void> {
+  for (const port of ["3389", "5985"]) {
+    assertWindowsAllocation(options.execution, options.allocationDeadline, (options.now ?? Date.now)());
+    const fresh = await options.read();
+    if (!fresh || fresh.id !== options.id || fresh.description !== options.label ||
+      !firewallEligibility(fresh.id, fresh.description, options.environment).eligible) {
+      throw windowsFailure("ownership_changed", "connection", "not_started", {}, options.execution);
+    }
+    assertWindowsAllocation(options.execution, options.allocationDeadline, (options.now ?? Date.now)());
+    await options.post(port);
+  }
 }
 
 export async function waitForStableWindowsTransport(
@@ -303,28 +334,29 @@ export async function waitForStableWindowsTransport(
   deadline: number,
   execution?: WindowsExecutionContext,
 ): Promise<Record<string, unknown>> {
-  const started = clock.now(), budget = Math.max(0, deadline - started);
+  const started = clock.now();
   let samples = 0; let firstSuccess = 0;
-  while (clock.now() < deadline) {
-    assertWindowsExecution(execution);
+  while (true) {
+    const remaining = windowsRemaining(started, deadline, clock.now(), execution);
+    let observation: Record<string, unknown>;
     try {
-      const observation = await probe(Math.max(1, Math.min(180_000, deadline - clock.now())));
-      assertWindowsExecution(execution);
-      const observedAt = clock.now();
-      if (observedAt >= deadline) break;
-      if (samples === 0) firstSuccess = observedAt;
-      samples += 1;
-      if (samples >= 3 && observedAt - firstSuccess >= 60_000) {
-        return { ...observation, transportStabilitySamples: samples, transportStabilityDurationMs: observedAt - firstSuccess };
-      }
+      observation = await probe(Math.min(180_000, remaining));
     } catch (error) {
-      if (clock.now() >= deadline) throw windowsLocalDeadline(budget, Math.max(0, clock.now() - started), execution);
+      const nextBudget = windowsRemaining(started, deadline, clock.now(), execution);
       if (!(error instanceof QualificationFailure) || error.evidence.class !== "infra_transient") throw error;
       samples = 0; firstSuccess = 0;
+      await clock.sleep(Math.min(30_000, nextBudget));
+      continue;
     }
-    await clock.sleep(Math.min(30_000, Math.max(0, deadline - clock.now())));
+    const observedAt = clock.now();
+    const nextBudget = windowsRemaining(started, deadline, observedAt, execution);
+    if (samples === 0) firstSuccess = observedAt;
+    samples += 1;
+    if (samples >= 3 && observedAt - firstSuccess >= 60_000) {
+      return { ...observation, transportStabilitySamples: samples, transportStabilityDurationMs: observedAt - firstSuccess };
+    }
+    await clock.sleep(Math.min(30_000, nextBudget));
   }
-  throw windowsLocalDeadline(budget, Math.max(0, clock.now() - started), execution);
 }
 
 /** A legacy admitted boolean is not a durable observation of the stability window. */
@@ -343,17 +375,22 @@ export function windowsGuestAccessAvailable(value: unknown): boolean {
 export async function pollWindows(action: () => Promise<boolean>, ms: number, name: string, execution?: WindowsExecutionContext,
   clock: Pick<WindowsRuntime, "now" | "sleep"> = { now: performance.now, sleep: Bun.sleep }): Promise<void> {
   const started = clock.now(), deadline = started + ms;
-  while (clock.now() < deadline) {
-    assertWindowsExecution(execution);
-    const succeeded = await action();
-    assertWindowsExecution(execution);
-    const remaining = deadline - clock.now();
-    if (remaining <= 0) break;
+  const remaining = () => {
+    try { return windowsRemaining(started, deadline, clock.now(), execution); }
+    catch (error) {
+      if (error instanceof QualificationFailure && error.evidence.reason === "deadline_exceeded") error.message = `${name} timed out`;
+      throw error;
+    }
+  };
+  while (true) {
+    remaining();
+    let succeeded: boolean;
+    try { succeeded = await action(); }
+    catch (error) { remaining(); throw error; }
+    const budget = remaining();
     if (succeeded) return;
-    await clock.sleep(Math.min(5_000, remaining));
+    await clock.sleep(Math.min(5_000, budget));
   }
-  const failure = windowsLocalDeadline(ms, Math.max(0, clock.now() - started), execution);
-  failure.message = `${name} timed out`; throw failure;
 }
 
 /** Own the child from its first stdin operation until exit, including write/end rejection. */
@@ -362,15 +399,31 @@ export async function settleWindowsRdp(child: {
   readonly exitCode: number | null;
   kill(signal: "SIGTERM" | "SIGKILL"): unknown;
   readonly exited: Promise<number>;
-}, input: string, observe: () => Promise<void>): Promise<void> {
+}, input: string, observe: () => Promise<void>, execution?: WindowsExecutionContext): Promise<void> {
+  let grace: ReturnType<typeof setTimeout> | undefined, deadline: ReturnType<typeof setTimeout> | undefined, stopped = false;
+  const terminate = () => {
+    if (stopped) return;
+    stopped = true;
+    grace = setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 5_000);
+    child.kill("SIGTERM");
+  };
+  execution?.signal.addEventListener("abort", terminate, { once: true });
   try {
-    await child.stdin.write(input); await child.stdin.end();
+    assertWindowsExecution(execution);
+    if (execution) {
+      const now = performance.now();
+      deadline = setTimeout(terminate, windowsRemaining(now, execution.deadline, now, execution, "not_started"));
+    }
+    await child.stdin.write(input); assertWindowsExecution(execution);
+    await child.stdin.end(); assertWindowsExecution(execution);
     await observe();
   } finally {
-    const grace = setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 5_000);
     try {
-      try { child.kill("SIGTERM"); } finally { await child.exited; }
-    } finally { clearTimeout(grace); }
+      try { terminate(); } finally { await child.exited; }
+    } finally {
+      clearTimeout(grace); clearTimeout(deadline);
+      execution?.signal.removeEventListener("abort", terminate);
+    }
   }
 }
 
@@ -454,39 +507,33 @@ export async function reconnectWindowsTransport<T>(probe: (timeoutMs: number) =>
   clock: Pick<WindowsRuntime, "now" | "sleep">, execution?: WindowsExecutionContext): Promise<T> {
   const started = clock.now(), deadline = started + 90_000;
   const delays = [2_000, 4_000, 8_000, 16_000];
-  const assertExecution = () => {
-    if (execution?.signal.aborted || (execution && performance.now() >= execution.deadline)) {
-      throw windowsLocalDeadline(90_000, Math.max(0, clock.now() - started), execution);
-    }
-  };
+  const remaining = () => Math.min(windowsRemaining(started, deadline, clock.now(), execution),
+    execution === undefined ? Infinity : windowsRemaining(execution.deadline - 90_000, execution.deadline, performance.now(), execution));
   for (let attempt = 0; ; attempt += 1) {
-    assertExecution();
-    const remaining = Math.min(deadline - clock.now(), (execution?.deadline ?? Infinity) - performance.now());
-    if (remaining <= 0) throw windowsLocalDeadline(90_000, Math.max(0, clock.now() - started), execution);
+    const budget = remaining();
+    let result: T;
     try {
-      const result = await probe(remaining);
-      assertExecution();
-      if (clock.now() >= deadline) throw windowsLocalDeadline(90_000, Math.max(0, clock.now() - started), execution);
-      return result;
+      result = await probe(budget);
     }
     catch (error) {
-      assertExecution();
-      if (clock.now() >= deadline) throw windowsLocalDeadline(90_000, Math.max(0, clock.now() - started), execution);
+      const budget = remaining();
       if (!(error instanceof QualificationFailure) || error.evidence.class !== "infra_transient") throw error;
       const delay = delays[attempt];
-      if (delay === undefined || clock.now() + delay >= deadline) throw error;
+      if (delay === undefined || delay >= budget) throw error;
       if (execution === undefined) await clock.sleep(delay);
       else {
         // Await every owned sleep; never abandon a Promise.race loser on cancellation.
-        let remaining = delay;
-        while (remaining > 0) {
-          assertExecution();
-          const slice = Math.min(remaining, 100, execution.deadline - performance.now());
-          await clock.sleep(slice); remaining -= slice;
-          assertExecution();
+        let left = delay;
+        while (left > 0) {
+          const slice = Math.min(left, 100, remaining());
+          await clock.sleep(slice); left -= slice;
+          remaining();
         }
       }
+      continue;
     }
+    remaining();
+    return result;
   }
 }
 
@@ -496,12 +543,13 @@ export async function reconcileWindowsUpload(operations: {
   inspect: () => Promise<{ exists: boolean; matches: boolean; writerEnded: boolean }>;
   remove: () => Promise<unknown>;
 }, execution?: WindowsExecutionContext): Promise<void> {
-  try { await operations.stream(); return; }
+  try { assertWindowsExecution(execution); await operations.stream(); return; }
   catch (error) {
     if (!(error instanceof QualificationFailure) || !interruptedUploadTransports.has(error)) throw error;
+    assertWindowsExecution(execution);
     const found = await operations.inspect();
     if (found.writerEnded && found.matches) return;
-    if (found.writerEnded && found.exists) await operations.remove();
+    if (found.writerEnded && found.exists) { assertWindowsExecution(execution); await operations.remove(); }
     throw windowsFailure("mutation_unconfirmed", "upload", "unknown",
       { mutationReconciled: found.writerEnded }, execution);
   }
@@ -516,6 +564,7 @@ export async function windowsUploadOnce(operations: {
   verify: () => Promise<boolean>;
 }, execution?: WindowsExecutionContext): Promise<void> {
   const state = await operations.state();
+  assertWindowsExecution(execution);
   if (state !== undefined && state !== "started" && state !== "complete") throw windowsFailure("helper_failed", "upload", "unknown", {}, execution);
   if (state === "started") throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, execution);
   if (state === "complete") {
@@ -524,8 +573,10 @@ export async function windowsUploadOnce(operations: {
   }
   if (operations.allowFresh !== true) throw windowsFailure("mutation_unconfirmed", "upload", "unknown", {}, execution);
   await operations.checkpoint("started");
+  assertWindowsExecution(execution);
   await operations.upload();
   await operations.checkpoint("complete");
+  assertWindowsExecution(execution);
 }
 
 /** Add only the Python helper's redacted message and source-free traceback to its legacy diagnostic. */
@@ -549,8 +600,11 @@ export async function windowsUploadStep<T>(step: WindowsUploadStep, action: (ste
 }
 
 export async function createWindowsRuntime(options: { development?: boolean; execution?: WindowsExecutionContext } = {}): Promise<WindowsRuntime> {
+  let execution = options.execution;
   const hostCommand = (argv: readonly string[], settings: Parameters<typeof command>[1] = {}) =>
-    command(argv, { ...settings, ...(options.execution === undefined ? {} : { execution: options.execution }) });
+    command(argv, { ...settings, ...(execution === undefined ? {} : { execution }) });
+  const runAdb: typeof androidAdb = (...args) => { assertWindowsExecution(execution); return androidAdb(...args); };
+  const requireSingleDevice: typeof androidDevice = (...args) => { assertWindowsExecution(execution); return androidDevice(...args); };
   const environment: Record<string, string | undefined> = { ...process.env };
   const vultrKey = (await privateFile(join(homedir(), ".vultr-apikey"))).trim();
   let joinValue = ""; let apiValue = "";
@@ -564,7 +618,8 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
   if (!joinValue || !apiValue) throw new Error("tagged join credential and tailnet API credential are required");
   const headers = { Authorization: `Bearer ${vultrKey}` };
   const tsHeaders = { Authorization: `Bearer ${apiValue}` };
-  const api = <T>(path: string, method = "GET", body?: unknown) => request<T>(`https://api.vultr.com/v2/${path}`, headers, method, body);
+  const api = <T>(path: string, method = "GET", body?: unknown, owner = execution, deadline?: number) =>
+    request<T>(`https://api.vultr.com/v2/${path}`, headers, method, body, owner, deadline);
   const list = async <T>(path: string, key: string): Promise<T[]> => {
     let cursor = ""; const items: T[] = [];
     do {
@@ -588,33 +643,32 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
     firewalls: () => list<WindowsFirewall>("firewalls", "firewall_groups"),
     instance: (id: string) => confirmAbsence(async () => (await api<{ instance: WindowsInstance }>(`instances/${encodeURIComponent(id)}`))?.instance),
     firewall: (id: string) => confirmAbsence(async () => (await api<{ firewall_group: WindowsFirewall }>(`firewalls/${encodeURIComponent(id)}`))?.firewall_group),
-    async createFirewall(label: string, execution?: WindowsExecutionContext, allocationDeadline?: number) {
+    async createFirewall(label: string, owner = execution, allocationDeadline?: number) {
       if (!egress) throw new Error("Windows preflight was not performed");
-      assertWindowsAllocation(execution ?? options.execution, allocationDeadline);
-      const item = await api<{ firewall_group: WindowsFirewall }>("firewalls", "POST", { description: label });
+      assertWindowsAllocation(owner, allocationDeadline);
+      const item = await api<{ firewall_group: WindowsFirewall }>("firewalls", "POST", { description: label }, owner);
       if (!item) throw new Error("firewall create response lost");
       // Preserve the exact ID before configuring it; a later label change must not become absence.
       await atomicPrivate(vaultPath(label.slice(QUAL_LABEL_PREFIX.length)), { firewall: item.firewall_group.id });
       return item.firewall_group;
     },
-    async configureFirewall(id: string, label: string) {
-      for (const port of ["3389", "5985"]) {
-        const fresh = await provider.firewall(id);
-        if (!fresh || fresh.description !== label || !firewallEligibility(id, fresh.description, environment).eligible) throw new Error("firewall ownership changed");
-        await api(`firewalls/${id}/rules`, "POST", { ip_type: "v4", protocol: "tcp", subnet: egress, subnet_size: 32, port, notes: "qualification operator" });
-      }
+    async configureFirewall(id: string, label: string, owner = execution, allocationDeadline?: number) {
+      await configureWindowsFirewallRules({ id, label, environment, execution: owner, allocationDeadline,
+        read: () => provider.firewall(id),
+        post: async port => { await api(`firewalls/${id}/rules`, "POST", { ip_type: "v4", protocol: "tcp", subnet: egress, subnet_size: 32, port, notes: "qualification operator" }, owner); },
+      });
     },
-    async createInstance(label: string, firewall: string, execution?: WindowsExecutionContext, allocationDeadline?: number) {
+    async createInstance(label: string, firewall: string, owner = execution, allocationDeadline?: number) {
       const group = await provider.firewall(firewall);
       if (!group || group.description !== label || !firewallEligibility(group.id, group.description, environment).eligible) throw new Error("attached firewall ownership changed");
       const counterPath = join(devRoot, `creations-${activeTag}.json`);
       let creations = 0;
       try { creations = JSON.parse(await privateFile(counterPath)) as number; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const creationLimit = options.development ? 6 : 4;
-      if (!Number.isInteger(creations) || creations < 0 || creations >= creationLimit) throw new Error("Windows creation cap reached");
-      await windowsCreationClaim(counterPath, creations, execution ?? options.execution, allocationDeadline);
-      assertWindowsAllocation(execution ?? options.execution, allocationDeadline);
-      const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false });
+      windowsCreationAllowance(creations, creationLimit, owner);
+      await windowsCreationClaim(counterPath, creations, owner, allocationDeadline);
+      assertWindowsAllocation(owner, allocationDeadline);
+      const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false }, owner);
       if (!item) throw new Error("instance create response lost"); return item.instance;
     },
     async destroyInstance(id: string, label: string) {
@@ -633,15 +687,16 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
   const guestScript = await readFile(join(import.meta.dir, "windows-qualification-guest.ps1"), "utf8");
   const winrm = async (context: WindowsContext, script: string, input?: unknown, timeoutMs = 300_000, upload?: { sourcePath: string; destinationPath: string }, mutation = true, principal: WindowsPrincipal = "administrator", transportProbe?: WindowsContext["transportProbe"], uploadStep?: WindowsUploadStep): Promise<Record<string, unknown>> => {
     const started = performance.now();
-    const execution = context.execution ?? options.execution;
+    const owner = context.execution ?? execution;
     const access = await loadAccess(context.epoch);
-    if (!windowsGuestAccessAvailable(access)) throw windowsFailure("helper_failed", "command", "not_started", {}, execution);
+    assertWindowsExecution(owner);
+    if (!windowsGuestAccessAvailable(access)) throw windowsFailure("helper_failed", "command", "not_started", {}, owner);
     if (mutation || !access.host) {
       const current = await provider.instance(access.instance);
-      if (!current) throw windowsFailure("ownership_changed", "connection", "not_started", {}, execution);
+      if (!current) throw windowsFailure("ownership_changed", "connection", "not_started", {}, owner);
       const mismatches = [current.id !== access.instance && "identity", current.label !== windowsCampaignLabel(context.epoch) && "label", current.os_id !== pins.osId && "image", current.plan !== pins.plan && "plan", current.region !== pins.region && "region", !instanceEligibility(current.id, current.label, environment).eligible && "protection"].filter(Boolean);
-      if (mismatches.length) throw windowsFailure("ownership_changed", "connection", "not_started", {}, execution);
-      if (!current.main_ip) throw windowsFailure("helper_failed", "connection", "not_started", {}, execution);
+      if (mismatches.length) throw windowsFailure("ownership_changed", "connection", "not_started", {}, owner);
+      if (!current.main_ip) throw windowsFailure("helper_failed", "connection", "not_started", {}, owner);
       if (access.host !== current.main_ip) {
         access.host = current.main_ip; await context.beforeEffect(); await atomicPrivate(vaultPath(context.epoch), access);
       }
@@ -651,16 +706,16 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
       const result: unknown = JSON.parse(await command([python, join(import.meta.dir, "windows-winrm.py")], {
         input: JSON.stringify({ host: access.host, username: credential.account, password: credential.password, script, input, upload, uploadStep,
           readOnly: !mutation, observeTransport: transportProbe !== undefined }),
-        timeoutMs: Math.max(1, Math.floor(timeoutMs - (performance.now() - started))), allowedExitCodes: [0, 1], ...(transportProbe === undefined ? {} : { transportProbe }),
-        ...(execution === undefined ? {} : { execution }),
+        timeoutMs: windowsRemaining(started, started + timeoutMs, performance.now(), owner, "not_started"), allowedExitCodes: [0, 1], ...(transportProbe === undefined ? {} : { transportProbe }),
+        ...(owner === undefined ? {} : { execution: owner }),
       }));
-      return windowsWinrmResult(result, !mutation, execution, upload !== undefined);
+      return windowsWinrmResult(result, !mutation, owner, upload !== undefined);
     } catch (error) {
       if (error instanceof QualificationFailure) throw error;
       if (error instanceof WindowsCommandFailure) {
-        throw classifyWindowsCommandFailure(error, !mutation, object(input) && input.action === "transport", execution);
+        throw classifyWindowsCommandFailure(error, !mutation, object(input) && input.action === "transport", owner);
       }
-      throw windowsFailure("helper_failed", "output", mutation ? "unknown" : "read_only", {}, execution);
+      throw windowsFailure("helper_failed", "output", mutation ? "unknown" : "read_only", {}, owner);
     }
   };
   const ps = async (context: WindowsContext, action: string, extra: Record<string, unknown> = {}, timeoutMs?: number, principal: WindowsPrincipal = "administrator") => {
@@ -676,7 +731,7 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
         action === "transport" ? context.transportProbe : undefined);
     if (!readOnly) return context.mutation(`ps:${principal}:${action}`, execute);
     return action !== "transport" ? reconnectWindowsTransport(execute,
-      { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution) : execute();
+      { now: performance.now, sleep: Bun.sleep }, context.execution ?? execution) : execute();
   };
   const upload = async (context: WindowsContext, local: string, name: "candidate.tar" | "predecessor.tar" | "source.tar") => {
     const expected = digest(await readFile(local));
@@ -698,7 +753,7 @@ if ($exists) {
 }
 @{ exists=$exists; matches=$matches; writerEnded=$ended } | ConvertTo-Json -Compress`,
       { path: destinationPath, digest: expected }, budget, undefined, false, "administrator", undefined, "existence/hash"),
-      { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution);
+      { now: performance.now, sleep: Bun.sleep }, context.execution ?? execution);
       if (typeof found.exists !== "boolean" || typeof found.matches !== "boolean" || typeof found.writerEnded !== "boolean") {
         throw windowsFailure("helper_failed", "upload", "read_only", {}, context.execution);
       }
@@ -728,9 +783,9 @@ if ($exists) {
         await context.beforeEffect();
         await reconcileWindowsUpload({ inspect, remove,
           stream: () => windowsUploadStep("stream", step => winrm(context, "", undefined, 900_000, { sourcePath: local, destinationPath }, true, "administrator", undefined, step)),
-        }, context.execution ?? options.execution);
+        }, context.execution ?? execution);
       },
-    }, context.execution ?? options.execution);
+    }, context.execution ?? execution);
   };
   const restorePixel = async (context: WindowsContext) => {
     const access = await existingAccess(context.epoch);
@@ -742,9 +797,12 @@ if ($exists) {
     if (serial !== baseline.serial) throw new Error("Pixel changed during Windows attempt");
     await context.beforeEffect();
     await withAndroidChrome(async driver => {
+      assertWindowsExecution(context.execution ?? execution);
       const targets = await driver.send("Target.getTargets");
       for (const target of (targets.targetInfos ?? []) as Array<{ targetId: string; type: string; url: string }>) {
-        if (target.type === "page" && target.url.startsWith(`${access.origin}/`)) await driver.send("Target.closeTarget", { targetId: target.targetId });
+        if (target.type === "page" && target.url.startsWith(`${access.origin}/`)) {
+          assertWindowsExecution(context.execution ?? execution); await driver.send("Target.closeTarget", { targetId: target.targetId });
+        }
       }
     });
     await context.beforeEffect();
@@ -769,10 +827,14 @@ if ($exists) {
   };
   return {
     development: options.development === true, environment, provider, now: Date.now, sleep: Bun.sleep, uuid: randomUUID,
+    setExecution: owner => { execution = owner; },
     async admit(input: WindowsPreflightInput): Promise<WindowsAdmission> {
       if (process.platform !== "darwin" || Bun.version !== pins.bunVersion) throw new Error("Windows controller requires macOS and pinned Bun");
       activeTag = input.identity?.tag ?? "preflight";
-      const external = await readProvider(() => fetch("https://api.ipify.org", { signal: AbortSignal.timeout(15_000) }));
+      const external = await readProvider(() => {
+        assertWindowsExecution(execution);
+        return fetch("https://api.ipify.org", { signal: AbortSignal.timeout(15_000) });
+      });
       egress = (await external.text()).trim();
       if (!/^(?:\d{1,3}\.){3}\d{1,3}$/u.test(egress) || egress.split(".").some(part => Number(part) > 255)) throw new Error("operator IPv4 egress unavailable");
       if (environment.OMP_STABLE_WINDOWS_OPERATOR_CIDR && environment.OMP_STABLE_WINDOWS_OPERATOR_CIDR !== `${egress}/32`) throw new Error("operator egress no longer matches admitted /32");
@@ -791,7 +853,7 @@ if ($exists) {
       const rdpVersion = await hostCommand(["sdl-freerdp", "/version"]);
       if (!rdpVersion.includes(`version ${pins.freerdpVersion} `)) throw new Error("FreeRDP version mismatch");
       await requireSingleDevice(); // Read-only device enumeration; navigation is behind pixel().
-      const tailnet = await request<{ devices: unknown[] }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders);
+      const tailnet = await request<{ devices: unknown[] }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, execution);
       if (!tailnet || !Array.isArray(tailnet.devices)) throw new Error("qualification tailnet admission failed");
       if (input.identity) for (const artifact of [input.identity.candidate, input.identity.predecessor]) {
         const info = await lstat(artifact.archivePath);
@@ -801,9 +863,9 @@ if ($exists) {
       try { creations = JSON.parse(await privateFile(join(devRoot, `creations-${activeTag}.json`))) as number; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const limit = options.development ? 6 : 4;
-      if (!Number.isSafeInteger(creations) || creations < 0 || creations >= limit) throw windowsFailure("helper_failed", "preflight", "not_started");
+      const localCreationAllowance = windowsCreationAllowance(creations, limit, execution);
       return { admitted: true, protectionVerified: true, toolchainVerified: true,
-        localCreationAllowance: limit - creations, providerQuotaObservable: false };
+        localCreationAllowance, providerQuotaObservable: false };
     },
     async saveAccess(epoch, instance) {
       if (!instance.default_password) throw new Error("create response lacks guest access; destroy required");
@@ -859,19 +921,18 @@ if ($exists) {
         if (!fresh.main_ip) throw windowsFailure("helper_failed", "connection", "not_started", {}, context.execution);
         await context.beforeEffect(); await save({ host: fresh.main_ip });
         return reconnectWindowsTransport(timeoutMs => ps(context, "transport", {}, timeoutMs),
-          { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution);
+          { now: performance.now, sleep: Bun.sleep }, context.execution ?? execution);
       }
       if (action === "transport") {
         const admitted = windowsTransportStability(context.transportAdmission) ?? windowsTransportStability(access.transportAdmission);
         if (admitted) {
           const current = await reconnectWindowsTransport(timeoutMs => ps(context, "transport", {}, timeoutMs),
-            { now: performance.now, sleep: Bun.sleep }, context.execution ?? options.execution);
+            { now: performance.now, sleep: Bun.sleep }, context.execution ?? execution);
           return { ...current, ...admitted };
         }
         if (context.allocationDeadline === undefined) throw windowsFailure("helper_failed", "connection", "not_started", {}, context.execution);
-        const remaining = context.allocationDeadline - Date.now();
-        if (remaining <= 0) throw windowsLocalDeadline(12 * 60_000, 12 * 60_000 - remaining, context.execution);
-        const deadline = performance.now() + remaining;
+        const remaining = windowsRemaining(context.allocationDeadline - 12 * 60_000, context.allocationDeadline, Date.now(), context.execution ?? execution);
+        const started = performance.now(), deadline = started + remaining;
         // Creation can return a provisional address. Wait for provider allocation,
         // then authenticate the guest at that freshly observed address.
         await pollWindows(async () => {
@@ -880,10 +941,10 @@ if ($exists) {
           if (current.status !== "active" || current.server_status !== "ok" || current.power_status !== "running" || !current.main_ip) return false;
           await context.beforeEffect(); await save({ host: current.main_ip });
           return true;
-        }, Math.max(0, deadline - performance.now()), "provider Windows allocation", context.execution ?? options.execution);
+        }, windowsRemaining(started, deadline, performance.now(), context.execution ?? execution), "provider Windows allocation", context.execution ?? execution);
         const observed = await waitForStableWindowsTransport(
           timeoutMs => ps(context, "transport", {}, timeoutMs),
-          { now: performance.now, sleep: Bun.sleep }, deadline, context.execution ?? options.execution,
+          { now: performance.now, sleep: Bun.sleep }, deadline, context.execution ?? execution,
         );
         await context.beforeEffect(); await save({ transportAdmission: windowsTransportStability(observed) });
         return observed;
@@ -928,16 +989,18 @@ if ($exists) {
         await context.beforeEffect();
         const started = await ps(context, "startOmp", { launcher: script });
         await save({ ompPid: started.ompPid });
+        assertWindowsExecution(context.execution ?? execution);
         const session = await waitForPublishedSession(String(access.origin), sessionLabel);
         const publication = await ps(context, "publication");
         return { namedPipe: publication.namedPipe, generation: session.generation };
       }
       if (action === "launch") {
+        assertWindowsExecution(context.execution ?? execution);
         const session = await waitForPublishedSession(String(access.origin), sessionLabel);
-        await verifyWindowsLaunchContracts(String(access.origin), session);
-        return { viewStatus: 200, controlStatus: 200, noStore: true, ...await verifyWindowsStaleLaunch(String(access.origin), session) };
+        await verifyWindowsLaunchContracts(String(access.origin), session, fetch, context.execution ?? execution);
+        return { viewStatus: 200, controlStatus: 200, noStore: true, ...await verifyWindowsStaleLaunch(String(access.origin), session, fetch, context.execution ?? execution) };
       }
-      if (action === "revoked") { await waitForRevocation(String(access.origin), sessionLabel); return { revoked: true }; }
+      if (action === "revoked") { assertWindowsExecution(context.execution ?? execution); await waitForRevocation(String(access.origin), sessionLabel); return { revoked: true }; }
       await context.beforeEffect(); const result = await ps(context, action, {}, undefined, principal);
       // The guest's post-mutation status window is observed, not silent: record every read past the first.
       if (typeof result.statusReads === "number" && result.statusReads > 1) console.log(`Windows ${action}: status settled after ${result.statusReads} reads`);
@@ -951,12 +1014,13 @@ if ($exists) {
       const cert = await ps(context, "fingerprint");
       if (typeof cert.fingerprint !== "string" || !SHA.test(cert.fingerprint)) throw new Error("RDP certificate SHA-256 unavailable");
       await context.beforeEffect();
+      assertWindowsExecution(context.execution ?? execution);
       const child = Bun.spawn(["sdl-freerdp", `/v:${access.host}`, `/u:${credential.account}`, "/from-stdin:force", `/cert:fingerprint:sha256:${cert.fingerprint}`, "/size:800x600", "/log-level:OFF"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
       // A new account's first logon builds its profile before Explorer starts, which the provider's Administrator never waits for.
       const session = principal === "administrator" ? {} : { account: credential.account };
       await settleWindowsRdp(child, `${credential.password}\n`, () => pollWindows(
         async () => (await ps(context, "interactive", session)).interactive === true, principal === "administrator" ? 120_000 : 240_000,
-        "certificate-pinned interactive RDP", context.execution ?? options.execution));
+        "certificate-pinned interactive RDP", context.execution ?? execution), context.execution ?? execution);
     },
     async pixel(context) {
       const access = await loadAccess(context.epoch);
@@ -973,6 +1037,7 @@ if ($exists) {
       let result: Record<string, unknown> | undefined;
       let primary: unknown;
       try {
+        assertWindowsExecution(context.execution ?? execution);
         const smoke = await runAndroidCollabSmoke({ origin: String(access.origin), label: sessionLabel, allowDisposableTarget: true });
         // Serve must supply the user identity for this exact-login, production-mode gateway.
         result = { pixelIdentityAccepted: true, viewReadOnly: smoke.viewReadOnly, controlWritable: smoke.controlWritable, promptAccepted: smoke.promptAccepted, returnedToDirectory: smoke.returnedToDirectory };
@@ -991,16 +1056,17 @@ if ($exists) {
     },
     restorePixel,
     async deleteTailnet(context) {
-      const listing = await request<{ devices: Array<{ id: string; hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders);
+      const owner = context.execution ?? execution;
+      const listing = await request<{ devices: Array<{ id: string; hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, owner);
       if (!listing) throw new Error("tailnet listing failed");
       const matches = listing.devices.filter(item => item.hostname === windowsCampaignLabel(context.epoch));
       for (const match of matches) {
-        const fresh = await confirmAbsence(() => request<{ id: string; hostname: string }>(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders));
+        const fresh = await confirmAbsence(() => request<{ id: string; hostname: string }>(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "GET", undefined, owner));
         if (!fresh) continue;
         if (fresh.hostname !== windowsCampaignLabel(context.epoch)) throw new Error("tailnet ownership changed");
-        await context.beforeEffect(); await request(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "DELETE");
+        await context.beforeEffect(); await request(`https://api.tailscale.com/api/v2/device/${encodeURIComponent(match.id)}`, tsHeaders, "DELETE", undefined, owner);
       }
-      const after = await request<{ devices: Array<{ hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders);
+      const after = await request<{ devices: Array<{ hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, owner);
       if (!after || after.devices.some(item => item.hostname === windowsCampaignLabel(context.epoch))) throw new Error("tailnet node remains");
     },
   };
@@ -1059,9 +1125,10 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
   }
   async function checkpoint(next: Record<string, unknown>): Promise<void> { progress = next; await atomicPrivate(progressPath, next); }
   async function pixel<T>(_owner: string, action: () => Promise<T>): Promise<T> {
-    const lock = "/tmp/omp-gw-pixel.lock"; const deadline = Date.now() + 60 * 60_000;
+    const lock = "/tmp/omp-gw-pixel.lock"; const started = Date.now(), deadline = started + 60 * 60_000;
     const epoch = (progress as { epoch: string }).epoch;
     while (true) {
+      windowsRemaining(started, deadline, Date.now(), undefined, "not_started");
       try { await mkdir(lock, { mode: 0o700 }); break; }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -1071,8 +1138,7 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
           try { process.kill(Number(fields[3]), 0); }
           catch (failure) { if ((failure as NodeJS.ErrnoException).code === "ESRCH") break; }
         }
-        if (Date.now() > deadline) throw new Error("shared Pixel lock held over 60 minutes");
-        await Bun.sleep(5_000);
+        await Bun.sleep(Math.min(5_000, windowsRemaining(started, deadline, Date.now(), undefined, "not_started")));
       }
     }
     try {

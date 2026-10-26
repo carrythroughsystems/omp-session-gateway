@@ -114,8 +114,10 @@ failed two v0.7.2 campaign attempts with a bare `WebException` at the Tailscale 
 Allocation and authenticated WinRM admission share one 12-minute deadline, durably set before
 firewall creation; firewall/VM creation and provider allocation consume that same budget.
 The same allocation-and-execution guard runs after awaited checkpoints/inventory reads and
-immediately before each creation POST; an expired budget cannot begin a new allocation.
+immediately before each creation POST and each firewall-rule POST after its ownership refetch;
+an expired budget cannot begin a new allocation or authorize another rule.
 Creation-counter persistence is also guarded before it can consume the local allowance.
+Admission and creation-cap refusals use the current execution's failure-ID allocator.
 Subsequent transport probes use bounded reconnect, not another allocation window. Admission requires
 three consecutive read-only successes spanning at least 60 seconds; a transport error resets
 both the count and window, while a guest assertion failure aborts immediately. The observed
@@ -128,6 +130,10 @@ the helper independently attempts command cleanup and shell closure before exiti
 exit within five seconds, the controller sends SIGKILL, awaits exit, and drains both pipes before
 reporting failure. A subprocess deadline remains a failed probe, not a successful observation or an
 automatic mutation retry.
+Cancellation and termination ownership are installed before the first asynchronous probe checkpoint.
+The execution and local command budget are checked again immediately before spawning, so cancellation
+or expiry during that checkpoint cannot start a helper. WinRM preparation, stability probes, and
+reconnects use one positive-remainder guard; an exhausted budget is never clamped to a 1-ms command.
 
 ### Transport recovery and failure evidence
 
@@ -146,7 +152,9 @@ helper with delays of **2, 4, 8, and 16 seconds**, at most five calls, inside a 
 operational budget that includes time already spent executing probes. Process teardown remains
 mandatory on expiry. Cleanup uses this reconnect path, never another 12-minute allocation window.
 Mutating guest actions and upload streams are never replayed.
-Reconnect and readiness/RDP/allocation polls reject success at or after their local deadline.
+Reconnect and readiness/RDP/allocation polls reject both successful and rejected observations at or
+after their local deadline. An in-budget rejection keeps its original classification; a late rejection
+reports controller expiry rather than whichever error the action happened to throw.
 Admission persists the actual stability sample count and duration before the phase checkpoint;
 a resumed admission reuses those observations only after reconnect. A legacy boolean marker
 without observations must re-observe the stability window within the original allocation budget.
@@ -297,16 +305,22 @@ Provider reads retry a transient 5xx. A lookup that answers missing, or a Vultr 
 array, is final only when a second read five seconds later agrees: on 2026-09-29 one listing did so
 while the lane polled for allocation, failing an attempt whose VM was still booting.
 A stable interrupted attempt is reconciled, never blindly replayed; start a fresh epoch
-afterwards. For development only, a code failure after guest access retains the VM for immediate
-repair: rerunning `run` resumes only read-only phases and skips completed phases. Any unsettled
+afterwards. For an initial development attempt only, a typed Windows `product`/`assertion_failed`
+failure with a known operation disposition after guest access may retain the VM for immediate
+repair inside its three-hour lease. Infrastructure/transient failures, authentication refusals,
+harness or unknown errors, unknown operation dispositions, and controller/probe expiry always enter
+containment; diagnostic text cannot authorize retention. Rerunning `run` resumes only read-only
+phases and skips completed phases. Any unsettled
 mutating phase refuses resume regardless of completed upload claims. `cleanup` is explicit
 after an abandoned attempt.
 Outer cancellation or deadline always runs containment, including development mode; only
 repairable code failures on an initial development attempt may retain the guest. Once retained
 progress is accepted, every failing re-entry—including mutation refusal and preflight failure—
 uses independent containment. That cleanup owner exists before preflight and receives a fresh
-cleanup deadline when containment begins. FreeRDP ownership covers stdin write/end as
-well as readiness observation: every failure terminates and awaits the child.
+cleanup deadline when containment begins. The runtime switches to that cleanup owner for provider,
+guest, helper, tailnet, and Pixel dispatch instead of capturing the failed primary's cancellation.
+FreeRDP ownership covers stdin write/end as well as readiness observation: cancellation is armed
+before input, and every failure terminates and awaits the child.
 Failed phase resumes are counted in evidence; repair time is not called successful phase time.
 Development resume is refused after three hours, and every VM must be destroyed within four
 hours of creation. The current development campaign permits six total VM creations, one at a

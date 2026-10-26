@@ -81,12 +81,30 @@ const nonProviderFetches: Readonly<Record<string, readonly string[]>> = {
   "test-visual.ts": ['new URL("/percy/healthcheck"', 'new URL("/test/logs"'],
 };
 
+/** Only these Windows callbacks may put a synchronous ownership guard before a provider fetch. */
+function reviewedWindowsGuardedFetch(rel: string, text: string, before: string, target: string | undefined, after: string): boolean {
+  if (rel !== "scripts/windows-qualification-runtime.ts") return false;
+  if (target === "url") {
+    const send = /const send = (\(\)|\(readSignal: AbortSignal = signal\)) => \{\s*assertWindowsExecution\(execution\);\s*(if \(deadline !== undefined\) windowsRemaining\(started, deadline, performance\.now\(\), execution, "not_started"\);\s*)?return\s*$/u.exec(before);
+    if (!send || (send[1] === "()" && send[2] === undefined) || !/^,\s*\{\s*method,\s*headers:/u.test(after)) return false;
+    return text.includes('const response = method === "GET" ? await readProvider(send) : await send();') ||
+      text.includes('const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();');
+  }
+  if (target !== '"https://api.ipify.org"') return false;
+  const callback = /readProvider\(\s*(\(\)|\(signal\))\s*=>\s*\{\s*assertWindowsExecution\(execution\);\s*return\s*$/u.exec(before);
+  if (!callback) return false;
+  return callback[1] === "()"
+    ? /^,\s*\{\s*signal:\s*AbortSignal\.timeout\(15_000\)\s*\}\s*\);\s*\}\s*\)/u.test(after)
+    : /^,\s*\{\s*signal:\s*AbortSignal\.any\(\[signal,\s*AbortSignal\.timeout\(15_000\)\]\)\s*\}\s*\);\s*\}\s*\)/u.test(after);
+}
+
 export function checkProviderReads(rel: string, text: string): string[] {
   if (!/^scripts\/.+\.ts$/u.test(rel) || rel.endsWith(".test.ts")) return [];
   const failures: string[] = [];
   for (const match of text.matchAll(/\b(?:globalThis\.)?fetch\s*\(\s*([^,\n]+)/gu)) {
     const target = match[1]?.trim().replace(/\);$/u, "");
     const before = text.slice(0, match.index);
+    if (reviewedWindowsGuardedFetch(rel, text, before, target, text.slice(match.index! + match[0].length))) continue;
     if (rel === "scripts/browserstack.ts" && target === '`${API}/sessions/${sessionId}.json`') {
       const after = text.slice(match.index! + match[0].length);
       if (!/readProvider\(\s*\(\)\s*=>\s*$/u.test(before) && /^,\s*\{\s*method:\s*"DELETE"/u.test(after)) continue;
