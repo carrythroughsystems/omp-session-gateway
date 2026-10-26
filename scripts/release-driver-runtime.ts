@@ -10,7 +10,7 @@ import { assertReleaseTagState } from "./release-tag-state.ts";
 import { releaseAssetNames, verifyReleaseSignatures } from "./post-release-smoke.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
 import { compareReleaseArchives } from "./release-runtime-compare.ts";
-import { assertCampaignRetryEligible, assertDeviceCloudResumeEligible, externalCleanupCurrent, validateStableQualificationReceipt, type StableQualificationLaneModules, type StableQualificationReceipt } from "./stable-qualification.ts";
+import { assertCampaignCleanupComplete, assertCampaignRetryEligible, assertDeviceCloudResumeEligible, externalCleanupCurrent, validateStableQualificationReceipt, type StableQualificationLaneModules, type StableQualificationReceipt } from "./stable-qualification.ts";
 import { defaultLaneModules } from "./stable-lanes.ts";
 import { clearReleaseHostLease } from "./release-host-lease.ts";
 import { parseDeviceCloudMachineOutcome, readDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
@@ -455,7 +455,10 @@ export class StudioDriver implements DriverPort {
       const bytes = await readFile(path);
       if (createHash("sha256").update(bytes).digest("hex") !== outcome.receipt.sha256) throw new Error("completed campaign receipt changed");
       const receipt = validateStableQualificationReceipt(JSON.parse(bytes.toString()), state.candidate, state.candidateCommit!, state.previousStable!);
-      if (qualificationOutcomeExitCode(outcome, expected) === 75) restartLanes = this.campaignRetryLanes(receipt, state);
+      if (qualificationOutcomeExitCode(outcome, expected) === 75) {
+        if (expected.campaignAttempt === 2) this.campaignCleanupComplete(receipt, state);
+        else restartLanes = this.campaignRetryLanes(receipt, state);
+      }
       if (JSON.stringify(receipt.failureSummary) !== JSON.stringify(outcome.failureSummary)) throw new Error("campaign outcome differs from its receipt");
       files.set("failed-qualification.json", bytes);
     }
@@ -465,6 +468,9 @@ export class StudioDriver implements DriverPort {
   }
   campaignRetryLanes(receipt: StableQualificationReceipt, state: DriverState): CampaignFailureObservation["restartLanes"] {
     return assertCampaignRetryEligible(receipt, campaignExecution(state));
+  }
+  campaignCleanupComplete(receipt: StableQualificationReceipt, state: DriverState): void {
+    assertCampaignCleanupComplete(receipt, campaignExecution(state));
   }
   /** Revalidation is used for both scheduling and unclaimed-launch replay; it never clears a lease. */
   async validateCampaignRetry(state: DriverState): Promise<void> {
@@ -519,8 +525,15 @@ export class StudioDriver implements DriverPort {
       if (await this.campaignWorkerRunning({ ...state, campaignAttempt: attempt })) throw new Error("a candidate campaign worker is still active");
     }
     const bytes = await readFile(this.receipt(state), "utf8");
-    assertFailedCampaignCleanup(bound, JSON.parse(bytes));
-    return createHash("sha256").update(bytes).digest("hex");
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    if (bound.qualificationExecution === undefined) assertFailedCampaignCleanup(bound, JSON.parse(bytes));
+    else {
+      if (await this.anyCampaignWorkerRunning(state)) throw new Error("a candidate campaign worker is still active");
+      const failure = await this.completedCampaignFailure(bound);
+      if (failure.outcome.receipt?.sha256 !== digest) throw new Error("failed campaign receipt changed before retirement");
+      this.campaignCleanupComplete(JSON.parse(bytes), bound);
+    }
+    return digest;
   }
   async recoverFailedCampaign(state: DriverState): Promise<void> {
     const owner = await this.releaseHostOwner();

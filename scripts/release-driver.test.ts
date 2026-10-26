@@ -68,7 +68,7 @@ test("routine controls normalize generated versions but retain policy and depend
 import { assertFailedCampaignCleanup, botEnvironment, campaignAvailabilityObservation, campaignWorkerArguments, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
 import { applyDecisionPatch, campaignAttempt, campaignExecution, parseCampaignRetryPlan, compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, parseCampaignInfrastructureHold, REPOSITORY, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
 import type { CampaignFailureObservation, CampaignInfrastructureHold, Decision, DriverPort, DriverState, JobObservation, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
-import { assertCampaignRetryEligible, createStableQualificationReceipt } from "./stable-qualification.ts";
+import { assertCampaignCleanupComplete, assertCampaignRetryEligible, createStableQualificationReceipt } from "./stable-qualification.ts";
 import type { ExternalLaneModule, StableQualificationLaneModules, StableQualificationReceipt } from "./stable-qualification.ts";
 import { readDeviceCloudOutcomeFile, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
 import { writeQualificationOutcomeFile } from "./qualification-outcome.ts";
@@ -808,6 +808,9 @@ class AutomaticRuntime extends StudioDriver {
   override campaignRetryLanes(receipt: StableQualificationReceipt, selected: DriverState) {
     return assertCampaignRetryEligible(receipt, campaignExecution(selected), retryReceiptModules);
   }
+  override campaignCleanupComplete(receipt: StableQualificationReceipt, selected: DriverState) {
+    assertCampaignCleanupComplete(receipt, campaignExecution(selected), retryReceiptModules);
+  }
   override async api<T>(path: string): Promise<T | undefined> {
     const current = this.current;
     return (path === "commits/main" ? { sha: current.candidateCommit }
@@ -864,6 +867,7 @@ describe("automatic retry runtime revalidation", () => {
       for (const [name, bytes] of old) expect(await readFile(join(directory, name), "utf8")).toBe(bytes);
       if (receipt !== undefined) {
         expect(await readFile(runtime.receiptPath, "utf8")).toBe(JSON.stringify(receipt) + "\n");
+        expect(await runtime.failedCampaignCleanup(runtime.current)).toBe(next.retryPlan!.outcome.receipt!.sha256);
         expect(next.retryPlan?.restartLanes).toContain("windows");
         for (const name of ["debian", "macos", "android", "androidPush", "relay", "deviceCloud", "ompPublication"] as const) {
           expect(next.retryPlan?.restartLanes).not.toContain(name);
