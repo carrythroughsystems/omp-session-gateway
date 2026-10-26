@@ -17,6 +17,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
   Recovery binds opaque qualification aliases to the exact fixture ask before mutation. Bracketed log
   reads, committed rotation boundaries, durable local retention and sticky search-permission failures
   preserve evidence; bounded nested Android operations retain late-created targets and readiness late posts.
+  An in-directory writer lease rejects unclosed histories even when failure writes are impossible.
+  Unproven CDP target/forward cleanup blocks Pixel release; task restoration cannot reopen CDP.
+  Re-arm rechecks generation before mutation, metadata timeouts retain late sampling, and post-evidence
+  deadline checks plus bounded integer phase durations prevent stale delivery success.
 - Closed qualification failure and machine-outcome contracts, POSIX-only private atomic outcome persistence,
   and additive schema-3 receipt validation, including paired private readiness owner epochs and
   closed phases. Complete owner-bound failure graphs, effects-free preflight boundaries and

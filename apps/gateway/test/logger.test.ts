@@ -27,7 +27,10 @@ test.skipIf(process.platform === "win32")("qualification sink rotates four priva
       expect(readFileSync(join(dir, name), "utf8")).not.toContain("SYNTHETIC-SECRET");
     }
     expect(sink.healthy).toBe(true);
-    expect(new QualificationLogSink(dir).healthy).toBe(true);
+    sink.close();
+    const restarted = new QualificationLogSink(dir);
+    expect(restarted.healthy).toBe(true);
+    restarted.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -47,7 +50,7 @@ test.skipIf(process.platform === "win32")("qualification sink refuses unsafe des
     expect(sink.healthy).toBe(false);
     rmSync(join(root, "events.0.jsonl"));
     expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
-  } finally { rmSync(`${root}-link`, { force: true }); rmSync(`${root}.unhealthy`, { force: true }); rmSync(root, { recursive: true, force: true }); }
+  } finally { rmSync(`${root}-link`, { force: true }); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("coalesces repetitive denial events into a bounded log rate", () => {
@@ -79,19 +82,22 @@ test.skipIf(process.platform === "win32")("R1 write-ahead health survives a dire
     expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
     chmodSync(dir, 0o700);
     expect(() => new QualificationLogSink(dir)).toThrow();
-  } finally { chmodSync(dir, 0o700); rmSync(`${dir}.unhealthy`, { force: true }); rmSync(dir, { recursive: true, force: true }); }
+  } finally { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test.skipIf(process.platform === "win32")("U1 restart validates every rotated event and all rate-limited IPC events remain safe", async () => {
   const dir = mkdtempSync(join(realpathSync(tmpdir()), "health-vocabulary-")); chmodSync(dir, 0o700);
   try {
     let now = 0;
-    const logger = new SafeLogger(new QualificationLogSink(dir), () => now);
+    const sink = new QualificationLogSink(dir), logger = new SafeLogger(sink, () => now);
     for (const event of ["ipc.protocol_rejected", "ipc.authentication_denied", "ipc.connection_timeout", "ipc.connection_error"]) {
       logger.event("warn", event); logger.event("warn", event); now += 60_000; logger.event("warn", event);
     }
     await Promise.resolve();
-    expect(new QualificationLogSink(dir).healthy).toBe(true);
+    sink.close();
+    const restarted = new QualificationLogSink(dir);
+    expect(restarted.healthy).toBe(true);
+    restarted.close();
     writeFileSync(join(dir, "events.1.jsonl"), '{"payload":"SYNTHETIC-SECRET"}\n', { mode: 0o600 });
     expect(() => new QualificationLogSink(dir)).toThrow();
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -100,13 +106,16 @@ test.skipIf(process.platform === "win32")("U1 restart validates every rotated ev
 test.skipIf(process.platform === "win32")("coalesces a synchronous burst behind durable unhealthy state until its commit", async () => {
   const dir = mkdtempSync(join(realpathSync(tmpdir()), "health-batch-")); chmodSync(dir, 0o700);
   try {
-    const sink = new QualificationLogSink(dir), logger = new SafeLogger(sink);
+    let sink = new QualificationLogSink(dir), logger = new SafeLogger(sink);
     for (let index = 0; index < 100; index++) logger.event("info", "http.listening", { port: 4317 });
     expect(readFileSync(join(dir, "health"), "utf8")).toBe("!");
     expect(() => new QualificationLogSink(dir)).toThrow();
     await Promise.resolve();
     expect(readFileSync(join(dir, "health"), "utf8")).toBe("[100,1]\n");
-    expect(new QualificationLogSink(dir).healthy).toBe(true);
+    expect(() => new QualificationLogSink(dir)).toThrow("not closed");
+    sink.close();
+    sink = new QualificationLogSink(dir); logger = new SafeLogger(sink);
+    expect(sink.nextIndex).toBe(101);
     logger.event("info", "http.listening", { port: 4317 });
     chmodSync(dir, 0o500);
     expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
@@ -115,7 +124,7 @@ test.skipIf(process.platform === "win32")("coalesces a synchronous burst behind 
     expect(sink.healthy).toBe(false);
     expect(readFileSync(join(dir, "health"), "utf8")).toBe("!");
     expect(() => new QualificationLogSink(dir)).toThrow();
-  } finally { chmodSync(dir, 0o700); rmSync(`${dir}.unhealthy`, { force: true }); rmSync(dir, { recursive: true, force: true }); }
+  } finally { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("does not suppress distinct lifecycle information", () => {
@@ -139,13 +148,30 @@ test.skipIf(process.platform === "win32")("R2 search-permission loss cannot resu
   } finally { chmodSync(dir, 0o700); rmSync(root, { recursive: true, force: true }); }
 });
 
+test.skipIf(process.platform === "win32")("495 R1 restart fails closed when every failure-marker write is denied", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "health-no-writes-")); chmodSync(root, 0o700);
+  const dir = mkdtempSync(join(root, "logs-")); chmodSync(dir, 0o700);
+  try {
+    const sink = new QualificationLogSink(dir), logger = new SafeLogger(sink);
+    logger.event("info", "http.listening", { port: 4317 }); await Promise.resolve();
+    chmodSync(root, 0o500); chmodSync(dir, 0);
+    expect(() => logger.event("info", "http.listening", { port: 4317 })).toThrow();
+    expect(sink.healthy).toBe(false);
+    chmodSync(root, 0o700); chmodSync(dir, 0o700);
+    expect(() => sink.close()).toThrow();
+    expect(readFileSync(join(dir, "writer"), "utf8")).toBe("active\n");
+    expect(() => new QualificationLogSink(dir)).toThrow();
+  } finally { chmodSync(root, 0o700); chmodSync(dir, 0o700); rmSync(root, { recursive: true, force: true }); }
+});
+
 test.skipIf(process.platform === "win32").each(["missing-first", "truncated-first", "missing-rotated"] as const)(
   "R2 restart refuses lost retained history: %s", async variant => {
     const dir = mkdtempSync(join(realpathSync(tmpdir()), "health-retention-")); chmodSync(dir, 0o700);
     try {
-      const logger = new SafeLogger(new QualificationLogSink(dir));
+      const sink = new QualificationLogSink(dir), logger = new SafeLogger(sink);
       for (let index = 0; index < (variant === "missing-rotated" ? 12_000 : 3); index++) logger.event("info", "http.listening", { port: 4317 });
       await Promise.resolve();
+      sink.close();
       if (variant === "missing-rotated") rmSync(join(dir, "events.3.jsonl"));
       else {
         const path = join(dir, "events.0.jsonl");

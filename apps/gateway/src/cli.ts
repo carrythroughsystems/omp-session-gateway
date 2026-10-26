@@ -257,6 +257,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
         await pushService.stop();
       }
     }
+    sink?.close();
   }
 }
 

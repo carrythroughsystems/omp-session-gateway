@@ -90,7 +90,7 @@ export function assertQualificationLogDirectory(directory: string): void {
   }
 }
 
-/** Service restarts preserve the sequence; an unhealthy prior writer cannot erase its failure. */
+/** Only graceful writer closure permits restart; failed writes cannot erase the active lease. */
 export class QualificationLogSink implements LogSink {
   readonly #directory: string;
   #healthy = true;
@@ -98,39 +98,47 @@ export class QualificationLogSink implements LogSink {
   #firstIndex = 1;
   #pending = false;
   #rotated = false;
+  #closed = false;
   constructor(directory: string) {
     assertQualificationLogDirectory(directory);
     this.#directory = directory;
-    try { lstatSync(`${directory}.unhealthy`); throw new Error("qualification logging previously failed"); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     const names = readdirSync(directory);
     if (names.length > 0) {
-      if (!names.includes("health") || !names.includes("events.0.jsonl") ||
-        names.some(name => name !== "health" && !/^events\.[0-3]\.jsonl$/u.test(name))) throw new Error("qualification logging was interrupted");
+      if (!names.includes("health") || !names.includes("writer") || !names.includes("events.0.jsonl") ||
+        names.some(name => name !== "health" && name !== "writer" && !/^events\.[0-3]\.jsonl$/u.test(name))) throw new Error("qualification logging was interrupted");
       for (const name of names) {
         const path = join(directory, name), stat = lstatSync(path);
         if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid!() || stat.nlink !== 1 ||
-          (stat.mode & 0o777) !== 0o600 || stat.size > QUALIFICATION_LOG_BYTES || name === "health" && stat.size > 64) throw new Error("unsafe qualification log file");
+          (stat.mode & 0o777) !== 0o600 || stat.size > QUALIFICATION_LOG_BYTES ||
+          ["health", "writer"].includes(name) && stat.size > 64) throw new Error("unsafe qualification log file");
       }
-      const files = names.filter(name => name !== "health").sort();
+      if (readFileSync(join(directory, "writer"), "utf8") !== "closed\n") throw new Error("qualification writer was not closed");
+      const files = names.filter(name => name.startsWith("events.")).sort();
       if (files.some((name, index) => name !== `events.${index}.jsonl`)) throw new Error("qualification rotation gap");
       const [committed, first] = parseQualificationLogHealth(readFileSync(join(directory, "health"), "utf8"));
       const events = parseQualificationLogFiles(files.reverse().map(name => readFileSync(join(directory, name), "utf8")), first);
       this.#index = events.at(-1)?.index ?? 0;
       this.#firstIndex = first;
       if (committed !== this.#index) throw new Error("qualification logging was interrupted");
+      this.#state("active\n", "writer");
       return;
     }
-    for (const name of ["events.0.jsonl", "health"]) {
+    for (const name of ["events.0.jsonl", "health", "writer"]) {
       const fd = openSync(join(directory, name), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      try { if (name === "health") writeSync(fd, "[0,1]\n"); fsyncSync(fd); } finally { closeSync(fd); }
+      try {
+        if (name !== "events.0.jsonl") {
+          const value = name === "health" ? "[0,1]\n" : "active\n";
+          if (writeSync(fd, value) !== Buffer.byteLength(value)) throw new Error("qualification state write failed");
+        }
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
     }
     this.#syncDirectory();
   }
-  #state(value: string): void {
+  #state(value: string, name: "health" | "writer" = "health"): void {
     // Overwrite the existing private inode, not a directory entry: even lost directory-write
     // permission cannot preserve an old success marker across a failed event.
-    const fd = openSync(join(this.#directory, "health"), constants.O_WRONLY | constants.O_NOFOLLOW);
+    const fd = openSync(join(this.#directory, name), constants.O_WRONLY | constants.O_NOFOLLOW);
     try {
       const stat = fstatSync(fd);
       if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o600) throw new Error("unsafe qualification health");
@@ -153,15 +161,9 @@ export class QualificationLogSink implements LogSink {
   }
   #fail(): void {
     this.#healthy = false;
-    try { this.#state("!"); } catch { /* Never repair missing or inaccessible failure evidence. */ }
-    // Search permission on the log directory may itself be gone. A sibling marker does not
-    // depend on traversing that directory, and restoration must never erase this evidence.
-    try {
-      const fd = openSync(`${this.#directory}.unhealthy`, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      try { writeSync(fd, "!"); fsyncSync(fd); } finally { closeSync(fd); }
-      const parent = openSync(dirname(this.#directory), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-      try { fsyncSync(parent); } finally { closeSync(parent); }
-    } catch { /* Failure remains sticky in this writer; never replace an existing marker. */ }
+    // The durable active lease already prevents restart/final retention if this write also
+    // fails. It lives inside the service's accepted writable directory, not beside it.
+    try { this.#state("!"); } catch { /* Active lease remains unverifiable until explicit reset. */ }
   }
   #commit(): void {
     if (!this.#healthy || !this.#pending) return;
@@ -175,11 +177,22 @@ export class QualificationLogSink implements LogSink {
   }
   get healthy(): boolean { return this.#healthy; }
   get nextIndex(): number {
-    if (!this.#healthy || !Number.isSafeInteger(this.#index + 1)) throw new Error("qualification logging failed");
+    if (!this.#healthy || this.#closed || !Number.isSafeInteger(this.#index + 1)) throw new Error("qualification logging failed");
     return this.#index + 1;
   }
-  write(line: string): void {
+  /** Called only after every event producer stops; failed closure never releases the lease. */
+  close(): void {
+    if (this.#closed) return;
+    this.#commit();
+    if (this.#healthy) {
+      try { this.#state("closed\n", "writer"); }
+      catch { this.#fail(); }
+    }
+    this.#closed = true;
     if (!this.#healthy) throw new Error("qualification logging failed");
+  }
+  write(line: string): void {
+    if (!this.#healthy || this.#closed) throw new Error("qualification logging failed");
     try {
       if (!this.#pending) {
         // One durable unhealthy transition covers the entire synchronous burst.

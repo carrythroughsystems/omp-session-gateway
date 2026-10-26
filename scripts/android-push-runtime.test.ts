@@ -1,8 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
-import { runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
-import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDeliveryRequest, qualificationPushAliasFor } from "./android-push-runtime.ts";
+import { AndroidBrowserCleanupError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
+import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { checkProviderReads } from "./check-repository.ts";
+import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qualification.ts";
+import { normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
 
 test("only the exact owned DevTools probe is classified as a non-provider fetch", () => {
@@ -159,7 +161,44 @@ test("R3 rejecting ADB streams cannot finish cancellation before the child exits
   expect(prematurelyDone).toBe(false);
 });
 
-for (const scenario of ["abort-attach", "deadline-open", "abort-create", "close-refused", "forward-cancel", "constructor-throws"] as const) test(`R2 CDP cleanup retains ownership through ${scenario}`, async () => {
+test("495 R2 task restoration cannot reopen a CDP connection after browser containment", async () => {
+  const calls: string[][] = [];
+  const stream = (text: string) => new ReadableStream<Uint8Array>({ start(value) { value.enqueue(new TextEncoder().encode(text)); value.close(); } });
+  const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+    calls.push(argv);
+    const text = argv.includes("devices") ? "List of devices attached\nsynthetic device\n" :
+      argv.includes("packages") ? "package:org.chromium.webapk.synthetic\n" : argv.includes("dumpsys") ? 'Authority: "synthetic.example.test": -1' : "";
+    return { stdout: stream(text), stderr: stream(""), exited: Promise.resolve(0), kill() {} };
+  }) as typeof Bun.spawn);
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    const device: PushDeviceBaseline = { wifi: true, mobile: true, airplane: false, forcedDoze: false, batteryOverride: false,
+      awake: false, locked: true, webApkTask: true, chromeNotificationsAllowed: true, webApkNotificationsAllowed: true };
+    runtime.beforeEffect = async () => {};
+    runtime.device = async () => device;
+    runtime.lock = async () => {};
+    runtime.openPwa = async () => { throw new Error("CDP reopened after browser restoration"); };
+    await runtime.cleanup("task", { device } as AndroidPushProgress);
+    expect(calls.some(argv => argv.includes("monkey"))).toBe(true);
+    expect(calls.some(argv => argv.includes("forward"))).toBe(false);
+  } finally { spawn.mockRestore(); }
+});
+
+test("495 R2 browser cleanup has a harness root and causally bound containment collateral", () => {
+  let id = 0;
+  const error = pushBrowserCleanupFailure(new AndroidBrowserCleanupError([], 1), () => ++id);
+  const failures = parseLaneFailures(normalizeQualificationFailures(error));
+  expect(failures).toHaveLength(2);
+  expect(failures[0]).toMatchObject({ id: 1, lane: "androidPushCleanup", step: "browser", class: "harness",
+    reason: "containment_unproven", observations: { remainingResources: 1, cleanupVerified: false } });
+  expect(failures[1]).toMatchObject({ class: "collateral", step: "containment", originIds: [1] });
+  expect(qualificationRetryEligible({ failures, timings: { attemptMs: 0, cleanupMs: 0 },
+    containment: { proven: false, cleanupComplete: false, unresolvedMutation: true } }, true)).toBe(false);
+  expect(error).toMatchObject({ pixelUnrestored: true });
+});
+
+for (const scenario of ["abort-attach", "deadline-open", "abort-create", "close-refused", "forward-cancel", "constructor-throws",
+  "495-forward-remove", "495-acquisition-remove", "495-abort-create-unacknowledged", "495-create-timeout"] as const) test(`R2 CDP cleanup retains ownership through ${scenario}`, async () => {
   const controller = new AbortController(), calls: string[] = [];
   const stream = (text: string) => new ReadableStream<Uint8Array>({ start(value) { value.enqueue(new TextEncoder().encode(text)); value.close(); } });
   const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
@@ -167,7 +206,7 @@ for (const scenario of ["abort-attach", "deadline-open", "abort-create", "close-
     if (scenario === "forward-cancel" && argv.includes("forward") && !argv.includes("--remove")) controller.abort();
     return {
     stdout: stream(argv.includes("devices") ? "List of devices attached\nsynthetic device\n" : argv.includes("package") ? "versionName=153.0.0.0" : ""),
-    stderr: stream(""), exited: Promise.resolve(0), kill() {},
+    stderr: stream(""), exited: Promise.resolve(argv.includes("--remove") && ["495-forward-remove", "495-acquisition-remove"].includes(scenario) ? 1 : 0), kill() {},
   }; }) as typeof Bun.spawn);
   const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
     "Android-Package": "com.android.chrome", Browser: "Chrome/153.0.0.0", webSocketDebuggerUrl: "ws://127.0.0.1:9238/devtools/browser/synthetic",
@@ -176,7 +215,7 @@ for (const scenario of ["abort-attach", "deadline-open", "abort-create", "close-
   class Socket {
     onmessage?: (event: { data: string }) => void; onopen?: () => void; onerror?: () => void;
     constructor() {
-      if (scenario === "constructor-throws") throw new Error("synthetic socket construction failure");
+      if (scenario === "constructor-throws" || scenario === "495-acquisition-remove") throw new Error("synthetic socket construction failure");
       if (scenario !== "deadline-open") queueMicrotask(() => this.onopen?.());
     }
     close() { calls.push("socket.close"); }
@@ -188,6 +227,13 @@ for (const scenario of ["abort-attach", "deadline-open", "abort-create", "close-
         setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: { targetId: "late-owned-tab" } }) }), 10);
         return;
       }
+      if (message.method === "Target.createTarget" && ["495-abort-create-unacknowledged", "495-create-timeout"].includes(scenario)) {
+        if (scenario === "495-abort-create-unacknowledged") {
+          controller.abort();
+          nativeTimeout(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: { targetId: "after-grace-tab" } }) }), 15);
+        }
+        return;
+      }
       const result = message.method === "Browser.getVersion" ? { product: "Chrome/153.0.0.0" } :
         message.method === "Target.createTarget" ? { targetId: "owned-tab" } :
         message.method === "Target.closeTarget" ? { success: scenario !== "close-refused" || calls.filter(call => call === "Target.closeTarget").length > 1 } : {};
@@ -195,13 +241,19 @@ for (const scenario of ["abort-attach", "deadline-open", "abort-create", "close-
     }
   }
   globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  const nativeTimeout = globalThis.setTimeout;
+  const timers = scenario.includes("495-") ? spyOn(globalThis, "setTimeout").mockImplementation(((callback: TimerHandler, milliseconds?: number, ...args: unknown[]) =>
+    nativeTimeout(callback, milliseconds !== undefined && milliseconds >= 10_000 ? 5 : milliseconds, ...args)) as typeof setTimeout) : undefined;
   const started = performance.now();
   try {
-    await expect(withAndroidChrome(async driver => { await driver.openTab(); await driver.closeTab(); throw new Error("synthetic completion"); }, { port: 9238, launchBrowser: false,
-      execution: { signal: controller.signal, deadline: started + 100 } })).rejects.toThrow();
+    const result = withAndroidChrome(async driver => { await driver.openTab(); await driver.closeTab(); throw new Error("synthetic completion"); }, { port: 9238, launchBrowser: false,
+      execution: { signal: controller.signal, deadline: started + 100 } });
+    if (scenario.startsWith("495-")) await expect(result).rejects.toMatchObject({ pixelUnrestored: true, remainingResources: 1 });
+    else await expect(result).rejects.toThrow();
     if (scenario === "abort-attach" || scenario === "abort-create") expect(calls).toContain("Target.closeTarget");
     if (scenario === "close-refused") expect(calls.filter(call => call === "Target.closeTarget")).toHaveLength(2);
     expect(calls).toContain("forward.remove");
+    if (scenario === "495-abort-create-unacknowledged") await Bun.sleep(20);
     expect(performance.now() - started).toBeLessThan(1_000);
-  } finally { globalThis.WebSocket = realSocket; fetchMock.mockRestore(); spawn.mockRestore(); }
+  } finally { timers?.mockRestore(); globalThis.WebSocket = realSocket; fetchMock.mockRestore(); spawn.mockRestore(); }
 }, 12_000);
