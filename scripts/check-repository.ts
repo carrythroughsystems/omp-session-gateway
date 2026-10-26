@@ -114,9 +114,22 @@ export function checkProviderReads(rel: string, text: string): string[] {
 interface SourceToken {
   value: string;
   line: number;
+  literal?: string;
 }
 
-function* sourceTokens(source: string): Generator<SourceToken> {
+function decodeSourceLiteral(raw: string): string {
+  return raw.replace(/\\(?:\r\n|[\n\r\u2028\u2029]|u\{[a-f0-9]+\}|u[a-f0-9]{4}|x[a-f0-9]{2}|.)/giu, escaped => {
+    const value = escaped.slice(1);
+    if (/^[\n\r\u2028\u2029]/u.test(value)) return "";
+    if (/^[ux]/u.test(value)) {
+      const code = Number.parseInt(value.startsWith("u{") ? value.slice(2, -1) : value.slice(1), 16);
+      return Number.isFinite(code) && code <= 0x10ffff ? String.fromCodePoint(code) : escaped;
+    }
+    return ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", "0": "\0" } as Record<string, string>)[value] ?? value;
+  });
+}
+
+function* sourceTokens(source: string, retainLiterals = false): Generator<SourceToken> {
   let offset = 0;
   let line = 1;
   const advance = (): string => {
@@ -158,22 +171,29 @@ function* sourceTokens(source: string): Generator<SourceToken> {
       }
       const tokenLine = line;
       let value: string;
+      let literal: string | undefined;
       if (char === "'" || char === '"') {
+        const start = offset;
         quoted(char);
+        if (retainLiterals) literal = decodeSourceLiteral(source.slice(start + 1, offset - 1));
         value = "<literal>";
       } else if (char === "\x60") {
         advance();
-        yield { value: "<literal>", line: tokenLine };
+        const start = offset;
+        let interpolated = false;
         while (offset < source.length) {
           const templateChar = advance();
           if (templateChar === "\\") advance();
           else if (templateChar === "\x60") break;
           else if (templateChar === "$" && source[offset] === "{") {
+            if (!interpolated) yield { value: "<literal>", line: tokenLine };
+            interpolated = true;
             advance();
             yield { value: "{", line };
             yield* code(true);
           }
         }
+        if (retainLiterals && !interpolated) literal = decodeSourceLiteral(source.slice(start, offset - 1));
         value = "<literal>";
       } else if (char === "/" && regexAllowed) {
         advance();
@@ -196,7 +216,7 @@ function* sourceTokens(source: string): Generator<SourceToken> {
         value = advance();
         if (["=>", "?.", "++", "--", "&&", "||", "??"].includes(value + (source[offset] ?? ""))) value += advance();
       }
-      yield { value, line: tokenLine };
+      yield { value, line: tokenLine, ...(literal === undefined ? {} : { literal }) };
       if (value === "{") depth++;
       if (value === "}" && depth-- === 0 && interpolation) return;
       if (value === "(") controlParens.push(/^(?:if|while|for|with|switch|catch)$/u.test(previous));
@@ -265,6 +285,63 @@ export function checkDocumentTimers(relativePath: string, source: string): strin
   return violations;
 }
 
+/** Network completion is not application readiness. Keep HTTP-contract assertions explicit. */
+export function checkE2EReadiness(relativePath: string, source: string): string[] {
+  if (!/^apps\/web\/e2e\/.+\.ts$/u.test(relativePath)) return [];
+  const tokens = [...sourceTokens(source, true)];
+  const violations: string[] = [];
+  const callEnd = (open: number): number => {
+    let depth = 0;
+    for (let index = open; index < tokens.length; index++) {
+      if (tokens[index]?.value === "(") depth++;
+      else if (tokens[index]?.value === ")" && --depth === 0) return index;
+    }
+    return tokens.length;
+  };
+  for (const [index, token] of tokens.entries()) {
+    const previous = tokens[index - 1]?.value ?? "";
+    let member: string | undefined;
+    let after = index + 1;
+    if (previous === "." || previous === "?.") member = token.value;
+    if (token.value === "[" && tokens[index + 1]?.literal !== undefined && tokens[index + 2]?.value === "]" &&
+      /^(?:[$\p{ID_Continue}]+|[)\]]|\?\.)$/u.test(previous)) {
+      member = tokens[index + 1]?.literal;
+      after = index + 3;
+    }
+    if (member === "finished") {
+      violations.push(`${relativePath}:${token.line}: response completion access is not e2e readiness; observe application state`);
+      continue;
+    }
+    if (tokens[after]?.value === "?.") after++;
+    if (tokens[after]?.value !== "(") continue;
+    const end = callEnd(after);
+    const arguments_ = tokens.slice(after + 1, end);
+    if (["waitForEvent", "on", "once", "addListener"].includes(member ?? "") && arguments_[0]?.literal === "requestfinished") {
+      violations.push(`${relativePath}:${token.line}: request-finished events are not e2e readiness; observe application state`);
+    } else if (["goto", "reload", "goBack", "goForward", "waitForNavigation", "waitForLoadState"].includes(member ?? "") &&
+      arguments_.some(argument => argument.literal === "networkidle")) {
+      violations.push(`${relativePath}:${token.line}: networkidle is not e2e readiness; observe application state`);
+    } else if (member === "waitForResponse") {
+      let variable: string | undefined;
+      for (let cursor = index - 1; cursor >= 0 && ![";", "{", "}"].includes(tokens[cursor]?.value ?? ""); cursor--) {
+        if (tokens[cursor]?.value === "=") { variable = tokens[cursor - 1]?.value; break; }
+      }
+      let asserted = false;
+      for (let cursor = end + 1; variable !== undefined && cursor < tokens.length; cursor++) {
+        if (tokens[cursor]?.value !== "expect" || tokens[cursor + 1]?.value !== "(") continue;
+        const close = callEnd(cursor + 1);
+        if (tokens[close + 1]?.value !== "." || !tokens[close + 2]?.value.startsWith("to")) continue;
+        const assertion = tokens.slice(cursor + 2, close);
+        asserted ||= assertion.some((value, position) => value.value === variable &&
+          [".", "?."].includes(assertion[position + 1]?.value ?? "") &&
+          ["status", "ok", "headers", "headerValue", "json", "body", "text"].includes(assertion[position + 2]?.value ?? ""));
+      }
+      if (!asserted) violations.push(`${relativePath}:${token.line}: waitForResponse requires an explicit HTTP-contract assertion, not UI readiness`);
+    }
+  }
+  return violations;
+}
+
 async function main(): Promise<void> {
   const errors: string[] = [];
   for (const rel of required) {
@@ -285,6 +362,7 @@ async function main(): Promise<void> {
     errors.push(...checkProviderReads(rel, text));
     errors.push(...checkUnsafeFinally(rel, text));
     errors.push(...checkDocumentTimers(rel, text));
+    errors.push(...checkE2EReadiness(rel, text));
     if (rel === "scripts/check-repository.ts") continue;
     // adb argv must be constructed only by its redacting, exit-checking owner, including calls
     // routed through generic subprocess wrappers. The one executable-prerequisite list is not argv.

@@ -501,19 +501,21 @@ test("request lifecycle: delayed bfcache resume yields to a foreground launch", 
       await route.fulfill({ response }).catch(() => undefined);
       delivered.resolve();
     });
-    const localRefresh = page.waitForResponse(`${home.origin}/api/v1/sessions`);
+    // The resumed local snapshot must be applied, not merely received. Keep the remote held
+    // while observing this row transition, so the foreground intent still races its continuation.
+    home.upsert({ ...working, title: "Foreground choice refreshed" });
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
     await intercepted.promise;
-    await (await localRefresh).finished();
-    await page.getByRole("button", { name: "View Foreground choice", exact: true }).click();
-    await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice");
+    await expect(page.getByRole("button", { name: "View Foreground choice refreshed", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View Foreground choice refreshed", exact: true }).click();
+    await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice refreshed");
     const foregroundRoot = await page.locator("#root").elementHandle();
     release.resolve();
     await delivered.promise;
     // The resumed snapshot and its continuation settle before checking that no POST was sent.
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     expect(home.launchRequests.map(request => request.instanceId)).toEqual([GATEWAY_WAITING.instanceId, working.instanceId]);
-    await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice");
+    await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice refreshed");
     expect(await foregroundRoot!.evaluate(element => element === document.querySelector("#root"))).toBe(true);
     expect(await relaySocketCount(page)).toBe(2);
     await assertPrivate(page, home);

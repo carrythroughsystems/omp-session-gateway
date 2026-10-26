@@ -6,6 +6,15 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Contain browser CI flakes with one CI-only retry across both mobile Chromium and cross-engine
+  core suites, closed privacy-safe attempt reports and summaries retained for 14 days, and a
+  weekly/manual seven-day flake budget with fail-closed evidence coverage. Local runs keep zero
+  retries and prepare PRs still execute their own required checks. Reject response-completion,
+  request-finished and network-idle readiness waits in e2e; the delayed-resume tray race now waits
+  for an applied local row transition while its remote snapshot remains held.
+
 ## [v0.9.0] — 2026-10-25
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 44 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.

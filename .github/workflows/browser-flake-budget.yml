@@ -1,0 +1,32 @@
+name: Browser flake budget
+
+on:
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  browser-flake-budget:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out maintenance revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+      - name: Verify pinned Bun
+        run: test "$(bun --version)" = 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Evaluate seven-day reporting coverage and budget
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun run check:browser-flakes
