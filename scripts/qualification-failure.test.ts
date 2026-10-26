@@ -111,13 +111,13 @@ describe("closed qualification failure contracts", () => {
     }
     expect(() => parseLaneFailure({ ...root(), lane: "androidPush", step: "network_verified", reason: "delivery_timeout", class: "infra_transient" })).toThrow();
   });
-  test.each([
+  for (const value of [
     { id: 1, lane: "androidPush", step: "network_verified", reason: "delivery_metadata_timeout", class: "harness",
       elapsedMs: 90_000, operation: "read_only", observations: { timeoutMs: 1_000 } },
     { id: 1, lane: "rigReadiness", step: "pixel_push", reason: "delivery_metadata_timeout", class: "harness",
       elapsedMs: 90_000, operation: "read_only", observations: { timeoutMs: 1_000 } },
-  ] as const satisfies readonly LaneFailure[])(
-    "delivery metadata timeout stays harness (%#)", value => {
+  ] as const satisfies readonly LaneFailure[]) {
+    test(`delivery metadata timeout stays harness in ${value.lane}`, () => {
       const failure = parseLaneFailure(value);
       expect(failure).toEqual(value);
       const error = new QualificationFailure(failure, { cause: new Error(secret) });
@@ -128,8 +128,8 @@ describe("closed qualification failure contracts", () => {
         expect(() => parseLaneFailure({ ...value, class: classification })).toThrow();
       }
       expect(() => parseLaneFailure({ ...root(), class: "harness", reason: value.reason })).toThrow();
-    },
-  );
+    });
+  }
   test("closed keys reject secrets and identifiers without echoing them", () => {
     for (const change of [{ detail: secret }, { cause: { message: secret } }, { host: "private.example.ts.net" },
       { observations: { [secret]: true } }, { observations: { transportFailure: secret } }, { reason: secret }, { step: secret }]) {
