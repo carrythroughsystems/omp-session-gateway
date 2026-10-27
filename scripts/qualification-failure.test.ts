@@ -107,6 +107,13 @@ describe("closed qualification failure contracts", () => {
     expect(() => parseLaneFailure({ ...failure, operation: "unknown" })).toThrow();
     expect(() => parseLaneFailure({ ...failure, step: "lease" })).toThrow();
   });
+  test.each([false, true])("514 R1 GCM diagnosis grants no campaign retry (remedy=%s)", gcmRemedyApplied => {
+    const failure = parseLaneFailure({ id: 1, lane: "rigReadiness", step: "pixel_push", reason: "gcm_disconnected",
+      class: "infra_transient", operation: "read_only", elapsedMs: 32_000,
+      observations: { gcmConnected: false, gcmRemedyApplied } });
+    expect(qualificationRetryEligible({ ...summary(), failures: [failure] }, true)).toBe(false);
+    expect(qualificationRetryEligible({ ...summary(), failures: [failure, { ...root(), id: 2 }] }, true)).toBe(false);
+  });
   test("council498r1 persistence failure cannot acquire retry authority from a contradictory summary", () => {
     expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(),
       observations: { ...root().observations, persistenceFailed: true } }] }, true)).toBe(false);

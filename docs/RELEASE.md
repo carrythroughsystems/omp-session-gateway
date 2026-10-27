@@ -1021,14 +1021,19 @@ GcmService` under its lease and after checkpointing the original device/radio ba
 connected client proceeds without radio changes. A disconnected client gets exactly one
 `svc wifi disable`, two-second pause, `svc wifi enable` cycle, then at most 30 seconds to report
 connected. Individual ADB reads/changes are capped at ten seconds and the execution deadline
-still applies. No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
-automatic. Missing or ambiguous connection flags fail as invalid evidence without cycling Wi-Fi.
-Unproved connection after the bound fails before any ask as `gcm_disconnected` (`infra_transient`);
-normal Pixel/Mac restoration still runs. If that refusal persists, keep the driver disabled,
-inspect its private cause diagnostic and reconcile the rig rather than extending delivery waits.
+still applies independently of that reconnect window: late output cannot replace an in-window
+observation. No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
+automatic. Any malformed or duplicate connection line fails as invalid evidence without cycling
+Wi-Fi. In-window disconnected evidence after the bound fails before any ask as `gcm_disconnected`
+(`infra_transient`); a command timeout or missing in-window proof remains a harness deadline
+failure. Neither grants another campaign attempt: the driver stops `diagnostic-required`.
+Normal Pixel/Mac restoration still runs, without opening a browser for notification cleanup when
+no browser baseline was captured. Keep the driver disabled, inspect its private cause diagnostic
+and reconcile the rig rather than extending delivery waits.
 
-Readiness observations carry `gcmConnected` and `gcmRemedyApplied` on success and typed GCM
-refusal. The latter records whether the Wi-Fi cycle began. These are additive schema-3 booleans:
+Readiness observations carry `gcmConnected` and `gcmRemedyApplied` on success and every GCM
+failure, including cancellation, command errors and later readiness failures. The latter records
+whether the Wi-Fi cycle was attempted, even if disable or enable fails. These are additive schema-3 booleans:
 historical receipts may omit both, so no receipt-version bump is needed; new readiness requires
 both and an affirmative connected proof. They do not replace the actual Push presentation/clear
 gate or award qualification. Only a censored connection flag and allowlisted reconnect-alarm

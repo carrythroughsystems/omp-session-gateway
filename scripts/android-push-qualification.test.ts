@@ -76,7 +76,8 @@ function fake(options: FakeOptions = {}) {
     now: () => time, beforeEffect: async () => {},
     deliveryOwnership: async () => 1,
     subscriptionCount: async () => 1,
-    gcmReadiness: async () => ({ gcmConnected: true, gcmRemedyApplied: false }),
+    gcmReadiness: async () => ({ observations: { gcmConnected: true, gcmRemedyApplied: false },
+      diagnostic: new Error("GcmService censored sample: Is client connected: true; Reconnect Scheduler Alarm: OFF") }),
     pause: async milliseconds => {
       time += milliseconds;
       if (time < socketStaleUntil) return;
@@ -238,12 +239,15 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   const host = fake();
   host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
   host.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
-  expect(await runAndroidPushReadiness(host.input)).toMatchObject({
+  const result = await runAndroidPushReadiness(host.input);
+  expect(result).toMatchObject({
     delivered: true, acknowledged: true, gcmConnected: true, gcmRemedyApplied: false,
     subscriptionCount: 1, sendCount: 1, ackCount: 1, cleanup: { restored: true },
   });
   expect(host.state().device).toEqual(baseline);
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
+  expect(result).not.toHaveProperty("diagnostic");
+  expect(JSON.stringify(result)).not.toContain("GcmService");
 });
 
 test("GCM refusal precedes browser and fixture effects and restores the checkpointed radios", async () => {
@@ -268,6 +272,31 @@ test("GCM refusal precedes browser and fixture effects and restores the checkpoi
   expect(host.state().device).toEqual(baseline);
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
 });
+
+test.each(["ordinary", "typed", "aggregate", "empty-aggregate", "containment"] as const)(
+  "514 R1 post-GCM %s failures retain the observation pair and private sample", async kind => {
+    const host = fake(), raw = new Error("synthetic private post-GCM fixture failure");
+    let id = 10;
+    const typed = new QualificationFailure({ id: 1, lane: "androidPush", step: "baseline_captured",
+      reason: "invalid_evidence", class: "harness", operation: "read_only", elapsedMs: 0, observations: {} }, { cause: raw });
+    const failure = kind === "typed" ? typed : kind === "aggregate" ? new AggregateError([typed, raw], "synthetic mixed failure") :
+      kind === "empty-aggregate" ? new AggregateError([], raw.message) :
+      kind === "containment" ? Object.assign(raw, { pixelUnrestored: true }) : raw;
+    host.runtime.fixture = async operation => { if (operation === "start") throw failure; };
+    const error = await runAndroidPushReadiness({ ...host.input, execution: {
+      signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id,
+    } }).catch(error => error);
+    const failures = normalizeQualificationFailures(error);
+    expect(failures).toHaveLength(kind === "aggregate" ? 2 : 1);
+    for (const item of failures) expect(item).toMatchObject({ lane: "rigReadiness", class: "harness",
+      observations: { gcmConnected: true, gcmRemedyApplied: false } });
+    const text = JSON.stringify(privateQualificationFailureDiagnostic(error));
+    expect(text).toContain(raw.message);
+    expect(text).toContain("GcmService censored sample: Is client connected: true");
+    expect(JSON.stringify(failures)).not.toContain("GcmService");
+    expect(pixelUnrestored(error)).toBe(kind === "containment");
+    expect(host.state().device).toEqual(baseline);
+  });
 
 test.each(["poll", "telemetry", "ownership", "request"] as const)("509 round2 ordinary %s failures survive expiry and conversion", async stage => {
   const host = fake(), metrics = emptyPushDeliveryMetrics(), controller = new AbortController();
@@ -461,7 +490,12 @@ test.each(["readiness-error", "readiness-deadline", "qualification-error", "qual
     };
     const input = { ...host.input, execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } };
     const run = scenario.startsWith("readiness") ? runAndroidPushReadiness(input) : runAndroidPush(input);
-    if (scenario.endsWith("error")) await expect(run).rejects.toBe(failure);
+    if (scenario === "readiness-error") {
+      const error = await run.catch(error => error);
+      expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "unclassified_failure",
+        observations: { gcmConnected: true, gcmRemedyApplied: false } }]);
+      expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(failure.message);
+    } else if (scenario.endsWith("error")) await expect(run).rejects.toBe(failure);
     else await expect(run).rejects.toMatchObject({ evidence: { reason: "delivery_timeout" } });
     expect(host.cleanup).toHaveLength(7);
   });

@@ -501,10 +501,15 @@ Effectful Pixel readiness reads GCM only after acquiring its lease and checkpoin
 device baseline. A proven disconnection authorizes one bounded Wi-Fi off/on cycle, not changes to
 Tailscale, DNS, exit-node, firewall, battery or notification policy. The 30-second reconnect wait
 does not enlarge delivery budgets; execution cancellation and normal radio restoration remain
-authoritative. Receipts contain only `gcmConnected`/`gcmRemedyApplied` booleans. The private
-`gcm_disconnected` cause sample allowlists the client-connected flag and an `OFF` or bounded
-duration reconnect alarm; malformed fields become `unavailable`. Device IDs, app/message IDs,
-network names, endpoints and the rest of `GcmService` output are never retained.
+authoritative. An exhausted GCM remedy never authorizes an automatic campaign retry. Late
+observations and any malformed or duplicate connection line cannot establish readiness. Receipts
+contain only `gcmConnected`/`gcmRemedyApplied` booleans; all GCM exits and subsequent readiness
+errors retain those facts and the censored private sample. The sample allowlists the client-connected
+flag and an `OFF` or bounded duration reconnect alarm; malformed fields become `unavailable`.
+Device IDs, app/message IDs, network names, endpoints and the rest of `GcmService` output are
+never retained. `AndroidAdbError` in `scripts/android-device.ts` withholds command stdout/stderr
+at construction, before the bounded, identifier/capability-scanned private diagnostic formatter;
+it does not copy provider output into an Error message and rely on redaction afterward.
 
 These are access-restricted local diagnostics (0700 parent directory, 0600 files), not sanitized
 publication surfaces. Producer-authored Error messages are the authorship boundary: producers

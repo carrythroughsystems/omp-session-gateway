@@ -99,6 +99,9 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 56 changel
   Detect a disconnected Pixel GCM transport before browser capture or any ask, try one bounded
   Wi-Fi reconnect, and fail fast with typed infrastructure evidence and a censored private sample
   if it remains disconnected; retain additive readiness booleans and restore the device baseline.
+  Keep command and reconnect deadlines distinct, reject malformed/duplicate connection flags,
+  retain censored context across all failure exits, avoid pre-browser notification cleanup effects,
+  and stop exhausted GCM remedies for diagnosis rather than granting another campaign attempt.
 - Retain bounded, byte-exact qualification child stdout/stderr in immutable private release-driver
   job logs for successful and failed campaigns, retries and preflights before terminal publication.
   Bind both logs into the retry plan's job digest without changing sanitized diagnostics or public
