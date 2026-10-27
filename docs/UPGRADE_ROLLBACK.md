@@ -99,10 +99,14 @@ Returning from `v0.4.0+` to `v0.3.0` also requires a stopped transition rather t
 - **Never restores `publisher-token` or `v0.3.0` compatibility:** pointer rollback only switches between retained mainline gateway runtimes (`v0.4.0+`).
 
 <!-- release-generate:predecessor:start -->
+## v0.9.0 predecessor compatibility
+
+The selected predecessor is published v0.8.0. Gateway rollback does not change the separately running OMP process. This release uses stock OMP v18.12.5; retained-runtime selection does not restore the predecessor's OMP baseline. After a v0.9.0 install, `rollback --to` selects only runtimes pruning retained. VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon a9dda5e6640b173279d738c0d13374fcc5daa409d7167ce9ff54ea56bf5afb30. Windows history-selected restoration passed. Preserve configuration and readiness state. Earlier predecessors retain the compatibility limits below; their receipts do not qualify this candidate.
+<!-- release-generate:predecessor:end -->
+
 ## v0.8.0 predecessor compatibility
 
 The selected predecessor is published v0.7.7. Gateway rollback does not change the separately running OMP process. This release uses stock OMP v18.12.5; retained-runtime selection does not restore the predecessor's OMP baseline. After a v0.8.0 install, `rollback --to` selects only runtimes pruning retained. VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon a9dda5e6640b173279d738c0d13374fcc5daa409d7167ce9ff54ea56bf5afb30. Windows history-selected restoration passed. Preserve configuration and readiness state. Earlier predecessors retain the compatibility limits below; their receipts do not qualify this candidate.
-<!-- release-generate:predecessor:end -->
 
 ## v0.7.7 predecessor compatibility
 

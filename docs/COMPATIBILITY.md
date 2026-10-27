@@ -8,15 +8,15 @@ web-app installation. The gateway runs on the computer that runs OMP.
 <!-- release-generate:platforms:start -->
 | Surface | Status | Tested by | Qualified on hardware |
 |---|---|---|---|
-| Linux host | Supported | `portable-source (ubuntu-24.04)`, `implementation-checks`, `linux-arm64-source-checkout` (aarch64), daily `canary` against stock OMP | Run 39937344468 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/39937344468); OS/kernel versions and migration counts are not exported. |
+| Linux host | Supported | `portable-source (ubuntu-24.04)`, `implementation-checks`, `linux-arm64-source-checkout` (aarch64), daily `canary` against stock OMP | Run 40427270819 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/40427270819); OS/kernel versions and migration counts are not exported. |
 | macOS host | Supported | `portable-source (macos-latest)` | VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon a9dda5e6640b173279d738c0d13374fcc5daa409d7167ce9ff54ea56bf5afb30. |
-| Windows host | Supported | `portable-source (windows-latest)`, `windows-service-lifecycle`, daily `canary-windows` against stock OMP | Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.7.7 and fresh standard-account lifecycle; interactive logon, not unattended boot. |
-| Chrome and Chromium | Supported | `browser-core` desktop Chromium; `browser-notifications` full suite at Pixel sizes | Pixel 8 Pro, Android 17, Chrome 155.0.8059.84; TestingBot, tunnel 4.9: Galaxy S26 (16.0.0, chrome 145.0.7632.159) |
+| Windows host | Supported | `portable-source (windows-latest)`, `windows-service-lifecycle`, daily `canary-windows` against stock OMP | Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.8.0 and fresh standard-account lifecycle; interactive logon, not unattended boot. |
+| Chrome and Chromium | Supported | `browser-core` desktop Chromium; `browser-notifications` full suite at Pixel sizes | Pixel 8 Pro, Android 17, Chrome 155.0.8059.84; BrowserStack, tunnel 8.9: Galaxy S26 (16.0.0, chrome 152.0.7977.54) |
 | Edge and other Chromium-based browsers | Supported through Chromium | `browser-core` desktop Chromium; the client has no Edge-specific code path | None |
 | Firefox | Supported | `browser-core` desktop Firefox | None |
-| Safari and WebKit | Supported | `browser-core` desktop WebKit | TestingBot, tunnel 4.9: iPhone 17 Pro (26.5, safari 26.5); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6) |
-| Android | Supported | `browser-notifications` at measured Pixel sizes | Pixel 8 Pro, Android 17, Chrome 155.0.8059.84; TestingBot, tunnel 4.9: Galaxy S26 (16.0.0, chrome 145.0.7632.159) |
-| iPhone and iPad | Tested as a browser | `browser-core` WebKit with iPhone-class emulation | TestingBot, tunnel 4.9: iPhone 17 Pro (26.5, safari 26.5); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6) |
+| Safari and WebKit | Supported | `browser-core` desktop WebKit | TestingBot, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6.1); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6) |
+| Android | Supported | `browser-notifications` at measured Pixel sizes | Pixel 8 Pro, Android 17, Chrome 155.0.8059.84; BrowserStack, tunnel 8.9: Galaxy S26 (16.0.0, chrome 152.0.7977.54) |
+| iPhone and iPad | Tested as a browser | `browser-core` WebKit with iPhone-class emulation | TestingBot, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6.1); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6) |
 <!-- release-generate:platforms:end -->
 
 ### What the words mean
@@ -80,7 +80,7 @@ green results cannot be reused. See [browser evidence policy](TEST_PLAN.md#brows
 ## Current claim
 
 <!-- release-generate:release:start -->
-Stable v0.8.0 is published as immutable GitHub Latest. [Release v0.8.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.8.0). Signed candidate v0.8.0-prealpha.6; source f35b02c1a97456c778a359366f73df4beb436fb9; archive SHA-256 3ed73a967dc552da70d678ec5135430b6dc140992f3dcaf7d473bce7e2e7b47d. Published v0.7.7 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
+v0.9.0 is qualified for stable promotion; publication is pending. [Release v0.9.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.9.0). Signed candidate v0.9.0-prealpha.7; source b0f07b11e7d4fb2d0afeea7496a77323d6c66d5a; archive SHA-256 d2053558f3ac7dd857db971dcf57757e652e8776de83deb2b9a9138e7457a887. Published v0.8.0 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
 <!-- release-generate:release:end -->
 
 The current Mac host qualification runs in a Virtualization.framework guest (`VirtualMac2,1`),
@@ -136,19 +136,19 @@ start whose relay is unreachable or times out is retried
 | Surface | Current contract | Qualification |
 |---|---|---|
 | Exact qualified source | v18.12.5, d5cd750e41fede277f9eb933455da92a0738915e; Bun 1.4.0 | Stock OMP; mainline >=18.1.20 required |
-| artifacts | Signed candidate v0.8.0-prealpha.6 | Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; v0.7.7 verified the same way. |
-| debian | Signed candidate v0.8.0-prealpha.6 | Run 39937344468 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/39937344468); OS/kernel versions and migration counts are not exported. |
-| macos | Signed candidate v0.8.0-prealpha.6 | VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon a9dda5e6640b173279d738c0d13374fcc5daa409d7167ce9ff54ea56bf5afb30. |
-| ompPublication | Signed candidate v0.8.0-prealpha.6 | Stock OMP v18.12.5; generation 1; publication, View/Control, new-generation/fork/resume and revocation. |
-| android | Signed candidate v0.8.0-prealpha.6 | Pixel 8 Pro, Android 17 build CP3A.261005.005, Chrome 155.0.8059.84; same-page unlock 7066 ms, Airplane 3597 ms, Doze 117 ms; 7/7 detectable; clean. |
-| androidPush | Signed candidate v0.8.0-prealpha.6 | Android 17, Chrome 155.0.8059.84, installed WebAPK; force-stop delivered_while_force_stopped, Doze delivered_after_doze_exit; outcomes are observed variants, not delivery guarantees. |
-| androidPushCleanup | Signed candidate v0.8.0-prealpha.6 | Device, browser and fixture restored. |
-| deviceCloud | Signed candidate v0.8.0-prealpha.6 | TestingBot, tunnel 4.9: iPhone 17 Pro (26.5, safari 26.5); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6); TestingBot, tunnel 4.9: Galaxy S26 (16.0.0, chrome 145.0.7632.159). Home Screen alerts were proven only on the TestingBot iPhone and do not qualify lock-screen presentation. |
-| deviceCloudCleanup | Signed candidate v0.8.0-prealpha.6 | Restored. |
-| relay | Signed candidate v0.8.0-prealpha.6 | 1800 seconds, 2026-10-23T10:24:08.150Z–2026-10-23T10:54:08.165Z; 2 transitions, final phase live. Eight-hour endurance is not claimed. |
-| cleanup | Signed candidate v0.8.0-prealpha.6 | Zero gateway processes, listeners and live OMP hosts. |
-| windows | Signed candidate v0.8.0-prealpha.6 | Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.7.7 and fresh standard-account lifecycle; interactive logon, not unattended boot. |
-| windowsCleanup | Signed candidate v0.8.0-prealpha.6 | Zero instances and firewalls; tailnet node deleted and access vault removed. |
+| artifacts | Signed candidate v0.9.0-prealpha.7 | Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; v0.8.0 verified the same way. |
+| debian | Signed candidate v0.9.0-prealpha.7 | Run 40427270819 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/40427270819); OS/kernel versions and migration counts are not exported. |
+| macos | Signed candidate v0.9.0-prealpha.7 | VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon a9dda5e6640b173279d738c0d13374fcc5daa409d7167ce9ff54ea56bf5afb30. |
+| ompPublication | Signed candidate v0.9.0-prealpha.7 | Stock OMP v18.12.5; generation 1; publication, View/Control, new-generation/fork/resume and revocation. |
+| android | Signed candidate v0.9.0-prealpha.7 | Pixel 8 Pro, Android 17 build CP3A.261005.005, Chrome 155.0.8059.84; same-page unlock 7115 ms, Airplane 4425 ms, Doze 176 ms; 7/7 detectable; clean. |
+| androidPush | Signed candidate v0.9.0-prealpha.7 | Android 17, Chrome 155.0.8059.84, installed WebAPK; force-stop delivered_while_force_stopped, Doze delivered_after_doze_exit; outcomes are observed variants, not delivery guarantees. |
+| androidPushCleanup | Signed candidate v0.9.0-prealpha.7 | Device, browser and fixture restored. |
+| deviceCloud | Signed candidate v0.9.0-prealpha.7 | TestingBot, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6.1); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6); BrowserStack, tunnel 8.9: Galaxy S26 (16.0.0, chrome 152.0.7977.54). Home Screen alerts were proven only on the TestingBot iPhone and do not qualify lock-screen presentation. |
+| deviceCloudCleanup | Signed candidate v0.9.0-prealpha.7 | Restored. |
+| relay | Signed candidate v0.9.0-prealpha.7 | 1800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed. |
+| cleanup | Signed candidate v0.9.0-prealpha.7 | Zero gateway processes, listeners and live OMP hosts. |
+| windows | Signed candidate v0.9.0-prealpha.7 | Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.8.0 and fresh standard-account lifecycle; interactive logon, not unattended boot. |
+| windowsCleanup | Signed candidate v0.9.0-prealpha.7 | Zero instances and firewalls; tailnet node deleted and access vault removed. |
 <!-- release-generate:qualification:end -->
 
 The gateway only reads OMP discovery, polls metadata, and fetches capabilities per launch without
