@@ -11,6 +11,84 @@ import { privateQualificationFailureDiagnostic, normalizeQualificationFailures, 
 import { notificationTopicDigest } from "./android-notification.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
 
+test.each(["connected", "recovered", "disconnected"] as const)("GCM readiness uses one bounded Wi-Fi remedy when %s", async scenario => {
+  let time = 0, reads = 0;
+  const events: string[] = [];
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
+    const command = args.join(" ");
+    events.push(command);
+    expect(options?.timeoutMs).toBeGreaterThan(0);
+    expect(options?.timeoutMs).toBeLessThanOrEqual(10_000);
+    if (command === "shell dumpsys activity service GcmService") {
+      reads++;
+      const connected = scenario === "connected" || scenario === "recovered" && reads > 1;
+      return `DeviceID: SYNTHETIC-PRIVATE-GCM-DEVICE\nIs client connected: ${connected}\nReconnect Scheduler Alarm: in PT3H14M10.799S\nReceived SYNTHETIC-PRIVATE-GCM-MESSAGE`;
+    }
+    if (command === "shell svc wifi disable" || command === "shell svc wifi enable") return "";
+    throw new Error("unexpected synthetic adb command");
+  });
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.now = () => time;
+    runtime.pause = async milliseconds => { events.push(`pause ${milliseconds}`); time += milliseconds; };
+    runtime.beforeEffect = async () => { events.push("checkpoint"); };
+    if (scenario === "disconnected") {
+      const error = await runtime.gcmReadiness().catch(error => error);
+      expect(normalizeQualificationFailures(error)).toMatchObject([{
+        lane: "rigReadiness", step: "pixel_push", reason: "gcm_disconnected", class: "infra_transient",
+        elapsedMs: 32_000, observations: { gcmConnected: false, gcmRemedyApplied: true },
+      }]);
+      const diagnostic = JSON.stringify(privateQualificationFailureDiagnostic(error));
+      expect(diagnostic).toContain("Is client connected: false");
+      expect(diagnostic).toContain("Reconnect Scheduler Alarm: in PT3H14M10.799S");
+      expect(diagnostic).not.toContain("SYNTHETIC-PRIVATE-GCM");
+      expect(time).toBe(32_000);
+    } else {
+      expect(await runtime.gcmReadiness()).toEqual({ gcmConnected: true, gcmRemedyApplied: scenario === "recovered" });
+    }
+    expect(events.filter(event => event.startsWith("shell svc"))).toEqual(scenario === "connected" ? [] :
+      ["shell svc wifi disable", "shell svc wifi enable"]);
+    if (scenario === "connected") expect(events).toEqual(["shell dumpsys activity service GcmService"]);
+    else expect(events.slice(0, 6)).toEqual(["shell dumpsys activity service GcmService", "checkpoint",
+      "shell svc wifi disable", "pause 2000", "checkpoint", "shell svc wifi enable"]);
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
+test.each(["missing", "duplicate", "alarm", "late", "cancelled"] as const)("GCM readiness preserves the %s boundary", async scenario => {
+  let time = 0, reads = 0;
+  const commands: string[] = [], controller = new AbortController();
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => {
+    const command = args.join(" ");
+    commands.push(command);
+    if (command !== "shell dumpsys activity service GcmService") return "";
+    reads++;
+    if (scenario === "missing") return "DeviceID: SYNTHETIC-PRIVATE-GCM-DEVICE";
+    if (scenario === "duplicate") return "Is client connected: true\nIs client connected: false";
+    if (scenario === "late" && reads > 1) time += 30_000;
+    return `Is client connected: ${scenario === "late" && reads > 1}\nReconnect Scheduler Alarm: SYNTHETIC-PRIVATE-GCM-ALARM`;
+  });
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execution: {
+      signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1,
+    } });
+    runtime.now = () => time;
+    runtime.beforeEffect = async () => {};
+    runtime.pause = async milliseconds => {
+      time += milliseconds;
+      if (scenario === "cancelled") controller.abort(new Error("synthetic GCM cancellation"));
+    };
+    const error = await runtime.gcmReadiness().catch(error => error);
+    expect(normalizeQualificationFailures(error)[0]?.reason).toBe(scenario === "cancelled" || scenario === "late" ? "deadline_exceeded" :
+      scenario === "missing" || scenario === "duplicate" ? "invalid_evidence" : "gcm_disconnected");
+    expect(JSON.stringify(privateQualificationFailureDiagnostic(error))).not.toContain("SYNTHETIC-PRIVATE-GCM");
+    if (scenario === "missing" || scenario === "duplicate") expect(commands).toHaveLength(1);
+    if (scenario === "cancelled") expect(commands).not.toContain("shell svc wifi enable");
+    if (scenario === "late") expect(time).toBe(32_000);
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
 test("509 round2 runtime privacy conversion preserves ordinary notification errors", async () => {
   const raw = new Error("synthetic notification identity changed");
   const session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,

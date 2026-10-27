@@ -96,6 +96,9 @@ This release uses stock OMP v18.12.5 as its engineering baseline. The 56 changel
   baseline failures to closed browser/CDP substeps while preserving restoration and operator-only
   subscription recovery. Bind readiness counters to the final snapshot, require lock-screen
   presentation and clear proofs, reject out-of-order telemetry, and preserve execution deadlines.
+  Detect a disconnected Pixel GCM transport before browser capture or any ask, try one bounded
+  Wi-Fi reconnect, and fail fast with typed infrastructure evidence and a censored private sample
+  if it remains disconnected; retain additive readiness booleans and restore the device baseline.
 - Retain bounded, byte-exact qualification child stdout/stderr in immutable private release-driver
   job logs for successful and failed campaigns, retries and preflights before terminal publication.
   Bind both logs into the retry plan's job digest without changing sanitized diagnostics or public

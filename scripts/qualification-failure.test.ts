@@ -95,6 +95,18 @@ test("private diagnostic cycles and non-Error causes cannot hide real typed caus
 });
 
 describe("closed qualification failure contracts", () => {
+  test("GCM infrastructure evidence requires a disconnected observation and a bounded remedy verdict", () => {
+    const failure: LaneFailure = { id: 1, lane: "rigReadiness", step: "pixel_push", reason: "gcm_disconnected",
+      class: "infra_transient", operation: "read_only", elapsedMs: 32_000,
+      observations: { gcmConnected: false, gcmRemedyApplied: true } };
+    expect(parseLaneFailure(failure)).toEqual(failure);
+    for (const observations of [{}, { gcmConnected: false }, { gcmConnected: true, gcmRemedyApplied: true },
+      { gcmConnected: false, gcmRemedyApplied: 1 }]) {
+      expect(() => parseLaneFailure({ ...failure, observations })).toThrow();
+    }
+    expect(() => parseLaneFailure({ ...failure, operation: "unknown" })).toThrow();
+    expect(() => parseLaneFailure({ ...failure, step: "lease" })).toThrow();
+  });
   test("council498r1 persistence failure cannot acquire retry authority from a contradictory summary", () => {
     expect(qualificationRetryEligible({ ...summary(), failures: [{ ...root(),
       observations: { ...root().observations, persistenceFailed: true } }] }, true)).toBe(false);

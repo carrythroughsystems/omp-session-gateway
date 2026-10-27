@@ -284,11 +284,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     bun: options.fixtureBun ?? process.execPath,
     binary: options.fixtureBinary ?? process.env.OMP_PUSH_FIXTURE_BINARY ?? "",
     scripts: options.fixtureScripts ?? resolve(import.meta.dir) });
-  const boundedAdb = (device: string | undefined, args: readonly string[]) => {
+  const boundedAdb = (device: string | undefined, args: readonly string[], timeoutMs?: number) => {
     checkExecution();
     const current = execution;
-    return runAdb(device, args, current === undefined ? {} : {
-      timeoutMs: Math.max(1, current.deadline - performance.now()),
+    return runAdb(device, args, current === undefined ? timeoutMs === undefined ? {} : { timeoutMs } : {
+      timeoutMs: Math.max(1, Math.min(timeoutMs ?? Infinity, current.deadline - performance.now())),
       signal: current.signal,
     });
   };
@@ -425,6 +425,59 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const device = await runtime.device();
       if (device.forcedDoze || device.batteryOverride) throw new Error("Push qualification requires no pre-existing battery/Doze override");
       return { android, browser, webApk: true, dndOff: true };
+    },
+    async gcmReadiness() {
+      const start = runtime.now();
+      let gcmRemedyApplied = false;
+      let lastConnected: boolean | undefined;
+      let sample = "Is client connected: unavailable; Reconnect Scheduler Alarm: unavailable";
+      const fail = (reason: "gcm_disconnected" | "invalid_evidence" | "deadline_exceeded", cause?: unknown): never => {
+        const diagnostic = new Error(`GcmService censored sample: ${sample}`, cause === undefined ? undefined : { cause });
+        const common = { id: nextFailureId(), lane: "rigReadiness" as const, step: "pixel_push" as const,
+          elapsedMs: Math.round(runtime.now() - start), operation: "read_only" as const,
+          observations: { gcmConnected: lastConnected === true, gcmRemedyApplied } };
+        if (reason === "gcm_disconnected") throw new QualificationFailure({ ...common, reason, class: "infra_transient" }, { cause: diagnostic });
+        throw new QualificationFailure({ ...common, reason, class: "harness" }, { cause: diagnostic });
+      };
+      const read = async (deadline: number): Promise<boolean> => {
+        checkExecution();
+        if (runtime.now() >= deadline) fail(lastConnected === false ? "gcm_disconnected" : "deadline_exceeded");
+        let dump: string;
+        try {
+          dump = await boundedAdb(await selectDevice(), ["shell", "dumpsys", "activity", "service", "GcmService"],
+            Math.max(1, Math.min(10_000, deadline - runtime.now())));
+        } catch (error) {
+          rethrowPushSafetyFailure(error);
+          checkExecution();
+          if (runtime.now() >= deadline) fail(lastConnected === false ? "gcm_disconnected" : "deadline_exceeded", error);
+          throw error;
+        }
+        checkExecution();
+        // Never retain DeviceID, app/message IDs, network names, endpoints or the raw dump.
+        const flags = [...dump.matchAll(/^[ \t]*Is client connected: (true|false)[ \t]*\r?$/gmu)];
+        const connected = flags.length === 1 ? flags[0]![1] : "unavailable";
+        const alarm = dump.match(/^[ \t]*Reconnect Scheduler Alarm: (OFF|in PT(?=\d)(?:\d{1,3}H)?(?:\d{1,3}M)?(?:\d{1,3}(?:\.\d{1,3})?S)?)[ \t]*\r?$/mu)?.[1] ?? "unavailable";
+        sample = `Is client connected: ${connected}; Reconnect Scheduler Alarm: ${alarm}`;
+        lastConnected = connected === "unavailable" ? undefined : connected === "true";
+        if (connected === "unavailable") fail("invalid_evidence");
+        if (runtime.now() >= deadline) fail(lastConnected ? "deadline_exceeded" : "gcm_disconnected");
+        return connected === "true";
+      };
+      if (await read(start + 10_000)) return { gcmConnected: true, gcmRemedyApplied };
+      // The readiness owner has checkpointed the original radios; restoration runs on every exit.
+      await runtime.beforeEffect();
+      await boundedAdb(await selectDevice(), ["shell", "svc", "wifi", "disable"], 10_000);
+      gcmRemedyApplied = true;
+      await runtime.pause(2_000);
+      await runtime.beforeEffect();
+      await boundedAdb(await selectDevice(), ["shell", "svc", "wifi", "enable"], 10_000);
+      const deadline = runtime.now() + 30_000;
+      while (runtime.now() < deadline) {
+        if (await read(deadline)) return { gcmConnected: true, gcmRemedyApplied };
+        await runtime.pause(Math.min(500, deadline - runtime.now()));
+      }
+      checkExecution();
+      return fail("gcm_disconnected");
     },
     dndOff: async () => (await command("shell", "settings", "get", "global", "zen_mode")).trim() === "0",
     async device() {

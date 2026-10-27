@@ -1322,6 +1322,39 @@ describe("campaign terminal evidence and readiness", () => {
     expect(Object.values(receipt.lanes).every(lane => lane.status === "pending")).toBe(true);
   });
 
+  test("GCM refusal preserves receipt observations and its private sample through readiness ownership", async () => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    const cause = new Error("GcmService censored sample: Is client connected: false; Reconnect Scheduler Alarm: OFF");
+    const error = await runRigReadiness(receipt, async () => {}, {
+      prepare: async () => {}, windows: async () => ({}), macos: async () => ({}),
+      push: async () => { throw new QualificationFailure({ id: 1, lane: "rigReadiness", step: "pixel_push",
+        class: "infra_transient", reason: "gcm_disconnected", operation: "read_only", elapsedMs: 32_000,
+        observations: { gcmConnected: false, gcmRemedyApplied: true } }, { cause }); },
+      restorePixel: async () => {}, restoreMac: async () => {},
+    }).catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "gcm_disconnected", class: "infra_transient" }]);
+    expect(receipt.rigReadiness).toMatchObject({ status: "failed", observations: {
+      gcmConnected: false, gcmRemedyApplied: true, baselineRestored: true,
+    } });
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(cause.message);
+    expect(JSON.stringify(receipt)).not.toContain("GcmService censored sample");
+    expect(receipt.schemaVersion).toBe(3);
+  });
+
+  test.each([false, true])("successful readiness records whether the GCM remedy ran: %s", async gcmRemedyApplied => {
+    const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+    await runRigReadiness(receipt, async () => {}, {
+      prepare: async () => {},
+      windows: async () => ({ windowsApiReady: true, windowsResourcesAbsent: true, creationAllowance: 4 }),
+      macos: async () => ({ macEgress: true, macDoctor: true, loopbackOnly: true, serveExpected: true, funnelOff: true, fixturePinned: true }),
+      push: async () => ({ gcmConnected: true, gcmRemedyApplied, pixelReachable: true, pushSent: true,
+        pushAcknowledged: true, pushPresented: true, pushCleared: true, deliveryMs: 1, clearMs: 1,
+        subscriptionCount: 1, sendCount: 1, ackCount: 1 }),
+      restorePixel: async () => {}, restoreMac: async () => {},
+    });
+    expect(receipt.rigReadiness).toMatchObject({ status: "passed", observations: { gcmConnected: true, gcmRemedyApplied } });
+  });
+
   test("509 council readiness ownership preserves the browser cause through aggregate and lane owners", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     const cause = new Error("CDP Runtime.evaluate: synthetic context missing");

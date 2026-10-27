@@ -2908,6 +2908,10 @@ export async function runRigReadiness(
       pixelUnrestored(error) ? { pixelUnrestored: true } : {});
     if (error instanceof QualificationFailure) {
       const evidence = error.evidence;
+      if (typeof evidence.observations.gcmConnected === "boolean" && typeof evidence.observations.gcmRemedyApplied === "boolean") {
+        receipt.rigReadiness = { ...receipt.rigReadiness!, observations: { ...receipt.rigReadiness!.observations,
+          gcmConnected: evidence.observations.gcmConnected, gcmRemedyApplied: evidence.observations.gcmRemedyApplied } };
+      }
       if ((evidence.lane === "campaign" && evidence.step === "teardown") ||
         (evidence.lane === "cleanup" && (evidence.reason === "remote_unsettled" || receipt.lanes.cleanup.status === "failed"))) return error;
       const reason = Object.hasOwn(FAILURE_REASONS.rigReadiness, evidence.reason) ? evidence.reason :
@@ -2945,11 +2949,11 @@ export async function runRigReadiness(
     receipt.rigReadiness = { ...receipt.rigReadiness!, observations: { ...receipt.rigReadiness!.observations, ...push } };
     await persist();
     const observed = receipt.rigReadiness.observations;
-    for (const field of ["leaseOwned", "pixelReachable", "pushSent", "pushAcknowledged", "pushPresented", "pushCleared",
+    for (const field of ["leaseOwned", "pixelReachable", "gcmConnected", "pushSent", "pushAcknowledged", "pushPresented", "pushCleared",
       "windowsApiReady", "windowsResourcesAbsent", "macEgress", "macDoctor", "loopbackOnly", "serveExpected", "funnelOff", "fixturePinned"] as const) {
       if (observed[field] !== true) throw new Error("rig readiness prerequisite is unproven");
     }
-    if (typeof observed.creationAllowance !== "number" || observed.creationAllowance < 1 ||
+    if (typeof observed.gcmRemedyApplied !== "boolean" || typeof observed.creationAllowance !== "number" || observed.creationAllowance < 1 ||
       typeof observed.deliveryMs !== "number" || observed.deliveryMs > 160_000) throw new Error("rig readiness bounds are unproven");
   } catch (error) { failures.push(ownedFailure(error)); }
   finally {
@@ -3061,7 +3065,8 @@ async function runCampaignReadiness(
         identity, pixel, progress, checkpoint, execution, mac, origin: context!.publicOrigin,
         sessionLabel: options.sessionLabel, qualificationLogs: logs!.logs,
       });
-      if (result.delivered !== true || result.acknowledged !== true || typeof result.elapsedMs !== "number" || typeof result.clearMs !== "number") {
+      if (result.delivered !== true || result.acknowledged !== true || result.gcmConnected !== true ||
+        typeof result.gcmRemedyApplied !== "boolean" || typeof result.elapsedMs !== "number" || typeof result.clearMs !== "number") {
         throw new Error("rig readiness push path is unproven");
       }
       for (const key of ["subscriptionCount", "sendCount", "ackCount"] as const) {
@@ -3070,6 +3075,7 @@ async function runCampaignReadiness(
         }
       }
       return { pixelReachable: true, pushSent: true, pushAcknowledged: true, pushPresented: true, pushCleared: true,
+        gcmConnected: true, gcmRemedyApplied: result.gcmRemedyApplied,
         deliveryMs: result.elapsedMs, clearMs: result.clearMs, subscriptionCount: result.subscriptionCount as number,
         sendCount: result.sendCount as number, ackCount: result.ackCount as number };
     },

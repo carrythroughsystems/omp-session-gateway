@@ -207,6 +207,8 @@ export interface AndroidPushRuntime {
   beforeEffect: () => Promise<void>;
   beginCleanup?(execution?: PushExecution): void;
   preflight(input: AndroidPushPreflightInput): Promise<AndroidPushAdmission>;
+  /** Effectful readiness only, after the Pixel lease and restorable baseline checkpoint. */
+  gcmReadiness(): Promise<{ gcmConnected: true; gcmRemedyApplied: boolean }>;
   dndOff(): Promise<boolean>;
   device(): Promise<PushDeviceBaseline>;
   browser(): Promise<PushBrowserBaseline>;
@@ -424,6 +426,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     let failureAt = deliveryStarted;
     let sampleLate: (() => Promise<void>) | undefined;
     const metrics = emptyPushDeliveryMetrics();
+    let gcm: { gcmConnected: true; gcmRemedyApplied: boolean } | undefined;
     const readinessFailure = (error: unknown, ancestors = new Set<unknown>()): unknown => {
       if (error instanceof AggregateError) {
         if (ancestors.has(error)) return error;
@@ -446,7 +449,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       }
       if (evidence.lane !== "rigReadiness") return error;
       return Object.assign(new QualificationFailure({ ...evidence,
-        observations: { ...evidence.observations, subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount,
+        observations: { ...gcm, ...evidence.observations, subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount,
           ackCount: metrics.ackCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } }, { cause: error }),
         pixelUnrestored(error) ? { pixelUnrestored: true } : {});
     };
@@ -482,6 +485,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     };
     try {
       await runtime.beforeEffect(); requireBudget();
+      gcm = await runtime.gcmReadiness(); requireBudget();
       try { progress.browser = await runtime.browser(); }
       catch (error) {
         rethrowPushSafetyFailure(error);
@@ -587,7 +591,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       throw finalFailure(Object.assign(new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness restoration failed"), { pixelUnrestored: true }));
     }
     if (primary !== undefined) throw finalFailure(primary);
-    return { delivered, acknowledged: true, elapsedMs: roundTripMs, clearMs: metrics.clearMs,
+    return { delivered, acknowledged: true, ...gcm, elapsedMs: roundTripMs, clearMs: metrics.clearMs,
       subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount, ackCount: metrics.ackCount, cleanup };
   });
 }

@@ -76,6 +76,7 @@ function fake(options: FakeOptions = {}) {
     now: () => time, beforeEffect: async () => {},
     deliveryOwnership: async () => 1,
     subscriptionCount: async () => 1,
+    gcmReadiness: async () => ({ gcmConnected: true, gcmRemedyApplied: false }),
     pause: async milliseconds => {
       time += milliseconds;
       if (time < socketStaleUntil) return;
@@ -238,8 +239,32 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
   host.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1, failures: 0, retryable: false, httpStatus: 0, requestAlias: 1 });
   expect(await runAndroidPushReadiness(host.input)).toMatchObject({
-    delivered: true, acknowledged: true, subscriptionCount: 1, sendCount: 1, ackCount: 1, cleanup: { restored: true },
+    delivered: true, acknowledged: true, gcmConnected: true, gcmRemedyApplied: false,
+    subscriptionCount: 1, sendCount: 1, ackCount: 1, cleanup: { restored: true },
   });
+  expect(host.state().device).toEqual(baseline);
+  expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
+});
+
+test("GCM refusal precedes browser and fixture effects and restores the checkpointed radios", async () => {
+  const host = fake();
+  let fixtureCalls = 0, browserCalls = 0;
+  host.runtime.browser = async () => { browserCalls++; return browserBaseline; };
+  host.runtime.fixture = async () => { fixtureCalls++; };
+  host.runtime.gcmReadiness = async () => {
+    expect(host.checkpoints.at(-1)).toMatchObject({ phase: "baseline_captured", device: baseline });
+    await host.runtime.network("cellular");
+    throw new QualificationFailure({ id: 1, lane: "rigReadiness", step: "pixel_push", reason: "gcm_disconnected",
+      class: "infra_transient", elapsedMs: 32_000, operation: "read_only",
+      observations: { gcmConnected: false, gcmRemedyApplied: true } },
+    { cause: new Error("GcmService censored sample: Is client connected: false; Reconnect Scheduler Alarm: OFF") });
+  };
+  const error = await runAndroidPushReadiness(host.input).catch(error => error);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{
+    reason: "gcm_disconnected", class: "infra_transient", observations: { gcmConnected: false, gcmRemedyApplied: true },
+  }]);
+  expect(browserCalls).toBe(0);
+  expect(fixtureCalls).toBe(0);
   expect(host.state().device).toEqual(baseline);
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
 });

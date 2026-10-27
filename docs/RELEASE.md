@@ -1016,6 +1016,24 @@ one Private background/locked Pixel push through the actual tailnet/FCM send, ac
 presentation path. Delivery must occur within 160 seconds; answer and authoritative clear must
 also pass. HTTP reachability alone does not prove FCM readiness.
 
+Before browser capture or the readiness ask, the Pixel owner reads `dumpsys activity service
+GcmService` under its lease and after checkpointing the original device/radio baseline. An already
+connected client proceeds without radio changes. A disconnected client gets exactly one
+`svc wifi disable`, two-second pause, `svc wifi enable` cycle, then at most 30 seconds to report
+connected. Individual ADB reads/changes are capped at ten seconds and the execution deadline
+still applies. No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
+automatic. Missing or ambiguous connection flags fail as invalid evidence without cycling Wi-Fi.
+Unproved connection after the bound fails before any ask as `gcm_disconnected` (`infra_transient`);
+normal Pixel/Mac restoration still runs. If that refusal persists, keep the driver disabled,
+inspect its private cause diagnostic and reconcile the rig rather than extending delivery waits.
+
+Readiness observations carry `gcmConnected` and `gcmRemedyApplied` on success and typed GCM
+refusal. The latter records whether the Wi-Fi cycle began. These are additive schema-3 booleans:
+historical receipts may omit both, so no receipt-version bump is needed; new readiness requires
+both and an affirmative connected proof. They do not replace the actual Push presentation/clear
+gate or award qualification. Only a censored connection flag and allowlisted reconnect-alarm
+sample enter the private cause chain; the raw GCM dump never enters receipts or diagnostics.
+
 Before issuing its ask, readiness reads the authenticated `GET /api/v1/push/config` recipient count.
 The disposable rig must have exactly one eligible subscription, belonging to its prepared Pixel.
 More than one produces the harness refusal `stale_subscriptions` with `subscriptionCount`; zero
