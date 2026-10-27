@@ -51,7 +51,7 @@ export const FAILURE_REASONS = {
     push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient" },
   preflight: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness" },
   rigReadiness: { ...commonReasons, ...transportReasons, prerequisite_failed: "harness", assertion_failed: "product",
-    push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient",
+    push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient", gcm_disconnected: "infra_transient",
     delivery_timeout: "harness", delivery_metadata_timeout: "harness", stale_subscriptions: "harness", browser_baseline_failed: "harness" },
   artifacts: { ...commonReasons, ...transportReasons, signature_failed: "harness", digest_mismatch: "harness" },
   debian: { ...commonReasons, ...transportReasons, assertion_failed: "product", workflow_unknown: "harness" },
@@ -114,6 +114,7 @@ const observationBounds = {
   pushServiceFailure: "boolean", outageSpansWindow: "boolean", deviceUnavailable: "boolean", tailnetUnavailable: "boolean",
   allocationRejected: "boolean", noAllocation: "boolean", cleanupVerified: "boolean", mutationReconciled: "boolean",
   persistenceFailed: "boolean",
+  gcmConnected: "boolean", gcmRemedyApplied: "boolean",
   subscriptionCount: 8, sendCount: 16_384, ackCount: 16_384,
 } as const;
 export type FailureObservations = { readonly [K in keyof typeof observationBounds]?: (typeof observationBounds)[K] extends "boolean" ? boolean : number };
@@ -186,6 +187,10 @@ export function parseLaneFailure(value: unknown): LaneFailure {
         break;
       case "push_service_failure":
         if (observations.pushServiceFailure !== true || observations.retryableStatus !== true) invalid();
+        break;
+      case "gcm_disconnected":
+        if (item.step !== "pixel_push" || item.operation !== "read_only" || observations.gcmConnected !== false ||
+          typeof observations.gcmRemedyApplied !== "boolean") invalid();
         break;
       case "device_outage": case "tailnet_outage":
         if (observations.outageSpansWindow !== true || observations[item.reason === "device_outage" ? "deviceUnavailable" : "tailnetUnavailable"] !== true) invalid();
@@ -393,6 +398,7 @@ export function qualificationRetryEligible(value: unknown, bindingsMatch: boolea
       !qualificationContainmentUnproven(summary.failures) &&
       summary.failures.some(item => item.class === "infra_transient") &&
       summary.failures.every(item =>
+        item.reason !== "gcm_disconnected" &&
         !(item.class === "infra_transient" && item.step === "cleanup") &&
         (item.class === "infra_transient" ? item.operation === "not_started" || item.operation === "read_only" :
           item.class === "collateral" && item.operation !== "unknown"));

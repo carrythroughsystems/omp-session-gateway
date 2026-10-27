@@ -284,11 +284,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     bun: options.fixtureBun ?? process.execPath,
     binary: options.fixtureBinary ?? process.env.OMP_PUSH_FIXTURE_BINARY ?? "",
     scripts: options.fixtureScripts ?? resolve(import.meta.dir) });
-  const boundedAdb = (device: string | undefined, args: readonly string[]) => {
+  const boundedAdb = (device: string | undefined, args: readonly string[], timeoutMs?: number) => {
     checkExecution();
     const current = execution;
-    return runAdb(device, args, current === undefined ? {} : {
-      timeoutMs: Math.max(1, current.deadline - performance.now()),
+    return runAdb(device, args, current === undefined ? timeoutMs === undefined ? {} : { timeoutMs } : {
+      timeoutMs: Math.max(1, Math.min(timeoutMs ?? Infinity, current.deadline - performance.now())),
       signal: current.signal,
     });
   };
@@ -425,6 +425,112 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const device = await runtime.device();
       if (device.forcedDoze || device.batteryOverride) throw new Error("Push qualification requires no pre-existing battery/Doze override");
       return { android, browser, webApk: true, dndOff: true };
+    },
+    async gcmReadiness() {
+      const start = runtime.now();
+      let gcmRemedyApplied = false, mutationInFlight = false, reconnectObserved = false;
+      let lastConnected: boolean | undefined;
+      let sample = "Is client connected: unavailable; Reconnect Scheduler Alarm: unavailable";
+      const observations = () => ({ gcmConnected: lastConnected === true, gcmRemedyApplied });
+      const diagnostic = (cause?: unknown) => new Error(`GcmService censored sample: ${sample}`, cause === undefined ? undefined : { cause });
+      const fail = (reason: "gcm_disconnected" | "invalid_evidence" | "deadline_exceeded", cause?: unknown): never => {
+        const common = { id: nextFailureId(), lane: "rigReadiness" as const, step: "pixel_push" as const,
+          elapsedMs: Math.round(runtime.now() - start), operation: "read_only" as const,
+          observations: observations() };
+        if (reason === "gcm_disconnected") throw new QualificationFailure({ ...common, reason, class: "infra_transient" }, { cause });
+        throw new QualificationFailure({ ...common, reason, class: "harness" }, { cause });
+      };
+      const expiredWindow = (cause?: unknown): never =>
+        fail(reconnectObserved && lastConnected === false ? "gcm_disconnected" : "deadline_exceeded", cause);
+      const executionFailure = (error: unknown): unknown => {
+        try { checkExecution(); return error; }
+        catch (expiry) {
+          return expiry instanceof QualificationFailure ?
+            Object.assign(new QualificationFailure(expiry.evidence,
+              { cause: new AggregateError([error, expiry], "GCM operation and execution failed") }),
+            pixelUnrestored(expiry) ? { pixelUnrestored: true } : {}) :
+            new AggregateError([error, expiry], "GCM operation and execution failed");
+        }
+      };
+      const retain = (error: unknown, ancestors = new Set<unknown>()): Error => {
+        if (error instanceof AggregateError && Array.isArray(error.errors) && error.errors.length > 0 && !ancestors.has(error)) {
+          ancestors.add(error);
+          const retained = Object.assign(new AggregateError(error.errors.map(child => retain(child, ancestors)),
+            "GCM readiness failures", { cause: diagnostic(error) }), pixelUnrestored(error) ? { pixelUnrestored: true } : {});
+          ancestors.delete(error);
+          return retained;
+        }
+        const evidence = error instanceof QualificationFailure ? error.evidence : {
+          id: nextFailureId(), lane: "rigReadiness" as const, step: "pixel_push" as const,
+          reason: "invalid_evidence" as const, class: "harness" as const, elapsedMs: Math.round(runtime.now() - start),
+          operation: mutationInFlight ? "unknown" as const : "read_only" as const, observations: {},
+        };
+        return Object.assign(new QualificationFailure({ ...evidence,
+          observations: { ...evidence.observations, ...observations() } }, { cause: diagnostic(error) }),
+        pixelUnrestored(error) ? { pixelUnrestored: true } : {});
+      };
+      const read = async (windowDeadline?: number): Promise<boolean> => {
+        checkExecution();
+        const device = await selectDevice();
+        if (windowDeadline !== undefined && runtime.now() >= windowDeadline) expiredWindow();
+        const commandDeadline = runtime.now() + 10_000;
+        const deadline = Math.min(commandDeadline, windowDeadline ?? Infinity);
+        let dump: string;
+        try {
+          dump = await boundedAdb(device, ["shell", "dumpsys", "activity", "service", "GcmService"],
+            Math.max(1, deadline - runtime.now()));
+        } catch (error) {
+          rethrowPushSafetyFailure(error);
+          const current = executionFailure(error);
+          if (current !== error) throw current;
+          if (windowDeadline !== undefined && runtime.now() >= windowDeadline) expiredWindow(error);
+          if (runtime.now() >= commandDeadline) fail("deadline_exceeded", error);
+          throw error;
+        }
+        checkExecution();
+        // Late output cannot replace the last observation actually made inside this window.
+        if (windowDeadline !== undefined && runtime.now() >= windowDeadline) expiredWindow();
+        if (runtime.now() >= commandDeadline) fail("deadline_exceeded");
+        // Never retain DeviceID, app/message IDs, network names, endpoints or the raw dump.
+        // Candidate detection is deliberately broader than the one accepted spelling below:
+        // suffixes (including word characters), case and spacing variants must not be ignored.
+        const flags = [...dump.matchAll(/^[^\S\r\n]*Is[^\S\r\n]*client[^\S\r\n]*connected[^\r\n]*\r?$/gimu)];
+        const connected = flags.length === 1 ?
+          /^[ \t]*Is client connected: (true|false)[ \t]*\r?$/u.exec(flags[0]![0])?.[1] ?? "unavailable" : "unavailable";
+        const alarm = dump.match(/^[ \t]*Reconnect Scheduler Alarm: (OFF|in PT(?=\d)(?:\d{1,3}H)?(?:\d{1,3}M)?(?:\d{1,3}(?:\.\d{1,3})?S)?)[ \t]*\r?$/mu)?.[1] ?? "unavailable";
+        sample = `Is client connected: ${connected}; Reconnect Scheduler Alarm: ${alarm}`;
+        lastConnected = connected === "unavailable" ? undefined : connected === "true";
+        if (connected === "unavailable") fail("invalid_evidence");
+        if (windowDeadline !== undefined) reconnectObserved = true;
+        return connected === "true";
+      };
+      try {
+        if (await read()) return { observations: { gcmConnected: true, gcmRemedyApplied }, diagnostic: diagnostic() };
+        // Record the attempted cycle before either mutating command; restoration owns uncertain exits.
+        await runtime.beforeEffect();
+        gcmRemedyApplied = true; mutationInFlight = true;
+        await boundedAdb(await selectDevice(), ["shell", "svc", "wifi", "disable"], 10_000);
+        mutationInFlight = false;
+        await runtime.pause(2_000);
+        await runtime.beforeEffect();
+        mutationInFlight = true;
+        await boundedAdb(await selectDevice(), ["shell", "svc", "wifi", "enable"], 10_000);
+        mutationInFlight = false;
+        const deadline = runtime.now() + 30_000;
+        while (runtime.now() < deadline) {
+          if (await read(deadline)) return { observations: { gcmConnected: true, gcmRemedyApplied }, diagnostic: diagnostic() };
+          await runtime.pause(Math.min(500, deadline - runtime.now()));
+        }
+        checkExecution();
+        return expiredWindow();
+      } catch (error) {
+        // A rejected ADB operation can mask a simultaneous cancellation. Preserve both privately,
+        // without replacing a stronger typed persistence/containment failure or duplicating roots.
+        if (!(error instanceof QualificationFailure) && !(error instanceof AggregateError)) {
+          error = executionFailure(error);
+        }
+        throw retain(error);
+      }
     },
     dndOff: async () => (await command("shell", "settings", "get", "global", "zen_mode")).trim() === "0",
     async device() {
@@ -978,6 +1084,14 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           }
           break;
         case "notifications": {
+          // No fixture or sink can exist before browser capture. Do not create browser effects
+          // while cleaning up an earlier GCM refusal; inconsistent ownership remains unresolved.
+          if (progress.browser === null) {
+            if (progress.notificationTopicDigest !== null || progress.secondaryNotificationTopicDigest !== null) {
+              throw new Error("notification ownership has no captured browser baseline");
+            }
+            break;
+          }
           const digests = [progress.notificationTopicDigest, progress.secondaryNotificationTopicDigest].filter((digest): digest is string => digest !== null);
           await page(async driver => {
             // The fixtures are stopped, so the loaded directory drops their Hold and Hide records; wait for that.

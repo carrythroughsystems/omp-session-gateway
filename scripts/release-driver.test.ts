@@ -649,6 +649,22 @@ function scheduledRetry(selected: DriverState, evidence = automaticFailure(selec
 }
 
 describe("automatic same-candidate campaign retry state machine", () => {
+  test("514 R1 a restored post-remedy GCM refusal stops diagnostic-required without another ordinal", () => {
+    const selected = automaticCampaign(), failure = automaticFailure(selected);
+    const campaignFailure: CampaignFailureObservation = { ...failure, outcome: { ...failure.outcome, scope: "campaign",
+      receipt: { sha256: "b".repeat(64), cleanupDisposition: "restored" },
+      failureSummary: { ...failure.outcome.failureSummary, failures: [{
+        id: 1, lane: "rigReadiness", step: "pixel_push", reason: "gcm_disconnected", class: "infra_transient",
+        elapsedMs: 32_000, operation: "read_only", observations: { gcmConnected: false, gcmRemedyApplied: true },
+      }] } } };
+    const step = nextStep(selected, snapshot({ campaign: { status: "failed", campaignFailure } }), config);
+    expect(step.operation).toBe("stop");
+    if (step.operation === "idle") throw new Error("expected diagnostic stop");
+    expect(step.phase).toBe("diagnostic-required");
+    expect(step.patch?.campaignAttempt).toBeUndefined();
+    expect(step.patch?.retryNotBefore).toBeUndefined();
+    expect(step.detail).toContain("rigReadiness:infra_transient:gcm_disconnected");
+  });
   test("infra failures allocate 1 then 2, persist 60/120-second deadlines, then exhaust", () => {
     let selected = automaticCampaign();
     const identity = [selected.candidate, selected.candidateCommit, selected.candidateDigest, selected.previousStable, selected.macHost, selected.authorityPolicy];

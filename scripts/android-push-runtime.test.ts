@@ -7,9 +7,260 @@ import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDel
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { checkProviderReads } from "./check-repository.ts";
 import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qualification.ts";
-import { privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
+import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
 import { notificationTopicDigest } from "./android-notification.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
+
+test.each(["connected", "recovered", "disconnected"] as const)("GCM readiness uses one bounded Wi-Fi remedy when %s", async scenario => {
+  let time = 0, reads = 0;
+  const events: string[] = [];
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
+    const command = args.join(" ");
+    events.push(command);
+    expect(options?.timeoutMs).toBeGreaterThan(0);
+    expect(options?.timeoutMs).toBeLessThanOrEqual(10_000);
+    if (command === "shell dumpsys activity service GcmService") {
+      reads++;
+      const connected = scenario === "connected" || scenario === "recovered" && reads > 1;
+      return `DeviceID: SYNTHETIC-PRIVATE-GCM-DEVICE\nIs client connected: ${connected}\nReconnect Scheduler Alarm: in PT3H14M10.799S\nReceived SYNTHETIC-PRIVATE-GCM-MESSAGE`;
+    }
+    if (command === "shell svc wifi disable" || command === "shell svc wifi enable") return "";
+    throw new Error("unexpected synthetic adb command");
+  });
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.now = () => time;
+    runtime.pause = async milliseconds => { events.push(`pause ${milliseconds}`); time += milliseconds; };
+    runtime.beforeEffect = async () => { events.push("checkpoint"); };
+    if (scenario === "disconnected") {
+      const error = await runtime.gcmReadiness().catch(error => error);
+      expect(normalizeQualificationFailures(error)).toMatchObject([{
+        lane: "rigReadiness", step: "pixel_push", reason: "gcm_disconnected", class: "infra_transient",
+        elapsedMs: 32_000, observations: { gcmConnected: false, gcmRemedyApplied: true },
+      }]);
+      const diagnostic = JSON.stringify(privateQualificationFailureDiagnostic(error));
+      expect(diagnostic).toContain("Is client connected: false");
+      expect(diagnostic).toContain("Reconnect Scheduler Alarm: in PT3H14M10.799S");
+      expect(diagnostic).not.toContain("SYNTHETIC-PRIVATE-GCM");
+      expect(time).toBe(32_000);
+    } else {
+      expect(await runtime.gcmReadiness()).toMatchObject({
+        observations: { gcmConnected: true, gcmRemedyApplied: scenario === "recovered" }, diagnostic: expect.any(Error),
+      });
+    }
+    expect(events.filter(event => event.startsWith("shell svc"))).toEqual(scenario === "connected" ? [] :
+      ["shell svc wifi disable", "shell svc wifi enable"]);
+    if (scenario === "connected") expect(events).toEqual(["shell dumpsys activity service GcmService"]);
+    else expect(events.slice(0, 6)).toEqual(["shell dumpsys activity service GcmService", "checkpoint",
+      "shell svc wifi disable", "pause 2000", "checkpoint", "shell svc wifi enable"]);
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
+test.each(["missing", "duplicate", "alarm", "late", "cancelled"] as const)("GCM readiness preserves the %s boundary", async scenario => {
+  let time = 0, reads = 0;
+  const commands: string[] = [], controller = new AbortController();
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => {
+    const command = args.join(" ");
+    commands.push(command);
+    if (command !== "shell dumpsys activity service GcmService") return "";
+    reads++;
+    if (scenario === "missing") return "DeviceID: SYNTHETIC-PRIVATE-GCM-DEVICE";
+    if (scenario === "duplicate") return "Is client connected: true\nIs client connected: false";
+    if (scenario === "late" && reads > 1) time += 30_000;
+    return `Is client connected: ${scenario === "late" && reads > 1}\nReconnect Scheduler Alarm: SYNTHETIC-PRIVATE-GCM-ALARM`;
+  });
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execution: {
+      signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1,
+    } });
+    runtime.now = () => time;
+    runtime.beforeEffect = async () => {};
+    runtime.pause = async milliseconds => {
+      time += milliseconds;
+      if (scenario === "cancelled") controller.abort(new Error("synthetic GCM cancellation"));
+    };
+    const error = await runtime.gcmReadiness().catch(error => error);
+    expect(normalizeQualificationFailures(error)[0]?.reason).toBe(scenario === "cancelled" || scenario === "late" ? "deadline_exceeded" :
+      scenario === "missing" || scenario === "duplicate" ? "invalid_evidence" : "gcm_disconnected");
+    expect(normalizeQualificationFailures(error)[0]?.observations).toMatchObject({
+      gcmConnected: false, gcmRemedyApplied: !["missing", "duplicate"].includes(scenario),
+    });
+    expect(JSON.stringify(privateQualificationFailureDiagnostic(error))).not.toContain("SYNTHETIC-PRIVATE-GCM");
+    if (scenario === "missing" || scenario === "duplicate") expect(commands).toHaveLength(1);
+    if (scenario === "cancelled") expect(commands).not.toContain("shell svc wifi enable");
+    if (scenario === "late") expect(time).toBe(32_000);
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
+test.each([
+  "Is client connected: false\nIs client connected: malformed",
+  "Is client connected: true\nIs client connected = false",
+  "Is client connected: true\nIS CLIENT CONNECTED: true",
+  "Is client connected: true trailing-private-value",
+  "Is\tclient connected: true",
+])("514 R1 GCM rejects every malformed or duplicate connection line: %s", async dump => {
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockResolvedValue(dump);
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    let effects = 0;
+    runtime.beforeEffect = async () => { effects++; };
+    const error = await runtime.gcmReadiness().catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "invalid_evidence",
+      observations: { gcmConnected: false, gcmRemedyApplied: false } }]);
+    expect(effects).toBe(0); expect(adb).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(privateQualificationFailureDiagnostic(error))).not.toContain("trailing-private-value");
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
+test.each(
+  ["Is client connected", "is CLIENT connected", " Is\tclient\tconnected", "Isclientconnected",
+    "Is  client  connected", "Is\u00a0client\u00a0connected"].flatMap(label =>
+    ["_legacy", "Legacy", "1", "-legacy"].flatMap(suffix => ["true", "false"].flatMap(value => {
+      const malformed = `${label}${suffix}: ${value}`;
+      return [malformed, `Is client connected: true\n${malformed}`, `${malformed}\nIs client connected: false`];
+    }))),
+)("514 R2 GCM never ignores a malformed label prefix: %s", async dump => {
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockResolvedValue(dump);
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    let effects = 0;
+    runtime.beforeEffect = async () => { effects++; };
+    const error = await runtime.gcmReadiness().catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "invalid_evidence",
+      observations: { gcmConnected: false, gcmRemedyApplied: false } }]);
+    expect(effects).toBe(0); expect(adb).toHaveBeenCalledTimes(1);
+    const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+    expect(messages).toContain("GcmService censored sample: Is client connected: unavailable; Reconnect Scheduler Alarm: unavailable");
+    expect(messages).not.toContain(dump);
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
+test.each(["initial-cap", "read-cap", "read-cap-error", "late-first", "late-after-false", "in-window"] as const)(
+  "514 R1 GCM separates command caps from the reconnect window (%s)", async scenario => {
+    let time = 0, reads = 0;
+    const caps: number[] = [];
+    const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+    const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
+      if (args[1] !== "dumpsys") return "";
+      caps.push(options!.timeoutMs!); reads++;
+      let connected = false;
+      if (scenario === "initial-cap") { time += 10_000; connected = true; }
+      if (reads > 1 && scenario.startsWith("read-cap")) {
+        time += 10_000; connected = true;
+        if (scenario === "read-cap-error") throw new Error("synthetic per-read timeout");
+      }
+      if (scenario === "late-first" && reads === 2 || scenario === "late-after-false" && reads === 3) {
+        time = 32_000; connected = true;
+      }
+      if (scenario === "in-window" && reads === 2) { time += 9_999; connected = true; }
+      return `Is client connected: ${connected}\nReconnect Scheduler Alarm: ${connected ? "OFF" : "in PT30S"}`;
+    });
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.now = () => time; runtime.pause = async ms => { time += ms; }; runtime.beforeEffect = async () => {};
+      if (scenario === "in-window") {
+        expect(await runtime.gcmReadiness()).toMatchObject({ observations: { gcmConnected: true, gcmRemedyApplied: true } });
+      } else {
+        const error = await runtime.gcmReadiness().catch(error => error);
+        expect(normalizeQualificationFailures(error)).toMatchObject([{
+          reason: scenario === "late-after-false" ? "gcm_disconnected" : "deadline_exceeded",
+          observations: { gcmConnected: false, gcmRemedyApplied: scenario !== "initial-cap" },
+        }]);
+        const diagnostic = JSON.stringify(privateQualificationFailureDiagnostic(error));
+        expect(diagnostic).not.toContain("Is client connected: true");
+        expect(diagnostic).toContain(`Is client connected: ${scenario === "initial-cap" ? "unavailable" : "false"}`);
+        if (scenario === "read-cap-error") expect(diagnostic).toContain("synthetic per-read timeout");
+      }
+      expect(caps.every(cap => cap > 0 && cap <= 10_000)).toBe(true);
+      if (scenario.startsWith("read-cap")) expect(time).toBe(12_000);
+    } finally { adb.mockRestore(); select.mockRestore(); }
+  });
+
+test.each(["read", "disable", "pause", "enable", "reconnect-read", "checkpoint", "cancel", "expiry", "containment"] as const)(
+  "514 R1 GCM retains typed facts and private context when %s fails", async stage => {
+    const controller = new AbortController(), raw = new Error(`synthetic private GCM ${stage} failure`);
+    let time = 0, reads = 0, checkpoints = 0, id = 10;
+    const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
+    const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+    const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => {
+      if (args[1] === "dumpsys") {
+        reads++;
+        if (stage === "cancel") { controller.abort(new Error("synthetic GCM cancellation cause")); throw raw; }
+        if (stage === "expiry") { execution.deadline = 0; throw raw; }
+        if (stage === "read" || stage === "reconnect-read" && reads > 1) throw raw;
+        return "Is client connected: false\nReconnect Scheduler Alarm: OFF";
+      }
+      if (stage === "disable" && args[3] === "disable" || stage === "enable" && args[3] === "enable") throw raw;
+      return "";
+    });
+    try {
+      const runtime = createAndroidPushRuntime(identity, { execution });
+      runtime.now = () => time;
+      runtime.pause = async ms => { time += ms; if (stage === "pause") throw raw; };
+      runtime.beforeEffect = async () => {
+        checkpoints++;
+        if (stage === "checkpoint") throw raw;
+        if (stage === "containment") throw Object.assign(new AggregateError([
+          new QualificationFailure({ id: 1, lane: "androidPushCleanup", step: "containment", reason: "invalid_evidence",
+            class: "harness", elapsedMs: 0, operation: "unknown", observations: { persistenceFailed: true } }, { cause: raw }),
+        ], "synthetic containment failure"), { pixelUnrestored: true });
+      };
+      const error = await runtime.gcmReadiness().catch(error => error);
+      const remedy = ["disable", "pause", "enable", "reconnect-read"].includes(stage);
+      expect(normalizeQualificationFailures(error)).toMatchObject([{
+        reason: stage === "cancel" || stage === "expiry" ? "deadline_exceeded" : "invalid_evidence",
+        observations: { gcmConnected: false, gcmRemedyApplied: remedy },
+      }]);
+      const text = JSON.stringify(privateQualificationFailureDiagnostic(error));
+      expect(text).toContain(raw.message); expect(text).toContain("GcmService censored sample:");
+      if (stage === "cancel") expect(text).toContain("synthetic GCM cancellation cause");
+      if (stage === "enable" || stage === "disable") expect(normalizeQualificationFailures(error)[0]?.operation).toBe("unknown");
+      if (stage === "enable") expect(checkpoints).toBe(2);
+      if (stage === "containment") expect(error).toMatchObject({ pixelUnrestored: true });
+    } finally { adb.mockRestore(); select.mockRestore(); }
+  });
+
+test("514 U1 the real AndroidAdbError constructor withholds identifier-bearing stdout and stderr before the private chain", async () => {
+  const host = ["synthetic-private", "synthetic-net", "ts", "net"].join(".");
+  const home = "/" + ["Users", "syntheticoperator"].join("/");
+  const body = `${host}\n${home}\nDeviceID: SYNTHETIC-ADB-PRIVATE\n` + "private-output ".repeat(10_000);
+  const stream = () => new ReadableStream<Uint8Array>({ start(value) {
+    value.enqueue(new TextEncoder().encode(body)); value.close();
+  } });
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+    stdout: stream(), stderr: stream(), exited: Promise.resolve(23), kill() {},
+  })) as unknown as typeof Bun.spawn);
+  try {
+    const error = await createAndroidPushRuntime(identity).gcmReadiness().catch(error => error);
+    const entries = privateQualificationFailureDiagnostic(error), text = JSON.stringify(entries);
+    expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "invalid_evidence",
+      observations: { gcmConnected: false, gcmRemedyApplied: false } }]);
+    expect(entries.map(entry => entry.message)).toContain("adb exited 23; output withheld");
+    for (const value of [host, home, "SYNTHETIC-ADB-PRIVATE", "private-output"]) expect(text).not.toContain(value);
+    expect(entries.every(entry => Buffer.byteLength(entry.message) <= 4096 && Buffer.byteLength(entry.stack) <= 16_384)).toBe(true);
+    expect(Buffer.byteLength(text)).toBeLessThan(262_144);
+  } finally { spawn.mockRestore(); select.mockRestore(); }
+});
+
+test.each([false, true])("514 R1 pre-browser notification cleanup opens no browser (inconsistent ownership=%s)", async owned => {
+  const chrome = spyOn(deviceOperations, "withAndroidChrome").mockRejectedValue(new Error("unexpected browser effect"));
+  const adb = spyOn(deviceOperations, "runAdb").mockRejectedValue(new Error("unexpected adb effect"));
+  const open = spyOn(webApkOperations, "openWebApk").mockRejectedValue(new Error("unexpected navigation"));
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    const cleanup = runtime.cleanup("notifications", { epoch: "synthetic", browser: null,
+      notificationTopicDigest: owned ? notificationTopicDigest("omp-attention-synthetic") : null,
+      secondaryNotificationTopicDigest: null } as AndroidPushProgress);
+    if (owned) await expect(cleanup).rejects.toThrow("notification ownership has no captured browser baseline");
+    else await cleanup;
+    expect(chrome).not.toHaveBeenCalled(); expect(adb).not.toHaveBeenCalled(); expect(open).not.toHaveBeenCalled();
+  } finally { open.mockRestore(); adb.mockRestore(); chrome.mockRestore(); }
+});
 
 test("509 round2 runtime privacy conversion preserves ordinary notification errors", async () => {
   const raw = new Error("synthetic notification identity changed");

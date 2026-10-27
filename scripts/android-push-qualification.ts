@@ -180,6 +180,11 @@ export interface PushDeviceBaseline {
 export interface PushBrowserBaseline {
   readonly subscribed: boolean; readonly detail: PushDetailLevel; readonly permission: "granted" | "denied" | "default";
 }
+export interface PushGcmReadiness {
+  readonly observations: { readonly gcmConnected: true; readonly gcmRemedyApplied: boolean };
+  /** Censored, private context only; never spread this object into receipt observations. */
+  readonly diagnostic: Error;
+}
 export interface PushTapObservation {
   readonly launches: number; readonly successful: number; readonly currentGeneration: boolean;
   readonly currentRequest: boolean; readonly scrubbedBeforeNetwork: boolean;
@@ -207,6 +212,8 @@ export interface AndroidPushRuntime {
   beforeEffect: () => Promise<void>;
   beginCleanup?(execution?: PushExecution): void;
   preflight(input: AndroidPushPreflightInput): Promise<AndroidPushAdmission>;
+  /** Effectful readiness only, after the Pixel lease and restorable baseline checkpoint. */
+  gcmReadiness(): Promise<PushGcmReadiness>;
   dndOff(): Promise<boolean>;
   device(): Promise<PushDeviceBaseline>;
   browser(): Promise<PushBrowserBaseline>;
@@ -412,7 +419,7 @@ export async function cleanupAndroidPush(input: LaneInput): Promise<Record<strin
   return input.pixel("androidPush-cleanup", () => restore(input, runtime, progress));
 }
 
-/** Effectful readiness only: this does not manufacture any qualification phase pass. */
+/** Effectful readiness only. The internal result includes private GCM context, not receipt data. */
 export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<string, unknown>> {
   const runtime = input.runtime ?? createAndroidPushRuntime(input.identity, input.execution === undefined ? {} : { execution: input.execution });
   await preflightAndroidPush({ origin: input.identity.origin }, runtime);
@@ -424,15 +431,23 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     let failureAt = deliveryStarted;
     let sampleLate: (() => Promise<void>) | undefined;
     const metrics = emptyPushDeliveryMetrics();
+    let gcm: PushGcmReadiness | undefined;
     const readinessFailure = (error: unknown, ancestors = new Set<unknown>()): unknown => {
-      if (error instanceof AggregateError) {
-        if (ancestors.has(error)) return error;
+      if (error instanceof AggregateError && Array.isArray(error.errors) && error.errors.length > 0 && !ancestors.has(error)) {
         ancestors.add(error);
         const mapped = Object.assign(new AggregateError(error.errors.map(child => readinessFailure(child, ancestors)),
           "Push readiness failures", { cause: error }), pixelUnrestored(error) ? { pixelUnrestored: true } : {});
         ancestors.delete(error);
         return mapped;
       }
+      if (!(error instanceof QualificationFailure)) {
+        if (gcm === undefined) return error;
+        error = Object.assign(new QualificationFailure({ id: input.execution?.nextFailureId() ?? 1,
+          lane: "rigReadiness", step: "pixel_push", reason: "unclassified_failure", class: "harness",
+          elapsedMs: pushMilliseconds(failureAt - deliveryStarted), operation: "unknown", observations: {} }, { cause: error }),
+        pixelUnrestored(error) ? { pixelUnrestored: true } : {});
+      }
+      // The conversion above makes ordinary post-GCM failures typed without discarding their cause.
       if (!(error instanceof QualificationFailure)) return error;
       let evidence = error.evidence;
       if (evidence.lane === "androidPush") {
@@ -444,10 +459,12 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
           evidence.reason === "push_service_failure" ? { ...common, class: "infra_transient", reason: "push_service_failure" } :
           { ...common, class: "harness", reason: evidence.reason === "delivery_timeout" || evidence.reason === "deadline_exceeded" ? evidence.reason : "invalid_evidence" };
       }
-      if (evidence.lane !== "rigReadiness") return error;
+      if (evidence.lane !== "rigReadiness" && gcm === undefined) return error;
       return Object.assign(new QualificationFailure({ ...evidence,
-        observations: { ...evidence.observations, subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount,
-          ackCount: metrics.ackCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } }, { cause: error }),
+        observations: { ...gcm?.observations, ...evidence.observations, ...(evidence.lane === "rigReadiness" ? {
+          subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount,
+          ackCount: metrics.ackCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } : {}) } },
+        { cause: gcm === undefined ? error : new AggregateError([error, gcm.diagnostic], "Push readiness GCM context") }),
         pixelUnrestored(error) ? { pixelUnrestored: true } : {});
     };
     const finalFailure = (error: unknown): unknown => {
@@ -482,6 +499,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     };
     try {
       await runtime.beforeEffect(); requireBudget();
+      gcm = await runtime.gcmReadiness(); requireBudget();
       try { progress.browser = await runtime.browser(); }
       catch (error) {
         rethrowPushSafetyFailure(error);
@@ -587,7 +605,8 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       throw finalFailure(Object.assign(new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness restoration failed"), { pixelUnrestored: true }));
     }
     if (primary !== undefined) throw finalFailure(primary);
-    return { delivered, acknowledged: true, elapsedMs: roundTripMs, clearMs: metrics.clearMs,
+    return { delivered, acknowledged: true, ...gcm?.observations, gcmDiagnostic: gcm?.diagnostic,
+      elapsedMs: roundTripMs, clearMs: metrics.clearMs,
       subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount, ackCount: metrics.ackCount, cleanup };
   });
 }

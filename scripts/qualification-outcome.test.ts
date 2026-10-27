@@ -93,6 +93,23 @@ describe("general qualification machine outcome", () => {
     }
     expect(() => parseRigReadinessReceipt({ ...base, observations: { ...observations, ackCount: 1 } })).toThrow();
   });
+  test("schema-3 GCM observations are an optional boolean pair, never a disconnected passing proof", () => {
+    const observations = { baselineRestored: true, pixelReachable: true, pushSent: true, pushAcknowledged: true,
+      pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 1, ackCount: 1 };
+    const base = { status: "passed", campaignAttempt: 0, timings: {}, cleanupDisposition: "restored", observations };
+    expect(parseRigReadinessReceipt(base).observations).toEqual(observations);
+    for (const gcmRemedyApplied of [false, true]) {
+      expect(parseRigReadinessReceipt({ ...base, observations: { ...observations, gcmConnected: true, gcmRemedyApplied } })
+        .observations).toMatchObject({ gcmConnected: true, gcmRemedyApplied });
+    }
+    for (const fields of [{ gcmConnected: true }, { gcmRemedyApplied: false },
+      { gcmConnected: 1, gcmRemedyApplied: false }, { gcmConnected: true, gcmRemedyApplied: "false" },
+      { gcmConnected: false, gcmRemedyApplied: true }]) {
+      expect(() => parseRigReadinessReceipt({ ...base, observations: { ...observations, ...fields } })).toThrow();
+    }
+    expect(parseRigReadinessReceipt({ ...base, status: "failed",
+      observations: { ...observations, gcmConnected: false, gcmRemedyApplied: true } }).status).toBe("failed");
+  });
   test("council U1 complete outcomes reject duplicate and escaped-equivalent keys through portable parsing and POSIX file reads", async () => {
     const root = process.platform === "win32" ? undefined : await mkdtemp(join(privateTmpdir, "qualification-duplicate-"));
     try {

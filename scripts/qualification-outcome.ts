@@ -60,6 +60,7 @@ export interface QualificationOutcome {
 }
 const readinessBounds = {
   leaseOwned: "boolean", pixelReachable: "boolean", pushSent: "boolean", pushAcknowledged: "boolean",
+  gcmConnected: "boolean", gcmRemedyApplied: "boolean",
   pushPresented: "boolean", pushCleared: "boolean", baselineRestored: "boolean", windowsApiReady: "boolean",
   windowsResourcesAbsent: "boolean", creationAllowance: 1_000, quotaObservable: "boolean", quotaAvailable: 1_000_000,
   macEgress: "boolean", macDoctor: "boolean", loopbackOnly: "boolean", serveExpected: "boolean", funnelOff: "boolean",
@@ -135,6 +136,10 @@ export function parseRigReadinessReceipt(value: unknown): RigReadinessReceipt {
     if (["quotaAvailable", "creationAllowance", "subscriptionCount", "sendCount", "ackCount"].includes(key) && !Number.isSafeInteger(value)) invalid();
   }
   if (observations.quotaObservable !== true && Object.hasOwn(observations, "quotaAvailable")) invalid();
+  // Historical schema-3 receipts omit both; new evidence must carry the complete boolean pair.
+  if ((Object.hasOwn(observations, "gcmConnected") || Object.hasOwn(observations, "gcmRemedyApplied")) &&
+    (typeof observations.gcmConnected !== "boolean" || typeof observations.gcmRemedyApplied !== "boolean" ||
+      readiness.status === "passed" && observations.gcmConnected !== true)) invalid();
   if ((readiness.cleanupDisposition === "restored" && observations.baselineRestored !== true) ||
     (observations.baselineRestored === true && readiness.cleanupDisposition === "unresolved") ||
     (observations.baselineRestored === false && readiness.cleanupDisposition !== "unresolved")) invalid();
