@@ -419,7 +419,7 @@ export async function cleanupAndroidPush(input: LaneInput): Promise<Record<strin
   return input.pixel("androidPush-cleanup", () => restore(input, runtime, progress));
 }
 
-/** Effectful readiness only: this does not manufacture any qualification phase pass. */
+/** Effectful readiness only. The internal result includes private GCM context, not receipt data. */
 export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<string, unknown>> {
   const runtime = input.runtime ?? createAndroidPushRuntime(input.identity, input.execution === undefined ? {} : { execution: input.execution });
   await preflightAndroidPush({ origin: input.identity.origin }, runtime);
@@ -605,7 +605,8 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       throw finalFailure(Object.assign(new AggregateError(primary === undefined ? [error] : [primary, error], "Push readiness restoration failed"), { pixelUnrestored: true }));
     }
     if (primary !== undefined) throw finalFailure(primary);
-    return { delivered, acknowledged: true, ...gcm?.observations, elapsedMs: roundTripMs, clearMs: metrics.clearMs,
+    return { delivered, acknowledged: true, ...gcm?.observations, gcmDiagnostic: gcm?.diagnostic,
+      elapsedMs: roundTripMs, clearMs: metrics.clearMs,
       subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount, ackCount: metrics.ackCount, cleanup };
   });
 }

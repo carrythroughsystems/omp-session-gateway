@@ -492,7 +492,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if (windowDeadline !== undefined && runtime.now() >= windowDeadline) expiredWindow();
         if (runtime.now() >= commandDeadline) fail("deadline_exceeded");
         // Never retain DeviceID, app/message IDs, network names, endpoints or the raw dump.
-        const flags = [...dump.matchAll(/^[ \t]*Is[ \t]+client[ \t]+connected\b[^\r\n]*\r?$/gimu)];
+        // Candidate detection is deliberately broader than the one accepted spelling below:
+        // suffixes (including word characters), case and spacing variants must not be ignored.
+        const flags = [...dump.matchAll(/^[^\S\r\n]*Is[^\S\r\n]*client[^\S\r\n]*connected[^\r\n]*\r?$/gimu)];
         const connected = flags.length === 1 ?
           /^[ \t]*Is client connected: (true|false)[ \t]*\r?$/u.exec(flags[0]![0])?.[1] ?? "unavailable" : "unavailable";
         const alarm = dump.match(/^[ \t]*Reconnect Scheduler Alarm: (OFF|in PT(?=\d)(?:\d{1,3}H)?(?:\d{1,3}M)?(?:\d{1,3}(?:\.\d{1,3})?S)?)[ \t]*\r?$/mu)?.[1] ?? "unavailable";

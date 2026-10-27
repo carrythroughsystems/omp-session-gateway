@@ -246,7 +246,9 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   });
   expect(host.state().device).toEqual(baseline);
   expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", results: {} });
-  expect(result).not.toHaveProperty("diagnostic");
+  expect(result.gcmDiagnostic).toBeInstanceOf(Error);
+  expect((result.gcmDiagnostic as Error).message).toBe("GcmService censored sample: Is client connected: true; Reconnect Scheduler Alarm: OFF");
+  expect(host.checkpoints.every(checkpoint => !Object.hasOwn(checkpoint, "gcmDiagnostic"))).toBe(true);
   expect(JSON.stringify(result)).not.toContain("GcmService");
 });
 

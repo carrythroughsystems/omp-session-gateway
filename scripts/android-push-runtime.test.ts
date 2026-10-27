@@ -115,6 +115,30 @@ test.each([
   } finally { adb.mockRestore(); select.mockRestore(); }
 });
 
+test.each(
+  ["Is client connected", "is CLIENT connected", " Is\tclient\tconnected", "Isclientconnected",
+    "Is  client  connected", "Is\u00a0client\u00a0connected"].flatMap(label =>
+    ["_legacy", "Legacy", "1", "-legacy"].flatMap(suffix => ["true", "false"].flatMap(value => {
+      const malformed = `${label}${suffix}: ${value}`;
+      return [malformed, `Is client connected: true\n${malformed}`, `${malformed}\nIs client connected: false`];
+    }))),
+)("514 R2 GCM never ignores a malformed label prefix: %s", async dump => {
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockResolvedValue(dump);
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    let effects = 0;
+    runtime.beforeEffect = async () => { effects++; };
+    const error = await runtime.gcmReadiness().catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "invalid_evidence",
+      observations: { gcmConnected: false, gcmRemedyApplied: false } }]);
+    expect(effects).toBe(0); expect(adb).toHaveBeenCalledTimes(1);
+    const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+    expect(messages).toContain("GcmService censored sample: Is client connected: unavailable; Reconnect Scheduler Alarm: unavailable");
+    expect(messages).not.toContain(dump);
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
 test.each(["initial-cap", "read-cap", "read-cap-error", "late-first", "late-after-false", "in-window"] as const)(
   "514 R1 GCM separates command caps from the reconnect window (%s)", async scenario => {
     let time = 0, reads = 0;

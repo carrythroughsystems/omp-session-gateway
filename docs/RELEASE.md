@@ -1023,7 +1023,8 @@ connected client proceeds without radio changes. A disconnected client gets exac
 connected. Individual ADB reads/changes are capped at ten seconds and the execution deadline
 still applies independently of that reconnect window: late output cannot replace an in-window
 observation. No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
-automatic. Any malformed or duplicate connection line fails as invalid evidence without cycling
+automatic. Any malformed or duplicate connection line, including a label-prefix suffix or
+case/spacing variant beside a valid line, fails as invalid evidence without cycling
 Wi-Fi. In-window disconnected evidence after the bound fails before any ask as `gcm_disconnected`
 (`infra_transient`); a command timeout or missing in-window proof remains a harness deadline
 failure. Neither grants another campaign attempt: the driver stops `diagnostic-required`.
@@ -1038,6 +1039,10 @@ historical receipts may omit both, so no receipt-version bump is needed; new rea
 both and an affirmative connected proof. They do not replace the actual Push presentation/clear
 gate or award qualification. Only a censored connection flag and allowlisted reconnect-alarm
 sample enter the private cause chain; the raw GCM dump never enters receipts or diagnostics.
+The successful Push action hands its censored diagnostic separately to the readiness owner,
+which retains its observations before post-action persistence or outer deadline enforcement.
+A later checkpoint, deadline or restoration failure therefore keeps both GCM booleans in typed
+failure evidence and the sample only in the private cause chain.
 
 Before issuing its ask, readiness reads the authenticated `GET /api/v1/push/config` recipient count.
 The disposable rig must have exactly one eligible subscription, belonging to its prepared Pixel.

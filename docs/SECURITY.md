@@ -504,7 +504,10 @@ does not enlarge delivery budgets; execution cancellation and normal radio resto
 authoritative. An exhausted GCM remedy never authorizes an automatic campaign retry. Late
 observations and any malformed or duplicate connection line cannot establish readiness. Receipts
 contain only `gcmConnected`/`gcmRemedyApplied` booleans; all GCM exits and subsequent readiness
-errors retain those facts and the censored private sample. The sample allowlists the client-connected
+errors retain those facts and the censored private sample. Successful Push hands the sample to
+its enclosing readiness owner as separate process-local context; observations are retained before
+post-action persistence and deadline checks, without serializing that context into the receipt.
+The sample allowlists the client-connected
 flag and an `OFF` or bounded duration reconnect alarm; malformed fields become `unavailable`.
 Device IDs, app/message IDs, network names, endpoints and the rest of `GcmService` output are
 never retained. `AndroidAdbError` in `scripts/android-device.ts` withholds command stdout/stderr

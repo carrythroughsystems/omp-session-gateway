@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { PRODUCT_VERSION } from "./build-release.ts";
 import {
   assertMacBuildOutput,
@@ -1313,7 +1313,7 @@ describe("campaign terminal evidence and readiness", () => {
       prepare: () => action("prepare"),
       windows: async () => { await action("windows"); return {}; },
       macos: async () => { await action("macos"); return {}; },
-      push: async () => { await action("push"); return {}; },
+      push: async () => { await action("push"); return { observations: {}, diagnostic: new Error("synthetic GCM context") }; },
       restorePixel: () => action("pixel restored"),
       restoreMac: () => action("Mac restored"),
     })).rejects.toThrow("rig readiness failed");
@@ -1347,13 +1347,68 @@ describe("campaign terminal evidence and readiness", () => {
       prepare: async () => {},
       windows: async () => ({ windowsApiReady: true, windowsResourcesAbsent: true, creationAllowance: 4 }),
       macos: async () => ({ macEgress: true, macDoctor: true, loopbackOnly: true, serveExpected: true, funnelOff: true, fixturePinned: true }),
-      push: async () => ({ gcmConnected: true, gcmRemedyApplied, pixelReachable: true, pushSent: true,
+      push: async () => ({ diagnostic: new Error("synthetic GCM context"), observations: {
+        gcmConnected: true, gcmRemedyApplied, pixelReachable: true, pushSent: true,
         pushAcknowledged: true, pushPresented: true, pushCleared: true, deliveryMs: 1, clearMs: 1,
-        subscriptionCount: 1, sendCount: 1, ackCount: 1 }),
+        subscriptionCount: 1, sendCount: 1, ackCount: 1 } }),
       restorePixel: async () => {}, restoreMac: async () => {},
     });
     expect(receipt.rigReadiness).toMatchObject({ status: "passed", observations: { gcmConnected: true, gcmRemedyApplied } });
+    expect(JSON.stringify(receipt)).not.toContain("diagnostic");
   });
+
+  test.each(["post-action-persist", "outer-deadline", "cleanup", "cleanup-persist", "terminal-persist"] as const)(
+    "514 R2 successful Push retains GCM proof and private context through %s failure", async stage => {
+      const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+      const diagnostic = new Error("GcmService censored sample: Is client connected: true; Reconnect Scheduler Alarm: OFF");
+      const raw = new Error(`synthetic ${stage} failure`);
+      const observations = { gcmConnected: true, gcmRemedyApplied: true, pixelReachable: true, pushSent: true,
+        pushAcknowledged: true, pushPresented: true, pushCleared: true, deliveryMs: 1, clearMs: 1,
+        subscriptionCount: 1, sendCount: 1, ackCount: 1 };
+      const setTimer = globalThis.setTimeout;
+      const timer = stage === "outer-deadline" ? spyOn(globalThis, "setTimeout").mockImplementation(
+        ((...args: Parameters<typeof setTimeout>) => {
+          const [run, delay, ...rest] = args;
+          return setTimer(run, delay === 30 * 60_000 ? 1 : delay, ...rest);
+        }) as typeof setTimeout) : undefined;
+      let returned = false, failedPersist = false;
+      const restored: string[] = [];
+      try {
+        const error = await runRigReadiness(receipt, async () => {
+          if (!returned) return;
+          expect(receipt.rigReadiness?.observations).toMatchObject({ gcmConnected: true, gcmRemedyApplied: true });
+          expect(JSON.stringify(receipt)).not.toContain("GcmService");
+          expect(JSON.stringify(receipt)).not.toContain("diagnostic");
+          const current = receipt.rigReadiness!;
+          const fail = stage === "post-action-persist" && current.phase === "pixel_push" ||
+            stage === "cleanup-persist" && current.phase === "cleanup" ||
+            stage === "terminal-persist" && current.status === "passed";
+          if (fail && !failedPersist) { failedPersist = true; throw raw; }
+        }, {
+          prepare: async () => {},
+          windows: async () => ({ windowsApiReady: true, windowsResourcesAbsent: true, creationAllowance: 4 }),
+          macos: async () => ({ macEgress: true, macDoctor: true, loopbackOnly: true, serveExpected: true, funnelOff: true, fixturePinned: true }),
+          push: async execution => {
+            if (stage === "outer-deadline") await new Promise<void>(resolve =>
+              execution.signal.addEventListener("abort", () => resolve(), { once: true }));
+            returned = true;
+            return { observations, diagnostic };
+          },
+          restorePixel: async () => { restored.push("Pixel"); if (stage === "cleanup") throw raw; },
+          restoreMac: async () => { restored.push("Mac"); },
+        }).catch(error => error);
+        const failures = normalizeQualificationFailures(error);
+        expect(failures.length).toBeGreaterThan(0);
+        for (const failure of failures) expect(failure.observations).toMatchObject({ gcmConnected: true, gcmRemedyApplied: true });
+        expect(failures.some(failure => failure.reason === (stage === "outer-deadline" ? "deadline_exceeded" : "unclassified_failure"))).toBe(true);
+        const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+        expect(messages).toContain(diagnostic.message);
+        if (stage !== "outer-deadline") expect(messages).toContain(raw.message);
+        expect(receipt.rigReadiness).toMatchObject({ status: "failed", observations: { gcmConnected: true, gcmRemedyApplied: true } });
+        expect(restored).toEqual(["Pixel", "Mac"]);
+        expect(JSON.stringify(receipt)).not.toContain(diagnostic.message);
+      } finally { timer?.mockRestore(); }
+    });
 
   test("509 council readiness ownership preserves the browser cause through aggregate and lane owners", async () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
@@ -1385,7 +1440,8 @@ describe("campaign terminal evidence and readiness", () => {
     const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
     let macRestored = false;
     await expect(runRigReadiness(receipt, async () => {}, {
-      prepare: async () => { throw new Error("setup failed"); }, windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+      prepare: async () => { throw new Error("setup failed"); }, windows: async () => ({}), macos: async () => ({}),
+      push: async () => ({ observations: {}, diagnostic: new Error("synthetic GCM context") }),
       restorePixel: async () => { throw new Error("baseline unavailable"); }, restoreMac: async () => { macRestored = true; },
     })).rejects.toThrow();
     expect(macRestored).toBe(true);
@@ -1399,7 +1455,7 @@ describe("campaign terminal evidence and readiness", () => {
       if (receipt.rigReadiness?.phase === "cleanup") throw new Error("persistence unavailable");
     }, {
       prepare: async () => { throw new Error("probe failed"); },
-      windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+      windows: async () => ({}), macos: async () => ({}), push: async () => ({ observations: {}, diagnostic: new Error("synthetic GCM context") }),
       restorePixel: async () => { restored.push("Pixel"); }, restoreMac: async () => { restored.push("Mac"); },
     })).rejects.toThrow("rig readiness failed");
     expect(restored).toEqual(["Pixel", "Mac"]);
@@ -1774,7 +1830,7 @@ test("council498r1 readiness cannot restore a remote owner lost before Mac effec
   receipt.execution = { ...receiptExecution(), binding: { ...receiptExecution().binding, macHostSha256: digest(target.sshDestination) } };
   const error = await runRigReadiness(receipt, async () => {}, {
     prepare: async () => { await remoteExecutor(target, async () => ({ exitCode: 125, stdout: "", stderr: "" }))(["/bin/true"]); },
-    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({ observations: {}, diagnostic: new Error("synthetic GCM context") }),
     restorePixel: async () => {}, restoreMac: async () => {},
   }).catch(error => error);
   expect(receipt.rigReadiness).toMatchObject({ cleanupDisposition: "unresolved", observations: { baselineRestored: false } });
@@ -1789,7 +1845,7 @@ test("council498r1 readiness cleanup checkpoint failure cannot claim a restored 
     if (receipt.rigReadiness?.phase === "cleanup") throw new Error("synthetic disk failure");
   }, {
     prepare: async () => { throw new Error("synthetic readiness refusal"); },
-    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({ observations: {}, diagnostic: new Error("synthetic GCM context") }),
     restorePixel: async () => { restored.push("pixel"); }, restoreMac: async () => { restored.push("mac"); },
   }).catch(() => {});
   expect(restored).toEqual(["pixel", "mac"]);
@@ -1932,7 +1988,7 @@ test("council498 readiness preserves the shared remote root while attempting all
   const owners: string[] = [];
   const error = await runRigReadiness(receipt, async () => {}, {
     prepare: async () => { await remote(["/bin/true"], { execution }); },
-    windows: async () => ({}), macos: async () => ({}), push: async () => ({}),
+    windows: async () => ({}), macos: async () => ({}), push: async () => ({ observations: {}, diagnostic: new Error("synthetic GCM context") }),
     restorePixel: async () => { owners.push("pixel"); assertRetainedMacCommandsSettled(target.sshDestination); },
     restoreMac: async () => { owners.push("mac"); await executeReceiptLane(receipt, "cleanup", async () => {}, async () => {
       assertRetainedMacCommandsSettled(target.sshDestination); return { restored: true };

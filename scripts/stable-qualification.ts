@@ -2884,7 +2884,11 @@ export interface RigReadinessActions {
   prepare(): Promise<void>;
   windows(): Promise<RigReadinessReceipt["observations"]>;
   macos(): Promise<RigReadinessReceipt["observations"]>;
-  push(execution: QualificationExecutionContext): Promise<RigReadinessReceipt["observations"]>;
+  push(execution: QualificationExecutionContext): Promise<{
+    readonly observations: RigReadinessReceipt["observations"];
+    /** Private, process-local context; never merge into receipt observations. */
+    readonly diagnostic: Error;
+  }>;
   restorePixel(execution: QualificationExecutionContext): Promise<void>;
   restoreMac(execution: QualificationExecutionContext): Promise<void>;
 }
@@ -2903,26 +2907,37 @@ export async function runRigReadiness(
   receipt.rigReadiness = readiness;
   await persist();
   const failures: unknown[] = [];
-  const ownedFailure = (error: unknown): unknown => {
-    if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(ownedFailure), "readiness failures", { cause: error }),
-      pixelUnrestored(error) ? { pixelUnrestored: true } : {});
-    if (error instanceof QualificationFailure) {
-      const evidence = error.evidence;
-      if (typeof evidence.observations.gcmConnected === "boolean" && typeof evidence.observations.gcmRemedyApplied === "boolean") {
-        receipt.rigReadiness = { ...receipt.rigReadiness!, observations: { ...receipt.rigReadiness!.observations,
-          gcmConnected: evidence.observations.gcmConnected, gcmRemedyApplied: evidence.observations.gcmRemedyApplied } };
-      }
-      if ((evidence.lane === "campaign" && evidence.step === "teardown") ||
-        (evidence.lane === "cleanup" && (evidence.reason === "remote_unsettled" || receipt.lanes.cleanup.status === "failed"))) return error;
-      const reason = Object.hasOwn(FAILURE_REASONS.rigReadiness, evidence.reason) ? evidence.reason :
-        evidence.class === "product" ? "assertion_failed" : "prerequisite_failed";
-      return Object.assign(new QualificationFailure(parseLaneFailure({ ...evidence, lane: "rigReadiness",
-        step: evidence.reason === "browser_baseline_failed" ? evidence.step : receipt.rigReadiness?.phase ?? "fixture", reason,
-        observations: { ...evidence.observations, ...(pixelUnrestored(error) || qualificationContainmentUnproven([evidence]) ? { cleanupVerified: false } : {}) },
-        class: FAILURE_REASONS.rigReadiness[reason as keyof typeof FAILURE_REASONS.rigReadiness] }), { cause: error }),
-      pixelUnrestored(error) ? { pixelUnrestored: true } : {});
+  let pushDiagnostic: Error | undefined;
+  const ownedFailure = (error: unknown, ancestors = new Set<unknown>()): unknown => {
+    if (error instanceof AggregateError && Array.isArray(error.errors) && error.errors.length > 0 && !ancestors.has(error)) {
+      ancestors.add(error);
+      const mapped = Object.assign(new AggregateError(error.errors.map(child => ownedFailure(child, ancestors)), "readiness failures", { cause: error }),
+        pixelUnrestored(error) ? { pixelUnrestored: true } : {});
+      ancestors.delete(error);
+      return mapped;
     }
-    return laneFailure(error, "rigReadiness", () => nextReceiptFailureId(receipt));
+    const evidence = error instanceof QualificationFailure ? error.evidence : parseLaneFailure({
+      id: nextReceiptFailureId(receipt), lane: "rigReadiness", step: receipt.rigReadiness?.phase ?? "fixture",
+      reason: "unclassified_failure", class: "harness", elapsedMs: 0, operation: "unknown", observations: {},
+    });
+    if (typeof evidence.observations.gcmConnected === "boolean" && typeof evidence.observations.gcmRemedyApplied === "boolean") {
+      receipt.rigReadiness = { ...receipt.rigReadiness!, observations: { ...receipt.rigReadiness!.observations,
+        gcmConnected: evidence.observations.gcmConnected, gcmRemedyApplied: evidence.observations.gcmRemedyApplied } };
+    }
+    const observed = receipt.rigReadiness!.observations;
+    const gcm = typeof observed.gcmConnected === "boolean" && typeof observed.gcmRemedyApplied === "boolean" ?
+      { gcmConnected: observed.gcmConnected, gcmRemedyApplied: observed.gcmRemedyApplied } : {};
+    const preserveLane = (evidence.lane === "campaign" && evidence.step === "teardown") ||
+      (evidence.lane === "cleanup" && (evidence.reason === "remote_unsettled" || receipt.lanes.cleanup.status === "failed"));
+    const reason = Object.hasOwn(FAILURE_REASONS.rigReadiness, evidence.reason) ? evidence.reason :
+      evidence.class === "product" ? "assertion_failed" : "prerequisite_failed";
+    return Object.assign(new QualificationFailure(parseLaneFailure({ ...evidence, ...(preserveLane ? {} : { lane: "rigReadiness",
+        step: evidence.reason === "browser_baseline_failed" ? evidence.step : receipt.rigReadiness?.phase ?? "fixture", reason,
+        class: FAILURE_REASONS.rigReadiness[reason as keyof typeof FAILURE_REASONS.rigReadiness] }),
+      observations: { ...gcm, ...evidence.observations,
+        ...(pixelUnrestored(error) || qualificationContainmentUnproven([evidence]) ? { cleanupVerified: false } : {}) },
+    }), { cause: pushDiagnostic === undefined ? error : new AggregateError([error, pushDiagnostic], "Readiness GCM context") }),
+    pixelUnrestored(error) ? { pixelUnrestored: true } : {});
   };
   const step = async <T>(phase: keyof RigReadinessReceipt["timings"], action: () => Promise<T>, alwaysRun = false): Promise<T> => {
     const start = performance.now();
@@ -2944,10 +2959,14 @@ export async function runRigReadiness(
     const macos = await step("macos", actions.macos);
     receipt.rigReadiness = { ...receipt.rigReadiness!, observations: { ...receipt.rigReadiness!.observations, ...macos } };
     await persist();
-    const push = await step("pixel_push", () => withQualificationDeadline("rigReadiness", 30 * 60_000,
-      () => nextReceiptFailureId(receipt), actions.push));
-    receipt.rigReadiness = { ...receipt.rigReadiness!, observations: { ...receipt.rigReadiness!.observations, ...push } };
-    await persist();
+    await step("pixel_push", () => withQualificationDeadline("rigReadiness", 30 * 60_000,
+      () => nextReceiptFailureId(receipt), async execution => {
+        const push = await actions.push(execution);
+        // Retain the completed action's proof before either the outer deadline or the step's
+        // post-action persistence can reject. Only observations are eligible for the receipt.
+        pushDiagnostic = push.diagnostic;
+        receipt.rigReadiness = { ...receipt.rigReadiness!, observations: { ...receipt.rigReadiness!.observations, ...push.observations } };
+      }));
     const observed = receipt.rigReadiness.observations;
     for (const field of ["leaseOwned", "pixelReachable", "gcmConnected", "pushSent", "pushAcknowledged", "pushPresented", "pushCleared",
       "windowsApiReady", "windowsResourcesAbsent", "macEgress", "macDoctor", "loopbackOnly", "serveExpected", "funnelOff", "fixturePinned"] as const) {
@@ -3066,7 +3085,8 @@ async function runCampaignReadiness(
         sessionLabel: options.sessionLabel, qualificationLogs: logs!.logs,
       });
       if (result.delivered !== true || result.acknowledged !== true || result.gcmConnected !== true ||
-        typeof result.gcmRemedyApplied !== "boolean" || typeof result.elapsedMs !== "number" || typeof result.clearMs !== "number") {
+        typeof result.gcmRemedyApplied !== "boolean" || !(result.gcmDiagnostic instanceof Error) ||
+        typeof result.elapsedMs !== "number" || typeof result.clearMs !== "number") {
         throw new Error("rig readiness push path is unproven");
       }
       for (const key of ["subscriptionCount", "sendCount", "ackCount"] as const) {
@@ -3074,10 +3094,11 @@ async function runCampaignReadiness(
           throw new Error("rig readiness push counts are unproven");
         }
       }
-      return { pixelReachable: true, pushSent: true, pushAcknowledged: true, pushPresented: true, pushCleared: true,
+      return { diagnostic: result.gcmDiagnostic, observations: {
+        pixelReachable: true, pushSent: true, pushAcknowledged: true, pushPresented: true, pushCleared: true,
         gcmConnected: true, gcmRemedyApplied: result.gcmRemedyApplied,
         deliveryMs: result.elapsedMs, clearMs: result.clearMs, subscriptionCount: result.subscriptionCount as number,
-        sendCount: result.sendCount as number, ackCount: result.ackCount as number };
+        sendCount: result.sendCount as number, ackCount: result.ackCount as number } };
     },
     restorePixel: async execution => {
       if (progress === undefined) return;
