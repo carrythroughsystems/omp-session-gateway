@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Let Android acceptance use a bounded, credential-free device-origin HTTPS health probe when
+  VPN-over-Wi-Fi drops ICMP. Retain which probe satisfied admission in private evidence, preserve
+  owned browser cleanup, and keep qualification preflights read-only and ICMP-only.
+
 ## [v0.9.0] — 2026-10-27
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 56 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.

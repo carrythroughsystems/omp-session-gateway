@@ -3,7 +3,13 @@ import {
   ANDROID_DIRECTORY_SURFACE_EXPRESSION,
   ANDROID_QUALIFICATION_PIN_KEYCHAIN_SERVICE,
   AndroidAdbError,
+  AndroidBrowserCleanupError,
   androidDeviceReachesHost,
+  androidDeviceHttpsReachesOrigin,
+  requireAndroidGatewayReachability,
+  withAndroidChrome,
+  type AndroidChromeDriver,
+  type AndroidGatewayReachabilityEvidence,
   runAdb,
   type AndroidAdbSpawner,
   type AndroidRadioBaseline,
@@ -54,6 +60,163 @@ describe("Android network reachability", () => {
   test("an adb transport failure remains fatal even when its exit code resembles ping loss", async () => {
     const error = new AndroidAdbError(1);
     await expect(androidDeviceReachesHost("synthetic-ping.invalid", async () => { throw error; })).rejects.toBe(error);
+  });
+
+  test("read-only qualification admission never acquires a browser after ICMP loss", async () => {
+    await expect(requireAndroidGatewayReachability("https://gateway-fixture.invalid", async () => "0 received"))
+      .rejects.toMatchObject({ reason: "unreachable" });
+  });
+
+  test("ICMP success records admission without invoking HTTPS", async () => {
+    const evidence: AndroidGatewayReachabilityEvidence[] = [];
+    await requireAndroidGatewayReachability("https://gateway-fixture.invalid", async () => "1 received", {
+      probe: async () => { throw new Error("HTTPS must not run"); }, record: value => { evidence.push(value); },
+    });
+    expect(evidence).toEqual([{ icmp: "reachable", https: "not_run", satisfiedBy: "icmp" }]);
+  });
+
+  test("a failed HTTPS probe and failed evidence write both retain their original error", async () => {
+    const probe = new Error("probe failed"), recording = new Error("recording failed");
+    const error = await requireAndroidGatewayReachability("https://gateway-fixture.invalid", async () => "0 received", {
+      probe: async () => { throw probe; }, record: value => {
+        expect(value).toEqual({ icmp: "unreachable", https: "failed", satisfiedBy: null });
+        throw recording;
+      },
+    }).catch(error => error);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.errors).toEqual([probe, recording]);
+  });
+});
+
+describe("device-origin HTTPS reachability", () => {
+  function fixture(resource: unknown = { success: true, httpStatusCode: 200, stream: "owned-stream" }) {
+    const calls: { method: string; parameters?: Record<string, unknown> }[] = [];
+    let clock = 100, cleaned = false, cleanupDelay = 0, resultDelay = 0;
+    let opaqueOrigin = "null", frame: unknown = { id: "owned-frame", url: "about:blank" };
+    let closeError: Error | undefined, containmentError: Error | undefined;
+    let execution: { readonly signal: AbortSignal; readonly deadline: number } | undefined;
+    // Only the operations this probe uses are implemented; no device, sockets, or host fetches.
+    const driver = {
+      async openTab() { calls.push({ method: "openTab" }); },
+      async evaluate<T>(expression: string): Promise<T> {
+        calls.push({ method: "evaluate", parameters: { expression } });
+        return opaqueOrigin as T;
+      },
+      async send(method: string, parameters?: Record<string, unknown>) {
+        calls.push({ method, ...(parameters === undefined ? {} : { parameters }) });
+        if (method === "Page.navigate") return { frameId: "owned-frame" };
+        if (method === "Page.getFrameTree") return { frameTree: { frame } };
+        if (method === "Page.setDocumentContent") return {};
+        if (method === "Network.loadNetworkResource") { clock += resultDelay; return { resource }; }
+        if (method === "IO.close") { if (closeError !== undefined) throw closeError; return {}; }
+        throw new Error("unexpected HTTPS probe operation");
+      },
+    };
+    const chrome = (async (run: (driver: AndroidChromeDriver) => Promise<unknown>, options?: Parameters<typeof withAndroidChrome>[1]) => {
+      execution = options?.execution;
+      try {
+        const result = await run(driver as AndroidChromeDriver);
+        if (containmentError !== undefined) throw containmentError;
+        return result;
+      } finally { cleaned = true; clock += cleanupDelay; }
+    }) as typeof withAndroidChrome;
+    return {
+      calls, chrome, now: () => clock, cleaned: () => cleaned, execution: () => execution,
+      opaque: (value: string) => { opaqueOrigin = value; }, frame: (value: unknown) => { frame = value; },
+      delay: (value: number, cleanup = false) => { if (cleanup) cleanupDelay = value; else resultDelay = value; },
+      closeFailure: (error: Error) => { closeError = error; }, containmentFailure: (error: Error) => { containmentError = error; },
+    };
+  }
+
+  test("uses the device CDP network loader with an opaque origin, exact TLS authority and no credentials/cache", async () => {
+    const browser = fixture();
+    expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid:9443", browser)).toBe(true);
+    expect(browser.calls.map(call => call.method)).toEqual([
+      "openTab", "Page.navigate", "Page.getFrameTree", "evaluate", "Page.setDocumentContent",
+      "Network.loadNetworkResource", "IO.close",
+    ]);
+    expect(browser.calls[1]!.parameters).toEqual({ url: "about:blank" });
+    expect(browser.calls[3]!.parameters).toEqual({ expression: "location.origin" });
+    expect(browser.calls[4]!.parameters).toEqual({
+      frameId: "owned-frame",
+      html: `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://gateway-fixture.invalid:9443">`,
+    });
+    expect(browser.calls[5]!.parameters).toEqual({
+      frameId: "owned-frame", url: "https://gateway-fixture.invalid:9443/api/v1/health",
+      options: { disableCache: true, includeCredentials: false },
+    });
+    expect(browser.calls[6]!.parameters).toEqual({ handle: "owned-stream" });
+    expect(browser.execution()!.deadline).toBe(15_100);
+    expect(browser.execution()!.signal).toBeInstanceOf(AbortSignal);
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test.each([
+    { success: false, httpStatusCode: 200 },
+    { success: true, httpStatusCode: 200, netError: -202 },
+    { success: true, httpStatusCode: 301 },
+    { success: true, httpStatusCode: 403 },
+    { success: true, httpStatusCode: 500 },
+    { success: true, httpStatusCode: 0 },
+    { success: true, httpStatusCode: "200" },
+    { success: true, httpStatusCode: 200.5 },
+    { success: true },
+    { httpStatusCode: 200 },
+  ])("refuses incomplete, TLS-failed, redirected or unsuccessful response %j", async result => {
+    const browser = fixture({ ...result, stream: "owned-stream" });
+    expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(false);
+    expect(browser.calls.at(-1)).toEqual({ method: "IO.close", parameters: { handle: "owned-stream" } });
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test.each(["http://gateway-fixture.invalid", "file:///tmp/probe", "https://user:secret@gateway-fixture.invalid",
+    "https://gateway-fixture.invalid/path", "https://gateway-fixture.invalid/?token=synthetic", "https://gateway-fixture.invalid/#synthetic"])(
+    "refuses non-origin or credential-bearing input before Chrome effects: %s", async origin => {
+      const browser = fixture();
+      await expect(androidDeviceHttpsReachesOrigin(origin, browser)).rejects.toThrow("credential-free HTTPS origin");
+      expect(browser.calls).toEqual([]);
+    },
+  );
+
+  test("same-origin documents cannot turn includeCredentials:false into an authenticated request", async () => {
+    const browser = fixture();
+    browser.opaque("https://gateway-fixture.invalid");
+    await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toThrow("owned opaque document");
+    expect(browser.calls.some(call => call.method === "Network.loadNetworkResource")).toBe(false);
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test.each([{}, { id: "", url: "about:blank" }, { id: "owned-frame", url: "https://foreign.invalid/" }])(
+    "refuses an invalid or nonblank owned frame %j", async frame => {
+      const browser = fixture(); browser.frame(frame);
+      await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toThrow("owned opaque document");
+      expect(browser.calls.some(call => call.method === "Network.loadNetworkResource")).toBe(false);
+    },
+  );
+
+  test.each([null, [], "invalid"])("malformed protocol results never admit HTTPS: %j", async result => {
+    const browser = fixture(result);
+    await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toThrow("invalid Android HTTPS");
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test.each([false, true])("late response/cleanup cannot satisfy the deadline (cleanup=%s)", async cleanup => {
+    const browser = fixture(); browser.delay(15_000, cleanup);
+    await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toThrow("HTTPS reachability deadline");
+    expect(browser.calls.at(-1)!.method).toBe("IO.close");
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test("stream and browser containment failures cannot become successful reachability", async () => {
+    const stream = fixture(), closeFailure = new Error("stream closure refused");
+    stream.closeFailure(closeFailure);
+    const failure = await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", stream).catch(error => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure.errors).toEqual([closeFailure]);
+    expect(stream.cleaned()).toBe(true);
+    const browser = fixture(), containment = new AndroidBrowserCleanupError([], 1);
+    browser.containmentFailure(containment);
+    await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toBe(containment);
   });
 });
 

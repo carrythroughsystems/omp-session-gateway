@@ -24,7 +24,7 @@ function radios() {
   return { state, calls, command };
 }
 
-test("configured-origin reachability refuses DNS/loss before browser or radio effects with a named prerequisite diagnostic", async () => {
+test("configured-origin reachability refuses DNS/loss after both probes fail, before acceptance or radio effects", async () => {
   for (const output of ["ping: unknown host gateway-fixture.invalid", "1 packets transmitted, 0 received, 100% packet loss"]) {
     const device = radios();
     let touchedBrowser = false;
@@ -32,7 +32,9 @@ test("configured-origin reachability refuses DNS/loss before browser or radio ef
       ? (device.calls.push(args.join(" ")), output) : device.command(...args);
     await expect(withAndroidAcceptanceRestoration(command, async () => {
       touchedBrowser = true;
-    }, "https://gateway-fixture.invalid:9443")).rejects.toMatchObject({
+    }, "https://gateway-fixture.invalid:9443", { httpsProbe: async () => false, recordEvidence: evidence => {
+      expect(evidence).toEqual({ icmp: "unreachable", https: "unreachable", satisfiedBy: null });
+    } })).rejects.toMatchObject({
       name: "AndroidReachabilityPreconditionError", reason: "unreachable",
       message: expect.stringContaining("connect Tailscale on the Pixel"),
     });
@@ -41,15 +43,53 @@ test("configured-origin reachability refuses DNS/loss before browser or radio ef
   }
 });
 
+test("acceptance accepts device-origin HTTPS when ICMP is unavailable and records the satisfying probe", async () => {
+  const device = radios(), evidence: unknown[] = [];
+  let probes = 0, ran = false;
+  const command: AndroidAdbCommand = async (...args) => args.join(" ").startsWith("shell ping ")
+    ? "1 packets transmitted, 0 received, 100% packet loss" : device.command(...args);
+  const result = await withAndroidAcceptanceRestoration(command, async () => {
+    expect(evidence).toEqual([{ icmp: "unreachable", https: "reachable", satisfiedBy: "https" }]);
+    ran = true;
+    return "accepted";
+  }, "https://gateway-fixture.invalid:9443", {
+    httpsProbe: async origin => { expect(origin).toBe("https://gateway-fixture.invalid:9443"); probes++; return true; },
+    recordEvidence: (value: unknown) => { evidence.push(value); },
+  });
+  expect(result).toBe("accepted");
+  expect(ran).toBe(true);
+  expect(probes).toBe(1);
+  expect(device.state).toEqual({ airplane: false, wifi: true, mobile: false });
+});
+
 test("configured-origin reachability preserves adb transport failure as a separate prerequisite diagnostic", async () => {
   let touchedBrowser = false;
   await expect(withAndroidAcceptanceRestoration(async () => { throw new AndroidAdbError(1); }, async () => {
     touchedBrowser = true;
-  }, "https://gateway-fixture.invalid")).rejects.toMatchObject({
+  }, "https://gateway-fixture.invalid", {
+    httpsProbe: async () => { throw new Error("HTTPS must not run without adb"); },
+    recordEvidence: evidence => { expect(evidence).toEqual({ icmp: "failed", https: "not_run", satisfiedBy: null }); },
+  })).rejects.toMatchObject({
     name: "AndroidReachabilityPreconditionError", reason: "adb-transport",
     message: expect.stringContaining("adb transport"),
   });
   expect(touchedBrowser).toBe(false);
+});
+
+test("unproven HTTPS containment or unavailable evidence cannot start the acceptance journey", async () => {
+  const device = radios();
+  let ran = false;
+  const command: AndroidAdbCommand = async (...args) => args.join(" ").startsWith("shell ping ") ? "0 received" : device.command(...args);
+  const original = new Error("HTTPS browser cleanup failed");
+  await expect(withAndroidAcceptanceRestoration(command, async () => { ran = true; }, "https://gateway-fixture.invalid", {
+    httpsProbe: async () => { throw original; },
+    recordEvidence: evidence => { expect(evidence).toEqual({ icmp: "unreachable", https: "failed", satisfiedBy: null }); },
+  })).rejects.toBe(original);
+  await expect(withAndroidAcceptanceRestoration(command, async () => { ran = true; }, "https://gateway-fixture.invalid", {
+    httpsProbe: async () => true, recordEvidence: () => { throw new Error("private evidence unavailable"); },
+  })).rejects.toMatchObject({ errors: [expect.objectContaining({ message: "private evidence unavailable" })] });
+  expect(ran).toBe(false);
+  expect(device.calls).toEqual([]);
 });
 
 test("acceptance preserves the phase failure alongside a restoration failure and still resets Doze and battery", async () => {
