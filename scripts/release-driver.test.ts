@@ -1004,25 +1004,24 @@ process.exitCode = ${exitCode};\n`);
   await writeFile(join(directory, "spec.json"), JSON.stringify({ kind, state: selected, root: join(import.meta.dir, "..") }));
   await writeFile(join(directory, "out.log"), "", { mode: 0o600 });
   await writeFile(join(directory, "err.log"), "", { mode: 0o600 });
-  return { runtime, directory, original, checkout };
+  return { runtime, directory, original, checkout, bin };
 }
 
 describe.skipIf(process.platform === "win32")("private smoke worker output", () => {
   test.each([[0, false], [0, true], [1, false], [1, true]] as const)(
     "smoke worker retains child bytes for exit=%i bounded=%s",
     async (exitCode, bounded) => {
-      const root = await mkdtemp(join(tmpdir(), "smoke-output-")), previousExit = process.exitCode, previousHome = process.env.HOME;
+      const root = await mkdtemp(join(tmpdir(), "smoke-output-")), previousExit = process.exitCode;
       try {
         const selected = automaticCampaign();
         selected.stableCommit = selected.candidateCommit;
         selected.stableDigest = "a".repeat(64);
-        const { runtime, directory, checkout } = await automaticWorkerFixture(root, exitCode, selected, "smoke");
+        const { runtime, directory, checkout, bin } = await automaticWorkerFixture(root, exitCode, selected, "smoke");
         const home = join(root, "home"), installation = join(home, ".local/state/omp-session-gateway/installation");
         const bunDirectory = join(home, ".local/lib/omp-session-gateway/bun/v1.4.0");
         await mkdir(installation, { recursive: true }); await mkdir(bunDirectory, { recursive: true });
         await writeFile(join(installation, "current.json"), JSON.stringify({ versionDirectory: "0.0.0-aaaaaaaaaaaa" }));
         await writeFile(join(bunDirectory, "bun"), "#!/bin/sh\nprintf '%s\\n' '{\"fixture\":true}'\n", { mode: 0o700 });
-        process.env.HOME = home;
         const out = exitCode === 0 ? Buffer.from(JSON.stringify({ padding: "x".repeat(bounded ? 300_000 : 2), smoke: true }) + "\r\n ")
           : Buffer.concat([Buffer.alloc(bounded ? 300_000 : 2, 0xff), Buffer.from(" PRIVATE-SMOKE-STDOUT-CANARY \r\n\0 ")]);
         const err = Buffer.concat([Buffer.alloc(bounded ? 300_000 : 2, 0xfe), Buffer.from(" Error: PRIVATE-SMOKE-ERROR-CANARY \r\n\0 ")]);
@@ -1041,7 +1040,25 @@ process.exitCode = ${exitCode};
           new Response(child.stdout).arrayBuffer(), new Response(child.stderr).arrayBuffer(), child.exited,
         ]);
         expect(expectedExit).toBe(exitCode);
-        await runtime.worker(join(directory, "spec.json"));
+        // Bun caches homedir(): HOME must be bound before the worker process starts,
+        // not changed in the test process after importing the runtime.
+        const worker = Bun.spawn([process.execPath, "--eval", `
+import { StudioDriver, driverConfig } from ${JSON.stringify(join(import.meta.dir, "release-driver-runtime.ts"))};
+class Worker extends StudioDriver {
+  override async authenticate() {}
+  override async checkout() { return ${JSON.stringify(checkout)}; }
+  override async git() { return ${JSON.stringify(selected.stableCommit)}; }
+}
+await new Worker(driverConfig(), false).worker(${JSON.stringify(join(directory, "spec.json"))});
+`], {
+          cwd: checkout, env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, OMP_RELEASE_STATE_DIR: runtime.config.stateDir },
+          stdin: "ignore", stdout: "pipe", stderr: "pipe",
+        });
+        const [workerOut, workerErr, workerExit] = await Promise.all([
+          new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited,
+        ]);
+        expect(workerExit, workerErr).toBe(exitCode);
+        expect(workerOut + workerErr).not.toContain("CANARY");
         for (const [name, bytes] of [["smoke-out.log", expectedOut], ["smoke-err.log", expectedErr]] as const) {
           expect(await readFile(join(directory, name))).toEqual(Buffer.from(bytes).subarray(-262_144));
           expect((await lstat(join(directory, name))).mode & 0o777).toBe(0o600);
@@ -1049,14 +1066,17 @@ process.exitCode = ${exitCode};
         const terminal = await readFile(join(directory, "result.json"), "utf8");
         expect(JSON.parse(terminal).status).toBe(exitCode === 0 ? "passed" : "failed");
         expect(terminal).not.toContain("CANARY");
-        if (exitCode === 0) expect(await Bun.file(join(directory, "smoke-failure.json")).exists()).toBe(false);
+        if (exitCode === 0) {
+          expect(await Bun.file(join(directory, "smoke-failure.json")).exists()).toBe(false);
+          expect(await Bun.file(join(directory, "smoke.json")).json()).toEqual(JSON.parse(out.toString()));
+          expect(await Bun.file(join(directory, "status.json")).json()).toEqual({ fixture: true });
+        }
         else {
           expect(await readFile(join(directory, "smoke-failure.json"), "utf8")).toContain("release smoke failed");
           expect((await lstat(join(directory, "smoke-failure.json"))).mode & 0o777).toBe(0o600);
           expect(JSON.parse(await readFile(join(directory, "diagnostic.json"), "utf8"))).toEqual({ class: "harness", reason: "unclassified_failure" });
         }
       } finally {
-        if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
         process.exitCode = previousExit ?? 0;
         await rm(root, { recursive: true, force: true });
       }
