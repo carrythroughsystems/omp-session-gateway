@@ -6,7 +6,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
-## [v0.9.0] — 2026-10-26
+## [v0.9.0] — 2026-10-27
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 56 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.
 
