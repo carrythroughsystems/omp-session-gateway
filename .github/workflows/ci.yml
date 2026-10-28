@@ -219,7 +219,7 @@ jobs:
         run: bun scripts/test-browser.ts --summary-only
       - name: Retain sanitized browser flakes
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-flake-browser-notifications-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-results/browser-flakes/browser-flake-report.json
@@ -273,7 +273,7 @@ jobs:
           printf '%s\n' 'Percy not uploaded: fork or gateway-ci dispatch; all 18 synthetic states validated locally without a repository secret.' >> "$GITHUB_STEP_SUMMARY"
       - name: Retain closed visual diagnostics
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: visual-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-results/visual-diagnostics/
