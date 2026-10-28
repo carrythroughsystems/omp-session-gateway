@@ -16,6 +16,8 @@
  *  - `Target.createTarget`'s `url` is ignored on Android. The tab opens blank regardless, so the
  *    caller must `Page.navigate` explicitly.
  */
+import { runWithRestoration } from "./restoration.ts";
+
 const DEFAULT_BROWSER_PACKAGE = "com.android.chrome";
 const DEFAULT_DEVTOOLS_SOCKET = "localabstract:chrome_devtools_remote";
 const ANDROID_PACKAGE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/u;
@@ -290,23 +292,101 @@ export async function androidDeviceReachesHost(host: string, command: AndroidAdb
 
 export class AndroidReachabilityPreconditionError extends Error {
   readonly name = "AndroidReachabilityPreconditionError";
-  constructor(readonly reason: "unreachable" | "adb-transport") {
+  constructor(readonly reason: "unreachable" | "adb-transport", options?: ErrorOptions) {
     super(reason === "unreachable"
       ? "Android gateway reachability prerequisite: connect Tailscale on the Pixel and verify DNS/routing to the configured gateway origin before navigation; no device settings were changed"
-      : "Android gateway reachability prerequisite: adb transport failed; restore the authorized USB connection before navigation; no device settings were changed");
+      : "Android gateway reachability prerequisite: adb transport failed; restore the authorized USB connection before navigation; no device settings were changed", options);
   }
 }
 
-/** Read-only device-origin DNS/ICMP admission, not proof of HTTPS, Chrome or CDP health. */
-export async function requireAndroidGatewayReachability(origin: string, command: AndroidAdbCommand): Promise<void> {
+export interface AndroidGatewayReachabilityEvidence {
+  readonly icmp: "reachable" | "unreachable" | "failed";
+  readonly https: "not_run" | "reachable" | "unreachable" | "failed";
+  readonly satisfiedBy: "icmp" | "https" | null;
+}
+
+/** Qualification preflights stay read-only/ICMP-only; acceptance explicitly owns its HTTPS alternative. */
+export async function requireAndroidGatewayReachability(
+  origin: string,
+  command: AndroidAdbCommand,
+  httpsFallback?: {
+    readonly probe: (origin: string) => Promise<boolean>;
+    readonly record: (evidence: AndroidGatewayReachabilityEvidence) => unknown | Promise<unknown>;
+  },
+): Promise<void> {
   const host = new URL(origin).hostname;
-  let reachable: boolean;
-  try { reachable = await androidDeviceReachesHost(host, command); }
-  catch (error) {
-    if (error instanceof AndroidAdbError) throw new AndroidReachabilityPreconditionError("adb-transport");
-    throw error;
+  let icmp: AndroidGatewayReachabilityEvidence["icmp"] = "failed";
+  let https: AndroidGatewayReachabilityEvidence["https"] = "not_run";
+  let satisfiedBy: AndroidGatewayReachabilityEvidence["satisfiedBy"] = null;
+  return runWithRestoration("Android gateway reachability", async () => {
+    try { icmp = await androidDeviceReachesHost(host, command) ? "reachable" : "unreachable"; }
+    catch (error) {
+      if (error instanceof AndroidAdbError) throw new AndroidReachabilityPreconditionError("adb-transport", { cause: error });
+      throw error;
+    }
+    if (icmp === "reachable") { satisfiedBy = "icmp"; return; }
+    if (httpsFallback !== undefined) {
+      https = "failed";
+      https = await httpsFallback.probe(origin) ? "reachable" : "unreachable";
+      if (https === "reachable") { satisfiedBy = "https"; return; }
+    }
+    throw new AndroidReachabilityPreconditionError("unreachable");
+  }, httpsFallback === undefined ? [] : [() => httpsFallback.record({ icmp, https, satisfiedBy })]);
+}
+
+/** A device-origin, TLS-validated health GET; no controller fetch, cookies, auth, or PWA cache. */
+export async function androidDeviceHttpsReachesOrigin(
+  origin: string,
+  { chrome = withAndroidChrome, now = () => performance.now() }: {
+    readonly chrome?: typeof withAndroidChrome;
+    readonly now?: () => number;
+  } = {},
+): Promise<boolean> {
+  const url = new URL(origin);
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
+    url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    throw new Error("Android HTTPS reachability requires a credential-free HTTPS origin");
   }
-  if (!reachable) throw new AndroidReachabilityPreconditionError("unreachable");
+  const controller = new AbortController(), deadline = now() + 15_000;
+  const check = () => {
+    controller.signal.throwIfAborted();
+    if (now() >= deadline) throw new Error("Android HTTPS reachability deadline");
+  };
+  const timer = setTimeout(() => controller.abort(new Error("Android HTTPS reachability deadline")), 15_000);
+  try {
+    const reached = await chrome(async driver => {
+      await driver.openTab();
+      await driver.send("Page.navigate", { url: "about:blank" });
+      const tree = await driver.send("Page.getFrameTree");
+      const frame = (tree.frameTree as { frame?: { id?: unknown; url?: unknown } } | undefined)?.frame;
+      if (typeof frame?.id !== "string" || frame.id === "" || frame.url !== "about:blank" ||
+        await driver.evaluate("location.origin") !== "null") {
+        throw new Error("Android HTTPS reachability requires an owned opaque document");
+      }
+      // includeCredentials:false means same-origin credentials in Chromium. The verified opaque
+      // document makes this credential-free; its CSP also refuses off-origin or HTTP redirects.
+      const policy = `default-src 'none'; connect-src ${url.origin}`.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+      await driver.send("Page.setDocumentContent", {
+        frameId: frame.id, html: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${policy}">`,
+      });
+      const response = await driver.send("Network.loadNetworkResource", {
+        frameId: frame.id, url: new URL("/api/v1/health", url).href,
+        options: { disableCache: true, includeCredentials: false },
+      });
+      const resource = response.resource;
+      if (resource === null || typeof resource !== "object" || Array.isArray(resource)) throw new Error("invalid Android HTTPS reachability result");
+      const result = resource as Record<string, unknown>;
+      const stream = typeof result.stream === "string" && result.stream !== "" ? result.stream : undefined;
+      return runWithRestoration("Android HTTPS reachability", () => {
+        check();
+        return result.success === true && typeof result.httpStatusCode === "number" &&
+          Number.isInteger(result.httpStatusCode) && result.httpStatusCode >= 200 && result.httpStatusCode < 300 &&
+          (result.netError === undefined || result.netError === 0);
+      }, stream === undefined ? [] : [() => driver.send("IO.close", { handle: stream })]);
+    }, { execution: { signal: controller.signal, deadline } });
+    check(); // Cleanup cannot turn a late response into timely admission.
+    return reached;
+  } finally { clearTimeout(timer); }
 }
 
 export const ANDROID_QUALIFICATION_PIN_KEYCHAIN_SERVICE =

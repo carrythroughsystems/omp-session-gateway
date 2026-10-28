@@ -21,6 +21,7 @@ import {
   ANDROID_DIRECTORY_SURFACE_EXPRESSION,
   requireAndroidDevicePreconditions,
   requireAndroidGatewayReachability,
+  androidDeviceHttpsReachesOrigin,
   requireSingleDevice,
   androidDeviceReachesHost,
   runAdb,
@@ -31,6 +32,7 @@ import {
   withAndroidChrome,
   type AndroidChromeDriver,
   type AndroidAdbCommand,
+  type AndroidGatewayReachabilityEvidence,
 } from "./android-device.ts";
 import { isProtectedLabel, targetEligibility } from "./acceptance-target.ts";
 import { ANDROID_ACCEPTANCE_STAGES, announceAndroidStage } from "./android-stages.ts";
@@ -223,9 +225,18 @@ async function authorizationMatrix(driver: AndroidChromeDriver, label: string): 
   return value;
 }
 
-/** Refuses a missing device path before browser/radio effects, then verifies radio restoration. */
-export async function withAndroidAcceptanceRestoration<T>(command: AndroidAdbCommand, body: () => Promise<T>, origin: string): Promise<T> {
-  await requireAndroidGatewayReachability(origin, command);
+/** Admit ICMP or an owned HTTPS probe before the acceptance journey and its radio mutations. */
+export async function withAndroidAcceptanceRestoration<T>(
+  command: AndroidAdbCommand,
+  body: () => Promise<T>,
+  origin: string,
+  { httpsProbe = androidDeviceHttpsReachesOrigin, recordEvidence = evidence =>
+    console.error(`android-reachability: ${JSON.stringify(evidence)}`) }: {
+    readonly httpsProbe?: (origin: string) => Promise<boolean>;
+    readonly recordEvidence?: (evidence: AndroidGatewayReachabilityEvidence) => unknown | Promise<unknown>;
+  } = {},
+): Promise<T> {
+  await requireAndroidGatewayReachability(origin, command, { probe: httpsProbe, record: recordEvidence });
   const baseline = await readAndroidRadioBaseline(command);
   return runWithRestoration("Android acceptance", body, [
     () => restoreAndroidRadios(baseline, command),
