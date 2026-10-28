@@ -973,13 +973,13 @@ describe("council R1 retry authority counterexamples", () => {
   });
 });
 
-async function automaticWorkerFixture(root: string, exitCode: number, selected = automaticCampaign()) {
+async function automaticWorkerFixture(root: string, exitCode: number, selected = automaticCampaign(), kind: "campaign" | "smoke" = "campaign") {
   process.exitCode = 0; // Each production worker starts in its own process.
   root = await realpath(root);
   const checkout = join(root, "checkout"), bin = join(root, "bin");
   await mkdir(checkout); await mkdir(bin);
   await writeFile(join(bin, "security"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-  await writeFile(join(checkout, "package.json"), JSON.stringify({ name: "retry-worker-fixture", scripts: { "qualify:stable": "bun fixture.ts" } }));
+  await writeFile(join(checkout, "package.json"), JSON.stringify({ name: "retry-worker-fixture", scripts: { "qualify:stable": "bun fixture.ts", "smoke:release": "bun fixture.ts" } }));
   const install = Bun.spawn([process.execPath, "install", "--lockfile-only"], { cwd: checkout, stdout: "ignore", stderr: "pipe" });
   const installError = await new Response(install.stderr).text();
   expect(await install.exited, installError).toBe(0);
@@ -995,17 +995,131 @@ async function automaticWorkerFixture(root: string, exitCode: number, selected =
   process.env.PATH = previousPath;
   runtime.current = selected;
   runtime.receiptPath = join(root, "stable-qualification.json");
-  const directory = runtime.jobDirectory("campaign", selected);
+  const directory = runtime.jobDirectory(kind, selected);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const original = JSON.stringify(automaticFailure(selected).outcome, null, 4) + "\n\n";
   await writeFile(join(checkout, "fixture.ts"), `import { writeFile } from "node:fs/promises";
 await writeFile(process.env.OMP_STABLE_OUTCOME_FILE!, ${JSON.stringify(original)}, { mode: 0o600 });
 process.exitCode = ${exitCode};\n`);
-  await writeFile(join(directory, "spec.json"), JSON.stringify({ kind: "campaign", state: selected, root: join(import.meta.dir, "..") }));
+  await writeFile(join(directory, "spec.json"), JSON.stringify({ kind, state: selected, root: join(import.meta.dir, "..") }));
   await writeFile(join(directory, "out.log"), "", { mode: 0o600 });
   await writeFile(join(directory, "err.log"), "", { mode: 0o600 });
-  return { runtime, directory, original, checkout };
+  return { runtime, directory, original, checkout, bin };
 }
+
+describe.skipIf(process.platform === "win32")("private smoke worker output", () => {
+  test.each([[0, false], [0, true], [1, false], [1, true]] as const)(
+    "smoke worker retains child bytes for exit=%i bounded=%s",
+    async (exitCode, bounded) => {
+      const root = await mkdtemp(join(tmpdir(), "smoke-output-")), previousExit = process.exitCode;
+      try {
+        const selected = automaticCampaign();
+        selected.stableCommit = selected.candidateCommit;
+        selected.stableDigest = "a".repeat(64);
+        const { runtime, directory, checkout, bin } = await automaticWorkerFixture(root, exitCode, selected, "smoke");
+        const home = join(root, "home"), installation = join(home, ".local/state/omp-session-gateway/installation");
+        const bunDirectory = join(home, ".local/lib/omp-session-gateway/bun/v1.4.0");
+        await mkdir(installation, { recursive: true }); await mkdir(bunDirectory, { recursive: true });
+        await writeFile(join(installation, "current.json"), JSON.stringify({ versionDirectory: "0.0.0-aaaaaaaaaaaa" }));
+        await writeFile(join(bunDirectory, "bun"), "#!/bin/sh\nprintf '%s\\n' '{\"fixture\":true}'\n", { mode: 0o700 });
+        const out = exitCode === 0 ? Buffer.from(JSON.stringify({ padding: "x".repeat(bounded ? 300_000 : 2), smoke: true }) + "\r\n ")
+          : Buffer.concat([Buffer.alloc(bounded ? 300_000 : 2, 0xff), Buffer.from(" PRIVATE-SMOKE-STDOUT-CANARY \r\n\0 ")]);
+        const err = Buffer.concat([Buffer.alloc(bounded ? 300_000 : 2, 0xfe), Buffer.from(" Error: PRIVATE-SMOKE-ERROR-CANARY \r\n\0 ")]);
+        await writeFile(join(checkout, "fixture.ts"), `
+if (process.env.OMP_RELEASE_SMOKE_LOG_DIR !== ${JSON.stringify(join(directory, "smoke-logs"))}) throw new Error("smoke log destination was not bound");
+await Bun.write(Bun.stdout, Buffer.from(${JSON.stringify(out.toString("base64"))}, "base64"));
+await Bun.write(Bun.stderr, Buffer.from(${JSON.stringify(err.toString("base64"))}, "base64"));
+process.exitCode = ${exitCode};
+`);
+        const child = Bun.spawn([process.execPath, "run", "smoke:release", "--", "--tag", `v${selected.version}`,
+          "--archive-sha256", selected.stableDigest, "--force-reinstall", "--rebuild-omp"], {
+          cwd: checkout, env: { ...process.env, OMP_RELEASE_SMOKE_LOG_DIR: join(directory, "smoke-logs") },
+          stdout: "pipe", stderr: "pipe", stdin: "ignore",
+        });
+        const [expectedOut, expectedErr, expectedExit] = await Promise.all([
+          new Response(child.stdout).arrayBuffer(), new Response(child.stderr).arrayBuffer(), child.exited,
+        ]);
+        expect(expectedExit).toBe(exitCode);
+        // Bun caches homedir(): HOME must be bound before the worker process starts,
+        // not changed in the test process after importing the runtime.
+        const worker = Bun.spawn([process.execPath, "--eval", `
+import { StudioDriver, driverConfig } from ${JSON.stringify(join(import.meta.dir, "release-driver-runtime.ts"))};
+class Worker extends StudioDriver {
+  override async authenticate() {}
+  override async checkout() { return ${JSON.stringify(checkout)}; }
+  override async git() { return ${JSON.stringify(selected.stableCommit)}; }
+}
+await new Worker(driverConfig(), false).worker(${JSON.stringify(join(directory, "spec.json"))});
+`], {
+          cwd: checkout, env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, OMP_RELEASE_STATE_DIR: runtime.config.stateDir },
+          stdin: "ignore", stdout: "pipe", stderr: "pipe",
+        });
+        const [workerOut, workerErr, workerExit] = await Promise.all([
+          new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited,
+        ]);
+        expect(workerExit, workerErr).toBe(exitCode);
+        expect(workerOut + workerErr).not.toContain("CANARY");
+        for (const [name, bytes] of [["smoke-out.log", expectedOut], ["smoke-err.log", expectedErr]] as const) {
+          expect(await readFile(join(directory, name))).toEqual(Buffer.from(bytes).subarray(-262_144));
+          expect((await lstat(join(directory, name))).mode & 0o777).toBe(0o600);
+        }
+        const terminal = await readFile(join(directory, "result.json"), "utf8");
+        expect(JSON.parse(terminal).status).toBe(exitCode === 0 ? "passed" : "failed");
+        expect(terminal).not.toContain("CANARY");
+        if (exitCode === 0) {
+          expect(await Bun.file(join(directory, "smoke-failure.json")).exists()).toBe(false);
+          expect(await Bun.file(join(directory, "smoke.json")).json()).toEqual(JSON.parse(out.toString()));
+          expect(await Bun.file(join(directory, "status.json")).json()).toEqual({ fixture: true });
+        }
+        else {
+          expect(await readFile(join(directory, "smoke-failure.json"), "utf8")).toContain("release smoke failed");
+          expect((await lstat(join(directory, "smoke-failure.json"))).mode & 0o777).toBe(0o600);
+          expect(JSON.parse(await readFile(join(directory, "diagnostic.json"), "utf8"))).toEqual({ class: "harness", reason: "unclassified_failure" });
+        }
+      } finally {
+        process.exitCode = previousExit ?? 0;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+  test("smoke failure before spawning retains empty logs and the original cause chain", async () => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-unstarted-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory } = await automaticWorkerFixture(root, 1, automaticCampaign(), "smoke");
+      runtime.authenticate = async () => { throw new Error("ORIGINAL-AUTH-ERROR", { cause: new Error("ORIGINAL-AUTH-CAUSE") }); };
+      await runtime.worker(join(directory, "spec.json"));
+      for (const name of ["smoke-out.log", "smoke-err.log"]) expect(await readFile(join(directory, name))).toEqual(Buffer.alloc(0));
+      const diagnostic = await readFile(join(directory, "smoke-failure.json"), "utf8");
+      expect(diagnostic).toContain("ORIGINAL-AUTH-ERROR");
+      expect(diagnostic).toContain("ORIGINAL-AUTH-CAUSE");
+      expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(262_144);
+      expect(await readFile(join(directory, "result.json"), "utf8")).not.toContain("ORIGINAL-AUTH");
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["smoke-out.log", "smoke-err.log", "smoke-failure.json"])("smoke never overwrites immutable %s", async name => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-immutable-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory } = await automaticWorkerFixture(root, 1, automaticCampaign(), "smoke");
+      runtime.authenticate = async () => { throw new Error("fixture auth refusal"); };
+      await writeFile(join(directory, name), "immutable prior bytes");
+      await expect(runtime.worker(join(directory, "spec.json"))).rejects.toThrow();
+      expect(await readFile(join(directory, name), "utf8")).toBe("immutable prior bytes");
+      for (const terminal of ["exit", "result.json"]) expect(await Bun.file(join(directory, terminal)).exists()).toBe(false);
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+  test.each(["exit", "result.json"])("smoke persists private diagnostics before %s publication", async name => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-publication-")), previousExit = process.exitCode;
+    try {
+      const { runtime, directory } = await automaticWorkerFixture(root, 1, automaticCampaign(), "smoke");
+      runtime.authenticate = async () => { throw new Error("fixture auth refusal"); };
+      await mkdir(join(directory, name));
+      await expect(runtime.worker(join(directory, "spec.json"))).rejects.toThrow();
+      expect(await readFile(join(directory, "smoke-out.log"))).toEqual(Buffer.alloc(0));
+      expect(await readFile(join(directory, "smoke-err.log"))).toEqual(Buffer.alloc(0));
+      expect(await readFile(join(directory, "smoke-failure.json"), "utf8")).toContain("fixture auth refusal");
+    } finally { process.exitCode = previousExit ?? 0; await rm(root, { recursive: true, force: true }); }
+  });
+});
 
 async function qualificationFixtureOutput(runtime: AutomaticRuntime, checkout: string, flags: string[]) {
   const child = Bun.spawn([process.execPath, "run", "qualify:stable", "--", "--tag", runtime.current.candidate, ...flags], {
@@ -1869,9 +1983,9 @@ test("plan reads live inputs but writes no state, effects, comments, or bot cred
 test("dedicated bot environment strips founder credential/identity and preserves no arbitrary qualification override", () => {
   expect(() => driverConfig({ OMP_RELEASE_DRY_RUN: "yes" })).toThrow("OMP_RELEASE_DRY_RUN");
   const cfg = driverConfig({ OMP_RELEASE_BOT_LOGIN: "release-user", OMP_RELEASE_FOUNDER_LOGIN: "founder", OMP_RELEASE_GH_CONFIG_DIR: "/private/bot-gh", OMP_RELEASE_SIGNING_KEY: "/private/key", OMP_RELEASE_STATE_DIR: "/private/state" });
-  const env = botEnvironment(cfg, { GH_TOKEN: "founder-value", GITHUB_TOKEN: "founder-value", GH_CONFIG_DIR: "/founder", GIT_AUTHOR_EMAIL: "founder@example.com", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "founder-helper", OMP_STABLE_PREVIOUS_TAG: "v0.0.1", PATH: "/bin" });
+  const env = botEnvironment(cfg, { GH_TOKEN: "founder-value", GITHUB_TOKEN: "founder-value", GH_CONFIG_DIR: "/founder", GIT_AUTHOR_EMAIL: "founder@example.com", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "founder-helper", OMP_STABLE_PREVIOUS_TAG: "v0.0.1", OMP_RELEASE_SMOKE_LOG_DIR: "/foreign", PATH: "/bin" });
   expect(env.GH_CONFIG_DIR).toBe("/private/bot-gh");
-  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GIT_AUTHOR_EMAIL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "OMP_STABLE_PREVIOUS_TAG"]) expect(env[key]).toBeUndefined();
+  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GIT_AUTHOR_EMAIL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "OMP_STABLE_PREVIOUS_TAG", "OMP_RELEASE_SMOKE_LOG_DIR"]) expect(env[key]).toBeUndefined();
   expect(env.PATH).toBe("/bin");
 });
 test("runtime refuses a changed order scope at the last merge boundary, including rename history", async () => {

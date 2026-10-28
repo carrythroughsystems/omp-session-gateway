@@ -430,6 +430,13 @@ terminal result are written, on success and failure. The outer worker's `out.log
 separate. Raw child output and error chains stay private: never copy these logs into tracking
 issues or announcements. The sanitized `diagnostic.json` contract is unchanged. Campaign receipts remain at
 `~/.local/share/omp-session-gateway/qualification/<candidate>/stable-qualification.json`.
+Smoke workers likewise retain immutable `smoke-out.log` and `smoke-err.log` (the last 262,144
+unmodified bytes per stream, mode `0600`) before publishing their exit/result, including empty
+files if the child never started. A failed smoke also retains the bounded original error/cause
+chain in `smoke-failure.json`; this private diagnostic does not grant retry authority or change
+`diagnostic.json`. Nested Android command output is retained separately in the job's private
+`smoke-logs/` directory, so a closed stage such as “Android Chrome” no longer loses the child
+exception. Never infer a product or rig cause from that stage alone.
 Qualification and smoke use their existing shared release-host lease (including its durable failed
 owner); the driver never deletes or replaces the database or steals a foreign/live owner.
 A missing worker or an ordinary/non-retryable device/cloud failure enters diagnostic-required.
@@ -1443,6 +1450,16 @@ non-Control fixtures fail closed.
 Normal success and failure kill only that tmux session, wait for registry revocation, remove the
 fixture only when its per-run ownership marker still matches, and delete private staging. The stable
 gateway, config/token, Bun runtime, mainline OMP, Serve configuration, and WebAPK remain installed.
+Before deleting staging, the smoke copies its three Android commands' `android-{collab,leaks,acceptance}-{out,err}.log`
+files to a new private diagnostic directory; each contains at most 262,144 exact bytes and is
+fsynced with mode `0600`. The directory is mode `0700`. It retains no downloaded archives or
+fixture launcher scripts. Failure/cause/restoration diagnostics are saved as bounded `failure.json`.
+The driver binds `OMP_RELEASE_SMOKE_LOG_DIR` to its job's `smoke-logs/`; a standalone run uses a
+fresh directory below `~/.local/state/omp-session-gateway/post-release-smoke/` and announces that
+location on stderr. An explicit `OMP_RELEASE_SMOKE_LOG_DIR` must be absolute and not yet exist.
+Existing evidence is never replaced. If copying logs fails, staging is left intact for private
+operator recovery after all fixture restoration steps have been attempted. Review these files
+locally; do not publish raw command output, capabilities, credentials, or device identifiers.
 `--rebuild-omp` runs `bun add --global --exact` for the pinned package and uses Bun's global bin.
 `--force-reinstall` retests an already active stable gateway. `--plan` prints the
 bounded effects without network, service, Tailscale, OMP, or Android changes.
