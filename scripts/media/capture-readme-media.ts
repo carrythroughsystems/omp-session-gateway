@@ -799,7 +799,7 @@ Security boundary: loopback-only gateway · memory-only capabilities · no trans
 
 ## Seeded state
 
-The opening contains four working sessions: Release qualification, Android reconnect soak, Docs & examples, and Upstream compatibility. Gateway auth hardening then arrives as a fifth working session before becoming the oldest of two waiting asks; Release qualification is second. Open request launches Control for the synthetic “How should ADR-0036 proceed?” ask with two synthetic options.
+The opening contains four live sessions: Release qualification, Android reconnect soak, and Upstream compatibility working, and Docs & examples idle. Gateway auth hardening then arrives as a fifth working session before becoming the oldest of two waiting asks; Release qualification is second. Open request launches Control for the synthetic “How should ADR-0036 proceed?” ask with two synthetic options.
 
 The canonical directory contains only the eight binaries, this provenance file, and \`manifest.json\`. The [unposted launch-copy draft](../LAUNCH_COPY.md) lives outside the synthetic-media fixture directory. The checker rejects every unexpected file, including concepts and contact sheets.
 

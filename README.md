@@ -52,11 +52,11 @@ Works with stock [OMP 18.1.20+](https://github.com/can1357/oh-my-pi/releases/tag
 <summary>Screens</summary>
 
 <p>
-  <img src="docs/media/01-all-clear.png" alt="OMP Sessions directory in the All clear state, showing a Live · 4 pill and four working sessions, none waiting for input" width="300"><br>
+  <img src="docs/media/01-all-clear.png" alt="OMP Sessions directory in the All clear state, showing a Live · 4 pill and four live sessions — three working and one idle — none waiting for input" width="300"><br>
   <sub><strong>All clear:</strong> every live session listed automatically with no per-session setup.</sub>
 </p>
 <p>
-  <img src="docs/media/02-needs-you.png" alt="Sessions directory in the Needs you state with two waiting requests: the oldest, Gateway auth hardening, is promoted to a hero card with Open request and View transcript instead actions, ahead of Release qualification and three working sessions" width="300"><br>
+  <img src="docs/media/02-needs-you.png" alt="Sessions directory in the Needs you state with two waiting requests: the oldest, Gateway auth hardening, is promoted to a hero card with Open request and Options actions, ahead of Release qualification and three live sessions" width="300"><br>
   <sub><strong>Needs you:</strong> the oldest waiting request is promoted first with bounded metadata.</sub>
 </p>
 <p>
@@ -121,10 +121,10 @@ Open your configured HTTPS address from your allowlisted Tailscale device and ad
 <div align="center">
 <img
   src="docs/media/04-notification-settings.png"
-  alt="OMP Sessions settings sheet with a Background alerts section, per-device Private, Session, and Preview notification detail levels, Session selected as the default, and a Disable background alerts toggle"
+  alt="OMP Sessions Alert detail tray with per-device Private, Session, and Preview notification levels, Session selected as the default, and a note that the gateway builds each payload at the chosen level"
   width="300"
 ><br>
-<sub>Per-device notification detail in the Settings sheet. Full guide: <a href="docs/USAGE.md">docs/USAGE.md</a>.</sub>
+<sub>Per-device notification detail, opened from Background alerts in the Settings tray. Full guide: <a href="docs/USAGE.md">docs/USAGE.md</a>.</sub>
 </div>
 
 ## Private by design

@@ -1,0 +1,19 @@
+{
+  "generatedBy": "bun run media:brand",
+  "artwork": {
+    "assets/banner.png": {
+      "source": "assets/banner.html",
+      "sourceSha256": "fe10c83e5c8580a68ae9f61fd6492247f9462c8bea340ab3ad12ff53aab17ed1",
+      "outputSha256": "8416e13b2f704b01360fec8ee30ee4b26875fc3e7b546ba79a7667a5a7129e86",
+      "width": 2560,
+      "height": 640
+    },
+    "assets/og.png": {
+      "source": "assets/og.html",
+      "sourceSha256": "cd42383fa4006a7b0ed8eff592011a8b8620c990414ec4b4e46620cfac2e998e",
+      "outputSha256": "964bdda367189316558ce75df71513556b71f80c6180a1dffd571d3300307b56",
+      "width": 1280,
+      "height": 640
+    }
+  }
+}

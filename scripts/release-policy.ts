@@ -132,6 +132,7 @@ export const ROUTINE_IMPLEMENTATION_PATHS: Readonly<Record<string, string>> = {
   "scripts/media/readme-media-contract.ts": "Defines demonstration media checks.",
   "scripts/media/readme-media-compositor.ts": "Composes authored demonstration media.",
   "scripts/media/check-readme-media.ts": "Checks demonstration media.",
+  "scripts/media/render-brand-assets.ts": "Renders authored brand artwork from committed sources.",
 };
 export function routinePathClassification(path: string): { authority: boolean; reason: string } | undefined {
   if (ROUTINE_AUTHORITY_PATHS[path]) return { authority: true, reason: ROUTINE_AUTHORITY_PATHS[path]! };

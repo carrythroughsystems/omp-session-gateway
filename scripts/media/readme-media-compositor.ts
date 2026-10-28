@@ -349,8 +349,8 @@ ${SHARED_TOKENS}
   function copyForFrame(frame) {
     if (frame <= 17 || frame >= 127) return ["01 · Discover", "Every live OMP session.", "One private mobile page."];
     if (frame <= 38) return ["01 · Discover", "Sessions appear automatically.", "No per-session command, QR scan, or copied link."];
-    if (frame <= 66) return ["02 · Triage", "Only interrupt when input is needed.", "Oldest waiting ask first. Revalidated before Control."];
-    if (frame <= 83) return ["03 · Control", "One tap to the real OMP request.", "The pinned encrypted collaboration client stays authoritative."];
+    if (frame <= 66) return ["02 · Triage", "Only interrupt when input is needed.", "Oldest waiting ask first. Re-checked before Control."];
+    if (frame <= 83) return ["03 · Control", "One tap to the real OMP request.", "The request is answered in OMP’s own pinned, encrypted client."];
     if (frame <= 107) return ["03 · Control", "The exact live request.", "Actual pinned OMP collaboration UI — no replacement agent client."];
     if (frame <= 123) return ["Private by construction", "Leave the terminal. Keep the session.", "No QR codes · no copied links · no public dashboard"];
     return ["01 · Discover", "Every live OMP session.", "One private mobile page."];
@@ -412,14 +412,14 @@ export function createFlowCompositorHtml(inputs: FlowCompositorInputs): string {
       number: "02",
       label: "Triage",
       headline: "The oldest waiting ask rises first.",
-      body: "The gateway shows bounded metadata; the authoritative request stays in OMP.",
+      body: "The directory shows bounded metadata; the request itself stays in OMP.",
     },
     {
       screen: "openRequest",
       number: "03",
       label: "Control",
       headline: "Open the exact live request.",
-      body: "Control launches only after generation and request revalidation; View transcript instead remains read-only.",
+      body: "Control opens only after the gateway re-checks that the request is still live; View transcript instead stays read-only.",
     },
   ] as const;
   return `<!doctype html>
@@ -547,7 +547,7 @@ ${SHARED_TOKENS}
   </div>
   <span class="flow-proof product-proof">Actual built PWA + pinned client pixels</span>
   <h1 class="flow-title">From running session to exact request.</h1>
-  <p class="flow-subtitle">A metadata-only directory hands off to OMP’s authoritative encrypted collaboration surface.</p>
+  <p class="flow-subtitle">A metadata-only directory hands off to OMP’s own encrypted client.</p>
   <section class="steps">
     ${steps.map(step => `<article class="step">
       <div class="step-label"><span class="step-number">${step.number}</span><span>${step.label}</span></div>

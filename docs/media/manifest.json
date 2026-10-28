@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceRevision": "8b4ffe23abd7e8d55f90ac50df3e87e97cb98aec",
+  "sourceRevision": "090be7bcfec8307d4b13029e7df67965dafbf70a",
   "upstreamClient": {
     "tag": "v18.12.6",
     "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
@@ -33,8 +33,8 @@
   },
   "assets": {
     "omp-session-gateway-demo.gif": {
-      "bytes": 414653,
-      "sha256": "2dfffc421c7da27594d01eb862847b21f6c3c7cf54c3f2308396ba95b0f34bc1",
+      "bytes": 404596,
+      "sha256": "e99424794328f679f22ab91d1cee8f263e935c0a58396bbdb016a84ab2af2eb2",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
@@ -45,15 +45,15 @@
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "2ada5622006a1d45c1a54171faf718fc0c134be44a780d49451cc9894853b771"
+          "sha256": "5be178feff8a24ddb4a8237706a8b160411984ce3988101261bdf0c83ab0a5a0"
         },
         {
           "id": "runtime:discovered-live-five",
-          "sha256": "1c556a0c33eef662ec05c2702edf0ea26dc071d9894600c9bddc40f397f2be07"
+          "sha256": "41eddcd8251a1482b0bb8399c7a1859de685117bfdf9b9770617ee174a386891"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "fbe19c79c6bdeb6bb7843bdd90e41bd7999892c3155b5c20669fcb0a305b9904"
+          "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9"
         },
         {
           "id": "runtime:03-open-request.png",
@@ -66,8 +66,8 @@
       ]
     },
     "omp-session-gateway-demo.mp4": {
-      "bytes": 423779,
-      "sha256": "9559bd8ce9b78926a560ea96c5564d14930ba7a49f0543b4504833048923e7a1",
+      "bytes": 419321,
+      "sha256": "f63d07ff4f24aa85baaa4438c55f4a3c9c1be71e0010853ba9957f77c59fbdca",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
@@ -79,15 +79,15 @@
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "2ada5622006a1d45c1a54171faf718fc0c134be44a780d49451cc9894853b771"
+          "sha256": "5be178feff8a24ddb4a8237706a8b160411984ce3988101261bdf0c83ab0a5a0"
         },
         {
           "id": "runtime:discovered-live-five",
-          "sha256": "1c556a0c33eef662ec05c2702edf0ea26dc071d9894600c9bddc40f397f2be07"
+          "sha256": "41eddcd8251a1482b0bb8399c7a1859de685117bfdf9b9770617ee174a386891"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "fbe19c79c6bdeb6bb7843bdd90e41bd7999892c3155b5c20669fcb0a305b9904"
+          "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9"
         },
         {
           "id": "runtime:03-open-request.png",
@@ -100,15 +100,15 @@
       ]
     },
     "omp-session-gateway-demo-poster.png": {
-      "bytes": 76924,
-      "sha256": "bdcbbac7c35c8d001ebf9346d3a615c0e9c29042d8a9c932e35bedbffb022483",
+      "bytes": 76116,
+      "sha256": "3b6d081cd0fadcf81b98e1ac542a4de53b18ddcc6b5d5920129cb2e68a9dfaf2",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
       "compositeInputs": [
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "fbe19c79c6bdeb6bb7843bdd90e41bd7999892c3155b5c20669fcb0a305b9904"
+          "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9"
         },
         {
           "id": "brand:assets/logo.svg",
@@ -118,19 +118,19 @@
       "sourceFrame": 60
     },
     "omp-session-gateway-product-flow.png": {
-      "bytes": 197173,
-      "sha256": "6d1156e0aa9759129117be6c721a12543d3f47229eb6394ecf43997b74b6c353",
+      "bytes": 192055,
+      "sha256": "946f16dcb60730b05241f09c0f350e5477dbd80a7f7be412111dde49f17a9dc4",
       "width": 1600,
       "height": 980,
       "provenance": "capture-only-presentation-composite",
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "2ada5622006a1d45c1a54171faf718fc0c134be44a780d49451cc9894853b771"
+          "sha256": "5be178feff8a24ddb4a8237706a8b160411984ce3988101261bdf0c83ab0a5a0"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "fbe19c79c6bdeb6bb7843bdd90e41bd7999892c3155b5c20669fcb0a305b9904"
+          "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9"
         },
         {
           "id": "runtime:03-open-request.png",
@@ -143,15 +143,15 @@
       ]
     },
     "01-all-clear.png": {
-      "bytes": 124988,
-      "sha256": "2ada5622006a1d45c1a54171faf718fc0c134be44a780d49451cc9894853b771",
+      "bytes": 118202,
+      "sha256": "5be178feff8a24ddb4a8237706a8b160411984ce3988101261bdf0c83ab0a5a0",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"
     },
     "02-needs-you.png": {
-      "bytes": 144965,
-      "sha256": "fbe19c79c6bdeb6bb7843bdd90e41bd7999892c3155b5c20669fcb0a305b9904",
+      "bytes": 141230,
+      "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"
@@ -164,8 +164,8 @@
       "provenance": "built-pwa-runtime-with-pinned-collab-client"
     },
     "04-notification-settings.png": {
-      "bytes": 160535,
-      "sha256": "d2edd0492b047baf5d3f609cff7f11bc758718cb575ecf76430388d364c9e63d",
+      "bytes": 159432,
+      "sha256": "c1c38ac37c11c72dac211c379c21a34945af8fda3228d34bb67e31964c7fdc35",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"

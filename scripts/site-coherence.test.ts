@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ArtworkManifest } from "./media/render-brand-assets.ts";
 
 const rootPath = fileURLToPath(new URL("../", import.meta.url));
 const sitePath = join(rootPath, "site");
@@ -202,4 +204,30 @@ test("sitemap and canonical links name exactly the site pages under the canonica
     }).transform(new Response(html)).text();
     expect(canonical, `${relative(rootPath, page.path)} canonical URL`).toEqual([page.url]);
   }
+});
+
+// The social preview rendered in July still named `github.com/alphastorm/…` three weeks after the
+// repository moved, and the banner kept a "zero-touch" tagline the voice rule forbids, because the
+// PNGs had no committed source to drift from. `bun run media:brand` now renders both from
+// `assets/*.html` and records source and output digests; every committed PNG matches its source,
+// and the social card names the canonical repository and carries the README's promise.
+test("rendered artwork matches its committed source and the README promise", async () => {
+  const sha256 = async (file: string) => createHash("sha256").update(await readFile(join(rootPath, file))).digest("hex");
+  const manifest = JSON.parse(await readFile(join(rootPath, "assets/artwork.json"), "utf8")) as ArtworkManifest;
+  expect(Object.keys(manifest.artwork).sort()).toEqual(["assets/banner.png", "assets/og.png"]);
+  for (const [output, record] of Object.entries(manifest.artwork)) {
+    expect(await sha256(record.source), `${record.source} changed without \`bun run media:brand\``).toBe(record.sourceSha256);
+    expect(await sha256(output), `${output} differs from the recorded render`).toBe(record.outputSha256);
+  }
+  expect(manifest.artwork[STAGED_SITE_ASSETS["og.png"] ?? ""]).toMatchObject({ width: 1280, height: 640 });
+
+  const readme = await readFile(join(rootPath, "README.md"), "utf8");
+  const promise = readme.match(/^# OMP Session Gateway\n\n\*\*(.+)\*\*$/mu)?.[1];
+  if (promise === undefined) throw new Error("README.md lost its one-line promise under the H1");
+  const text = (html: string) => html.replace(/<br>/gu, " ").replace(/<[^>]+>/gu, "").replace(/\s+/gu, " ");
+  const og = text(await readFile(join(rootPath, "assets/og.html"), "utf8"));
+  expect(og).toContain("github.com/carrythroughsystems/omp-session-gateway");
+  expect(og).toContain(promise);
+  expect(og).not.toMatch(/alphastorm/u);
+  expect(text(await readFile(join(rootPath, "assets/banner.html"), "utf8"))).not.toMatch(/zero-touch|no setup/iu);
 });
