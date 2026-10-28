@@ -115,7 +115,7 @@ test("visual review stays GitHub-hosted and scopes its secret only to eligible u
   expect(setup.if).toBeUndefined();
   expect(setup.with?.["bun-version"]).toBe("1.4.0");
   const nodeSetup = steps.find(step => step.uses?.startsWith("actions/setup-node@"))!;
-  expect(nodeSetup.uses).toBe("actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38");
+  expect(nodeSetup.uses).toBe("actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1"); // v7.1.0
   expect(nodeSetup.if).toBeUndefined();
   expect(nodeSetup.with?.["node-version"]).toBe("24.22.0");
   expect(nodeSetup.with?.["package-manager-cache"]).toBe(false);
