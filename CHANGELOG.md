@@ -8,6 +8,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Retain bounded private smoke-child output and original failure causes before release-driver
+  terminal evidence, and preserve nested Android command logs before removing smoke staging.
+  Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.
 - Let Android acceptance use a bounded, credential-free device-origin HTTPS health probe when
   VPN-over-Wi-Fi drops ICMP. Retain which probe satisfied admission in private evidence, preserve
   owned browser cleanup, and keep qualification preflights read-only and ICMP-only.

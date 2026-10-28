@@ -20,6 +20,7 @@ import type { RoutineAuthority, RoutineEvidence } from "./release-policy.ts";
 import { runAdb } from "./android-device.ts";
 import { parseQualificationOutcome, qualificationExecutionsMatch, qualificationOutcomeExitCode, readQualificationOutcomeFile, type QualificationOutcome } from "./qualification-outcome.ts";
 import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
+import { privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 interface RuntimeConfig extends DriverConfig {
@@ -46,7 +47,7 @@ export function driverConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfi
 /** Never let ambient founder tokens or git identity override the dedicated machine account. */
 export function botEnvironment(config: RuntimeConfig, ambient: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...ambient, GH_CONFIG_DIR: config.ghConfig, GH_HOST: "github.com", GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" };
-  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT", "OMP_STABLE_PREVIOUS_TAG", "OMP_STABLE_MAC_SUDO_PASSWORD_FILE", "OMP_STABLE_QUALIFICATION_DIR", "OMP_STABLE_OUTCOME_FILE"]) delete env[key];
+  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT", "OMP_STABLE_PREVIOUS_TAG", "OMP_STABLE_MAC_SUDO_PASSWORD_FILE", "OMP_STABLE_QUALIFICATION_DIR", "OMP_STABLE_OUTCOME_FILE", "OMP_RELEASE_SMOKE_LOG_DIR"]) delete env[key];
   for (const key of Object.keys(env)) if (/^GIT_CONFIG_(KEY|VALUE)_/u.test(key)) delete env[key];
   return env;
 }
@@ -96,10 +97,13 @@ async function immutableJobBytes(path: string, bytes: Buffer): Promise<boolean> 
   try { await parent.sync(); } finally { await parent.close(); }
   return true;
 }
-async function retainQualificationOutput(directory: string, out: Buffer, err: Buffer): Promise<void> {
-  for (const [name, bytes] of [["qualification-out.log", out], ["qualification-err.log", err]] as const) {
-    if (!await immutableJobBytes(join(directory, name), bytes)) throw new Error("qualification output already exists");
+async function retainJobDiagnostics(directory: string, prefix: "qualification" | "smoke", out: Buffer, err: Buffer, failure?: Error): Promise<void> {
+  for (const [name, bytes] of [[`${prefix}-out.log`, out], [`${prefix}-err.log`, err]] as const) {
+    if (!await immutableJobBytes(join(directory, name), bytes)) throw new Error(`${prefix} output already exists`);
   }
+  if (failure !== undefined && !await immutableJobJson(join(directory, `${prefix}-failure.json`), {
+    errors: privateQualificationFailureDiagnostic(failure),
+  })) throw new Error(`${prefix} failure evidence already exists`, { cause: failure });
 }
 async function privateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
@@ -1220,6 +1224,7 @@ export class StudioDriver implements DriverPort {
     }
     let observedCampaignExit: number | undefined, exitCode = 1;
     let qualificationOut: Buffer = Buffer.alloc(0), qualificationErr: Buffer = Buffer.alloc(0);
+    let smokeOut: Buffer = Buffer.alloc(0), smokeErr: Buffer = Buffer.alloc(0), smokeFailure: Error | undefined;
     let terminal: JobObservation & { evidence?: RoutineEvidence } = { status: "failed",
       detail: spec.kind === "campaign" ? "campaign harness:unclassified_failure" : `${spec.kind} failed; inspect private job logs; no retry` };
     try {
@@ -1318,7 +1323,11 @@ export class StudioDriver implements DriverPort {
         await command(["security", "set-keychain-settings", join(homedir(), "Library/Keychains/omp-qualification.keychain-db")], checkout, this.env);
         // --force-reinstall: a retried smoke finds the release already active from the failed run,
         // and the record requires smoke evidence that this run installed the published bytes.
-        const smoke = await command([process.execPath, "run", "smoke:release", "--", "--tag", `v${state.version}`, "--archive-sha256", state.stableDigest!, "--force-reinstall", "--rebuild-omp"], checkout, this.env);
+        const smoke = await command([process.execPath, "run", "smoke:release", "--", "--tag", `v${state.version}`, "--archive-sha256", state.stableDigest!, "--force-reinstall", "--rebuild-omp"],
+          checkout, { ...this.env, OMP_RELEASE_SMOKE_LOG_DIR: join(directory, "smoke-logs") }, false, (out, err) => {
+            smokeOut = commandOutputTail(smokeOut, out);
+            smokeErr = commandOutputTail(smokeErr, err);
+          });
         await atomicJson(join(directory, "smoke.json"), JSON.parse(smoke.out));
         const installation = join(homedir(), ".local/state/omp-session-gateway/installation");
         const active = (await jsonFile<{ versionDirectory?: string }>(join(installation, "current.json")))?.versionDirectory;
@@ -1343,6 +1352,7 @@ export class StudioDriver implements DriverPort {
         terminal = { status: "infrastructure-hold", availabilityHold: error.hold };
         exitCode = 75;
       } else {
+        if (spec.kind === "smoke") smokeFailure = new Error("release smoke failed", { cause: error });
         console.error("release job failed; private evidence required");
         await atomicJson(join(directory, "diagnostic.json"), { class: "harness", reason: "unclassified_failure" });
       }
@@ -1350,7 +1360,9 @@ export class StudioDriver implements DriverPort {
       process.exitCode = exitCode;
       if (spec.kind === "campaign") {
         // Preserve exact child bytes across preflight and campaign before publishing any terminal marker.
-        await retainQualificationOutput(directory, qualificationOut, qualificationErr);
+        await retainJobDiagnostics(directory, "qualification", qualificationOut, qualificationErr);
+      } else if (spec.kind === "smoke") {
+        await retainJobDiagnostics(directory, "smoke", smokeOut, smokeErr, smokeFailure);
       }
       // A terminal result is the publication marker: its durable exit must already exist.
       await atomicJson(join(directory, "exit"), exitCode);

@@ -2,12 +2,14 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { runWithRestoration } from "./restoration.ts";
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { spawn } from "node:child_process";
+import { constants } from "node:fs";
 import {
   chmod,
   copyFile,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -16,7 +18,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defaultGatewayPaths, loadGatewayConfig } from "../apps/gateway/src/config.ts";
@@ -31,6 +33,7 @@ import { releaseVersion } from "./release-policy.ts";
 import { requireAndroidDevicePreconditions, requireSingleDevice, runAdb, type AndroidAdbCommand } from "./android-device.ts";
 import { fixtureModelError, OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
+import { privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Published under alphastorm through v0.7.5 (2026-10-08T16:38:49Z), captured 2026-10-09.
@@ -141,6 +144,8 @@ interface CommandOptions {
   readonly safeFailureOutput?: boolean;
   /** Closed stage vocabulary a withheld lane announces; the last announced stage is surfaced. */
   readonly stages?: readonly string[];
+  /** Private owned staging prefix; raw output must never enter the public error message. */
+  readonly logPrefix?: string;
 }
 
 interface CommandResult {
@@ -352,7 +357,7 @@ async function sha256File(path: string): Promise<string> {
 }
 
 
-async function runCommand(name: string, command: readonly string[], options: CommandOptions = {}): Promise<CommandResult> {
+export async function runCommand(name: string, command: readonly string[], options: CommandOptions = {}): Promise<CommandResult> {
   const [executable, ...arguments_] = command;
   if (executable === undefined) throw new Error(`${name} command was empty`);
   const environment = Object.fromEntries(
@@ -387,24 +392,83 @@ async function runCommand(name: string, command: readonly string[], options: Com
     child.kill("SIGTERM");
     forceTimeout = setTimeout(() => child.kill("SIGKILL"), 2_000);
   }, timeoutMs);
-  try {
-    const exitCode = await new Promise<number>((resolveExit, rejectExit) => {
-      child.once("error", rejectExit);
-      child.once("close", code => resolveExit(code ?? 1));
-    });
-    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-    const stderr = Buffer.concat(stderrChunks).toString("utf8");
-    if (outputExceeded) throw new Error(`${name} output exceeded the safety limit`);
-    if (timedOut) throw new Error(`${name} timed out${stageSuffix(stderr, options.stages ?? [])}`);
-    if (!(options.allowedExitCodes ?? [0]).includes(exitCode)) {
-      throw new Error(
-        formatCommandFailure(name, exitCode, stdout, stderr, options.safeFailureOutput === true, options.stages),
-      );
+  return runWithRestoration(name, async () => {
+    try {
+      const exitCode = await new Promise<number>((resolveExit, rejectExit) => {
+        child.once("error", rejectExit);
+        child.once("close", code => resolveExit(code ?? 1));
+      });
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (outputExceeded) throw new Error(`${name} output exceeded the safety limit`);
+      if (timedOut) throw new Error(`${name} timed out${stageSuffix(stderr, options.stages ?? [])}`);
+      if (!(options.allowedExitCodes ?? [0]).includes(exitCode)) {
+        throw new Error(
+          formatCommandFailure(name, exitCode, stdout, stderr, options.safeFailureOutput === true, options.stages),
+        );
+      }
+      return { stdout, stderr, exitCode };
+    } finally {
+      clearTimeout(timeout);
+      if (forceTimeout !== undefined) clearTimeout(forceTimeout);
     }
-    return { stdout, stderr, exitCode };
-  } finally {
-    clearTimeout(timeout);
-    if (forceTimeout !== undefined) clearTimeout(forceTimeout);
+  }, options.logPrefix === undefined ? [] : [
+    () => writeSmokeDiagnostic(`${options.logPrefix}-out.log`, Buffer.concat(stdoutChunks).subarray(-262_144)),
+    () => writeSmokeDiagnostic(`${options.logPrefix}-err.log`, Buffer.concat(stderrChunks).subarray(-262_144)),
+  ], "cleanup");
+}
+
+async function writeSmokeDiagnostic(path: string, bytes: Buffer): Promise<void> {
+  const file = await open(path, "wx", 0o600);
+  try { await file.writeFile(bytes); await file.sync(); }
+  finally { await file.close(); }
+  if (process.platform !== "win32") {
+    const parent = await open(dirname(path), "r");
+    try { await parent.sync(); } finally { await parent.close(); }
+  }
+}
+
+/** Copy only bounded diagnostic files, never downloaded archives or credential-bearing launchers. */
+async function retainSmokeLogs(logs: string, destination: string): Promise<void> {
+  for (const name of await readdir(logs)) {
+    if (!/^android-(?:collab|leaks|acceptance)-(?:out|err)\.log$/u.test(name)) throw new Error("unexpected smoke diagnostic file");
+    const file = await open(join(logs, name), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      const metadata = await file.stat();
+      if (!metadata.isFile() || metadata.size > 262_144) throw new Error("invalid smoke diagnostic file");
+      const bytes = await file.readFile();
+      if (bytes.length > 262_144) throw new Error("smoke diagnostic grew beyond its limit");
+      await writeSmokeDiagnostic(join(destination, name), bytes);
+    } finally { await file.close(); }
+  }
+}
+
+/** A failed retention leaves staging intact; every fixture restoration still runs first. */
+export async function withSmokeDiagnostics<T>(
+  destination: string,
+  body: (staging: string, logs: string) => Promise<T>,
+  restoration: readonly (() => unknown | Promise<unknown>)[],
+): Promise<T> {
+  if (!isAbsolute(destination)) throw new Error("smoke diagnostic directory must be absolute");
+  await mkdir(destination, { mode: 0o700 });
+  const staging = await mkdtemp(join(tmpdir(), "omp-gateway-post-release-"));
+  await chmod(staging, 0o700);
+  const logs = join(staging, "logs");
+  try {
+    await mkdir(logs, { mode: 0o700 });
+    return await runWithRestoration("post-release smoke", () => body(staging, logs), [
+      ...restoration,
+      async () => { await retainSmokeLogs(logs, destination); await rm(staging, { recursive: true }); },
+    ], "cleanup");
+  } catch (error) {
+    try {
+      await writeSmokeDiagnostic(join(destination, "failure.json"), Buffer.from(JSON.stringify({
+        errors: privateQualificationFailureDiagnostic(new Error("post-release smoke failed", { cause: error })),
+      }) + "\n"));
+    } catch (retentionError) {
+      throw new AggregateError([error, retentionError], "post-release smoke and private failure retention failed");
+    }
+    throw error;
   }
 }
 
@@ -1140,6 +1204,7 @@ async function runAndroidLanes(
   release: VerifiedRelease,
   bunExecutable: string,
   label: string,
+  logs: string,
 ): Promise<void> {
   const config = await loadGatewayConfig();
   const collab = parseJsonRecord(
@@ -1153,7 +1218,7 @@ async function runAndroidLanes(
         "--expected-app-asset",
         release.appAsset,
       ],
-      { timeoutMs: 300_000, stages: ANDROID_COLLAB_STAGES },
+      { timeoutMs: 300_000, stages: ANDROID_COLLAB_STAGES, logPrefix: join(logs, "android-collab") },
     ),
     "Android View and Control smoke",
   );
@@ -1169,12 +1234,12 @@ async function runAndroidLanes(
   await runCommand(
     "Android capability sink sweep",
     [bunExecutable, join(repositoryRoot, "scripts/android-leak-sweep.ts"), config.http.publicOrigin, label],
-    { timeoutMs: 300_000, stages: ANDROID_LEAK_SWEEP_STAGES },
+    { timeoutMs: 300_000, stages: ANDROID_LEAK_SWEEP_STAGES, logPrefix: join(logs, "android-leaks") },
   );
   await runCommand(
     "Android same-page recovery",
     [bunExecutable, join(repositoryRoot, "scripts/android-acceptance.ts"), config.http.publicOrigin, label],
-    { timeoutMs: 900_000, stages: ANDROID_ACCEPTANCE_STAGES },
+    { timeoutMs: 900_000, stages: ANDROID_ACCEPTANCE_STAGES, logPrefix: join(logs, "android-acceptance") },
   );
   await verifyInstalledWebApk(config.http.publicOrigin);
 }
@@ -1228,10 +1293,15 @@ async function runOwnedPostReleaseSmoke(
   packageManifest: PackageManifest,
 ): Promise<Record<string, unknown>> {
   await assertRequiredTools();
-  const staging = await mkdtemp(join(tmpdir(), "omp-gateway-post-release-"));
-  await chmod(staging, 0o700);
+  let diagnostics = process.env.OMP_RELEASE_SMOKE_LOG_DIR;
+  if (diagnostics === undefined) {
+    const root = join(homedir(), ".local/state/omp-session-gateway/post-release-smoke");
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    diagnostics = join(root, `${options.tag}-${randomBytes(8).toString("hex")}`);
+  }
   let fixture: FixtureHandle | undefined;
-  return runWithRestoration("post-release smoke", async () => {
+  console.error(`Post-release smoke private diagnostics: ${diagnostics}`);
+  return withSmokeDiagnostics(diagnostics, async (staging, logs) => {
     const release = await verifyPublishedRelease(options, staging, packageManifest);
     const bunExecutable = await ensurePersistentBun(release.bunVersion);
     // An unusable OMP fails the run before the installed gateway changes.
@@ -1242,7 +1312,7 @@ async function runOwnedPostReleaseSmoke(
     await enableOmpAutoStart(omp.binary);
     fixture = await createFixture(release.version);
     await startFixture(fixture, omp.binary, staging);
-    await runAndroidLanes(release, bunExecutable, fixture.label);
+    await runAndroidLanes(release, bunExecutable, fixture.label, logs);
     return {
       tag: options.tag,
       sourceCommit: release.sourceCommit,
@@ -1265,7 +1335,7 @@ async function runOwnedPostReleaseSmoke(
       },
       leaveInstalled: { gateway: true, mainlineOmp: true, webApk: true },
     };
-  }, [() => stopFixture(fixture), () => rm(staging, { recursive: true })], "cleanup");
+  }, [() => stopFixture(fixture)]);
 }
 
 if (import.meta.main) {

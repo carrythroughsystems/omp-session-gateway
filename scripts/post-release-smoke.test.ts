@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isProtectedLabel } from "./acceptance-target.ts";
@@ -29,7 +29,121 @@ import {
   releaseSigningRepositories,
   verifyReleaseSignatures,
   unrelatedServeSnapshot,
+  runCommand,
+  withSmokeDiagnostics,
 } from "./post-release-smoke.ts";
+
+describe("private nested smoke diagnostics", () => {
+  test.each([0, 1])("retains bounded exact nested child bytes before staging cleanup for exit=%i", async exitCode => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-nested-output-")), destination = join(root, "retained");
+    let staging = "", restored = false;
+    const out = Buffer.concat([Buffer.alloc(300_000, 0xff), Buffer.from(" stdout \r\n\0 ")]);
+    const err = Buffer.concat([Buffer.alloc(300_000, 0xfe), Buffer.from("\nandroid-stage: Android Chrome\nError: PRIVATE-NESTED-EXCEPTION\n  at fixture\nCaused by: ORIGINAL-CHILD-CAUSE \r\n\0 ")]);
+    try {
+      const operation = withSmokeDiagnostics(destination, async (temporary, logs) => {
+        staging = temporary;
+        await writeFile(join(temporary, "must-not-retain-launcher"), "synthetic credential-bearing fixture script");
+        const child = join(temporary, "child.ts");
+        await writeFile(child, `
+await Bun.write(Bun.stdout, Buffer.from(${JSON.stringify(out.toString("base64"))}, "base64"));
+await Bun.write(Bun.stderr, Buffer.from(${JSON.stringify(err.toString("base64"))}, "base64"));
+process.exitCode = ${exitCode};
+`);
+        return runCommand("Android smoke", [process.execPath, child], { logPrefix: join(logs, "android-collab"), stages: ANDROID_COLLAB_STAGES });
+      }, [async () => { expect((await lstat(staging)).isDirectory()).toBe(true); restored = true; }]);
+      if (exitCode === 0) expect((await operation).exitCode).toBe(0);
+      else {
+        const error = await operation.catch(error => error);
+        expect(error.message).toBe('Android smoke failed with exit 1 at stage "Android Chrome"');
+        expect(error.message).not.toContain("PRIVATE-NESTED-EXCEPTION");
+        expect(await readFile(join(destination, "failure.json"), "utf8")).toContain("Android smoke failed");
+      }
+      expect(restored).toBe(true);
+      await expect(lstat(staging)).rejects.toMatchObject({ code: "ENOENT" });
+      for (const [name, bytes] of [["android-collab-out.log", out], ["android-collab-err.log", err]] as const) {
+        expect(await readFile(join(destination, name))).toEqual(bytes.subarray(-262_144));
+        if (process.platform !== "win32") expect((await lstat(join(destination, name))).mode & 0o777).toBe(0o600);
+      }
+      if (process.platform !== "win32") expect((await lstat(destination)).mode & 0o777).toBe(0o700);
+      expect((await readdir(destination)).sort()).toEqual([
+        "android-collab-err.log", "android-collab-out.log", ...(exitCode === 0 ? [] : ["failure.json"]),
+      ]);
+    } finally { await rm(root, { recursive: true, force: true }); if (staging) await rm(staging, { recursive: true, force: true }); }
+  });
+
+  test("retains timeout and spawn failures without exposing child bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-command-failure-"));
+    try {
+      await expect(runCommand("timed smoke", [process.execPath, "-e", 'console.error("PRIVATE-TIMEOUT-CHILD"); await Bun.sleep(60_000);'], {
+        timeoutMs: 1_000, logPrefix: join(root, "android-acceptance"),
+      })).rejects.toThrow("timed smoke timed out");
+      expect(await readFile(join(root, "android-acceptance-err.log"), "utf8")).toContain("PRIVATE-TIMEOUT-CHILD");
+      await expect(runCommand("absent smoke", [join(root, "not-an-executable")], {
+        logPrefix: join(root, "android-leaks"),
+      })).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(join(root, "android-leaks-err.log"))).toEqual(Buffer.alloc(0));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("retains original cause and all restoration errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-causes-")), destination = join(root, "retained");
+    const cause = new Error("ORIGINAL-ROOT-CAUSE"), original = new Error("ORIGINAL-BODY-ERROR", { cause }), cleanup = new Error("ORIGINAL-CLEANUP-ERROR");
+    let staging = "", restored = false;
+    try {
+      const error = await withSmokeDiagnostics(destination, async temporary => {
+        staging = temporary; throw original;
+      }, [() => { throw cleanup; }, () => { restored = true; }]).catch(error => error);
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error.errors).toEqual([original, cleanup]);
+      expect(restored).toBe(true);
+      const diagnostic = await readFile(join(destination, "failure.json"), "utf8");
+      for (const message of [cause.message, original.message, cleanup.message]) expect(diagnostic).toContain(message);
+      expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(262_144);
+      await expect(lstat(staging)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test.each(["collision", "unexpected", "oversized"])("retention %s preserves staging and existing evidence", async failure => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-retention-failure-")), destination = join(root, "retained");
+    let staging = "", restored = false;
+    try {
+      await expect(withSmokeDiagnostics(destination, async (temporary, logs) => {
+        staging = temporary;
+        await writeFile(join(logs, failure === "unexpected" ? "launcher" : "android-collab-out.log"),
+          failure === "oversized" ? Buffer.alloc(262_145) : "original staging bytes", { mode: 0o600 });
+        if (failure === "collision") await writeFile(join(destination, "android-collab-out.log"), "immutable prior evidence");
+      }, [() => { restored = true; }])).rejects.toThrow();
+      expect(restored).toBe(true);
+      expect((await lstat(staging)).isDirectory()).toBe(true);
+      if (failure === "collision") expect(await readFile(join(destination, "android-collab-out.log"), "utf8")).toBe("immutable prior evidence");
+      expect(await Bun.file(join(destination, "failure.json")).exists()).toBe(true);
+    } finally { await rm(root, { recursive: true, force: true }); if (staging) await rm(staging, { recursive: true, force: true }); }
+  });
+
+  test.skipIf(process.platform === "win32")("never follows a staged diagnostic symlink", async () => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-log-symlink-")), destination = join(root, "retained");
+    let staging = "";
+    try {
+      const foreign = join(root, "foreign");
+      await writeFile(foreign, "not diagnostic bytes");
+      await expect(withSmokeDiagnostics(destination, async (temporary, logs) => {
+        staging = temporary;
+        await symlink(foreign, join(logs, "android-collab-out.log"));
+      }, [])).rejects.toThrow();
+      expect(await Bun.file(join(destination, "android-collab-out.log")).exists()).toBe(false);
+      expect(await readFile(foreign, "utf8")).toBe("not diagnostic bytes");
+    } finally { await rm(root, { recursive: true, force: true }); if (staging) await rm(staging, { recursive: true, force: true }); }
+  });
+
+  test("an existing destination refuses before running the body or restoration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-existing-"));
+    try {
+      let ran = false;
+      await expect(withSmokeDiagnostics(root, async () => { ran = true; }, [() => { ran = true; }])).rejects.toMatchObject({ code: "EEXIST" });
+      expect(ran).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
 
 
 test.each([
