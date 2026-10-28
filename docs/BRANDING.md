@@ -55,9 +55,9 @@ accent.
   glyphs, served as first-party assets. Runtime assets must remain first-party;
   no remote fonts, Google Fonts requests, third-party scripts, or CDNs.
   This is a privacy requirement, not an optional offline optimization.
-- **Exported artwork:** `assets/banner.html` uses Space Grotesk 500/600 and
-  JetBrains Mono 400/500 from Google Fonts to render static assets. That artwork
-  source is not a runtime shell; do not copy its font-loading links into the app
+- **Exported artwork:** `assets/banner.html` and `assets/og.html` use Space Grotesk 500/600 and
+  JetBrains Mono 400/500 from Google Fonts to render static assets (`bun run media:brand`). Those
+  artwork sources are not runtime shells; do not copy their font-loading links into the app
   or site. Existing media retains its recorded provenance.
 - Artwork wordmark: "OMP Session Gateway", weight 600, letter-spacing −0.015em.
   Mono labels: 11–12px, uppercase, letter-spacing 0.1–0.22em.
@@ -94,8 +94,9 @@ Paths below are relative to the repository root.
 |---|---|
 | `assets/logo.svg` | mark, transparent, for dark backgrounds |
 | `assets/logo-light.svg` | mark for light backgrounds |
-| `assets/banner.html` | README banner source (1280×320) |
+| `assets/banner.html` | banner source (1280×320) for placements outside the README; `bun run media:brand` renders it |
 | `assets/banner.png` | rendered banner @2x (2560×640) |
+| `assets/og.html` | social preview source (1280×640); `bun run media:brand` renders it |
 | `assets/og.png` | GitHub social preview and site `og:image` (1280×640) |
 | `apps/web/src/icon.svg` | PWA icon source (512, rx116 tile); app favicon |
 | `apps/web/src/favicon.svg` | site favicon source (96, rx22 tile) |
@@ -118,8 +119,8 @@ Manifest snippet:
 ]
 ```
 
-README banner: use `assets/banner.png` at top (it is dark-mode native and acceptable
-on light GitHub). `<meta name="theme-color" content="#060809">`.
+README top: the mark via `<picture>` (`logo.svg` dark, `logo-light.svg` light) above the H1 and
+the one-line promise; the banner is not embedded. `<meta name="theme-color" content="#060809">`.
 
 ## PWA UI system ("OMP Sessions")
 

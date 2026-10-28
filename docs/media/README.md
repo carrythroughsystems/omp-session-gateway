@@ -15,7 +15,7 @@ bun run media:check
 
 `media:capture` builds the actual PWA and pinned collaboration client before capture. It publishes the canonical set only after staging the complete package. `media:check` verifies the binaries, manifest, public-safety rules, and root README references; it does not regenerate media. Both use `packages/collab-client/upstream/UPSTREAM.json` for browser-client provenance, independently of the OMP host baseline.
 
-Source revision: `8b4ffe23abd7e8d55f90ac50df3e87e97cb98aec`  
+Source revision: `090be7bcfec8307d4b13029e7df67965dafbf70a`  
 Pinned client: `v18.12.6` / `45c35e40c46166dc726ccc52f5d27f40f2449f99` (`@oh-my-pi/collab-web` 16.3.6)
 
 Normalized tool versions:
@@ -45,7 +45,7 @@ Security boundary: loopback-only gateway · memory-only capabilities · no trans
 
 ## Seeded state
 
-The opening contains four working sessions: Release qualification, Android reconnect soak, Docs & examples, and Upstream compatibility. Gateway auth hardening then arrives as a fifth working session before becoming the oldest of two waiting asks; Release qualification is second. Open request launches Control for the synthetic “How should ADR-0036 proceed?” ask with two synthetic options.
+The opening contains four live sessions: Release qualification, Android reconnect soak, and Upstream compatibility working, and Docs & examples idle. Gateway auth hardening then arrives as a fifth working session before becoming the oldest of two waiting asks; Release qualification is second. Open request launches Control for the synthetic “How should ADR-0036 proceed?” ask with two synthetic options.
 
 The canonical directory contains only the eight binaries, this provenance file, and `manifest.json`. The [unposted launch-copy draft](../LAUNCH_COPY.md) lives outside the synthetic-media fixture directory. The checker rejects every unexpected file, including concepts and contact sheets.
 

@@ -9,8 +9,13 @@ export function syntheticSession(
   cwdLabel: string,
   startedAt: string,
   lastSeenAt: string,
-  attention?: { readonly requestId: string; readonly since: string; readonly preview: string },
+  options: {
+    /** Omitted renders "Activity unknown"; the README capture seeds every working row. */
+    readonly busy?: boolean;
+    readonly attention?: { readonly requestId: string; readonly since: string; readonly preview: string };
+  } = {},
 ): SessionMetadata {
+  const { busy, attention } = options;
   return {
     instanceId,
     generation: 1,
@@ -21,6 +26,7 @@ export function syntheticSession(
     canView: true,
     canControl: true,
     inputRequired: attention !== undefined,
+    ...(busy === undefined ? {} : { busy }),
     ...(attention === undefined
       ? {}
       : {
@@ -40,6 +46,7 @@ export const RELEASE_WORKING = syntheticSession(
   "omp-session-gateway",
   "2026-08-21T11:50:00.000Z",
   "2026-08-21T12:09:58.000Z",
+  { busy: true },
 );
 export const ANDROID_WORKING = syntheticSession(
   "media-android-soak-0003",
@@ -47,13 +54,16 @@ export const ANDROID_WORKING = syntheticSession(
   "omp-session-gateway",
   "2026-08-21T11:40:00.000Z",
   "2026-08-21T12:09:57.000Z",
+  { busy: true },
 );
+/** The one idle row shows the directory's second resting state beside Working. */
 export const DOCS_WORKING = syntheticSession(
   "media-docs-examples-0004",
   "Docs & examples",
   "omp-session-gateway",
   "2026-08-21T11:30:00.000Z",
   "2026-08-21T12:09:56.000Z",
+  { busy: false },
 );
 export const UPSTREAM_WORKING = syntheticSession(
   "media-upstream-compat-0005",
@@ -61,6 +71,7 @@ export const UPSTREAM_WORKING = syntheticSession(
   "oh-my-pi",
   "2026-08-21T11:20:00.000Z",
   "2026-08-21T12:09:55.000Z",
+  { busy: true },
 );
 export const INITIAL_SESSIONS = [RELEASE_WORKING, ANDROID_WORKING, DOCS_WORKING, UPSTREAM_WORKING] as const;
 export const GATEWAY_WORKING = syntheticSession(
@@ -69,6 +80,7 @@ export const GATEWAY_WORKING = syntheticSession(
   "omp-session-gateway",
   "2026-08-21T12:00:00.000Z",
   "2026-08-21T12:09:59.000Z",
+  { busy: true },
 );
 export const GATEWAY_WAITING = syntheticSession(
   "media-gateway-auth-0001",
@@ -77,9 +89,11 @@ export const GATEWAY_WAITING = syntheticSession(
   "2026-08-21T12:00:00.000Z",
   "2026-08-21T12:09:59.000Z",
   {
-    requestId: "media-request-auth-0001",
-    since: "2026-08-21T12:05:00.000Z",
-    preview: "How should ADR-0036 proceed?",
+    attention: {
+      requestId: "media-request-auth-0001",
+      since: "2026-08-21T12:05:00.000Z",
+      preview: "How should ADR-0036 proceed?",
+    },
   },
 );
 export const RELEASE_WAITING = syntheticSession(
@@ -89,9 +103,11 @@ export const RELEASE_WAITING = syntheticSession(
   "2026-08-21T11:50:00.000Z",
   "2026-08-21T12:09:58.000Z",
   {
-    requestId: "media-request-release-0002",
-    since: "2026-08-21T12:07:00.000Z",
-    preview: "Approve the synthetic qualification record?",
+    attention: {
+      requestId: "media-request-release-0002",
+      since: "2026-08-21T12:07:00.000Z",
+      preview: "Approve the synthetic qualification record?",
+    },
   },
 );
 
