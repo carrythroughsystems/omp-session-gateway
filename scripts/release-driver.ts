@@ -252,6 +252,8 @@ export interface Decision {
   operation: Operation;
   phase: Phase;
   detail: string;
+  /** Best-effort post-transition maintenance cannot undo a saved close. */
+  warning?: string;
   links?: string[];
   pr?: PullRequest;
   patch?: { [Key in keyof DriverState]?: Exclude<DriverState[Key], undefined> };
@@ -500,6 +502,8 @@ export interface DriverPort {
   perform(step: Decision, state: DriverState): Promise<Partial<DriverState>>;
   /** Reconcile marker on the issue, accepting only comments authored by the configured bot. */
   announce(issue: number, body: string, marker: string): Promise<void>;
+  /** Apply is best-effort maintenance only, after close is durably saved. */
+  pruneWork?(apply?: boolean): Promise<unknown>;
 }
 /** A saved intent's pinned input moved before release advancement. Retry-only cleanup may have
  *  settled durably. Immutable job binding mismatches stop diagnostically; other moved inputs re-plan. */
@@ -547,6 +551,12 @@ export async function tick(port: DriverPort, config: DriverConfig, plan = false)
   const marker = `<!-- release-driver:${createHash("sha256").update(`${state.issue.number}:${state.issue.request}:${state.candidate}:${state.sequence}:${state.phase}`).digest("hex")} -->`;
   state.announcement = { marker, body: [`release-driver: ${state.phase} — ${step.detail.replace(/[\r\n]/gu, " ")}`, ...(step.links ?? []), marker].join("\n") };
   await port.save(state);
+  if (step.operation === "close") {
+    try { await port.pruneWork?.(true); }
+    catch (error) {
+      step = { ...step, warning: `worktree pruning failed: ${error instanceof Error ? error.message : String(error)}`.replace(/[\r\n]/gu, " ").slice(0, 512) };
+    }
+  }
   await port.announce(state.issue.number, state.announcement.body, marker);
   delete state.announcement;
   await port.save(state);

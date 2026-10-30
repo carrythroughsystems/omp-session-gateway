@@ -1,0 +1,1 @@
+- Prune older release-driver work checkouts after close and offer guarded dry-run/apply cleanup.
