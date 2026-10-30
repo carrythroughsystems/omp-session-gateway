@@ -29,7 +29,9 @@ publisher-token
 site/logo.svg
 site/favicon.svg
 site/og.png
-site/product-flow.png
+site/screen-all-clear.png
+site/screen-needs-you.png
+site/screen-open-request.png
 
 # Python bytecode
 __pycache__/

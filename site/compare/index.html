@@ -3,10 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#060809">
 <title>OMP Session Gateway compared — omp-deck, oh-my-portal, claudecodeui, pi-agent-dashboard</title>
 <meta name="description" content="Choose a phone or browser workflow: native stock-OMP session access with OMP Session Gateway, a browser workspace, or remote terminal access. Dated primary sources and support boundaries.">
 <link rel="canonical" href="https://carrythroughsystems.github.io/omp-session-gateway/compare/">
+<link rel="preload" href="../fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../site.css">
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
 <meta property="og:title" content="OMP Session Gateway compared — omp-deck, oh-my-portal, claudecodeui, pi-agent-dashboard">
@@ -18,17 +21,21 @@
 </head>
 <body>
 <header class="site">
-  <img src="../logo.svg" alt="" aria-hidden="true">
-  <a class="brand" href="../">OMP Session Gateway</a>
-  <nav>
+  <div class="wrap">
+    <a class="brand" href="../"><img src="../logo.svg" alt="" width="24" height="24">OMP Session Gateway</a>
+    <nav aria-label="Site">
       <a href="../">Overview</a>
-      <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a>
       <a href="../compare/" aria-current="page">Compare</a>
-      <a href="../status/">Status</a>
       <a href="../security/">Security</a>
-  </nav>
+      <a href="../status/">Status</a>
+      <a class="ext" href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a>
+      <a class="ext" href="https://github.com/carrythroughsystems/omp-session-gateway">GitHub</a>
+    </nav>
+  </div>
 </header>
 <main>
+<section class="page">
+<div class="wrap">
 <p class="eyebrow">Decision guide</p>
 <h1>Keep the terminal, or move the work to a browser?</h1>
 <p class="lede">Start with the workflow you want to keep. A directory for running terminal sessions,
@@ -43,46 +50,44 @@ OMP build, or gateway-specific OMP plugin is needed. The gateway remains a separ
 <p><strong>One-time setup:</strong> install the gateway with Bun 1.4.0, enable
 <code>collab.autoStart</code>, and configure TUN-mode Tailscale Serve with an exact user allowlist
 and Funnel disabled. Then start sessions with plain <code>omp</code> — no per-session link copying.
-<a href="https://github.com/carrythroughsystems/omp-session-gateway#build-and-run">Setup guide</a>.</p>
+<a href="../#setup">Setup steps</a>.</p>
 
 <h2>Choose a different workflow</h2>
-<ul>
-<li><strong>A browser-hosted OMP workspace:</strong>
-<a href="https://github.com/bjb2/omp-deck">omp-deck</a> embeds the OMP SDK in-process and shares
+<ul class="grid">
+<li><h3>A browser-hosted OMP workspace</h3>
+<p><a href="https://github.com/bjb2/omp-deck">omp-deck</a> embeds the OMP SDK in-process and shares
 OMP's session/auth store. Choose it for persistent browser sessions and the work around chat,
-such as kanban, routines, and an inbox; its README says the OMP CLI need not be installed separately.
-Sources: <a href="https://github.com/bjb2/omp-deck/blob/main/README.md">README</a>,
-<a href="https://github.com/bjb2/omp-deck/blob/main/package.json">package</a>.</li>
-<li><strong>Agent web chat, sharing, or a remote terminal:</strong>
-<a href="https://github.com/gosuda/oh-my-portal">oh-my-portal</a> provides skills for several CLI
+such as kanban, routines, and an inbox; its README says the OMP CLI need not be installed separately.</p>
+<p class="small">Sources: <a href="https://github.com/bjb2/omp-deck/blob/main/README.md">README</a>,
+<a href="https://github.com/bjb2/omp-deck/blob/main/package.json">package</a>.</p></li>
+<li><h3>Agent web chat, sharing, or a remote terminal</h3>
+<p><a href="https://github.com/gosuda/oh-my-portal">oh-my-portal</a> provides skills for several CLI
 agents over Portal tunnels. OMP web chat uses RPC; its optional <code>omp-collab</code> skill also
 shares a live session through OMP's own collaboration path. Choose the surface you need rather
-than treating it as a terminal-session directory.
-Sources: <a href="https://github.com/gosuda/oh-my-portal/blob/main/README.md">README</a>,
-<a href="https://github.com/gosuda/oh-my-portal/blob/main/package.json">package</a>.</li>
-<li><strong>A browser/mobile workspace for other coding CLIs:</strong>
-<a href="https://github.com/siteboon/claudecodeui">CloudCLI (claudecodeui)</a> advertises Claude Code,
+than treating it as a terminal-session directory.</p>
+<p class="small">Sources: <a href="https://github.com/gosuda/oh-my-portal/blob/main/README.md">README</a>,
+<a href="https://github.com/gosuda/oh-my-portal/blob/main/package.json">package</a>.</p></li>
+<li><h3>A browser/mobile workspace for other coding CLIs</h3>
+<p><a href="https://github.com/siteboon/claudecodeui">CloudCLI (claudecodeui)</a> advertises Claude Code,
 Cursor CLI, and Codex in its README, with self-hosted and hosted options. That README does not
-advertise OMP support; do not assume OMP compatibility from a similar interface.
-Sources: <a href="https://github.com/siteboon/claudecodeui/blob/main/README.md">README</a>,
-<a href="https://github.com/siteboon/claudecodeui/blob/main/package.json">package</a>.</li>
-<li><strong>A dashboard alongside the pi terminal:</strong>
-<a href="https://github.com/BlackBeltTechnology/pi-agent-dashboard">pi-agent-dashboard</a> mirrors
+advertise OMP support; do not assume OMP compatibility from a similar interface.</p>
+<p class="small">Sources: <a href="https://github.com/siteboon/claudecodeui/blob/main/README.md">README</a>,
+<a href="https://github.com/siteboon/claudecodeui/blob/main/package.json">package</a>.</p></li>
+<li><h3>A dashboard alongside the pi terminal</h3>
+<p><a href="https://github.com/BlackBeltTechnology/pi-agent-dashboard">pi-agent-dashboard</a> mirrors
 pi sessions through a bridge extension and supports browser interaction. Its README explicitly
-says Oh My Pi is not supported; pi and OMP are different integration targets.
-Sources: <a href="https://github.com/BlackBeltTechnology/pi-agent-dashboard/blob/develop/README.md">README</a>,
-<a href="https://github.com/BlackBeltTechnology/pi-agent-dashboard/blob/develop/package.json">package</a>.</li>
+says Oh My Pi is not supported; pi and OMP are different integration targets.</p>
+<p class="small">Sources: <a href="https://github.com/BlackBeltTechnology/pi-agent-dashboard/blob/develop/README.md">README</a>,
+<a href="https://github.com/BlackBeltTechnology/pi-agent-dashboard/blob/develop/package.json">package</a>.</p></li>
 </ul>
 
 <h2>Evidence and limits</h2>
 <p>The <a href="https://github.com/carrythroughsystems/omp-session-gateway/releases/latest">latest stable gateway release</a>
 is published from a qualified signed candidate. Its minimum OMP version is an integration contract, not evidence that every
-later version or platform was tested. Qualification covers the exact OMP 18.3.0/Bun 1.4.0
-Debian/macOS/Windows Server 2025/Pixel matrix, background Web Push on the Pixel, and a
-<strong>1,800-second relay check, not eight hours</strong>.
+later version or platform was tested. Qualification names the exact OMP, Bun, host, and device builds the candidate
+passed on, and the relay check is a <strong>1,800-second run, not eight hours</strong>.
 Linux, macOS, and Windows hosts and the Chromium, Firefox, and WebKit browser engines are supported and
-tested in CI, which is not qualification. Specialized attention, branch/resume, and broader
-host/browser combinations remain unqualified. The <a href="../status/">status page</a> and
+tested in CI, which is not qualification. The <a href="../status/">status page</a> and
 <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md">release ledger</a>
 retain the per-release evidence.</p>
 <p class="verified">Primary READMEs and package metadata checked 2026-09-14. This is a workflow
@@ -90,11 +95,23 @@ comparison, not a hands-on interoperability test or a security assessment of the
 Their scope can change; follow the source links before deciding. The upstream
 <a href="https://github.com/can1357/oh-my-pi/discussions/6460">discussion</a> provides further context.</p>
 <p><a href="https://github.com/carrythroughsystems/omp-session-gateway#how-it-compares">Short repository guide</a></p>
+</div>
+</section>
 </main>
 <footer>
-  Community project; not affiliated with or endorsed by the Oh My Pi maintainers.
-  Gateway release evidence lives in the <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md">release ledger</a>;
-  other projects' scope is attributed to the dated primary sources above.
+  <div class="wrap">
+    <a class="brand" href="../"><img src="../logo.svg" alt="" width="20" height="20">OMP Session Gateway</a>
+    <ul class="links">
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway">GitHub</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/CHANGELOG.md">Changelog</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/SECURITY.md">Security policy</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/LICENSE">MIT license</a></li>
+    </ul>
+    <p>Community project; not affiliated with or endorsed by the Oh My Pi maintainers.
+    Gateway release evidence lives in the <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md">release ledger</a>;
+    other projects' scope is attributed to the dated primary sources above.</p>
+  </div>
 </footer>
 </body>
 </html>

@@ -18,7 +18,9 @@ const STAGED_SITE_ASSETS: Record<string, string> = {
   "logo.svg": "assets/logo.svg",
   "favicon.svg": "apps/web/src/favicon.svg",
   "og.png": "assets/og.png",
-  "product-flow.png": "docs/media/omp-session-gateway-product-flow.png",
+  "screen-all-clear.png": "docs/media/01-all-clear.png",
+  "screen-needs-you.png": "docs/media/02-needs-you.png",
+  "screen-open-request.png": "docs/media/03-open-request.png",
 };
 
 async function sitePages(): Promise<Array<{ path: string; url: string }>> {
