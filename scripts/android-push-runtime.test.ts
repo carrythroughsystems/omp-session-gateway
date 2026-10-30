@@ -94,6 +94,77 @@ test.each(["missing", "duplicate", "alarm", "late", "cancelled"] as const)("GCM 
   } finally { adb.mockRestore(); select.mockRestore(); }
 });
 
+test.each(["checkpoint-bound", "execution-deadline", "cancelled", "rejected"] as const)(
+  "510 post-disable checkpoint %s cannot pin Wi-Fi or skip radio restoration", async stage => {
+    const commands: string[] = [], controller = new AbortController(), checkpointBounds: number[] = [];
+    const baseline: PushDeviceBaseline = { wifi: true, mobile: false, airplane: false, forcedDoze: false, batteryOverride: false,
+      awake: true, locked: false, webApkTask: false, chromeNotificationsAllowed: true, webApkNotificationsAllowed: true };
+    let checkpoints = 0, wifi = true, restored = false, id = 0;
+    let cancellation: ReturnType<typeof setTimeout> | undefined, watchdog: ReturnType<typeof setTimeout> | undefined;
+    const raw = new Error(`synthetic post-disable checkpoint ${stage}`);
+    const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+    const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => {
+      const command = args.join(" "); commands.push(command);
+      if (command === "shell dumpsys activity service GcmService") return "Is client connected: false\nReconnect Scheduler Alarm: OFF";
+      if (command === "shell svc wifi disable") wifi = false;
+      if (command === "shell svc wifi enable") wifi = true;
+      return "";
+    });
+    const setTimer = globalThis.setTimeout;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((...args: Parameters<typeof setTimeout>) => {
+      const [run, delay, ...rest] = args;
+      if (checkpoints === 2 && !restored && delay !== undefined && delay <= 30_000) {
+        checkpointBounds.push(delay);
+        return setTimer(run, stage === "checkpoint-bound" ? 20 : delay, ...rest);
+      }
+      return setTimer(run, delay, ...rest);
+    }) as typeof setTimeout);
+    try {
+      const runtime = createAndroidPushRuntime(identity, { execution: {
+        signal: controller.signal, deadline: performance.now() + (stage === "execution-deadline" ? 150 : 60_000),
+        nextFailureId: () => ++id,
+      } });
+      runtime.pause = async () => {};
+      runtime.beforeEffect = async () => {
+        checkpoints++;
+        if (checkpoints !== 2) return;
+        expect(wifi).toBe(false);
+        if (stage === "rejected") throw raw;
+        if (stage === "cancelled") cancellation = setTimer(() => controller.abort(raw), 20);
+        await new Promise<void>(() => {});
+      };
+      runtime.device = async () => ({ ...baseline, wifi });
+      const started = performance.now();
+      const error = await Promise.race([
+        runtime.gcmReadiness().finally(async () => {
+          expect(wifi).toBe(false);
+          runtime.beginCleanup!();
+          await runtime.cleanup("network", { epoch: "synthetic", device: baseline } as AndroidPushProgress);
+          restored = true;
+        }).catch(error => error),
+        new Promise<"pending">(resolve => { watchdog = setTimer(() => resolve("pending"), 1_000); }),
+      ]);
+      expect(error).not.toBe("pending");
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(restored).toBe(true); expect(wifi).toBe(true);
+      expect(commands.filter(command => command.startsWith("shell svc wifi"))).toEqual([
+        "shell svc wifi disable", "shell svc wifi enable",
+      ]);
+      expect(normalizeQualificationFailures(error)).toMatchObject([{
+        operation: "unknown", observations: { gcmConnected: false, gcmRemedyApplied: true },
+      }]);
+      const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+      expect(messages).toContain(stage === "cancelled" || stage === "rejected" ? raw.message :
+        "Push checkpoint persistence exceeded its bound");
+      if (stage === "checkpoint-bound") expect(checkpointBounds).toContain(30_000);
+      if (stage === "execution-deadline") {
+        expect(checkpointBounds).toHaveLength(1);
+        expect(checkpointBounds[0]).toBeGreaterThan(0);
+        expect(checkpointBounds[0]).toBeLessThanOrEqual(150);
+      }
+    } finally { clearTimeout(watchdog); clearTimeout(cancellation); timer.mockRestore(); adb.mockRestore(); select.mockRestore(); }
+  });
+
 test.each([
   "Is client connected: false\nIs client connected: malformed",
   "Is client connected: true\nIs client connected = false",

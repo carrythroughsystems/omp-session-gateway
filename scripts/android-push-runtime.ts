@@ -403,6 +403,27 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     if (records.some(record => record.tag.includes("omp-attention-") && !observedTopics.some(topic => record.tag.endsWith(topic)) && baselineRecords.get(record.key) !== record.postedAt)) throw new NotificationOverlapError();
     return records;
   };
+  // A pending filesystem checkpoint must not pin the radio cycle past cancellation or its bound.
+  const checkpoint = async (): Promise<void> => {
+    checkExecution();
+    const signal = execution?.signal;
+    const bound = execution === undefined ? 30_000 : Math.max(1, Math.min(30_000, execution.deadline - performance.now()));
+    let timer: ReturnType<typeof setTimeout> | undefined, abort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        runtime.beforeEffect(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Push checkpoint persistence exceeded its bound")), bound);
+          if (signal !== undefined) {
+            abort = () => reject(signal.reason ?? new Error("Push execution cancelled"));
+            signal.addEventListener("abort", abort, { once: true });
+            if (signal.aborted) abort();
+          }
+        }),
+      ]);
+    } finally { clearTimeout(timer); if (abort !== undefined) signal!.removeEventListener("abort", abort); }
+    checkExecution();
+  };
   const runtime: AndroidPushRuntime = {
     now: () => performance.now(),
     pause: async milliseconds => {
@@ -528,13 +549,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       try {
         if (await read()) return { observations: { gcmConnected: true, gcmRemedyApplied }, diagnostic: diagnostic() };
         // Record the attempted cycle before either mutating command; restoration owns uncertain exits.
-        await runtime.beforeEffect();
+        await checkpoint();
         gcmRemedyApplied = true; mutationInFlight = true;
         await boundedAdb(await selectDevice(), ["shell", "svc", "wifi", "disable"], 10_000);
-        mutationInFlight = false;
         await runtime.pause(2_000);
-        await runtime.beforeEffect();
-        mutationInFlight = true;
+        await checkpoint();
         await boundedAdb(await selectDevice(), ["shell", "svc", "wifi", "enable"], 10_000);
         mutationInFlight = false;
         const deadline = runtime.now() + 30_000;

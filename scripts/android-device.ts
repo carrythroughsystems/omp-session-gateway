@@ -334,7 +334,7 @@ export async function requireAndroidGatewayReachability(
   }, httpsFallback === undefined ? [] : [() => httpsFallback.record({ icmp, https, satisfiedBy })]);
 }
 
-/** A device-origin, TLS-validated health GET; no controller fetch, cookies, auth, or PWA cache. */
+/** A TLS health navigation in an owned device tab; no capability fetch or PWA cache effects. */
 export async function androidDeviceHttpsReachesOrigin(
   origin: string,
   { chrome = withAndroidChrome, now = () => performance.now() }: {
@@ -347,6 +347,18 @@ export async function androidDeviceHttpsReachesOrigin(
     url.pathname !== "/" || url.search !== "" || url.hash !== "") {
     throw new Error("Android HTTPS reachability requires a credential-free HTTPS origin");
   }
+  const healthUrl = new URL("/api/v1/health", url).href;
+  const expression = `(() => {
+    if (document.readyState !== "complete") return null;
+    if (location.href !== ${JSON.stringify(healthUrl)}) return false;
+    const status = performance.getEntriesByType("navigation")[0]?.responseStatus;
+    if (!Number.isInteger(status) || status < 200 || status >= 300) return false;
+    try {
+      const health = JSON.parse(document.body?.textContent ?? "");
+      return health !== null && typeof health === "object" && !Array.isArray(health) &&
+        (health.status === "ready" || health.status === "degraded");
+    } catch { return false; }
+  })()`;
   const controller = new AbortController(), deadline = now() + 15_000;
   const check = () => {
     controller.signal.throwIfAborted();
@@ -356,33 +368,18 @@ export async function androidDeviceHttpsReachesOrigin(
   try {
     const reached = await chrome(async driver => {
       await driver.openTab();
-      await driver.send("Page.navigate", { url: "about:blank" });
-      const tree = await driver.send("Page.getFrameTree");
-      const frame = (tree.frameTree as { frame?: { id?: unknown; url?: unknown } } | undefined)?.frame;
-      if (typeof frame?.id !== "string" || frame.id === "" || frame.url !== "about:blank" ||
-        await driver.evaluate("location.origin") !== "null") {
-        throw new Error("Android HTTPS reachability requires an owned opaque document");
-      }
-      // includeCredentials:false means same-origin credentials in Chromium. The verified opaque
-      // document makes this credential-free; its CSP also refuses off-origin or HTTP redirects.
-      const policy = `default-src 'none'; connect-src ${url.origin}`.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
-      await driver.send("Page.setDocumentContent", {
-        frameId: frame.id, html: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${policy}">`,
-      });
-      const response = await driver.send("Network.loadNetworkResource", {
-        frameId: frame.id, url: new URL("/api/v1/health", url).href,
-        options: { disableCache: true, includeCredentials: false },
-      });
-      const resource = response.resource;
-      if (resource === null || typeof resource !== "object" || Array.isArray(resource)) throw new Error("invalid Android HTTPS reachability result");
-      const result = resource as Record<string, unknown>;
-      const stream = typeof result.stream === "string" && result.stream !== "" ? result.stream : undefined;
-      return runWithRestoration("Android HTTPS reachability", () => {
+      // Local Network Access blocks an opaque document's tailnet fetch, not this top-level navigation.
+      const navigation = await driver.send("Page.navigate", { url: healthUrl });
+      check();
+      if (navigation.errorText !== undefined) return false;
+      for (;;) {
         check();
-        return result.success === true && typeof result.httpStatusCode === "number" &&
-          Number.isInteger(result.httpStatusCode) && result.httpStatusCode >= 200 && result.httpStatusCode < 300 &&
-          (result.netError === undefined || result.netError === 0);
-      }, stream === undefined ? [] : [() => driver.send("IO.close", { handle: stream })]);
+        // A new document can replace the evaluation context while the navigation commits.
+        const result = await driver.evaluate<boolean | null>(expression).catch(() => null);
+        check();
+        if (typeof result === "boolean") return result;
+        await Bun.sleep(LOAD_POLL_MS);
+      }
     }, { execution: { signal: controller.signal, deadline } });
     check(); // Cleanup cannot turn a late response into timely admission.
     return reached;

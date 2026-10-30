@@ -1034,7 +1034,10 @@ connected client proceeds without radio changes. A disconnected client gets exac
 `svc wifi disable`, two-second pause, `svc wifi enable` cycle, then at most 30 seconds to report
 connected. Individual ADB reads/changes are capped at ten seconds and the execution deadline
 still applies independently of that reconnect window: late output cannot replace an in-window
-observation. No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
+observation. Each radio-cycle checkpoint is capped at 30 seconds or the remaining execution
+deadline, whichever is shorter, and observes cancellation. Until enable succeeds, a failed
+cycle reports its operation as unknown and existing Pixel cleanup restores the captured radios.
+No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
 automatic. Any malformed or duplicate connection line, including a label-prefix suffix or
 case/spacing variant beside a valid line, fails as invalid evidence without cycling
 Wi-Fi. In-window disconnected evidence after the bound fails before any ask as `gcm_disconnected`
@@ -1119,7 +1122,8 @@ Private messages are limited to 4 KiB and stacks to 16 KiB; oversized fields are
 scanning, with `truncated: true`. Redaction is flagged with `redacted: true`. The complete compact
 stderr diagnostic and browser file each stay within the driver's 256-KiB retention ceiling, with
 an explicit terminal marker when the cause graph exceeds its byte budget.
-The browser file selects the deepest retained CDP cause and carries redaction/truncation flags
+The browser file selects the deepest retained CDP cause, or the deepest non-synthesized leaf
+when there is no CDP cause (equal-depth leaves keep the earlier primary failure), and carries redaction/truncation flags
 from the entire chain, including omitted siblings. Ordinary errors remain privately reachable
 through deadline, persistence and containment conversions. Nested readiness failures receive the
 same lane remapping and final delivery counters as single failures. These mode-0600 diagnostics
@@ -1144,6 +1148,8 @@ The Push owner retains its transient baseline, while the orchestrator's mirror a
 a durable sidecar write. Even a failed initial checkpoint or repeated restore checkpoint failures
 cannot skip subsequent restoration owners. Failed cleanup persistence cannot claim baseline
 restoration; terminal write failures preserve the original typed cleanup identity and Pixel poisoning.
+Preflight/admission outcome publication and campaign terminal persistence retain both the original
+qualification failure and any publication failure as aggregate siblings, including private causes.
 Later successful cleanup does not erase earlier cleanup failures. Negative cleanup/reconciliation
 facts, remaining resources, persistence failure or any unsettled remote owner block containment,
 same-candidate eligibility and automatic retirement. Unrestored cloud/Push fixtures retain their
@@ -1453,25 +1459,24 @@ eligibility is checked before touching the device; protected, soak, old, missing
 non-Control fixtures fail closed.
 
 The Android acceptance journey admits device-origin reachability when ICMP succeeds **or**, after
-ICMP loss, an owned Chrome/CDP HTTPS probe succeeds. The latter performs a TLS-validated GET of
-`/api/v1/health` on the exact configured gateway authority, with cache bypass and no credentials.
-It uses a verified opaque disposable document because Chromium's `includeCredentials: false`
-means same-origin credentials, not unconditional omission. That document's restrictive CSP also
-rejects redirects outside the HTTPS gateway authority. The probe does not navigate the PWA or
-inspect/log response bodies; it closes the returned stream. Its execution deadline is 15 seconds,
-followed by the existing bounded owned target/stream/forward cleanup; late responses or unproven
-cleanup cannot admit the journey.
+ICMP loss, an owned Chrome/CDP top-level HTTPS health navigation succeeds. The host can drop ICMP,
+for example when the macOS application firewall uses stealth mode. Chrome's Local Network Access
+blocks the same tailnet request from an opaque `about:blank` document, so the fallback navigates
+only its owned disposable tab to `/api/v1/health` on the validated, credential-free HTTPS origin.
+Admission requires no navigation error, that exact committed URL (not a redirect or interstitial),
+a 2xx navigation `responseStatus`, and a parsed gateway health body whose `status` is `ready` or
+`degraded`; discovery readiness does not change network reachability. It fetches no capability and
+does not log response bodies or navigate the user's PWA tab. The service worker bypasses both
+navigations and `/api/`, and the health response is `no-store`, so the PWA cache is untouched.
+Its execution deadline is 15 seconds, followed by the existing bounded owned target/forward cleanup;
+late responses or unproven cleanup cannot admit the journey.
 
 Private Android stderr contains a closed `android-reachability` record: the ICMP and HTTPS
 observations and `satisfiedBy` (`icmp`, `https`, or `null`). ICMP loss alone is an observation, not
 a refusal, when the HTTPS alternative succeeds. Both failed probes still refuse before the
 acceptance journey's radio mutations. An adb transport failure remains fatal. No VPN, DNS, firewall,
 credential, or TLS-validation policy is changed. Qualification preflights remain ICMP-only and
-read-only; they never opt into the browser-backed alternative. The CDP
-[Network schema](https://github.com/ChromeDevTools/devtools-protocol/blob/7245ec551bc9d450170193456ab3965bb7e716cb/pdl/domains/Network.pdl)
-and Chromium's
-[resource loader](https://github.com/chromium/chromium/blob/30466547ef3ffed6e21355b0bb457b22a8a4d88e/content/browser/devtools/protocol/devtools_network_resource_loader.cc)
-define the credential/cache behavior used by this probe.
+read-only; they never opt into the browser-backed alternative.
 
 Normal success and failure kill only that tmux session, wait for registry revocation, remove the
 fixture only when its per-run ownership marker still matches, and delete private staging. The stable
