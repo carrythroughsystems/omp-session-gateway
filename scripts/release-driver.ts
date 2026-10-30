@@ -502,7 +502,7 @@ export interface DriverPort {
   announce(issue: number, body: string, marker: string): Promise<void>;
 }
 /** A saved intent's pinned input moved before release advancement. Retry-only cleanup may have
- *  settled durably, but the failed selection stays intact and the next tick plans afresh. */
+ *  settled durably. Immutable job binding mismatches stop diagnostically; other moved inputs re-plan. */
 export class StaleIntentError extends Error {}
 /** At most one state transition. The caller holds the tick mutex; plan never calls save/perform. */
 export async function tick(port: DriverPort, config: DriverConfig, plan = false): Promise<Decision | Idle> {
@@ -528,8 +528,10 @@ export async function tick(port: DriverPort, config: DriverConfig, plan = false)
       result = {};
     } else {
       if (!(error instanceof StaleIntentError)) throw error;
-      if (step.operation === "schedule-campaign-retry" || (step.operation === "start-campaign" && state.retryPlan !== undefined)) {
-        step = decision("stop", "diagnostic-required", "campaign harness:binding_mismatch", {
+      const campaignOperation = step.operation === "schedule-campaign-retry" || step.operation === "start-campaign";
+      if (campaignOperation || step.operation === "start-approve-checks" || step.operation === "start-smoke") {
+        step = decision("stop", "diagnostic-required", campaignOperation ? "campaign harness:binding_mismatch"
+          : "release job binding mismatch; inspect the immutable job specification and its launch binding", {
           patch: { failedMain: state.candidateCommit ?? state.selectedMain },
         });
         result = {};

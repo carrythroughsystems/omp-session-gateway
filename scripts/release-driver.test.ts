@@ -66,7 +66,7 @@ test("routine controls normalize generated versions but retain policy and depend
   expect(await runtime.controls("old", true)).toEqual(await runtime.controls("new", true));
 });
 
-import { assertFailedCampaignCleanup, botEnvironment, campaignAvailabilityObservation, campaignWorkerArguments, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
+import { assertFailedCampaignCleanup, botEnvironment, campaignAvailabilityObservation, campaignWorkerArguments, CommandOutputTail, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
 import { applyDecisionPatch, campaignAttempt, campaignExecution, campaignRetryLaunchState, parseCampaignRetryPlan, compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, parseCampaignInfrastructureHold, REPOSITORY, requestVersion, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
 import type { CampaignFailureObservation, CampaignInfrastructureHold, Decision, DriverPort, DriverState, JobObservation, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
 import { assertCampaignCleanupComplete, assertCampaignRetryEligible, createStableQualificationReceipt, withConsumedCampaignRetry } from "./stable-qualification.ts";
@@ -984,6 +984,43 @@ describe("council R1 retry authority counterexamples", () => {
     expect(fake.state.campaignAttempt ?? 0).toBe(0);
     expect(fake.state.intent).toBeUndefined();
   });
+  test.each(["start-campaign", "start-approve-checks", "start-smoke"] as const)(
+    "%s binding mismatch stops with a durable diagnostic instead of re-planning", async operation => {
+      class Invalidated extends FakeDriver {
+        launches = 0;
+        override async perform(step: Decision, current: DriverState): Promise<Partial<DriverState>> {
+          if (step.operation === operation) {
+            this.launches++;
+            throw new StaleIntentError("immutable release job specification differs from its launch binding");
+          }
+          return super.perform(step, current);
+        }
+      }
+      const fake = new Invalidated();
+      const phase = operation === "start-campaign" ? "candidate-verified" : operation === "start-smoke" ? "stable-verified" : "approve-checking";
+      fake.state = { ...state(phase), candidateCommit: evidence.candidateCommit, candidateDigest: evidence.candidateDigest,
+        approvedHead: evidence.head, approvedTree: evidence.tree,
+        ...(operation === "start-smoke" ? { stableCommit: "2".repeat(40), stableDigest: "3".repeat(64) } : {}) };
+      fake.repo.main = evidence.candidateCommit;
+      fake.repo.approve = pr();
+      fake.repo.approveChecks = { status: "absent" };
+      expect(nextStep(fake.state, fake.repo, config).operation).toBe(operation);
+      expect(fake.state.retryPlan).toBeUndefined();
+      expect(campaignAttempt(fake.state)).toBe(0);
+      const step = await tick(fake, config);
+      expect(step.operation).toBe("stop");
+      expect(fake.state.phase).toBe("diagnostic-required");
+      expect(fake.state.failedMain).toBe(evidence.candidateCommit);
+      expect(fake.state.intent).toBeUndefined();
+      expect(step.detail).toBe(operation === "start-campaign" ? "campaign harness:binding_mismatch"
+        : "release job binding mismatch; inspect the immutable job specification and its launch binding");
+      expect(fake.comments.size).toBe(1);
+      expect([...fake.comments.values()][0]).toContain("release-driver: diagnostic-required");
+      expect((await tick(fake, config)).operation).toBe("idle");
+      expect(fake.launches).toBe(1);
+      expect(fake.comments.size).toBe(1);
+    },
+  );
   test("receipt retry authority requires a nonempty exact restart set", () => {
     const selected = automaticCampaign(), evidence = automaticFailure(selected);
     const campaignFailure = { ...evidence, outcome: { ...evidence.outcome, scope: "campaign" as const,
@@ -1174,6 +1211,22 @@ async function qualificationFixtureOutput(runtime: AutomaticRuntime, checkout: s
   return { out: Buffer.from(out), err: Buffer.from(err), code };
 }
 
+test.each([65_537, 300_017])("bounded qualification output tail preserves exact bytes across %i-byte chunks", chunkSize => {
+  const tail = new CommandOutputTail();
+  expect(tail.bytes()).toEqual(Buffer.alloc(0));
+  const input = Buffer.alloc(8 * 1024 * 1024 + 317);
+  for (let index = 0; index < input.length; index++) input[index] = (index * 17 + (index >>> 8)) & 0xff;
+  input.set([0xff, 0, 0x80, 0xc3, 0x28, 0xfe, 0, 0x0a], input.length - 8);
+  for (let offset = 0; offset < input.length; offset += chunkSize) {
+    const chunk = input.subarray(offset, offset + chunkSize);
+    tail.push(chunk);
+    expect(tail.bytes()).toEqual(input.subarray(Math.max(0, offset + chunk.length - 262_144), offset + chunk.length));
+  }
+  tail.push(new Uint8Array());
+  expect(tail.bytes()).toEqual(input.subarray(-262_144));
+  expect(tail.bytes().length).toBe(262_144);
+});
+
 describe.skipIf(process.platform === "win32")("council R1 retry runtime counterexamples", () => {
   test("receiptless retry worker consumes authority before its only admission command", async () => {
     const root = await mkdtemp(join(tmpdir(), "retry-admission-command-")), previousExit = process.exitCode;
@@ -1236,8 +1289,12 @@ process.exitCode = 1;\n`);
       const out = Buffer.concat([Buffer.alloc(bounded ? 300_000 : 2, 0xff), Buffer.from("  PRIVATE-QUALIFICATION-STDOUT-CANARY \r\n\0 ")]),
         err = Buffer.concat([Buffer.alloc(bounded ? 300_000 : 2, 0xfe), Buffer.from("  Error: PRIVATE-QUALIFICATION-ERROR-CANARY\nCaused by: raw child failure \r\n\0 ")]);
       const fixture = join(checkout, "fixture.ts");
-      await writeFile(fixture, `await Bun.write(Bun.stdout, Buffer.from(${JSON.stringify(out.toString("base64"))}, "base64"));
-await Bun.write(Bun.stderr, Buffer.from(${JSON.stringify(err.toString("base64"))}, "base64"));
+      await writeFile(fixture, `const out = Buffer.from(${JSON.stringify(out.toString("base64"))}, "base64");
+const err = Buffer.from(${JSON.stringify(err.toString("base64"))}, "base64");
+for (let offset = 0; offset < Math.max(out.length, err.length); offset += 16_381) {
+  await Bun.write(Bun.stdout, out.subarray(offset, offset + 16_381));
+  await Bun.write(Bun.stderr, err.subarray(offset, offset + 16_381));
+}
 ${await readFile(fixture, "utf8")}`);
       const expected = await qualificationFixtureOutput(runtime, checkout, campaignWorkerArguments(runtime.current, join(directory, "execution.json"), true));
       expect(expected.code).toBe(1);
