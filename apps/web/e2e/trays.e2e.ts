@@ -480,22 +480,26 @@ test("request lifecycle: delayed bfcache resume yields to a foreground launch", 
   const key = randomBytes(32);
   const working = { ...GATEWAY_WORKING, instanceId: "foreground-choice-0001", title: "Foreground choice" };
   const home = await startDashboardFixture([GATEWAY_WAITING, working], { roomKey: key });
-  const away = await startDashboardFixture([INITIAL_SESSIONS[1]!], { roomKey: key });
+  const away = await startDashboardFixture([INITIAL_SESSIONS[1]!, INITIAL_SESSIONS[2]!], { roomKey: key });
   home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], []);
   away.configureFleet("Away", [], [home.origin]);
   const intercepted = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const hiddenRemoteCount = () => page.evaluate(() => {
+  const hiddenRemoteRecords = () => page.evaluate(() => {
     const records: unknown = JSON.parse(localStorage.getItem("omp.sessions.dismissed.v2") ?? "[]");
-    return Array.isArray(records) ? records.length : 0;
+    return Array.isArray(records)
+      ? records.map(({ instanceId, generation }: { instanceId: string; generation: number }) => ({ instanceId, generation }))
+      : [];
   });
   try {
     await installSyntheticProductFixture(context, key);
     await page.goto(home.origin);
-    await expect(page.locator(".working-row")).toHaveCount(2);
-    // A real remote Hide is reconciled only when that source's authoritative snapshot applies.
+    // Observe the complete remote snapshot, not the transient count while it is arriving.
+    await expect(page.locator(".working-row")).toHaveCount(3);
+    // Real remote Hides are reconciled only when that source's authoritative snapshot applies.
     await page.getByRole("button", { name: `Hide ${INITIAL_SESSIONS[1]!.title} on this device`, exact: true }).click();
-    await expect.poll(hiddenRemoteCount).toBe(1);
+    await page.getByRole("button", { name: `Hide ${INITIAL_SESSIONS[2]!.title} on this device`, exact: true }).click();
+    await expect.poll(async () => (await hiddenRemoteRecords()).length).toBe(2);
     await page.locator(".action-request").click();
     await expect(page.locator("#tray #root .sh-app")).toHaveCount(1);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
@@ -516,11 +520,14 @@ test("request lifecycle: delayed bfcache resume yields to a foreground launch", 
     await page.getByRole("button", { name: "View Foreground choice refreshed", exact: true }).click();
     await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice refreshed");
     const foregroundRoot = await page.locator("#root").elementHandle();
-    expect(await hiddenRemoteCount()).toBe(1);
+    expect(await hiddenRemoteRecords()).toHaveLength(2);
     release.resolve();
     // The mounted shell intentionally does not render directory rows. Observe the app's
     // generation reconciliation instead, not response completion or a fixed frame count.
-    await expect.poll(hiddenRemoteCount).toBe(0);
+    // The unbumped dismissal survives the same apply, ruling out a blanket store reset.
+    await expect.poll(hiddenRemoteRecords).toEqual([
+      { instanceId: INITIAL_SESSIONS[2]!.instanceId, generation: INITIAL_SESSIONS[2]!.generation },
+    ]);
     expect(home.launchRequests.map(request => request.instanceId)).toEqual([GATEWAY_WAITING.instanceId, working.instanceId]);
     await expect(page.locator("body > .gateway-shell .shell-title")).toHaveText("Foreground choice refreshed");
     expect(await foregroundRoot!.evaluate(element => element === document.querySelector("#root"))).toBe(true);

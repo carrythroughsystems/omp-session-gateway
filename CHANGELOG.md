@@ -20,6 +20,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Tighten browser-evidence linting for child-block response reassignments and static string aliases,
+  and prove delayed-resume Hide reconciliation retains an unchanged-generation dismissal.
+- Preserve actionable private browser failures and original qualification errors when outcome
+  publication fails; bound Wi-Fi-cycle checkpoints by cancellation, the execution deadline and
+  30 seconds, retaining unknown mutation status until re-enable and restoring radios on failure.
 - Require readiness proof on execution-bearing passed qualification receipts, preserve controller
   expiry attribution and abort causes in Push failures, and reject fractional readiness durations.
 - Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
@@ -27,9 +32,11 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.
-- Let Android acceptance use a bounded, credential-free device-origin HTTPS health probe when
-  VPN-over-Wi-Fi drops ICMP. Retain which probe satisfied admission in private evidence, preserve
-  owned browser cleanup, and keep qualification preflights read-only and ICMP-only.
+- Let Android acceptance use a bounded top-level HTTPS health navigation of an owned tab when
+  the host drops ICMP, for example with macOS firewall stealth mode. Chrome's Local Network Access
+  blocks the same request from an opaque document. Retain which probe satisfied admission in
+  private evidence, preserve owned browser cleanup, and keep qualification preflights read-only
+  and ICMP-only.
 
 ## [v0.9.0] — 2026-10-27
 
