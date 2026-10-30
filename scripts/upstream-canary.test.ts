@@ -107,13 +107,38 @@ describe("canary preparation failures", () => {
     });
   });
 
-  test("names the installed OMP engine floor and running Bun without executing OMP", async () => {
+  test("compares the installed OMP engine floor with an explicit Bun version", async () => {
     await withOmpPackage(">=1.4.4", async directory => {
       const installed = await readCanaryPackage(directory);
       expect(installed).toEqual({ ompVersion: "18.14.0", bunEngine: ">=1.4.4" });
       expect(canaryBunEngineError(installed, "1.4.0")).toBe("OMP 18.14.0 requires Bun >=1.4.4; running Bun 1.4.0");
       expect(canaryBunEngineError(installed, "1.4.4")).toBeUndefined();
     });
+  });
+
+  test("rejects an incompatible Bun before executing the installed OMP CLI", async () => {
+    await withOmpPackage(">=99.0.0", async (directory, binary) => {
+      const marker = join(directory, "cli-executed");
+      await writeFile(binary, `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(marker)}, "executed");\nprocess.exit(1);\n`);
+      const { summary, stderr } = failedCanary(binary);
+      expect(summary.failedStage).toBe("prepare");
+      expect(summary.ompVersion).toBe("18.14.0");
+      expect(await Bun.file(marker).exists()).toBe(false);
+      expect(stderr).toBe(`prepare: OMP 18.14.0 requires Bun >=99.0.0; running Bun ${Bun.version}\n`);
+    });
+  });
+
+  test("binds both passed outputs to the nonempty requested-or-resolved install version", async () => {
+    const workflow = Bun.YAML.parse(await Bun.file(new URL("../.github/workflows/upstream-canary.yml", import.meta.url)).text()) as {
+      jobs: Record<string, { outputs: Record<string, string>; steps: { id?: string; run?: string }[] }>;
+    };
+    for (const name of ["canary", "canary-windows"]) {
+      const job = workflow.jobs[name]!;
+      expect(job.outputs.passed).toBe("${{ steps.summary.outcome == 'success' && steps.summary.outputs.failed_stage == '' && steps.install.outputs.expected_version != '' && steps.summary.outputs.omp_version == steps.install.outputs.expected_version }}");
+      const install = job.steps.find(step => step.id === "install")!;
+      expect(install.run).toContain('const expectedVersion = process.env.OMP_VERSION === "latest" ? installed.ompVersion : process.env.OMP_VERSION;');
+      expect(install.run).toContain('await appendFile(process.env.GITHUB_OUTPUT, `omp_version=${installed.ompVersion}\\nbun_engine=${installed.bunEngine}\\nexpected_version=${expectedVersion}\\n`);');
+    }
   });
 
   test("publishes the resolved version and runtime context even without a canary report", async () => {

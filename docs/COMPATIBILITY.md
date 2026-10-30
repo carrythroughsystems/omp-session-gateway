@@ -454,10 +454,12 @@ For every proposed OMP update:
    downstream OMP patch or fallback transport.
 4. Rebuild the pinned collab-web integration and verify its provenance and license notices.
 5. Run discovery/query, protocol, link parsing, View, and Control verification.
-6. Run the [upstream canary](LIFECYCLE_BRANCH_RESUME.md#daily-upstream-canary): `publish`,
+6. Run the [upstream canary](LIFECYCLE_BRANCH_RESUME.md#daily-upstream-canary): `prepare`, `publish`,
    `snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`,
-   `continue`, and `unregister`. Windows runs `continue` but skips exactly the three keystroke
-   stages. Prove the retained-Mac `ompPublication` lifecycle step with
+   `continue`, and `unregister`. The `prepare` pre-flight stage resolves the installed package
+   manifest version, checks the running Bun against `engines.bun`, verifies the stock binary,
+   and queries its version before `publish`. Windows runs `continue` but skips exactly the three
+   keystroke stages. Prove the retained-Mac `ompPublication` lifecycle step with
    `bun scripts/omp-lifecycle-development.ts --omp <absolute path to stock OMP dist/cli.js>`
    before the campaign; require its additive lifecycle evidence in that campaign. Keep
    relay-replacement, fatal-failure, and shutdown checks; these stages do not stand in for them.
