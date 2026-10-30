@@ -29,7 +29,7 @@ Schema 3 campaign 2026-10-27T00:30:44.034Z–2026-10-27T01:20:14.105Z; orchestra
 | androidPushCleanup | 1 | Device, browser and fixture restored. |
 | deviceCloud | 1 | TestingBot, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6.1); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6); BrowserStack, tunnel 8.9: Galaxy S26 (16.0.0, chrome 152.0.7977.54). Home Screen alerts were proven only on the TestingBot iPhone and do not qualify lock-screen presentation. |
 | deviceCloudCleanup | 1 | Restored. |
-| relay | 1 | 1800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed. |
+| relay | 1 | 1,800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed. |
 | cleanup | 2 | Zero gateway processes, listeners and live OMP hosts. |
 | windows | 1 | Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.8.0 and fresh standard-account lifecycle; interactive logon, not unattended boot. |
 | windowsCleanup | 1 | Zero instances and firewalls; tailnet node deleted and access vault removed. |

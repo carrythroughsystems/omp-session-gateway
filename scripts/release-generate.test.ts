@@ -167,6 +167,34 @@ test("new release generation uses the transferred repository", () => {
   expect(() => generateRelease(recordBefore, { ...recordOptions, publication: oldPublication })).toThrow("release run URL");
 });
 
+test("approved and published site blocks render public copy and working evidence links", () => {
+  for (const result of [approved, recorded]) {
+    const llms = result["site/llms.txt"]!;
+    const page = result["site/status/index.html"]!;
+    expect(llms).toContain("[release ledger](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md)");
+    expect(llms).not.toContain("](RELEASE_STATUS.md)");
+    expect(llms).toContain(">= 18.1.20");
+    expect(llms).toContain("Community project; not affiliated with or endorsed by the Oh My Pi maintainers.");
+    expect(result["docs/COMPATIBILITY.md"]).toContain("[release ledger](RELEASE_STATUS.md)");
+    expect(page).toContain('<a href="https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.7.4">Release v0.7.4</a>');
+    expect(page).toContain('<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md">release ledger</a>');
+    expect(page).toContain('<a href="https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/37142569203">https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/37142569203</a>');
+    expect(page).toContain("<tr><td>relay</td><td>1</td><td>1,800 seconds,");
+    expect(page).toContain("A clean stable-channel build is compared with the qualified candidate before merging; the campaign receipt alone does not prove that comparison.");
+    for (const [path, bytes] of Object.entries(result)) if (path.startsWith("site/")) expect(bytes).not.toContain("approval driver");
+    expect(result["docs/RELEASE_STATUS.md"]).toContain("**Runtime equivalence gate:** the approval driver must compare a clean stable-channel build with the qualified candidate before merging.");
+  }
+});
+
+test("status evidence escapes HTML before rendering links without linking anchors twice", () => {
+  const data = JSON.parse(recordBefore[RELEASE_TEXT]!);
+  data.qualification.lanes.find((lane: { name: string }) => lane.name === "debian").summary =
+    'Run <candidate> & "receipt" (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/123?check=1&view=2).';
+  const result = generateRelease({ ...recordBefore, [RELEASE_TEXT]: JSON.stringify(data) }, recordOptions);
+  expect(result["site/status/index.html"]).toContain('<td>Run &lt;candidate&gt; &amp; &quot;receipt&quot; (<a href="https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/123?check=1&amp;view=2">https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/123?check=1&amp;view=2</a>).</td>');
+  expect(result["site/status/index.html"]).not.toContain('<a href="<a');
+});
+
 test("v0.7.4 package/lock/constants exactly reproduce the manual prepare commit", () => {
   for (const path of Object.keys(prepared).filter(path => path.endsWith("package.json") || path.endsWith(".ts") || path === "bun.lock")) {
     expect(prepared[path], path).toBe(originals.dcfa0b3![path]);

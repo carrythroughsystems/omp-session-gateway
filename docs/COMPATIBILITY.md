@@ -145,7 +145,7 @@ start whose relay is unreachable or times out is retried
 | androidPushCleanup | Signed candidate v0.9.0-prealpha.7 | Device, browser and fixture restored. |
 | deviceCloud | Signed candidate v0.9.0-prealpha.7 | TestingBot, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6.1); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6); BrowserStack, tunnel 8.9: Galaxy S26 (16.0.0, chrome 152.0.7977.54). Home Screen alerts were proven only on the TestingBot iPhone and do not qualify lock-screen presentation. |
 | deviceCloudCleanup | Signed candidate v0.9.0-prealpha.7 | Restored. |
-| relay | Signed candidate v0.9.0-prealpha.7 | 1800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed. |
+| relay | Signed candidate v0.9.0-prealpha.7 | 1,800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed. |
 | cleanup | Signed candidate v0.9.0-prealpha.7 | Zero gateway processes, listeners and live OMP hosts. |
 | windows | Signed candidate v0.9.0-prealpha.7 | Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.8.0 and fresh standard-account lifecycle; interactive logon, not unattended boot. |
 | windowsCleanup | Signed candidate v0.9.0-prealpha.7 | Zero instances and firewalls; tailnet node deleted and access vault removed. |

@@ -19,23 +19,23 @@
   },
   "approve": {
     "STABLE_RELEASE.lock.json": "ea6596fa7ec3c8ab6804d1ad70965c8abf7cd3be6b0d9494673ba9b346713bfd",
-    "docs/RELEASE_STATUS.md": "345d3e503b9e54ea4e0a4415aa8b8a8c1699418cf44cd1f348e0f580dfeddc71",
+    "docs/RELEASE_STATUS.md": "ded992f064e9ec4016816d1a78b91bb3902ebf6ccd3104de77d3a9dd70d8234a",
     "docs/UPGRADE_ROLLBACK.md": "a46fa8e0dce8d677be732d987ddd36d05d7bf8e574f6ddb5a54a76cc84a7d7e3",
     "README.md": "7e6ac14b9e2bee5b3e12168140b157189297ce6946ec6b75a1f9b9b6af1e221b",
-    "docs/COMPATIBILITY.md": "252e20a0b557bf11baf372e3994ce02d698f9c48582085a622d7219f919aca4d",
-    "site/llms.txt": "dadd5e324580311d95e1acdc8ecfbafe7fdabfee4de284d850844b496c0016ba",
-    "site/status/index.html": "d8717034c7626e8c63b67d747b6667e45e28e5a6cbd39eba0d5673d5b0408a91",
-    "scripts/release-text.json": "64f4f363f145b14388550958f781cb513e9ceda38af0a607cee6310868d95de8"
+    "docs/COMPATIBILITY.md": "65a696710f00b49342735eca8ea00a7a43fdaeb59b9f15df59a821fbe722ad0c",
+    "site/llms.txt": "d80ffa835c79f4e3e70334010ef03cac604ab70f9a9e6f71ee5095500650801e",
+    "site/status/index.html": "4568c694d1dcf5dc572151fa8939a67e8ce5afc38971d3211bc0d3551829ec3e",
+    "scripts/release-text.json": "d64f8ca5f8c2e822fe3948b23d474f41a21ddce998a732c35576ace4c0729011"
   },
   "record": {
-    "docs/RELEASE_STATUS.md": "5bbb199b72cb4f7fb179cef3c941aa22a763b4f83805dc4b80483bdd17ea5e0d",
+    "docs/RELEASE_STATUS.md": "40a2879682cfb5db28dc1f3733c3e6cc82f19c7bf54c7cc6f580ae057ae566b3",
     "docs/ANDROID.md": "1976d39b237e9f14309f4094c10a8e6516423265f58e2ad2bec30b88ccadd41b",
     "docs/ATTENTION_SPEC.md": "903b5030f834f8770ec3fe7e20b1dad369261a9cfd08673e18ca19323e8f01b1",
     "docs/LIFECYCLE_BRANCH_RESUME.md": "af96ec186f09bcee9fedee62055f1ff4c93aad9e3c8a1a2a06b0a227066f4c94",
     "docs/BACKLOG.md": "dc02da70ce5f0c10a4084e8da7e606724268c6699ec99b06f92bded934a972e5",
-    "docs/COMPATIBILITY.md": "24ea212c91abcc2280b9db396e536a3454b90924ae98b2002ccf3b576584d8d5",
-    "site/llms.txt": "2c58a377bda7dcb1b6ef099a616d42c36b8b07d2df7c7a4aa415e614f205bdd3",
-    "site/status/index.html": "d7792a95fe1fda1292a4adfa836f6eef1a99dddfe59945da0dd0015d339959b2",
-    "scripts/release-text.json": "9f85f0b670b40891baa1efa56ba9ddc664f86d839260c91c2c0781b260349c03"
+    "docs/COMPATIBILITY.md": "aceb1f376c6c7d52599c7b352d12ed416a227e2a993f8d709436d00342053949",
+    "site/llms.txt": "c733f022d70f50e28faffede3f1b674f8f40ac285f1cd3057a38c70d4e0ce2ca",
+    "site/status/index.html": "db4b6b37b8253905c6a3a986cdc080fd294c3e70f4f7b0dae61fba042d6ea0ea",
+    "scripts/release-text.json": "c61f5af6e6494fc85938439cac2062c4ef16a9b9ebb5e1e8fd65005c48a7b5d6"
   }
 }
