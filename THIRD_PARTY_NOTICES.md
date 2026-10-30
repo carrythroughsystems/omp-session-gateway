@@ -246,5 +246,31 @@ runtime component of this archive. The upstream OMP license text is retained at
   <https://github.com/microsoft/vscode-codicons>,
   [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); modified as described above.
 
+## Public site fonts
+
+The canonical public site (`site/`, deployed to GitHub Pages) self-hosts two latin subsets as
+first-party assets so no page requests a remote font service. They are not part of the release
+archive or the PWA.
+
+### Space Grotesk
+
+- Source: <https://github.com/floriankarsten/space-grotesk>
+- License: SIL Open Font License 1.1 (`OFL-1.1`)
+- Copyright: Copyright 2020 The Space Grotesk Project Authors
+- License text: `licenses/fonts/space-grotesk/LICENSE`
+- Distributed file: `site/fonts/space-grotesk-latin.woff2` (variable `wght` axis, latin
+  unicode-range subset as served by Google Fonts `spacegrotesk/v22`;
+  SHA-256 `a0d054c4af557de20afd6ca59f47ab353bcaec49c63ff04b6c9d39d0f8910557`)
+
+### JetBrains Mono
+
+- Source: <https://github.com/JetBrains/JetBrainsMono>
+- License: SIL Open Font License 1.1 (`OFL-1.1`)
+- Copyright: Copyright 2020 The JetBrains Mono Project Authors
+- License text: `licenses/fonts/jetbrains-mono/LICENSE`
+- Distributed file: `site/fonts/jetbrains-mono-latin.woff2` (variable `wght` axis, latin
+  unicode-range subset as served by Google Fonts `jetbrainsmono/v24`;
+  SHA-256 `2c32b9b3ee358c119e210f6f5195f9bd34894d78a785ff2e95d60e718e400af4`)
+
 The top-level `LICENSE` covers OMP Session Gateway itself. `NOTICE.md` describes the project's
 independent relationship to Oh My Pi; it does not replace any license text listed above.

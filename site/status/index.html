@@ -3,12 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#060809">
 <title>OMP Session Gateway status — current qualified release and support boundary</title>
 <!-- release-generate:description:start -->
 <meta name="description" content="v0.9.0 is qualified for stable promotion; publication is pending. Stock OMP v18.12.5; exact candidate host/client evidence in the release ledger.">
 <!-- release-generate:description:end -->
 <link rel="canonical" href="https://carrythroughsystems.github.io/omp-session-gateway/status/">
+<link rel="preload" href="../fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../site.css">
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
 <meta property="og:title" content="OMP Session Gateway status — current qualified release and support boundary">
@@ -22,18 +25,22 @@
 </head>
 <body>
 <header class="site">
-  <img src="../logo.svg" alt="" aria-hidden="true">
-  <a class="brand" href="../">OMP Session Gateway</a>
-  <nav>
+  <div class="wrap">
+    <a class="brand" href="../"><img src="../logo.svg" alt="" width="24" height="24">OMP Session Gateway</a>
+    <nav aria-label="Site">
       <a href="../">Overview</a>
-      <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a>
       <a href="../compare/">Compare</a>
-      <a href="../status/" aria-current="page">Status</a>
       <a href="../security/">Security</a>
-  </nav>
+      <a href="../status/" aria-current="page">Status</a>
+      <a class="ext" href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a>
+      <a class="ext" href="https://github.com/carrythroughsystems/omp-session-gateway">GitHub</a>
+    </nav>
+  </div>
 </header>
 <main>
-<p class="eyebrow">Native OMP integration · release status</p>
+<section class="page">
+<div class="wrap">
+<p class="eyebrow">Release status</p>
 <!-- release-generate:status:start -->
 <h1>Qualified v0.9.0</h1>
 <p class="lede">v0.9.0 is qualified for stable promotion; publication is pending. Release v0.9.0. Signed candidate v0.9.0-prealpha.7; source b0f07b11e7d4fb2d0afeea7496a77323d6c66d5a; archive SHA-256 d2053558f3ac7dd857db971dcf57757e652e8776de83deb2b9a9138e7457a887. Published v0.8.0 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the release ledger. Stable publication and published-byte smoke are pending.</p>
@@ -85,11 +92,27 @@ runtime-equivalent. The historical matrix was Debian 13 (trixie) x86-64, macOS 2
 predecessor was <code>v0.2.1</code>, with separately activated exact patched OMP <code>v17.4.1</code>.</p>
 <p>The source baseline moved to stock mainline OMP <code>v18.1.20</code> on 2026-09-14 after upstream
 merged the collaboration registry. Fork-era qualification does not transfer to this architecture.</p>
+</div>
+</section>
 </main>
 <footer>
-  Community project; not affiliated with or endorsed by the Oh My Pi maintainers.
-  Evidence lives in the <a href="https://github.com/carrythroughsystems/omp-session-gateway">repository</a>:
-  every claim on this site is bound to a versioned release ledger entry.
+  <div class="wrap">
+    <a class="brand" href="../"><img src="../logo.svg" alt="" width="20" height="20">OMP Session Gateway</a>
+    <ul class="links">
+      <li><a href="../">Overview</a></li>
+      <li><a href="../compare/">Compare</a></li>
+      <li><a href="../security/">Security</a></li>
+      <li><a href="../status/">Status</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway">GitHub</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/CHANGELOG.md">Changelog</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/SECURITY.md">Security policy</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/LICENSE">MIT license</a></li>
+    </ul>
+    <p>Community project; not affiliated with or endorsed by the Oh My Pi maintainers.
+    Evidence lives in the <a href="https://github.com/carrythroughsystems/omp-session-gateway">repository</a>:
+    every claim on this site is bound to a versioned release ledger entry.</p>
+  </div>
 </footer>
 </body>
 </html>

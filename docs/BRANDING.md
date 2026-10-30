@@ -49,17 +49,21 @@ accent.
 
 ## Type
 
-- **Runtime PWA and public site:** system/local font stacks for text —
-  `system-ui, sans-serif` / `ui-monospace, monospace`. The PWA additionally uses one
-  self-hosted, lazily loaded Symbols Nerd Font Mono subset for Private Use Area
-  glyphs, served as first-party assets. Runtime assets must remain first-party;
-  no remote fonts, Google Fonts requests, third-party scripts, or CDNs.
-  This is a privacy requirement, not an optional offline optimization.
+- **Runtime PWA:** system/local font stacks for text — `system-ui, sans-serif` /
+  `ui-monospace, monospace`. The PWA additionally uses one self-hosted, lazily loaded Symbols
+  Nerd Font Mono subset for Private Use Area glyphs, served as first-party assets. Runtime
+  assets must remain first-party; no remote fonts, Google Fonts requests, third-party scripts,
+  or CDNs. This is a privacy requirement, not an optional offline optimization.
+- **Public site:** the same first-party rule, satisfied by self-hosted latin subsets in
+  `site/fonts/` (Space Grotesk, variable weight, for the wordmark and headings; JetBrains Mono,
+  variable weight, for eyebrows, pills, and code; provenance in `THIRD_PARTY_NOTICES.md`).
+  Body text stays on the system sans stack. The site's only script is the inline copy-button
+  enhancement for setup commands; it makes no network, storage, or analytics calls.
 - **Exported artwork:** `assets/banner.html` and `assets/og.html` use Space Grotesk 500/600 and
   JetBrains Mono 400/500 from Google Fonts to render static assets (`bun run media:brand`). Those
   artwork sources are not runtime shells; do not copy their font-loading links into the app
   or site. Existing media retains its recorded provenance.
-- Artwork wordmark: "OMP Session Gateway", weight 600, letter-spacing −0.015em.
+- Wordmark (artwork and site): "OMP Session Gateway", weight 600, letter-spacing −0.015em.
   Mono labels: 11–12px, uppercase, letter-spacing 0.1–0.22em.
 
 ## Voice
@@ -104,7 +108,7 @@ Paths below are relative to the repository root.
 | `apps/web/src/icon-maskable-512.png` | manifest icon, `purpose: maskable` |
 | `apps/web/src/apple-touch-icon-180.png` | apple-touch-icon |
 | `apps/web/src/index.html`, `apps/web/src/app.ts`, `apps/web/src/styles.css`, `apps/web/src/manifest.webmanifest` | maintained PWA shell, behavior, styles, and manifest; see [web app notes](../apps/web/README.md) |
-| `site/` | canonical public site (`carrythroughsystems.github.io/omp-session-gateway`), system font stacks only; `pages.yml` stages the mark, favicon, `og.png`, and product-flow capture from their canonical sources at deploy time, so `site/` never carries copies |
+| `site/` | canonical public site (`carrythroughsystems.github.io/omp-session-gateway`), system font stacks only, no JavaScript; `pages.yml` stages the mark, favicon, `og.png`, and the three raw PWA captures (`screen-*.png` from `docs/media/0{1,2,3}-*.png`) from their canonical sources at deploy time, so `site/` never carries copies |
 
 Manifest snippet:
 

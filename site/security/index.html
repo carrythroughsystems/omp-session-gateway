@@ -3,10 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#060809">
 <title>OMP Session Gateway security — private by design, fail-closed by default</title>
 <meta name="description" content="Release-blocking security invariants of OMP Session Gateway: loopback-only listeners, allowlisted tailnet identity, memory-only View/Control capabilities, metadata-only APIs, and no transcript storage.">
 <link rel="canonical" href="https://carrythroughsystems.github.io/omp-session-gateway/security/">
+<link rel="preload" href="../fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../site.css">
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
 <meta property="og:title" content="OMP Session Gateway security — private by design, fail-closed by default">
@@ -18,17 +21,21 @@
 </head>
 <body>
 <header class="site">
-  <img src="../logo.svg" alt="" aria-hidden="true">
-  <a class="brand" href="../">OMP Session Gateway</a>
-  <nav>
+  <div class="wrap">
+    <a class="brand" href="../"><img src="../logo.svg" alt="" width="24" height="24">OMP Session Gateway</a>
+    <nav aria-label="Site">
       <a href="../">Overview</a>
-      <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a>
       <a href="../compare/">Compare</a>
-      <a href="../status/">Status</a>
       <a href="../security/" aria-current="page">Security</a>
-  </nav>
+      <a href="../status/">Status</a>
+      <a class="ext" href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a>
+      <a class="ext" href="https://github.com/carrythroughsystems/omp-session-gateway">GitHub</a>
+    </nav>
+  </div>
 </header>
 <main>
+<section class="page">
+<div class="wrap">
 <p class="eyebrow">Security</p>
 <h1>Private by design, fail-closed by default</h1>
 <p class="lede">Open the session, not a secret link. View can read sensitive work; Control can steer it.
@@ -36,37 +43,57 @@ The gateway treats both as bearer capabilities and fetches one only for an autho
 <p>Stock OMP <code>&gt;= 18.1.20</code> supplies the native collaboration controller and local registry.
 No fork, custom OMP build, or gateway-specific OMP plugin is required. The gateway is still a
 separate installation, and native integration does not relax the boundaries below.</p>
-<ul>
-<li><strong>Loopback-only listeners</strong> — the production HTTP server binds only to <code>127.0.0.1</code> and optionally <code>::1</code>; Tailscale Serve is the only supported remote path and Funnel is never enabled.</li>
-<li><strong>Allowlisted tailnet identity</strong> — production requires a verified <code>Tailscale-User-Login</code> that matches an exact allowlist, and identity headers are believed only while Tailscale's tunnel device is present. A userspace-networking client makes every peer look local, so the daemon returns <code>403</code> rather than trusting the header.</li>
-<li><strong>No gateway capability store</strong> — View and Control links exist only in live OMP memory, a transient authenticated query and <code>no-store</code> launch response, and volatile client JavaScript. The gateway never stores or caches them, even in its memory-only registry. Never in files, logs, diagnostics, URLs, cookies, push payloads, browser storage, or service-worker caches.</li>
-<li><strong>Metadata-only APIs</strong> — session-list and SSE responses carry bounded metadata; a capability is fetched only after an explicit tap and only for the expected generation, so stale cards fail instead of receiving a newer secret.</li>
-<li><strong>OMP-owned discovery</strong> — the gateway reads private discovery files and queries each OMP-owned endpoint with its per-host token. Snapshots contain metadata only; a link query resolves one exact generation and role at launch. The gateway never writes or removes OMP's discovery files. Its own readiness token is separate and never sent to OMP.</li>
-<li><strong>Generation-bound launch</strong> — OMP owns host replacement and revocation; stale cards cannot exchange an old generation for a newer capability. The gateway polls every 10 seconds by default. Missing discovery or definitive endpoint failure removes the card; transient query failures retain metadata only until the 35-second TTL expires.</li>
-<li><strong>Hardened browser surface</strong> — exact <code>Origin</code> validation on state-changing requests, no wildcard CORS, strict CSP, <code>Referrer-Policy: no-referrer</code>, and a service worker that caches only immutable shell assets.</li>
-<li><strong>No gateway transcript storage</strong> — the directory never stores or renders transcripts; opening a session mounts the pinned OMP client, which connects directly through the encrypted relay. The relay still observes connection metadata, timing, and ciphertext sizes. OMP and the chosen model provider retain their own content-handling policies.</li>
-<li><strong>Notification detail is a choice</strong> — explicit opt-in enables capability-free Push v2 alerts. Private has no body; Session (the default) includes bounded session/project labels. Preview currently falls back to Session. Visible text may persist in notification history, screenshots, or wearables; background delivery is best effort and not in the qualified core matrix.</li>
+
+<h2>Release-blocking invariants</h2>
+<ul class="grid three">
+<li><h3>Loopback-only listeners</h3><p>The production HTTP server binds only to <code>127.0.0.1</code> and optionally <code>::1</code>; Tailscale Serve is the only supported remote path and Funnel is never enabled.</p></li>
+<li><h3>Allowlisted tailnet identity</h3><p>Production requires a verified <code>Tailscale-User-Login</code> that matches an exact allowlist, and identity headers are believed only while Tailscale's tunnel device is present. A userspace-networking client makes every peer look local, so the daemon returns <code>403</code> rather than trusting the header.</p></li>
+<li><h3>No gateway capability store</h3><p>View and Control links exist only in live OMP memory, a transient authenticated query and <code>no-store</code> launch response, and volatile client JavaScript. The gateway never stores or caches them, even in its memory-only registry. Never in files, logs, diagnostics, URLs, cookies, push payloads, browser storage, or service-worker caches.</p></li>
+<li><h3>Metadata-only APIs</h3><p>Session-list and SSE responses carry bounded metadata; a capability is fetched only after an explicit tap and only for the expected generation, so stale cards fail instead of receiving a newer secret.</p></li>
+<li><h3>OMP-owned discovery</h3><p>The gateway reads private discovery files and queries each OMP-owned endpoint with its per-host token. Snapshots contain metadata only; a link query resolves one exact generation and role at launch. The gateway never writes or removes OMP's discovery files. Its own readiness token is separate and never sent to OMP.</p></li>
+<li><h3>Generation-bound launch</h3><p>OMP owns host replacement and revocation; stale cards cannot exchange an old generation for a newer capability. The gateway polls every 10 seconds by default. Missing discovery or definitive endpoint failure removes the card; transient query failures retain metadata only until the 35-second TTL expires.</p></li>
+<li><h3>Hardened browser surface</h3><p>Exact <code>Origin</code> validation on state-changing requests, no wildcard CORS, strict CSP, <code>Referrer-Policy: no-referrer</code>, and a service worker that caches only immutable shell assets.</p></li>
+<li><h3>No gateway transcript storage</h3><p>The directory never stores or renders transcripts; opening a session mounts the pinned OMP client, which connects directly through the encrypted relay. The relay still observes connection metadata, timing, and ciphertext sizes. OMP and the chosen model provider retain their own content-handling policies.</p></li>
+<li><h3>Notification detail is a choice</h3><p>Explicit opt-in enables capability-free Push v2 alerts. Private has no body; Session (the default) includes bounded session/project labels. Preview currently falls back to Session. Visible text may persist in notification history, screenshots, or wearables; background delivery is best effort and not in the qualified core matrix.</p></li>
 </ul>
+
+<h2>Scope and residual risk</h2>
 <p>Out of scope in v1: mutually untrusted local accounts on a shared shell host, Portal Tunnel, and self-hosted or
 proxied relays. Every release runs distinctive-synthetic-secret leak scans across logs, storage, caches, URLs, and
 CI artifacts before it is qualified.</p>
-<p>The full threat model, boundaries, and acceptance gates:
-<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/SECURITY.md">docs/SECURITY.md</a> ·
-report a vulnerability privately via the
-<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/SECURITY.md">security policy</a>.</p>
 <p>Device lock and prompt tailnet revocation matter: a still-authorized unlocked phone can request
 Control. Passkey verification is proposed, not implemented. The accepted protection against
 upgrades interrupting a pending launch also has an unresolved implementation gap; see
 <a href="https://github.com/alphastorm/omp-session-gateway/blob/main/docs/DECISIONS.md#current-implementation-audit--2026-09-14">ADR-018</a>.</p>
+<p>The full threat model, boundaries, and acceptance gates:
+<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/SECURITY.md">docs/SECURITY.md</a> ·
+report a vulnerability privately via the
+<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/SECURITY.md">security policy</a>.</p>
 <p class="verified">Each stable release's core qualification names its exact OMP, Bun, Debian,
 macOS, and Pixel builds and a 1,800-second relay check, not eight hours; the current release's
 receipts and exclusions are on the <a href="../status/">status page</a>. Testing more platforms and
 browsers in CI does not change this security boundary.</p>
+</div>
+</section>
 </main>
 <footer>
-  Community project; not affiliated with or endorsed by the Oh My Pi maintainers.
-  Evidence lives in the <a href="https://github.com/carrythroughsystems/omp-session-gateway">repository</a>:
-  every claim on this site is bound to a versioned release ledger entry.
+  <div class="wrap">
+    <a class="brand" href="../"><img src="../logo.svg" alt="" width="20" height="20">OMP Session Gateway</a>
+    <ul class="links">
+      <li><a href="../">Overview</a></li>
+      <li><a href="../compare/">Compare</a></li>
+      <li><a href="../security/">Security</a></li>
+      <li><a href="../status/">Status</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway">GitHub</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/CHANGELOG.md">Changelog</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/SECURITY.md">Security policy</a></li>
+      <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/LICENSE">MIT license</a></li>
+    </ul>
+    <p>Community project; not affiliated with or endorsed by the Oh My Pi maintainers.
+    Evidence lives in the <a href="https://github.com/carrythroughsystems/omp-session-gateway">repository</a>:
+    every claim on this site is bound to a versioned release ledger entry.</p>
+  </div>
 </footer>
 </body>
 </html>

@@ -11,6 +11,12 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Refresh the README media with seeded Working and Idle activity on every directory row and
   plain-language board copy, and re-render the social preview and banner from committed sources
   (`bun run media:brand`) with the current repository and promise.
+- Redesign the public site around the product's real screens: a true-size phone capture in the
+  hero, the three-step flow as cropped details of the raw PWA captures, a what-runs-where
+  pipeline, the security invariants as a grid, on-page one-time setup with copy buttons, and a
+  version-free supported/qualified summary. Self-host Space Grotesk and JetBrains Mono latin
+  subsets as first-party site assets, stage the three directory captures at deploy time instead of
+  the composite board, and render the status page's lane table as cards on phones.
 
 ### Fixed
 
