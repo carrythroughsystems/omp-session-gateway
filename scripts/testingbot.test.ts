@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -286,8 +287,10 @@ describe("TestingBot tunnel ownership", () => {
 
   describe("with a stand-in tunnel process", () => {
     let root: string;
+    let identifier: string;
 
     beforeEach(async () => {
+      identifier = `omp-dc-${randomBytes(4).toString("hex")}`;
       root = await mkdtemp(join(tmpdir(), "testingbot-tunnel-"));
       // Listens where told and touches its ready file; the open listener keeps it alive until stopped.
       await writeFile(join(root, "stand-in.ts"), [
@@ -302,24 +305,24 @@ describe("TestingBot tunnel ownership", () => {
     });
 
     afterEach(async () => {
-      await stopTunnel("omp-dc-0000feed").catch(() => undefined);
+      await stopTunnel(identifier).catch(() => undefined);
       await rm(root, { recursive: true, force: true });
     });
 
     const options = (java: string) => ({
       java: join(root, java), jar: join(root, "TestingBotTunnel-standin.jar"), directory: join(root, "work"),
-      identifier: "omp-dc-0000feed", localProxyPort: 9,
+      identifier, localProxyPort: 9,
     });
     const credentials = { key: KEY, secret: SECRET };
 
     test("refuses a tunnel that listens beyond loopback and leaves it stopped", async () => {
       await expect(startTunnel(options("java-exposed"), credentials, 20_000)).rejects.toThrow("listens beyond loopback");
-      expect(await stopTunnel("omp-dc-0000feed")).toBe(0);
+      expect(await stopTunnel(identifier)).toBe(0);
     });
 
     test("accepts a tunnel that listens on loopback only", async () => {
       await startTunnel(options("java-loopback"), credentials, 20_000);
-      expect(await stopTunnel("omp-dc-0000feed")).toBe(1);
+      expect(await stopTunnel(identifier)).toBe(1);
     });
   });
 });
