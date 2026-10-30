@@ -2139,7 +2139,7 @@ describe("record tracks main", () => {
       expect(runtime.commits[0]).toContain("-S");
       expect(runtime.pushes[0]).toContain(`--force-with-lease=refs/heads/${branch}:`);
       runtime.current!.checksPassed = true;
-      const merge = nextStep({ ...selected, ...opened, phase: "record-open" }, snapshot({ main: "main", record: runtime.current }), config) as Decision;
+      const merge = nextStep({ ...selected, ...opened, phase: "record-open" }, snapshot({ main: "main", record: runtime.current! }), config) as Decision;
       expect(merge.operation).toBe("merge-record");
       // Reconcile a provider-accepted merge through the real final authority boundary.
       Object.assign(runtime.current!, { merged: true, mergedBy: config.bot, state: "closed" });
@@ -2157,7 +2157,7 @@ describe("record tracks main", () => {
       runtime.trees.set(runtime.main, { ...runtime.trees.get("main")!, "scripts/release-driver.ts": "later reviewed control\n" });
       Object.assign(runtime.current!, { behind: status === "BEHIND", mergeable: status !== "DIRTY", checksPassed: false });
       const current = { ...selected, phase: "record-open" as const, recordPr: runtime.current!.number };
-      const step = nextStep(current, snapshot({ record: runtime.current }), config) as Decision;
+      const step = nextStep(current, snapshot({ record: runtime.current! }), config) as Decision;
       expect(step.operation).toBe("update-release-pr");
       await runtime.perform(step, current);
       expect(runtime.parents.get(runtime.current!.head)).toBe("new-main");
@@ -2168,7 +2168,7 @@ describe("record tracks main", () => {
       expect(runtime.providerWrites).toHaveLength(1); // Only the original PR creation.
       await runtime.perform(step, current); // Crash after accepted push, before saving state.
       expect(runtime.commits).toHaveLength(2);
-      expect(nextStep(current, snapshot({ record: runtime.current }), config).operation).toBe("idle");
+      expect(nextStep(current, snapshot({ record: runtime.current! }), config).operation).toBe("idle");
       await expect(runtime.merge({ ...runtime.current!, head: old, tree: old }, false)).rejects.toThrow(StaleIntentError);
     } finally { await rm(root, { recursive: true, force: true }); }
   });

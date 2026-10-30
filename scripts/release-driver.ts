@@ -262,7 +262,7 @@ export interface Decision {
   patch?: { [Key in keyof DriverState]?: Exclude<DriverState[Key], undefined> };
   /** JSON preserves deletion intent; assigning undefined in a persisted patch does not. */
   clear?: (keyof Pick<DriverState, "preparePr" | "orderPr" | "updatedHead" | "candidateCommit" | "candidateDigest" |
-    "approvePr" | "approvedHead" | "approvedTree" | "stableCommit" | "stableDigest" | "publicationRun" |
+    "approvePr" | "approvedHead" | "approvedTree" | "stableCommit" | "stableDigest" | "publicationRun" | "smokedAt" |
     "recordPr" | "failedMain" | "holdReason" | "holdCommit" | "infrastructureHold" | "resumeDeviceCloud" | "macHost" |
     "qualificationExecution" | "retryPlan" | "retryNotBefore">)[];
   holdReason?: RoutineHoldReason;
