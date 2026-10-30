@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { releaseVersion } from "./release-policy.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

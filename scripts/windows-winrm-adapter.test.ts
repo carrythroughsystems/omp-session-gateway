@@ -7,7 +7,7 @@ import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQ
 import type { WindowsContext, WindowsTransportProbe } from "./windows-stable-qualification";
 import { assertWindowsAllocation, windowsFailure, windowsRemaining } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

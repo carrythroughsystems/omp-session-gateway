@@ -11,7 +11,7 @@ import {
   SESSION_CREATION_UUID_PATTERN, type FleetSource, type SessionEvent, type SessionMetadata,
   type SessionCreationOptions, type SessionCreationRequest, type SessionCreationState, type SessionCreationError,
 } from "@omp-session-gateway/protocol";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "../../gateway/test/test-support.ts";
 
 const MIME_TYPES: Readonly<Record<string, string>> = {
   ".css": "text/css; charset=utf-8",

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { cloudReleaseEvidence, generateRelease, releaseInputPaths, RELEASE_TEXT, runReleaseGenerate, type ReleaseEdits, type ReleaseGenerateOptions } from "./release-generate.ts";
 import type { DeviceCloudProgress } from "./device-cloud-qualification.ts";
 import { historicalTrees, normalizeHistoricalTree } from "./fixtures/release-generate/historical.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

@@ -6,7 +6,7 @@ import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { remoteCommandLine, type RemoteExecutor } from "./stable-qualification.ts";
 import { gatewayStreamsDiscarded, PUSH_FIXTURE_FILES, remoteHome, retainedMacCloudFixture, retainedMacLogs, stageRemoteFile } from "./stable-lanes.ts";
 import type { ExternalLaneContext, RetainedMacLaneContext } from "./stable-qualification.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { SessionMetadata } from "@omp-session-gateway/protocol";
 import { startDashboardFixture } from "./fixture-server.ts";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "../../gateway/test/test-support.ts";
 
 function session(): SessionMetadata {
   return {

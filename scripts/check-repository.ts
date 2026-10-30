@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkChangelogFragment } from "./release-policy.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 const rootPath = fileURLToPath(new URL("../", import.meta.url));
 
@@ -327,7 +327,7 @@ export function checkUnsafeFinally(relativePath: string, source: string): string
  * or the immediately preceding line. Strings, regexes and comments are not executable timers.
  */
 export function checkHangDeadlines(relativePath: string, source: string): string[] {
-  if (!/^(?:apps\/[^/]+\/(?:test|e2e)\/.+\.tsx?|scripts\/.+\.test\.ts|scripts\/test-(?:support|browser|portable|visual)\.ts)$/u.test(relativePath)) return [];
+  if (!/^(?:apps\/[^/]+\/(?:test|e2e)\/.+\.tsx?|scripts\/.+\.test\.ts|scripts\/test-(?:browser|portable|visual)\.ts)$/u.test(relativePath)) return [];
   const tokens = [...sourceTokens(source, true)];
   const pairs = new Map<number, number>();
   const stack: number[] = [];

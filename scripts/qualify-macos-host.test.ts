@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { expect, test, setDefaultTimeout } from "bun:test";
 import { assertMacExposureEvidence, loadConfiguredMacTarget, parseStableQualificationArgs } from "./stable-qualification.ts";
 import { PRODUCT_VERSION } from "./build-release.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

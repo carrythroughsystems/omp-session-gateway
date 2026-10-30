@@ -7,7 +7,7 @@
  * file that fails anywhere it is not excluded fails the job.
  */
 import { fileURLToPath } from "node:url";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 interface HostBoundTest {
   readonly platforms: readonly NodeJS.Platform[];

@@ -3,7 +3,7 @@ import { cp, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

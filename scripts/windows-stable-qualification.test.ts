@@ -14,7 +14,7 @@ import { firewallEligibility } from "./vultr-target.ts";
 import { createPixelLease, parseQualificationPins } from "./stable-qualification.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import * as windowsLane from "./windows-stable-qualification.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

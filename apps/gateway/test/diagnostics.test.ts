@@ -12,7 +12,7 @@ import {
   serveConfigurationMatches,
   tailscaleSelfIp,
 } from "../src/doctor.ts";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

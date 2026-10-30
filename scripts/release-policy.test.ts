@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { repositoryFiles } from "./repository-files.ts";
 import { nextReleaseVersion, parseReleaseClass, REQUIRED_CHECKS, ROUTINE_BRANCH_PROTECTION, routineBranchProtectionMatches, ROUTINE_HOLD_REASONS, ROUTINE_EVIDENCE_STEPS, GENERATED_RELEASE_PATHS, generatedReleaseKind, generatedReleaseFilesMatch, routinePathClassification, routineProtectedPath, routineReleaseHold, assertStableReleaseQualification, releasePolicy, releaseVersion } from "./release-policy.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

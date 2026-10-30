@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { SessionMetadata } from "@omp-session-gateway/protocol";
 import { startDashboardFixture, installSilentWebSocket } from "./fixture-server";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "../../gateway/test/test-support.ts";
 
 const shared: SessionMetadata = {
   instanceId: "colliding-session-001", generation: 1, title: "Shared session",

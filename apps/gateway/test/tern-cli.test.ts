@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TernCli, matchingTernBasename, parseTernInspection, parseTernJson, sessionBasenameMatches, validateTernRuntime } from "../src/tern-cli.ts";
 import type { TernProfile } from "../src/config.ts";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LOG_AUDIT_SUCCESS, PERCY_RUNTIME_NOTICE, assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
 import { VISUAL_CASE_COUNT, VISUAL_PHASES } from "../apps/web/visual/safe-reporter.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

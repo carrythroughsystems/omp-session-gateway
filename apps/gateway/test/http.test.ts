@@ -17,7 +17,7 @@ import { SessionRegistry } from "../src/registry.ts";
 import { StaticAssetStore } from "../src/static.ts";
 import { SessionCreationProblem, type SessionCreationService } from "../src/tern-creation.ts";
 import type { SessionCreationRequest, SessionCreationReceipt, SessionCreationStatus } from "@omp-session-gateway/protocol";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

@@ -10,7 +10,7 @@ import {
 import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
 import { FAILURE_STEPS, QualificationFailure } from "./qualification-failure.ts";
 import { request } from "./windows-qualification-runtime.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 const privateTmpdir = realpathSync(tmpdir());
 
 const execution = (): QualificationExecution => ({ formatVersion: 1, campaignAttempt: 0, binding: {

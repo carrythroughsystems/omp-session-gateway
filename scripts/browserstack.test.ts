@@ -11,7 +11,7 @@ import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { boundedVendorBytes, boundedVendorText, requireLoopbackListeners } from "./device-cloud-common.ts";
 import type { CloudArtifact, CloudRecordRemoval, TestRecord } from "./device-cloud-common.ts";
 import pins from "./browserstack-pins.json";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

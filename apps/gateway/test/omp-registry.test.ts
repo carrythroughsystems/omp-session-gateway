@@ -19,7 +19,7 @@ import {
   type OmpDiscoveryObservation,
 } from "../src/omp-registry.ts";
 import { SessionRegistry, type SessionActivityStopEvent } from "../src/registry.ts";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 setDefaultTimeout(3 * HANG_DEADLINE_MS);
 

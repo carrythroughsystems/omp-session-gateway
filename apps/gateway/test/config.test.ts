@@ -26,7 +26,7 @@ import {
   writeGatewayConfigFile,
   writePrivateTextFile,
 } from "../src/config.ts";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 const roots: string[] = [];
 // A cold helper gets two attempts of 45 s plus stderr teardown; warm replies keep their 10 s

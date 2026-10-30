@@ -6,7 +6,7 @@ import {
   startDashboardFixture,
 } from "./fixture-server.ts";
 import { JOURNEY_VIEW_STATE } from "../../../scripts/browser-journey.ts";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "../../gateway/test/test-support.ts";
 
 const SESSION_TITLE = "Implement seamless registry recovery across long-running upgraded OMP sessions";
 // The ask fixture pins Math.random to 0.5, so the relay socket's jittered retry fires within half of

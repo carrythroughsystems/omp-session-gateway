@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 import { fileURLToPath } from "node:url";
-import { HANG_DEADLINE_MS } from "../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "../gateway/test/test-support.ts";
 
 // The browser-neutral compatibility lane: the `@core` tests of the e2e suite on every major
 // engine, at a desktop size and an iPhone-class size. The deep lane (playwright.config.ts) keeps

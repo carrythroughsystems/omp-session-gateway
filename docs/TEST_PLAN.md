@@ -24,7 +24,7 @@ These are implementation checks, not a physical-device or background-delivery qu
 
 ### Real-process hang detection
 
-Use `HANG_DEADLINE_MS` from `scripts/test-support.ts` for real subprocess/PTY exits, socket
+Use `HANG_DEADLINE_MS` from `apps/gateway/test/test-support.ts` for real subprocess/PTY exits, socket
 readiness/closure, and I/O helper completion. It is 120 seconds: almost four times the longest
 recent hosted timing (30,045.06 ms), and above two 45-second Windows ACL cold attempts plus
 teardown. The source comment links the sampled Compatibility runs. This is a hang guard, not a

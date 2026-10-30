@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 import { fileURLToPath } from "node:url";
-import { HANG_DEADLINE_MS } from "../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "../gateway/test/test-support.ts";
 
 // Playwright otherwise captures an automatic failure DOM snapshot even when tracing is off.
 process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";

@@ -3,14 +3,14 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { assertRetainedMacCommandsSettled, runMacScript } from "./stable-qualification.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(4 * HANG_DEADLINE_MS);
 
 const root = resolve(import.meta.dir, "..");
 const helper = join(import.meta.dir, "qualification-remote-owner.sh");
 
-async function ownedPtyReader(startupDelayMs: number, reader: string, timeoutSeconds = HANG_DEADLINE_MS / 1_000, ownerHelper = helper): Promise<{ exitCode: number; stderr: string }> {
+async function ownedPtyReader(startupDelayMs: number, reader: string, timeoutSeconds = HANG_DEADLINE_MS / 1_000, ownerHelper = helper, reapSeconds = HANG_DEADLINE_MS / 1_000): Promise<{ exitCode: number; stderr: string }> {
   const home = await mkdtemp(join(tmpdir(), "remote-pty-owner-"));
   const id = "11111111-2222-4333-8444-555555555556";
   const child = Bun.spawn(["python3", "-c", `
@@ -48,7 +48,7 @@ finally:
             break
         try: os.kill(pid, stop)
         except ProcessLookupError: pass
-        deadline = time.monotonic() + ${HANG_DEADLINE_MS / 1_000}
+        deadline = time.monotonic() + ${reapSeconds}
         while time.monotonic() < deadline:
             ended, status = os.waitpid(pid, os.WNOHANG)
             if ended:
@@ -106,8 +106,8 @@ test.skipIf(process.platform !== "darwin").each([0, 250])("PTY reader waits for 
 }, 4 * HANG_DEADLINE_MS);
 
 test.skipIf(process.platform !== "darwin")("PTY regression supervisor bounds termination of a stopped owner", async () => {
-  // hang-deadline: behavior-under-test -- deliberately expire the supervisor of a stopped owner.
-  expect(await ownedPtyReader(0, 'kill -STOP "$PPID"; IFS= read -r line', 0.5)).toEqual({
+  // hang-deadline: behavior-under-test -- expire a stopped owner, then force TERM-to-KILL escalation.
+  expect(await ownedPtyReader(0, 'kill -STOP "$PPID"; IFS= read -r line', 0.5, helper, 1)).toEqual({
     exitCode: 124, stderr: "PTY reader deadline exceeded (readiness=missing)\n",
   });
 }, 4 * HANG_DEADLINE_MS);

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { checkChangelogFile, checkDocumentTimers, checkE2EReadiness, checkHangDeadlines, checkProviderReads, checkUnsafeFinally, checkWorkflowBunVersions } from "./check-repository.ts";
 import { readFile } from "node:fs/promises";
 import packageManifest from "../package.json";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 test("hang deadlines reject the pre-fix CLI exit race and admit the migrated source", async () => {
   const path = "apps/gateway/test/cli.test.ts";

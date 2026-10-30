@@ -15,7 +15,7 @@ import type { GatewayConfig } from "../src/config.ts";
 import { SafeLogger } from "../src/logger.ts";
 import { PushService, type PushSendOptions, type PushTransport, webPushOptions } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
-import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

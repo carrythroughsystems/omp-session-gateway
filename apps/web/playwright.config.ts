@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 import { fileURLToPath } from "node:url";
-import { HANG_DEADLINE_MS } from "../../scripts/test-support.ts";
+import { HANG_DEADLINE_MS } from "../gateway/test/test-support.ts";
 
 // Chrome's reduced UA freezes the platform at "Android 10; K" by design; do not
 // "fix" it to report the device's Android 17 version.

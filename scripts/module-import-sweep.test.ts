@@ -1,7 +1,7 @@
 import { expect, test, setDefaultTimeout } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

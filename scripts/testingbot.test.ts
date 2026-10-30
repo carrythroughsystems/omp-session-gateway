@@ -12,7 +12,7 @@ import {
 } from "./testingbot.ts";
 import { runOp, startAllowlistProxy, type OpRunner, type ProcessEntry } from "./device-cloud-common.ts";
 import { WebDriverSession, pageEvaluationScript } from "./device-cloud-webdriver.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

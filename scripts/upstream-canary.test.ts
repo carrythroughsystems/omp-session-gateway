@@ -18,7 +18,7 @@ import {
   windowsArgument,
   windowsHostScript,
 } from "./upstream-canary.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

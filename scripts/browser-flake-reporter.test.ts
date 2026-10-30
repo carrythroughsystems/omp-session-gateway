@@ -9,7 +9,7 @@ import {
 } from "./browser-flake-reporter.ts";
 import BrowserFlakeReporter from "./browser-flake-reporter.ts";
 import { completeBrowserRun } from "./test-browser.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 

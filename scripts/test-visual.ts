@@ -10,7 +10,7 @@ import { chromium } from "@playwright/test";
 import { startDashboardFixture, type SyntheticFixtureAuthority } from "../apps/web/e2e/fixture-server.ts";
 import { assertPercyLogsSafe } from "../apps/web/visual/snapshot-safety.ts";
 import { VISUAL_CASE_COUNT, VISUAL_PHASES, VISUAL_PROJECTS, VISUAL_STATES, VISUAL_UPLOAD_REASONS } from "../apps/web/visual/safe-reporter.ts";
-import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 export type VisualMode = "local" | "upload";
 export interface VisualProcessResult { code: number; stdout: string; stderr: string }
