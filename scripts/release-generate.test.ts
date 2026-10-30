@@ -287,6 +287,33 @@ test("approved and published site blocks render public copy and working evidence
   }
 });
 
+const publicNumerals = await fixture("public-numerals.json") as { name: string; summary: string; rendered: string }[];
+for (const { name, summary, rendered } of publicNumerals) {
+  test(`record renders public prose numerals without changing stored evidence: ${name}`, () => {
+    const data = JSON.parse(recordBefore[RELEASE_TEXT]!);
+    data.qualification.lanes.find((lane: { name: string }) => lane.name === "relay").summary = summary;
+    // Replay an existing approval: the public page already has the copy-pass comma, but
+    // release-text still contains the older, ungrouped receipt summary.
+    const result = generateRelease({ ...recordBefore, [RELEASE_TEXT]: JSON.stringify(data) }, recordOptions);
+    expect(result["site/llms.txt"]).toContain(`- relay (1 attempt): ${rendered}`);
+    const evidence = result["site/status/index.html"]!
+      .match(/<tr><td>relay<\/td><td>1<\/td><td>(.*)<\/td><\/tr>/u)![1]!;
+    const text = (value: string) => value
+      .replace(/\[([^\]]+)\]\([^)]+\)/gu, "$1")
+      .replace(/<a href="[^"]*">([^<]+)<\/a>/gu, "$1")
+      .replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+    expect(text(evidence)).toBe(text(rendered));
+    expect(JSON.parse(result[RELEASE_TEXT]!).qualification).toEqual(data.qualification);
+    expect(result["docs/RELEASE_STATUS.md"]).toBe(recorded["docs/RELEASE_STATUS.md"]);
+    expect(result["docs/COMPATIBILITY.md"]).toBe(recorded["docs/COMPATIBILITY.md"]);
+    const replay = { ...recordBefore, ...result };
+    // Record requires this pre-publication heading; rewind only that precondition.
+    replay["docs/RELEASE_STATUS.md"] = replay["docs/RELEASE_STATUS.md"]!
+      .replace("## Mainline v0.7.4 — published stable", "## Mainline v0.7.4 — qualified; stable publication pending");
+    expect(generateRelease(replay, recordOptions)).toEqual(result);
+  });
+}
+
 test("status evidence escapes HTML before rendering links without linking anchors twice", () => {
   const data = JSON.parse(recordBefore[RELEASE_TEXT]!);
   data.qualification.lanes.find((lane: { name: string }) => lane.name === "debian").summary =
