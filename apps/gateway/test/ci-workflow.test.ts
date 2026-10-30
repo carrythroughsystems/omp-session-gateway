@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import packageManifest from "../../../package.json";
+import { checkWorkflowMergeQueue } from "../../../scripts/check-repository.ts";
 
 const workflowPath = join(import.meta.dir, "../../../.github/workflows/ci.yml");
 const validEnvironment = {
@@ -12,6 +13,55 @@ const validEnvironment = {
   TARGET_SHA: "a".repeat(40),
   RUNNER_NAME: "gateway-ci-nyc-2",
 };
+
+test("all seven required checks run on merge groups without a pull request payload", async () => {
+  const requiredJobs = {
+    "ci.yml": ["implementation-checks", "browser-notifications"],
+    "compatibility.yml": ["portable-source", "browser-core"],
+    "platform-qualification.yml": ["windows-service-lifecycle"],
+  };
+  let checks = 0;
+  for (const [file, names] of Object.entries(requiredJobs)) {
+    const workflow = Bun.YAML.parse(await readFile(join(import.meta.dir, "../../../.github/workflows", file), "utf8")) as {
+      on: Record<string, unknown>;
+      jobs: Record<string, {
+        if?: string;
+        strategy?: { matrix?: { os?: string[] } };
+        steps: VisualWorkflowStep[];
+      }>;
+    };
+    expect(workflow.on.merge_group).toEqual({ types: ["checks_requested"] });
+    expect(Object.hasOwn(workflow.on, "pull_request")).toBe(true);
+    for (const name of names) {
+      const job = workflow.jobs[name]!;
+      expect(job).toBeDefined();
+      expect(job.if).toBeUndefined();
+      expect(JSON.stringify(job)).not.toContain("github.event.pull_request");
+      const checkout = job.steps.find(step => step.uses?.startsWith("actions/checkout@"))!;
+      expect(checkout).toBeDefined();
+      // Checkout's default is the event SHA; the fleet override must fall back to it too.
+      if (checkout.with?.ref !== undefined) expect(checkout.with.ref).toMatch(/github\.sha\s*\}\}$/u);
+      checks += job.strategy?.matrix?.os?.length ?? 1;
+    }
+  }
+  expect(checks).toBe(7);
+});
+
+test("workflow policy rejects the pre-queue state and filtered or missing merge-group checks", async () => {
+  for (const file of ["ci.yml", "compatibility.yml", "platform-qualification.yml"]) {
+    const source = await readFile(join(import.meta.dir, "../../../.github/workflows", file), "utf8");
+    const workflow = Bun.YAML.parse(source) as { on: Record<string, unknown> };
+    expect(checkWorkflowMergeQueue(file, source)).toEqual([]);
+    // Model the existing PR-only workflow before enabling the queue.
+    delete workflow.on.merge_group;
+    expect(checkWorkflowMergeQueue(file, Bun.YAML.stringify(workflow))).toHaveLength(1);
+    for (const trigger of [{ types: ["destroyed"] }, { types: ["checks_requested"], branches: ["other"] }]) {
+      workflow.on.merge_group = trigger;
+      expect(checkWorkflowMergeQueue(file, Bun.YAML.stringify(workflow))).toHaveLength(1);
+    }
+  }
+  expect(checkWorkflowMergeQueue("signed-release.yml", "on:\n  push:\n    tags: ['v*']\n")).toEqual([]);
+});
 
 function validationScripts(source: string): string[] {
   return [...source.matchAll(/      - name: Validate bounded gateway dispatch[\s\S]*?        run: \|\n((?:          .*\n)+)/g)].map(

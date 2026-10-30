@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkChangelogFragment } from "./release-policy.ts";
 
 const rootPath = fileURLToPath(new URL("../", import.meta.url));
 
@@ -8,6 +9,7 @@ const required = [
   "README.md",
   "AGENTS.md",
   "CHANGELOG.md",
+  "changelog.d/README.md",
   "LICENSE",
   "NOTICE.md",
   "SECURITY.md",
@@ -556,6 +558,16 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
   return violations;
 }
 
+export function checkWorkflowMergeQueue(name: string, text: string): string[] {
+  if (!["ci.yml", "compatibility.yml", "platform-qualification.yml"].includes(name)) return [];
+  const workflow = Bun.YAML.parse(text) as { on?: Record<string, unknown> };
+  const trigger = workflow.on?.merge_group;
+  if (JSON.stringify(trigger) !== JSON.stringify({ types: ["checks_requested"] })) {
+    return [`${name}: required checks must run on merge_group checks_requested without filters`];
+  }
+  return [];
+}
+
 export function checkWorkflowBunVersions(name: string, text: string, packageManager: string): string[] {
   const failures: string[] = [];
   const version = packageManager.replace(/^bun@/u, "");
@@ -584,6 +596,16 @@ export function checkWorkflowBunVersions(name: string, text: string, packageMana
   return failures;
 }
 
+export function checkChangelogFile(path: string, source: string): string[] {
+  if (path.startsWith("changelog.d/") && path !== "changelog.d/README.md") {
+    return checkChangelogFragment(path, source);
+  }
+  if (path !== "CHANGELOG.md") return [];
+  const pending = source.match(/(?:^|\n)## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|$)/u)?.[1];
+  if (pending === undefined) return ["CHANGELOG.md: missing [Unreleased] header"];
+  return pending.trim() ? ["CHANGELOG.md: [Unreleased] must be empty; add changelog.d/ fragments instead"] : [];
+}
+
 async function main(): Promise<void> {
   const errors: string[] = [];
   for (const rel of required) {
@@ -597,10 +619,11 @@ async function main(): Promise<void> {
   for (const file of await walk(rootPath)) {
     // Rules below name files with forward slashes; Windows `relative` returns backslashes.
     const rel = relative(rootPath, file).split(sep).join("/");
-    if (!/\.(?:md|json|jsonc|hujson|ts|tsx|yml|yaml|toml|sh|ps1)$/.test(file) && !["LICENSE", "NOTICE"].includes(rel)) {
+    if (!/\.(?:md|json|jsonc|hujson|ts|tsx|yml|yaml|toml|sh|ps1)$/.test(file) && !["LICENSE", "NOTICE"].includes(rel) && !rel.startsWith("changelog.d/")) {
       continue;
     }
     const text = await readFile(file, "utf8");
+    errors.push(...checkChangelogFile(rel, text));
     errors.push(...checkProviderReads(rel, text));
     errors.push(...checkUnsafeFinally(rel, text));
     errors.push(...checkDocumentTimers(rel, text));
@@ -718,7 +741,9 @@ async function main(): Promise<void> {
   const workflows = join(rootPath, ".github/workflows");
   for (const name of await readdir(workflows)) {
     if (!/\.ya?ml$/u.test(name)) continue;
-    errors.push(...checkWorkflowBunVersions(name, await readFile(join(workflows, name), "utf8"), packageJson.packageManager));
+    const source = await readFile(join(workflows, name), "utf8");
+    errors.push(...checkWorkflowBunVersions(name, source, packageJson.packageManager));
+    errors.push(...checkWorkflowMergeQueue(name, source));
   }
 
   const canonicalChecks: Array<[string, string]> = [

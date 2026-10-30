@@ -146,6 +146,9 @@ The supported settings contract is:
   present hosted-runner, emulated-device, or smoke evidence as qualification.
 - Update architecture, protocol, operations, compatibility, security, and changelog material when
   their contracts change. Record accepted architecture changes in `docs/DECISIONS.md`.
+- Changelog entries are `changelog.d/` fragments; never edit `CHANGELOG.md` `[Unreleased]` directly.
+  Follow `changelog.d/README.md`: one section-prefixed file per bullet, two-space continuations,
+  lines at most 100 characters, and a trailing LF newline. Test-only changes need no fragment.
 - Keep generated assets and unrelated refactors out of integration changes.
 - Use Conventional Commits subjects: `type(scope): lowercase imperative description` or
   `type: lowercase imperative description`.
