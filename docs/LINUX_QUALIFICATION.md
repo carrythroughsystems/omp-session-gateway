@@ -363,7 +363,7 @@ from the same state as the first.
 | `OMP_QUAL_USER` | `ompqual` | The non-root user the gateway is installed as. |
 | `OMP_QUAL_ALLOWED_LOGIN` | local `tailscale status` | Login used for the allowed half of the identity matrix. |
 | `OMP_QUAL_PORT` | `4317` | Gateway loopback port. |
-| `OMP_QUAL_BUN_VERSION` | `1.4.0` | Matches current `UPSTREAM.lock.json`; use the tagged pin for historical releases. |
+| `OMP_QUAL_BUN_VERSION` | `1.4.4` | Matches current `UPSTREAM.lock.json`; use the tagged pin for historical releases. |
 | `OMP_QUAL_GH_VERSION` | `2.97.0` | `gh` release fetched onto the droplet. |
 | `OMP_QUAL_COSIGN_VERSION` | `3.1.3` | `cosign` release fetched onto the droplet. |
 | `OMP_QUAL_TAG` | `tag:omp-session-gateway` | Tag the auth key is expected to carry; used in messages only. |

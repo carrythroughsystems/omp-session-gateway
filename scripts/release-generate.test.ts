@@ -401,10 +401,13 @@ async function materialize(tree: Record<string, string>): Promise<string> {
 test.skipIf(process.platform === "win32")("workflow data extraction renders exactly the old v0.7.4 stable, candidate and provenance notes", async () => {
   const old = originals.dcfa0b3![".github/workflows/signed-release.yml"]!;
   const changed = await readFile(join(root, ".github/workflows/signed-release.yml"), "utf8");
-  const directory = await materialize({ [RELEASE_TEXT]: releaseText });
+  const directory = await materialize({ [RELEASE_TEXT]: releaseText, "package.json": originals.dcfa0b3!["package.json"]! });
   try {
     const render = async (workflow: string, channel: string, tag: string) => {
-      const start = workflow.indexOf('          if [[ "$GITHUB_REF_NAME" == provenance-test-* ]]; then');
+      const versionStart = workflow.indexOf("          bun_version=");
+      const start = versionStart === -1
+        ? workflow.indexOf('          if [[ "$GITHUB_REF_NAME" == provenance-test-* ]]; then')
+        : versionStart;
       const end = workflow.indexOf("\n          fi\n", start) + "\n          fi".length;
       const script = workflow.slice(start, end).replace(/^          /gmu, "");
       const process = Bun.spawn(["bash", "-euo", "pipefail", "-c", script + '\ncat "$notes"'], {

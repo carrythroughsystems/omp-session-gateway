@@ -702,7 +702,7 @@ truthful per device state, and media, e2e, and unit fixtures encode the new pres
 
 ## ADR-028 — Consume mainline OMP discovery and resolve capabilities only at launch
 
-**Status:** Accepted
+**Status:** Accepted; the Bun prerequisite is amended by ADR-046
 
 **Date:** 2026-09-14
 
@@ -1977,3 +1977,54 @@ assertions, or turn unrestricted Playwright diagnostics into capability-bearing 
 or signed-release gates. Maintenance is not a substitute for required PR checks or exact physical
 qualification. Clean and retried browser evidence remain distinct under ADR-030; no historical
 or emulated result acquires a new qualification claim.
+
+---
+
+## ADR-046 — Bun 1.4.4 toolchain and release runtime floor
+
+**Status:** Accepted; amends only the Bun prerequisite in ADR-028
+
+**Date:** 2026-10-30
+
+**Context:** Stock OMP `>=18.13.3` requires `engines.bun >=1.4.4` and exits at startup under an
+older runtime. The scheduled upstream canary has been red since 2026-10-28
+([#343](https://github.com/carrythroughsystems/omp-session-gateway/issues/343)).
+Bun 1.4.4, released 2026-10-22, is also the patched version for:
+
+- [GHSA-663w-cv8g-jj2p](https://github.com/oven-sh/bun/security/advisories/GHSA-663w-cv8g-jj2p),
+  **CVE-2026-111497**: an out-of-bounds write in the bundled brotli decoder.
+- [GHSA-cf8x-9m69-3gg3](https://github.com/oven-sh/bun/security/advisories/GHSA-cf8x-9m69-3gg3):
+  HTTP/3 QPACK amplification causing memory exhaustion and CPU stalls.
+- [GHSA-26q8-h657-pf84](https://github.com/oven-sh/bun/security/advisories/GHSA-26q8-h657-pf84):
+  trust in compromised eMudhra/emSign intermediates. **CVE-2026-91403** is the cross-ecosystem
+  identifier for that compromise, not a Bun-assigned CVE.
+
+In the default gateway topology, untrusted brotli decoding and HTTP/3 QPACK are not reachable:
+the loopback HTTP/1.1 listener does not enable HTTP/3, doctor fetches its own health/origin or
+uses a relay-health HEAD, and Web Push's `node:https` transport does not auto-decompress.
+The compromised trust store is reachable in principle through outbound Web Push and doctor's
+HTTPS checks. A network-path attacker with a compromised intermediate could impersonate those
+servers, but encrypted, VAPID-signed push payloads bound the impact to endpoint metadata,
+delivery disruption and forged service status (including subscription pruning); doctor's result
+is diagnostic, not authorization. Operator-time dependency downloads also consume the trust store.
+
+**Decision:** Pin the repository toolchain and Bun types to **1.4.4**, with `package.json`
+`packageManager` as the runtime source of truth. Derive release-driver checks, persistent Bun
+paths and release archive metadata from that pin; next archives declare **Bun `>=1.4.4`**.
+Check every workflow's `setup-bun` version and explicit Bun-version assertion against the pin.
+This moves Bun only, not the exact OMP baseline or the vendored client's provenance.
+
+**Consequences:**
+
+- The next release must requalify every lane under Bun 1.4.4. Published **v0.9.0** retains its
+  Bun **1.4.0** qualification; its receipt, generated claim blocks and historical evidence are
+  unchanged. CI and realpath regression tests are not a substitute for that release qualification.
+- Prepare the Studio `gwops` checksum-verified lane toolchain and regenerate the installed driver
+  plist from its template while drained. Satisfy retained-Mac, Linux and Windows runtimes from the
+  current lock/pins before admitting the next campaign; the published-byte smoke creates the
+  persistent `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun`.
+- `install` writes the service definition with the Bun executable running that command. Installing
+  under Bun 1.4.4 therefore re-points the service to that persistent Bun path.
+- `rollback` changes the gateway payload, not Bun: it keeps the Bun running the rollback command,
+  so a retained predecessor then runs on 1.4.4. It does not restore the predecessor's old Bun or
+  transfer its earlier qualification to this runtime.

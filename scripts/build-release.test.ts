@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import packageManifest from "../package.json";
 import {
   PRODUCT_VERSION,
   RELEASE_QUALIFICATIONS,
@@ -198,7 +199,13 @@ test(
       const releaseInfo = JSON.parse(entries.get(`${archivePrefix}release-info.json`)?.toString("utf8") ?? "{}") as {
         bunLockSha256?: string;
         qualification?: string;
+        runtime?: string;
       };
+      const archivePackage = JSON.parse(entries.get(`${archivePrefix}package.json`)?.toString("utf8") ?? "{}");
+      const bunVersion = packageManifest.packageManager.replace(/^bun@/u, "");
+      expect({ engine: archivePackage.engines?.bun, runtime: releaseInfo.runtime }).toEqual({
+        engine: `>=${bunVersion}`, runtime: `Bun >=${bunVersion}`,
+      });
       const archivedLock = entries.get(`${archivePrefix}bun.lock`);
       expect(archivedLock).toBeDefined();
       expect(releaseInfo.bunLockSha256).toBe(createHash("sha256").update(archivedLock ?? "").digest("hex"));

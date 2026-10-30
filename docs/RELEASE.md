@@ -18,7 +18,7 @@ predecessor rollback boundaries, see [Upgrade and rollback](UPGRADE_ROLLBACK.md)
 This sequence published v0.5.0 (#222–#225) and v0.5.1 (#227–#230). Each step is a separate effect;
 a candidate, a passed receipt, or an approved lock never promotes itself. Work from a clean checkout
 of `main` that matches `origin/main` (`qualify:stable` refuses detached or unpublished commits), with
-pinned Bun `1.4.0` first on `PATH`.
+pinned Bun `1.4.4` first on `PATH`.
 
 The manual path requires an explicit maintainer decision for scope/publication, live qualification
 and installed-byte smoke. The standing routine driver below already has authority for these steps
@@ -252,7 +252,7 @@ not a release-bot self-upgrade. No main changes may land between prepare and app
 ### Repository transfer window (Studio driver)
 
 The installed LaunchAgent is `~/Library/LaunchAgents/com.omp.gateway-release-driver.plist`,
-working in `~/Development/omp-session-gateway` as `gwops`. It invokes pinned Bun 1.4.0 with
+working in `~/Development/omp-session-gateway` as `gwops`. It invokes pinned Bun 1.4.4 with
 `scripts/release-driver.ts tick` every 300 seconds. The repository is the code constant
 `REPOSITORY`, not a plist argument or a gh host setting. The installed checkout does not follow
 main automatically. Its last inspected commit was `d70791bf490e4e38ca743b4738b856784b8ebc4b`.
@@ -262,7 +262,7 @@ main automatically. Its last inspected commit was `d70791bf490e4e38ca743b4738b85
    and unload the timer only after all work is drained:
 
    ```sh
-   export PATH="$HOME/.omp/lane-toolchain/bun-1.4.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+   export PATH="$HOME/.omp/lane-toolchain/bun-1.4.4/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
    state="$HOME/.local/state/omp-session-gateway/release-driver"
    touch "$state/disabled"
    jq '{phase,candidate,intent,job}' "$state/state.json"
@@ -308,6 +308,61 @@ orders/owned PRs. It also addresses comments, PR creation/merges and pushes with
 write redirect behavior is not a cutover guarantee. No state/receipt rewriting is needed for a
 drained driver: historical URLs are evidence, not dispatch targets.
 
+### Bun 1.4.4 host preparation (before the next campaign)
+
+This repository move is not a host deployment or a new qualification. Keep the Studio driver
+disabled and unloaded, with no campaign, worker or shared lease active, throughout toolchain and
+checkout preparation. Do not mutate a pending release's runtime or policy.
+
+For a published-byte smoke of a pre-move release such as v0.9.0, use a pre-move harness checkout
+under Bun 1.4.0, following the [matching-release recovery-checkout pattern](#post-release-local-installation-smoke).
+`post-release-smoke` derives the expected archive runtime and required running Bun from that
+checkout's `packageManager`, not from the release tag alone.
+
+1. As Studio `gwops`, install the official Darwin-arm64 binary at
+   `~/.omp/lane-toolchain/bun-1.4.4/bin/bun`, verifying the downloaded zip against the same
+   release's `SHASUMS256.txt` before extracting it. Seed the persistent runtime used by Android
+   and Windows controller commands from that verified binary, rather than waiting for a smoke:
+
+   ```sh
+   toolchain="$HOME/.omp/lane-toolchain/bun-1.4.4"
+   download="$(mktemp -d)"
+   (
+     set -euo pipefail
+     persistent="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4"
+     cd "$download" &&
+     gh release download bun-v1.4.4 -R oven-sh/bun \
+       -p bun-darwin-aarch64.zip -p SHASUMS256.txt &&
+     awk '$2 == "bun-darwin-aarch64.zip" { print }' SHASUMS256.txt | shasum -a 256 -c &&
+     unzip -q bun-darwin-aarch64.zip &&
+     install -d "$toolchain/bin" &&
+     install -m 755 bun-darwin-aarch64/bun "$toolchain/bin/bun" &&
+     test "$("$toolchain/bin/bun" --version)" = 1.4.4 &&
+     install -d -m 700 "$persistent" &&
+     cp "$toolchain/bin/bun" "$persistent/bun" &&
+     chmod 0755 "$persistent/bun" &&
+     test "$("$persistent/bun" --version)" = 1.4.4
+   ) && rm -rf "$download" && export PATH="$toolchain/bin:$PATH"
+   ```
+
+2. Advance the drained checkout through the Studio installation procedure below, install its
+   frozen dependencies under 1.4.4, and **regenerate the installed driver plist from
+   `scripts/com.omp.gateway-release-driver.plist`**. Merely updating the checkout leaves the old
+   installed executable and PATH in place. Preserve the actual retained-Mac target and reviewed
+   dry-run setting, inspect the read-only plan, then reload the regenerated plist only after the
+   remaining prerequisites agree.
+3. Before the next campaign, satisfy the retained Mac's `~/.bun/bin/bun` and the Linux provisioner's
+   runtime from `UPSTREAM.lock.json.bunVersion`, and the Windows guest runtime and downloaded-zip
+   checksum from `scripts/windows-qualification-pins.json` (`bunVersion`/`bunSha256`). Require their
+   observed versions to agree with the current pin; an older lane installation is not inherited
+   qualification. The next signed candidate must requalify every lane under 1.4.4.
+4. The published-byte smoke verifies the prepared persistent Bun at
+   `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun` before installing the gateway, copying its
+   running Bun there if absent. That persistent copy is distinct from the driver's lane toolchain;
+   keep the service's exact installed Bun path available. Installation re-points the service
+   definition to that Bun, and gateway rollback keeps it
+   ([upgrade and rollback](UPGRADE_ROLLBACK.md)). Published v0.9.0 retains its 1.4.0 qualification.
+
 ### Studio installation (run as gwops after integration)
 
 The bot account is a repository collaborator with write access. Its registered Studio SSH signing
@@ -331,7 +386,7 @@ worker, detached job or host lease remains active: let it finish and retain its 
 owner requires its documented recovery; never delete the lease to make installation proceed.
 
 ```sh
-export PATH="$HOME/.omp/lane-toolchain/bun-1.4.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$HOME/.omp/lane-toolchain/bun-1.4.4/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 state="$HOME/.local/state/omp-session-gateway/release-driver"
 install -d -m 700 "$state"
 touch "$state/disabled"
@@ -954,7 +1009,7 @@ listener and successful doctor, and an unchanged full SHA-256 readiness-token di
 non-identifying `guest reboot changed`, `console login`, and `readiness token preserved` verdicts
 must all be `yes` and are recorded as booleans in the schema-3 Mac evidence.
 On a bare-metal automatic-login host, FileVault must be off. The account needs
-Bun 1.4.0 in `~/.bun/bin`, **stock OMP >=18.1.20 on PATH**, the lane's command-line tools, and a
+Bun 1.4.4 in `~/.bun/bin`, **stock OMP >=18.1.20 on PATH**, the lane's command-line tools, and a
 user-owned TUN-mode Tailscale node. Doctor checks OMP compatibility during install, before the
 `omp-build` lane creates its separate pinned fixture. Install the stock coding-agent package as
 the qualification account, using `packageVersions["@oh-my-pi/pi-coding-agent"]` from
@@ -1371,7 +1426,7 @@ before any new attempt, never guess an ID, discard progress or retry creation bl
 restore any resource/checkpoint sets `pixelUnrestored` and blocks later Pixel lanes.
 
 After the lead confirms no campaign, Pixel operation or retained-Mac use overlaps, select the
-verified Bun 1.4.0 binary on `PATH` (not a newer workstation Bun), then run:
+verified Bun 1.4.4 binary on `PATH` (not a newer workstation Bun), then run:
 
 ```sh
 bun scripts/device-cloud-development.ts \

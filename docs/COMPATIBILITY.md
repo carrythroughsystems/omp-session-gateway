@@ -369,6 +369,10 @@ release tag’s `UPSTREAM.lock.json`. Those historical integrations required:
 - exact Bun `1.4.0` for the v0.3.0 qualified build/runtime. Archives declare Bun `>=1.4.0`, but
   no broader version range is qualified. Historical v0.2.1 remains specific to Bun `1.3.14`.
 
+Builds from current `main` and the next release archives require Bun `>=1.4.4`. Published v0.9.0
+retains its original Bun qualification; the next candidate must requalify every lane under 1.4.4
+before any new qualified claim.
+
 ## Versioned interfaces
 
 Three compatibility surfaces change independently:

@@ -8,6 +8,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Move the toolchain and next release's Bun runtime floor to 1.4.4 for current OMP compatibility
+  and the brotli, HTTP/3 QPACK and compromised emSign trust-store fixes; preserve published qualification.
+  `media:check` stays red until the README media is recaptured under 1.4.4 in a follow-up PR;
+  provenance is never hand-edited.
 - Refresh the README media with seeded Working and Idle activity on every directory row and
   plain-language board copy, and re-render the social preview and banner from committed sources
   (`bun run media:brand`) with the current repository and promise.

@@ -5,7 +5,7 @@ Implementation of the `omp-gateway` CLI and per-user `omp-gatewayd` daemon.
 Stock OMP `>= 18.1.20` supplies the collaboration controller and local registry natively. This
 separately installed gateway reads that registry; no fork, custom OMP build, or gateway-specific
 OMP plugin is required. Enable `collab.autoStart` once, then start plain `omp`. Deployment still
-requires Bun 1.4.0 and TUN-mode Tailscale Serve; see [OMP integration](../../docs/OMP_INTEGRATION.md).
+requires Bun 1.4.4 and TUN-mode Tailscale Serve; see [OMP integration](../../docs/OMP_INTEGRATION.md).
 
 Implemented modules:
 
