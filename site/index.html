@@ -184,30 +184,6 @@
       <p>Configure OMP and the host service once; new sessions then register automatically. Nothing here needs a custom OMP build or a gateway-specific OMP plugin.</p>
     </div>
     <div class="setup-wrap">
-      <ol class="setup">
-        <li>
-          <h3>Enable collaboration once in OMP</h3>
-          <div class="snippet"><pre><code><span class="c"># confirm your stock omp meets the minimum in Requires above</span>
-omp --version
-<span class="c"># or view for read-only sharing</span>
-omp config set collab.autoStart control</code></pre></div>
-          <p>Start participating sessions with plain <code>omp</code> after changing this setting; already-running processes do not pick it up.</p>
-        </li>
-        <li>
-          <h3>Install the gateway</h3>
-          <div class="snippet"><pre><code>tar -xf omp-session-gateway-*-bun.tar
-cd omp-session-gateway-*-bun
-bun apps/gateway/src/cli.js install \
-  --origin https://host.tailnet.ts.net \
-  --allow you@example.com
-bun apps/gateway/src/cli.js serve-guidance</code></pre></div>
-          <p>Download and <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE.md#verify-a-published-build">verify the published archive</a> in your download directory first. Run the Tailscale Serve command that <code>serve-guidance</code> prints, grant your login HTTPS access to the host in your tailnet policy (<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/examples/tailscale-policy.hujson">example</a>), then confirm with <code>bun apps/gateway/src/cli.js doctor</code>. Windows uses the <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md#2-cli-and-daemon-installation">PowerShell steps</a> (one command per line, no backslash continuations).</p>
-        </li>
-        <li>
-          <h3>Open OMP Sessions on your phone</h3>
-          <p>Open your configured HTTPS address from an allowlisted Tailscale device and add <strong>OMP Sessions</strong> to your Home Screen. <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md">Operations</a> covers service management and updates; <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md#troubleshooting-by-symptom">troubleshooting by symptom</a> covers common issues.</p>
-        </li>
-      </ol>
       <aside class="setup-aside" aria-label="Requirements and guides">
         <h3>You need</h3>
         <ul>
@@ -224,6 +200,30 @@ bun apps/gateway/src/cli.js serve-guidance</code></pre></div>
           <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/CONTRIBUTING.md#build-from-source">Build from source</a></li>
         </ul>
       </aside>
+      <ol class="setup">
+        <li>
+          <h3>Enable collaboration once in OMP</h3>
+          <div class="snippet"><pre><code><span class="c"># confirm your stock omp meets the minimum in Requires above</span>
+omp --version
+<span class="c"># or view for read-only sharing</span>
+omp config set collab.autoStart control</code></pre></div>
+          <p>Start participating sessions with plain <code>omp</code> after changing this setting; already-running processes do not pick it up.</p>
+        </li>
+        <li>
+          <h3>Install the gateway</h3>
+          <p>Download and <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE.md#verify-a-published-build">verify the published archive</a> in your download directory first. Run the Tailscale Serve command that <code>serve-guidance</code> prints, grant your login HTTPS access to the host in your tailnet policy (<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/examples/tailscale-policy.hujson">example</a>), then confirm with <code>bun apps/gateway/src/cli.js doctor</code>. Windows uses the <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md#2-cli-and-daemon-installation">PowerShell steps</a> (one command per line, no backslash continuations).</p>
+          <div class="snippet"><pre><code>tar -xf omp-session-gateway-*-bun.tar
+cd omp-session-gateway-*-bun
+bun apps/gateway/src/cli.js install \
+  --origin https://host.tailnet.ts.net \
+  --allow you@example.com
+bun apps/gateway/src/cli.js serve-guidance</code></pre></div>
+        </li>
+        <li>
+          <h3>Open OMP Sessions on your phone</h3>
+          <p>Open your configured HTTPS address from an allowlisted Tailscale device and add <strong>OMP Sessions</strong> to your Home Screen. <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md">Operations</a> covers service management and updates; <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/OPERATIONS.md#troubleshooting-by-symptom">troubleshooting by symptom</a> covers common issues.</p>
+        </li>
+      </ol>
     </div>
   </div>
 </section>
@@ -256,7 +256,6 @@ bun apps/gateway/src/cli.js serve-guidance</code></pre></div>
       <p>The gateway is a directory and launch broker for running terminal sessions, not a replacement chat client or a public dashboard. The <a href="compare/">comparison</a> cites dated primary sources for each alternative.</p>
     </div>
     <ul class="alts">
-      <li><span class="want">A browser-hosted OMP workspace with persistent sessions, kanban, and an inbox</span><span class="use"><a href="https://github.com/bjb2/omp-deck">omp-deck</a> embeds the OMP SDK in-process.</span></li>
       <li><span class="want">Agent web chat or a remote terminal across several CLI agents</span><span class="use"><a href="https://github.com/gosuda/oh-my-portal">oh-my-portal</a> provides skills, RPC, and terminal access over Portal tunnels.</span></li>
       <li><span class="want">A browser workspace for other coding CLIs</span><span class="use"><a href="https://github.com/siteboon/claudecodeui">CloudCLI (claudecodeui)</a> targets Claude Code, Cursor CLI, and Codex; <a href="https://github.com/BlackBeltTechnology/pi-agent-dashboard">pi-agent-dashboard</a> targets <code>pi</code>, not OMP.</span></li>
     </ul>
