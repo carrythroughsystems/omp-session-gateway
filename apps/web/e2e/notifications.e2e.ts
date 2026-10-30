@@ -45,7 +45,8 @@ async function holdDirectoryEvents(page: Page): Promise<void> {
       this: EventSource, type: string, listener: EventListenerOrEventListenerObject | null,
       options?: boolean | AddEventListenerOptions,
     ): void {
-      if (listener === null || !["snapshot", "session_upsert", "session_remove", "keepalive"].includes(type)) {
+      if (listener === null) return;
+      if (!["snapshot", "session_upsert", "session_remove", "keepalive"].includes(type)) {
         add.call(this, type, listener, options);
         return;
       }
