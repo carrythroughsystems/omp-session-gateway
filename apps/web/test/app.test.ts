@@ -3978,32 +3978,43 @@ describe("fleet directory bindings", () => {
   });
 
   test("offline recovery without an online event resumes remote polling and keeps the retained clock", async () => {
-    const home = session("offline-fleet-home");
-    const harness = await bootApp({
-      permission: "denied", initialSessions: [home], remoteSessions: [session("offline-fleet-away")],
-      clientConfig: config, suffix: "offline-fleet-recovery",
-    });
-    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
-    harness.setRemoteStatus(503);
-    harness.setList(2, [home], 503);
-    harness.setOnline(false);
-    harness.window.dispatchEvent(new Event("offline"));
-    await settleUntil(() => harness.pendingDelays().includes(35_000), 100);
-    const facts = harness.elements.sessionList.querySelectorAll(".session-freshness");
-    expect(facts).toHaveLength(2);
-    expect(facts.every(fact => fact.textContent?.startsWith("List as of "))).toBeTrue();
-    expect(harness.elements.statusBanner.children).toHaveLength(1);
-    expect(harness.elements.fleetStatus.children).toHaveLength(0);
-    harness.setOnline(true); // Deliberately do not dispatch `online`.
-    harness.setRemoteStatus(200);
-    harness.setList(3, [home]);
-    harness.runTimers();
-    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
-    const requests = harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length;
-    harness.window.runTimersWithDelay(10_000);
-    await settleUntil(() => harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length > requests, 100);
-    expect(harness.elements.statusBanner.hidden).toBeTrue();
-    harness.setVisibility("hidden");
+    const previousNow = Date.now;
+    const now = previousNow();
+    // This test asserts exact fake-timer delays; coverage must not let real elapsed milliseconds
+    // shorten the retained observation's 35-second deadline between boot and interruption.
+    Date.now = () => now;
+    let harness: BrowserHarness | undefined;
+    try {
+      const home = session("offline-fleet-home");
+      harness = await bootApp({
+        permission: "denied", initialSessions: [home], remoteSessions: [session("offline-fleet-away")],
+        clientConfig: config, suffix: "offline-fleet-recovery",
+      });
+      const active = harness;
+      await settleUntil(() => active.elements.directoryCount.textContent === "Live · 2", 100);
+      harness.setRemoteStatus(503);
+      harness.setList(2, [home], 503);
+      harness.setOnline(false);
+      harness.window.dispatchEvent(new Event("offline"));
+      await settleUntil(() => active.pendingDelays().includes(35_000), 100);
+      const facts = harness.elements.sessionList.querySelectorAll(".session-freshness");
+      expect(facts).toHaveLength(2);
+      expect(facts.every(fact => fact.textContent?.startsWith("List as of "))).toBeTrue();
+      expect(harness.elements.statusBanner.children).toHaveLength(1);
+      expect(harness.elements.fleetStatus.children).toHaveLength(0);
+      harness.setOnline(true); // Deliberately do not dispatch `online`.
+      harness.setRemoteStatus(200);
+      harness.setList(3, [home]);
+      harness.runTimers();
+      await settleUntil(() => active.elements.directoryCount.textContent === "Live · 2", 100);
+      const requests = harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length;
+      harness.window.runTimersWithDelay(10_000);
+      await settleUntil(() => active.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length > requests, 100);
+      expect(harness.elements.statusBanner.hidden).toBeTrue();
+    } finally {
+      harness?.setVisibility("hidden");
+      Date.now = previousNow;
+    }
   });
 
   test("a retained empty observation says when it was empty, not never checked", async () => {
