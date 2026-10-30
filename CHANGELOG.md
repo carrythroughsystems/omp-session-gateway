@@ -20,6 +20,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Wake and unlock Android, then send HOME before the published-byte smoke's installed-WebAPK
+  launch; re-launch once after ten seconds without extending the focus deadline, and retain
+  only bounded private activity, power, and keyguard evidence when focus never arrives.
 - Tighten browser-evidence linting for child-block response reassignments and static string aliases,
   and prove delayed-resume Hide reconciliation retains an unchanged-generation dismissal.
 - Preserve actionable private browser failures and original qualification errors when outcome
