@@ -19,7 +19,7 @@ Do not attach these assets without that context or replace them with personal se
 
 - [ ] [v0.4.0](https://github.com/alphastorm/omp-session-gateway/releases/tag/v0.4.0) still matches
       the intended release and the current ledger; all outbound links resolve.
-- [ ] Setup still requires the separate gateway, Bun 1.4.0, one-time `collab.autoStart`,
+- [ ] Setup still requires the separate gateway, Bun 1.4.4, one-time `collab.autoStart`,
       and TUN-mode Tailscale Serve with an exact allowlist and Funnel disabled.
 - [ ] Exact host/client qualification and known limits still match the compatibility policy.
 - [ ] Attached media are canonical, unmodified, and explicitly labeled synthetic product demos;
@@ -49,7 +49,7 @@ for each session. The gateway keeps bounded session metadata, not transcripts.
 
 [v0.4.0](https://github.com/alphastorm/omp-session-gateway/releases/tag/v0.4.0) uses the native
 registry and controller shipped in stock OMP `>= 18.1.20`: no fork, custom OMP build, or
-gateway-specific OMP plugin. Install the separate gateway with Bun 1.4.0, enable
+gateway-specific OMP plugin. Install the separate gateway with Bun 1.4.4, enable
 `collab.autoStart` once, and configure TUN-mode Tailscale Serve with an exact user allowlist and
 Funnel disabled. Then start participating sessions with plain `omp`.
 
@@ -171,7 +171,7 @@ from a phone. It discovers participating interactive sessions through stock OMP'
 registry, then opens View or Control in OMP's existing encrypted collaboration client.
 
 Stock OMP `>= 18.1.20` supplies the registry and controller. No OMP fork, custom build, or
-gateway-specific OMP plugin is needed. The gateway is still a separate install: use Bun 1.4.0,
+gateway-specific OMP plugin is needed. The gateway is still a separate install: use Bun 1.4.4,
 enable `collab.autoStart` once, and set up TUN-mode Tailscale Serve with an exact user allowlist
 and Funnel disabled. After that, start sessions with plain `omp`; no per-session link copying.
 

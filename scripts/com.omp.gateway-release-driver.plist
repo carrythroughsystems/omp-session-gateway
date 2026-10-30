@@ -5,7 +5,7 @@
   <key>Label</key><string>com.omp.gateway-release-driver</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@HOME@/.omp/lane-toolchain/bun-1.4.0/bin/bun</string>
+    <string>@HOME@/.omp/lane-toolchain/bun-1.4.4/bin/bun</string>
     <string>@HOME@/Development/omp-session-gateway/scripts/release-driver.ts</string>
     <string>tick</string>
   </array>
@@ -19,7 +19,7 @@
   <key>Umask</key><integer>63</integer>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>@HOME@/.omp/lane-toolchain/bun-1.4.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>@HOME@/.omp/lane-toolchain/bun-1.4.4/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>OMP_RELEASE_BOT_LOGIN</key><string>alphastorm-release</string>
     <key>OMP_RELEASE_FOUNDER_LOGIN</key><string>alphastorm</string>
     <key>OMP_RELEASE_GH_CONFIG_DIR</key><string>@HOME@/.config/gh-release-bot</string>

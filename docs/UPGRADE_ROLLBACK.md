@@ -28,6 +28,11 @@ bun apps/gateway/src/cli.js doctor
 
 The installer validates your existing `config.json`, preserves an omitted `--port`, `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `tern`, `readiness-token`, and Web Push state verbatim, and switches `installation/current.json` only after the new service passes its authenticated loopback readiness check. Reinstalling or upgrading never strips `http.trustedDashboardOrigins`, `fleet`, `speech`, or `tern`. If startup or readiness fails, the installer restores the prior configuration, service definition, and verified runtime automatically.
 
+The service definition uses the exact Bun executable running `install`. Installing under Bun
+**1.4.4** re-points the LaunchAgent, systemd unit or Windows task to that Bun; keep its persistent
+path available. The release smoke creates `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun`.
+This does not change the Bun version recorded in a published release's original qualification.
+
 ## Roll back to a retained predecessor
 
 To switch the active user service back to the previous activated runtime without re-extracting an archive, run `rollback` from any verified extraction root (or the currently installed CLI):
@@ -43,6 +48,10 @@ bun apps/gateway/src/cli.js rollback --to <version>-<digest12>
 ```
 
 Each readiness-proven `install` keeps the active runtime plus the two most recent distinct predecessors in `installation/history.json` (plus any divergent version named by the on-disk service definition) and prunes older or never-activated staged directories. `rollback` itself never prunes, so you can switch back and forth between the active release and its predecessor; if you need a version that was already pruned, verify and `install` its release archive again.
+
+Rollback keeps the Bun running the command and rewrites the service definition with that executable;
+it does not restore the predecessor's Bun. After this move, run rollback under the persistent Bun
+**1.4.4**, and the selected predecessor then runs on 1.4.4 rather than its originally qualified Bun.
 
 ### Tern creation on every managed rollback
 
