@@ -1,6 +1,46 @@
 import { expect, test } from "bun:test";
-import { checkDocumentTimers, checkE2EReadiness, checkProviderReads, checkUnsafeFinally } from "./check-repository.ts";
+import { checkDocumentTimers, checkE2EReadiness, checkProviderReads, checkUnsafeFinally, checkWorkflowBunVersions } from "./check-repository.ts";
 import { readFile } from "node:fs/promises";
+import packageManifest from "../package.json";
+
+const pinnedBun = packageManifest.packageManager.replace(/^bun@/u, "");
+const bunWorkflow = (setupVersion = pinnedBun, verifyVersion = pinnedBun): string => `
+jobs:
+  runtime:
+    steps:
+      - uses: oven-sh/setup-bun@synthetic
+        with:
+          bun-version: ${setupVersion}
+      - run: test "$(bun --version)" = ${verifyVersion}
+`;
+
+test.each(["compatibility.yml", "platform-qualification.yml", "signed-release.yml", "upstream-canary.yml",
+  "browser-flake-budget.yml", "capacity-qualification.yml"])("rejects stale Bun pins outside ci.yml in %s", name => {
+  expect(checkWorkflowBunVersions(name, bunWorkflow(), packageManifest.packageManager)).toEqual([]);
+  expect(checkWorkflowBunVersions(name, bunWorkflow("0.0.0"), packageManifest.packageManager)).toHaveLength(1);
+  expect(checkWorkflowBunVersions(name, bunWorkflow(pinnedBun, "0.0.0"), packageManifest.packageManager)).toHaveLength(1);
+});
+
+test("checks every setup step and quoted version assertion without requiring Bun in unrelated jobs", () => {
+  const source = bunWorkflow() + `
+      - uses: oven-sh/setup-bun@synthetic
+        with:
+          bun-version: 0.0.0
+      - run: |
+          test "$(bun --version)" = "0.0.0"
+          test "$(bun --version)" = '0.0.0'
+  no-bun:
+    steps:
+      - run: echo unrelated
+`;
+  expect(checkWorkflowBunVersions("other.yaml", source, packageManifest.packageManager)).toHaveLength(3);
+});
+
+test("ci.yml still requires an unconditional pinned Bun setup in every job", () => {
+  expect(checkWorkflowBunVersions("ci.yml", bunWorkflow(), packageManifest.packageManager)).toEqual([]);
+  expect(checkWorkflowBunVersions("ci.yml", bunWorkflow().replace("with:", "if: false\n        with:"), packageManifest.packageManager)).toHaveLength(1);
+  expect(checkWorkflowBunVersions("ci.yml", "jobs:\n  missing:\n    steps:\n      - run: echo missing\n", packageManifest.packageManager)).toHaveLength(1);
+});
 
 test("cloud transport may retry only GET, and record DELETE is never replayed", () => {
   const source = 'const connection = { endpoint: "https://hub.testingbot.com/wd/hub", fallback: { endpoint: "https://hub.browserstack.com/wd/hub" } };\n' +

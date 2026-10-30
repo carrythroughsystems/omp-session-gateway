@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { watch } from "node:fs";
@@ -79,6 +79,42 @@ describe("lossless bounded Tern metadata", () => {
 // The fake Tern executable is a shebang script, which Windows cannot execute directly; Tern session
 // creation is exercised on POSIX hosts only (docs/OPERATIONS.md), so the subprocess boundary is too.
 describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
+  test("requires canonical directory working copies while preserving literal POSIX backslashes", async () => {
+    const fixture = await fake(), root = fixture.copy.path;
+    const copy = { ...fixture.copy, path: join(root, "work\\copy") };
+    await mkdir(copy.path);
+    const config = { executable: fixture.executable,
+      projects: [{ id: "main", label: "Main", workingCopies: [copy] }], profiles: [fixture.profile] };
+    expect(await validateTernRuntime(config)).toBe(true);
+    const alias = join(root, "alias");
+    await symlink(copy.path, alias);
+    for (const path of [alias, `${alias}/..`, `${copy.path}/..`, `${copy.path}/`, fixture.executable]) {
+      expect(await validateTernRuntime({ ...config,
+        projects: [{ ...config.projects[0]!, workingCopies: [{ ...copy, path }] }] })).toBe(false);
+    }
+  });
+  test("canonicalizes executable and profile symlink-parent paths and refuses trailing file slashes", async () => {
+    const fixture = await fake(), root = fixture.copy.path, commands = join(root, "commands");
+    await mkdir(join(commands, "nested"), { recursive: true });
+    await rename(fixture.executable, join(commands, "tern"));
+    const link = join(root, "link");
+    await symlink(join(commands, "nested"), link);
+    const path = `${link}/../tern`, executable = join(commands, "tern");
+    const profile = { ...fixture.profile, argv: [path, ...fixture.profile.argv.slice(1)] };
+    expect(await validateTernRuntime({ executable: path,
+      projects: [{ id: "main", label: "Main", workingCopies: [fixture.copy] }], profiles: [profile] })).toBe(true);
+    const cli = new TernCli(path);
+    expect(await cli.inspect(profile, new AbortController().signal)).toEqual(parseTernInspection(bytes(inspect())));
+    expect(await cli.createTab(fixture.copy, profile, new AbortController().signal))
+      .toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
+    const received = JSON.parse(await readFile(join(fixture.root, "received"), "utf8"));
+    expect(received.argv[7]).toBe(executable);
+    const invalid = `${path}/`, invalidProfile = { ...profile, argv: [invalid] };
+    expect(await validateTernRuntime({ executable: invalid,
+      projects: [{ id: "main", label: "Main", workingCopies: [fixture.copy] }], profiles: [invalidProfile] })).toBe(false);
+    expect(await new TernCli(invalid).inspect(profile, new AbortController().signal)).toBeUndefined();
+    expect(await cli.createTab(fixture.copy, invalidProfile, new AbortController().signal)).toEqual({ kind: "not_started" });
+  });
   test("uses literal argv, keep-open, canonical executable and only the configured environment", async () => {
     const fixture = await fake();
     const cli = new TernCli(fixture.executable);

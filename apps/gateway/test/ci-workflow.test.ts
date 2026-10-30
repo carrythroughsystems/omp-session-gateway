@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import packageManifest from "../../../package.json";
 
 const workflowPath = join(import.meta.dir, "../../../.github/workflows/ci.yml");
 const validEnvironment = {
@@ -113,7 +114,7 @@ test("visual review stays GitHub-hosted and scopes its secret only to eligible u
   const steps = visual.steps;
   const setup = steps.find(step => step.uses?.startsWith("oven-sh/setup-bun@"))!;
   expect(setup.if).toBeUndefined();
-  expect(setup.with?.["bun-version"]).toBe("1.4.0");
+  expect(setup.with?.["bun-version"]).toBe(packageManifest.packageManager.replace(/^bun@/u, ""));
   const nodeSetup = steps.find(step => step.uses?.startsWith("actions/setup-node@"))!;
   expect(nodeSetup.uses).toBe("actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1"); // v7.1.0
   expect(nodeSetup.if).toBeUndefined();
