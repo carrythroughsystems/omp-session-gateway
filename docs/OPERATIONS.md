@@ -274,6 +274,19 @@ tailscale funnel status
 
 The daemon stays bound to loopback behind Tailscale Serve. Serve strips incoming identity headers and adds `Tailscale-User-Login` for user-owned tailnet devices; because local loopback processes can forge headers directly, the supported host is a single-user workstation with no untrusted local accounts.
 
+### Co-hosting on a dedicated HTTPS port
+
+Path mounts (`tailscale serve --set-path`) are unsupported. The gateway admits state-changing and capability requests by checking the exact `Origin` header (`http.publicOrigin`) and same-origin fetch metadata (`Sec-Fetch-Site`), so any other application served on the same browser origin could read session metadata and open **View** or **Control** links as the signed-in user. The **OMP Sessions** web app manifest scope, service worker, and browser history paths also assume the origin root (`/`).
+
+To share a Tailscale node with other web services, give the gateway its own HTTPS port (for example `8443`), install with the matching `--origin` (and `--port <port>` if `127.0.0.1:4317` is in use), and run the command printed by `serve-guidance`:
+
+```sh
+bun apps/gateway/src/cli.js install --origin https://host.example.ts.net:8443 --allow you@example.com
+tailscale serve --bg --https=8443 http://127.0.0.1:4317
+```
+
+Grant `tcp:8443` in your [tailnet access policy](#6-tailnet-access-policy), then run `bun apps/gateway/src/cli.js doctor`, which checks `serveMapping` to confirm Tailscale Serve proxies the configured `http.publicOrigin` host and port to the gateway's loopback listener (`http.hostname` and `http.port` in `config.json`).
+
 ## 6. Tailnet access policy
 
 ### Access policy and identities
