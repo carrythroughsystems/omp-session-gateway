@@ -501,6 +501,22 @@ test("cancelled runtime pauses stop, cleanup obtains a fresh independent context
   await runtime.pause(1);
 });
 
+test.each(["abort", "deadline"] as const)("502 runtime pause %s preserves typed delivery timeout evidence", async scenario => {
+  const controller = new AbortController(), raw = new Error("synthetic runtime pause cancellation");
+  let id = 40;
+  const runtime = createAndroidPushRuntime(identity, { execution: { signal: controller.signal,
+    deadline: performance.now() + (scenario === "deadline" ? 10 : 60_000), nextFailureId: () => ++id } });
+  const pending = runtime.pause(60_000);
+  if (scenario === "abort") controller.abort(raw);
+  const error = await pending.catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{
+    id: 41, lane: "androidPush", step: "baseline_captured", class: "harness", reason: "delivery_timeout", operation: "read_only",
+  }]);
+  if (scenario === "abort") expect(error.cause).toBe(raw);
+  else expect(error.cause).toBeInstanceOf(Error);
+});
+
 test("ADB cancellation reaps and drains its owned subprocess before returning", async () => {
   const controller = new AbortController();
   const exited = Promise.withResolvers<number>();
