@@ -1214,8 +1214,6 @@ describe("source-bound session creation", () => {
       const ready = session("creation-banner-0001");
       const harness = await bootApp({
         permission: "denied", initialSessions: [], suffix: `creation-banner-${reason}`, launchGate: gate.promise,
-        // A stale notification locks SSE status changes; the launch must settle its own banner.
-        ...(reason === "discard" ? { pathname: "/collab/synthetic-expired-0001", search: "?activity=stopped&generation=1" } : {}),
         creationResponse: async (path, init) => Response.json(path.endsWith("options") ? choices
           : init.method === "POST" ? { operationId, state: "accepted" }
             : { operationId, state: "ready", updatedAt: new Date().toISOString(), session: { instanceId: ready.instanceId, generation: 1 } }),
@@ -1227,7 +1225,7 @@ describe("source-bound session creation", () => {
       expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
       if (reason === "discard") {
         harness.emit("session_upsert", { type: "session_upsert", revision: 3, session: { ...ready, generation: 2 } });
-        expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+        expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
       } else if (reason === "hidden") harness.setVisibility("hidden");
       else {
         if (reason === "offline") harness.window.dispatchEvent(new Event("offline"));
@@ -1841,8 +1839,9 @@ describe("dashboard attention and notifications", () => {
     expect(harness.fetchLocations.every(path => path === "/")).toBeTrue();
     expect(harness.replacedPaths).toEqual(["/"]);
     expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
-    harness.emit("keepalive", { type: "keepalive", revision: 1 });
     expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+    harness.emit("keepalive", { type: "keepalive", revision: 1 });
+    expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
   });
 
   test("rejects changed, gone, and unavailable activity-stop sessions without launching", async () => {
@@ -1862,11 +1861,11 @@ describe("dashboard attention and notifications", () => {
       expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
       expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
       harness.emit("keepalive", { type: "keepalive", revision: 1 });
-      expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+      expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
     }
   });
 
-  test("scrubs stale notification routes and keeps their expired state visible", async () => {
+  test("scrubs stale notification routes and releases their status on a fresh observation", async () => {
     const harness = await bootApp({
       permission: "denied",
       pathname: "/collab/stale-attention-0001",
@@ -1878,7 +1877,7 @@ describe("dashboard attention and notifications", () => {
     expect(harness.replacedPaths).toEqual(["/"]);
     expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
     harness.emit("snapshot", { type: "snapshot", revision: 2, sessions: [] });
-    expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+    expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
   });
 
   test("reloads an idle directory after an updated worker activates", async () => {
