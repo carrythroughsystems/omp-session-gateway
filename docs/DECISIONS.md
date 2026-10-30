@@ -2028,3 +2028,29 @@ This moves Bun only, not the exact OMP baseline or the vendored client's provena
 - `rollback` changes the gateway payload, not Bun: it keeps the Bun running the rollback command,
   so a retained predecessor then runs on 1.4.4. It does not restore the predecessor's old Bun or
   transfer its earlier qualification to this runtime.
+
+---
+
+## ADR-047 — Publication records follow main without changing release authority
+
+**Status:** Accepted
+
+**Date:** 2026-10-30
+
+**Context:** v0.9.0's record conflicted with site edits after approval, while the pinned driver's
+control comparison rejected legitimate newer controls on main. Its preparation date also
+misdated a smoke completed three days later.
+
+**Decision:** Generate record PRs on current main. Regenerate a BEHIND or conflicting record as
+one bot-authored, bot-signed commit, replacing only the owned branch with an old-head force lease,
+not an update-branch merge. Use GitHub's `mergeable: false` or `mergeable_state: dirty` as conflict
+evidence; unknown mergeability waits. Replacement heads need fresh strict checks and the existing
+stale-merge-intent re-plan. Record authority requires the generated record path allowlist and
+unchanged controls between the PR merge base and head; prepare/approve retain the pinned-checkout
+comparison. Persist `smokedAt` in the finish-smoke intent/state and use its UTC date for records.
+
+**Consequences:** Main can move after approval and stable signing without preventing the final
+record of immutable release evidence. A record cannot change controls, install new driver policy,
+or expand qualification. Source-keyed detached worktrees retain crash checkpoints without
+rewriting previous worktrees. No legacy date fallback is needed: the installed driver is closed
+and the state parser permits historical closed states without a smoke timestamp.

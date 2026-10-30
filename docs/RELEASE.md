@@ -60,7 +60,8 @@ within its requested patch/minor release class and existing resource caps; it do
    with the verified digest.
 6. **Record the evidence.** One `docs(release): record vX.Y.Z publication and installed
    verification` PR moves the COMPATIBILITY release paragraph, the status page, and `site/llms.txt`
-   to "published" and records the publication run, source, digest, and smoke result.
+   to "published" and records the publication run, source, digest, and smoke result. Generate it
+   on current `main`, using the smoke completion date, not the release-preparation date.
 
 Every mainline release so far has renewed a founder-approved fresh 1,800-second relay check in
 place of the eight-hour gate. The orchestrator defaults to 1,800 seconds and rejects shorter
@@ -173,7 +174,9 @@ runtime comparison, release-policy gate, smoke plan and local checks to that sub
 GitHub checks must pass on the same head. The legacy phase name "approval-required" evaluates
 this predicate; it no longer asks the founder. Only the configured release bot may merge this PR.
 Stable signing independently rereads merger, merge source/tree, evidence, current main and policy.
-Main movement after prepare is a stale-source hold, never silent incorporation of newer work.
+Main movement between prepare and approval is a stale-source hold, never silent incorporation
+of newer work into the release. After approval and stable signing, `main` may move while publication,
+smoke and record finish; the published source and evidence stay pinned.
 
 A routine release cannot change its own authority. `ROUTINE_AUTHORITY_PATHS` in
 `scripts/release-policy.ts` is the explicit, reasoned authority list: request/selection and merge
@@ -221,6 +224,21 @@ versions, proven by normalized control equality at the merge boundary. Existing 
 checkpoints require a verified head signature and the configured bot as commit author before
 adoption. Bot PR authorship or a release-driver branch prefix alone grants no authority.
 
+Prepare and approve compare normalized controls against the pinned installed checkout. Record
+instead compares controls at its PR merge base with its head, in addition to the exact generated
+record file allowlist. Reviewed control changes already on `main` do not prevent documenting an
+immutable published release; a record PR that changes a control still holds with
+`generated-content-mismatch`. This does not advance the installed driver or authorize another release.
+
+Record generation starts at the current `main` commit, not `stableCommit`. If GitHub reports the
+record PR BEHIND, `mergeable: false`, or DIRTY (`mergeable_state: dirty`), the driver regenerates
+on current `main` and force-updates only its owned record branch, using a lease pinned to the old
+head and a fresh bot-authored, bot-signed single commit. It never uses GitHub update-branch for
+records, even if the old checks have not passed. Unknown mergeability waits. Checks must pass on
+the replacement head; a saved merge intent for an older head is dropped and re-planned as usual.
+The old PR must still satisfy bot ownership/signature and generated-file/control checks before
+replacement. Source-keyed detached worktrees preserve local commit checkpoints across crashes.
+
 ROUTINE_HOLD_REASONS in scripts/release-policy.ts enumerates authority-path-changed, policy-changed,
 out-of-class, stale-source, missing-evidence, head-tree-changed, unexpected-merger,
 pr-identity-changed, required-checks-missing, merge-tree-changed, merge-missing, merge-signature-missing and generated-content-mismatch. Pending required
@@ -229,6 +247,11 @@ passed job without the exact evidence binding grants no authority.
 
 Prepare, approve and record use `scripts/release-generate.ts` with an explicit persisted
 `--date YYYY-MM-DD`; package/workspace versions and source constants are mechanical edits.
+`finish-smoke` persists `smokedAt` as an ISO UTC timestamp in its decision/state; record passes
+its UTC date to `release-generate.ts record --date`, including after regeneration or intent replay.
+Prepare and approve retain the preparation date. A manual record uses the actual smoke completion
+date and current `main`. There is no preparation-date fallback: installation is drained at `closed`,
+whose historical state needs no `smokedAt`; a new smoke transition supplies it before recording.
 Release prose lives in `scripts/release-text.json`, not in the workflow. The existing
 `site-coherence.test.ts` and `release-policy.ts` remain gates, not bypassable renderer assertions.
 The golden v0.7.4 fixtures use a sanitized real candidate receipt and compare generated surfaces

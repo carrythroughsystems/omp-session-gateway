@@ -514,7 +514,7 @@ export function releaseInputPaths(command: Options["command"]): string[] {
 /** CLI errors (including usage/markers/receipt identity) exit 1; success exits 0. */
 export async function runReleaseGenerate(argv: readonly string[], root = process.cwd()): Promise<string[]> {
   const [command, version, ...rest] = argv;
-  if (command !== "prepare" && command !== "approve" && command !== "record") throw new Error("usage: release-generate.ts prepare|approve|record VERSION --date YYYY-MM-DD [inputs]");
+  if (command !== "prepare" && command !== "approve" && command !== "record") throw new Error("usage: release-generate.ts prepare|approve|record VERSION --date YYYY-MM-DD [inputs]; record uses the UTC smoke completion date on current main");
   const allowed = command === "prepare" ? ["--date", "--candidate-tag", "--release-class"] : command === "approve" ? ["--date", "--receipt", "--candidate-tag"] : ["--date", "--smoke", "--status", "--publication"];
   const flags: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {

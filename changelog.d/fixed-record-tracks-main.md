@@ -1,0 +1,1 @@
+- Generate release records on current main, refresh stale branches, and date them by smoke completion.
