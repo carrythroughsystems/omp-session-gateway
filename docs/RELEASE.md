@@ -1494,6 +1494,24 @@ verifies that exact baseline, rather than unconditionally enabling both radios. 
 Doze and battery reset after a failed radio restoration. Restoration and owned-fixture cleanup
 failures are reported with, never instead of, the primary qualification failure.
 
+After each lock, Airplane and forced-Doze recovery cycle, acceptance requires the Pixel's
+tailnet VPN to return: up to 60 seconds of one-second polling for a connected VPN agent in the
+`Current Networks:` section of `dumpsys connectivity`. Each recovery adb read is bounded to
+five seconds. This read-only check follows the rendered same-page recovery measurement without
+opening Chrome tabs, changing DevTools forwards or disturbing the measured page's visibility.
+Private acceptance evidence records VPN/HTTPS booleans and timings, with `httpsProbed: false`
+between cycles; ICMP observations alone never establish recovery.
+After the measured journey is over, restoration restores radios, exits forced Doze, resets battery
+emulation, repeats the VPN check and additionally proves the tailnet path with one owned top-level
+HTTPS health navigation using the same 15-second probe described below. A lost path raises
+`AndroidTailnetRecoveryError`; during restoration it is a restoration failure, preventing later
+smoke or qualification stages from using the disconnected Pixel.
+
+Tailscale is not on the release Pixel's Doze whitelist. Forced Doze can terminate its VPN and
+leave the tailnet path down after Doze exits. The operator remedy is to **reconnect Tailscale on
+the Pixel** before another attempt. No Tailscale/VPN, airplane-mode, DNS, exit-node, firewall or
+battery-policy remedy is automatic; the recovery check changes none of those device settings.
+
 This fork-era example ran from the `v0.2.1` checkout with its own Bun and OMP pins. The later
 fork-era v0.3.0 engineering source used Bun 1.4.0 and OMP v18.1.14; neither set of bytes is the
 current mainline source or a transferable qualification:
