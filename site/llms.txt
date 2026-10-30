@@ -6,7 +6,7 @@
 
 ## Supported platforms
 
-- Tested in CI on every change (with daily stock-OMP canaries on Linux and Windows): Linux, macOS, and Windows gateway hosts; Chrome/Chromium, Edge, Firefox, Safari/WebKit, and Android; iPhone and iPad as a WebKit browser. Supported is not hardware-qualified; qualification is the exact matrix below.
+- Supported (tested in CI on every change, with daily stock-OMP canaries on Linux and Windows, and bug reports accepted): Linux, macOS, and Windows gateway hosts; Chrome and Chromium, Edge (through Chromium), Firefox, and Safari and WebKit browsers; and Android. Tested as a browser in CI WebKit emulation: iPhone and iPad. Supported and Tested do not imply hardware qualification; Qualified is the exact matrix below.
 
 ## Current qualification boundary
 

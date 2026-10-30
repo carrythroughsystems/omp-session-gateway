@@ -45,14 +45,14 @@
 a browser-hosted workspace, and remote shell access solve different problems.</p>
 
 <h2>Keep your running OMP terminal sessions</h2>
-<p><strong>OMP Session Gateway</strong> puts participating interactive sessions on one private mobile
+<p><strong>OMP Session Gateway</strong> puts participating interactive Oh My Pi (OMP) sessions on one private mobile
 page and opens View or Control in OMP's existing encrypted collaboration client. The gateway keeps
-bounded metadata, not transcripts.</p>
-<p><strong>Stock OMP ≥18.1.20 supplies the native registry and controller.</strong> No fork, custom
+bounded session metadata (title, folder, model, uptime, and waiting state), not transcripts.</p>
+<p><strong>Stock OMP ≥ 18.1.20 supplies the native registry and controller.</strong> No fork, custom
 OMP build, or gateway-specific OMP plugin is needed. The gateway remains a separate companion.</p>
-<p><strong>One-time setup:</strong> install the gateway with Bun 1.4.0, enable
-<code>collab.autoStart</code>, and configure TUN-mode Tailscale Serve with an exact user allowlist
-and Funnel disabled. Then start sessions with plain <code>omp</code> — no per-session link copying.
+<p><strong>One-time setup:</strong> install the gateway with the pinned Bun runtime, enable
+<code>collab.autoStart</code> once, and configure TUN-mode Tailscale Serve with an exact user allowlist
+and Funnel disabled. Then start participating sessions with plain <code>omp</code> — no per-session link copying.
 <a href="../#setup">Setup steps</a>.</p>
 
 <h2>Choose a different workflow</h2>
