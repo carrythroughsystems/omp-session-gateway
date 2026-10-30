@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import packageManifest from "../package.json";
 
 
 test("local and API control fingerprints normalize the same source framing", async () => {
@@ -1018,7 +1019,7 @@ describe.skipIf(process.platform === "win32")("private smoke worker output", () 
         selected.stableDigest = "a".repeat(64);
         const { runtime, directory, checkout, bin } = await automaticWorkerFixture(root, exitCode, selected, "smoke");
         const home = join(root, "home"), installation = join(home, ".local/state/omp-session-gateway/installation");
-        const bunDirectory = join(home, ".local/lib/omp-session-gateway/bun/v1.4.0");
+        const bunDirectory = join(home, ".local/lib/omp-session-gateway/bun", `v${packageManifest.packageManager.replace(/^bun@/u, "")}`);
         await mkdir(installation, { recursive: true }); await mkdir(bunDirectory, { recursive: true });
         await writeFile(join(installation, "current.json"), JSON.stringify({ versionDirectory: "0.0.0-aaaaaaaaaaaa" }));
         await writeFile(join(bunDirectory, "bun"), "#!/bin/sh\nprintf '%s\\n' '{\"fixture\":true}'\n", { mode: 0o700 });

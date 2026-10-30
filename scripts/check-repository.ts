@@ -518,6 +518,34 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
   return violations;
 }
 
+export function checkWorkflowBunVersions(name: string, text: string, packageManager: string): string[] {
+  const failures: string[] = [];
+  const version = packageManager.replace(/^bun@/u, "");
+  const workflow = Bun.YAML.parse(text) as {
+    jobs?: Record<string, { steps?: Array<{ uses?: string; if?: unknown; with?: Record<string, unknown>; run?: string }> }>;
+  };
+  for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+    const steps = job.steps ?? [];
+    const setups = steps.filter(step => step.uses?.startsWith("oven-sh/setup-bun@"));
+    if (name === "ci.yml" && !setups.some(step => step.if === undefined && step.with?.["bun-version"] === version)) {
+      failures.push(`${name}: ${jobName} must unconditionally install the packageManager Bun version`);
+    }
+    for (const setup of setups) {
+      if (setup.with?.["bun-version"] !== version) {
+        failures.push(`${name}: ${jobName} setup-bun must use the packageManager Bun version (${version})`);
+      }
+    }
+    for (const step of steps) {
+      for (const match of (step.run ?? "").matchAll(/\btest\s+"\$\(\s*bun\s+--version\s*\)"\s+=\s+(?:"([^"]+)"|'([^']+)'|([^\s;]+))/gu)) {
+        if ((match[1] ?? match[2] ?? match[3]) !== version) {
+          failures.push(`${name}: ${jobName} Bun version assertion must use the packageManager Bun version (${version})`);
+        }
+      }
+    }
+  }
+  return failures;
+}
+
 async function main(): Promise<void> {
   const errors: string[] = [];
   for (const rel of required) {
@@ -647,16 +675,12 @@ async function main(): Promise<void> {
     }
   }
 
-  // Fleet images are shared across repositories and may carry an older Bun. Every CI job
-  // must establish this repository's runtime, independently of the runner environment.
-  const ci = Bun.YAML.parse(await readFile(join(rootPath, ".github/workflows/ci.yml"), "utf8")) as {
-    jobs: Record<string, { steps: Array<{ uses?: string; if?: unknown; with?: Record<string, unknown> }> }>;
-  };
-  for (const [name, job] of Object.entries(ci.jobs)) {
-    const setup = job.steps.find(step => step.uses?.startsWith("oven-sh/setup-bun@"));
-    if (setup === undefined || setup.if !== undefined || setup.with?.["bun-version"] !== packageJson.packageManager.replace(/^bun@/, "")) {
-      errors.push(`ci.yml: ${name} must unconditionally install the packageManager Bun version`);
-    }
+  // Fleet images may carry an older Bun. CI jobs must establish the pin unconditionally,
+  // and every workflow's setup and explicit version assertions must agree with packageManager.
+  const workflows = join(rootPath, ".github/workflows");
+  for (const name of await readdir(workflows)) {
+    if (!/\.ya?ml$/u.test(name)) continue;
+    errors.push(...checkWorkflowBunVersions(name, await readFile(join(workflows, name), "utf8"), packageJson.packageManager));
   }
 
   const canonicalChecks: Array<[string, string]> = [

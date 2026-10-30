@@ -6,7 +6,7 @@ Use stock mainline OMP `>= 18.1.20`. The integration is native to stock OMP: no 
 build, or gateway-specific OMP plugin is required. The separately installed gateway consumes OMP's
 local registry; it does not patch OMP, import private controller APIs, or install a second OMP
 executable. Releases earlier than `18.1.20` lack this registry and are unsupported. Deployment
-requires Bun `1.4.0`, TUN-mode Tailscale Serve, an exact login allowlist, and the one-time
+requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact login allowlist, and the one-time
 `collab.autoStart` setting below.
 
 | Surface | Pin or contract | Notes |
@@ -14,7 +14,7 @@ requires Bun `1.4.0`, TUN-mode Tailscale Serve, an exact login allowlist, and th
 | Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
 | Engineering host baseline | `v18.12.5` (`d5cd750e41fede277f9eb933455da92a0738915e`) | Exact OMP source and tree (`1d19bf65af4446fa9bfda4ed0a7d09315b02d9c8`) in `UPSTREAM.lock.json` |
 | Embedded browser client | `v18.12.6` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.12.6`) | Independent provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); includes upstream render coalescing and streaming-tail Markdown ([#14728](https://github.com/can1357/oh-my-pi/pull/14728)), linear-time Markdown/math lexing ([#13961](https://github.com/can1357/oh-my-pi/pull/13961), [#14667](https://github.com/can1357/oh-my-pi/pull/14667)), idle agent-drawer polling shutdown, and eval-output rendering. Only pure TypeScript parser sources are vendored, without pi-utils/pi-natives packages. |
-| Gateway runtime | Bun `1.4.0` | Required runtime for the CLI, daemon, and release archives |
+| Gateway runtime | Bun `1.4.4` | Required runtime for the CLI, daemon, and release archives |
 
 For the current published release and its qualified hardware matrix, see
 [Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md).

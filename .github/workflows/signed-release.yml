@@ -36,7 +36,7 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
 
       - name: Validate signed release tag and derive its channel
         env:
@@ -205,6 +205,7 @@ jobs:
           bun scripts/release-tag-state.ts "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
           upstream_commit="$(jq -r '.commit' UPSTREAM.lock.json)"
           upstream_tag="$(jq -r '.tag' UPSTREAM.lock.json)"
+          bun_version="$(jq -er '.packageManager | sub("^bun@"; "")' package.json)"
           jq -e '[.highlights, .combinations, .stableRollback, .changesToTest, .plannedBoundary, .candidateRollback] | all(.[]; type == "string" and length > 0)' scripts/release-text.json > /dev/null
           if [[ "$GITHUB_REF_NAME" == provenance-test-* ]]; then
             cat > "$notes" <<EOF
@@ -214,7 +215,7 @@ jobs:
 
           - Source commit: \`$GITHUB_SHA\`
           - OMP baseline: \`$upstream_commit\` (tag $upstream_tag)
-          - Runtime: Bun 1.4.0 or newer
+          - Runtime: Bun $bun_version or newer
           - Registry protocol: 1
           - Verification: [docs/RELEASE.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/RELEASE.md)
           EOF
@@ -256,7 +257,7 @@ jobs:
 
           - Source commit: $GITHUB_SHA
           - OMP source reference: $upstream_commit (tag $upstream_tag); mainline >=18.1.20 is required
-          - Runtime: Bun 1.4.0; registry protocol 1; Push API 2
+          - Runtime: Bun $bun_version; registry protocol 1; Push API 2
           - Verification: https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/RELEASE.md
           EOF
           else
@@ -276,7 +277,7 @@ jobs:
           ### Qualification boundary
 
           - Source commit: $GITHUB_SHA
-          - Runtime: Bun 1.4.0; registry protocol 1; Push API 2.
+          - Runtime: Bun $bun_version; registry protocol 1; Push API 2.
           $(jq -er '.plannedBoundary | select(type == "string" and length > 0)' scripts/release-text.json)
           - The Chrome process-wide network wedge remains a disclosed environment limitation; Portal Tunnel and self-hosted/proxied relays remain outside the stable core claim.
 

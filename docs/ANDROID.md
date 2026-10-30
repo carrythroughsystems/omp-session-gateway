@@ -9,7 +9,7 @@ and [Release status](RELEASE_STATUS.md).
 ## Decision: PWA first
 
 Current hosts use stock mainline OMP `>= 18.1.20` with `collab.autoStart` alone: no fork, custom
-OMP build, or gateway-specific OMP plugin. Install the gateway separately and retain Bun 1.4.0,
+OMP build, or gateway-specific OMP plugin. Install the gateway separately and retain Bun 1.4.4,
 TUN-mode Tailscale Serve, and exact login allowlisting. The gateway polls OMP metadata and fetches
 a capability per explicit launch without storing it; Android HTTP/SSE and in-memory client
 bootstrap are unchanged. Physical-client qualification on the Pixel 10 Pro (Android 17, Chrome 154)
@@ -229,7 +229,7 @@ installed for the developer Mac does not qualify the retained Mac's origin. Equi
 separate explicit operation, never part of lane run or cleanup:
 
 ```sh
-export PATH="$HOME/.local/lib/omp-session-gateway/bun/v1.4.0:$PATH"
+export PATH="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4:$PATH"
 bun scripts/android-webapk.ts setup "$ORIGIN"
 ```
 
