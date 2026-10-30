@@ -367,6 +367,8 @@ for (const reason of ["close", "hidden"] as const) {
     const opening = Promise.withResolvers<void>();
     const arrived = Promise.withResolvers<void>();
     const settled = Promise.withResolvers<void>();
+    const events = Promise.withResolvers<void>();
+    await page.route("**/api/v1/events", async route => { await events.promise; await route.continue(); });
     await page.route(`**/api/v1/sessions/${readySession.instanceId}/launch`, async route => {
       arrived.resolve();
       await opening.promise;
@@ -374,9 +376,8 @@ for (const reason of ["close", "hidden"] as const) {
     });
     try {
       await installSyntheticProductFixture(context, key, { activeAsk: false });
-      // Keep SSE snapshots from settling the launch banner on the launch's behalf.
-      await page.goto(`${fixture.origin}/collab/synthetic-expired-0001?activity=stopped&generation=1`);
-      await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "expired");
+      // Hold actual SSE delivery rather than relying on a completed notification's status lock.
+      await page.goto(fixture.origin);
       await review(page);
       await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
       await arrived.promise;
@@ -389,11 +390,12 @@ for (const reason of ["close", "hidden"] as const) {
       await expect(page.locator("#tray")).toBeHidden();
       await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "ready");
       await expect(page.locator("#status-banner")).toBeHidden();
+      events.resolve();
       opening.resolve();
       await settled.promise;
       await expect(page.locator(".gateway-shell")).toHaveCount(0);
       await privateSinks(page, fixture);
-    } finally { opening.resolve(); await fixture.stop(); }
+    } finally { events.resolve(); opening.resolve(); await fixture.stop(); }
   });
 }
 
