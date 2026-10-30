@@ -8,6 +8,8 @@ import { QualificationLogSink, SafeLogger } from "../apps/gateway/src/logger.ts"
 import { createQualificationLogs, parseQualificationLogs, pushDeliveryTelemetry, qualificationLogDirectory } from "./qualification-logs.ts";
 import { executeFixture } from "./push-qualification-fixture.ts";
 import { QualificationFailure, normalizeQualificationFailures, privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
+import { AndroidBrowserCleanupError } from "./android-device.ts";
+import { pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 const event = (index: number, name: string, fields: Record<string, number | boolean>) => ({ timestamp: "2026-01-01T00:00:00.000Z", level: "info" as const, event: name, request_alias: 1, ...fields, index });
 const flags = { request_alias: 1, attention: true, clear: false, activity_stop: false, subscription_replay: false };
 const send = [event(1, "push.queue_accepted", { sequence: 1, ...flags }), event(2, "push.send_started", { sequence: 1, ...flags, subscriptions: 1 }),
@@ -45,6 +47,21 @@ test.skipIf(process.platform === "win32")("509 round2 browser sink selects deepe
     await logs.browserFailure("browser_context", chain, 1);
     expect(JSON.parse(readFileSync(join(root, "browser-substep.json"), "utf8"))).toMatchObject({
       message: deep.message, cdpMethod: "Runtime.evaluate", truncated: true, redacted: true,
+    });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === "win32")("510 browser sink selects the earlier actionable cleanup leaf without a CDP prefix", async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "qualification-browser-cleanup-")); chmodSync(root, 0o700);
+  const logs = createQualificationLogs({ execute: executeFixture, remoteDirectory: qualificationLogDirectory(root, randomUUID()), jobDirectory: root });
+  const primary = new Error("Android Push directory did not load"); primary.stack = primary.message;
+  const cleanup = new Error("browser forward removal failed"); cleanup.stack = cleanup.message;
+  let id = 0;
+  const error = pushBrowserCleanupFailure(new AndroidBrowserCleanupError([primary, cleanup], 1), () => ++id);
+  try {
+    await logs.browserFailure("browser_navigation", error, 1);
+    expect(JSON.parse(readFileSync(join(root, "browser-substep.json"), "utf8"))).toMatchObject({
+      substep: "browser_navigation", message: primary.message, cdpMethod: null, elapsedMs: 1,
     });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
