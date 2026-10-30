@@ -26,6 +26,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 - Report the upstream canary's resolved OMP version, pre-flight failures, and Bun engine requirement
   in summaries and failure issues, and expose successful scheduled runs correctly.
+- Wake and unlock Android, then send HOME before the published-byte smoke's installed-WebAPK
+  launch; re-launch once after ten seconds without extending the focus deadline, and retain
+  only bounded private activity, power, and keyguard evidence when focus never arrives.
 - Require alias-matched outbound clear acknowledgements before Android Push overlap recovery
   re-arms using settled clear-only proofs, including removed fixture hosts. Retain typed delivery
   timeouts and late sampling at actual execution expiry without changing local-timeout or GCM
