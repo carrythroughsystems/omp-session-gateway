@@ -89,83 +89,138 @@ describe("Android network reachability", () => {
 });
 
 describe("device-origin HTTPS reachability", () => {
-  function fixture(resource: unknown = { success: true, httpStatusCode: 200, stream: "owned-stream" }) {
+  function fixture(page: {
+    readonly finalUrl?: string;
+    readonly responseStatus?: unknown;
+    readonly body?: string | null;
+    readonly errorText?: string;
+  } = {}) {
     const calls: { method: string; parameters?: Record<string, unknown> }[] = [];
     let clock = 100, cleaned = false, cleanupDelay = 0, resultDelay = 0;
-    let opaqueOrigin = "null", frame: unknown = { id: "owned-frame", url: "about:blank" };
-    let closeError: Error | undefined, containmentError: Error | undefined;
+    let currentUrl = "about:blank", readyStates: string[] = [];
+    let containmentError: Error | undefined;
     let execution: { readonly signal: AbortSignal; readonly deadline: number } | undefined;
     // Only the operations this probe uses are implemented; no device, sockets, or host fetches.
     const driver = {
       async openTab() { calls.push({ method: "openTab" }); },
       async evaluate<T>(expression: string): Promise<T> {
         calls.push({ method: "evaluate", parameters: { expression } });
-        return opaqueOrigin as T;
+        clock += resultDelay;
+        const body = page.body === undefined ? '{"status":"ready"}' : page.body;
+        return new Function("document", "location", "performance", `return ${expression};`)(
+          { readyState: readyStates.shift() ?? "complete", body: body === null ? null : { textContent: body } },
+          { href: page.finalUrl ?? currentUrl },
+          { getEntriesByType(type: string) {
+            expect(type).toBe("navigation");
+            return [{ responseStatus: "responseStatus" in page ? page.responseStatus : 200 }];
+          } },
+        ) as T;
       },
       async send(method: string, parameters?: Record<string, unknown>) {
         calls.push({ method, ...(parameters === undefined ? {} : { parameters }) });
-        if (method === "Page.navigate") return { frameId: "owned-frame" };
-        if (method === "Page.getFrameTree") return { frameTree: { frame } };
-        if (method === "Page.setDocumentContent") return {};
-        if (method === "Network.loadNetworkResource") { clock += resultDelay; return { resource }; }
-        if (method === "IO.close") { if (closeError !== undefined) throw closeError; return {}; }
+        if (method === "Page.navigate") {
+          currentUrl = String(parameters?.url);
+          return { frameId: "owned-frame", ...(page.errorText === undefined ? {} : { errorText: page.errorText }) };
+        }
         throw new Error("unexpected HTTPS probe operation");
       },
     };
     const chrome = (async (run: (driver: AndroidChromeDriver) => Promise<unknown>, options?: Parameters<typeof withAndroidChrome>[1]) => {
       execution = options?.execution;
+      let result: unknown, failure: unknown, failed = false;
       try {
-        const result = await run(driver as AndroidChromeDriver);
-        if (containmentError !== undefined) throw containmentError;
-        return result;
+        result = await run(driver as AndroidChromeDriver);
+      } catch (error) {
+        failed = true; failure = error;
       } finally { cleaned = true; clock += cleanupDelay; }
+      if (containmentError !== undefined) throw new AndroidBrowserCleanupError(
+        failed ? [failure, containmentError] : [containmentError], 1);
+      if (failed) throw failure;
+      return result;
     }) as typeof withAndroidChrome;
     return {
       calls, chrome, now: () => clock, cleaned: () => cleaned, execution: () => execution,
-      opaque: (value: string) => { opaqueOrigin = value; }, frame: (value: unknown) => { frame = value; },
+      loading: (...states: string[]) => { readyStates = states; },
       delay: (value: number, cleanup = false) => { if (cleanup) cleanupDelay = value; else resultDelay = value; },
-      closeFailure: (error: Error) => { closeError = error; }, containmentFailure: (error: Error) => { containmentError = error; },
+      containmentFailure: (error: Error) => { containmentError = error; },
     };
   }
 
-  test("uses the device CDP network loader with an opaque origin, exact TLS authority and no credentials/cache", async () => {
+  test("navigates only an owned tab to the exact TLS health URL and validates its committed response", async () => {
     const browser = fixture();
     expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid:9443", browser)).toBe(true);
-    expect(browser.calls.map(call => call.method)).toEqual([
-      "openTab", "Page.navigate", "Page.getFrameTree", "evaluate", "Page.setDocumentContent",
-      "Network.loadNetworkResource", "IO.close",
-    ]);
-    expect(browser.calls[1]!.parameters).toEqual({ url: "about:blank" });
-    expect(browser.calls[3]!.parameters).toEqual({ expression: "location.origin" });
-    expect(browser.calls[4]!.parameters).toEqual({
-      frameId: "owned-frame",
-      html: `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://gateway-fixture.invalid:9443">`,
-    });
-    expect(browser.calls[5]!.parameters).toEqual({
-      frameId: "owned-frame", url: "https://gateway-fixture.invalid:9443/api/v1/health",
-      options: { disableCache: true, includeCredentials: false },
-    });
-    expect(browser.calls[6]!.parameters).toEqual({ handle: "owned-stream" });
+    expect(browser.calls.map(call => call.method)).toEqual(["openTab", "Page.navigate", "evaluate"]);
+    expect(browser.calls[1]!.parameters).toEqual({ url: "https://gateway-fixture.invalid:9443/api/v1/health" });
     expect(browser.execution()!.deadline).toBe(15_100);
     expect(browser.execution()!.signal).toBeInstanceOf(AbortSignal);
     expect(browser.cleaned()).toBe(true);
   });
 
-  test.each([
-    { success: false, httpStatusCode: 200 },
-    { success: true, httpStatusCode: 200, netError: -202 },
-    { success: true, httpStatusCode: 301 },
-    { success: true, httpStatusCode: 403 },
-    { success: true, httpStatusCode: 500 },
-    { success: true, httpStatusCode: 0 },
-    { success: true, httpStatusCode: "200" },
-    { success: true, httpStatusCode: 200.5 },
-    { success: true },
-    { httpStatusCode: 200 },
-  ])("refuses incomplete, TLS-failed, redirected or unsuccessful response %j", async result => {
-    const browser = fixture({ ...result, stream: "owned-stream" });
+  test.each(["net::ERR_CERT_AUTHORITY_INVALID", "net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS", ""])(
+    "a navigation error cannot admit HTTPS: %s", async errorText => {
+      const browser = fixture({ errorText });
+      expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(false);
+      expect(browser.calls.map(call => call.method)).toEqual(["openTab", "Page.navigate"]);
+      expect(browser.cleaned()).toBe(true);
+    },
+  );
+
+  test.each(["https://foreign.invalid/api/v1/health", "https://gateway-fixture.invalid/",
+    "https://gateway-fixture.invalid/api/v1/health?redirected", "http://gateway-fixture.invalid/api/v1/health",
+    "chrome-error://chromewebdata/", "about:blank"])("refuses a redirected or interstitial final URL: %s", async finalUrl => {
+    const browser = fixture({ finalUrl });
     expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(false);
-    expect(browser.calls.at(-1)).toEqual({ method: "IO.close", parameters: { handle: "owned-stream" } });
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test.each([0, 199, 300, 301, 403, 500, "200", 200.5, undefined, null])(
+    "refuses an unsuccessful or missing navigation response status: %j", async responseStatus => {
+      const browser = fixture({ responseStatus });
+      expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(false);
+      expect(browser.cleaned()).toBe(true);
+    },
+  );
+
+  test.each([200, 204, 299])("a 2xx gateway health response proves reachability: %s", async responseStatus => {
+    const browser = fixture({ responseStatus });
+    expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(true);
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test.each(["ready", "degraded"])("gateway readiness %s still proves reachability", async status => {
+    const browser = fixture({ body: JSON.stringify({ status }) });
+    expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(true);
+  });
+
+  test.each(["not JSON", "", "<html>interstitial</html>", "null", "[]", '"ready"', "true",
+    '{"status":"unknown"}', '{"status":true}', '{"ready":true}', null])(
+    "refuses malformed or non-gateway health bodies: %j", async body => {
+      const browser = fixture({ body });
+      expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(false);
+      expect(browser.cleaned()).toBe(true);
+    },
+  );
+
+  test("waits for the health navigation to finish loading before examining its body", async () => {
+    const browser = fixture();
+    browser.loading("loading", "interactive");
+    expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(true);
+    expect(browser.calls.map(call => call.method)).toEqual(["openTab", "Page.navigate", "evaluate", "evaluate", "evaluate"]);
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test("a pending health navigation cannot outlive the deadline", async () => {
+    const browser = fixture();
+    browser.loading("loading");
+    browser.delay(15_000);
+    await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser))
+      .rejects.toThrow("Android HTTPS reachability deadline");
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test("an unsuccessful response still closes the owned browser resources", async () => {
+    const browser = fixture({ responseStatus: 503 });
+    expect(await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).toBe(false);
     expect(browser.cleaned()).toBe(true);
   });
 
@@ -178,45 +233,30 @@ describe("device-origin HTTPS reachability", () => {
     },
   );
 
-  test("same-origin documents cannot turn includeCredentials:false into an authenticated request", async () => {
-    const browser = fixture();
-    browser.opaque("https://gateway-fixture.invalid");
-    await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toThrow("owned opaque document");
-    expect(browser.calls.some(call => call.method === "Network.loadNetworkResource")).toBe(false);
-    expect(browser.cleaned()).toBe(true);
-  });
-
-  test.each([{}, { id: "", url: "about:blank" }, { id: "owned-frame", url: "https://foreign.invalid/" }])(
-    "refuses an invalid or nonblank owned frame %j", async frame => {
-      const browser = fixture(); browser.frame(frame);
-      await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toThrow("owned opaque document");
-      expect(browser.calls.some(call => call.method === "Network.loadNetworkResource")).toBe(false);
-    },
-  );
-
-  test.each([null, [], "invalid"])("malformed protocol results never admit HTTPS: %j", async result => {
-    const browser = fixture(result);
-    await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toThrow("invalid Android HTTPS");
-    expect(browser.cleaned()).toBe(true);
-  });
-
   test.each([false, true])("late response/cleanup cannot satisfy the deadline (cleanup=%s)", async cleanup => {
     const browser = fixture(); browser.delay(15_000, cleanup);
     await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toThrow("HTTPS reachability deadline");
-    expect(browser.calls.at(-1)!.method).toBe("IO.close");
     expect(browser.cleaned()).toBe(true);
   });
 
-  test("stream and browser containment failures cannot become successful reachability", async () => {
-    const stream = fixture(), closeFailure = new Error("stream closure refused");
-    stream.closeFailure(closeFailure);
-    const failure = await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", stream).catch(error => error);
-    expect(failure).toBeInstanceOf(AggregateError);
-    expect(failure.errors).toEqual([closeFailure]);
-    expect(stream.cleaned()).toBe(true);
-    const browser = fixture(), containment = new AndroidBrowserCleanupError([], 1);
+  test("browser containment failures cannot become successful reachability", async () => {
+    const browser = fixture(), containment = new Error("target closure refused");
     browser.containmentFailure(containment);
-    await expect(androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser)).rejects.toBe(containment);
+    const failure = await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser).catch(error => error);
+    expect(failure).toBeInstanceOf(AndroidBrowserCleanupError);
+    expect(failure.errors).toEqual([containment]);
+    expect(browser.cleaned()).toBe(true);
+  });
+
+  test("deadline and browser cleanup failures retain both errors in order", async () => {
+    const browser = fixture(), containment = new Error("forward removal refused");
+    browser.delay(15_000); browser.containmentFailure(containment);
+    const failure = await androidDeviceHttpsReachesOrigin("https://gateway-fixture.invalid", browser).catch(error => error);
+    expect(failure).toBeInstanceOf(AndroidBrowserCleanupError);
+    expect(failure.errors).toHaveLength(2);
+    expect(failure.errors[0].message).toBe("Android HTTPS reachability deadline");
+    expect(failure.errors[1]).toBe(containment);
+    expect(browser.cleaned()).toBe(true);
   });
 });
 

@@ -1453,25 +1453,24 @@ eligibility is checked before touching the device; protected, soak, old, missing
 non-Control fixtures fail closed.
 
 The Android acceptance journey admits device-origin reachability when ICMP succeeds **or**, after
-ICMP loss, an owned Chrome/CDP HTTPS probe succeeds. The latter performs a TLS-validated GET of
-`/api/v1/health` on the exact configured gateway authority, with cache bypass and no credentials.
-It uses a verified opaque disposable document because Chromium's `includeCredentials: false`
-means same-origin credentials, not unconditional omission. That document's restrictive CSP also
-rejects redirects outside the HTTPS gateway authority. The probe does not navigate the PWA or
-inspect/log response bodies; it closes the returned stream. Its execution deadline is 15 seconds,
-followed by the existing bounded owned target/stream/forward cleanup; late responses or unproven
-cleanup cannot admit the journey.
+ICMP loss, an owned Chrome/CDP top-level HTTPS health navigation succeeds. The host can drop ICMP,
+for example when the macOS application firewall uses stealth mode. Chrome's Local Network Access
+blocks the same tailnet request from an opaque `about:blank` document, so the fallback navigates
+only its owned disposable tab to `/api/v1/health` on the validated, credential-free HTTPS origin.
+Admission requires no navigation error, that exact committed URL (not a redirect or interstitial),
+a 2xx navigation `responseStatus`, and a parsed gateway health body whose `status` is `ready` or
+`degraded`; discovery readiness does not change network reachability. It fetches no capability and
+does not log response bodies or navigate the user's PWA tab. The service worker bypasses both
+navigations and `/api/`, and the health response is `no-store`, so the PWA cache is untouched.
+Its execution deadline is 15 seconds, followed by the existing bounded owned target/forward cleanup;
+late responses or unproven cleanup cannot admit the journey.
 
 Private Android stderr contains a closed `android-reachability` record: the ICMP and HTTPS
 observations and `satisfiedBy` (`icmp`, `https`, or `null`). ICMP loss alone is an observation, not
 a refusal, when the HTTPS alternative succeeds. Both failed probes still refuse before the
 acceptance journey's radio mutations. An adb transport failure remains fatal. No VPN, DNS, firewall,
 credential, or TLS-validation policy is changed. Qualification preflights remain ICMP-only and
-read-only; they never opt into the browser-backed alternative. The CDP
-[Network schema](https://github.com/ChromeDevTools/devtools-protocol/blob/7245ec551bc9d450170193456ab3965bb7e716cb/pdl/domains/Network.pdl)
-and Chromium's
-[resource loader](https://github.com/chromium/chromium/blob/30466547ef3ffed6e21355b0bb457b22a8a4d88e/content/browser/devtools/protocol/devtools_network_resource_loader.cc)
-define the credential/cache behavior used by this probe.
+read-only; they never opt into the browser-backed alternative.
 
 Normal success and failure kill only that tmux session, wait for registry revocation, remove the
 fixture only when its per-run ownership marker still matches, and delete private staging. The stable
