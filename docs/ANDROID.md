@@ -120,6 +120,24 @@ Push and acceptance share the Wi-Fi-validation-before-mobile-data sequence. Ever
 is attempted, and restoration failures are reported alongside, never instead of, the phase failure.
 A killed process cannot run restoration; inspect and restore the device before another attempt.
 
+After each lock/resume, Airplane and forced-Doze cycle's rendered recovery measurement, acceptance
+proves the tailnet path independently: poll the live `Current Networks:` list from
+`dumpsys connectivity` for a connected VPN for up to 60 seconds at one-second intervals, with
+five-second adb read bounds, then perform one owned top-level `/api/v1/health` HTTPS navigation.
+The health probe has a 15-second execution deadline and the same URL, HTTP-status, body and owned
+cleanup checks as admission; it never navigates the measured PWA tab or competes with its first
+restored request. Private recovery evidence contains only VPN/HTTPS booleans and timings. ICMP
+can remain false when the host drops ping; it does not decide tailnet recovery.
+Restoration repeats the proof after restoring the radio baseline, exiting forced Doze and
+resetting battery emulation. A lost path raises `AndroidTailnetRecoveryError`, including as a
+restoration failure, so later smoke/qualification stages cannot run on the disconnected device.
+
+Tailscale is not Doze-whitelisted on the release Pixel; forced Doze can terminate the VPN and
+leave it offline after exit. **Reconnect Tailscale on the Pixel** before replaying a failed journey.
+No Tailscale/VPN, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is automatic.
+The path proof observes connectivity and navigates only its disposable health tab; it changes
+none of those device settings.
+
 Every acceptance record includes the package name, Android package version, complete
 Browser.getVersion result, launch activity, and DevTools socket. Before recording evidence, the
 driver reads the forwarded endpoint's Android-Package, Browser, and loopback WebSocket URL and

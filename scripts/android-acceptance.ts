@@ -9,7 +9,8 @@
  *
  * Recovery polling observes the rendered directory and never issues its own fetch. Competing probe
  * requests previously changed the browser connection workload and could consume the first restored
- * request while the PWA remained stale. Device-shell reachability remains an independent signal.
+ * request while the PWA remained stale. After polling, a connected VPN and one owned HTTPS health
+ * navigation prove the tailnet path independently; device-shell ICMP is only an observation.
  *
  * The radio baseline captured after admission is restored and verified after every phase outcome.
  * Restoration failures are reported with, never instead of, the phase failure. A killed process
@@ -24,6 +25,7 @@ import {
   androidDeviceHttpsReachesOrigin,
   requireSingleDevice,
   androidDeviceReachesHost,
+  parseAndroidVpnNetwork,
   runAdb,
   readAndroidRadioBaseline,
   restoreAndroidRadios,
@@ -45,6 +47,11 @@ let serial = "";
 
 async function adb(...args: readonly string[]): Promise<string> {
   return (await runAdb(serial, args)).trim();
+}
+
+/** Recovery reads must not hang beyond the VPN polling window on an unresponsive adb transport. */
+async function recoveryAdb(...args: string[]): Promise<string> {
+  return runAdb(serial, args, { timeoutMs: 5_000 });
 }
 
 async function sleep(milliseconds: number): Promise<void> {
@@ -126,6 +133,70 @@ interface PageContinuity {
   reloaded: boolean;
 }
 
+type AndroidAcceptanceCycle = "lock" | "airplane" | "Doze" | "restoration";
+
+export class AndroidTailnetRecoveryError extends Error {
+  readonly name = "AndroidTailnetRecoveryError";
+  constructor(readonly cycle: AndroidAcceptanceCycle, options?: ErrorOptions) {
+    super(`Pixel tailnet path did not recover after the ${cycle} cycle; reconnect Tailscale on the device (no device settings were changed)`, options);
+  }
+}
+
+interface AndroidAcceptanceTailnetEvidence {
+  readonly vpnPresent: boolean;
+  readonly vpnRecoveredMs: number | null;
+  readonly httpsProbed: boolean;
+  readonly httpsReachable: boolean;
+  readonly httpsProbeMs: number | null;
+  readonly recoveredMs: number | null;
+}
+
+interface AndroidAcceptanceTailnetRecoveryOptions {
+  readonly httpsProbe?: (origin: string) => Promise<boolean>;
+  readonly now?: () => number;
+  readonly pause?: (milliseconds: number) => Promise<void>;
+  readonly recordEvidence?: (evidence: AndroidAcceptanceTailnetEvidence) => unknown | Promise<unknown>;
+}
+
+/** Observe VPN recovery for at most a minute, then navigate once; never reconnect or change policy. */
+export async function requireAndroidAcceptanceTailnetRecovery(
+  origin: string,
+  cycle: AndroidAcceptanceCycle,
+  command: AndroidAdbCommand,
+  {
+    httpsProbe = androidDeviceHttpsReachesOrigin,
+    now = () => performance.now(),
+    pause = sleep,
+    recordEvidence = evidence => record({ step: `${cycle}-tailnet-recovery`, ...evidence }),
+  }: AndroidAcceptanceTailnetRecoveryOptions = {},
+): Promise<void> {
+  const since = now(), deadline = since + 60_000;
+  let vpnPresent = false, httpsProbed = false, httpsReachable = false;
+  let vpnRecoveredMs: number | null = null, httpsProbeMs: number | null = null, recoveredMs: number | null = null;
+  return runWithRestoration("Android tailnet recovery evidence", async () => {
+    try {
+      while (now() < deadline) {
+        vpnPresent = parseAndroidVpnNetwork(await command("shell", "dumpsys", "connectivity"));
+        const completedAt = now();
+        if (completedAt > deadline) break;
+        if (vpnPresent) { vpnRecoveredMs = Math.round(completedAt - since); break; }
+        const remaining = deadline - now();
+        if (remaining > 0) await pause(Math.min(1_000, remaining));
+      }
+      if (vpnRecoveredMs === null) throw new AndroidTailnetRecoveryError(cycle);
+      const probedAt = now();
+      httpsProbed = true;
+      try { httpsReachable = await httpsProbe(origin); }
+      finally { httpsProbeMs = Math.round(now() - probedAt); }
+      if (!httpsReachable) throw new AndroidTailnetRecoveryError(cycle);
+      recoveredMs = Math.round(now() - since);
+    } catch (error) {
+      if (error instanceof AndroidTailnetRecoveryError) throw error;
+      throw new AndroidTailnetRecoveryError(cycle, { cause: error });
+    }
+  }, [() => recordEvidence({ vpnPresent, vpnRecoveredMs, httpsProbed, httpsReachable, httpsProbeMs, recoveredMs })]);
+}
+
 function isSamePage(
   probe: Readonly<Record<string, unknown>>,
   expectedTimeOrigin: number,
@@ -141,18 +212,20 @@ function isSamePage(
 /**
  * Polls until the directory is reachable, returning milliseconds since the disruption ended.
  *
- * Each attempt also pings the host from the device shell. That separates a slow tailnet from a
- * stuck page: if the device cannot reach the host either, the delay is not the application's.
+ * Each attempt also pings the host from the device shell, but a host dropping ICMP makes loss
+ * inconclusive. Only after measurement do VPN state and an owned health navigation prove the path.
  */
 async function awaitRecovery(
   driver: AndroidChromeDriver,
-  label: string,
+  cycle: Exclude<AndroidAcceptanceCycle, "restoration">,
   since: number,
   timeoutMs: number,
-  host: string,
+  origin: string,
   expectedTimeOrigin: number,
   continuity: PageContinuity,
 ): Promise<{ recoveredMs: number | null; deviceReachableFirstMs: number | null }> {
+  const host = new URL(origin).hostname;
+  const label = cycle === "lock" ? "lock-resume" : `${cycle.toLowerCase()}-recovery`;
   let deviceReachableFirstMs: number | null = null;
   const recoveredMs = await measureAndroidRecovery(since, timeoutMs, async index => {
     // The app's resume path is driven by visibilityState, so a probe against a hidden or frozen page
@@ -166,6 +239,13 @@ async function awaitRecovery(
     if (deviceReachable && deviceReachableFirstMs === null) deviceReachableFirstMs = sinceMs;
     record({ ...probe, samePage, presentation, deviceReachable, sinceMs });
     return probe.directoryReady === true && samePage;
+  });
+  await requireAndroidAcceptanceTailnetRecovery(origin, cycle, recoveryAdb, {
+    // The PWA still owns port 9222: the disposable health tab needs a separate forward and must not
+    // relaunch Chrome or navigate the measured page. Its execution and cleanup bounds are unchanged.
+    httpsProbe: origin => androidDeviceHttpsReachesOrigin(origin, {
+      chrome: (run, options) => withAndroidChrome(run, { ...options, port: 9223, launchBrowser: false }),
+    }),
   });
   return { recoveredMs, deviceReachableFirstMs };
 }
@@ -231,13 +311,15 @@ export async function withAndroidAcceptanceRestoration<T>(
   body: () => Promise<T>,
   origin: string,
   { httpsProbe = androidDeviceHttpsReachesOrigin, recordEvidence = evidence =>
-    console.error(`android-reachability: ${JSON.stringify(evidence)}`) }: {
+    console.error(`android-reachability: ${JSON.stringify(evidence)}`), tailnetRecovery = {} }: {
     readonly httpsProbe?: (origin: string) => Promise<boolean>;
     readonly recordEvidence?: (evidence: AndroidGatewayReachabilityEvidence) => unknown | Promise<unknown>;
+    readonly tailnetRecovery?: Omit<AndroidAcceptanceTailnetRecoveryOptions, "httpsProbe"> & { readonly command?: AndroidAdbCommand };
   } = {},
 ): Promise<T> {
   await requireAndroidGatewayReachability(origin, command, { probe: httpsProbe, record: recordEvidence });
   const baseline = await readAndroidRadioBaseline(command);
+  const { command: recoveryCommand = command, ...recoveryOptions } = tailnetRecovery;
   return runWithRestoration("Android acceptance", body, [
     () => restoreAndroidRadios(baseline, command),
     async () => {
@@ -248,6 +330,7 @@ export async function withAndroidAcceptanceRestoration<T>(
     },
     () => command("shell", "dumpsys", "deviceidle", "unforce"),
     () => command("shell", "dumpsys", "battery", "reset"),
+    () => requireAndroidAcceptanceTailnetRecovery(origin, "restoration", recoveryCommand, { ...recoveryOptions, httpsProbe }),
   ]);
 }
 
@@ -332,7 +415,7 @@ if (import.meta.main) {
     const wokeAt = performance.now();
     const wakefulness = await wake();
     const presentation = await ensureVisible(driver);
-    const lock = await awaitRecovery(driver, "lock-resume", wokeAt, 36_000, host, baselineTimeOrigin, continuity);
+    const lock = await awaitRecovery(driver, "lock", wokeAt, 36_000, origin, baselineTimeOrigin, continuity);
     unlockMs = lock.recoveredMs;
     record({ step: "lock-resume-summary", wakefulness, presentation, recoveredMs: unlockMs });
 
@@ -341,7 +424,7 @@ if (import.meta.main) {
     await adb("shell", "cmd", "connectivity", "airplane-mode", "enable");
     outageBanner = await awaitOutage(driver, performance.now(), host, baselineTimeOrigin, continuity);
     await adb("shell", "cmd", "connectivity", "airplane-mode", "disable");
-    airplane = await awaitRecovery(driver, "airplane-recovery", performance.now(), 160_000, host, baselineTimeOrigin, continuity);
+    airplane = await awaitRecovery(driver, "airplane", performance.now(), 160_000, origin, baselineTimeOrigin, continuity);
     if (airplane.recoveredMs !== null) {
       await sleep(10_000);
       const settled = await attempt(driver, "airplane-settled");
@@ -358,7 +441,7 @@ if (import.meta.main) {
     record({ step: "doze-state", idle: await adb("shell", "dumpsys", "deviceidle", "get", "deep") });
     await adb("shell", "dumpsys", "deviceidle", "unforce");
     await adb("shell", "dumpsys", "battery", "reset");
-    doze = await awaitRecovery(driver, "doze-recovery", performance.now(), 48_000, host, baselineTimeOrigin, continuity);
+    doze = await awaitRecovery(driver, "Doze", performance.now(), 48_000, origin, baselineTimeOrigin, continuity);
 
     return {
       serial: driver.serial,
@@ -377,7 +460,7 @@ if (import.meta.main) {
       airplaneDeviceReachableMs: airplane.deviceReachableFirstMs,
       dozeRecoveredMs: doze.recoveredMs,
     };
-  }), origin);
+  }), origin, { tailnetRecovery: { command: recoveryAdb } });
 
   console.log(JSON.stringify(summary, null, 1));
 
@@ -399,13 +482,9 @@ if (import.meta.main) {
   if (!summary.baselineReady) failures.push("baseline directory was not rendered ready");
   if (!summary.samePage) failures.push("PWA reloaded during recovery");
   if (summary.unlockMs === null) failures.push("lock/resume did not recover");
-  // A tailnet that is still down is not an application failure, so attribute before failing.
+  // VPN plus HTTPS already proved the path; a host dropping ICMP cannot explain an app failure.
   if (summary.airplaneRecoveredMs === null) {
-    failures.push(
-      summary.airplaneDeviceReachableMs === null
-        ? "airplane mode: the device never regained tailnet reachability within the window, so the app was never given a chance to recover"
-        : `airplane mode: the device was reachable at ${String(summary.airplaneDeviceReachableMs)}ms but the app never recovered`,
-    );
+    failures.push("airplane mode: the tailnet path recovered but the app did not recover within the polling window");
   }
   if (summary.dozeRecoveredMs === null) failures.push("Doze did not recover within the polling window");
   if (summary.outageBanner !== true) failures.push("no recovery status during the outage");

@@ -24,6 +24,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Prove the Pixel tailnet path with a live VPN and owned HTTPS health navigation after every
+  acceptance lock, Airplane and Doze cycle and after equipment restoration; fail precisely before
+  later stages if it is lost, retaining private boolean/timing evidence without automatic remedies.
 - Require alias-matched outbound clear acknowledgements before Android Push overlap recovery
   re-arms using settled clear-only proofs, including removed fixture hosts. Retain typed delivery
   timeouts and late sampling at actual execution expiry without changing local-timeout or GCM
