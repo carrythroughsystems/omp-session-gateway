@@ -75,6 +75,11 @@ requested only when you tap an action."). Keep the standing disclaimer in prose:
 keeps the short form "Community project; not affiliated with OMP."). Describe stock mainline OMP
 `>= 18.1.20` as the prerequisite, not a gateway-specific build.
 
+Public release copy uses comma thousands separators for integer quantities of 1,000 or more.
+Keep unit labels unchanged (`seconds`, `ms`, `MiB`); group hyphenated quantities too
+(`1,800-second`). Versions, dates, timestamps, digests, ports, IDs, URLs, and code spans stay literal.
+Apply this style when rendering public copy, without rewriting stored release evidence.
+
 ## Message hierarchy
 
 1. **Outcome:** live terminal sessions, one private mobile page; View or Control
