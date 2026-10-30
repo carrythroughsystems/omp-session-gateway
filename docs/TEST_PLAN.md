@@ -900,10 +900,11 @@ access with a statically resolvable string alias), request-finished readiness li
 or `networkidle` navigation/load waits, including unchanged string aliases in an enclosing scope.
 `waitForResponse()` is reserved for an explicit HTTP-contract assertion on that response
 binding in the same lexical scope (including Promise.all/destructured or awaited-promise forms).
-Reassignment in a child block invalidates that exemption; mutation tracking does not cross a
-function/arrow boundary or confuse member writes with binding writes. The assertion is never proof that
-the UI applied a response. Observe an application-state transition instead; the delayed-bfcache
-tray regression changes a local synthetic row label while keeping its remote response held.
+Reassignment in a child block invalidates that exemption; mutation tracking skips nested
+function/arrow bodies but resumes for later writes, and does not confuse member writes with
+binding writes. The assertion is never proof that the UI applied a response. Observe an
+application-state transition instead; the delayed-bfcache tray regression changes a local
+synthetic row label while keeping its remote response held.
 After the foreground shell mounts, it waits for application-owned remote Hide reconciliation
 on a new generation and proves a same-apply dismissal with an unchanged generation survives,
 before checking no stale-resume launch occurred; receipt of the response or

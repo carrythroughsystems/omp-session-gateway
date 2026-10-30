@@ -365,14 +365,18 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
     if (token.value === "{") blocks.push(index);
     else if (token.value === "}") blocks.pop();
   }
+  const conciseArrowEnd = (start: number): number => {
+    let end = start;
+    for (; end < tokens.length && ![";", ",", ")", "]", "}"].includes(tokens[end]?.value ?? ""); end++) {
+      if (["(", "[", "{"].includes(tokens[end]?.value ?? "")) end = pairs.get(end) ?? end;
+    }
+    return end;
+  };
   // Expression-bodied arrows have function scopes too, even without a brace to stop a scan.
   for (const [index, token] of tokens.entries()) {
     if (token.value !== "=>" || tokens[index + 1]?.value === "{") continue;
     const parent = scopes[index];
-    let end = index + 1;
-    for (; end < tokens.length && ![";", ",", ")", "]", "}"].includes(tokens[end]?.value ?? ""); end++) {
-      if (["(", "[", "{"].includes(tokens[end]?.value ?? "")) end = pairs.get(end) ?? end;
-    }
+    const end = conciseArrowEnd(index + 1);
     for (let cursor = index + 1; cursor < end; cursor++) {
       if (scopes[cursor] === parent) scopes[cursor] = index;
     }
@@ -435,7 +439,20 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
   const unmodified = (binding: Binding, until: number): boolean => {
     for (let cursor = binding.at + 1; cursor < until; cursor++) {
       // Parameter bindings are not recorded; do not mistake their writes for outer mutations.
-      if (["function", "=>"].includes(tokens[cursor]?.value ?? "")) return true;
+      // Skip only the nested function, then keep looking for later outer writes.
+      if (tokens[cursor]?.value === "function") {
+        let body = cursor + 1;
+        for (; body < tokens.length && tokens[body]?.value !== "{"; body++) {
+          if (["(", "["].includes(tokens[body]?.value ?? "")) body = pairs.get(body) ?? body;
+        }
+        cursor = pairs.get(body) ?? body;
+        continue;
+      }
+      if (tokens[cursor]?.value === "=>") {
+        const body = cursor + 1;
+        cursor = tokens[body]?.value === "{" ? pairs.get(body) ?? body : conciseArrowEnd(body) - 1;
+        continue;
+      }
       if (tokens[cursor]?.value === binding.name &&
         ![".", "?."].includes(tokens[cursor - 1]?.value ?? "") && tokens[cursor + 1]?.value === "=") return false;
     }

@@ -337,6 +337,9 @@ test("e2e readiness leaves safe, reassigned, shadowed and unavailable string bin
   for (const source of [
     'const s = "domcontentloaded"; await page.goto(origin, { waitUntil: s });',
     'let s = "networkidle"; s = "domcontentloaded"; await page.goto(origin, { waitUntil: s });',
+    'let s = "networkidle"; const f = () => 0; s = "domcontentloaded"; await page.goto(url, { waitUntil: s });',
+    'let s = "networkidle"; function f() {} s = "domcontentloaded"; await page.goto(url, { waitUntil: s });',
+    'let s = "networkidle"; const f = s => { s = "ignored"; }; s = "domcontentloaded"; await page.goto(url, { waitUntil: s });',
     'let s = "networkidle"; if (ready) { s = "domcontentloaded"; } await page.goto(origin, { waitUntil: s });',
     'const k = "finished"; { const k = "status"; response[k](); }',
     'const k = "finished"; { const k = property; response[k](); }',
@@ -367,6 +370,9 @@ test("HTTP assertion exemptions never cross scopes, shadowing or a response reas
     'async function scenario() { const response = await page.waitForResponse(url); { const response = other; expect(response.status()).toBe(200); } }',
     'async function scenario() { let response = await page.waitForResponse(url); response = other; expect(response.status()).toBe(200); }',
     'async function scenario() { let response = await page.waitForResponse(url); if (ready) { response = other; } expect(response.status()).toBe(200); }',
+    'let response = await page.waitForResponse(url); const f = () => 1; response = other; expect(response.status()).toBe(200);',
+    'let response = await page.waitForResponse(url); function f() {} response = other; expect(response.status()).toBe(200);',
+    'let response = await page.waitForResponse(url); const f = response => { response = ignored; }; response = other; expect(response.status()).toBe(200);',
     'async function scenario() { const response = await page.waitForResponse(url); function later(response) { expect(response.status()).toBe(200); } }',
     'async function scenario() { const response = await page.waitForResponse(url); const later = response => expect(response.status()).toBe(200); }',
     'async function scenario() { var response = await page.waitForResponse(url); var response = other; expect(response.status()).toBe(200); }',
@@ -384,6 +390,7 @@ test("race-free response contracts support destructuring, promise aliases, annot
     'const response = await page.waitForResponse(url); expect(response.status()).not.toBe(500);',
     'const response = await page.waitForResponse(url); function later(response) { response = other; } expect(response.status()).toBe(200);',
     'const response = await page.waitForResponse(url); const later = response => { response = other; }; expect(response.status()).toBe(200);',
+    'const response = await page.waitForResponse(url); const later = response => (response = other); expect(response.status()).toBe(200);',
     'const response = await page.waitForResponse(url); state.response = other; state?.response = other; expect(response.status()).toBe(200);',
   ]) expect(checkE2EReadiness("apps/web/e2e/example.e2e.ts", source)).toEqual([]);
 });
