@@ -434,11 +434,17 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         const remaining = execution!.deadline - performance.now();
         const expires = milliseconds >= remaining;
         const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(deliveryTimeout(signal.reason)); };
-        const timer = setTimeout(() => {
+        const finish = () => {
+          const remaining = execution!.deadline - performance.now();
+          if (expires && remaining > 0) {
+            timer = setTimeout(finish, Math.max(1, Math.ceil(remaining)));
+            return;
+          }
           signal.removeEventListener("abort", abort);
           if (expires) reject(deliveryTimeout(new Error("Android Push execution deadline")));
           else resolve();
-        }, Math.min(milliseconds, Math.max(1, remaining)));
+        };
+        let timer = setTimeout(finish, Math.min(milliseconds, Math.max(1, remaining)));
         signal.addEventListener("abort", abort, { once: true });
         if (signal.aborted) abort();
       });
@@ -566,7 +572,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       } catch (error) {
         // A rejected ADB operation can mask a simultaneous cancellation. Preserve both privately,
         // without replacing a stronger typed persistence/containment failure or duplicating roots.
-        if (!(error instanceof QualificationFailure) && !(error instanceof AggregateError)) {
+        if (error instanceof QualificationFailure && error.evidence.lane === "androidPush" && error.evidence.reason === "delivery_timeout" ||
+          !(error instanceof QualificationFailure) && !(error instanceof AggregateError)) {
           error = executionFailure(error);
         }
         throw retain(error);

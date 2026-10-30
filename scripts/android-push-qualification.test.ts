@@ -212,7 +212,7 @@ function eventBackedTelemetry(host: ReturnType<typeof fake>) {
   host.runtime.fixture = async (...args) => {
     const active = (await snapshot(args[1], args[2]))?.inputRequired === true;
     await fixture(...args);
-    if (args[2] !== "secondary" && (args[0] === "ask" || args[0] === "answer" && active)) append(args[0] === "answer");
+    if (args[0] === "ask" || (args[0] === "answer" || args[0] === "stop") && active) append(args[0] !== "ask");
   };
   host.runtime.answer = async () => { await answer(); append(true); };
   host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: events.length, ordinal: ++ordinal });
@@ -1096,7 +1096,8 @@ test.each(["missing", "wrong-alias", "settled"] as const)("502 overlap recovery 
   host.runtime.dismissOwned = async () => { dismissed = true; };
   const error = await runAndroidPush(host.input).catch(error => error);
   expect(error).toBeInstanceOf(QualificationFailure);
-  expect(error).toMatchObject({ evidence: { lane: "androidPush", step: "private_verified", class: "harness", reason: "invalid_evidence" }, cause: overlap });
+  expect(error).toMatchObject({ evidence: { lane: "androidPush", step: "private_verified", class: "harness", reason: "invalid_evidence" } });
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(overlap.message);
   expect(asks).toBe(1);
   expect(dismissed).toBe(false);
   expect(host.cleanup).toHaveLength(7);
@@ -1128,6 +1129,49 @@ test.each(["pending", "settled", "control"] as const)("502 review overlap recove
   });
   expect(events.some(event => event.clear === true)).toBe(true);
   expect(host.cleanup).toHaveLength(7);
+});
+
+test.each(["stale-delivery", "stale-removal", "triage-clears"] as const)(
+  "502 round2 overlap retains settled clear proof through %s events", async scenario => {
+    const host = fake(), events = eventBackedTelemetry(host);
+    const begin = host.runtime.beginNotificationPhase, fixture = host.runtime.fixture, triage = host.runtime.triage;
+    let phase: string | undefined, overlapped = false, removed = false, triageFinished = false;
+    host.runtime.beginNotificationPhase = async (...args) => { if (args[1] !== undefined) phase = args[1]; await begin(...args); };
+    host.runtime.fixture = async (...args) => {
+      await fixture(...args);
+      if (phase === "stale_taps_verified" && args[0] === "stop" && args[2] === "secondary") removed = true;
+    };
+    host.runtime.triage = async action => {
+      const result = await triage(action);
+      if (phase === "triage_verified" && action?.kind === "showAll") triageFinished = true;
+      return result;
+    };
+    host.runtime.assertNotificationOwnership = async () => {
+      if (overlapped) return;
+      const expiring = phase === "stale_taps_verified" && (await host.runtime.snapshot("", "secondary"))?.inputRequired === true;
+      if (scenario === "stale-delivery" && expiring || scenario === "stale-removal" && removed ||
+        scenario === "triage-clears" && triageFinished) {
+        overlapped = true; throw new NotificationOverlapError();
+      }
+    };
+    expect((await runAndroidPush(host.input)).passed).toBe(true);
+    expect(overlapped).toBe(true);
+    const recovered = scenario === "triage-clears" ? "triage_verified" : "stale_taps_verified";
+    expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results[recovered]).toMatchObject({ rearmCount: 1 });
+    expect(events.filter(event => event.event === "push.queue_accepted" && event.clear === true).length).toBeGreaterThan(1);
+    expect(host.cleanup).toHaveLength(7);
+  });
+
+test("502 round2 invalid overlap clear retains the local clear timeout cause", async () => {
+  const host = fake({ overlaps: 1 });
+  host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0,
+    failures: 0, retryable: false, httpStatus: 0, clearAcknowledged: false, requestAlias: 1 });
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "invalid_evidence" }]);
+  const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+  expect(messages).toContain("unowned notification overlapped the owned phase");
+  expect(messages).toContain("qualification androidPush delivery_timeout");
 });
 
 test("a post arriving during timeout cleanup is recorded but never turns the missed ask into a pass", async () => {

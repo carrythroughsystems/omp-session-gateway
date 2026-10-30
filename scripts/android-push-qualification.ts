@@ -655,7 +655,9 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
     let activePhase: AndroidPushPhase = "subscription_ready";
     let metrics = emptyPushDeliveryMetrics();
     let lateDelivery: (() => Promise<void>) | undefined;
-    const armedAsks = new Map<PushFixtureRole, { session: SessionMetadata; clearWindow?: QualificationLogWindow }>();
+    const armedAsks = new Map<PushFixtureRole, {
+      session: SessionMetadata; clearWindow?: QualificationLogWindow; clearProven?: boolean; clearAlias?: number;
+    }>();
     const phaseElapsed = () => {
       try { return pushMilliseconds(runtime.now() - phaseStarted); }
       catch (error) { throw new QualificationFailure({
@@ -709,8 +711,21 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       if (current?.inputRequired !== true) return;
       const window = await runtime.beginDeliveryTelemetry?.(activePhase);
       requireExecution();
+      armed.clearProven = false;
+      delete armed.clearAlias;
       if (window === undefined) delete armed.clearWindow;
       else armed.clearWindow = window;
+    };
+    const proveAskClear = async (role: PushFixtureRole): Promise<boolean> => {
+      const armed = armedAsks.get(role);
+      if (armed?.session.qualificationPushAlias === undefined) return false;
+      if (armed.clearProven === true) return armed.clearAlias === armed.session.qualificationPushAlias;
+      if (armed.clearWindow === undefined) return false;
+      const telemetry = await runtime.deliveryTelemetry?.(armed.clearWindow);
+      requireExecution();
+      armed.clearProven = telemetry?.clearAcknowledged === true && telemetry.requestAlias === armed.session.qualificationPushAlias;
+      if (armed.clearProven) armed.clearAlias = telemetry!.requestAlias!;
+      return armed.clearProven;
     };
     const fixture = async (operation: "start" | PushFixtureCommand, role: PushFixtureRole = "primary", expectedOwner?: SessionMetadata) => {
       if (!["answer", "stop"].includes(operation)) await assertDndOff();
@@ -726,9 +741,10 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           operation: "read_only", elapsedMs: phaseElapsed(), observations: {} });
         verifiedOwner = owner;
       }
-      if (operation === "answer") await beginAskClear(role);
+      if (operation === "answer" || operation === "stop") await beginAskClear(role);
       await runtime.fixture(operation, progress.epoch, role, verifiedOwner);
       requireExecution();
+      if (operation === "answer" || operation === "stop") await proveAskClear(role);
     };
     const finish = async (phase: AndroidPushPhase, result: Record<string, boolean | number | string>) => {
       await assertDndOff();
@@ -745,6 +761,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       await wait("authoritative clear", async () => {
         const current = await runtime.snapshot(progress.epoch, role);
         if (current === undefined || current.inputRequired) return undefined;
+        await proveAskClear(role);
         return (await runtime.observe(current, "attention", "private")).count === 0 ? true : undefined;
       }, timeout, start);
       metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - start);
@@ -773,13 +790,11 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         ...((arm || existingWindow !== undefined) && kind === "attention" ? { rearm: async (old: SessionMetadata, late: () => Promise<void>) => {
           const clearing = runtime.now();
           await fixture("answer");
-          const clearWindow = armedAsks.get("primary")?.clearWindow;
           const settled = await wait("authoritative clear before re-arm", async () => {
             await late();
             const current = await runtime.snapshot(progress.epoch);
             if (current === undefined || current.inputRequired) return undefined;
-            const telemetry = clearWindow === undefined ? undefined : await runtime.deliveryTelemetry?.(clearWindow);
-            return telemetry?.clearAcknowledged === true && telemetry.requestAlias === old.qualificationPushAlias &&
+            return await proveAskClear("primary") && armedAsks.get("primary")?.clearAlias === old.qualificationPushAlias &&
               (await runtime.observe(current, "attention", detail)).count === 0 ? current : undefined;
           }, timeout, clearing);
           lateDelivery = undefined;
@@ -824,30 +839,29 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
             const host = await runtime.snapshot(progress.epoch, role);
             const armed = armedAsks.get(role);
             const needsClear = host?.inputRequired === true || armed !== undefined;
-            const invalidClear = (): never => { throw new QualificationFailure({
+            const invalidClear = (clearError?: unknown): never => { throw new QualificationFailure({
               id: nextFailureId(), lane: "androidPush", step: activePhase, class: "harness", reason: "invalid_evidence",
-              operation: "read_only", elapsedMs: phaseElapsed(), observations: {} }, { cause: error }); };
-            if (host === undefined) { if (needsClear) invalidClear(); continue; }
+              operation: "read_only", elapsedMs: phaseElapsed(), observations: {} },
+              { cause: clearError === undefined ? error : new AggregateError([error, clearError], "Push overlap and clear failed") }); };
+            if (host === undefined && !needsClear) continue;
             if (needsClear && (armed?.session.qualificationPushAlias === undefined ||
-              host.instanceId !== armed.session.instanceId || host.generation !== armed.session.generation ||
+              host !== undefined && (host.instanceId !== armed.session.instanceId || host.generation !== armed.session.generation ||
               host.inputRequired && (host.ask?.requestId !== armed.session.ask?.requestId ||
-                host.qualificationPushAlias !== armed.session.qualificationPushAlias))) invalidClear();
-            if (host.inputRequired) await fixture("answer", role);
+                host.qualificationPushAlias !== armed.session.qualificationPushAlias)))) invalidClear();
+            if (host?.inputRequired) await fixture("answer", role);
             if (needsClear && armed?.clearWindow === undefined) invalidClear();
             try {
               await wait("authoritative clear", async () => {
                 const settled = await runtime.snapshot(progress.epoch, role);
-                if (settled === undefined || settled.inputRequired || settled.busy !== false) return undefined;
-                const observation = await runtime.observe(settled, "attention", "private");
-                if (needsClear) {
-                  const telemetry = await runtime.deliveryTelemetry?.(armed!.clearWindow!);
-                  if (telemetry?.clearAcknowledged !== true || telemetry.requestAlias !== armed!.session.qualificationPushAlias) return undefined;
-                }
+                if (settled === undefined && armed === undefined ||
+                  settled !== undefined && (settled.inputRequired || settled.busy !== false)) return undefined;
+                if (needsClear && !await proveAskClear(role)) return undefined;
+                const observation = await runtime.observe(settled ?? armed!.session, "attention", "private");
                 return observation.count === 0 || !observation.titleMatches ? true : undefined;
               }, PUSH_RECOVERY_MS, clearing);
             } catch (clearError) {
               if (!pushBudgetExpired(runtime, input.execution) && clearError instanceof QualificationFailure &&
-                clearError.evidence.reason === "delivery_timeout") invalidClear();
+                clearError.evidence.reason === "delivery_timeout") invalidClear(clearError);
               throw clearError;
             }
           }
@@ -885,7 +899,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           throw assertion("Android Push attention tap did not revalidate into Control");
         }
         await beginAskClear("primary");
-        await runtime.answer(); await snapshot(s => !s.inputRequired); await clear();
+        await runtime.answer(); await proveAskClear("primary"); await snapshot(s => !s.inputRequired); await clear();
         await finish("attention_tap_verified", { control: true, revalidated: true, scrubbed: true });
       });
       const stop = async () => {
@@ -1039,6 +1053,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         await wait("secondary unpublication", async () => await runtime.snapshot(progress.epoch, "secondary") === undefined ? true : undefined, 45_000);
         // Removing a host with an open ask sends its clear; one landing after the replay would close it.
         await wait("secondary removal clear", async () => (await runtime.observe(expiring, "attention", "private")).count === 0 ? true : undefined, 60_000);
+        await proveAskClear("secondary");
         await staleTap(expiring, "expired-host");
         await finish("stale_taps_verified", { resolved: true, rearmed: true, replaced: true, expired: true, launches: 0, scrubbed: true, replayed: true });
       });
@@ -1064,7 +1079,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           requireExecution();
           await runtime.pause(500);
         }
-        await fixture("answer"); await snapshot(s => !s.inputRequired);
+        await fixture("answer"); await snapshot(s => !s.inputRequired); await proveAskClear("primary");
         await runtime.permission("granted");
         // Permission restoration reopens the app and reconciles its subscription:
         // the first background delivery is recovery, not steady state.
@@ -1136,6 +1151,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         }, 60_000, clearing);
         await runtime.openPwa();
         await wait("authoritative clear after Doze", async () => (await runtime.observe(settled, "attention", "private")).count === 0 ? true : undefined, 60_000, clearing);
+        await proveAskClear("primary");
         await runtime.closePwa();
         await finish("doze_verified", { variant: duringDoze ? "delivered_during_doze" : afterExit ? "delivered_after_doze_exit" : "undelivered_after_doze_exit" });
       });
