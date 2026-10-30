@@ -351,7 +351,10 @@ describe("authorized Android selection", () => {
     { switchesRadios: true, needsNotifications: false });
     let failure: unknown;
     try {
-      await requireAndroidDevicePreconditions(async () => { throw new Error("synthetic-private-device"); }, { switchesRadios: true, needsNotifications: false });
+      await requireAndroidDevicePreconditions(async (...args) => {
+        if (args.join(" ") === "shell dumpsys deviceidle whitelist") return "user,com.tailscale.ipn,10123\n";
+        throw new Error("synthetic-private-device");
+      }, { switchesRadios: true, needsNotifications: false });
     } catch (error) { failure = error; }
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).not.toContain("synthetic-private-device");
@@ -488,19 +491,20 @@ describe("Android Tailscale Doze admission", () => {
     expect(pixel.state.mutations).toBe(0);
   });
 
-  test("an unavailable allowlist probe fails closed without exposing adb details", async () => {
+  test("an unavailable allowlist probe fails closed with adb details in its private cause only", async () => {
     const calls: string[][] = [];
+    const transportFailure = new Error("synthetic-private-device");
     let failure: unknown;
     try {
       await requireAndroidDevicePreconditions(async (...args) => {
         calls.push(args);
-        throw new Error("synthetic-private-device");
+        throw transportFailure;
       }, { switchesRadios: true, needsNotifications: false });
     } catch (error) { failure = error; }
     expect((failure as Error).message).toBe(
       "cannot verify the Pixel's Tailscale (com.tailscale.ipn) Doze allowlist; restore adb access and retry; no device settings were changed",
     );
-    expect((failure as Error).cause).toBeUndefined();
+    expect((failure as Error).cause).toBe(transportFailure);
     expect(calls).toEqual([["shell", "dumpsys", "deviceidle", "whitelist"]]);
   });
 });

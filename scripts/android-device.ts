@@ -536,8 +536,8 @@ export async function requireAndroidDevicePreconditions(
   let allowlist: string;
   try {
     allowlist = await command("shell", "dumpsys", "deviceidle", "whitelist");
-  } catch {
-    throw new Error("cannot verify the Pixel's Tailscale (com.tailscale.ipn) Doze allowlist; restore adb access and retry; no device settings were changed");
+  } catch (error) {
+    throw new Error("cannot verify the Pixel's Tailscale (com.tailscale.ipn) Doze allowlist; restore adb access and retry; no device settings were changed", { cause: error });
   }
   if (!/^(?:user|system),com\.tailscale\.ipn,[0-9]+\r?$/mu.test(allowlist)) {
     throw new Error("Tailscale (com.tailscale.ipn) must be on the Pixel's Doze allowlist before qualification or smoke: set Settings → Apps → Tailscale → Battery → Unrestricted, or run adb shell dumpsys deviceidle whitelist +com.tailscale.ipn; no device settings were changed");
