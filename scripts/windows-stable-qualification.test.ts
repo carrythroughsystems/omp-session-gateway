@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -376,7 +377,9 @@ describe("Windows qualification ownership and failure paths", () => {
     const child = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
     await child.exited;
     await mkdir(lock);
-    await writeFile(join(lock, "owner"), `WindowsLane 2026-10-26T00:00:00.000Z ${epoch} ${child.pid}\n`);
+    const stale = `WindowsLane 2026-10-26T00:00:00.000Z ${epoch} ${child.pid}\n`;
+    const fence = join(lock, `recovery-${createHash("sha256").update(stale).digest("hex").slice(0, 32)}`);
+    await writeFile(join(lock, "owner"), stale);
     const blocked = new Error("synthetic competing cleanup queued"), retained = new Error("synthetic retained restoration");
     let pending = true;
     const leases = [0, 1].map(() => windowsRuntime.createWindowsDevelopmentPixelLease({
@@ -392,11 +395,33 @@ describe("Windows qualification ownership and failure paths", () => {
       expect(claims).toHaveLength(1);
       expect(results).toContain(blocked); expect(results).toContain(retained);
       expect(await readFile(join(lock, "owner"), "utf8")).toBe(claims[0]!);
-      expect(await readFile(join(lock, `recovery-${child.pid}`), "utf8")).toBe(claims[0]!);
+      expect(await readFile(fence, "utf8")).toBe(claims[0]!);
       pending = false;
       await leases[results.indexOf(retained)]!("windows-cleanup", async () => {});
       expect(await Bun.file(join(lock, "owner")).exists()).toBe(false);
-      expect(await Bun.file(join(lock, `recovery-${child.pid}`)).exists()).toBe(false);
+      expect(await Bun.file(fence).exists()).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("501 R5 a later stale claim can recover after its PID was reused", async () => {
+    const root = await mkdtemp(join(tmpdir(), "windows-pixel-reused-pid-")), lock = join(root, "lease");
+    const child = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
+    await child.exited; await mkdir(lock);
+    const original = `WindowsLane 2026-10-26T00:00:00.000Z ${epoch} ${child.pid}\n`;
+    const later = `WindowsLane 2026-10-30T00:00:00.000Z ${epoch} ${child.pid}\n`;
+    await writeFile(join(lock, "owner"), original);
+    let pending = true, restorations = 0;
+    const blocked = new Error("synthetic stale fence blocked reused PID"), refused = new Error("synthetic retained restoration");
+    const lease = () => windowsRuntime.createWindowsDevelopmentPixelLease({
+      lock, epoch: () => epoch, recoverExitedOwner: true, recoveryPending: async () => pending,
+      clock: { now: () => 0, sleep: async () => { throw blocked; } },
+    });
+    try {
+      await expect(lease()("windows-cleanup", async () => { throw refused; })).rejects.toBe(refused);
+      // A later exited owner can have the same PID without having the same claim.
+      await writeFile(join(lock, "owner"), later); pending = false;
+      await expect(lease()("windows-cleanup", async () => { restorations += 1; return "restored"; })).resolves.toBe("restored");
+      expect(restorations).toBe(1);
+      expect(await Bun.file(join(lock, "owner")).exists()).toBe(false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   test("501 R5 a delayed stale-owner unlink cannot erase the winning cleanup claim", async () => {

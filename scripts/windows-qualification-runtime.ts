@@ -1220,7 +1220,8 @@ export function createWindowsDevelopmentPixelLease(options: {
               const takeover = `WindowsLane ${new Date().toISOString()} ${epoch} ${process.pid}\n`;
               // Retain this exclusive fence until lock retirement: a delayed stale reader
               // must never unlink a winning cleanup's new owner file.
-              try { await writeFile(join(lock, `recovery-${fields[3]}`), takeover, { flag: "wx", mode: 0o600 }); }
+              const fence = join(lock, `recovery-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}`);
+              try { await writeFile(fence, takeover, { flag: "wx", mode: 0o600 }); }
               catch (error) {
                 if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
                 await clock.sleep(Math.min(5_000, remaining())); continue;

@@ -229,18 +229,29 @@ rechecks ownership after restoration proof, and an owner change blocks deletion.
 Every development retirement or cleanup invocation gets its own 30-minute containment owner.
 A refused restoration retains the lock even when the recovery vault is missing; absence of recovery
 state is not restoration proof. Concurrent exited-owner cleanups must exclusively claim the owner
-file before touching the device. A `recovery-<deadPid>` file inside the lock is an exclusive
-takeover fence: only its creator may recheck and remove that stale owner, then exclusively create
-the new owner. The fence stays until the whole lock is retired, so a delayed contender cannot
-unlink the winner's live claim. A crash before takeover completes deliberately retains the lock.
+file before touching the device. A `recovery-<claimHash>` file inside the lock is an exclusive
+takeover fence, named by the first 32 hexadecimal characters of SHA-256 of the exact stale owner
+claim, not its PID. Only its creator may recheck and remove that stale owner, then exclusively
+create the new owner. The fence stays until the whole lock is retired, so a delayed contender
+cannot unlink the winner's live claim, while a later claim can still recover if a PID is reused.
+A crash before takeover completes deliberately retains the lock.
 
 **Retained-lock operator recovery.** First stop the owning Windows development process and every
 other Pixel-driving lane. Prefer explicit cleanup with the original epoch's intact private vault.
-If that vault is irrecoverably missing, manually reconcile the Pixel's foreground app, display,
-keyguard, ordinary Chrome pages and debugging forward, and independently confirm the epoch's VM,
-firewall and tailnet containment. Only after that reconciliation may the operator remove
-`/tmp/omp-gw-pixel.lock` (`rm -rf /tmp/omp-gw-pixel.lock`) to admit another lane. Never remove a live
-or foreign owner's lock, and never record the manual escape as successful qualification.
+
+- If the vault is intact but takeover was interrupted, explicit cleanup cannot acquire a lock
+  whose recovery-fence creator is no longer running or whose owner file is missing. With every
+  Pixel-driving lane stopped, remove `/tmp/omp-gw-pixel.lock` (`rm -rf /tmp/omp-gw-pixel.lock`) and
+  immediately rerun `bun scripts/windows-stable-qualification.ts cleanup` with that epoch's intact
+  vault, so restoration runs from its captured baseline. Do not admit another lane before cleanup
+  proves restoration.
+- If that vault is irrecoverably missing, manually reconcile the Pixel's foreground app, display,
+  keyguard, ordinary Chrome pages and debugging forward, and independently confirm the epoch's VM,
+  firewall and tailnet containment. Only after that reconciliation may the operator remove
+  `/tmp/omp-gw-pixel.lock` (`rm -rf /tmp/omp-gw-pixel.lock`) to admit another lane.
+
+Never remove a live or foreign owner's lock, and never record the manual escape as successful
+qualification.
 
 **Post-mutation status.** `install`, `rollback` and `rotate-readiness-token` return once the gateway
 proves readiness, but on this two-vCPU guest one immediate `status` read has still failed after them
