@@ -11,7 +11,7 @@
     "@oh-my-pi/pi-wire": "18.12.5",
     "@oh-my-pi/collab-web": "16.3.6"
   },
-  "bunVersion": "1.4.0",
+  "bunVersion": "1.4.4",
   "relevantPaths": [
     "docs/collab.md",
     "docs/extensions.md",
