@@ -1,0 +1,22 @@
+[
+  {
+    "name": "ungrouped receipt durations and timings",
+    "summary": "1800 seconds; unlock 7115 ms, Airplane 4425 ms, Doze 176 ms; 8186 MiB; 1000 CPUs, 1200 transitions and 2000 attempts.",
+    "rendered": "1,800 seconds; unlock 7,115 ms, Airplane 4,425 ms, Doze 176 ms; 8,186 MiB; 1,000 CPUs, 1,200 transitions and 2,000 attempts."
+  },
+  {
+    "name": "quantity boundaries and already grouped copy",
+    "summary": "999 seconds; 1000 seconds; 1000000 milliseconds; 1800-second check; 1,800 seconds; 1.800 seconds; -1800 seconds.",
+    "rendered": "999 seconds; 1,000 seconds; 1,000,000 milliseconds; 1,800-second check; 1,800 seconds; 1.800 seconds; -1800 seconds."
+  },
+  {
+    "name": "versions dates timestamps digests ports and identifiers",
+    "summary": "Stock OMP v1800.1000.2000, Chrome 155.0.8059.84; 2026-10-30, 2026-10-30T18:00:00.000Z; source 1234567890123456789012345678901234567890; SHA-256 1234567890123456789012345678901234567890123456789012345678901234; Run 40427270819; build 26100; port 8080; 127.0.0.1:1800; ID 1000; generation 1800; 1.1800 seconds; v1800 seconds.",
+    "rendered": "Stock OMP v1800.1000.2000, Chrome 155.0.8059.84; 2026-10-30, 2026-10-30T18:00:00.000Z; source 1234567890123456789012345678901234567890; SHA-256 1234567890123456789012345678901234567890123456789012345678901234; Run 40427270819; build 26100; port 8080; 127.0.0.1:1800; ID 1000; generation 1800; 1.1800 seconds; v1800 seconds."
+  },
+  {
+    "name": "code spans and link destinations",
+    "summary": "1800 seconds outside; `1800 seconds, 7115 ms`; ``1800 seconds and `7115 ms` ``; <code>1800 seconds</code>; [1800 seconds](https://example.invalid/1800-seconds?wait=7115); https://example.invalid/1800-seconds.",
+    "rendered": "1,800 seconds outside; `1800 seconds, 7115 ms`; ``1800 seconds and `7115 ms` ``; <code>1800 seconds</code>; [1,800 seconds](https://example.invalid/1800-seconds?wait=7115); https://example.invalid/1800-seconds."
+  }
+]
