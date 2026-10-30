@@ -20,6 +20,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Require readiness proof on execution-bearing passed qualification receipts, preserve controller
+  expiry attribution and abort causes in Push failures, and reject fractional readiness durations.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.

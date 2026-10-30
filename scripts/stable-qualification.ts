@@ -662,6 +662,9 @@ function validateReceiptExecution(receipt: StableQualificationReceipt): void {
     (receipt.status === "passed" || summary?.containment.proven === true || summary?.containment.cleanupComplete === true)) {
     throw new Error("qualification receipt contradicts retained cleanup failure facts");
   }
+  if (execution !== undefined && receipt.status === "passed" && receipt.rigReadiness === undefined) {
+    throw new Error("qualification receipt omits its readiness proof");
+  }
   if (receipt.rigReadiness !== undefined) {
     const readiness = parseRigReadinessReceipt(receipt.rigReadiness);
     if (readiness.campaignAttempt !== (execution?.campaignAttempt ?? 0)) {
@@ -1411,6 +1414,7 @@ export async function runExternalLane<Extra extends object>(
 
 /** The first reason the receipt cannot be a pass, or undefined when every lane holds. */
 export function incompleteQualification(receipt: StableQualificationReceipt): string | undefined {
+  if (receipt.execution !== undefined && receipt.rigReadiness === undefined) return "rig readiness recorded no result";
   const lane = LANE_NAMES.find(name => receipt.lanes[name].status !== "passed");
   if (lane !== undefined) return `qualification lane ${lane} did not pass`;
   for (const name of Object.keys(CLEANUP_LANES) as ExternalLaneName[]) {
