@@ -27,7 +27,7 @@ within its requested patch/minor release class and existing resource caps; it do
 1. **Prepare the candidate.** One `chore(release): prepare X.Y.Z` PR bumps the version in the five
    `package.json` files, `PRODUCT_VERSION` in `apps/gateway/src/diagnostics.ts` and
    `scripts/build-release.ts`, and `GATEWAY_VERSION` in `apps/gateway/src/installation.ts`; cuts the
-   `CHANGELOG.md` section; generates the highlights and rollback text in
+   `CHANGELOG.md` section from `changelog.d/` fragments; generates the highlights and rollback text in
    `scripts/release-text.json` (read by `.github/workflows/signed-release.yml`); and notes the preparation in the release ledger. After it
    merges, push a signed annotated `vX.Y.Z-prealpha.1` tag on the merge commit and
    [verify the published candidate](#verify-a-published-build).
@@ -217,7 +217,9 @@ the machine credential to administration access. Changing the installed-policy f
 reviewed one-time setup/installation path, never a release-bot self-upgrade.
 
 Generated prepare/approve/record PRs must change only the exact per-kind `GENERATED_RELEASE_PATHS`
-set in scripts/release-policy.ts, including both rename filenames. This is rechecked before merging
+set in scripts/release-policy.ts, including both rename filenames. Prepare may additionally delete
+valid `changelog.d/<section>-<short-slug>.md` fragments, never add, edit or rename them; this exception
+does not apply to approve or record, or to `changelog.d/README.md`. This is rechecked before merging
 and when classifying previous release records. Protected paths remain refused; prepare may change
 only the generated build-release.ts version literal, manifest versions and bun.lock workspace
 versions, proven by normalized control equality at the merge boundary. Existing PR/remote-branch
@@ -264,6 +266,15 @@ timestamp and persists it as `smokedAt` in its decision/state; record passes its
 Prepare and approve retain the preparation date. A manual record uses the actual smoke completion
 date and current `main`. There is no preparation-date fallback: installation is drained at `closed`,
 whose historical state needs no `smokedAt`; a new smoke transition supplies it before recording.
+
+Prepare reads every `changelog.d/` fragment, assembles the new `CHANGELOG.md` release section in
+Added, Changed, Deprecated, Removed, Fixed, Security order, and sorts filenames within each section.
+It deletes consumed fragments, keeps `## [Unreleased]` empty, and generates the entry count and
+singular/plural summary with the companion release text. Re-prepare keeps the existing release
+bullets in order and appends new, filename-sorted fragments to the corresponding sections before
+recounting; a superseding minor preparation folds the old patch cut the same way.
+Both operations are byte-deterministic for the same inputs and date.
+See [fragment authoring rules](../changelog.d/README.md); `README.md` is never consumed.
 Release prose lives in `scripts/release-text.json`, not in the workflow. The existing
 `site-coherence.test.ts` and `release-policy.ts` remain gates, not bypassable renderer assertions.
 The golden v0.7.4 fixtures use a sanitized real candidate receipt and compare generated surfaces
@@ -272,12 +283,12 @@ with committed release history; the fixture notes describe the retained public e
 `prepare X.Y.Z --release-class minor --date YYYY-MM-DD` uses the same next-minor predicate
 as selection and promotion. It may supersede an unqualified, unpublished next-patch preparation:
 the package/workspace/constants move to the next minor; that prepared CHANGELOG section and
-the pending entries are folded into one new cut; the generator recounts all bullets and regenerates
+the pending fragments are folded into one new cut; the generator recounts all bullets and regenerates
 `release-text.json` together. When an unqualified/unpublished prepared section gains a bullet,
 count-only drift between its generated summary and companion metadata is safely recounted on
-the next prepare (including the 2026-10-22 27→28 case). Prefer adding the bullet without
-hand-recounting either header. Every other summary byte, including baseline, predecessor and
-qualification disclaimer, must still match. Count drift on qualified/published preparations,
+the next prepare (including the 2026-10-22 27→28 case). Add new entries as fragments without
+editing `[Unreleased]` or hand-recounting either header. Every other summary byte, including baseline,
+predecessor and qualification disclaimer, must still match. Count drift on qualified/published preparations,
 unrelated versions, duplicate cuts and other edited summaries refuse. The requested candidate
 identity remains exact; the published stable lock, earlier changelog sections and OMP baseline
 stay unchanged.

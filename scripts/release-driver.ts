@@ -46,7 +46,7 @@ export interface PullRequest {
   /** GitHub's conflict calculation; null means it has not settled yet. */
   mergeable?: boolean | null;
   checksPassed: boolean;
-  files: { filename: string; previous_filename?: string }[];
+  files: { filename: string; previous_filename?: string; status?: string }[];
   url: string;
 }
 export type Phase = "selected" | "order-updated" | "order-ready" | "order-landed" | "held"

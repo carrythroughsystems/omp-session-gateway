@@ -1,0 +1,19 @@
+{
+  "fragments": {
+    "changelog.d/fixed-zulu.md": "- Repair the final edge.\n",
+    "changelog.d/added-zulu.md": "- Add the later feature.\n",
+    "changelog.d/security-headers.md": "- Protect the response.\n",
+    "changelog.d/changed-policy.md": "- Change the existing policy.\n  Preserve its boundary.\n",
+    "changelog.d/removed-obsolete.md": "- Remove the obsolete path.\n",
+    "changelog.d/added-alpha.md": "- Add the first feature.\n",
+    "changelog.d/deprecated-old.md": "- Deprecate the old option.\n",
+    "changelog.d/fixed-alpha.md": "- Repair the first edge.\n"
+  },
+  "cut": "### Added\n\n- Add the first feature.\n- Add the later feature.\n\n### Changed\n\n- Change the existing policy.\n  Preserve its boundary.\n\n### Deprecated\n\n- Deprecate the old option.\n\n### Removed\n\n- Remove the obsolete path.\n\n### Fixed\n\n- Repair the first edge.\n- Repair the final edge.\n\n### Security\n\n- Protect the response.",
+  "subsequentFragments": {
+    "changelog.d/fixed-beta.md": "- Repair a subsequent edge.\n",
+    "changelog.d/added-beta.md": "- Add a subsequent feature.\n",
+    "changelog.d/changed-followup.md": "- Change the follow-up policy.\n"
+  },
+  "subsequentCut": "### Added\n\n- Add the first feature.\n- Add the later feature.\n- Add a subsequent feature.\n\n### Changed\n\n- Change the existing policy.\n  Preserve its boundary.\n- Change the follow-up policy.\n\n### Deprecated\n\n- Deprecate the old option.\n\n### Removed\n\n- Remove the obsolete path.\n\n### Fixed\n\n- Repair the first edge.\n- Repair the final edge.\n- Repair a subsequent edge.\n\n### Security\n\n- Protect the response."
+}
