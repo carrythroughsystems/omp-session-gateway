@@ -687,6 +687,7 @@ describe("physical Android release target", () => {
     let tethering = false;
     const command = async (...args: string[]) => {
       if (args[0] === "devices") return "List of devices attached\nSYNTHETIC-SMOKE-DEVICE device\n";
+      if (args.slice(-4).join(" ") === "shell dumpsys deviceidle whitelist") return "user,com.tailscale.ipn,10123\n";
       if (args.slice(-3).join(" ") === "shell dumpsys tethering") return "Upstream wanted: " + tethering + "\n";
       if (args.slice(-5).join(" ") === "shell settings get global zen_mode") return "1\n";
       throw new Error("unexpected device mutation or probe");
@@ -694,6 +695,26 @@ describe("physical Android release target", () => {
     await preflightPostReleaseAndroid(command);
     tethering = true;
     await expect(preflightPostReleaseAndroid(command)).rejects.toThrow("turn off hotspot");
+  });
+
+  test("Pixel Tailscale Doze prerequisite refuses smoke before any device mutation", async () => {
+    const calls: string[][] = [];
+    let mutations = 0;
+    const command = async (...args: string[]) => {
+      calls.push(args);
+      if (args[0] === "devices") return "List of devices attached\nSYNTHETIC-SMOKE-DEVICE device\n";
+      if (args.slice(-4).join(" ") === "shell dumpsys deviceidle whitelist") return "system,com.example.other,10001\n";
+      if (args.slice(-3).join(" ") === "shell dumpsys tethering") return "Upstream wanted: false\n";
+      mutations += 1;
+      throw new Error("unexpected device mutation or probe");
+    };
+    await expect(preflightPostReleaseAndroid(command))
+      .rejects.toThrow("Tailscale (com.tailscale.ipn) must be on the Pixel's Doze allowlist");
+    expect(calls).toEqual([
+      ["devices"],
+      ["-s", "SYNTHETIC-SMOKE-DEVICE", "shell", "dumpsys", "deviceidle", "whitelist"],
+    ]);
+    expect(mutations).toBe(0);
   });
 
   test("requires the exact WebAPK to own the focused standalone task", () => {

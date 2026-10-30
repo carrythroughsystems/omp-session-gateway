@@ -134,8 +134,10 @@ deadline and the same URL, HTTP-status, body and owned cleanup checks as admissi
 raises `AndroidTailnetRecoveryError`, including as a restoration failure, so later smoke/qualification
 stages cannot run on the disconnected device.
 
-Tailscale is not Doze-whitelisted on the release Pixel; forced Doze can terminate the VPN and
-leave it offline after exit. **Reconnect Tailscale on the Pixel** before replaying a failed journey.
+The qualification Pixel must exempt Tailscale from Doze through the
+[one-time operator setup](#device-admission-and-one-time-webapk-setup) below. Without that exemption,
+forced Doze can terminate the VPN and leave it offline after exit. If the VPN has already stopped,
+**reconnect Tailscale on the Pixel** before replaying a failed journey.
 No Tailscale/VPN, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is automatic.
 The path proof observes connectivity and navigates only its disposable health tab; it changes
 none of those device settings.
@@ -198,6 +200,23 @@ remains the local LaunchAgent. Pixel adb/CDP, Keychain access, the driver Bun pi
 extension-source hash remain local to the controller.
 
 ### Device admission and one-time WebAPK setup
+
+Before the first qualification campaign or published-byte smoke, exempt Tailscale (`com.tailscale.ipn`)
+from Doze on the qualification Pixel. Tailscale recommends unrestricted battery use; the acceptance
+journey's forced-Doze cycle otherwise can kill the VPN and strand later stages off the tailnet.
+This is one-time operator equipment setup, not a harness remedy: select **Settings → Apps →
+Tailscale → Battery → Unrestricted**, or explicitly run:
+
+```sh
+adb shell dumpsys deviceidle whitelist +com.tailscale.ipn
+adb shell dumpsys deviceidle whitelist
+```
+
+Verify the readback includes `user,com.tailscale.ipn,<uid>` or `system,com.tailscale.ipn,<uid>`,
+where `<uid>` is decimal digits. Shared admission reads this allowlist before device mutations;
+qualification preflight stays read-only, and published-byte smoke refuses before release downloads
+or host changes. Missing, malformed or similar-package entries do not satisfy it, and an unreadable
+probe also refuses. The harness never adds the exemption or changes battery policy automatically.
 
 Turn Do Not Disturb off manually for the complete notification qualification window. Stable
 orchestrator admission reads `zen_mode` immediately after device selection, before provider lookup
