@@ -8,6 +8,7 @@
 <title>OMP Session Gateway — every live OMP session, one private page</title>
 <meta name="description" content="Keep using Oh My Pi in your terminal. OMP Session Gateway lists your collaboration-enabled sessions, shows which need you, and opens OMP's encrypted View or Control client from your phone over Tailscale Serve.">
 <link rel="canonical" href="https://carrythroughsystems.github.io/omp-session-gateway/">
+<link rel="preload" href="screen-needs-you.png" as="image" fetchpriority="high">
 <link rel="preload" href="fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="site.css">
@@ -15,6 +16,9 @@
 <meta property="og:title" content="OMP Session Gateway — every live OMP session, one private page">
 <meta property="og:description" content="Keep using Oh My Pi in your terminal. Discover live sessions, see which need you, and open OMP's encrypted View or Control client from your phone — no QR scans, copied links, or per-session setup.">
 <meta property="og:image" content="https://carrythroughsystems.github.io/omp-session-gateway/og.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="OMP Session Gateway — every live OMP session, one private page, in any modern browser.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://carrythroughsystems.github.io/omp-session-gateway/">
 <meta name="twitter:card" content="summary_large_image">
@@ -86,7 +90,7 @@
           <h3>Every live session, automatically.</h3>
           <p>Each collaboration-enabled <code>omp</code> process appears within one 10-second discovery poll. No per-session command, QR code, or copied link.</p>
         </div>
-        <figure class="shot" style="--focus: 46%"><img src="screen-all-clear.png" width="780" height="1688" loading="lazy" alt="Detail of the Sessions directory in the All clear state: four live sessions listed with working or idle state and uptime."></figure>
+        <figure class="shot" style="--focus: 46%"><img src="screen-all-clear.png" width="780" height="1688" loading="lazy" fetchpriority="low" alt="Detail of the Sessions directory in the All clear state: four live sessions listed with working or idle state and uptime."></figure>
       </li>
       <li class="step">
         <div class="text">
@@ -94,7 +98,7 @@
           <h3>The oldest ask rises first.</h3>
           <p>When sessions wait for input, <strong>Needs you</strong> promotes the oldest request with bounded metadata. The prompt itself stays in OMP.</p>
         </div>
-        <figure class="shot" style="--focus: 48%"><img src="screen-needs-you.png" width="780" height="1688" loading="lazy" alt="Detail of the Needs you queue: the Up next card with an Open request button, then the next waiting session."></figure>
+        <figure class="shot" style="--focus: 48%"><img src="screen-needs-you.png" width="780" height="1688" loading="lazy" fetchpriority="low" alt="Detail of the Needs you queue: the Up next card with an Open request button, then the next waiting session."></figure>
       </li>
       <li class="step">
         <div class="text">
@@ -102,7 +106,7 @@
           <h3>Open the exact live request.</h3>
           <p><strong>Open request</strong> fetches the link when you tap and hands it to OMP's encrypted client once. Replaced or exited sessions fail closed instead of opening something newer.</p>
         </div>
-        <figure class="shot" style="--focus: 63%"><img src="screen-open-request.png" width="780" height="1688" loading="lazy" alt="Detail of OMP's collaboration client opened on the waiting request: two options, one marked Recommended, and a Send button."></figure>
+        <figure class="shot" style="--focus: 63%"><img src="screen-open-request.png" width="780" height="1688" loading="lazy" fetchpriority="low" alt="Detail of OMP's collaboration client opened on the waiting request: two options, one marked Recommended, and a Send button."></figure>
       </li>
     </ol>
     <p class="small steps-note">Details from synthetic captures of the built PWA and the pinned OMP collaboration client. Session names and requests are fixtures.</p>
