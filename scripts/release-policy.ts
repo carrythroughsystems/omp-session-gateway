@@ -148,6 +148,24 @@ export function routinePathClassification(path: string): { authority: boolean; r
 export function routineProtectedPath(path: string): boolean {
   return routinePathClassification(path)?.authority ?? true;
 }
+export const CHANGELOG_SECTIONS = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"] as const;
+export const CHANGELOG_FRAGMENT_PATH = /^changelog\.d\/(added|changed|deprecated|removed|fixed|security)-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u;
+
+export function checkChangelogFragment(path: string, source: string): string[] {
+  const errors: string[] = [];
+  if (!CHANGELOG_FRAGMENT_PATH.test(path)) errors.push(`${path}: invalid changelog fragment name`);
+  if (!source.endsWith("\n") || source.includes("\r")) errors.push(`${path}: fragment must end with an LF newline`);
+  const lines = source.endsWith("\n") ? source.slice(0, -1).split("\n") : source.split("\n");
+  if (!/^- \S.*$/u.test(lines[0] ?? "") || lines.slice(1).some(line =>
+    !/^ {2}\S.*$/u.test(line) || /^ {2}(?:[-+*] |[0-9]+[.)] )/u.test(line))) {
+    errors.push(`${path}: fragment must contain one '- ' bullet with two-space continuation lines`);
+  }
+  for (const [index, line] of lines.entries()) {
+    if (line.length > 100) errors.push(`${path}:${index + 1}: fragment line exceeds 100 characters`);
+  }
+  return errors;
+}
+
 export const GENERATED_RELEASE_PATHS = {
   prepare: ["package.json", "apps/gateway/package.json", "apps/web/package.json", "packages/collab-client/package.json", "packages/protocol/package.json",
     "apps/gateway/src/diagnostics.ts", "scripts/build-release.ts", "apps/gateway/src/installation.ts", "bun.lock", "CHANGELOG.md",
@@ -160,10 +178,12 @@ export function generatedReleaseKind(headRef: string): GeneratedReleaseKind | un
   return /^release-driver\/[1-9][0-9]*\/v[0-9]+\.[0-9]+\.[0-9]+-prealpha\.[1-9][0-9]*-(prepare|approve|record)$/u.exec(headRef)?.[1] as GeneratedReleaseKind | undefined;
 }
 /** A version-bearing control is permitted only with the runtime's normalized control equality check. */
-export function generatedReleaseFilesMatch(kind: GeneratedReleaseKind | undefined, files: readonly { filename: string; previous_filename?: string }[]): boolean {
+export function generatedReleaseFilesMatch(kind: GeneratedReleaseKind | undefined, files: readonly { filename: string; previous_filename?: string; status?: string }[]): boolean {
   if (kind === undefined) return false;
   const paths: readonly string[] = GENERATED_RELEASE_PATHS[kind];
-  return files.every(file => [file.filename, ...(file.previous_filename === undefined ? [] : [file.previous_filename])]
+  return files.every(file => kind === "prepare" && file.status === "removed"
+    && file.previous_filename === undefined && CHANGELOG_FRAGMENT_PATH.test(file.filename)
+    || [file.filename, ...(file.previous_filename === undefined ? [] : [file.previous_filename])]
     .every(path => paths.includes(path) && (!routineProtectedPath(path) || (kind === "prepare" && path === "scripts/build-release.ts")
       || (kind === "approve" && path === "STABLE_RELEASE.lock.json"))));
 }
@@ -208,7 +228,7 @@ export interface RoutineSubject {
 }
 export interface RoutinePromotion {
   author: string; base: string; headRepository: string; headRef: string; head: string; tree: string;
-  files: readonly { filename: string; previous_filename?: string }[];
+  files: readonly { filename: string; previous_filename?: string; status?: string }[];
   state: "open" | "closed"; draft: boolean; merged: boolean; checksPassed: boolean; behind: boolean;
   mergedBy?: string | undefined; mergeTree?: string | undefined; mergeCommit?: string | undefined; mergeVerified?: boolean | undefined;
 }

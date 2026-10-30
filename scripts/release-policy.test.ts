@@ -114,6 +114,29 @@ describe("standing routine release authority", () => {
     expect(generatedReleaseFilesMatch("record", [{ filename: "STABLE_RELEASE.lock.json" }])).toBe(false);
     expect(generatedReleaseFilesMatch("approve", [{ filename: "bun.lock" }])).toBe(false);
   });
+  test("only prepare may delete valid changelog fragments, never add, edit or rename them", () => {
+    for (const section of ["added", "changed", "deprecated", "removed", "fixed", "security"]) {
+      const filename = `changelog.d/${section}-sample-01.md`;
+      expect(generatedReleaseFilesMatch("prepare", [{ filename, status: "removed" }])).toBe(true);
+      for (const kind of ["approve", "record"] as const) {
+        expect(generatedReleaseFilesMatch(kind, [{ filename, status: "removed" }])).toBe(false);
+      }
+      for (const status of [undefined, "added", "modified", "renamed", "copied"]) {
+        expect(generatedReleaseFilesMatch("prepare", [{ filename, ...(status ? { status } : {}) }])).toBe(false);
+      }
+      expect(generatedReleaseFilesMatch("prepare", [{
+        filename, status: "removed", previous_filename: "scripts/release-policy.ts",
+      }])).toBe(false);
+      expect(generatedReleaseFilesMatch("prepare", [{
+        filename: "CHANGELOG.md", status: "renamed", previous_filename: filename,
+      }])).toBe(false);
+    }
+    for (const filename of ["changelog.d/README.md", "changelog.d/other-entry.md",
+      "changelog.d/fixed-.md", "changelog.d/fixed-UPPER.md", "changelog.d/nested/fixed-entry.md",
+      "changelog.d/fixed-entry.txt", "docs/fixed-entry.md"]) {
+      expect(generatedReleaseFilesMatch("prepare", [{ filename, status: "removed" }])).toBe(false);
+    }
+  });
   test("ordinary baseline pins and source fixes do not change the authority controls", () => {
     for (const path of ["apps/gateway/src/doctor.ts", "apps/gateway/test/diagnostics.test.ts", "UPSTREAM.lock.json", "scripts/windows-qualification-pins.json", "scripts/release-text.json"]) expect(routineProtectedPath(path)).toBe(false);
   });
