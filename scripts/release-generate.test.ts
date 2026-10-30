@@ -306,7 +306,7 @@ for (const { name, summary, rendered } of publicNumerals) {
     expect(JSON.parse(result[RELEASE_TEXT]!).qualification).toEqual(data.qualification);
     expect(result["docs/RELEASE_STATUS.md"]).toBe(recorded["docs/RELEASE_STATUS.md"]);
     expect(result["docs/COMPATIBILITY.md"]).toBe(recorded["docs/COMPATIBILITY.md"]);
-    const replay = { ...recordBefore, ...result };
+    const replay = applyEdits(recordBefore, result);
     // Record requires this pre-publication heading; rewind only that precondition.
     replay["docs/RELEASE_STATUS.md"] = replay["docs/RELEASE_STATUS.md"]!
       .replace("## Mainline v0.7.4 — published stable", "## Mainline v0.7.4 — qualified; stable publication pending");

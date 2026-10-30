@@ -7,15 +7,14 @@ import { assertRetainedMacCommandsSettled, runMacScript } from "./stable-qualifi
 const root = resolve(import.meta.dir, "..");
 const helper = join(import.meta.dir, "qualification-remote-owner.sh");
 
-async function ownedPtyReader(startupDelayMs: number, reader: string, timeoutSeconds = 10): Promise<{ exitCode: number; stderr: string }> {
+async function ownedPtyReader(startupDelayMs: number, reader: string, timeoutSeconds = 10, ownerHelper = helper): Promise<{ exitCode: number; stderr: string }> {
   const home = await mkdtemp(join(tmpdir(), "remote-pty-owner-"));
   const id = "11111111-2222-4333-8444-555555555556";
   const child = Bun.spawn(["python3", "-c", `
 import os, pty, select, signal, sys, time
-startup_delay = float(sys.argv[1]) / 1000
 pid, terminal = pty.fork()
 if pid == 0:
-    time.sleep(startup_delay)
+    time.sleep(float(sys.argv[1]) / 1000)
     os.execv("/bin/bash", ["bash", *sys.argv[3:]])
 reaped = False
 code = 124
@@ -23,8 +22,7 @@ pending = b""
 ready = os.environ["PTY_READER_READY"].encode()
 sent = False
 try:
-    # The fixture's injected sleep must not consume the reader's readiness/exit budget.
-    deadline = time.monotonic() + startup_delay + float(sys.argv[2])
+    deadline = time.monotonic() + float(sys.argv[2])
     while time.monotonic() < deadline:
         ended, status = os.waitpid(pid, os.WNOHANG)
         if ended:
@@ -56,31 +54,47 @@ finally:
             time.sleep(.05)
     os.close(terminal)
 sys.exit(code)
-`, String(startupDelayMs), String(timeoutSeconds), helper, "run", id, "/bin/bash", "-c", reader],
+`, String(startupDelayMs), String(timeoutSeconds), ownerHelper, "run", id, "python3", "-c", `
+import os, sys, time
+# A background read can print its prompt before SIGTTIN stops it. Do not start the reader until
+# the owner's real fg handoff; otherwise a line typed at that early prompt can be lost on resume.
+while os.tcgetpgrp(0) != os.getpgrp():
+    time.sleep(.01)
+os.execv(sys.argv[1], sys.argv[1:])
+`, "/bin/bash", "-c", reader],
   { env: { ...process.env, HOME: home, PTY_READER_READY: "reader-ready" }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
   try {
     const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
     return { exitCode, stderr };
   }
   finally {
-    const control = Bun.spawn(["/bin/bash", helper, "settle", id],
+    const control = Bun.spawn(["/bin/bash", ownerHelper, "settle", id],
       { env: { ...process.env, HOME: home }, stdout: "ignore", stderr: "ignore" });
     await control.exited;
     await rm(home, { recursive: true, force: true });
   }
 }
 
-// Worst default case: 2.5 s injected startup + 10 s readiness/exit + 2 s reap + 20 s settle = 34.5 s.
-// Input still waits for the real read prompt; extending the bound never sends input speculatively.
+// Worst default case: 10 s startup/readiness/exit + 2 s reap + 20 s settle = 32 s < 40 s.
+// The reader starts only in the foreground, and input still waits for its real read prompt.
 test.skipIf(process.platform !== "darwin").each([0, 2_500])("council498r1 owned OMP PTY keeps its reader in the foreground (startup delay %i ms)", async startupDelayMs => {
   // The read builtin emits the prompt only once it starts; prompts need no newline.
   // Keep the marker in the environment so an echoed command cannot satisfy the handshake.
   expect(await ownedPtyReader(startupDelayMs, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]')).toEqual({ exitCode: 0, stderr: "" });
 }, 40_000);
 
-test.skipIf(process.platform !== "darwin")("injected startup delay does not consume the PTY reader budget", async () => {
-  expect(await ownedPtyReader(500, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]', 0.5))
-    .toEqual({ exitCode: 0, stderr: "" });
+test.skipIf(process.platform !== "darwin")("PTY readiness waits for foreground handoff before sending input", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "remote-delayed-foreground-"));
+  const delayedOwner = join(directory, "owner.sh");
+  const source = await readFile(helper, "utf8");
+  const foreground = 'if [ -t 0 ]; then fg %1 >/dev/null; else wait "$pgid"; fi';
+  expect(source.split(foreground)).toHaveLength(2);
+  // A background read may print its prompt before fg; typing then loses the line on continuation.
+  await writeFile(delayedOwner, source.replace(foreground, `/bin/sleep .25\n${foreground}`));
+  try {
+    expect(await ownedPtyReader(0, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]', 2, delayedOwner))
+      .toEqual({ exitCode: 0, stderr: "" });
+  } finally { await rm(directory, { recursive: true, force: true }); }
 }, 40_000);
 
 test.skipIf(process.platform !== "darwin").each([0, 250])("PTY reader waits for its first output before writing (first output delay %i ms)", async firstOutputDelayMs => {
