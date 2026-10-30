@@ -303,9 +303,10 @@ test.each(["ordinary", "typed", "aggregate", "empty-aggregate", "containment"] a
 test.each(["poll", "telemetry", "ownership", "request"] as const)("509 round2 ordinary %s failures survive expiry and conversion", async stage => {
   const host = fake(), metrics = emptyPushDeliveryMetrics(), controller = new AbortController();
   const raw = new Error(`synthetic private ${stage} failure`);
+  const abortCause = new Error("synthetic delivery controller abort");
   const session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
     startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z" };
-  const fail = async (): Promise<never> => { controller.abort(); throw raw; };
+  const fail = async (): Promise<never> => { controller.abort(abortCause); throw raw; };
   host.runtime.observe = stage === "poll" ? fail : async () => ({
     count: stage === "ownership" ? 0 : 1, titleMatches: true, bodyMatches: true, forbiddenFound: false,
   });
@@ -318,7 +319,10 @@ test.each(["poll", "telemetry", "ownership", "request"] as const)("509 round2 or
     phase: "private_verified", timeout: 1, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
     execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } }).catch(error => error);
   expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
-  expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "delivery_timeout" }]);
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(abortCause.message);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{
+    reason: "deadline_exceeded", observations: { controllerDeadline: true },
+  }]);
 });
 
 test.each(["browser", "restoration"] as const)("509 round2 readiness remaps nested %s failures and attaches final metrics", async stage => {
@@ -376,21 +380,24 @@ test("506 council readiness cannot substitute a posted record for lock-screen pr
   expect(host.cleanup).toHaveLength(7);
 });
 
-test.each(["elapsed", "typed"] as const)("506 council readiness preserves %s browser deadline attribution", async variant => {
+test.each(["elapsed", "aborted", "typed"] as const)("506 council readiness preserves %s browser deadline attribution", async variant => {
   const host = fake();
-  let id = 0;
-  const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
+  const controller = new AbortController(), abortCause = new Error("synthetic readiness controller abort");
+  let id = 1;
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
   host.runtime.browser = async () => {
-    execution.deadline = 0;
+    if (variant === "aborted") controller.abort(abortCause);
+    else execution.deadline = 0;
     if (variant === "typed") throw new QualificationFailure({ id: 1, lane: "androidPush", step: "browser_forward",
       reason: "deadline_exceeded", class: "harness", elapsedMs: 1, operation: "unknown", observations: { controllerDeadline: true } });
     throw new Error("synthetic elapsed browser execution");
   };
   const error = await runAndroidPushReadiness({ ...host.input, execution }).catch(error => error);
   expect(normalizeQualificationFailures(error)).toContainEqual(expect.objectContaining({
-    lane: "rigReadiness", reason: variant === "typed" ? "deadline_exceeded" : "delivery_timeout",
+    lane: "rigReadiness", reason: "deadline_exceeded", observations: expect.objectContaining({ controllerDeadline: true }),
   }));
-  if (variant === "elapsed") expect(normalizeQualificationFailures(error)).toContainEqual(expect.objectContaining({ reason: "browser_baseline_failed" }));
+  if (variant !== "typed") expect(normalizeQualificationFailures(error)).toContainEqual(expect.objectContaining({ reason: "browser_baseline_failed" }));
+  if (variant === "aborted") expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(abortCause.message);
   expect(host.cleanup).toHaveLength(7);
 });
 
@@ -498,7 +505,7 @@ test.each(["readiness-error", "readiness-deadline", "qualification-error", "qual
         observations: { gcmConnected: true, gcmRemedyApplied: false } }]);
       expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(failure.message);
     } else if (scenario.endsWith("error")) await expect(run).rejects.toBe(failure);
-    else await expect(run).rejects.toMatchObject({ evidence: { reason: "delivery_timeout" } });
+    else await expect(run).rejects.toMatchObject({ evidence: { reason: "deadline_exceeded", observations: { controllerDeadline: true } } });
     expect(host.cleanup).toHaveLength(7);
   });
 
@@ -573,7 +580,7 @@ test("500 expiry after a settled rearm cannot reinstate the old ask sampler", as
     onTimeout: value => { sample = value; }, rearm: async () => {
       sample = freshSampler; controller.abort();
       return { session: { ...session, ask: { requestId: "fresh", since: session.ask!.since } } };
-    } })).rejects.toMatchObject({ evidence: { reason: "delivery_timeout" } });
+    } })).rejects.toMatchObject({ evidence: { reason: "deadline_exceeded", observations: { controllerDeadline: true } } });
   expect(sample).toBe(freshSampler);
 });
 
@@ -624,17 +631,28 @@ test("495 round2 all persisted delivery durations are bounded integers", async (
   }
 });
 
-test.each(["metadata", "phase"] as const)("495 round2 qualification checks the %s success boundary after awaits", async stage => {
+test.each(["metadata", "phase", "elapsed"] as const)("495 round2 qualification checks the %s success boundary after awaits", async stage => {
   const host = fake(), controller = new AbortController(), snapshot = host.runtime.snapshot, sinks = host.runtime.sinks;
+  const abortCause = new Error("synthetic qualification controller abort");
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
   let delayed = false;
   if (stage === "metadata") host.runtime.snapshot = async (...args) => {
     const current = await snapshot(...args);
     if (current?.inputRequired && !delayed) { delayed = true; await host.runtime.pause(90_001); }
     return current;
   };
-  else host.runtime.sinks = async (...args) => { const result = await sinks(...args); controller.abort(); return result; };
-  await expect(runAndroidPush({ ...host.input, execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 } }))
-    .rejects.toMatchObject({ evidence: { class: "harness", reason: stage === "metadata" ? "delivery_metadata_timeout" : "delivery_timeout" } });
+  else host.runtime.sinks = async (...args) => {
+    const result = await sinks(...args);
+    if (stage === "phase") controller.abort(abortCause);
+    else execution.deadline = 0;
+    return result;
+  };
+  const error = await runAndroidPush({ ...host.input, execution }).catch(error => error);
+  expect(error).toMatchObject({ evidence: { class: "harness",
+    reason: stage === "metadata" ? "delivery_metadata_timeout" : "deadline_exceeded" } });
+  if (stage === "metadata") expect(error.evidence.observations.controllerDeadline).toBeUndefined();
+  else expect(error.evidence.observations.controllerDeadline).toBe(true);
+  if (stage === "phase") expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(abortCause.message);
   expect(host.cleanup).toHaveLength(7);
 });
 
@@ -711,7 +729,7 @@ test("R2 deadline expiry records elapsed time and installs the late-post observe
     phase: "private_verified", timeout: 60_000,
     execution: { signal: new AbortController().signal, deadline: performance.now() - 1, nextFailureId: () => 1 },
     onTimeout: sample => { late = sample; } });
-  await expect(failure).rejects.toMatchObject({ evidence: { class: "harness", reason: "delivery_timeout" } });
+  await expect(failure).rejects.toMatchObject({ evidence: { class: "harness", reason: "deadline_exceeded", observations: { controllerDeadline: true } } });
   expect(late).toBeDefined();
   await late?.();
   expect(metrics.latePostCount).toBe(1);
@@ -746,7 +764,9 @@ test.each(["telemetry", "request"] as const)("495 R6 cancellation during %s cann
   await expect(waitForPushDelivery({ runtime: host.runtime, session, metrics, detail: "private", kind: "attention", phase: "private_verified",
     timeout: 60_000, window: { lane: "androidPush", phase: "private_verified", after: 0, ordinal: 1 },
     execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 },
-    onTimeout: value => { sample = value; } })).rejects.toMatchObject({ evidence: { reason: "delivery_timeout", class: "harness" } });
+    onTimeout: value => { sample = value; } })).rejects.toMatchObject({ evidence: {
+      reason: "deadline_exceeded", class: "harness", observations: { controllerDeadline: true },
+    } });
   // The post arrived within budget; later cancellation must not reclassify it as late.
   expect(sample).toBeUndefined();
   expect(metrics.latePostCount).toBe(0);
@@ -896,7 +916,9 @@ test("readiness includes fixture acknowledgement time in its 160-second delivery
     if (args[0] === "ask") await host.runtime.pause(160_000);
   };
   host.runtime.beginDeliveryTelemetry = async () => ({ lane: "rigReadiness", phase: "readiness", after: 0, ordinal: 1 });
-  await expect(runAndroidPushReadiness(host.input)).rejects.toMatchObject({ evidence: { lane: "rigReadiness", step: "pixel_push", reason: "delivery_timeout" } });
+  const error = await runAndroidPushReadiness(host.input).catch(error => error);
+  expect(error).toMatchObject({ evidence: { lane: "rigReadiness", step: "pixel_push", reason: "delivery_timeout" } });
+  expect(error.evidence.observations.controllerDeadline).toBeUndefined();
   expect(parseAndroidPushProgress(host.checkpoints.at(-1)).cleanupRequired).toBe(false);
   expect(host.state().device).toEqual(baseline);
 });

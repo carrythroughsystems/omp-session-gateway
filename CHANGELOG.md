@@ -20,6 +20,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Require readiness proof on execution-bearing passed qualification receipts, preserve controller
+  expiry attribution and abort causes in Push failures, and reject fractional readiness durations.
 - Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
   forever, and stream qualification output into bounded, byte-exact private tails.
 - Retain bounded private smoke-child output and original failure causes before release-driver
