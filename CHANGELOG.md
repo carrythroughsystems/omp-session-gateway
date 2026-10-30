@@ -20,6 +20,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Report the upstream canary's resolved OMP version, pre-flight failures, and Bun engine requirement
+  in summaries and failure issues, and expose successful scheduled runs correctly.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.
