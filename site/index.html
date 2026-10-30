@@ -48,18 +48,19 @@
 <section class="hero">
   <div class="wrap">
     <div>
-      <p class="eyebrow">Works with stock OMP 18.1.20+ · no fork</p>
+      <p class="eyebrow">Private tailnet directory</p>
       <h1><span class="line">Every live OMP session.</span> <span class="line">One private mobile&nbsp;page.</span></h1>
-      <p class="lede">Keep running <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a> in your terminal. The gateway lists your collaboration-enabled sessions, shows which one needs you first, and opens OMP's own encrypted View or Control client over your tailnet — no QR scans, copied links, or per-session setup.</p>
+      <p class="lede">Keep running stock <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a> in your terminal. The gateway lists your collaboration-enabled sessions, shows which one needs you first, and opens OMP's own encrypted View or Control client over your tailnet — no fork, no QR scans, no <span class="nowrap">per-session</span> link copying.</p>
       <div class="actions">
         <a class="cta" href="#setup">Get started</a>
         <a class="cta secondary" href="https://github.com/carrythroughsystems/omp-session-gateway/releases/latest">Latest release</a>
       </div>
       <ul class="facts" aria-label="Requirements">
+        <li class="label" aria-hidden="true">Requires</li>
         <li>Stock OMP ≥ 18.1.20</li>
         <li>Bun 1.4.0</li>
-        <li class="warn">Tailscale Serve, TUN mode</li>
-        <li>Linux · macOS · Windows hosts</li>
+        <li>Tailscale Serve, TUN mode</li>
+        <li>Linux · macOS · Windows host</li>
       </ul>
     </div>
     <figure class="visual">
@@ -182,8 +183,10 @@
       <ol class="setup">
         <li>
           <h3>Enable collaboration once in OMP</h3>
-          <div class="snippet"><pre><code>omp --version <span class="c"># must report at least 18.1.20</span>
-omp config set collab.autoStart control <span class="c"># or view for read-only sharing</span></code></pre></div>
+          <div class="snippet"><pre><code><span class="c"># must report at least 18.1.20</span>
+omp --version
+<span class="c"># or view for read-only sharing</span>
+omp config set collab.autoStart control</code></pre></div>
           <p>Start participating sessions with plain <code>omp</code> after changing this setting; already-running processes do not pick it up.</p>
         </li>
         <li>
@@ -261,6 +264,9 @@ bun apps/gateway/src/cli.js serve-guidance</code></pre></div>
   <div class="wrap">
     <a class="brand" href="./"><img src="logo.svg" alt="" width="20" height="20">OMP Session Gateway</a>
     <ul class="links">
+      <li><a href="compare/">Compare</a></li>
+      <li><a href="security/">Security</a></li>
+      <li><a href="status/">Status</a></li>
       <li><a href="https://github.com/carrythroughsystems/omp-session-gateway">GitHub</a></li>
       <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/README.md">Docs</a></li>
       <li><a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/CHANGELOG.md">Changelog</a></li>
@@ -285,7 +291,7 @@ if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") 
     let timer = 0;
     button.addEventListener("click", async () => {
       const text = Array.from(code.childNodes, (node) => node.nodeType === Node.ELEMENT_NODE && node.classList.contains("c") ? "" : node.textContent)
-        .join("").split("\n").map((line) => line.replace(/\s+$/u, "")).join("\n");
+        .join("").split("\n").map((line) => line.replace(/\s+$/u, "")).filter((line) => line !== "").join("\n");
       try {
         await navigator.clipboard.writeText(text);
         button.textContent = "Copied";
