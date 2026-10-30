@@ -565,7 +565,6 @@ export class StudioDriver implements DriverPort {
     }
     return { operation: "prune", apply, ...(apply ? { removed: candidates } : { wouldRemove: candidates }), kept };
   }
-  async afterClose(): Promise<void> { await this.pruneWork(true); }
   async campaignWorkerRunning(state: DriverState): Promise<boolean> {
     return (await command(["tmux", "has-session", "-t", this.session("campaign", state)], ROOT, this.env, true)).code === 0;
   }
