@@ -116,7 +116,7 @@ describe("device-origin HTTPS reachability", () => {
           } },
         ) as T;
       },
-      async send(method: string, parameters?: Record<string, unknown>) {
+      async send(method: string, parameters?: Record<string, unknown>): Promise<Record<string, unknown>> {
         calls.push({ method, ...(parameters === undefined ? {} : { parameters }) });
         if (method === "Page.navigate") {
           currentUrl = String(parameters?.url);
