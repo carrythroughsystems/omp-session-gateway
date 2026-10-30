@@ -20,6 +20,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Keep directory coverage and launch feedback consistent through loading hosts, SSE keepalives,
+  terminal session states, and cancelled notification or resume launches; retain the mounted
+  generation on View-to-Control and prevent delayed transitions from remounting disposed shells.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.

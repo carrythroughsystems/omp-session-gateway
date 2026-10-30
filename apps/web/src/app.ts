@@ -142,10 +142,10 @@ interface LaunchAttempt {
   readonly ref: SessionRef;
   readonly mode: LaunchMode;
   readonly presentation: LaunchPresentation;
-  readonly creationHandoff: boolean;
   readonly scope: SourceKey | "all";
   readonly sourceEpoch: number | undefined;
   readonly controller: AbortController;
+  bannerOwned: boolean;
   deadline?: number;
   settled: boolean;
 }
@@ -1182,13 +1182,13 @@ function cancelLaunch(source?: SourceKey, restore = true): void {
     } else tray.close(true, true);
     if (statusBanner.dataset.kind === "loading" && directoryLoaded && localFresh) setStatus("ready", "");
   }
-  if (cancelled.creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
+  if (cancelled.bannerOwned && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
 }
 
 function releaseLaunchFailure(sourceKey: SourceKey): void {
   remoteLaunchFailures.delete(sourceKey);
   if (activeCollabShell?.launchFailureSource === sourceKey) {
-    hideTriageBar(activeCollabShell, false);
+    hideTriageBar(activeCollabShell);
     reconcileActiveCollabShell();
   }
 }
@@ -1987,7 +1987,7 @@ function renderDirectoryContents(arrived = false): void {
   sessionList.replaceChildren();
   sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
   if (sessions.size === 0 && !scopeCoverage().failed &&
-    ![...sources.keys()].some(key => (selectedScope === "all" || key === selectedScope) && sourceAvailability(key).time !== undefined)) {
+    ![...sources.keys()].some(key => sourceAvailability(key).time !== undefined)) {
     emptyState.hidden = true;
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
@@ -2056,6 +2056,7 @@ function sessionEndedCopy(reason: string | null): string {
 
 function hideTriageBar(shell: ActiveCollabShell, rerenderConnection = true): void {
   const hidAnswerTriage = shell.answerTriageVisible;
+  const clearedFailure = shell.launchFailureSource !== undefined;
   if (shell.triageTimeout !== undefined) {
     window.clearTimeout(shell.triageTimeout);
     delete shell.triageTimeout;
@@ -2066,7 +2067,7 @@ function hideTriageBar(shell: ActiveCollabShell, rerenderConnection = true): voi
   delete shell.triageBar.dataset.failureKind;
   delete shell.triageBar.dataset.dismissible;
   delete shell.shell.dataset.triageVisible;
-  if (hidAnswerTriage && rerenderConnection) renderConnectionState(shell);
+  if ((hidAnswerTriage || clearedFailure) && rerenderConnection) renderConnectionState(shell);
 }
 
 function dismissTriageBar(shell: ActiveCollabShell): void {
@@ -2083,7 +2084,7 @@ function showTriageBar(
   actionLabel?: string,
   action?: () => void,
 ): void {
-  if (shell.launchFailureSource !== undefined && kind !== "launch-failed") return;
+  if (shell.launchFailureSource !== undefined && kind !== "launch-failed" && kind !== "ended") return;
   const drawCheck = kind === "clear" && copy.startsWith("✓ Answered — all clear") &&
     shell.triageBar.dataset.kind !== "clear";
   hideTriageBar(shell, false);
@@ -2461,7 +2462,6 @@ function reconcileActiveCollabShell(): void {
     shell === undefined ||
     shell.answerShown ||
     pendingLaunch !== undefined ||
-    shell.launchFailureSource !== undefined ||
     shell.latestEmbedState?.responsePending === true
   ) {
     return;
@@ -2475,6 +2475,7 @@ function reconcileActiveCollabShell(): void {
     showTriageBar(shell, "ended", "Session ended", "Back to Sessions", returnToDirectory);
     return;
   }
+  if (shell.launchFailureSource !== undefined) return;
   if (shell.openedRequestId !== undefined && current.ask?.requestId === shell.openedRequestId) {
     if (
       shell.latestEmbedState?.phase === "live" &&
@@ -2596,6 +2597,7 @@ function enterCollabClient(
   originTile: HTMLElement | null = null,
   presentation: LaunchPresentation = "full",
 ): void {
+  notificationRouteStatusLocked = false;
   setStatus("ready", "");
   const fromDirectory = activeCollabShell === undefined;
   const snapshot = captureDirectorySnapshot();
@@ -2625,7 +2627,11 @@ function enterCollabClient(
   control.textContent = "Control";
   control.hidden = mode === "control" || !session.canControl;
   control.addEventListener("click", () => {
-    const current = sessions.get(sessionKey(session)) ?? session;
+    const current = sessions.get(sessionKey(shellState));
+    if (current === undefined || !sameBinding(current, shellState)) {
+      reconcileActiveCollabShell();
+      return;
+    }
     void launch(current, "control", control, current.ask?.requestId, shellState.scope);
   });
   const connection = createTextElement("span", "conn-chip", "Connecting…");
@@ -2695,8 +2701,30 @@ function enterCollabClient(
     reconnectAttempt = 0;
   }
   const commitHistory = location.pathname !== "/client/";
+  const shellState: ActiveCollabShell = {
+    sourceKey: session.sourceKey,
+    scope: selectedScope,
+    instanceId: session.instanceId,
+    generation: session.generation,
+    ...(requestId === undefined ? {} : { openedRequestId: requestId }),
+    mode,
+    presentation,
+    connectionChip: connection,
+    triageBar,
+    shell,
+    answerShown: false,
+    answerTriageVisible: false,
+    hasBeenLive: false,
+  };
+  activeCollabShell = shellState;
+  // A live shell supersedes any disposed predecessor, so the bfcache restore path must not fire.
+  collabShellDisposedOnPageHide = false;
+  disposedShellResume = undefined;
+
   const commit = (): void => {
     originTile?.style.setProperty("view-transition-name", "");
+    // Disposal or a successor can take ownership while a forward transition waits for its frame.
+    if (activeCollabShell !== shellState) return;
     if (presentation === "request-tray") {
       const expand = document.createElement("button");
       expand.type = "button";
@@ -2747,26 +2775,6 @@ function enterCollabClient(
   } else {
     commit();
   }
-
-  const shellState: ActiveCollabShell = {
-    sourceKey: session.sourceKey,
-    scope: selectedScope,
-    instanceId: session.instanceId,
-    generation: session.generation,
-    ...(requestId === undefined ? {} : { openedRequestId: requestId }),
-    mode,
-    presentation,
-    connectionChip: connection,
-    triageBar,
-    shell,
-    answerShown: false,
-    answerTriageVisible: false,
-    hasBeenLive: false,
-  };
-  activeCollabShell = shellState;
-  // A live shell supersedes any disposed predecessor, so the bfcache restore path must not fire.
-  collabShellDisposedOnPageHide = false;
-  disposedShellResume = undefined;
 
   const updateConnection = (state: CollabEmbedState): void => {
     shellState.latestEmbedState = state;
@@ -2883,8 +2891,8 @@ async function launch(
     id: ++launchSequence, epoch: selectionEpoch,
     ref: { sourceKey: session.sourceKey, instanceId: session.instanceId, generation: session.generation,
       ...(requestId === undefined ? {} : { requestId }) },
-    mode, presentation, creationHandoff, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
-    controller: new AbortController(), settled: false,
+    mode, presentation, scope: selectedScope, sourceEpoch: remotes.get(session.sourceKey)?.epoch,
+    controller: new AbortController(), bannerOwned: false, settled: false,
   };
   pendingLaunch = attempt;
   const currentBinding = (): SessionMetadata | undefined => {
@@ -2912,6 +2920,7 @@ async function launch(
     button.setAttribute("aria-busy", "true");
     if (labelOnly) button.textContent = mode === "view" ? "Opening view…" : "Opening control…";
   } else if (sourceShell === undefined && session.sourceKey === localKey) {
+    attempt.bannerOwned = true;
     setStatus("loading", mode === "view" ? "Opening view…" : "Opening control…");
   }
   const settle = (): void => {
@@ -2943,7 +2952,7 @@ async function launch(
     const owned = pendingLaunch === attempt;
     settle();
     resetButton();
-    if (owned && creationHandoff && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
+    if (owned && attempt.bannerOwned && activeCollabShell === undefined && statusBanner.dataset.kind === "loading") setStatus("ready", "");
     if (owned && attempt.presentation === "request-tray" && activeCollabShell === undefined && tray.id === "request") {
       void restoreDirectory(undefined, session, false);
     }
@@ -3214,7 +3223,6 @@ function connectEvents(epoch: number): void {
     lastFreshAt = Date.now();
     localFresh = true;
     clearLocalTransportFailure();
-    releaseLaunchFailure(localKey);
     armEventLiveness(source, epoch);
     if (!notificationRouteStatusLocked) setStatus("ready", "");
   });
@@ -3231,38 +3239,42 @@ async function resolvePendingNotificationRoute(): Promise<void> {
   pendingNotificationRoute = false;
   const pending = pendingNotificationLaunch;
   pendingNotificationLaunch = undefined;
-  const session = pending === undefined ? undefined : sessions.get(sessionKey({ sourceKey: localKey, instanceId: pending.instanceId }));
-  // A tap for the collaboration this page already shows keeps it: an activity stop never
-  // downgrades Control to View, and an attention tap relaunches only to gain Control.
-  const shell = activeCollabShell;
-  const shown =
-    shell !== undefined &&
-    session !== undefined &&
-    shell.sourceKey === localKey &&
-    shell.instanceId === session.instanceId &&
-    shell.generation === session.generation;
-  if (pending?.kind === "activity_stop" && session?.generation === pending.generation && session.canView) {
-    if (shown) return;
-    selectedScope = localKey;
-    if (shell !== undefined) showTriageBar(shell, "sending", "Opening view…");
-    await launch(session, "view");
-  } else if (
-    pending?.kind === "attention" &&
-    session?.ask?.requestId === pending.requestId &&
-    session.inputRequired &&
-    session.canControl
-  ) {
-    if (shown && shell.mode === "control") return;
-    selectedScope = localKey;
-    if (shell !== undefined) showTriageBar(shell, "sending", "Opening control…");
-    await launch(session, "control", undefined, pending.requestId);
-  } else if (shell !== undefined) {
-    // The collaboration stays open. The directory banner is hidden behind it, so say so in the
-    // triage bar, unless that bar already holds a live prompt such as Hold for the open ask.
-    if (shell.triageBar.hidden) showTriageBar(shell, "clear", "That alert changed or expired.", "Sessions", returnToDirectory);
-  } else {
-    setStatus("expired", "That notification changed or expired. Choose a current session.");
-    applyActivatedWorkerUpdate();
+  try {
+    const session = pending === undefined ? undefined : sessions.get(sessionKey({ sourceKey: localKey, instanceId: pending.instanceId }));
+    // A tap for the collaboration this page already shows keeps it: an activity stop never
+    // downgrades Control to View, and an attention tap relaunches only to gain Control.
+    const shell = activeCollabShell;
+    const shown =
+      shell !== undefined &&
+      session !== undefined &&
+      shell.sourceKey === localKey &&
+      shell.instanceId === session.instanceId &&
+      shell.generation === session.generation;
+    if (pending?.kind === "activity_stop" && session?.generation === pending.generation && session.canView) {
+      if (shown) return;
+      selectedScope = localKey;
+      if (shell !== undefined) showTriageBar(shell, "sending", "Opening view…");
+      await launch(session, "view");
+    } else if (
+      pending?.kind === "attention" &&
+      session?.ask?.requestId === pending.requestId &&
+      session.inputRequired &&
+      session.canControl
+    ) {
+      if (shown && shell.mode === "control") return;
+      selectedScope = localKey;
+      if (shell !== undefined) showTriageBar(shell, "sending", "Opening control…");
+      await launch(session, "control", undefined, pending.requestId);
+    } else if (shell !== undefined) {
+      // The collaboration stays open. The directory banner is hidden behind it, so say so in the
+      // triage bar, unless that bar already holds a live prompt such as Hold for the open ask.
+      if (shell.triageBar.hidden) showTriageBar(shell, "clear", "That alert changed or expired.", "Sessions", returnToDirectory);
+    } else {
+      setStatus("expired", "That notification changed or expired. Choose a current session.");
+      applyActivatedWorkerUpdate();
+    }
+  } finally {
+    notificationRouteStatusLocked = false;
   }
 }
 
