@@ -365,14 +365,18 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
     if (token.value === "{") blocks.push(index);
     else if (token.value === "}") blocks.pop();
   }
+  const conciseArrowEnd = (start: number): number => {
+    let end = start;
+    for (; end < tokens.length && ![";", ",", ")", "]", "}"].includes(tokens[end]?.value ?? ""); end++) {
+      if (["(", "[", "{"].includes(tokens[end]?.value ?? "")) end = pairs.get(end) ?? end;
+    }
+    return end;
+  };
   // Expression-bodied arrows have function scopes too, even without a brace to stop a scan.
   for (const [index, token] of tokens.entries()) {
     if (token.value !== "=>" || tokens[index + 1]?.value === "{") continue;
     const parent = scopes[index];
-    let end = index + 1;
-    for (; end < tokens.length && ![";", ",", ")", "]", "}"].includes(tokens[end]?.value ?? ""); end++) {
-      if (["(", "[", "{"].includes(tokens[end]?.value ?? "")) end = pairs.get(end) ?? end;
-    }
+    const end = conciseArrowEnd(index + 1);
     for (let cursor = index + 1; cursor < end; cursor++) {
       if (scopes[cursor] === parent) scopes[cursor] = index;
     }
@@ -405,18 +409,6 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
     }
     return start;
   };
-  const memberAt = (index: number): { name: string; after: number; receiver: number } | undefined => {
-    const token = tokens[index]!;
-    const previous = tokens[index - 1]?.value ?? "";
-    if (token.value === "[") {
-      const close = pairs.get(index);
-      if (close === undefined || !/^(?:[$\p{ID_Continue}]+|[)\]]|\?\.)$/u.test(previous)) return undefined;
-      const literal = unwrap({ start: index + 1, end: close });
-      const name = literal.end === literal.start + 1 ? tokens[literal.start]?.literal : undefined;
-      if (name !== undefined) return { name, after: close + 1, receiver: index - (previous === "?." ? 2 : 1) };
-    } else if (previous === "." || previous === "?.") return { name: token.value, after: index + 1, receiver: index - 2 };
-    return undefined;
-  };
   interface Binding { name: string; at: number; scope: number; initializer: Span; slot?: number }
   const bindings: Binding[] = [];
   for (const [index, token] of tokens.entries()) {
@@ -442,23 +434,64 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
       bindings.push({ name: tokens[name.start]!.value, at: name.start, scope: scopes[index]!, initializer, ...(array ? { slot } : {}) });
     }
   }
+  const resolveBinding = (name: string, at: number, scope: number): Binding | undefined =>
+    bindings.filter(binding => binding.scope === scope && binding.name === name && binding.at < at).at(-1);
+  const unmodified = (binding: Binding, until: number): boolean => {
+    for (let cursor = binding.at + 1; cursor < until; cursor++) {
+      // Parameter bindings are not recorded; do not mistake their writes for outer mutations.
+      // Skip only the nested function, then keep looking for later outer writes.
+      if (tokens[cursor]?.value === "function") {
+        let body = cursor + 1;
+        for (; body < tokens.length && tokens[body]?.value !== "{"; body++) {
+          if (["(", "["].includes(tokens[body]?.value ?? "")) body = pairs.get(body) ?? body;
+        }
+        cursor = pairs.get(body) ?? body;
+        continue;
+      }
+      if (tokens[cursor]?.value === "=>") {
+        const body = cursor + 1;
+        cursor = tokens[body]?.value === "{" ? pairs.get(body) ?? body : conciseArrowEnd(body) - 1;
+        continue;
+      }
+      if (tokens[cursor]?.value === binding.name &&
+        ![".", "?."].includes(tokens[cursor - 1]?.value ?? "") && tokens[cursor + 1]?.value === "=") return false;
+    }
+    return true;
+  };
+  const staticString = (index: number): string | undefined => {
+    const token = tokens[index];
+    if (token?.literal !== undefined) return token.literal;
+    if (!/^[$_\p{ID_Start}][\p{ID_Continue}$]*$/u.test(token?.value ?? "")) return undefined;
+    for (let scope = scopes[index]!; ; scope = scopes[scope]!) {
+      const binding = resolveBinding(token!.value, index, scope);
+      if (binding !== undefined) {
+        if (binding.slot !== undefined || !unmodified(binding, index)) return undefined;
+        const value = unwrap(binding.initializer);
+        return value.end === value.start + 1 ? tokens[value.start]?.literal : undefined;
+      }
+      if (scope === -1) return undefined;
+    }
+  };
+  const memberAt = (index: number): { name: string; after: number; receiver: number } | undefined => {
+    const token = tokens[index]!;
+    const previous = tokens[index - 1]?.value ?? "";
+    if (token.value === "[") {
+      const close = pairs.get(index);
+      if (close === undefined || !/^(?:[$\p{ID_Continue}]+|[)\]]|\?\.)$/u.test(previous)) return undefined;
+      const literal = unwrap({ start: index + 1, end: close });
+      const name = literal.end === literal.start + 1 ? staticString(literal.start) : undefined;
+      if (name !== undefined) return { name, after: close + 1, receiver: index - (previous === "?." ? 2 : 1) };
+    } else if (previous === "." || previous === "?.") return { name: token.value, after: index + 1, receiver: index - 2 };
+    return undefined;
+  };
   const httpAsserted = (origin: number, callOpen: number, callEnd: number, receiver: number): boolean => {
     const scope = scopes[origin]!;
     const callStart = expressionStart(receiver);
-    const resolveBinding = (name: string, at: number): Binding | undefined =>
-      bindings.filter(binding => binding.scope === scope && binding.name === name && binding.at < at).at(-1);
-    const unmodified = (binding: Binding, until: number): boolean => {
-      for (let cursor = binding.at + 1; cursor < until; cursor++) {
-        if (scopes[cursor] === scope && tokens[cursor]?.value === binding.name &&
-          ![".", "?."].includes(tokens[cursor - 1]?.value ?? "") && tokens[cursor + 1]?.value === "=") return false;
-      }
-      return true;
-    };
     const refersToResponse = (input: Span, at: number, seen = new Set<Binding>()): boolean => {
       const span = unwrap(input);
       if (span.start === callStart && span.end === callEnd + 1) return true;
       if (span.end !== span.start + 1) return false;
-      const binding = resolveBinding(tokens[span.start]?.value ?? "", at);
+      const binding = resolveBinding(tokens[span.start]?.value ?? "", at, scope);
       if (binding === undefined || seen.has(binding) || !unmodified(binding, at)) return false;
       seen.add(binding);
       let value = unwrap(binding.initializer);
@@ -507,12 +540,17 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
     if (tokens[after]?.value === "?.") after++;
     if (tokens[after]?.value !== "(") continue;
     const end = pairs.get(after) ?? tokens.length;
-    const arguments_ = tokens.slice(after + 1, end);
-    if (["waitForEvent", "on", "once", "addListener"].includes(member.name) && arguments_[0]?.literal === "requestfinished") {
-      violations.push(`${relativePath}:${token.line}: request-finished events are not e2e readiness; observe application state`);
-    } else if (["goto", "reload", "goBack", "goForward", "setContent", "waitForURL", "waitForNavigation", "waitForLoadState"].includes(member.name) &&
-      arguments_.some(argument => argument.literal === "networkidle")) {
-      violations.push(`${relativePath}:${token.line}: networkidle is not e2e readiness; observe application state`);
+    if (["waitForEvent", "on", "once", "addListener"].includes(member.name)) {
+      const first = unwrap(expressions(after + 1, end)[0]!);
+      if (first.end === first.start + 1 && staticString(first.start) === "requestfinished") {
+        violations.push(`${relativePath}:${token.line}: request-finished events are not e2e readiness; observe application state`);
+      }
+    } else if (["goto", "reload", "goBack", "goForward", "setContent", "waitForURL", "waitForNavigation", "waitForLoadState"].includes(member.name)) {
+      for (let argument = after + 1; argument < end; argument++) {
+        if (staticString(argument) !== "networkidle") continue;
+        violations.push(`${relativePath}:${token.line}: networkidle is not e2e readiness; observe application state`);
+        break;
+      }
     } else if (member.name === "waitForResponse" && !httpAsserted(index, after, end, member.receiver)) violations.push(`${relativePath}:${token.line}: waitForResponse requires an explicit HTTP-contract assertion, not UI readiness`);
   }
   return violations;
