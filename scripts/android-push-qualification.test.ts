@@ -2033,7 +2033,7 @@ test("495 round2 fixture controller carries its last acknowledged private sessio
   }
 });
 
-test.each([false, true])("495 round2 fixture requires a private command and its acknowledged session (changed=%s)", async changed => {
+test.each([false, true, "invalid-command"] as const)("495 round2 fixture requires a private command and its acknowledged session (changed=%s)", async changed => {
   const root = await mkdtemp(join(tmpdir(), "extension-guard-")), epoch = randomUUID();
   const priorRoot = process.env.OMP_PUSH_FIXTURE_ROOT, priorEpoch = process.env.OMP_PUSH_FIXTURE_EPOCH;
   process.env.OMP_PUSH_FIXTURE_ROOT = root; process.env.OMP_PUSH_FIXTURE_EPOCH = epoch;
@@ -2045,19 +2045,22 @@ test.each([false, true])("495 round2 fixture requires a private command and its 
     isIdle: () => true, abort() {}, shutdown() {}, newSession: async () => ({ cancelled: false }),
     ui: { select: async () => { selected++; return undefined; } } });
   try {
-    await writeFile(join(root, "command.json"), JSON.stringify({ epoch, sequence: 1, operation: "ask", expectedSessionId: "session-before" }), { mode: 0o600 });
+    await writeFile(join(root, "command.json"), JSON.stringify(changed === "invalid-command" ? { invalid: true }
+      : { epoch, sequence: 1, operation: "ask", expectedSessionId: "session-before" }), { mode: 0o600 });
     expect(((await stat(join(root, "command.json"))).mode & 0o077) === 0).toBe(process.platform !== "win32");
     let ack: Record<string, unknown> | undefined;
     const deadline = performance.now() + HANG_DEADLINE_MS;
     while (performance.now() < deadline) {
       ack = await readFile(join(root, "ack.json"), "utf8").then(text => JSON.parse(text)).catch(() => undefined);
-      if (ack?.sequence === 1) break;
+      // Unsafe/malformed commands fail before admitting their sequence; that is terminal readiness.
+      if (ack?.sequence === 1 || ack?.phase === "failed") break;
       await Bun.sleep(5);
     }
     // This retained-Mac fixture deliberately requires POSIX private files. Windows cannot make
     // this command's mode 0600; prove refusal there rather than weakening the admission check.
-    const refused = changed || process.platform === "win32";
+    const refused = changed !== false || process.platform === "win32";
     expect(ack?.phase).toBe(refused ? "failed" : "accepted");
+    expect(ack?.sequence).toBe(changed === "invalid-command" || process.platform === "win32" ? 0 : 1);
     expect(selected).toBe(refused ? 0 : 1);
   } finally {
     await writeFile(join(root, "command.json"), JSON.stringify({ epoch, sequence: 2, operation: "stop" }), { mode: 0o600 });

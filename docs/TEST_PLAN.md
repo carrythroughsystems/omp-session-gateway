@@ -38,6 +38,8 @@ budget, and multiply further for multi-process/PTY supervisors.
 Product deadlines, fake timers, injected sleeps, browser UX timing assertions, and poll cadence
 are not hang budgets. Do not enlarge those to fix hosted scheduling delays. The CLI pruning
 regression delays only its child startup by six seconds before exercising the real install.
+Fixture acknowledgement polling also stops on terminal refusal before sequence admission, including
+the Windows rejection of a command that cannot have POSIX-private file mode.
 
 ### OMP discovery, queries, and registry
 
