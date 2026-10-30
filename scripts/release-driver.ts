@@ -27,6 +27,7 @@ export interface TrackingIssue {
 }
 export interface PullRequest {
   number: number;
+  title: string;
   author: string;
   authorType: string;
   headRepository: string;

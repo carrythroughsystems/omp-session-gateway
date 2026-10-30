@@ -94,9 +94,11 @@ every green branch just because another queued PR landed, and do not bypass the 
 administrator flag. Sign all commits; queueing does not waive signature or review requirements.
 Until rollout, the existing strict up-to-date merge workflow remains in force.
 
-The release machine user has a narrowly scoped queue-only exception and uses a pinned direct
-REST squash merge. Contributors must not join that bypass team or enqueue generated release
-PRs. During a release window, drain the queue and stop new enqueues until the release record
+The release machine user uses a pinned direct REST squash merge with a queue-only exception.
+The founder selected the repository Maintain-role bypass described in the rollout; it applies
+to matching role holders, not only the bot. Contributors must not acquire that bypass or enqueue
+generated release PRs.
+During a release window, drain the queue and stop new enqueues until the release record
 lands: the approve receipt binds an exact tree and must not absorb unrelated changes.
 
 ## Security-sensitive contributions

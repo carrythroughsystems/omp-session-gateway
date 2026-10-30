@@ -146,6 +146,8 @@ Every required GitHub Actions check must pass on the exact head: `implementation
 `portable-source (macos-latest)`, `portable-source (windows-latest)`, and `browser-core`.
 Behind branches are updated before rechecking; merges use the synchronous REST merge endpoint
 with `merge_method=squash` and the exact head `sha` (the REST equivalent of `--match-head-commit`).
+The driver explicitly sets `commit_title` to the observed PR title plus ` (#N)` and
+`commit_message` to an empty string, independent of repository squash-message defaults.
 No driver push targets `main`. Strict branch protection and signed-commit requirements remain in
 force; GitHub supplies the signed squash merge. Auto-merge stays disabled.
 
@@ -256,8 +258,19 @@ Repository changes prepare CI for the queue; they **do not enable it**. The 2026
 found a public organization repository, no rulesets, squash-only merges, auto-merge disabled,
 and the classic protection attested above. Keep that entire classic protection unchanged.
 Add one repository branch ruleset containing **only** `merge_queue`, targeting `refs/heads/main`,
-with a dedicated, non-secret team containing only `alphastorm-release` as a PR-only bypass actor.
+with the repository Maintain role as a PR-only bypass actor, after granting that role to
+`alphastorm-release`. **The founder selected this design; the lead executes the rollout.**
 Never bypass the write role, all admins, required checks, signatures, or the classic protection.
+
+The lead's 2026-10-30 read-only inspection found that `alphastorm-release` is a direct `write`
+collaborator, **not** an organization member. The Enterprise organization has **2/2 seats filled**
+and requires 2FA; the bot token has only `read:org` and `repo` scopes.
+The bot-only team design was rejected: it needs a paid seat, bot 2FA and bot UI acceptance.
+Updating the existing public-repository collaborator to Maintain avoids organization enrollment
+and a new team seat, but grants broader repository-management permissions and role-wide bypass
+to matching current/future holders. The [role capabilities][mq-roles] are broader than Write but
+not Admin. Inspect effective inherited/custom roles; require a non-bypass ordinary actor for
+the queue proof. This PR changes no settings and does not broaden the bot token's scopes.
 
 #### Decision and primary sources
 
@@ -267,17 +280,18 @@ Never bypass the write role, all admins, required checks, signatures, or the cla
   latest base plus earlier queued PRs, without requiring authors to refresh each branch.
   Retain `strict=true`: queue integration supplies the updated subject for ordinary PRs, while
   direct release-bot merges must still be up to date. Do not loosen the seven existing checks.
-- [Rule layering][mq-layering] and [team bypass][mq-bypass]: rulesets layer with classic
+- [Rule layering][mq-layering] and [role bypass][mq-bypass]: rulesets layer with classic
   protection; a bypass applies to its ruleset, not the independent classic rules.
-  A closed (not secret) team can bypass for pull requests only. A machine user can join that
-  team; an outside collaborator must accept organization membership first. The sole rule and
-  sole member make this a queue-only exception, not a general release-policy override.
+  Maintain can bypass for pull requests only. The sole `merge_queue` rule makes this a
+  queue-only exception, not a general release-policy override.
 - [CLI merge][mq-cli] queues on queue-required branches; its documented direct-bypass option
-  is the administrator flag, which this driver must never use. A team bypass alone does not
+  is the administrator flag, which this driver must never use. A role bypass alone does not
   justify leaving `gh pr merge` unchanged.
 - [Synchronous REST merge][mq-rest] supports an expected head `sha` and `merge_method=squash`;
   it does **not** enqueue. A merge that cannot be performed returns 405; a changed head returns
   409. The driver uses this endpoint with the queue-only bypass and still rereads the merged PR.
+  Explicit `commit_title="<observed PR title> (#N)"` and empty `commit_message` preserve the
+  immutable release subject without inheriting repository message defaults.
   Without an effective bypass it fails closed, rather than treating enqueue as completion.
 - [Queue actor fields][mq-actors] distinguish `enqueuer` from `mergedBy` (REST `merged_by`).
   The primary docs do **not** promise their equality. Do not authorize a release from an enqueue
@@ -297,81 +311,51 @@ bot merger attribution, and both pre/post-merge approve tree-equality checks. It
 the merge transport. Existing signed bot checkpoints and accepted-merge crash replay remain
 valid. No checkpoint-author relaxation or queue-head adoption is permitted.
 
-Before activation, drain/disable the release driver and install the reviewed runtime through
-the existing job-free setup path (this is an authority-file change, never a bot self-upgrade).
+After the debt PRs land and before activation, the lead drains/disables the Studio driver and
+advances its installed checkout to a `main` containing **#552**, following
+[Studio installation](#studio-installation-run-as-gwops-after-integration). This is the reviewed
+job-free setup path for an authority-file change, never a bot self-upgrade. Finish or recover
+pending work on its old policy before advancing the checkout.
 Before every release window, **drain the ordinary queue and stop new enqueues until record
 lands**. Queue bypass does not reserve `main`; unrelated main movement still holds the release.
 
-#### Exact settings commands
+#### Exact settings commands — selected Maintain-role design
 
-Run these manually as an organization owner after this PR is merged. They are not CI steps.
-Use an owner credential for settings; never give the machine credential administration access.
-Stop on any unexpected existing ruleset/team or protection drift; do not replace other rules.
-`audit` holds the before state and the exact payload for readback/rollback.
+The [GitHub Terraform provider's role-ID documentation][mq-role-ids] explicitly maps
+`maintain` to **`actor_id: 2`** (`write` is 4, `admin` is 5). These IDs are not the display-order
+positions of the roles. GitHub's REST ruleset schema documents `RepositoryRole` and PR-only
+bypass but does not enumerate these built-in IDs; the linked versioned provider document
+supplies the mapping. Verify the ruleset readback/UI identifies the bypass as Maintain.
+
+The [collaborator API][mq-collaborators] updates an existing collaborator without adding them
+to the organization. The lead runs these commands as owner after advancing the Studio. The role
+grant does not add a token scope or Administration permission. Before activation, inventory
+all effective roles: every current/future matching Maintain holder could gain this bypass.
+An unexpected effective bypass audience blocks rollout, rather than silently accepting it.
 
 ```sh
 set -eu
 repo=carrythroughsystems/omp-session-gateway
-team=omp-session-gateway-release
 audit=$(mktemp -d)
-owner_login=$(gh api user --jq .login)
-test "$owner_login" != alphastorm-release
+test "$(gh api user --jq .login)" != alphastorm-release
 gh api "repos/$repo/branches/main/protection" > "$audit/protection-before.json"
 gh api "repos/$repo/rulesets?includes_parents=true" > "$audit/rulesets-before.json"
 jq -e 'length == 0' "$audit/rulesets-before.json"
-gh api "repos/$repo" --jq \
-  '{visibility,allow_squash_merge,allow_merge_commit,allow_rebase_merge,allow_auto_merge}'
-
-# New, unparented, visible team. GitHub automatically adds its creator as a maintainer.
-gh api --method POST orgs/carrythroughsystems/teams --input - <<'JSON'
-{
-  "name": "omp-session-gateway-release",
-  "description": "Queue-only PR bypass for alphastorm-release; no other members or child teams",
-  "privacy": "closed",
-  "notification_setting": "notifications_disabled",
-  "repo_names": []
-}
-JSON
-gh api --method PUT "orgs/carrythroughsystems/teams/$team/memberships/alphastorm-release" \
-  --input - <<'JSON'
-{"role":"member"}
-JSON
-gh api --method PUT "orgs/carrythroughsystems/teams/$team/repos/$repo" --input - <<'JSON'
-{"permission":"push"}
-JSON
-```
-
-If membership is pending, the bot owner accepts the invitation in a **separate bot-authenticated
-shell** (or the bot's GitHub UI), without changing the driver token's scopes. The API form for
-an already authorized bot session is:
-
-```sh
-test "$(gh api user --jq .login)" = alphastorm-release
-gh api --method PATCH user/memberships/orgs/carrythroughsystems --input - <<'JSON'
-{"state":"active"}
-JSON
-```
-
-Back in the owner shell, remove the automatically added creator *before* granting bypass.
-Organization owners retain team administration without membership. Check all members,
-including maintainers and inherited members; keep the team unparented and without child teams.
-
-```sh
-gh api "orgs/carrythroughsystems/teams/$team/memberships/alphastorm-release" \
-  --jq '.state' | jq -Re 'select(. == "active")'
-gh api --method DELETE "orgs/carrythroughsystems/teams/$team/memberships/$owner_login"
-gh api --paginate "orgs/carrythroughsystems/teams/$team/members?role=all&per_page=100" \
-  --slurp | jq -e 'add | map(.login) | sort == ["alphastorm-release"]'
-gh api "orgs/carrythroughsystems/teams/$team" | jq -e '.privacy == "closed" and .parent == null'
-gh api "orgs/carrythroughsystems/teams/$team/teams" | jq -e 'length == 0'
-team_id=$(gh api "orgs/carrythroughsystems/teams/$team" --jq .id)
-cat > "$audit/queue-ruleset.json" <<JSON
+gh api --paginate "repos/$repo/collaborators?affiliation=all&per_page=100" \
+  --slurp > "$audit/collaborators-before.json"
+gh api "repos/$repo/collaborators/alphastorm-release/permission"
+gh api -X PUT repos/carrythroughsystems/omp-session-gateway/collaborators/alphastorm-release \
+  -f permission=maintain
+gh api "repos/$repo/collaborators/alphastorm-release/permission" \
+  --jq '{permission,role_name,user:.user.login}'
+# Require role_name=maintain. The legacy permission field can still say write.
+cat > "$audit/queue-ruleset.json" <<'JSON'
 {
   "name": "main-merge-queue",
   "target": "branch",
-  "enforcement": "disabled",
+  "enforcement": "active",
   "bypass_actors": [
-    {"actor_id": $team_id, "actor_type": "Team", "bypass_mode": "pull_request"}
+    {"actor_id": 2, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}
   ],
   "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
   "rules": [
@@ -393,68 +377,86 @@ JSON
 ruleset_id=$(gh api --method POST "repos/$repo/rulesets" \
   --input "$audit/queue-ruleset.json" --jq .id)
 gh api "repos/$repo/rulesets/$ruleset_id"
-
-# Only after the reviewed runtime is installed and driver/queue admission is drained:
-jq '.enforcement = "active"' "$audit/queue-ruleset.json" |
-  gh api --method PUT "repos/$repo/rulesets/$ruleset_id" --input -
+gh api "repos/$repo/rulesets/$ruleset_id" \
+  --jq '{id,enforcement,bypass_actors,conditions,rules,current_user_can_bypass}'
 gh api "repos/$repo/rules/branches/main"
 gh api "repos/$repo/branches/main/protection" > "$audit/protection-after.json"
 diff -u "$audit/protection-before.json" "$audit/protection-after.json"
 ```
 
-There are **no branch-protection edits**, no repository merge-method changes, and no auto-merge
-enablement. The REST [ruleset payload][mq-rules-api], [team creation][mq-teams-api] and
-[membership APIs][mq-members-api] define the bodies above. Five speculative builds allow useful
-overlap without unbounded runner fan-out; `ALLGREEN` never intentionally admits a failing PR.
-The 60-minute response limit covers the longest required job's 25-minute cap plus runner startup.
+Create the ruleset **active**, not disabled: a disabled queue cannot exercise an ordinary PR.
+Require readback `enforcement=active`, exactly one `merge_queue` rule and exactly the
+`RepositoryRole`/2/`pull_request` bypass. There are **no branch-protection edits**, merge-method
+changes or auto-merge enablement. Five speculative builds allow useful overlap; `ALLGREEN`
+does not intentionally admit failing PRs. The 60-minute response timeout covers the longest
+required job's 25-minute cap plus runner startup.
 
-#### Verification without a release
+No release script requires the bot's role to equal `write`: `StudioDriver.readiness()` checks
+only `repository.permissions.push === true`; qualification's GitHub preflight checks the same
+capability. The authority fingerprint binds bot/reviewer identities, protected controls,
+branch-protection attestation and required checks, not a repository role string. Maintain
+therefore needs no readiness/authority relaxation. Keep `permissions.admin=false` in the
+live readback. In the dedicated bot-authenticated shell, with no founder token overrides:
 
-Keep the timer disabled; do not dispatch release-request, call `tick`, create tags, or publish.
-Use two independently reviewed, signed, harmless documentation PRs, not generated release
-artifacts. Prepare the bot-authored probe before merging the ordinary PR so it becomes behind.
+```sh
+test "$(gh api user --jq .login)" = alphastorm-release
+gh api repos/carrythroughsystems/omp-session-gateway --jq '{permissions}'
+gh api "repos/carrythroughsystems/omp-session-gateway/rulesets/$ruleset_id" \
+  --jq '{id,enforcement,current_user_can_bypass}'
+```
 
-1. As the maintainer (not on the bypass team), wait for all seven ordinary-PR checks, then run
-   `gh pr merge "$ordinary_pr" --repo "$repo" --squash --match-head-commit "$ordinary_head"`.
-   Do not use auto-merge while checks are pending. Observe the queue entry and `merge_group`
-   runs for **all three** workflows. Confirm all seven checks succeeded on the merge-group SHA,
-   not just the PR head. Let the queue merge it; no manual branch refresh should be needed.
-   Record the queue enqueuer, PR `merged_by.login`, merge SHA, and signature.
-2. As `alphastorm-release`, verify repository `permissions.push=true`, `permissions.admin=false`
-   and ruleset `current_user_can_bypass=pull_requests_only`. With the now-behind probe, the
-   synchronous merge request below must refuse; it must not create a queue entry. Update its
-   branch as the bot using the driver's existing operation:
-   `gh api --method PUT "repos/$repo/pulls/$bot_pr/update-branch" -f expected_head_sha="$bot_head"`.
-   Confirm the resulting head commit's `.author.login` is `alphastorm-release` and
-   `.commit.verification.verified` is true, matching `assertCheckpointAuthor`.
-3. Wait for all seven checks on that updated bot head and drain the queue. Pin the new
-   `bot_head` and its tree, then use exactly the driver's transport, with bot credentials:
+Require bot `permissions.push=true`, `permissions.maintain=true`, `permissions.admin=false`
+and `current_user_can_bypass=pull_requests_only`.
 
-   ```sh
-   gh api --method PUT "repos/$repo/pulls/$bot_pr/merge" \
-     -f sha="$bot_head" -f merge_method=squash
-   gh api "repos/$repo/pulls/$bot_pr" \
-     --jq '{merged,merged_by:.merged_by.login,merge_commit_sha,head:.head.sha}'
-   ```
+#### Queue verification and next-release fallback
 
-   Require immediate `merged=true`, `merged_by=alphastorm-release`, unchanged head, and no
-   queue entry. Fetch the merge commit through `GET repos/$repo/commits/$merge_sha`; require
-   `.commit.verification.verified=true` and `.commit.tree.sha` equal to the pinned bot-head
-   tree. These are the approve invariants, without pretending this probe qualifies a release.
-   Run `bun test scripts/release-driver.test.ts apps/gateway/test/ci-workflow.test.ts` on the
-   installed reviewed runtime; this also exercises accepted-merge replay and unsafe-tree holds.
-4. Check protection readback still matches the snapshot. Any queue, attribution, signature,
-   checkpoint-author, strict-check or tree mismatch blocks rollout. Leave the driver disabled
-   and disable only this ruleset; do not weaken checks or teach the driver to trust queue actors:
+The lead first lands **one ordinary reviewed, signed PR through the active queue**, without
+requesting a release. Use an actor whose ruleset readback is `current_user_can_bypass=never`.
+After its seven required checks pass:
 
-   ```sh
-   jq '.enforcement = "disabled"' "$audit/queue-ruleset.json" |
-     gh api --method PUT "repos/$repo/rulesets/$ruleset_id" --input -
-   ```
+```sh
+gh api "repos/$repo/rulesets/$ruleset_id" --jq .current_user_can_bypass
+ordinary_head=$(gh pr view "$ordinary_pr" --repo "$repo" --json headRefOid --jq .headRefOid)
+ordinary_title=$(gh pr view "$ordinary_pr" --repo "$repo" --json title --jq .title)
+gh pr merge "$ordinary_pr" --repo "$repo" --squash --match-head-commit "$ordinary_head"
+gh run list --repo "$repo" --event merge_group \
+  --json databaseId,workflowName,headSha,status,conclusion,url
+# Set group_sha to this PR's observed merge-group SHA, not its individual head.
+gh api "repos/$repo/commits/$group_sha/check-runs?per_page=100&filter=latest" \
+  --jq '.check_runs[] | {name,status,conclusion,app:.app.slug}'
+gh pr view "$ordinary_pr" --repo "$repo" --json state,mergedBy,mergeCommit
+merge_sha=$(gh pr view "$ordinary_pr" --repo "$repo" --json mergeCommit --jq .mergeCommit.oid)
+gh api "repos/$repo/commits/$merge_sha" \
+  --jq '{parents:[.parents[].sha],message:.commit.message,verification:.commit.verification}'
+```
 
-Record run URLs, exact heads/trees, API readbacks and the ruleset/team IDs in the rollout
-evidence before resuming admission. The repository PR's green CI is not evidence that these
-settings or live-bot rehearsals have already run.
+Require all seven named contexts from GitHub Actions to succeed on the merge-group SHA,
+covering all three workflows; no manual branch refresh. Require the landed commit to have one
+parent (squash), first message line exactly `$ordinary_title (#$ordinary_pr)`, and
+`verification.verified=true`. Record run URLs, group SHA, merge SHA and attribution.
+If queue-created message defaults do not produce that subject, stop and reconcile the setting
+with the lead; this rollout does not silently change repository message defaults.
+
+The bot's **direct** merge is proven at the **next real release**, not by a synthetic release
+or an extra bot probe PR. Observe its normal prepare/approve/record merges; the driver pins the
+head, sends an explicit title and empty message, rereads bot merger identity, and retains all
+signature/checkpoint/tree checks. If the queue refuses that direct merge, the lead disables
+only this ruleset using the retained payload, reads back the result, then re-ticks the same
+driver state as `gwops` under the existing bot configuration:
+
+```sh
+# Owner settings shell:
+jq '.enforcement = "disabled"' "$audit/queue-ruleset.json" |
+  gh api --method PUT "repos/$repo/rulesets/$ruleset_id" --input -
+gh api "repos/$repo/rulesets/$ruleset_id" --jq '{id,enforcement,bypass_actors}'
+gh api "repos/$repo/branches/main/protection"
+# Studio gwops, installed checkout and pinned Bun from the installation runbook:
+bun scripts/release-driver.ts tick
+```
+
+Do not reset state, relax merger/tree/signature checks, or bypass classic protection. A different
+hold still requires its existing recovery; disabling the queue is not authority to ignore it.
+The PR's CI and the ordinary queue proof do not claim live bot-merge evidence before that release.
 
 [mq-availability]: https://docs.github.com/en/pull-requests/concepts/deploying-code
 [mq-docs]: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue
@@ -466,8 +468,9 @@ settings or live-bot rehearsals have already run.
 [mq-signatures]: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-signed-commits
 [mq-event]: https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#merge_group
 [mq-rules-api]: https://docs.github.com/en/rest/repos/rules#create-a-repository-ruleset
-[mq-teams-api]: https://docs.github.com/en/rest/teams/teams#create-a-team
-[mq-members-api]: https://docs.github.com/en/rest/teams/members#add-or-update-team-membership-for-a-user
+[mq-role-ids]: https://github.com/integrations/terraform-provider-github/blob/v6.12.1/website/docs/r/organization_ruleset.html.markdown#bypass_actors
+[mq-roles]: https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-repository-roles/repository-roles-for-an-organization
+[mq-collaborators]: https://docs.github.com/en/rest/collaborators/collaborators#add-a-repository-collaborator
 
 ### Repository transfer window (Studio driver)
 

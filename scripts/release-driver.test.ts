@@ -129,7 +129,7 @@ function state(phase: DriverState["phase"] = "selected"): DriverState {
   return { schemaVersion: 1, sequence: 1, phase, issue: { ...issue }, version: "0.7.5", candidate: "v0.7.5-prealpha.1", selectedMain: "a".repeat(40), previousStable: "v0.7.4", authorityPolicy: authority.policy, date: "2026-10-07" };
 }
 function pr(overrides: Partial<PullRequest> = {}): PullRequest {
-  return { number: 401, author: config.bot, authorType: "User", headRepository: REPOSITORY, base: "main", headRef: "release-driver/400/v0.7.5-prealpha.1-approve", head: "b".repeat(40), tree: "c".repeat(40), draft: false, state: "open", merged: false, mergeVerified: true, behind: false, checksPassed: true, files: [], url: "https://github.com/carrythroughsystems/omp-session-gateway/pull/401", ...overrides };
+  return { number: 401, title: "chore(release): approve v0.7.5", author: config.bot, authorType: "User", headRepository: REPOSITORY, base: "main", headRef: "release-driver/400/v0.7.5-prealpha.1-approve", head: "b".repeat(40), tree: "c".repeat(40), draft: false, state: "open", merged: false, mergeVerified: true, behind: false, checksPassed: true, files: [], url: "https://github.com/carrythroughsystems/omp-session-gateway/pull/401", ...overrides };
 }
 function order(overrides: Partial<PullRequest> = {}): PullRequest {
   return pr({ author: "carrythroughsystems[bot]", authorType: "Bot", headRef: "carrythrough/order-400", draft: true, files: ORDER_SCOPE.map(filename => ({ filename })), ...overrides });
@@ -2139,7 +2139,8 @@ test("queue-exempt release merges use the pinned synchronous REST merge and reco
   const pinned = runtime.current;
   const merged = await runtime.merge(pinned, false);
   expect(runtime.writes).toEqual([["api", "--method", "PUT", `repos/${REPOSITORY}/pulls/${pinned.number}/merge`,
-    "-f", `sha=${pinned.head}`, "-f", "merge_method=squash"]]);
+    "-f", `sha=${pinned.head}`, "-f", "merge_method=squash",
+    "-f", `commit_title=${pinned.title} (#${pinned.number})`, "-f", "commit_message="]]);
   expect(merged.mergedBy).toBe(config.bot);
   expect(merged.mergeTree).toBe(pinned.tree);
   // Existing open PR -> accepted merge -> crash replay never queues or repeats the merge.
