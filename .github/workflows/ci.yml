@@ -7,6 +7,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       runner:
@@ -46,7 +48,7 @@ permissions:
 
 jobs:
   implementation-checks:
-    # Pushes and pull requests always resolve to GitHub-hosted. A trusted controller must supply
+    # Pushes, pull requests and merge groups resolve to GitHub-hosted. A controller must supply
     # the unpredictable one-time label shared by the ephemeral runners it registers for this
     # invocation. The jobs here are independent, so a parallel self-hosted run needs one free
     # runner per job.
