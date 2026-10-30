@@ -20,6 +20,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Recheck Windows launch and Pixel lifetimes, provider-response deadlines and attached-firewall
+  ownership at dispatch; bound development cleanup independently and retain exclusive Pixel
+  custody until restoration completes.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.

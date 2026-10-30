@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupWindows, runWindows, verifyWindowsDoctor, windowsCampaignLabel, windowsFailure, windowsNeedsCleanup, assertWindowsPins } from "./windows-stable-qualification.ts";
@@ -11,6 +12,7 @@ import * as windowsRuntime from "./windows-qualification-runtime.ts";
 import { firewallEligibility } from "./vultr-target.ts";
 import { createPixelLease, parseQualificationPins } from "./stable-qualification.ts";
 import { pixelUnrestored } from "./restoration.ts";
+import * as windowsLane from "./windows-stable-qualification.ts";
 
 const epoch = "11111111-1111-4111-8111-111111111111";
 const label = windowsCampaignLabel(epoch);
@@ -322,6 +324,118 @@ describe("Windows qualification ownership and failure paths", () => {
       expect(windowsNeedsCleanup(f.progress)).toBe(false);
       expect(await Bun.file(join(root, "lease", "owner")).exists()).toBe(false);
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("501 R3 containment owners have fresh independent deadlines and failure allocation", () => {
+    const before = performance.now();
+    const first = windowsLane.windowsContainmentExecution();
+    const second = windowsLane.windowsContainmentExecution();
+    expect(first.signal).not.toBe(second.signal);
+    expect(first.signal.aborted).toBe(false); expect(second.signal.aborted).toBe(false);
+    for (const owner of [first, second]) {
+      expect(owner.deadline).toBeGreaterThanOrEqual(before + 30 * 60_000);
+      expect(owner.deadline).toBeLessThanOrEqual(performance.now() + 30 * 60_000);
+    }
+    const firstId = first.nextFailureId();
+    expect(second.nextFailureId()).toBeGreaterThan(firstId);
+    expect(() => windowsLane.assertWindowsExecution(windowsLane.windowsContainmentExecution(0))).toThrow("deadline_exceeded");
+  });
+  test("501 R3 cleanup ownership bounds Pixel waiting after paid-resource containment", async () => {
+    const execution = { ...windowsLane.windowsContainmentExecution() };
+    const f = fixture(); await f.run();
+    const error = await cleanupWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, runtime: f.runtime, execution,
+      pixel: async (_caller, action, owner) => {
+        expect(owner).toBe(execution);
+        expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+        execution.deadline = 0;
+        return action();
+      },
+    }).catch(error => error);
+    expect(normalizeQualificationFailures(error).some(failure =>
+      failure.reason === "deadline_exceeded" && failure.observations.controllerDeadline === true)).toBe(true);
+    expect(f.events).not.toContain("pixelRestored"); expect(f.events).not.toContain("vaultRemoved");
+    expect(windowsNeedsCleanup(f.progress)).toBe(true);
+  });
+  test("501 R4 refused restoration retains its development Pixel lock even without a vault", async () => {
+    const root = await mkdtemp(join(tmpdir(), "windows-pixel-refused-")), lock = join(root, "lease");
+    const pixel = windowsRuntime.createWindowsDevelopmentPixelLease({
+      lock, epoch: () => epoch, recoverExitedOwner: false, recoveryPending: async () => false,
+    });
+    const refusal = Object.assign(new Error("synthetic missing recovery vault"), { pixelUnrestored: true });
+    let owner = "";
+    try {
+      await expect(pixel("windows-cleanup", async () => {
+        owner = await readFile(join(lock, "owner"), "utf8");
+        throw refusal;
+      })).rejects.toBe(refusal);
+      expect(await readFile(join(lock, "owner"), "utf8")).toBe(owner);
+      expect(await Bun.file(join(lock, "owner")).exists()).toBe(true);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("501 R5 concurrent exited-owner cleanup grants exactly one restoration claim", async () => {
+    const root = await mkdtemp(join(tmpdir(), "windows-pixel-takeover-")), lock = join(root, "lease");
+    const child = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
+    await child.exited;
+    await mkdir(lock);
+    await writeFile(join(lock, "owner"), `WindowsLane 2026-10-26T00:00:00.000Z ${epoch} ${child.pid}\n`);
+    const blocked = new Error("synthetic competing cleanup queued"), retained = new Error("synthetic retained restoration");
+    let pending = true;
+    const leases = [0, 1].map(() => windowsRuntime.createWindowsDevelopmentPixelLease({
+      lock, epoch: () => epoch, recoverExitedOwner: true, recoveryPending: async () => pending,
+      clock: { now: () => 0, sleep: async () => { throw blocked; } },
+    }));
+    const claims: string[] = [];
+    try {
+      const results = await Promise.all(leases.map(pixel => pixel("windows-cleanup", async () => {
+        claims.push(await readFile(join(lock, "owner"), "utf8"));
+        throw retained;
+      }).catch(error => error)));
+      expect(claims).toHaveLength(1);
+      expect(results).toContain(blocked); expect(results).toContain(retained);
+      expect(await readFile(join(lock, "owner"), "utf8")).toBe(claims[0]!);
+      expect(await readFile(join(lock, `recovery-${child.pid}`), "utf8")).toBe(claims[0]!);
+      pending = false;
+      await leases[results.indexOf(retained)]!("windows-cleanup", async () => {});
+      expect(await Bun.file(join(lock, "owner")).exists()).toBe(false);
+      expect(await Bun.file(join(lock, `recovery-${child.pid}`)).exists()).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("501 R5 a delayed stale-owner unlink cannot erase the winning cleanup claim", async () => {
+    const root = await mkdtemp(join(tmpdir(), "windows-pixel-delayed-takeover-")), lock = join(root, "lease"), ownerPath = join(lock, "owner");
+    const child = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
+    await child.exited; await mkdir(lock);
+    await writeFile(ownerPath, `WindowsLane 2026-10-26T00:00:00.000Z ${epoch} ${child.pid}\n`);
+    const observedDead = Promise.withResolvers<void>(), winnerEntered = Promise.withResolvers<void>();
+    const kill = process.kill, remove = filesystem.rm;
+    let observations = 0, removals = 0;
+    const killSpy = spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === child.pid && signal === 0 && ++observations === 2) observedDead.resolve();
+      return kill(pid, signal);
+    });
+    const removeSpy = spyOn(filesystem, "rm").mockImplementation(async (path, options) => {
+      if (path === ownerPath) {
+        if (++removals === 1) await observedDead.promise;
+        else await winnerEntered.promise;
+      }
+      return remove(path, options);
+    });
+    const blocked = new Error("synthetic delayed cleanup queued"), retained = new Error("synthetic retained restoration");
+    const leases = [0, 1].map(() => windowsRuntime.createWindowsDevelopmentPixelLease({
+      lock, epoch: () => epoch, recoverExitedOwner: true, recoveryPending: async () => true,
+      clock: { now: () => 0, sleep: async () => { throw blocked; } },
+    }));
+    const claims: string[] = [];
+    try {
+      const results = await Promise.all(leases.map(pixel => pixel("windows-cleanup", async () => {
+        claims.push(await readFile(ownerPath, "utf8")); winnerEntered.resolve();
+        throw retained;
+      }).catch(error => error)));
+      expect(claims).toHaveLength(1);
+      expect(results).toContain(blocked); expect(results).toContain(retained);
+      expect(await readFile(ownerPath, "utf8")).toBe(claims[0]!);
+    } finally {
+      removeSpy.mockRestore(); killSpy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
   });
   test.each(["other-process", "same-pid-without-claim"] as const)("499 R1 development cleanup refuses %s lease custody within its execution budget", async kind => {
     const root = await mkdtemp(join(tmpdir(), "windows-pixel-foreign-")), lock = join(root, "lease");

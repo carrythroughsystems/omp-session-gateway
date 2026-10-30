@@ -25,6 +25,10 @@ export function assertWindowsExecution(execution?: WindowsExecutionContext, oper
       execution.signal.aborted ? { cause: execution.signal.reason } : undefined);
   }
 }
+/** A primary's cancellation must not disable its independently bounded containment. */
+export function windowsContainmentExecution(budgetMs = 30 * 60_000, nextFailureId: () => number = () => ++standaloneFailureId): WindowsExecutionContext {
+  return { signal: new AbortController().signal, deadline: performance.now() + budgetMs, nextFailureId };
+}
 /** One snapshot decides whether any positive millisecond of this local budget remains. */
 export function windowsRemaining(started: number, deadline: number, now: number, execution?: WindowsExecutionContext,
   operation: OperationDisposition = "read_only"): number {
@@ -101,7 +105,7 @@ export interface WindowsContext {
   readonly epoch: string;
   readonly identity: WindowsIdentity;
   /** No await may separate this resource/execution admission from guest dispatch. */
-  readonly assertEffect: () => void;
+  readonly assertEffect: (maximumAge?: number) => void;
   readonly beforeEffect: () => Promise<void>;
   /** Durable single-shot claims for qualification; cleanup supplies its idempotent owner. */
   readonly mutation: <T>(key: string, action: () => Promise<T>) => Promise<T>;
@@ -359,8 +363,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   const prior = input.progress === undefined ? undefined : parseProgress(input.progress, digest);
   let activeProgress = prior, repairable = false;
   // Establish containment ownership before any retained-state rejection or preflight work.
-  const cleanupExecution = { signal: new AbortController().signal, deadline: performance.now() + 30 * 60_000,
-    nextFailureId: input.execution?.nextFailureId ?? (() => ++standaloneFailureId) };
+  let cleanupExecution = windowsContainmentExecution(undefined, input.execution?.nextFailureId);
   try {
   assertWindowsExecution(input.execution);
   let resumed: Progress | undefined;
@@ -613,7 +616,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     if (activeProgress === undefined) throw error;
     if (retainWindowsForRepair(error, prior, activeProgress, runtime, repairable, input.execution)) throw error;
     // A failed primary's cancellation must not disable owned-resource containment.
-    cleanupExecution.deadline = performance.now() + 30 * 60_000;
+    cleanupExecution = windowsContainmentExecution(undefined, cleanupExecution.nextFailureId);
     try { await cleanupWindows({ ...input, progress: activeProgress, runtime, execution: cleanupExecution }); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], "Windows lane and cleanup failed"); }
     throw error;

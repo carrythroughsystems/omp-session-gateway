@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { classifyWindowsCommandFailure, command, reconnectWindowsTransport, reconcileWindowsUpload, windowsUploadStep, windowsWinrmDiagnostic, windowsWinrmResult } from "./windows-qualification-runtime";
 import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures } from "./qualification-failure";
-import type { WindowsTransportProbe } from "./windows-stable-qualification";
+import type { WindowsContext, WindowsTransportProbe } from "./windows-stable-qualification";
 import { assertWindowsAllocation, windowsFailure, windowsRemaining } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
 
@@ -294,6 +294,85 @@ test.each(["live", "stale"] as const)("496 R2 cancellation between %s launch obs
     "https://synthetic.invalid", { instanceId: "synthetic-only", generation: 1 }, fetcher, execution)).rejects.toThrow("deadline_exceeded");
   expect(posts).toBe(1);
 });
+test.each(["live", "stale"] as const)("501 R1a %s launch rechecks resource lifetime before every POST", async kind => {
+  for (const expireAfter of [0, 1]) {
+    let posts = 0, guards = 0;
+    const failure = windowsFailure("deadline_exceeded", "command", "not_started", { controllerDeadline: true });
+    const fetcher = async (_url: string, options: RequestInit) => {
+      posts += 1;
+      const { mode, generation } = JSON.parse(String(options.body));
+      return Response.json(kind === "live" ? { mode, generation, capability: "synthetic-never-real" } : { code: "generation_mismatch" },
+        { status: kind === "live" ? 200 : 409, headers: { "cache-control": "no-store" } });
+    };
+    await expect((kind === "live" ? winrmRuntime.verifyWindowsLaunchContracts : winrmRuntime.verifyWindowsStaleLaunch)(
+      "https://synthetic.invalid", { instanceId: "synthetic-only", generation: 1 }, fetcher, undefined,
+      () => { guards += 1; if (posts >= expireAfter) throw failure; })).rejects.toBe(failure);
+    expect(posts).toBe(expireAfter);
+    expect(guards).toBe(expireAfter + 1);
+  }
+});
+test("501 R1b Pixel dispatch reserves the two-hour lifetime before smoke effects", async () => {
+  const budgets: (number | undefined)[] = [];
+  const context: WindowsContext = {
+    epoch: "11111111-1111-4111-8111-111111111111",
+    identity: {} as WindowsContext["identity"],
+    assertEffect: maximumAge => { budgets.push(maximumAge); },
+    beforeEffect: async () => {},
+    mutation: async (_key, action) => action(),
+  };
+  winrmRuntime.assertWindowsPixelDispatch(context);
+  expect(budgets).toEqual([2 * 60 * 60_000]);
+  let dispatched = false;
+  const failure = windowsFailure("deadline_exceeded", "command", "not_started", { controllerDeadline: true });
+  await expect((async () => {
+    winrmRuntime.assertWindowsPixelDispatch({ ...context, assertEffect: () => { throw failure; } });
+    dispatched = true;
+  })()).rejects.toBe(failure);
+  expect(dispatched).toBe(false);
+});
+test.each(["GET", "POST"])("501 R2 late provider %s response cannot prove absence", async method => {
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 501 };
+  let sends = 0;
+  const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => {
+    sends += 1;
+    execution.deadline = 0;
+    return new Response(null, { status: 404 });
+  }, { preconnect: globalThis.fetch.preconnect }));
+  try {
+    const error = await winrmRuntime.request("https://synthetic.invalid", {}, method, undefined, execution).catch(error => error);
+    expect(error).toBeInstanceOf(QualificationFailure);
+    expect(error.evidence).toMatchObject({
+      id: 501, reason: "deadline_exceeded", operation: method === "GET" ? "read_only" : "unknown",
+      observations: { controllerDeadline: true },
+    });
+    expect(sends).toBe(1);
+  } finally { mock.mockRestore(); }
+});
+test.each(["missing", "foreign-id", "foreign-label", "protected", "matching"] as const)(
+  "501 R6 attached firewall %s is revalidated before instance effects", async kind => {
+    const id = "synthetic-firewall", label = "omp-winqual-11111111-1111-4111-8111-111111111111";
+    const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 501 };
+    let posts = 0, reads = 0;
+    const dispatch = async () => {
+      await winrmRuntime.windowsAttachedFirewallGuard(async () => {
+        reads += 1;
+        return kind === "missing" ? undefined : {
+          id: kind === "foreign-id" ? "synthetic-foreign" : id,
+          description: kind === "foreign-label" ? "synthetic-foreign-label" : label,
+        };
+      }, id, label, kind === "protected" ? { OMP_QUAL_PROTECTED_FIREWALLS: id } : {}, execution);
+      assertWindowsAllocation(execution, Date.now() + 60_000);
+      posts += 1;
+    };
+    if (kind === "matching") await dispatch();
+    else {
+      const error = await dispatch().catch(error => error);
+      expect(error).toBeInstanceOf(QualificationFailure);
+      expect(error.evidence).toMatchObject({ id: 501, reason: "ownership_changed", operation: "not_started" });
+    }
+    expect(reads).toBe(1);
+    expect(posts).toBe(kind === "matching" ? 1 : 0);
+  });
 test("496 R2 RDP cancellation during stdin owns teardown before any further work", async () => {
   const controller = new AbortController(), calls: string[] = [];
   let settle!: (code: number) => void;
