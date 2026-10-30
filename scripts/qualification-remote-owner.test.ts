@@ -19,6 +19,7 @@ if pid == 0:
 reaped = False
 code = 124
 pending = b""
+ready = os.environ["PTY_READER_READY"].encode()
 sent = False
 try:
     deadline = time.monotonic() + float(sys.argv[2])
@@ -31,11 +32,10 @@ try:
         if select.select([terminal], [], [], .05)[0]:
             try: pending += os.read(terminal, 4096)
             except OSError: pass
-            while b"\\n" in pending:
-                line, pending = pending.split(b"\\n", 1)
-                if line.rstrip(b"\\r") == b"reader-ready" and not sent:
-                    os.write(terminal, b"synthetic\\n")
-                    sent = True
+            if not sent and ready in pending:
+                os.write(terminal, b"synthetic\\n")
+                sent = True
+            pending = pending[-(len(ready) - 1):]
     if not reaped:
         sys.stderr.write("PTY reader deadline exceeded\\n")
 finally:
@@ -55,7 +55,7 @@ finally:
     os.close(terminal)
 sys.exit(code)
 `, String(startupDelayMs), String(timeoutSeconds), helper, "run", id, "/bin/bash", "-c", reader],
-  { env: { ...process.env, HOME: home }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+  { env: { ...process.env, HOME: home, PTY_READER_READY: "reader-ready" }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
   try {
     const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
     return { exitCode, stderr };
@@ -70,8 +70,14 @@ sys.exit(code)
 
 // The supervisor has 10 s for startup/readiness plus at most 2 s to reap; settle has up to 20 s.
 test.skipIf(process.platform !== "darwin").each([0, 2_500])("council498r1 owned OMP PTY keeps its reader in the foreground (startup delay %i ms)", async startupDelayMs => {
-  // Wait for the actual reader, not an arbitrary delay or input queued before job-control setup.
-  expect(await ownedPtyReader(startupDelayMs, 'printf "reader-ready\\n"; IFS= read -r line; [ "$line" = synthetic ]')).toEqual({ exitCode: 0, stderr: "" });
+  // The read builtin emits the prompt only once it starts; prompts need no newline.
+  // Keep the marker in the environment so an echoed command cannot satisfy the handshake.
+  expect(await ownedPtyReader(startupDelayMs, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]')).toEqual({ exitCode: 0, stderr: "" });
+}, 40_000);
+
+test.skipIf(process.platform !== "darwin").each([0, 250])("PTY reader waits for its first output before writing (first output delay %i ms)", async firstOutputDelayMs => {
+  // Hold the first prompt through a one-second read: any input before readiness must fail.
+  expect(await ownedPtyReader(0, `/bin/sleep ${firstOutputDelayMs / 1000}; if IFS= read -r -t 1 line; then exit 91; fi; IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]`)).toEqual({ exitCode: 0, stderr: "" });
 }, 40_000);
 
 test.skipIf(process.platform !== "darwin")("PTY regression supervisor bounds termination of a stopped owner", async () => {
