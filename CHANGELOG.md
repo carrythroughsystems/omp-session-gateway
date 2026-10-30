@@ -22,7 +22,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 - Keep directory coverage and launch feedback consistent through loading hosts, SSE keepalives,
   terminal session states, and cancelled notification or resume launches; retain the mounted
-  generation on View-to-Control and prevent delayed transitions from remounting disposed shells.
+  generation on View-to-Control, preserve expired-route notices through unchanged snapshots,
+  and prevent delayed transitions from remounting disposed shells.
 - Preserve actionable private browser failures and original qualification errors when outcome
   publication fails; bound Wi-Fi-cycle checkpoints by cancellation, the execution deadline and
   30 seconds, retaining unknown mutation status until re-enable and restoring radios on failure.

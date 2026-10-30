@@ -1841,7 +1841,7 @@ describe("dashboard attention and notifications", () => {
     expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
     expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
     harness.emit("keepalive", { type: "keepalive", revision: 1 });
-    expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+    expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
   });
 
   test("rejects changed, gone, and unavailable activity-stop sessions without launching", async () => {
@@ -1861,23 +1861,24 @@ describe("dashboard attention and notifications", () => {
       expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
       expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
       harness.emit("keepalive", { type: "keepalive", revision: 1 });
-      expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+      expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
     }
   });
 
-  test("scrubs stale notification routes and releases their status on a fresh observation", async () => {
+  test("scrubs stale notification routes and keeps their expired state visible", async () => {
     const harness = await bootApp({
       permission: "denied",
       pathname: "/collab/stale-attention-0001",
       search: "?request=stale-request-0001",
       suffix: "stale-attention-route",
       initialSessions: [],
+      listResponse: async () => Response.json({ revision: 2, sessions: [] }),
     });
 
     expect(harness.replacedPaths).toEqual(["/"]);
     expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
     harness.emit("snapshot", { type: "snapshot", revision: 2, sessions: [] });
-    expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+    expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
   });
 
   test("reloads an idle directory after an updated worker activates", async () => {
@@ -2931,7 +2932,7 @@ describe("fleet directory bindings", () => {
     }
   }
 
-  test("issue479: a completed expired notification route unlocks event-driven status", async () => {
+  test("issue479: only newer metadata releases a completed expired notification notice", async () => {
     const home = session("followups-expired-alert");
     const harness = await bootApp({
       permission: "denied", initialSessions: [home], pathname: "/collab/", search: "?invalid=1",
@@ -2939,11 +2940,72 @@ describe("fleet directory bindings", () => {
     });
     try {
       expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+      harness.emit("keepalive", {});
+      expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+      harness.emit("snapshot", { type: "snapshot", revision: 1, sessions: [home] });
+      expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
       harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: home });
       expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
       expect(harness.elements.statusBanner.hidden).toBeTrue();
     } finally { harness.window.dispatchEvent(new Event("pagehide")); }
   });
+
+  test("issue479-review: a superseded route cannot unlock a newer pending route", async () => {
+    const first = session("route-owner-first");
+    const second = session("route-owner-second");
+    const firstGate = Promise.withResolvers<void>();
+    const secondGate = Promise.withResolvers<void>();
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [first, second], suffix: "route-owner-sequence",
+      launchResponse: async (path, init) => {
+        await (path.includes(first.instanceId) ? firstGate.promise : secondGate.promise);
+        const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+        return Response.json({ ...body, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+      },
+    });
+    try {
+      harness.notify({ version: 2, type: "activity_stop", instanceId: first.instanceId, generation: first.generation });
+      await settleUntil(() => harness.launchRequests.length === 1, 100);
+      harness.notify({ version: 2, type: "activity_stop", instanceId: second.instanceId, generation: second.generation });
+      await settleUntil(() => harness.launchRequests.length === 2, 100);
+      expect(harness.launchRequests[0]!.init.signal!.aborted).toBeTrue();
+      firstGate.resolve();
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      harness.emit("keepalive", {});
+      expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: second });
+      expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+      secondGate.resolve();
+      await settleUntil(() => harness.embedCalls.length === 1, 100);
+      expect(harness.body.querySelector(".shell-title")?.textContent).toBe(second.title);
+      expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+    } finally {
+      firstGate.resolve();
+      secondGate.resolve();
+      harness.window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
+  for (const action of ["scope", "launch"] as const) {
+    test(`issue479-review: ${action} releases an unresolved notification route lock`, async () => {
+      const home = session(`route-abandoned-${action}`);
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [home], suffix: `route-abandoned-${action}`,
+        launchResponse: async () => new Response(null, { status: 503 }),
+      });
+      try {
+        harness.notify({ version: 2, type: "activity_stop", instanceId: home.instanceId, generation: home.generation });
+        if (action === "scope") harness.elements.hostPicker.dispatchEvent(new Event("change"));
+        harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+        await settleUntil(() => harness.elements.statusBanner.dataset.kind === "offline", 100);
+        expect(harness.launchRequests).toHaveLength(1);
+        expect(harness.embedCalls).toHaveLength(0);
+        harness.emit("keepalive", {});
+        expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+        expect(harness.elements.statusBanner.hidden).toBeTrue();
+      } finally { harness.window.dispatchEvent(new Event("pagehide")); }
+    });
+  }
 
   for (const advance of ["next", "hold"] as const) {
     for (const failure of [403, 404, 409, 503, "withdrawn"] as const) {

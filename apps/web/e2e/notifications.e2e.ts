@@ -34,40 +34,24 @@ function session(instanceId: string, overrides: Partial<SessionMetadata> = {}): 
   };
 }
 
-async function holdDirectoryEvents(page: Page): Promise<void> {
+async function observeDirectorySnapshots(page: Page): Promise<void> {
   await page.addInitScript(() => {
-    // Gate real metadata delivery, not network routing: a service-worker-controlled WebKit page
-    // can bypass Playwright's page routes after the first navigation.
-    const add = EventSource.prototype.addEventListener;
-    const queued: (() => void)[] = [];
-    let held = true;
-    EventSource.prototype.addEventListener = function (
-      this: EventSource, type: string, listener: EventListenerOrEventListenerObject | null,
-      options?: boolean | AddEventListenerOptions,
-    ): void {
-      if (listener === null) return;
-      if (!["snapshot", "session_upsert", "session_remove", "keepalive"].includes(type)) {
-        add.call(this, type, listener, options);
-        return;
+    const Native = EventSource;
+    globalThis.EventSource = class extends Native {
+      constructor(url: string | URL, options?: EventSourceInit) {
+        super(url, options);
+        this.addEventListener("snapshot", event => {
+          const { revision } = JSON.parse(event.data) as { revision: number };
+          // Observe after the app's listeners, without holding or rewriting live SSE delivery.
+          requestAnimationFrame(() => Reflect.set(globalThis, "__notificationSnapshotRevision", revision));
+        });
       }
-      add.call(this, type, event => {
-        const deliver = (): void => {
-          if (typeof listener === "function") listener.call(this, event);
-          else listener.handleEvent(event);
-        };
-        if (held) queued.push(deliver);
-        else deliver();
-      }, options);
-    } as typeof add;
-    Reflect.set(globalThis, "__releaseDirectoryEvents", () => {
-      held = false;
-      for (const deliver of queued.splice(0)) deliver();
-    });
+    };
   });
 }
 
-async function releaseDirectoryEvents(page: Page): Promise<void> {
-  await page.evaluate(() => (Reflect.get(globalThis, "__releaseDirectoryEvents") as () => void)());
+async function observedSnapshotRevision(page: Page): Promise<number | undefined> {
+  return page.evaluate(() => Reflect.get(globalThis, "__notificationSnapshotRevision") as number | undefined);
 }
 
 test("activity-stop routes launch View even with a current ask or without Control, without persistent capability sinks", { tag: "@core" }, async ({ page }) => {
@@ -133,7 +117,7 @@ test("activity-stop routes launch View even with a current ask or without Contro
 
 test("attention routes still acquire Control only for the exact current request", { tag: "@core" }, async ({ page }) => {
   await installSilentWebSocket(page);
-  await holdDirectoryEvents(page);
+  await observeDirectorySnapshots(page);
   const current = session("attention-route-current-01", { inputRequired: true });
   const requestId = current.ask!.requestId;
   const fixture = await startDashboardFixture([current]);
@@ -145,9 +129,10 @@ test("attention routes still acquire Control only for the exact current request"
     await page.goto("about:blank");
     fixture.setSnapshot([{ ...current, ask: { ...current.ask!, requestId: "attention-route-new-request" } }]);
     await page.goto(route);
+    await expect.poll(() => observedSnapshotRevision(page)).toBe(2);
     await expect(page.locator('#status-banner[data-kind="expired"]')).toBeVisible();
     await expect(page).toHaveURL(fixture.origin + "/");
-    await releaseDirectoryEvents(page);
+    fixture.setSnapshot([]);
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "ready");
     expect(fixture.launchRequests).toHaveLength(1);
   } finally {
@@ -156,16 +141,18 @@ test("attention routes still acquire Control only for the exact current request"
 });
 
 test("changed, gone, and unavailable stop routes remain in the directory without acquiring capabilities", { tag: "@core" }, async ({ page }) => {
-  await holdDirectoryEvents(page);
+  await observeDirectorySnapshots(page);
   const current = session("stop-expired-instance-01", { generation: 2 });
   const fixture = await startDashboardFixture([current]);
+  let revision = 1;
   try {
     for (const sessions of [[current], [], [{ ...current, generation: 1, canView: false, canControl: false }]]) {
-      fixture.setSnapshot(sessions);
+      fixture.setSnapshot(sessions, ++revision);
       await page.goto(fixture.origin + "/collab/stop-expired-instance-01?activity=stopped&generation=1");
+      await expect.poll(() => observedSnapshotRevision(page)).toBe(revision);
       await expect(page.locator('#status-banner[data-kind="expired"]')).toBeVisible();
       await expect(page).toHaveURL(fixture.origin + "/");
-      await releaseDirectoryEvents(page);
+      fixture.setSnapshot(sessions, ++revision);
       await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "ready");
       await expect(page.getByRole("application", { name: "OMP collaboration session" })).toHaveCount(0);
       expect(fixture.launchRequests).toEqual([]);

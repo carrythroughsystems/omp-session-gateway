@@ -513,6 +513,8 @@ function acceptNotificationRoute(event: MessageEvent): void {
   const intent = parseNotificationData(event.data.data);
   if (intent === undefined) return;
   event.ports[0]?.postMessage({ type: "omp-notification-route-accepted", version: PUSH_API_VERSION });
+  notificationRouteSequence += 1;
+  notificationRouteNoticeRevision = undefined;
   selectionEpoch += 1;
   creation.cancel("competing");
   clearCreationDraft();
@@ -665,7 +667,9 @@ function readPendingNotificationLaunch(): NotificationLaunchIntent | undefined {
 }
 
 let pendingNotificationRoute = location.pathname === "/collab" || location.pathname.startsWith("/collab/");
+let notificationRouteSequence = pendingNotificationRoute ? 1 : 0;
 let notificationRouteStatusLocked = pendingNotificationRoute;
+let notificationRouteNoticeRevision: number | undefined;
 let pendingNotificationLaunch = readPendingNotificationLaunch();
 
 if (location.pathname === "/update/" || location.pathname === "/client/") {
@@ -2598,6 +2602,7 @@ function enterCollabClient(
   presentation: LaunchPresentation = "full",
 ): void {
   notificationRouteStatusLocked = false;
+  notificationRouteNoticeRevision = undefined;
   setStatus("ready", "");
   const fromDirectory = activeCollabShell === undefined;
   const snapshot = captureDirectorySnapshot();
@@ -2872,6 +2877,8 @@ async function launch(
   if (activeCollabShell?.launchFailureSource !== undefined) hideTriageBar(activeCollabShell, false);
   selectedScope = scope;
   hostPicker.value = scope;
+  if (pendingNotificationRoute || notificationRouteNoticeRevision !== undefined) notificationRouteStatusLocked = false;
+  notificationRouteNoticeRevision = undefined;
   pendingNotificationLaunch = undefined;
   pendingNotificationRoute = false;
   cancelLaunch();
@@ -3205,8 +3212,13 @@ function connectEvents(epoch: number): void {
       }
       armEventLiveness(source, epoch);
       try {
-        if (applyEvent(parseSessionEvent(JSON.parse(event.data)), epoch) && !notificationRouteStatusLocked) {
-          setStatus("ready", "");
+        const parsed = parseSessionEvent(JSON.parse(event.data));
+        if (applyEvent(parsed, epoch)) {
+          if (notificationRouteNoticeRevision !== undefined && parsed.revision > notificationRouteNoticeRevision) {
+            notificationRouteNoticeRevision = undefined;
+            notificationRouteStatusLocked = false;
+          }
+          if (!notificationRouteStatusLocked) setStatus("ready", "");
         }
       } catch {
         failEventStream(source, epoch);
@@ -3236,6 +3248,7 @@ function connectEvents(epoch: number): void {
 
 async function resolvePendingNotificationRoute(): Promise<void> {
   if (!pendingNotificationRoute) return;
+  const sequence = notificationRouteSequence;
   pendingNotificationRoute = false;
   const pending = pendingNotificationLaunch;
   pendingNotificationLaunch = undefined;
@@ -3270,11 +3283,16 @@ async function resolvePendingNotificationRoute(): Promise<void> {
       // triage bar, unless that bar already holds a live prompt such as Hold for the open ask.
       if (shell.triageBar.hidden) showTriageBar(shell, "clear", "That alert changed or expired.", "Sessions", returnToDirectory);
     } else {
+      // The opening SSE snapshot repeats this list; only newer metadata or a new user intent
+      // should dismiss the explanation for a notification that could not be opened.
+      notificationRouteNoticeRevision = directoryRevision;
       setStatus("expired", "That notification changed or expired. Choose a current session.");
       applyActivatedWorkerUpdate();
     }
   } finally {
-    notificationRouteStatusLocked = false;
+    if (sequence === notificationRouteSequence && notificationRouteNoticeRevision === undefined) {
+      notificationRouteStatusLocked = false;
+    }
   }
 }
 
@@ -3316,6 +3334,8 @@ hostPicker.addEventListener("change", () => {
   selectedScope = sources.has(hostPicker.value) ? hostPicker.value : "all";
   selectionEpoch += 1;
   cancelLaunch();
+  if (pendingNotificationRoute || notificationRouteNoticeRevision !== undefined) notificationRouteStatusLocked = false;
+  notificationRouteNoticeRevision = undefined;
   pendingNotificationLaunch = undefined;
   pendingNotificationRoute = false;
   history.replaceState({ ompDirectory: { version: 2, scope: selectedScope, order: [], scrollY: window.scrollY } }, "", "/");
