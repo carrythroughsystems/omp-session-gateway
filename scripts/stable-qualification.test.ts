@@ -2435,6 +2435,24 @@ test("506 council campaign validation rejects a readiness pass without delivery 
   }
 });
 
+test("execution-bearing passed receipts require readiness while legacy and unfinished receipts remain readable", () => {
+  const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
+  receipt.execution = receiptExecution();
+  for (const status of ["running", "failed"] as const) {
+    receipt.status = status;
+    expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+  }
+  receipt.status = "passed";
+  receipt.rigReadiness = { campaignAttempt: 0, status: "passed", cleanupDisposition: "restored", timings: {},
+    observations: { baselineRestored: true, pixelReachable: true, pushSent: true, pushAcknowledged: true,
+      pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 1, ackCount: 1 } };
+  expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+  delete receipt.rigReadiness;
+  expect(() => validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toThrow("readiness proof");
+  delete receipt.execution;
+  expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
+});
+
 test.each(["failed owner omitted", "unresolved containment", "passed with failed owner"] as const)(
   "council P2 readiness receipt rejects %s", variant => {
     const receipt = summarizedReceipt();
@@ -3228,6 +3246,12 @@ describe("resource-owning lanes", () => {
     receipt.lanes.androidPushCleanup.evidence = { epoch: "p1" };
     receipt.lanes.deviceCloud.evidence = { progress: { epoch: "c1" }, result: { passed: true } };
     receipt.lanes.deviceCloudCleanup.evidence = { epoch: "c1" };
+    expect(incompleteQualification(receipt)).toBeUndefined();
+    receipt.execution = receiptExecution();
+    expect(incompleteQualification(receipt)).toContain("rig readiness recorded no result");
+    receipt.rigReadiness = { campaignAttempt: 0, status: "passed", cleanupDisposition: "restored", timings: {},
+      observations: { baselineRestored: true, pixelReachable: true, pushSent: true, pushAcknowledged: true,
+        pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 1, ackCount: 1 } };
     expect(incompleteQualification(receipt)).toBeUndefined();
     receipt.lanes.androidPushCleanup.evidence = { epoch: "p0" };
     expect(incompleteQualification(receipt)).toContain("androidPushCleanup");

@@ -133,7 +133,7 @@ export function parseRigReadinessReceipt(value: unknown): RigReadinessReceipt {
     const bound = readinessBounds[key as keyof typeof readinessBounds];
     if (bound === "boolean" ? typeof value !== "boolean" :
       typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > bound) invalid();
-    if (["quotaAvailable", "creationAllowance", "subscriptionCount", "sendCount", "ackCount"].includes(key) && !Number.isSafeInteger(value)) invalid();
+    if (["quotaAvailable", "creationAllowance", "subscriptionCount", "sendCount", "ackCount", "deliveryMs", "clearMs"].includes(key) && !Number.isSafeInteger(value)) invalid();
   }
   if (observations.quotaObservable !== true && Object.hasOwn(observations, "quotaAvailable")) invalid();
   // Historical schema-3 receipts omit both; new evidence must carry the complete boolean pair.
