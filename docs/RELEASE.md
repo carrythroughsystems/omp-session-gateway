@@ -238,6 +238,17 @@ records, even if the old checks have not passed. Unknown mergeability waits. Che
 the replacement head; a saved merge intent for an older head is dropped and re-planned as usual.
 The old PR must still satisfy bot ownership/signature and generated-file/control checks before
 replacement. Source-keyed detached worktrees preserve local commit checkpoints across crashes.
+A pushed branch awaiting PR creation is adopted without checking it out under a newer main's
+checkpoint key; subsequent regeneration still starts from that newer main.
+
+The record checkout is data only: generation calls the **installed** `runReleaseGenerate` in-process
+against its files, without installing dependencies or running the checkout's generator, imports or
+package lifecycle scripts. Main's code never gains the pinned driver's bot credentials this way.
+Current CI tests historical generator fixtures and live claim coherence, not byte equality between
+live generated blocks and main's generator output. New marker/schema or coherence requirements can
+still make an older installed generator fail generation or PR checks. Keep those gates intact and
+reconcile manually under the pending release's pinned policy; never run main's code or advance the
+driver mid-release to bypass the incompatibility.
 
 ROUTINE_HOLD_REASONS in scripts/release-policy.ts enumerates authority-path-changed, policy-changed,
 out-of-class, stale-source, missing-evidence, head-tree-changed, unexpected-merger,
@@ -247,8 +258,9 @@ passed job without the exact evidence binding grants no authority.
 
 Prepare, approve and record use `scripts/release-generate.ts` with an explicit persisted
 `--date YYYY-MM-DD`; package/workspace versions and source constants are mechanical edits.
-`finish-smoke` persists `smokedAt` as an ISO UTC timestamp in its decision/state; record passes
-its UTC date to `release-generate.ts record --date`, including after regeneration or intent replay.
+The smoke worker writes ISO UTC `completedAt` in its passed result. `finish-smoke` requires that
+timestamp and persists it as `smokedAt` in its decision/state; record passes its UTC date to
+`release-generate.ts record --date`, including after delayed observation, regeneration or intent replay.
 Prepare and approve retain the preparation date. A manual record uses the actual smoke completion
 date and current `main`. There is no preparation-date fallback: installation is drained at `closed`,
 whose historical state needs no `smokedAt`; a new smoke transition supplies it before recording.

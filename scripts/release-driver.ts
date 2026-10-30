@@ -117,6 +117,8 @@ export interface CampaignInfrastructureHold {
 }
 export interface JobObservation {
   status: "absent" | "running" | "passed" | "failed" | "infrastructure-hold";
+  /** Smoke worker completion, independent of when the next tick observes its result. */
+  completedAt?: string;
   detail?: string;
   availabilityHold?: CampaignInfrastructureHold;
   campaignFailure?: CampaignFailureObservation;
@@ -468,8 +470,12 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
         job.detail ?? `${state.phase} process disappeared; inspect private job logs; no retry`);
     if (job?.status !== "passed") return idle(`waiting for detached ${state.phase}`);
     if (state.phase === "qualifying") return decision("finish-campaign", "qualified", `campaign attempt=${campaignAttempt(state)}; all candidate qualification lanes passed`);
-    if (state.phase === "smoking") return decision("finish-smoke", "smoked", "published-byte smoke passed with --force-reinstall and --rebuild-omp",
-      { patch: { smokedAt: new Date(now).toISOString() } });
+    if (state.phase === "smoking") {
+      if (typeof job.completedAt !== "string" || !Number.isFinite(Date.parse(job.completedAt))
+        || new Date(job.completedAt).toISOString() !== job.completedAt) return failure("passed smoke lacks a valid worker completion time");
+      return decision("finish-smoke", "smoked", "published-byte smoke passed with --force-reinstall and --rebuild-omp",
+        { patch: { smokedAt: job.completedAt } });
+    }
     const pr = repo.approve;
     const invalid = refuse(pr, config, "approve");
     if (invalid !== undefined) return routineHold("pr-identity-changed");

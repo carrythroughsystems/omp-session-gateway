@@ -10,6 +10,7 @@ import { assertReleaseTagState } from "./release-tag-state.ts";
 import { releaseAssetNames, verifyReleaseSignatures } from "./post-release-smoke.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
 import { compareReleaseArchives } from "./release-runtime-compare.ts";
+import { runReleaseGenerate } from "./release-generate.ts";
 import { assertCampaignCleanupComplete, assertCampaignRetryEligible, assertDeviceCloudResumeEligible, externalCleanupCurrent, validateStableQualificationReceipt, type StableQualificationLaneModules, type StableQualificationReceipt } from "./stable-qualification.ts";
 import { defaultLaneModules } from "./stable-lanes.ts";
 import { clearReleaseHostLease } from "./release-host-lease.ts";
@@ -1059,21 +1060,25 @@ export class StudioDriver implements DriverPort {
     const remote = await this.api<{ object: { sha: string } }>(`git/ref/heads/${branch}`, true);
     if (remote !== undefined) await this.assertCheckpointAuthor(remote.object.sha);
     if (replace !== undefined && remote?.object.sha !== replace.head) throw new StaleIntentError("record branch changed before regeneration");
-    // A per-main detached checkout preserves crash checkpoints without resetting the old branch.
-    const directory = await this.checkout(`${state.issue.number}-${state.candidate}-${kind}${kind === "record" ? "-" + source : ""}`,
-      replace === undefined ? remote?.object.sha ?? source : source, kind === "record" ? undefined : branch);
     if (remote === undefined || replace !== undefined) {
       if (kind === "record" && (!state.smokedAt || !Number.isFinite(Date.parse(state.smokedAt))
         || new Date(state.smokedAt).toISOString() !== state.smokedAt)) throw new Error("record requires the persisted smoke completion time");
-      const args = [process.execPath, "scripts/release-generate.ts", kind, kind === "prepare" ? state.version : `v${state.version}`,
+      // Adopt a pushed branch without a checkout; a source-keyed directory must never hold an older head.
+      const directory = await this.checkout(`${state.issue.number}-${state.candidate}-${kind}${kind === "record" ? "-" + source : ""}`,
+        source, kind === "record" ? undefined : branch);
+      const args = [kind, kind === "prepare" ? state.version : `v${state.version}`,
         "--date", kind === "record" ? state.smokedAt!.slice(0, 10) : state.date];
       if (kind === "prepare") args.push("--candidate-tag", state.candidate, "--release-class", parseReleaseClass(state.issue.releaseClass));
       if (kind === "approve") args.push("--receipt", this.receipt(state), "--candidate-tag", state.candidate);
       if (kind === "record") args.push("--smoke", join(this.jobDirectory("smoke", state), "smoke.json"), "--status", join(this.jobDirectory("smoke", state), "status.json"), "--publication", join(this.config.stateDir, `${state.candidate}-publication.json`));
       // A committed local head is the crash checkpoint before a push; never regenerate its content.
       if (await this.git(["rev-parse", "HEAD"], directory) === source) {
-        await command([process.execPath, "install", "--frozen-lockfile"], directory, this.env);
-        await command(args, directory, this.env);
+        // Main is record data, not executable authority: never install or run its scripts as the bot.
+        if (kind === "record") await runReleaseGenerate(args, directory);
+        else {
+          await command([process.execPath, "install", "--frozen-lockfile"], directory, this.env);
+          await command([process.execPath, "scripts/release-generate.ts", ...args], directory, this.env);
+        }
         await this.git(["add", "--all"], directory);
         const changed = await this.git(["diff", "--cached", "--name-only"], directory);
         if (changed === "") throw new Error("release generator produced no changes; refusing an empty release PR");
@@ -1509,7 +1514,8 @@ export class StudioDriver implements DriverPort {
         candidateCommit: state.candidateCommit!, candidateDigest: state.candidateDigest!, policy: state.authorityPolicy!,
         steps: ROUTINE_EVIDENCE_STEPS,
       } : undefined;
-      terminal = { status: "passed", ...(evidence === undefined ? {} : { evidence }) };
+      terminal = { status: "passed", ...(evidence === undefined ? {} : { evidence }),
+        ...(spec.kind === "smoke" ? { completedAt: new Date().toISOString() } : {}) };
       exitCode = 0;
     } catch (error) {
       exitCode = observedCampaignExit ?? 1;

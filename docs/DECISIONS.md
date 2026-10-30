@@ -2047,10 +2047,17 @@ not an update-branch merge. Use GitHub's `mergeable: false` or `mergeable_state:
 evidence; unknown mergeability waits. Replacement heads need fresh strict checks and the existing
 stale-merge-intent re-plan. Record authority requires the generated record path allowlist and
 unchanged controls between the PR merge base and head; prepare/approve retain the pinned-checkout
-comparison. Persist `smokedAt` in the finish-smoke intent/state and use its UTC date for records.
+comparison. Treat current main as data: run the installed generator in-process without installing
+or executing the record checkout's code. Adopt a pushed branch without a checkout until regeneration
+is required. The smoke worker writes `completedAt`; finish-smoke requires and persists that exact
+timestamp as `smokedAt`, whose UTC date records completion rather than the next tick's observation.
 
 **Consequences:** Main can move after approval and stable signing without preventing the final
 record of immutable release evidence. A record cannot change controls, install new driver policy,
 or expand qualification. Source-keyed detached worktrees retain crash checkpoints without
 rewriting previous worktrees. No legacy date fallback is needed: the installed driver is closed
 and the state parser permits historical closed states without a smoke timestamp.
+Current CI checks historical generator fixtures and live claim coherence, not live generated-byte
+equality against main's generator. New marker/schema or coherence requirements may still reject an
+older installed renderer. Preserve the gates and reconcile manually under the pinned policy, rather
+than executing main's code or upgrading the driver during a pending release.

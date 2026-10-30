@@ -245,7 +245,7 @@ class FakeDriver implements DriverPort {
       case "merge-approve": Object.assign(this.repo.approve!, { state: "closed", merged: true, mergedBy: config.bot, mergeTree: current.approvedTree, mergeCommit: "2".repeat(40) }); patch = { stableCommit: "2".repeat(40) }; break;
       case "tag-stable": this.repo.stableWorkflow = "passed"; break;
       case "verify-stable": patch = { stableDigest: "1".repeat(64) }; break;
-      case "start-smoke": this.repo.smoke = { status: "passed" }; break;
+      case "start-smoke": this.repo.smoke = { status: "passed", completedAt: "2026-10-30T23:58:00.000Z" }; break;
       case "open-record": this.repo.record = pr({ number: 403 }); patch = { recordPr: 403 }; break;
       case "close": this.repo.issues = []; break;
     }
@@ -1381,6 +1381,7 @@ await new Worker(driverConfig(), false).worker(${JSON.stringify(join(directory, 
         expect(JSON.parse(terminal).status).toBe(exitCode === 0 ? "passed" : "failed");
         expect(terminal).not.toContain("CANARY");
         if (exitCode === 0) {
+          expect(JSON.parse(terminal).completedAt).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u);
           expect(await Bun.file(join(directory, "smoke-failure.json")).exists()).toBe(false);
           expect(await Bun.file(join(directory, "smoke.json")).json()).toEqual(JSON.parse(out.toString()));
           expect(await Bun.file(join(directory, "status.json")).json()).toEqual({ fixture: true });
@@ -2217,7 +2218,7 @@ test.each(["candidate-tagged", "stable-tagged"] as const)("%s waits for workflow
 });
 
 describe("record tracks main", () => {
-  const completedAt = "2026-10-30T23:59:59.123Z";
+  const completedAt = "2026-10-30T23:58:00.000Z";
   const branch = "release-driver/400/v0.7.4-prealpha.1-record";
   const preparedDate = "2026-10-27";
   async function fixture(root: string) {
@@ -2259,6 +2260,7 @@ describe("record tracks main", () => {
       comparisons: string[] = [];
       serial = 0;
       failPush = false;
+      failPost = false;
       override async checkout(name: string, source: string) {
         this.sources.push(source);
         const directory = join(root, name);
@@ -2267,8 +2269,6 @@ describe("record tracks main", () => {
             await mkdir(dirname(join(directory, path)), { recursive: true });
             await writeFile(join(directory, path), content);
           }
-          await writeFile(join(directory, "scripts/release-generate.ts"),
-            `import { runReleaseGenerate } from ${JSON.stringify(join(import.meta.dir, "release-generate.ts"))};\nawait runReleaseGenerate(process.argv.slice(2));\n`);
           this.heads.set(directory, source);
         }
         return directory;
@@ -2281,7 +2281,12 @@ describe("record tracks main", () => {
         if (path.startsWith("commits/")) return { author: { login: config.bot }, commit: { verification: { verified: true } } } as T;
         if (path.startsWith("compare/")) {
           this.comparisons.push(path);
-          return { merge_base_commit: { sha: this.parents.get(path.split("...")[1]!) } } as T;
+          const [base, head] = path.slice("compare/".length).split("...");
+          const ancestors = new Set<string>();
+          for (let commit = base; commit !== undefined; commit = this.parents.get(commit)) ancestors.add(commit);
+          let common = head;
+          while (common !== undefined && !ancestors.has(common)) common = this.parents.get(common);
+          return { merge_base_commit: { sha: common } } as T;
         }
         if (path.startsWith("git/trees/")) {
           const tree = this.trees.get(path.slice("git/trees/".length).split("?")[0]!)!;
@@ -2297,6 +2302,7 @@ describe("record tracks main", () => {
       override async gh<T>(args: string[]): Promise<T | undefined> {
         this.providerWrites.push(args);
         if (args.includes("POST")) {
+          if (this.failPost) { this.failPost = false; throw new Error("simulated crash before PR creation"); }
           this.current = pr({ headRef: branch, head: this.remote!, tree: this.remote!, baseCommit: this.main,
             files: this.changed(this.remote!), checksPassed: false, mergeable: true });
           return { number: this.current.number } as T;
@@ -2341,11 +2347,11 @@ describe("record tracks main", () => {
       .replaceAll("https://github.com/alphastorm/omp-session-gateway", "https://github.com/carrythroughsystems/omp-session-gateway"));
     return { runtime, selected };
   }
-  test("finish-smoke persists the smoke date in its intent, not the preparation date", async () => {
+  test("finish-smoke persists worker completion before midnight despite next-day observation", async () => {
     const fake = new FakeDriver();
     fake.state = { ...state("smoking"), date: preparedDate };
-    fake.repo.smoke = { status: "passed" };
-    const finish = nextStep(fake.state, fake.repo, config, preparedDate, Date.parse(completedAt)) as Decision;
+    fake.repo.smoke = { status: "passed", completedAt };
+    const finish = nextStep(fake.state, fake.repo, config, preparedDate, Date.parse("2026-10-31T00:02:00.000Z")) as Decision;
     expect(finish.patch?.smokedAt).toBe(completedAt);
     fake.state.intent = JSON.parse(JSON.stringify(finish));
     fake.failSave = 2;
@@ -2353,6 +2359,77 @@ describe("record tracks main", () => {
     await tick(fake, config);
     expect(fake.state.smokedAt).toBe(completedAt);
     expect(fake.state.phase).toBe("smoked");
+  });
+  test.each([undefined, "invalid", "2026-02-30T23:58:00.000Z", "2026-10-30T23:58:00+00:00"])(
+    "finish-smoke refuses missing or invalid worker completion %s", completedAt => {
+      const step = nextStep(state("smoking"), snapshot({ smoke: {
+        status: "passed", ...(completedAt === undefined ? {} : { completedAt }),
+      } }), config);
+      expect(step.operation).toBe("stop");
+      expect(step).toMatchObject({ phase: "diagnostic-required" });
+    },
+  );
+  test("record uses installed generator without executing main generator or install lifecycle", async () => {
+    const root = await mkdtemp(join(tmpdir(), "release-record-untrusted-"));
+    try {
+      const { runtime, selected } = await fixture(root);
+      const generatorSentinel = join(root, "generator-ran"), installSentinel = join(root, "install-ran");
+      Object.assign(runtime.trees.get("main")!, {
+        "scripts/release-generate.ts": `await Bun.write(${JSON.stringify(generatorSentinel)}, "ran");
+import { runReleaseGenerate } from ${JSON.stringify(join(import.meta.dir, "release-generate.ts"))};
+await runReleaseGenerate(process.argv.slice(2));\n`,
+        "scripts/lifecycle.ts": `await Bun.write(${JSON.stringify(installSentinel)}, "ran");\n`,
+        "package.json": JSON.stringify({ name: "record-fixture", version: "0.7.4", scripts: { postinstall: "bun scripts/lifecycle.ts" } }),
+      });
+      await runtime.openPr("record", selected);
+      expect(await Promise.all([generatorSentinel, installSentinel].map(path => Bun.file(path).exists()))).toEqual([false, false]);
+      expect(runtime.trees.get(runtime.current!.head)!["docs/RELEASE_STATUS.md"]).toContain("Recorded 2026-10-30.");
+      await expect(runtime.assertGeneratedControls(runtime.current!)).resolves.toBeUndefined();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("pushed record without a PR adopts after main moves then regenerates without poisoning its checkpoint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "release-record-post-replay-"));
+    try {
+      const { runtime, selected } = await fixture(root);
+      runtime.failPost = true;
+      await expect(runtime.openPr("record", selected)).rejects.toThrow("simulated crash before PR creation");
+      const pushed = runtime.remote!;
+      runtime.main = "new-main";
+      runtime.trees.set(runtime.main, { ...runtime.trees.get("main")!, "scripts/release-driver.ts": "later main control\n" });
+      runtime.parents.set(runtime.main, "main");
+      await runtime.openPr("record", selected);
+      expect(runtime.current!.head).toBe(pushed);
+      expect(runtime.sources).toEqual(["main"]); // Adopting a remote head needs no checkout.
+      Object.assign(runtime.current!, { behind: true, mergeable: true });
+      const current = { ...selected, phase: "record-open" as const, recordPr: runtime.current!.number };
+      const step = nextStep(current, snapshot({ main: runtime.main, record: runtime.current! }), config) as Decision;
+      expect(step.operation).toBe("update-release-pr");
+      await runtime.perform(step, current);
+      await runtime.perform(step, current);
+      expect(runtime.sources).toEqual(["main", "new-main"]);
+      expect(runtime.parents.get(runtime.current!.head)).toBe("new-main");
+      expect(runtime.commits).toHaveLength(2);
+      expect(runtime.pushes[1]).toContain(`--force-with-lease=refs/heads/${branch}:${pushed}`);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  test("record authority resolves both comparison SHAs when later main changes controls", async () => {
+    const root = await mkdtemp(join(tmpdir(), "release-record-merge-base-"));
+    try {
+      const { runtime, selected } = await fixture(root);
+      await runtime.openPr("record", selected);
+      runtime.trees.set("later-main", { ...runtime.trees.get("main")!, "scripts/release-driver.ts": "later reviewed control\n" });
+      runtime.parents.set("later-main", "main");
+      runtime.current!.baseCommit = "later-main";
+      await expect(runtime.assertGeneratedControls(runtime.current!)).resolves.toBeUndefined();
+      expect(runtime.comparisons).toContain(`compare/later-main...${runtime.current!.head}`);
+      const control = runtime.trees.get(runtime.current!.head)!["scripts/release-driver.ts"]!;
+      runtime.trees.get(runtime.current!.head)!["scripts/release-driver.ts"] = "record control edit\n";
+      await expect(runtime.assertGeneratedControls(runtime.current!)).rejects.toThrow("generated-content-mismatch");
+      runtime.trees.get(runtime.current!.head)!["scripts/release-driver.ts"] = control;
+      runtime.current!.baseCommit = "unrelated-main";
+      // No common ancestor must not synthesize the head's parent as a merge base.
+      await expect(runtime.assertGeneratedControls(runtime.current!)).rejects.toThrow("missing-evidence");
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
   test("main moved after approve: record regenerates site blocks on main, dates the smoke and merges without a hold", async () => {
     const root = await mkdtemp(join(tmpdir(), "release-record-main-"));
@@ -2889,7 +2966,7 @@ describe("round-two class closure", () => {
     const subject = { ...state(), candidateCommit: evidence.candidateCommit, candidateDigest: evidence.candidateDigest,
       approvedHead: evidence.head, approvedTree: evidence.tree, failedMain: state().selectedMain };
     const base = snapshot({ prepare: pr(), approve: pr(), record: pr(), campaign: { status: "passed" },
-      approveChecks: { status: "passed" }, smoke: { status: "passed" } });
+      approveChecks: { status: "passed" }, smoke: { status: "passed", completedAt: "2026-10-30T23:58:00.000Z" } });
     const repos = [
       base, { ...base, main: "d".repeat(40) }, { ...base, upstreamTag: "v18.8.2", order: order() },
       { ...base, upstreamTag: "v18.8.2", order: order({ behind: true }) },
