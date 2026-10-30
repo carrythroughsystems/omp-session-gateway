@@ -254,6 +254,7 @@ export async function request<T>(url: string, headers: Record<string, string>, m
   };
   try {
     const response = method === "GET" ? await readProvider(send, { signal, deadline: operationDeadline }) : await send();
+    assertWindowsExecution(execution, method === "GET" ? "read_only" : "unknown");
     if (response.status === 404) { await response.body?.cancel(); return undefined; }
     if (!response.ok) {
       await response.body?.cancel();
@@ -285,7 +286,7 @@ export async function request<T>(url: string, headers: Record<string, string>, m
 
 /** Same launch predicates as the shared verifier, with typed Windows assertion boundaries. */
 async function observeWindowsLaunch(origin: string, session: Record<string, unknown>, expected: "live" | "stale",
-  fetcher: (url: string, options: RequestInit) => Promise<Response>, execution?: WindowsExecutionContext): Promise<void> {
+  fetcher: (url: string, options: RequestInit) => Promise<Response>, execution?: WindowsExecutionContext, guard?: () => void): Promise<void> {
   if (typeof session.instanceId !== "string" || typeof session.generation !== "number") throw windowsFailure("helper_failed", "output", "read_only");
   const assertion = () => {
     const failure = windowsFailure("assertion_failed", "output", "confirmed");
@@ -296,6 +297,7 @@ async function observeWindowsLaunch(origin: string, session: Record<string, unkn
     let response: Response;
     try {
       assertWindowsExecution(execution);
+      guard?.();
       response = await fetcher(`${origin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
         method: "POST", headers: { "content-type": "application/json", origin, "sec-fetch-site": "same-origin" },
         body: JSON.stringify({ mode, generation: session.generation + (expected === "stale" ? 1 : 0) }),
@@ -317,13 +319,18 @@ async function observeWindowsLaunch(origin: string, session: Record<string, unkn
       : !valuePresent || payload.mode !== mode || payload.generation !== session.generation) throw assertion();
   }
 }
-export async function verifyWindowsLaunchContracts(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch, execution?: WindowsExecutionContext): Promise<void> {
-  await observeWindowsLaunch(origin, session, "live", fetcher, execution);
+export async function verifyWindowsLaunchContracts(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch, execution?: WindowsExecutionContext, guard?: () => void): Promise<void> {
+  await observeWindowsLaunch(origin, session, "live", fetcher, execution, guard);
 }
 /** Checks stale View and Control independently and discards launch values before returning. */
-export async function verifyWindowsStaleLaunch(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch, execution?: WindowsExecutionContext): Promise<Record<string, unknown>> {
-  await observeWindowsLaunch(origin, session, "stale", fetcher, execution);
+export async function verifyWindowsStaleLaunch(origin: string, session: Record<string, unknown>, fetcher: (url: string, options: RequestInit) => Promise<Response> = fetch, execution?: WindowsExecutionContext, guard?: () => void): Promise<Record<string, unknown>> {
+  await observeWindowsLaunch(origin, session, "stale", fetcher, execution, guard);
   return { staleViewStatus: 409, staleControlStatus: 409 };
+}
+
+/** Pixel measurement must leave the final hour of the resource lifetime for containment. */
+export function assertWindowsPixelDispatch(context: WindowsContext): void {
+  context.assertEffect(2 * 60 * 60_000);
 }
 
 export async function windowsCreationClaim(counterPath: string, creations: number, execution: WindowsExecutionContext | undefined, allocationDeadline: number | undefined): Promise<void> {
@@ -340,6 +347,15 @@ export function windowsCreationAllowance(creations: number, limit: number, execu
   return limit - creations;
 }
 
+/** Awaited preparation cannot authorize attaching a firewall whose ownership has changed. */
+export async function windowsAttachedFirewallGuard(read: () => Promise<WindowsFirewall | undefined>, id: string, label: string,
+  environment: Readonly<Record<string, string | undefined>>, execution?: WindowsExecutionContext): Promise<void> {
+  const fresh = await read();
+  if (!fresh || fresh.id !== id || fresh.description !== label || !firewallEligibility(fresh.id, fresh.description, environment).eligible) {
+    throw windowsFailure("ownership_changed", "connection", "not_started", {}, execution);
+  }
+}
+
 export async function configureWindowsFirewallRules(options: {
   id: string; label: string; environment: Readonly<Record<string, string | undefined>>;
   read: () => Promise<WindowsFirewall | undefined>; post: (port: string) => Promise<void>;
@@ -347,11 +363,7 @@ export async function configureWindowsFirewallRules(options: {
 }): Promise<void> {
   for (const port of ["3389", "5985"]) {
     assertWindowsAllocation(options.execution, options.allocationDeadline, (options.now ?? Date.now)());
-    const fresh = await options.read();
-    if (!fresh || fresh.id !== options.id || fresh.description !== options.label ||
-      !firewallEligibility(fresh.id, fresh.description, options.environment).eligible) {
-      throw windowsFailure("ownership_changed", "connection", "not_started", {}, options.execution);
-    }
+    await windowsAttachedFirewallGuard(options.read, options.id, options.label, options.environment, options.execution);
     assertWindowsAllocation(options.execution, options.allocationDeadline, (options.now ?? Date.now)());
     await options.post(port);
   }
@@ -737,14 +749,14 @@ export async function createWindowsRuntime(options: { development?: boolean; exe
     },
     async createInstance(label: string, firewall: string, owner = execution, allocationDeadline?: number) {
       const deadline = allocationDeadline === undefined ? undefined : performance.now() + Math.max(0, allocationDeadline - Date.now());
-      const group = await provider.firewall(firewall, owner, deadline);
-      if (!group || group.description !== label || !firewallEligibility(group.id, group.description, environment).eligible) throw new Error("attached firewall ownership changed");
+      await windowsAttachedFirewallGuard(() => provider.firewall(firewall, owner, deadline), firewall, label, environment, owner);
       const counterPath = join(devRoot, `creations-${activeTag}.json`);
       let creations = 0;
       try { creations = JSON.parse(await privateFile(counterPath)) as number; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const creationLimit = options.development ? 6 : 4;
       windowsCreationAllowance(creations, creationLimit, owner);
       await windowsCreationClaim(counterPath, creations, owner, allocationDeadline);
+      await windowsAttachedFirewallGuard(() => provider.firewall(firewall, owner, deadline), firewall, label, environment, owner);
       assertWindowsAllocation(owner, allocationDeadline);
       const item = await api<{ instance: WindowsInstance }>("instances", "POST", { region: pins.region, plan: pins.plan, os_id: pins.osId, label, hostname: label, firewall_group_id: firewall, backups: "disabled", enable_ipv6: false }, owner, deadline);
       if (!item) throw new Error("instance create response lost"); return item.instance;
@@ -1082,8 +1094,8 @@ if ($exists) {
       if (action === "launch") {
         assertWindowsExecution(context.execution ?? execution);
         const session = await waitForPublishedSession(String(access.origin), sessionLabel);
-        await verifyWindowsLaunchContracts(String(access.origin), session, fetch, context.execution ?? execution);
-        return { viewStatus: 200, controlStatus: 200, noStore: true, ...await verifyWindowsStaleLaunch(String(access.origin), session, fetch, context.execution ?? execution) };
+        await verifyWindowsLaunchContracts(String(access.origin), session, fetch, context.execution ?? execution, () => context.assertEffect());
+        return { viewStatus: 200, controlStatus: 200, noStore: true, ...await verifyWindowsStaleLaunch(String(access.origin), session, fetch, context.execution ?? execution, () => context.assertEffect()) };
       }
       if (action === "revoked") { assertWindowsExecution(context.execution ?? execution); await waitForRevocation(String(access.origin), sessionLabel); return { revoked: true }; }
       await context.beforeEffect(); const result = await ps(context, action, {}, undefined, principal);
@@ -1124,6 +1136,7 @@ if ($exists) {
       try {
         assertWindowsExecution(context.execution ?? execution);
         const owner = context.execution ?? execution;
+        assertWindowsPixelDispatch(context);
         const smoke = await runAndroidCollabSmoke({ origin: String(access.origin), label: sessionLabel, allowDisposableTarget: true,
           ...(owner === undefined ? {} : { execution: owner }) });
         // Serve must supply the user identity for this exact-login, production-mode gateway.
@@ -1199,7 +1212,7 @@ export function createWindowsDevelopmentPixelLease(options: {
     const epoch = options.epoch(), monotonicStarted = performance.now();
     const remaining = () => Math.min(windowsRemaining(started, deadline, clock.now(), execution, "not_started"),
       execution === undefined ? Infinity : windowsRemaining(monotonicStarted, execution.deadline, performance.now(), execution, "not_started"));
-    let previous: string | undefined, inherited = false;
+    let previous: string | undefined, inherited = false, recovered: string | undefined;
     while (true) {
       remaining();
       try { await mkdir(lock, { mode: 0o700 }); break; }
@@ -1212,7 +1225,29 @@ export function createWindowsDevelopmentPixelLease(options: {
         const fields = owner.trim().split(" ");
         if (caller === "windows-cleanup" && options.recoverExitedOwner && fields[0] === "WindowsLane" && fields[2] === epoch && /^\d+$/u.test(fields[3] ?? "")) {
           try { process.kill(Number(fields[3]), 0); }
-          catch (failure) { if ((failure as NodeJS.ErrnoException).code === "ESRCH") { previous = owner; break; } }
+          catch (failure) {
+            if ((failure as NodeJS.ErrnoException).code === "ESRCH") {
+              const takeover = `WindowsLane ${new Date().toISOString()} ${epoch} ${process.pid}\n`;
+              // Retain this exclusive fence until lock retirement: a delayed stale reader
+              // must never unlink a winning cleanup's new owner file.
+              const fence = join(lock, `recovery-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}`);
+              try { await writeFile(fence, takeover, { flag: "wx", mode: 0o600 }); }
+              catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+                await clock.sleep(Math.min(5_000, remaining())); continue;
+              }
+              if (await readFile(join(lock, "owner"), "utf8") !== owner) {
+                throw windowsFailure("ownership_changed", "command", "not_started", {}, execution);
+              }
+              await rm(join(lock, "owner"), { force: true });
+              try { await writeFile(join(lock, "owner"), takeover, { flag: "wx", mode: 0o600 }); }
+              catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+                await clock.sleep(Math.min(5_000, remaining())); continue;
+              }
+              recovered = takeover; break;
+            }
+          }
         }
         await clock.sleep(Math.min(5_000, remaining()));
       }
@@ -1220,16 +1255,18 @@ export function createWindowsDevelopmentPixelLease(options: {
     if (previous !== undefined && await readFile(join(lock, "owner"), "utf8") !== previous) {
       throw windowsFailure("ownership_changed", "command", "not_started", {}, execution);
     }
-    const claim = inherited ? previous! : `WindowsLane ${new Date().toISOString()} ${epoch} ${process.pid}\n`;
-    if (!inherited) await writeFile(join(lock, "owner"), claim, { mode: 0o600 });
+    const claim = recovered ?? (inherited ? previous! : `WindowsLane ${new Date().toISOString()} ${epoch} ${process.pid}\n`);
+    if (!inherited && recovered === undefined) await writeFile(join(lock, "owner"), claim, { mode: 0o600 });
     held = { epoch, claim };
+    let restored = false;
     try {
       remaining();
       const result = await action();
+      restored = true;
       if (await options.recoveryPending(epoch)) throw new Error("Pixel restoration incomplete; owned lease retained for cleanup");
       return result;
     } finally {
-      await releaseRestored(epoch, claim, execution);
+      if (restored) await releaseRestored(epoch, claim, execution);
     }
     } finally { active = false; }
   };
@@ -1254,7 +1291,7 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
   try { progress = JSON.parse(await privateFile(progressPath)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   if (mode !== "cleanup" && progress !== undefined && !windowsNeedsCleanup(progress)) {
     const priorIdentity = JSON.parse(await privateFile(identityPath)) as WindowsIdentity;
-    await retireWindowsDevelopmentEpoch({ identity: priorIdentity, progress, checkpoint, pixel, runtime });
+    await retireWindowsDevelopmentEpoch({ identity: priorIdentity, progress, checkpoint, pixel, runtime, execution: windowsContainmentExecution() });
     await rm(progressPath);
     progress = undefined;
   }
@@ -1275,9 +1312,9 @@ export async function windowsDevelopmentCli(args: readonly string[]): Promise<vo
     return;
   }
   async function checkpoint(next: Record<string, unknown>): Promise<void> { progress = next; await atomicPrivate(progressPath, next); }
-  if (mode === "cleanup") { console.log(JSON.stringify(await cleanupWindows({ identity, progress, checkpoint, pixel, runtime }))); return; }
+  if (mode === "cleanup") { console.log(JSON.stringify(await cleanupWindows({ identity, progress, checkpoint, pixel, runtime, execution: windowsContainmentExecution() }))); return; }
   const result = await runWindows({ identity, progress, checkpoint, pixel, runtime });
-  const cleanup = await cleanupWindows({ identity, progress, checkpoint, pixel, runtime });
+  const cleanup = await cleanupWindows({ identity, progress, checkpoint, pixel, runtime, execution: windowsContainmentExecution() });
   const evidence = { claim: "tested-development-only", ...result, cleanup };
   await atomicPrivate(join(devRoot, "evidence.json"), evidence); console.log(JSON.stringify(evidence, null, 2));
 }
