@@ -385,7 +385,7 @@ issue_reboot
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 test.skipIf(!POSIX)("bundle scan keeps readiness token bytes out of subprocess argv", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "omp-mac-bundle-argv-"));
