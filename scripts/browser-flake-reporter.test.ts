@@ -146,17 +146,21 @@ test("Playwright lifecycle writes failed/flaky evidence and makes reporter write
 
 test("both nonvisual configurations retry only true/1 CI and disable automatic secret-bearing captures", async () => {
   // A fresh module-loading boundary per environment is required; a static import caches CI values.
-  for (const file of ["apps/web/playwright.config.ts", "apps/web/playwright.compat.config.ts"]) {
-    for (const CI of ["true", "1", "false", "0", "TRUE", ""]) {
-      const result = Bun.spawnSync([process.execPath, "-e", `const {default:c}=await import(${JSON.stringify(join(root, file))});console.log(JSON.stringify({retries:c.retries,workers:c.workers,projects:c.projects.map(p=>p.name),use:c.use,reporter:c.reporter}));`], { env: { ...process.env, CI, PLAYWRIGHT_WORKERS: "2" }, stdout: "pipe", stderr: "pipe" });
-      expect(result.exitCode).toBe(0);
-      const config = JSON.parse(result.stdout.toString());
+  // Load all twelve independently; cold Playwright imports get the portable lane's 30 s bound.
+  await Promise.all(["apps/web/playwright.config.ts", "apps/web/playwright.compat.config.ts"].flatMap(file =>
+    ["true", "1", "false", "0", "TRUE", ""].map(async CI => {
+      const child = Bun.spawn([process.execPath, "-e", `const {default:c}=await import(${JSON.stringify(join(root, file))});console.log(JSON.stringify({retries:c.retries,workers:c.workers,projects:c.projects.map(p=>p.name),use:c.use,reporter:c.reporter}));`], { env: { ...process.env, CI, PLAYWRIGHT_WORKERS: "2" }, stdout: "pipe", stderr: "pipe" });
+      const [exitCode, stdout] = await Promise.all([
+        child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+      ]);
+      expect(exitCode).toBe(0);
+      const config = JSON.parse(stdout);
       expect(config.retries).toBe(CI === "true" || CI === "1" ? 1 : 0);
       expect(config.workers).toBe(file.includes("compat") ? 1 : 2);
       for (const key of ["trace", "video", "screenshot"]) expect(config.use[key]).toBe("off");
       expect(config.reporter[0]).toEqual(["line"]);
       expect(config.reporter[1][0]).toBe(join(root, "scripts/browser-flake-reporter.ts"));
       if (file.includes("compat")) expect(config.projects).toEqual(["desktop-chromium", "desktop-firefox", "desktop-webkit", "iphone-webkit"]);
-    }
-  }
-});
+    }),
+  ));
+}, 30_000);
