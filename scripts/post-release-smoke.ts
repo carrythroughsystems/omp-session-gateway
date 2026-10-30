@@ -30,7 +30,15 @@ import {
 } from "./android-stages.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
 import { releaseVersion } from "./release-policy.ts";
-import { requireAndroidDevicePreconditions, requireSingleDevice, runAdb, type AndroidAdbCommand } from "./android-device.ts";
+import {
+  requireAndroidDevicePreconditions,
+  requireSingleDevice,
+  runAdb,
+  unlockAndroidKeyguard,
+  wakeAndroidDisplay,
+  type AndroidAdbCommand,
+  type AndroidKeyguardUnlock,
+} from "./android-device.ts";
 import { fixtureModelError, OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 import { privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
@@ -326,26 +334,103 @@ export function assertWebApkActiveTask(activities: string, packageName: string):
   if (!isWebApkActiveTask(activities, packageName)) throw new Error("installed WebAPK did not become the active standalone task");
 }
 
+function webApkFocusEvidence(activities: string, deviceState: string): string {
+  const activityLines = activities.split(/\r?\n/u).map(line => line.trim());
+  const stateLines = deviceState.split(/\r?\n/u).map(line => line.trim());
+  return ([
+    ["topResumedActivity", activityLines, /^topResumedActivity=(?:null|ActivityRecord\{[a-f\d]+ u\d+ [\w.$]+\/[\w.$]+ t\d+(?: f)?\})$/u],
+    ["topDisplayFocusedRootTask", activityLines, /^topDisplayFocusedRootTask=(?:null|Task\{[a-f\d]+(?: #\d+)?(?: (?:type|A|U|visible|visibleRequested|mode|translucent|sz)=[\w.:-]+)*\})$/u],
+    ["mWakefulness", stateLines, /^mWakefulness=\w+$/u],
+    ["isKeyguardShowing", stateLines, /^isKeyguardShowing=(?:true|false)$/u],
+  ] as const).map(([key, lines, pattern]) => {
+    let line: string | undefined;
+    for (const candidate of lines) {
+      if (candidate.startsWith(`${key}=`)) line = candidate;
+    }
+    if (line === undefined) return `${key}=[unavailable]`;
+    // Only Android structural fields, never intent extras, page text, URLs or capabilities.
+    // Separate component names so a slash cannot mask a bare capability from the shared scan.
+    if (Buffer.byteLength(line) > 768 || !pattern.test(line) || findCapabilityLeaks(line.replaceAll("/", " ")).length > 0) {
+      return `${key}=[withheld]`;
+    }
+    return line;
+  }).join("\n");
+}
+
 /**
- * Waits, bounded, until the launched WebAPK is the focused, resumed standalone task. A fixed
- * two-second wait read Chrome's browser activity still in front after the acceptance lane's
- * lock/airplane/doze cycles (v0.7.2 published-byte smoke, 2026-10-02); the same launch settled
- * within the next seconds. The deadline keeps the check fail-closed.
+ * Launches and waits for the focused, resumed standalone task. Chrome can retain focus after
+ * acceptance's lock/airplane/Doze cycles; one launcher re-dispatch at ten seconds brings the
+ * existing WebAPK task forward without resetting the thirty-second deadline.
  */
 export async function awaitWebApkActiveTask(
   readActivities: () => Promise<string>,
   packageName: string,
-  pause: (milliseconds: number) => Promise<void> = sleep,
-  deadlineMs = 30_000,
-  now: () => number = Date.now,
+  {
+    launch,
+    readDeviceState,
+    sleep: pause = sleep,
+    deadlineMs = 30_000,
+    now = Date.now,
+  }: {
+    readonly launch: (timeoutMs: number) => Promise<unknown>;
+    readonly readDeviceState: () => Promise<string>;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
+    readonly deadlineMs?: number;
+    readonly now?: () => number;
+  },
 ): Promise<void> {
-  const deadline = now() + deadlineMs;
-  let activities = await readActivities();
-  while (!isWebApkActiveTask(activities, packageName) && now() < deadline) {
-    await pause(1_000);
+  const started = now(), deadline = started + deadlineMs, relaunchAt = started + 10_000;
+  let activities = "", relaunched = false;
+  await launch(Math.max(1, Math.min(20_000, deadline - now())));
+  while (now() <= deadline) {
     activities = await readActivities();
+    const current = now();
+    if (current <= deadline && isWebApkActiveTask(activities, packageName)) return;
+    if (current >= deadline) break;
+    if (!relaunched && current >= relaunchAt) {
+      relaunched = true;
+      await launch(Math.max(1, Math.min(20_000, deadline - now())));
+    } else {
+      await pause(Math.min(1_000, deadline - current, relaunched ? Infinity : relaunchAt - current));
+    }
   }
-  assertWebApkActiveTask(activities, packageName);
+  const deviceState = await readDeviceState().catch(() => "");
+  throw new Error("installed WebAPK did not become the active standalone task", {
+    cause: new Error(webApkFocusEvidence(activities, deviceState)),
+  });
+}
+
+/** Normalize acceptance's device state before the first idempotent launcher dispatch. */
+export async function launchInstalledWebApk(
+  serial: string,
+  packageName: string,
+  {
+    adb = runAdb,
+    unlockKeyguard = () => unlockAndroidKeyguard(serial),
+    sleep: pause = sleep,
+    now = Date.now,
+  }: {
+    readonly adb?: typeof runAdb;
+    readonly unlockKeyguard?: AndroidKeyguardUnlock;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
+    readonly now?: () => number;
+  } = {},
+): Promise<void> {
+  const command: AndroidAdbCommand = (...args) => adb(serial, args, { timeoutMs: 5_000 });
+  const wakefulness = await wakeAndroidDisplay(command, pause, unlockKeyguard);
+  if (wakefulness !== "Awake") throw new Error(`Android display did not wake (observed ${wakefulness})`);
+  await command("shell", "input", "keyevent", "KEYCODE_HOME");
+  await awaitWebApkActiveTask(() => command("shell", "dumpsys", "activity", "activities"), packageName, {
+    launch: timeoutMs => adb(serial, ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"], { timeoutMs }),
+    // Five-second adb bounds plus runAdb's two-second kill grace keep timeout diagnostics
+    // within fourteen seconds of the focus deadline, even if its final activity read stalls.
+    readDeviceState: async () => (await Promise.all([
+      command("shell", "dumpsys", "power").catch(() => ""),
+      command("shell", "dumpsys", "window").catch(() => ""),
+    ])).join("\n"),
+    sleep: pause,
+    now,
+  });
 }
 
 function hashBytes(value: Uint8Array): string {
@@ -1182,12 +1267,7 @@ async function verifyInstalledWebApk(origin: string): Promise<void> {
   const packageName = findWebApkForHost(packageList, packageDumps, host);
   if (packageName === undefined) throw new Error("OMP Sessions WebAPK is not installed for the gateway origin");
 
-  await runAdb(
-    serial,
-    ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
-    { timeoutMs: 30_000 },
-  );
-  await awaitWebApkActiveTask(() => device("shell", "dumpsys", "activity", "activities"), packageName);
+  await launchInstalledWebApk(serial, packageName);
 
   const port = await chooseLoopbackPort();
   await device("forward", `tcp:${port}`, "localabstract:chrome_devtools_remote");

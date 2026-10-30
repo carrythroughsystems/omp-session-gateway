@@ -19,6 +19,7 @@ import {
   type OmpInstall,
   ensureOnPath,
   inspectBunGlobalOmp,
+  launchInstalledWebApk,
   preferStockOmp,
   isWebApkAppTarget,
   formatCommandFailure,
@@ -708,19 +709,221 @@ describe("physical Android release target", () => {
   });
 });
 
-test("the WebAPK task check polls until the launch settles and still fails closed at its deadline", async () => {
+describe("installed WebAPK focus recovery", () => {
   const packageName = "org.chromium.webapk.abc_v2";
   const browserInFront = "topResumedActivity=ActivityRecord{1 u0 com.android.chrome/com.google.android.apps.chrome.Main t1}\n  topDisplayFocusedRootTask=Task{2 #1 type=standard A=10123:com.android.chrome}";
   const webApkInFront = `topResumedActivity=ActivityRecord{3 u0 com.android.chrome/org.chromium.chrome.browser.webapps.SameTaskWebApkActivity t2}\n  topDisplayFocusedRootTask=Task{4 #2 type=standard A=10466:${packageName}}`;
-  let clock = 0;
-  const pause = async (milliseconds: number) => { clock += milliseconds; };
-  let reads = 0;
-  await awaitWebApkActiveTask(async () => (++reads < 4 ? browserInFront : webApkInFront), packageName, pause, 30_000, () => clock);
-  expect(reads).toBe(4);
-  expect(clock).toBe(3_000);
-  reads = 0;
-  await expect(awaitWebApkActiveTask(async () => { reads++; return browserInFront; }, packageName, pause, 5_000, () => clock)).rejects.toThrow(
-    "installed WebAPK did not become the active standalone task",
-  );
-  expect(reads).toBe(6);
+  const deviceState = "mWakefulness=Awake\nisKeyguardShowing=false";
+
+  test("the WebAPK task check polls until the launch settles without a re-launch", async () => {
+    let clock = 0, reads = 0, launches = 0;
+    await awaitWebApkActiveTask(async () => ++reads < 4 ? browserInFront : webApkInFront, packageName, {
+      launch: async () => { launches++; },
+      readDeviceState: async () => { throw new Error("success must not collect diagnostics"); },
+      sleep: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    expect(reads).toBe(4);
+    expect(clock).toBe(3_000);
+    expect(launches).toBe(1);
+  });
+
+  test("the WebAPK task check re-launches once when Chrome keeps focus after the first launch", async () => {
+    let clock = 0, launches = 0;
+    const launchTimes: number[] = [];
+    await awaitWebApkActiveTask(async () => launches >= 2 ? webApkInFront : browserInFront, packageName, {
+      launch: async () => { launches++; launchTimes.push(clock); },
+      readDeviceState: async () => { throw new Error("success must not collect diagnostics"); },
+      sleep: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    expect(launches).toBe(2);
+    expect(launchTimes).toEqual([0, 10_000]);
+    expect(clock).toBe(10_000);
+  });
+
+  test("an already-focused WebAPK needs only the first launch and activity read", async () => {
+    let launches = 0, reads = 0;
+    await awaitWebApkActiveTask(async () => { reads++; return webApkInFront; }, packageName, {
+      launch: async () => { launches++; },
+      readDeviceState: async () => { throw new Error("success must not collect diagnostics"); },
+      sleep: async () => { throw new Error("already focused"); },
+      now: () => 0,
+    });
+    expect(launches).toBe(1);
+    expect(reads).toBe(1);
+  });
+
+  test("wakes and dismisses the keyguard, then sends HOME before the first launcher intent", async () => {
+    const events: string[] = [];
+    let keyguard = true, clock = 0, launches = 0;
+    await launchInstalledWebApk("SYNTHETIC-SMOKE-DEVICE", packageName, {
+      adb: async (_serial, args, options) => {
+        const command = args.join(" ");
+        events.push(command);
+        expect(options?.timeoutMs).toBe(command.startsWith("shell monkey") ? 20_000 : 5_000);
+        if (command === "shell dumpsys power") return "mWakefulness=Awake";
+        if (command === "shell dumpsys window") {
+          events.push(`keyguard:${keyguard}`);
+          return `isKeyguardShowing=${keyguard}`;
+        }
+        if (command === "shell wm size") return "Physical size: 1080x2400";
+        if (command.startsWith("shell monkey")) launches++;
+        if (command === "shell dumpsys activity activities") return launches >= 2 ? webApkInFront : browserInFront;
+        return "";
+      },
+      unlockKeyguard: async () => { events.push("unlock"); keyguard = false; },
+      sleep: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    const home = events.indexOf("shell input keyevent KEYCODE_HOME");
+    const launch = `shell monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`;
+    expect(events[0]).toBe("shell input keyevent 224");
+    expect(home).toBeGreaterThan(0);
+    expect(events.indexOf("unlock")).toBeGreaterThan(0);
+    expect(events.indexOf("keyguard:false")).toBeGreaterThan(events.indexOf("unlock"));
+    expect(events.indexOf("shell dumpsys power")).toBeLessThan(home);
+    expect(events.indexOf("unlock")).toBeLessThan(home);
+    expect(events.indexOf("keyguard:false")).toBeLessThan(home);
+    expect(home).toBeLessThan(events.indexOf(launch));
+    expect(events.filter(event => event === launch)).toHaveLength(2);
+  });
+
+  test("a slow first launcher dispatch can focus within the unchanged deadline", async () => {
+    let clock = 0, launches = 0, launchedAt = 0;
+    await launchInstalledWebApk("SYNTHETIC-SMOKE-DEVICE", packageName, {
+      adb: async (_serial, args, options) => {
+        const command = args.join(" ");
+        if (command.startsWith("shell monkey")) {
+          expect(options?.timeoutMs).toBe(20_000);
+          launches++;
+          launchedAt = clock;
+          clock += 12_000;
+          return "";
+        }
+        expect(options?.timeoutMs).toBe(5_000);
+        if (command === "shell dumpsys power") return "mWakefulness=Awake";
+        if (command === "shell dumpsys window") return "isKeyguardShowing=false";
+        if (command === "shell dumpsys activity activities") return webApkInFront;
+        return "";
+      },
+      unlockKeyguard: async () => { throw new Error("already unlocked"); },
+      sleep: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    expect(launches).toBe(1);
+    expect(clock - launchedAt).toBe(12_000);
+  });
+
+  test("a delayed re-launch is capped by the remaining thirty-second focus window", async () => {
+    let clock = 0, launches = 0;
+    const bounds: number[] = [];
+    await awaitWebApkActiveTask(async () => launches >= 2 ? webApkInFront : browserInFront, packageName, {
+      launch: async timeoutMs => {
+        bounds.push(timeoutMs);
+        clock += launches++ === 0 ? 12_000 : 18_000;
+      },
+      readDeviceState: async () => { throw new Error("success must not collect diagnostics"); },
+      sleep: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    expect(bounds).toEqual([20_000, 18_000]);
+    expect(clock).toBe(30_000);
+  });
+
+  test.each(["Asleep", "Keyguard"])("refuses a device still in %s before HOME or launch", async state => {
+    const events: string[] = [];
+    await expect(launchInstalledWebApk("SYNTHETIC-SMOKE-DEVICE", packageName, {
+      adb: async (_serial, args) => {
+        const command = args.join(" ");
+        events.push(command);
+        if (command === "shell dumpsys power") return `mWakefulness=${state === "Asleep" ? "Asleep" : "Awake"}`;
+        if (command === "shell dumpsys window") return "isKeyguardShowing=true";
+        if (command === "shell wm size") return "Physical size: 1080x2400";
+        return "";
+      },
+      unlockKeyguard: async () => {},
+      sleep: async () => {},
+    })).rejects.toThrow(`Android display did not wake (observed ${state})`);
+    expect(events).not.toContain("shell input keyevent KEYCODE_HOME");
+    expect(events.some(event => event.startsWith("shell monkey"))).toBe(false);
+  });
+
+  test("a never-focused WebAPK stops at thirty seconds and retains only its last private focus evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "smoke-webapk-focus-"));
+    const destination = join(root, "retained"), launchTimes: number[] = [];
+    const finalBrowser = browserInFront.replace("ActivityRecord{1 ", "ActivityRecord{99 ");
+    const capability = `#${"s".repeat(16)}.${"x".repeat(43)}`;
+    let clock = 0;
+    try {
+      const error = await withSmokeDiagnostics(destination, () => awaitWebApkActiveTask(
+        async () => `${clock < 30_000 ? browserInFront : finalBrowser}\nIntent: PAGE-CONTENT-NEVER-LOG ${capability}`,
+        packageName,
+        {
+          launch: async () => { launchTimes.push(clock); },
+          readDeviceState: async () => `mWakefulness=Awake\n  mWakefulness=Asleep\n  isKeyguardShowing=true\nWindow: PAGE-CONTENT-NEVER-LOG ${capability}`,
+          sleep: async milliseconds => { clock += milliseconds; },
+          now: () => clock,
+        },
+      ), []).catch(error => error);
+      const evidence = `${finalBrowser.split("\n").map(line => line.trim()).join("\n")}\nmWakefulness=Asleep\nisKeyguardShowing=true`;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toBe("installed WebAPK did not become the active standalone task");
+      expect(error.cause).toBeInstanceOf(Error);
+      expect(error.cause.message).toBe(evidence);
+      expect(Buffer.byteLength(error.cause.message)).toBeLessThanOrEqual(4 * 768 + 3);
+      expect(clock).toBe(30_000);
+      expect(launchTimes).toEqual([0, 10_000]);
+      const retained = await readFile(join(destination, "failure.json"), "utf8");
+      expect(JSON.parse(retained).errors.some((entry: { message: string }) => entry.message === evidence)).toBe(true);
+      for (const withheld of ["PAGE-CONTENT-NEVER-LOG", capability]) expect(retained).not.toContain(withheld);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("clips the last poll to its deadline and never re-launches after expiry", async () => {
+    let clock = 0, launches = 0, reads = 0;
+    const pauses: number[] = [];
+    await expect(awaitWebApkActiveTask(async () => { reads++; return browserInFront; }, packageName, {
+      launch: async () => { launches++; },
+      readDeviceState: async () => deviceState,
+      sleep: async milliseconds => { pauses.push(milliseconds); clock += milliseconds; },
+      deadlineMs: 2_500,
+      now: () => clock,
+    })).rejects.toThrow("installed WebAPK did not become the active standalone task");
+    expect(clock).toBe(2_500);
+    expect(pauses).toEqual([1_000, 1_000, 500]);
+    expect(reads).toBe(4);
+    expect(launches).toBe(1);
+  });
+
+  test("counts launch time against the deadline and refuses a late focused read", async () => {
+    let clock = 0, launches = 0;
+    await expect(awaitWebApkActiveTask(async () => { clock = 30_001; return webApkInFront; }, packageName, {
+      launch: async () => { launches++; clock += 9_000; },
+      readDeviceState: async () => deviceState,
+      sleep: async () => { throw new Error("late read must fail"); },
+      now: () => clock,
+    })).rejects.toThrow("installed WebAPK did not become the active standalone task");
+    expect(launches).toBe(1);
+  });
+
+  test("withholds oversized or nonstructural focus fields instead of page content or capabilities", async () => {
+    const capability = `${"s".repeat(16)}.${"x".repeat(43)}`;
+    const error = await awaitWebApkActiveTask(async () => [
+      `topResumedActivity=ActivityRecord{1 u0 com.android.chrome/${capability} t1}`,
+      `topDisplayFocusedRootTask=Task{${"x".repeat(2_000)}}`,
+      "Intent: PAGE-CONTENT-NEVER-LOG",
+    ].join("\n"), packageName, {
+      launch: async () => {},
+      readDeviceState: async () => `mWakefulness=${"x".repeat(2_000)}\nisKeyguardShowing=false`,
+      deadlineMs: 0,
+      now: () => 0,
+    }).catch(error => error);
+    expect(error.cause.message).toBe([
+      "topResumedActivity=[withheld]",
+      "topDisplayFocusedRootTask=[withheld]",
+      "mWakefulness=[withheld]",
+      "isKeyguardShowing=false",
+    ].join("\n"));
+  });
 });
