@@ -21,8 +21,10 @@ import { runAdb } from "./android-device.ts";
 import { parseQualificationOutcome, qualificationExecutionsMatch, qualificationOutcomeExitCode, readQualificationOutcomeFile, type QualificationOutcome } from "./qualification-outcome.ts";
 import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
 import { privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
+import packageManifest from "../package.json";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const PINNED_BUN_VERSION = packageManifest.packageManager.replace(/^bun@/u, "");
 interface RuntimeConfig extends DriverConfig {
   ghConfig: string;
   signingKey: string;
@@ -265,7 +267,7 @@ export class StudioDriver implements DriverPort {
       serviceAccount: join(homedir(), ".local/state/omp-session-gateway/op-service-account.token"),
       pixelKeychain: join(homedir(), "Library/Keychains/omp-qualification.keychain-db") })) checks[name] = await privateInput(path);
     checks.tailscaleJoin = await privateInput(join(homedir(), ".ts-qual-authkey")) || await privateInput(join(homedir(), ".ts-authkey-qual"));
-    checks.platform = process.platform === "darwin" && process.arch === "arm64" && Bun.version === "1.4.0";
+    checks.platform = process.platform === "darwin" && process.arch === "arm64" && Bun.version === PINNED_BUN_VERSION;
     // Share the qualification prerequisite list recognized by check:repository (not an adb argv).
     const executables = ["adb", "security", "git", "gh", "cosign", "shasum", "ssh", "scp", "bash", "python3", "curl"];
     for (const executable of [...executables, "tmux", "op"]) checks[executable] = Bun.which(executable) !== null;
@@ -1359,7 +1361,7 @@ export class StudioDriver implements DriverPort {
         const installation = join(homedir(), ".local/state/omp-session-gateway/installation");
         const active = (await jsonFile<{ versionDirectory?: string }>(join(installation, "current.json")))?.versionDirectory;
         if (active === undefined || !/^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{12}$/u.test(active)) throw new Error("installed gateway active version is missing or invalid");
-        const status = await command([join(homedir(), ".local/lib/omp-session-gateway/bun/v1.4.0/bun"), join(installation, "versions", active, "apps/gateway/src/cli.js"), "status"], checkout, this.env);
+        const status = await command([join(homedir(), ".local/lib/omp-session-gateway/bun", `v${PINNED_BUN_VERSION}`, "bun"), join(installation, "versions", active, "apps/gateway/src/cli.js"), "status"], checkout, this.env);
         await atomicJson(join(directory, "status.json"), JSON.parse(status.out));
       }
       const evidence: RoutineEvidence | undefined = spec.kind === "approve" ? {
@@ -1426,7 +1428,7 @@ async function drive(args: string[]): Promise<unknown> {
     }
     return { ...await tick(driver, config, true), readiness };
   }
-  if (process.platform !== "darwin" || (await command([process.execPath, "--version"], ROOT, process.env)).out !== "1.4.0") throw new Error("release driver writes require the Studio Darwin host and Bun 1.4.0");
+  if (process.platform !== "darwin" || (await command([process.execPath, "--version"], ROOT, process.env)).out !== PINNED_BUN_VERSION) throw new Error(`release driver writes require the Studio Darwin host and Bun ${PINNED_BUN_VERSION}`);
   if (await Bun.file(join(config.stateDir, "disabled")).exists()) return { operation: "idle", detail: "kill switch is enabled" };
   await privateDirectory(config.stateDir);
   if (mode === "worker") { await driver.worker(spec!); return { operation: "worker", completed: true }; }

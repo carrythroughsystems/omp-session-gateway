@@ -2793,7 +2793,7 @@ test.skipIf(process.platform !== "darwin" || process.arch !== "arm64")("mainline
   await mkdir(bin, { recursive: true });
   // The helper pins its own PATH, so git cannot be stubbed; route the clone to a closed local port instead.
   await writeFile(join(home, ".gitconfig"), '[url "http://127.0.0.1:1/"]\n\tinsteadOf = https://github.com/can1357/oh-my-pi.git\n');
-  await writeFile(join(bin, "bun"), `#!/bin/sh\nif [ "$1" = --version ]; then echo 1.4.0; fi\nexit 0\n`, { mode: 0o755 });
+  await writeFile(join(bin, "bun"), `#!/bin/sh\nif [ "$1" = --version ]; then echo 1.4.4; fi\nexit 0\n`, { mode: 0o755 });
   try {
     const child = Bun.spawn(["/bin/bash", "scripts/qualify-macos-omp.sh", "build"], {
       cwd: REPOSITORY_ROOT,
@@ -2804,7 +2804,7 @@ test.skipIf(process.platform !== "darwin" || process.arch !== "arm64")("mainline
         OMP_PIN_SOURCE_COMMIT: "a".repeat(40),
         OMP_PIN_SOURCE_TREE: "b".repeat(40),
         OMP_PIN_VERSION: "0.0.0",
-        OMP_PIN_BUN_VERSION: "1.4.0",
+        OMP_PIN_BUN_VERSION: "1.4.4",
         OMP_PIN_NATIVE_TARBALL_SHA256: "c".repeat(64),
         OMP_PIN_NATIVE_BINARY_SHA256: "d".repeat(64),
         OMP_QUAL_SESSION_LABEL: "synthetic",

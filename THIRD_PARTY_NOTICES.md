@@ -6,7 +6,7 @@ workspace roots in the distributed `bun.lock`; development-only packages are not
 package integrity values are preserved in `bun.lock` and `SBOM.spdx.json`; `release-info.json`
 records the SHA-256 of the distributed lockfile.
 
-The npm packages listed below are not locally modified. Bun 1.4.0 bundles their imported runtime
+The npm packages listed below are not locally modified. Bun 1.4.4 bundles their imported runtime
 code into either the gateway executable or the web assets. Their distributed license notices,
 source locations, and required attributions are included at the stated archive paths.
 

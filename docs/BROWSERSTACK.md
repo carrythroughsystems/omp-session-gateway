@@ -51,7 +51,7 @@ collection disables **CI logs only**, not CLI logs.
 
 ## Set up the Percy project
 
-Upload prerequisite: install native **Node.js 24.22.0 LTS** on `PATH`, alongside Bun 1.4.0 and
+Upload prerequisite: install native **Node.js 24.22.0 LTS** on `PATH`, alongside Bun 1.4.4 and
 Playwright's Chromium. Only the Percy CLI runs under Node; build, worker and local validation
 remain Bun commands. CI pins `actions/setup-node` by commit, verifies exactly 24.22.0, and passes
 that setup's executable path to the runner. Local uploads resolve native `node` from `PATH`;
