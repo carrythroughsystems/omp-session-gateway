@@ -266,12 +266,12 @@ preflight never reaches sudo. The exact compatibility minimum passes. Additional
 is rejected without exposing its raw diagnostic.
 
 Optional host-owned reboot-guard regressions execute the remote shell and admission probe in
-isolated local homes: a busy guard refuses before sudo, lanes, cleanup, or new receipts; a
-non-regular or non-owner-executable guard names its exact path and refuses preflight. A guard
-that passes preflight but becomes busy before persistence prevents shutdown and fails the lane
+isolated local homes: preflight never invokes an executable guard that records its invocation;
+a non-regular or non-owner-executable guard names its exact path and refuses preflight. A busy
+guard runs only at the owned pre-reboot gate, prevents shutdown, and fails the persistence lane
 with only the first 400 diagnostic bytes. Absent and allowing guards preserve the exact
-passwordless shutdown command. Admission keeps a fixed four-line protocol, hex-frames multiline
-diagnostics, and rejects malformed, oversized, or extra guard output without creating receipts.
+passwordless shutdown command. Admission keeps a fixed four-line protocol with only absent,
+present, or hex-framed invalid-path guard state, rejecting malformed or extra output without receipts.
 These local proofs do not reboot or qualify a real shared host.
 
 It also covers the three resource-owning lanes (ADR-031, ADR-032), with injected lane modules so no
@@ -282,6 +282,15 @@ test reaches a VM, a phone, or a device cloud:
 - a crashed attempt resumes from its last checkpoint, and a cleanup that leaves recorded resources
   fails;
 - a resumed campaign that fails admission still destroys the Windows VM it recorded;
+- typed Windows cleanup transport failures project to non-retryable containment failures with
+  their private cause retained, and a second successful cleanup preserves `cleanupFailed`;
+- a real Pixel lease retains its Windows cleanup restoration-failure origin, so later refused
+  Android work stays `collateral/dependency_failed` with the matching `originIds`;
+- a cancelled Windows Pixel primary restores under a fresh ten-minute owner before classification,
+  using the same failure allocator and leaving healthy dependent Pixel work admissible;
+- the production Windows Pixel runtime uses an isolated HOME, synthetic vault and fake adb
+  executable to prove restoration precedes classification after smoke cancellation; the test
+  fails independently when either the restoration context or its ADB owner is rebound to primary;
 - the Pixel lease runs one device action at a time and refuses later measurements, but not restoration, after a lane reports
   the phone unrestored;
 - fake hotspot, USB/Bluetooth tethering, pending-upstream, malformed and failed adb probes refuse
@@ -370,6 +379,8 @@ BrowserStack and shared transport tests add:
   origins, top-level dashboard references counted without fetching, and unknown origins refused;
 - raw/canonical post-audit API bodies are scanned before absence; post-DELETE retries preserve
   monotonic audited/deleted/absent milestones rather than inventing unaudited deletions;
+- a lost BrowserStack DELETE response leaves a durable started claim; a new API instance sends
+  no further DELETE and exhausts the existing absence bound if the record remains;
 - crash cleanup re-audits unchanged generations, counts unaudited deletions if links cannot be
   reconstructed, and persists link/media incidents instead of manufacturing a clean audit;
 - key-free lane argv, exact two-host argv, canonical ownership through symlinked ancestors,

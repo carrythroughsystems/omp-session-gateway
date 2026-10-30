@@ -618,7 +618,8 @@ export class BrowserStackApi {
     await inspect(existing, "session");
     if (existing.status !== 200 && existing.status !== 404) await unvalidated();
     let deletionError: Error | undefined;
-    if (existing.status !== 404 && !removal.deleted && !this.#removalStarted.has(sessionId)) {
+    if (existing.status !== 404 && !removal.deleted && !removal.removalStarted && !this.#removalStarted.has(sessionId)) {
+      await removal.markRemovalStarted();
       this.#removalStarted.add(sessionId);
       const response = await fetch(`${API}/sessions/${sessionId}.json`, { method: "DELETE", headers: { authorization: this.#authorization }, redirect: "error",
         signal: this.signal === undefined ? AbortSignal.timeout(30_000) : AbortSignal.any([this.signal, AbortSignal.timeout(30_000)]) });
