@@ -1523,8 +1523,19 @@ swallow prompts, and fails as soon as it publishes without a resolved model. The
 physical View-to-Control prompt/interrupt,
 forbidden-sink, lock/Airplane/Doze same-page recovery, and installed-WebAPK launch checks. The
 installed WebAPK may resume either the directory or its existing collaboration route; the launch
-check preserves that page instead of requiring the directory title. Target
-eligibility is checked before touching the device; protected, soak, old, missing, ambiguous, or
+check preserves that page instead of requiring the directory title. Before launching, the smoke
+confirms the display is awake and the keyguard dismissed, then sends HOME so Chrome's browser
+task does not keep focus after acceptance. It dispatches the same launcher intent once more if
+the standalone task is still not focused and resumed after ten seconds. Both launches and polling
+share one thirty-second focus deadline, measured from the first dispatch. Each launcher dispatch
+has a twenty-second adb bound, capped by the remaining focus window; dumpsys and keyevent
+commands retain their five-second bound. A stalled final adb read and private power/keyguard
+sampling each have a five-second command bound plus two-second termination grace, keeping the
+failure path below forty-five seconds from the first launch. A focus timeout keeps the public
+error unchanged; its private cause retains only the last `topResumedActivity` and
+`topDisplayFocusedRootTask` lines, `mWakefulness`, and `isKeyguardShowing` (four structural lines,
+at most 768 bytes each; unsafe fields are withheld). No page content or capability is retained.
+Target eligibility is checked before touching the device; protected, soak, old, missing, ambiguous, or
 non-Control fixtures fail closed.
 
 The Android acceptance journey admits device-origin reachability when ICMP succeeds **or**, after
