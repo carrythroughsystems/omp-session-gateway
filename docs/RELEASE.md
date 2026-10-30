@@ -1152,7 +1152,9 @@ same-candidate eligibility and automatic retirement. Unrestored cloud/Push fixtu
 Mac directory and owner records rather than being destroyed by unrelated Mac teardown.
 Windows cleanup wraps transport errors as `windowsCleanup/containment/containment_unproven`
 with `operation: unknown` and `cleanupVerified: false`, retaining the original typed error only
-as a private cause. Its optional private `cleanupFailed` progress fact survives later successful
+as a private cause. Pixel-lease-projected restoration failures already carry negative cleanup
+evidence and retain their original IDs, so dependent refusals keep their collateral origins.
+Its optional private `cleanupFailed` progress fact survives later successful
 resource destruction and is returned in cleanup evidence; it is independent of `cleanupRequired`,
 which may clear after resources are contained. Inline Windows Pixel restoration has a fresh
 ten-minute owner and the campaign's failure allocator, rather than the cancelled primary owner.

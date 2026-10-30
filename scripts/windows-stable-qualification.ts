@@ -642,6 +642,11 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
     if (error instanceof QualificationFailure && error.evidence.reason === "ownership_changed") ownershipChanged = true;
     failures.push(name);
     progress.cleanupFailed = true;
+    // The lease's projected IDs are the origins used by later collateral failures.
+    if (pixelUnrestored(error) && (error instanceof QualificationFailure || error instanceof AggregateError)) {
+      causes.push(error);
+      return;
+    }
     const failure = new QualificationFailure(parseLaneFailure({
       id: input.execution?.nextFailureId() ?? ++standaloneFailureId, lane: "windowsCleanup", step: "containment",
       class: "harness", reason: "containment_unproven",

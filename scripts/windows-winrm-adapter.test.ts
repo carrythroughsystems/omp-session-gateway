@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { classifyWindowsCommandFailure, command, reconnectWindowsTransport, reconcileWindowsUpload, windowsUploadStep, windowsWinrmDiagnostic, windowsWinrmResult } from "./windows-qualification-runtime";
 import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures } from "./qualification-failure";
@@ -94,6 +94,68 @@ test("503 Windows Pixel restoration gets a fresh ten-minute owner and the origin
   restoration.assertEffect();
   expect(await restoration.mutation("restore", async () => "restored")).toBe("restored");
   expect(restoration.epoch).toBe(context.epoch);
+});
+
+test.skipIf(process.platform === "win32")("503 review production Pixel restores through real ADB ownership after cancelled smoke", async () => {
+  const home = await mkdtemp(join(tmpdir(), "windows-pixel-runtime-"));
+  const epoch = "11111111-1111-4111-8111-111111111111";
+  const vault = join(home, ".local/share/omp-session-gateway/qualification/windows-vault", `${epoch}.json`);
+  try {
+    await mkdir(join(home, "bin"));
+    await mkdir(join(home, ".local/share/omp-session-gateway/qualification/windows-vault"), { recursive: true, mode: 0o700 });
+    for (const [name, value] of [[".vultr-apikey", "synthetic-provider-key"], [".ts-qual-authkey", "tskey-auth-synthetic"], [".ts-qual-apikey", "tskey-api-synthetic"]]) {
+      await writeFile(join(home, name!), value!, { mode: 0o600 });
+    }
+    await writeFile(vault, JSON.stringify({ instance: "synthetic-instance", host: "192.0.2.1",
+      password: "synthetic-password", origin: "https://synthetic.invalid" }), { mode: 0o600 });
+    await writeFile(join(home, "bin/adb"), `#!/bin/sh
+case "$*" in
+  devices) printf 'List of devices attached\\nsynthetic-pixel device\\n' ;;
+  '-s synthetic-pixel shell dumpsys activity activities')
+    printf '%s\\n' '* Task{d #2 type=home I=com.android.launcher/.Launcher U=0}' 'topResumedActivity=ActivityRecord{d u0 com.android.launcher/.Launcher t2}' ;;
+  '-s synthetic-pixel shell dumpsys power') printf 'mWakefulness=Awake\\n' ;;
+  '-s synthetic-pixel shell dumpsys window') printf 'isKeyguardShowing=false\\n' ;;
+  'forward --list') ;;
+  '-s synthetic-pixel shell monkey -p com.android.launcher -c android.intent.category.HOME 1') printf 'restored\\n' >>"$HOME/restored" ;;
+  *) exit 99 ;;
+esac
+`, { mode: 0o700 });
+    const child = Bun.spawn([process.execPath, "--eval", `
+import { spyOn } from "bun:test";
+const android = await import(${JSON.stringify(new URL("./android-device.ts", import.meta.url).href)});
+const smoke = await import(${JSON.stringify(new URL("./android-collab-smoke.ts", import.meta.url).href)});
+const { createWindowsRuntime } = await import(${JSON.stringify(new URL("./windows-qualification-runtime.ts", import.meta.url).href)});
+const { assertWindowsExecution, windowsFailure } = await import(${JSON.stringify(new URL("./windows-stable-qualification.ts", import.meta.url).href)});
+const { pixelUnrestored } = await import(${JSON.stringify(new URL("./restoration.ts", import.meta.url).href)});
+const controller = new AbortController();
+let id = 800, restorationConnected = false, classifiedAfterRestore = false;
+const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
+const primary = windowsFailure("deadline_exceeded", "pixel_verified", "unknown", {}, execution);
+spyOn(smoke, "runAndroidCollabSmoke").mockImplementation(async () => { controller.abort(); throw primary; });
+spyOn(android, "withAndroidChrome").mockImplementation(async (action, options) => {
+  assertWindowsExecution(options.execution);
+  if (options.execution.signal === controller.signal) throw new Error("restoration inherited primary owner");
+  restorationConnected = true;
+  return action({ send: async () => ({ targetInfos: [] }) });
+});
+const runtime = await createWindowsRuntime({ execution });
+const context = { epoch: ${JSON.stringify(epoch)}, identity: {},
+  execution, assertEffect: () => assertWindowsExecution(execution),
+  beforeEffect: async () => assertWindowsExecution(execution),
+  mutation: async (_key, action) => { assertWindowsExecution(execution); return action(); } };
+const error = await runtime.pixel(context).catch(error => {
+  classifiedAfterRestore = restorationConnected && Bun.file(process.env.HOME + "/restored").size > 0;
+  return error;
+});
+console.log(JSON.stringify({ primaryRetained: error === primary, poisoned: pixelUnrestored(error), restorationConnected, classifiedAfterRestore }));
+`], { env: { ...process.env, HOME: home, PATH: join(home, "bin") + ":" + process.env.PATH },
+      stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    expect(JSON.parse(stdout)).toEqual({ primaryRetained: true, poisoned: false, restorationConnected: true, classifiedAfterRestore: true });
+    expect(await readFile(join(home, "restored"), "utf8")).toBe("restored\n");
+    expect(JSON.parse(await readFile(vault, "utf8")).pixelState).toBeUndefined();
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
 
 test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructure retry authority", async method => {

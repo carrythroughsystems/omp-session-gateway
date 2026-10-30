@@ -284,8 +284,13 @@ test reaches a VM, a phone, or a device cloud:
 - a resumed campaign that fails admission still destroys the Windows VM it recorded;
 - typed Windows cleanup transport failures project to non-retryable containment failures with
   their private cause retained, and a second successful cleanup preserves `cleanupFailed`;
+- a real Pixel lease retains its Windows cleanup restoration-failure origin, so later refused
+  Android work stays `collateral/dependency_failed` with the matching `originIds`;
 - a cancelled Windows Pixel primary restores under a fresh ten-minute owner before classification,
   using the same failure allocator and leaving healthy dependent Pixel work admissible;
+- the production Windows Pixel runtime uses an isolated HOME, synthetic vault and fake adb
+  executable to prove restoration precedes classification after smoke cancellation; the test
+  fails independently when either the restoration context or its ADB owner is rebound to primary;
 - the Pixel lease runs one device action at a time and refuses later measurements, but not restoration, after a lane reports
   the phone unrestored;
 - fake hotspot, USB/Bluetooth tethering, pending-upstream, malformed and failed adb probes refuse

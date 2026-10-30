@@ -282,6 +282,26 @@ test.each(["phase", "expiry", "guest-containment", "poll-expiry"] as const)(
   });
 
 describe("Windows qualification ownership and failure paths", () => {
+  test("503 review Windows cleanup preserves the Pixel lease restoration origin for refused dependents", async () => {
+    const f = fixture();
+    await f.run();
+    let id = 700;
+    const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
+    const pixel = createPixelLease(() => {}, execution.nextFailureId);
+    f.runtime.restorePixel = async () => { throw Object.assign(new Error("synthetic restoration failure"), { pixelUnrestored: true }); };
+    const cleanup = await cleanupWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, runtime: f.runtime, pixel, execution }).catch(error => error);
+    const dependent = await pixel("android", async () => { throw new Error("poisoned measurement must not run"); }).catch(error => error);
+    expect(dependent).toBeInstanceOf(QualificationFailure);
+    const [origin] = dependent.evidence.originIds;
+    const failures = normalizeQualificationFailures(new AggregateError([cleanup, dependent]));
+    expect(failures).toMatchObject([
+      { id: origin, lane: "windowsCleanup", observations: { cleanupVerified: false } },
+      { lane: "android", class: "collateral", reason: "dependency_failed", originIds: [origin] },
+    ]);
+    expect(f.progress).toMatchObject({ cleanupRequired: true, cleanupFailed: true });
+    expect(f.instances).toEqual([]);
+    expect(f.firewalls).toEqual([]);
+  });
   test("503 cancelled Windows Pixel execution restores before failure classification without poisoning dependents", async () => {
     const f = fixture();
     const controller = new AbortController();
