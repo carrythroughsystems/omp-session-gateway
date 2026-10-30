@@ -588,6 +588,7 @@ async function preflightFixture(root: string, failure?: PreflightFailure): Promi
         return "List of devices attached\n" + devices + "\n";
       }
       if (invocation === "adb -s private-device shell getprop ro.product.model") return "Pixel 10";
+      if (invocation === "adb -s private-device shell dumpsys deviceidle whitelist") return "user,com.tailscale.ipn,10123\n";
       if (invocation === "adb -s private-device shell dumpsys tethering") return "    Upstream wanted: false\n";
       if (invocation === "adb -s private-device shell settings get global zen_mode") return "0\n";
       if (["qualification-mac.example.ts.net", "fixture.invalid"].some(host =>
@@ -619,6 +620,34 @@ async function preflightFixture(root: string, failure?: PreflightFailure): Promi
 }
 
 describe("stable qualification read-only admission", () => {
+  test("Pixel Tailscale Doze prerequisite refuses preflight before device mutation, provider lookup or receipts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stable-preflight-pixel-doze-"));
+    try {
+      const fixture = await preflightFixture(root);
+      const calls: string[][] = [];
+      let providerLookups = 0, laneAdmissions = 0;
+      const runtime: StablePreflightRuntime = {
+        ...fixture,
+        loadMacTarget: async options => { providerLookups += 1; return fixture.loadMacTarget(options); },
+        adb: async (serial, args) => {
+          calls.push([...(serial === undefined ? [] : ["-s", serial]), ...args]);
+          if (args.join(" ") === "shell dumpsys deviceidle whitelist") return "system,com.example.other,10001\n";
+          return fixture.adb(serial, args);
+        },
+      };
+      const lanes = admissionLanes();
+      const lane = { ...lanes.windows, preflight: async () => { laneAdmissions += 1; } };
+      await expect(runStableQualification(["--preflight", "--tag", TAG], runtime, { ...lanes, windows: lane }))
+        .rejects.toThrow("Tailscale (com.tailscale.ipn) must be on the Pixel's Doze allowlist");
+      expect(calls).toEqual([
+        ["devices"],
+        ["-s", "private-device", "shell", "dumpsys", "deviceidle", "whitelist"],
+      ]);
+      expect({ providerLookups, laneAdmissions }).toEqual({ providerLookups: 0, laneAdmissions: 0 });
+      expect(await readdir(root)).toEqual([]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   test("Pixel DNS prerequisite refusal happens before campaign admission, effects or receipts", async () => {
     const root = await mkdtemp(join(tmpdir(), "stable-preflight-pixel-path-"));
     try {

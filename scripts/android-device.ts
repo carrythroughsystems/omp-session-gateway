@@ -528,11 +528,20 @@ export function parseAndroidTethering(output: string): boolean {
   return wanted === "true" || /^\s*\S+ - TetheredState - lastError = -?\d+\r?$/mu.test(output);
 }
 
-/** Read-only admission, selected by the effects each entry point actually exercises. Never changes DND. */
+/** Read-only admission: require the Tailscale Doze exemption, then the lane-selected prerequisites. */
 export async function requireAndroidDevicePreconditions(
   command: AndroidAdbCommand,
   requirements: { readonly switchesRadios: boolean; readonly needsNotifications: boolean },
 ): Promise<void> {
+  let allowlist: string;
+  try {
+    allowlist = await command("shell", "dumpsys", "deviceidle", "whitelist");
+  } catch (error) {
+    throw new Error("cannot verify the Pixel's Tailscale (com.tailscale.ipn) Doze allowlist; restore adb access and retry; no device settings were changed", { cause: error });
+  }
+  if (!/^(?:user|system),com\.tailscale\.ipn,[0-9]+\r?$/mu.test(allowlist)) {
+    throw new Error("Tailscale (com.tailscale.ipn) must be on the Pixel's Doze allowlist before qualification or smoke: set Settings → Apps → Tailscale → Battery → Unrestricted, or run adb shell dumpsys deviceidle whitelist +com.tailscale.ipn; no device settings were changed");
+  }
   if (requirements.switchesRadios) {
     let tethering: boolean;
     try {

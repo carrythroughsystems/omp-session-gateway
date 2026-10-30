@@ -79,8 +79,16 @@ function escapePattern(value: string): string { return value.replace(/[.*+?^${}(
 function html(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
+/** Group prose quantities at render time, never identifiers or the stored evidence. */
+function publicCopy(value: string): string {
+  // A unit/count noun distinguishes a quantity from a run ID, build, port or generation.
+  // Consume code spans and URLs first so even quantity-looking technical text stays literal.
+  return value.replace(/(`+)[\s\S]*?\1(?!`)|<code\b[^>]*>[\s\S]*?<\/code>|https?:\/\/[^\s)]+|(?<![\p{L}\p{N}_.,:/#=+-])([1-9][0-9]{3,})(?=(?:[ \t]+|-)(?:milliseconds?|ms|seconds?|minutes?|hours?|bytes?|[KMGT]i?B|CPUs?|transitions?|attempts?)\b)/gu,
+    (match, _code: string | undefined, quantity: string | undefined) =>
+      quantity === undefined ? match : quantity.replace(/\B(?=(?:[0-9]{3})+(?![0-9]))/gu, ","));
+}
 function htmlLinks(value: string): string {
-  const escaped = html(value);
+  const escaped = html(publicCopy(value));
   return escaped.replace(/\[([^\]]+)\]\(([^)]+)\)|https:\/\/[^\s)]+/gu,
     (match, label: string | undefined, url: string | undefined) => `<a href="${url ?? match}">${label ?? match}</a>`);
 }
@@ -492,10 +500,10 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
   }
   const q = data.qualification!;
   const published = options.command === "record";
-  change("docs/COMPATIBILITY.md", "release", claim(q, published));
-  const siteClaim = claim(q, published, `${REPO}/blob/main/docs/RELEASE_STATUS.md`);
+  change("docs/COMPATIBILITY.md", "release", publicCopy(claim(q, published)));
+  const siteClaim = publicCopy(claim(q, published, `${REPO}/blob/main/docs/RELEASE_STATUS.md`));
   change("site/llms.txt", "summary", `# OMP Session Gateway\n\n> Native integration with stock Oh My Pi (OMP) >= 18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. ${phase(q, published)} The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun ${q.bun}, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by the Oh My Pi maintainers.`);
-  change("site/llms.txt", "boundary", `${siteClaim}\n\n${q.lanes.map(l => `- ${l.name} (${l.attempts} attempt${l.attempts === 1 ? "" : "s"}): ${l.summary}`).join("\n")}\n\nThe Mac guest does not qualify physical firmware, FileVault, Secure Boot or startup before login. Cloud devices qualify the browser, not phone-owned Tailscale identity; iPhone Home Screen alerts do not qualify lock-screen presentation. Gateway rollback does not switch OMP. Other hosts and browser builds remain outside this exact matrix. Portal Tunnel and self-hosted/proxied relays are unsupported.`);
+  change("site/llms.txt", "boundary", `${siteClaim}\n\n${q.lanes.map(l => `- ${l.name} (${l.attempts} attempt${l.attempts === 1 ? "" : "s"}): ${publicCopy(l.summary)}`).join("\n")}\n\nThe Mac guest does not qualify physical firmware, FileVault, Secure Boot or startup before login. Cloud devices qualify the browser, not phone-owned Tailscale identity; iPhone Home Screen alerts do not qualify lock-screen presentation. Gateway rollback does not switch OMP. Other hosts and browser builds remain outside this exact matrix. Portal Tunnel and self-hosted/proxied relays are unsupported.`);
   const description = `${phase(q, published)} Stock OMP ${q.baseline}; exact candidate host/client evidence in the release ledger.`;
   change("site/status/index.html", "description", `<meta name="description" content="${html(description)}">`);
   change("site/status/index.html", "og-description", `<meta property="og:description" content="${html(description)}">`);
