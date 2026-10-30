@@ -970,15 +970,17 @@ path rather than putting `~/qual-tools` ahead of system tools.
 
 On a shared host, the qualification account may provide the optional, host-owned
 `$HOME/.config/omp-qualification/reboot-guard`. It must be a regular file with its owner's
-execute bit set and executable by that account. Both preflights run it without arguments on
-the same fixed remote PATH, before lane effects; persistence runs it again immediately before
+execute bit set and executable by that account. Both preflights validate only its presence,
+type and owner-execute permission; they never execute host-owned guard code. Persistence runs
+it without arguments on the fixed remote PATH only at the owned gate immediately before
 `shutdown -r now`. A missing guard leaves the existing commands unchanged. A present but
 invalid guard refuses preflight and names its exact path.
 
-The guard must be a read-only, prompt check of the host's own workload state: exit zero only
+The guard should be a read-only, prompt check of the host's own workload state: exit zero only
 when reboot is safe, or exit nonzero with a diagnostic explaining why it is not. Refusal reports
 `the host's reboot guard refused: <output>` using the first 400 bytes of combined stdout/stderr;
-no shutdown is invoked. Do not put credentials in diagnostics. Qualification does not install
+the persistence lane fails and no shutdown is invoked. A busy executable guard does not refuse
+read-only admission. Do not put credentials in diagnostics. Qualification does not install
 the guard, know which other workloads run, wait for them, or reserve the host after a successful
 check. The host owner must coordinate workload starts to avoid a race after that check.
 
@@ -1148,6 +1150,13 @@ Later successful cleanup does not erase earlier cleanup failures. Negative clean
 facts, remaining resources, persistence failure or any unsettled remote owner block containment,
 same-candidate eligibility and automatic retirement. Unrestored cloud/Push fixtures retain their
 Mac directory and owner records rather than being destroyed by unrelated Mac teardown.
+Windows cleanup wraps transport errors as `windowsCleanup/containment/containment_unproven`
+with `operation: unknown` and `cleanupVerified: false`, retaining the original typed error only
+as a private cause. Its optional private `cleanupFailed` progress fact survives later successful
+resource destruction and is returned in cleanup evidence; it is independent of `cleanupRequired`,
+which may clear after resources are contained. Inline Windows Pixel restoration has a fresh
+ten-minute owner and the campaign's failure allocator, rather than the cancelled primary owner.
+It uses the same fresh-owner policy as the supervisor's thirty-minute containment.
 
 **Deferred installation-state limitation (P2):** readiness uninstall retains the gateway token and
 runtime activation history/current pointer. This gate does not capture, digest-compare or isolate
@@ -1325,8 +1334,11 @@ JSON or restoration approval; a checkpoint-write failure still stops effects.
 When inventory is missing, first verify record/all-six-log absence before reporting it unavailable;
 XML/text artifact 404 bodies and the reviewed media-403 denial are raw-scanned and hostname-censused
 as absence evidence without forcing JSON unless their Content-Type declares it.
-The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
-deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
+The `audited`, `recordRemovalStarted`, `recordDeleted`, and `recordRemoved` milestones are monotonic.
+The private `recordRemovalStarted` claim is durable before dispatching DELETE. A fresh cleanup
+runtime never replays a claimed DELETE, even after a lost response; it performs the existing
+bounded record/log/artifact absence checks and fails if absence cannot be verified. A retry after
+API deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
 from every retained surface, before or after the audit and whatever their HTTP status, are scanned
 before rejection: raw first, then strict canonical JSON and reference discovery for declared JSON.
 This includes rejected DELETE bodies, signed-artifact errors and transient 5xx bodies before a GET

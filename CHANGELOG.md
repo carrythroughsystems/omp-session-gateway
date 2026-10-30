@@ -24,6 +24,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   expiry attribution and abort causes in Push failures, and reject fractional readiness durations.
 - Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
   forever, and stream qualification output into bounded, byte-exact private tails.
+- Keep qualification preflight effect-free, retain Windows cleanup failures across recovery,
+  prevent ambiguous BrowserStack record DELETE replay, and restore the Pixel under a fresh owner.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.

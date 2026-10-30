@@ -72,6 +72,30 @@ test.each(["cancel", "deadline"] as const)("council498r1 Windows Android subproc
     Bun.spawn([process.execPath, "-e", 'process.stdout.write("settled")'], options) })).toBe("settled");
 });
 
+test("503 Windows Pixel restoration gets a fresh ten-minute owner and the original failure allocator", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let id = 600;
+  const context = {
+    epoch: "11111111-1111-4111-8111-111111111111", identity: {} as never,
+    execution: { signal: controller.signal, deadline: 0, nextFailureId: () => ++id },
+    assertEffect: () => { throw new Error("cancelled primary assertion"); },
+    beforeEffect: async () => { throw new Error("cancelled primary checkpoint"); },
+    mutation: async <T>(_key: string, _action: () => Promise<T>): Promise<T> => { throw new Error("cancelled primary mutation"); },
+  };
+  const started = performance.now();
+  const restoration = winrmRuntime.windowsPixelRestorationContext(context);
+  expect(restoration.execution?.signal).not.toBe(context.execution.signal);
+  expect(restoration.execution?.signal.aborted).toBe(false);
+  expect(restoration.execution!.deadline).toBeGreaterThanOrEqual(started + 10 * 60_000);
+  expect(restoration.execution!.deadline).toBeLessThanOrEqual(performance.now() + 10 * 60_000);
+  expect(restoration.execution!.nextFailureId()).toBe(601);
+  await restoration.beforeEffect();
+  restoration.assertEffect();
+  expect(await restoration.mutation("restore", async () => "restored")).toBe("restored");
+  expect(restoration.epoch).toBe(context.epoch);
+});
+
 test.each(["GET", "POST"])("council491 canceled provider %s is not infrastructure retry authority", async method => {
   const original = globalThis.fetch;
   const controller = new AbortController();

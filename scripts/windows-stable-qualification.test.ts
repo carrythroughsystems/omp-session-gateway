@@ -6,7 +6,7 @@ import { cleanupWindows, runWindows, verifyWindowsDoctor, windowsCampaignLabel, 
 import pins from "./windows-qualification-pins.json";
 import type { WindowsContext, WindowsFirewall, WindowsGuestAction, WindowsIdentity, WindowsInstance, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
 import { command as windowsCommand, reconnectWindowsTransport, verifyWindowsStaleLaunch, windowsPixelForeground, windowsPixelLauncher, waitForStableWindowsTransport } from "./windows-qualification-runtime.ts";
-import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures } from "./qualification-failure.ts";
+import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, qualificationRetryEligible } from "./qualification-failure.ts";
 import * as windowsRuntime from "./windows-qualification-runtime.ts";
 import { firewallEligibility } from "./vultr-target.ts";
 import { createPixelLease, parseQualificationPins } from "./stable-qualification.ts";
@@ -282,6 +282,52 @@ test.each(["phase", "expiry", "guest-containment", "poll-expiry"] as const)(
   });
 
 describe("Windows qualification ownership and failure paths", () => {
+  test("503 cancelled Windows Pixel execution restores before failure classification without poisoning dependents", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    let id = 500;
+    const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
+    const pixel = createPixelLease(() => {}, execution.nextFailureId);
+    f.runtime.restorePixel = async context => {
+      await context.beforeEffect();
+      context.assertEffect();
+      expect(context.execution?.signal.aborted).toBe(false);
+      f.events.push("pixelRestored");
+    };
+    f.runtime.pixel = async context => {
+      controller.abort(new Error("synthetic smoke cancellation"));
+      try { await f.runtime.restorePixel(windowsRuntime.windowsPixelRestorationContext(context)); }
+      catch (error) { throw Object.assign(error as Error, { pixelUnrestored: true }); }
+      f.events.push("restoredBeforeClassification");
+      throw windowsFailure("deadline_exceeded", "pixel_verified", "unknown", {}, execution);
+    };
+    const error = await runWindows({ identity, progress: undefined, runtime: f.runtime, checkpoint: f.checkpoint, pixel, execution }).catch(error => error);
+    expect(f.events.indexOf("pixelRestored")).toBeLessThan(f.events.indexOf("restoredBeforeClassification"));
+    expect(f.events.indexOf("restoredBeforeClassification")).toBeGreaterThan(-1);
+    expect(pixelUnrestored(error)).toBe(false);
+    expect(normalizeQualificationFailures(error).some(failure => failure.reason === "deadline_exceeded")).toBe(true);
+    expect(await pixel("android", async () => "admitted")).toBe("admitted");
+  });
+  test("503 Windows cleanup transport failures retain containment identity and stay sticky after recovery", async () => {
+    const f = fixture();
+    await f.run();
+    const deleteTailnet = f.runtime.deleteTailnet;
+    const transport = windowsFailure("retryable_service_failure", "connection", "read_only", { httpStatus: 503 });
+    f.runtime.deleteTailnet = async () => { throw transport; };
+    const error = await f.clean().catch(error => error);
+    const failures = normalizeQualificationFailures(error);
+    expect(failures).toMatchObject([{ lane: "windowsCleanup", step: "containment", reason: "containment_unproven",
+      class: "harness", operation: "unknown", observations: { cleanupVerified: false } }]);
+    expect(error.errors[0].cause).toBe(transport);
+    expect(qualificationRetryEligible({ failures, timings: { attemptMs: 1, cleanupMs: 1 },
+      containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } }, true)).toBe(false);
+    expect(f.progress).toMatchObject({ cleanupRequired: true, cleanupFailed: true });
+    f.runtime.deleteTailnet = deleteTailnet;
+    expect(await f.clean()).toMatchObject({ cleanupFailed: true, vaultRemoved: true });
+    expect(f.progress).toMatchObject({ cleanupRequired: false, cleanupFailed: true });
+    expect(f.instances).toEqual([]);
+    expect(f.firewalls).toEqual([]);
+  });
   test("council498r1 Windows Pixel projection preserves poison origins through later cleanup", async () => {
     const f = fixture();
     let id = 70;

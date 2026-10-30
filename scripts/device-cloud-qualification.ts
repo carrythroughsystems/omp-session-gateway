@@ -67,6 +67,8 @@ export interface DeviceCloudResource {
   ended: boolean;
   audited: boolean;
   recordRemoved: boolean;
+  /** Durable single-shot DELETE claim; an unknown response permits verification, never replay. */
+  recordRemovalStarted?: boolean;
   /** Monotonic acknowledgement/absence of the API record, before signed-object absence. */
   recordDeleted?: boolean;
   /** Private recovery inventory, never included in returned evidence. */
@@ -360,7 +362,7 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
     const targets = new Set<string>();
     const references = new Set<string>();
     for (const resource of value.resources) {
-      if (!isRecord(resource) || Object.keys(resource).some(key => !["audited", "ended", "recordRemoved", "recordDeleted", "target", "vendor", "sessionId", "artifacts", "unauditedDeletion", "incident", "attempt"].includes(key)) ||
+      if (!isRecord(resource) || Object.keys(resource).some(key => !["audited", "ended", "recordRemoved", "recordDeleted", "recordRemovalStarted", "target", "vendor", "sessionId", "artifacts", "unauditedDeletion", "incident", "attempt"].includes(key)) ||
         (resource.vendor !== "testingbot" && resource.vendor !== "browserstack") ||
         !DEVICE_CLOUD_TARGETS.some(target => target === resource.target) || typeof resource.target !== "string" ||
         (resource.vendor === "browserstack" && resource.target === "iphone") ||
@@ -384,10 +386,10 @@ export function parseDeviceCloudProgress(value: unknown): DeviceCloudProgress {
         resource.artifacts = artifacts;
         if (resource.recordRemoved && artifacts.length > 0) throw new Error("removed cloud record retains unchecked references");
       }
-      for (const field of ["recordDeleted", "unauditedDeletion", "incident"]) {
+      for (const field of ["recordDeleted", "recordRemovalStarted", "unauditedDeletion", "incident"]) {
         if (resource[field] !== undefined && (resource.vendor !== "browserstack" || typeof resource[field] !== "boolean")) throw new Error("invalid cloud deletion audit state");
       }
-      if ((resource.recordDeleted === true && (!resource.ended || resource.sessionId === undefined)) ||
+      if (((resource.recordDeleted === true || resource.recordRemovalStarted === true) && (!resource.ended || resource.sessionId === undefined)) ||
         (resource.recordRemoved && resource.recordDeleted === false)) throw new Error("invalid cloud deletion stage");
       if (value.cleanupRequired === false && resource.incident === true) throw new Error("unresolved cloud retention incident");
       if (!value.tunnels.includes(resource.vendor) || (resource.recordRemoved && (!resource.ended || resource.vendor !== "browserstack"))) throw new Error("inconsistent cloud resource lifecycle");
@@ -486,7 +488,13 @@ function rememberArtifacts(resource: DeviceCloudResource, save: () => Promise<vo
 function artifactRecovery(resource: DeviceCloudResource, save: () => Promise<void>, inspect: CloudRecordRemoval["inspect"], audited = () => resource.audited): CloudRecordRemoval {
   return {
     get artifacts() { return resource.artifacts ?? []; },
+    get removalStarted() { return resource.recordRemovalStarted === true; },
     get deleted() { return resource.recordDeleted === true; },
+    markRemovalStarted: async () => {
+      if (resource.recordRemovalStarted) return;
+      resource.recordRemovalStarted = true;
+      await save();
+    },
     markDeleted: async () => {
       if (resource.recordDeleted) return;
       resource.recordDeleted = true;

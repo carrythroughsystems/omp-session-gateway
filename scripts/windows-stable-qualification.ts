@@ -25,6 +25,11 @@ export function assertWindowsExecution(execution?: WindowsExecutionContext, oper
       execution.signal.aborted ? { cause: execution.signal.reason } : undefined);
   }
 }
+/** Containment has an independent deadline and cannot inherit primary cancellation. */
+export function windowsContainmentExecution(budgetMs = 30 * 60_000,
+  nextFailureId: () => number = () => ++standaloneFailureId): WindowsExecutionContext {
+  return { signal: new AbortController().signal, deadline: performance.now() + budgetMs, nextFailureId };
+}
 /** One snapshot decides whether any positive millisecond of this local budget remains. */
 export function windowsRemaining(started: number, deadline: number, now: number, execution?: WindowsExecutionContext,
   operation: OperationDisposition = "read_only"): number {
@@ -180,6 +185,7 @@ interface Progress extends Record<string, unknown> {
   mutationClaims?: Record<string, "started" | "complete">;
   allocationDeadline?: number;
   retirementPending?: boolean;
+  cleanupFailed?: boolean;
 }
 export interface WindowsLaneInput {
   readonly identity: WindowsIdentity;
@@ -235,7 +241,7 @@ function binding(identity: WindowsIdentity): string {
 function parseProgress(value: unknown, expected?: string): Progress {
   requireFact(record(value), "invalid Windows progress");
   const keys = ["binding", "cleanupRequired", "epoch", "facts", "lane", "phase", "schemaVersion", "settled", "startedAt", "timings"];
-  for (const key of ["transportProbes", "mutationClaims", "allocationDeadline", "retirementPending"]) if (Object.hasOwn(value, key)) keys.push(key);
+  for (const key of ["transportProbes", "mutationClaims", "allocationDeadline", "retirementPending", "cleanupFailed"]) if (Object.hasOwn(value, key)) keys.push(key);
   requireFact(JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys.sort()), "unknown Windows progress fields");
   requireFact(value.schemaVersion === 1 && value.lane === "windows" && typeof value.epoch === "string" && UUID.test(value.epoch) &&
     typeof value.binding === "string" && SHA.test(value.binding) && (expected === undefined || value.binding === expected) &&
@@ -250,6 +256,7 @@ function parseProgress(value: unknown, expected?: string): Progress {
   for (const [key, item] of Object.entries(value.facts)) requireFact(FACTS.includes(key as typeof FACTS[number]) && (typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item) && item >= 0)), "invalid Windows observation");
   if (value.allocationDeadline !== undefined) requireFact(Number.isSafeInteger(value.allocationDeadline) && Number(value.allocationDeadline) > Number(value.startedAt), "invalid Windows allocation deadline");
   if (value.retirementPending !== undefined) requireFact(typeof value.retirementPending === "boolean" && value.cleanupRequired === false, "invalid Windows retirement state");
+  if (value.cleanupFailed !== undefined) requireFact(typeof value.cleanupFailed === "boolean", "invalid Windows cleanup failure state");
   if (value.mutationClaims !== undefined) {
     requireFact(record(value.mutationClaims), "invalid Windows mutation claims");
     for (const [key, state] of Object.entries(value.mutationClaims)) {
@@ -359,8 +366,7 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
   const prior = input.progress === undefined ? undefined : parseProgress(input.progress, digest);
   let activeProgress = prior, repairable = false;
   // Establish containment ownership before any retained-state rejection or preflight work.
-  const cleanupExecution = { signal: new AbortController().signal, deadline: performance.now() + 30 * 60_000,
-    nextFailureId: input.execution?.nextFailureId ?? (() => ++standaloneFailureId) };
+  const cleanupExecution = windowsContainmentExecution(undefined, input.execution?.nextFailureId);
   try {
   assertWindowsExecution(input.execution);
   let resumed: Progress | undefined;
@@ -613,8 +619,8 @@ export async function runWindows(input: WindowsLaneInput): Promise<Record<string
     if (activeProgress === undefined) throw error;
     if (retainWindowsForRepair(error, prior, activeProgress, runtime, repairable, input.execution)) throw error;
     // A failed primary's cancellation must not disable owned-resource containment.
-    cleanupExecution.deadline = performance.now() + 30 * 60_000;
-    try { await cleanupWindows({ ...input, progress: activeProgress, runtime, execution: cleanupExecution }); }
+    try { await cleanupWindows({ ...input, progress: activeProgress, runtime,
+      execution: windowsContainmentExecution(undefined, cleanupExecution.nextFailureId) }); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], "Windows lane and cleanup failed"); }
     throw error;
   }
@@ -635,10 +641,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   const failed = (name: string, error: unknown) => {
     if (error instanceof QualificationFailure && error.evidence.reason === "ownership_changed") ownershipChanged = true;
     failures.push(name);
-    if (error instanceof QualificationFailure || error instanceof AggregateError) {
-      causes.push(error);
-      return;
-    }
+    progress.cleanupFailed = true;
     const failure = new QualificationFailure(parseLaneFailure({
       id: input.execution?.nextFailureId() ?? ++standaloneFailureId, lane: "windowsCleanup", step: "containment",
       class: "harness", reason: "containment_unproven",
@@ -766,14 +769,17 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   // controller dies afterward, the committed false checkpoint lets cleanup finish without
   // attempting Pixel restoration from a vault that may already be absent.
   try { assertWindowsExecution(input.execution); await runtime.removeAccess(progress.epoch); }
-  catch (error) { throw new QualificationFailure(parseLaneFailure({ id: input.execution?.nextFailureId() ?? ++standaloneFailureId,
+  catch (error) {
+    progress.cleanupFailed = true; await save();
+    throw new QualificationFailure(parseLaneFailure({ id: input.execution?.nextFailureId() ?? ++standaloneFailureId,
     lane: "windowsCleanup", step: "vault", reason: "containment_unproven", class: "harness",
-    elapsedMs: 0, operation: "unknown", observations: {} }), { cause: error }); }
+    elapsedMs: 0, operation: "unknown", observations: { cleanupVerified: false } }), { cause: error });
+  }
   progress.retirementPending = false; await save();
   if (failures.length) throw new AggregateError(causes, `Windows retirement failed: ${failures.join(", ")}`,
     { cause: new AggregateError(checkpointErrors, "Windows retirement diagnostics") });
   return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,
-    guestCleanupFailures: guestErrors.length, guestCommandsSkipped };
+    guestCleanupFailures: guestErrors.length, guestCommandsSkipped, ...(progress.cleanupFailed ? { cleanupFailed: true } : {}) };
 }
 
 if (import.meta.main) {
