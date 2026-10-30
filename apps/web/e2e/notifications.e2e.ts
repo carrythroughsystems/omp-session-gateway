@@ -100,18 +100,23 @@ test("attention routes still acquire Control only for the exact current request"
   const current = session("attention-route-current-01", { inputRequired: true });
   const requestId = current.ask!.requestId;
   const fixture = await startDashboardFixture([current]);
+  const events = Promise.withResolvers<void>();
   try {
     const route = fixture.origin + "/collab/attention-route-current-01?request=" + requestId;
     await page.goto(route);
     await expect(page.getByRole("application", { name: "OMP collaboration session" })).toBeVisible();
     expect(fixture.launchRequests).toEqual([{ instanceId: current.instanceId, generation: 1, mode: "control", requestId }]);
     await page.goto("about:blank");
+    await page.route("**/api/v1/events", async route => { await events.promise; await route.continue(); });
     fixture.setSnapshot([{ ...current, ask: { ...current.ask!, requestId: "attention-route-new-request" } }]);
     await page.goto(route);
     await expect(page.locator('#status-banner[data-kind="expired"]')).toBeVisible();
     await expect(page).toHaveURL(fixture.origin + "/");
+    events.resolve();
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "ready");
     expect(fixture.launchRequests).toHaveLength(1);
   } finally {
+    events.resolve();
     await fixture.stop();
   }
 });
@@ -119,18 +124,24 @@ test("attention routes still acquire Control only for the exact current request"
 test("changed, gone, and unavailable stop routes remain in the directory without acquiring capabilities", { tag: "@core" }, async ({ page }) => {
   const current = session("stop-expired-instance-01", { generation: 2 });
   const fixture = await startDashboardFixture([current]);
+  let events = Promise.withResolvers<void>();
+  await page.route("**/api/v1/events", async route => { await events.promise; await route.continue(); });
   try {
     for (const sessions of [[current], [], [{ ...current, generation: 1, canView: false, canControl: false }]]) {
+      events = Promise.withResolvers<void>();
       fixture.setSnapshot(sessions);
       await page.goto(fixture.origin + "/collab/stop-expired-instance-01?activity=stopped&generation=1");
       await expect(page.locator('#status-banner[data-kind="expired"]')).toBeVisible();
       await expect(page).toHaveURL(fixture.origin + "/");
+      events.resolve();
+      await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "ready");
       await expect(page.getByRole("application", { name: "OMP collaboration session" })).toHaveCount(0);
       expect(fixture.launchRequests).toEqual([]);
       expect(fixture.requests.some(request => request.includes("/launch"))).toBe(false);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     }
   } finally {
+    events.resolve();
     await fixture.stop();
   }
 });
