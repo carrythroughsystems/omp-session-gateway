@@ -46,7 +46,11 @@ jobs:
     outputs:
       omp_version: ${{ steps.summary.outputs.omp_version }}
       failed_stage: ${{ steps.summary.outputs.failed_stage }}
-      passed: ${{ steps.summary.outcome == 'success' && steps.summary.outputs.failed_stage == '' && steps.summary.outputs.omp_version == inputs.omp_version }}
+      requested_version: ${{ steps.install.outputs.requested_version }}
+      resolved_version: ${{ steps.install.outputs.omp_version }}
+      bun_version: ${{ steps.install.outputs.bun_version }}
+      bun_engine: ${{ steps.install.outputs.bun_engine }}
+      passed: ${{ steps.summary.outcome == 'success' && steps.summary.outputs.failed_stage == '' && steps.install.outputs.expected_version != '' && steps.summary.outputs.omp_version == steps.install.outputs.expected_version }}
     env:
       OMP_VERSION: ${{ inputs.omp_version || 'latest' }}
     steps:
@@ -70,21 +74,37 @@ jobs:
             sudo apt-get install -y tmux
           fi
       - name: Install isolated stock OMP
+        id: install
         env:
           OMP_PACKAGE: ${{ runner.temp }}/omp-upstream-package
         run: |
           set -euo pipefail
           if [[ ! "$OMP_VERSION" =~ ^(latest|[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
-            printf 'publish: invalid OMP version input\n' >&2
+            printf 'prepare: invalid OMP version input\n' >&2
             exit 1
           fi
+          printf 'requested_version=%s\nbun_version=%s\n' "$OMP_VERSION" "$(bun --version)" >>"$GITHUB_OUTPUT"
           mkdir -m 700 "$OMP_PACKAGE"
           cd "$OMP_PACKAGE"
           printf '{"private":true}\n' >package.json
           if ! bun add --exact "@oh-my-pi/pi-coding-agent@$OMP_VERSION" </dev/null >/dev/null 2>&1; then
-            printf 'publish: OMP installation failed\n' >&2
+            printf 'prepare: OMP installation failed\n' >&2
             exit 1
           fi
+          cd "$GITHUB_WORKSPACE"
+          # shellcheck disable=SC2016 # the single-quoted argument is JavaScript for bun, not shell
+          bun --eval '
+            import { appendFile } from "node:fs/promises";
+            import { readCanaryPackage, canaryBunEngineError } from "./scripts/upstream-canary.ts";
+            const installed = await readCanaryPackage(`${process.env.OMP_PACKAGE}/node_modules/@oh-my-pi/pi-coding-agent`);
+            const expectedVersion = process.env.OMP_VERSION === "latest" ? installed.ompVersion : process.env.OMP_VERSION;
+            await appendFile(process.env.GITHUB_OUTPUT, `omp_version=${installed.ompVersion}\nbun_engine=${installed.bunEngine}\nexpected_version=${expectedVersion}\n`);
+            const error = canaryBunEngineError(installed, Bun.version);
+            if (error !== undefined) {
+              process.stderr.write(`prepare: ${error}\n`);
+              process.exitCode = 1;
+            }
+          '
       - name: Exercise gateway compatibility
         env:
           OMP_PACKAGE: ${{ runner.temp }}/omp-upstream-package
@@ -97,20 +117,29 @@ jobs:
         if: always()
         env:
           CANARY_REPORT: ${{ runner.temp }}/upstream-canary.json
+          REQUESTED_OMP_VERSION: ${{ steps.install.outputs.requested_version }}
+          RESOLVED_OMP_VERSION: ${{ steps.install.outputs.omp_version }}
+          BUN_VERSION: ${{ steps.install.outputs.bun_version }}
+          OMP_BUN_ENGINE: ${{ steps.install.outputs.bun_engine }}
         run: |
           # shellcheck disable=SC2016 # the single-quoted argument is JavaScript for bun, not shell
           bun --eval '
             import { appendFile } from "node:fs/promises";
-            import { CANARY_STAGES, canarySummary, parseCanarySummary } from "./scripts/upstream-canary.ts";
+            import { CANARY_STAGES, canarySummary, parseCanarySummary, parseOmpVersion } from "./scripts/upstream-canary.ts";
+            const resolvedVersion = parseOmpVersion(process.env.RESOLVED_OMP_VERSION ?? "") ?? "";
             let summary;
             try {
-              summary = parseCanarySummary(await Bun.file(process.env.CANARY_REPORT).text(), "posix");
+              summary = parseCanarySummary(await Bun.file(process.env.CANARY_REPORT).text(), "posix", resolvedVersion);
             } catch {
-              summary = canarySummary("", 0, "publish", false, "posix");
+              summary = canarySummary(resolvedVersion, 0, "prepare", false, "posix");
               process.exitCode = 1;
             }
             const passed = summary.failedStage === undefined;
             const lines = [
+              `requestedOmpVersion: ${process.env.REQUESTED_OMP_VERSION || "unknown"}`,
+              `resolvedOmpVersion: ${resolvedVersion || "unknown"}`,
+              `bunVersion: ${process.env.BUN_VERSION || "unknown"}`,
+              `bunEngine: ${process.env.OMP_BUN_ENGINE || "unknown"}`,
               `ompVersion: ${summary.ompVersion}`,
               `platform: ${summary.platform}`,
               `passed: ${passed}`,
@@ -133,7 +162,11 @@ jobs:
     outputs:
       omp_version: ${{ steps.summary.outputs.omp_version }}
       failed_stage: ${{ steps.summary.outputs.failed_stage }}
-      passed: ${{ steps.summary.outcome == 'success' && steps.summary.outputs.failed_stage == '' && steps.summary.outputs.omp_version == inputs.omp_version }}
+      requested_version: ${{ steps.install.outputs.requested_version }}
+      resolved_version: ${{ steps.install.outputs.omp_version }}
+      bun_version: ${{ steps.install.outputs.bun_version }}
+      bun_engine: ${{ steps.install.outputs.bun_engine }}
+      passed: ${{ steps.summary.outcome == 'success' && steps.summary.outputs.failed_stage == '' && steps.install.outputs.expected_version != '' && steps.summary.outputs.omp_version == steps.install.outputs.expected_version }}
     env:
       OMP_VERSION: ${{ inputs.omp_version || 'latest' }}
     defaults:
@@ -152,21 +185,37 @@ jobs:
         run: test "$(bun --version)" = 1.4.4
       - run: bun install --frozen-lockfile
       - name: Install isolated stock OMP
+        id: install
         env:
           OMP_PACKAGE: ${{ runner.temp }}/omp-upstream-package
         run: |
           set -euo pipefail
           if [[ ! "$OMP_VERSION" =~ ^(latest|[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
-            printf 'publish: invalid OMP version input\n' >&2
+            printf 'prepare: invalid OMP version input\n' >&2
             exit 1
           fi
+          printf 'requested_version=%s\nbun_version=%s\n' "$OMP_VERSION" "$(bun --version)" >>"$GITHUB_OUTPUT"
           mkdir "$OMP_PACKAGE"
           cd "$OMP_PACKAGE"
           printf '{"private":true}\n' >package.json
           if ! bun add --exact "@oh-my-pi/pi-coding-agent@$OMP_VERSION" </dev/null >/dev/null 2>&1; then
-            printf 'publish: OMP installation failed\n' >&2
+            printf 'prepare: OMP installation failed\n' >&2
             exit 1
           fi
+          cd "$GITHUB_WORKSPACE"
+          # shellcheck disable=SC2016 # the single-quoted argument is JavaScript for bun, not shell
+          bun --eval '
+            import { appendFile } from "node:fs/promises";
+            import { readCanaryPackage, canaryBunEngineError } from "./scripts/upstream-canary.ts";
+            const installed = await readCanaryPackage(`${process.env.OMP_PACKAGE}/node_modules/@oh-my-pi/pi-coding-agent`);
+            const expectedVersion = process.env.OMP_VERSION === "latest" ? installed.ompVersion : process.env.OMP_VERSION;
+            await appendFile(process.env.GITHUB_OUTPUT, `omp_version=${installed.ompVersion}\nbun_engine=${installed.bunEngine}\nexpected_version=${expectedVersion}\n`);
+            const error = canaryBunEngineError(installed, Bun.version);
+            if (error !== undefined) {
+              process.stderr.write(`prepare: ${error}\n`);
+              process.exitCode = 1;
+            }
+          '
       - name: Exercise gateway compatibility
         env:
           OMP_PACKAGE: ${{ runner.temp }}/omp-upstream-package
@@ -179,20 +228,29 @@ jobs:
         if: always()
         env:
           CANARY_REPORT: ${{ runner.temp }}/upstream-canary.json
+          REQUESTED_OMP_VERSION: ${{ steps.install.outputs.requested_version }}
+          RESOLVED_OMP_VERSION: ${{ steps.install.outputs.omp_version }}
+          BUN_VERSION: ${{ steps.install.outputs.bun_version }}
+          OMP_BUN_ENGINE: ${{ steps.install.outputs.bun_engine }}
         run: |
           # shellcheck disable=SC2016 # the single-quoted argument is JavaScript for bun, not shell
           bun --eval '
             import { appendFile } from "node:fs/promises";
-            import { CANARY_STAGES, canarySummary, parseCanarySummary } from "./scripts/upstream-canary.ts";
+            import { CANARY_STAGES, canarySummary, parseCanarySummary, parseOmpVersion } from "./scripts/upstream-canary.ts";
+            const resolvedVersion = parseOmpVersion(process.env.RESOLVED_OMP_VERSION ?? "") ?? "";
             let summary;
             try {
-              summary = parseCanarySummary(await Bun.file(process.env.CANARY_REPORT).text(), "windows");
+              summary = parseCanarySummary(await Bun.file(process.env.CANARY_REPORT).text(), "windows", resolvedVersion);
             } catch {
-              summary = canarySummary("", 0, "publish", false, "windows");
+              summary = canarySummary(resolvedVersion, 0, "prepare", false, "windows");
               process.exitCode = 1;
             }
             const passed = summary.failedStage === undefined;
             const lines = [
+              `requestedOmpVersion: ${process.env.REQUESTED_OMP_VERSION || "unknown"}`,
+              `resolvedOmpVersion: ${resolvedVersion || "unknown"}`,
+              `bunVersion: ${process.env.BUN_VERSION || "unknown"}`,
+              `bunEngine: ${process.env.OMP_BUN_ENGINE || "unknown"}`,
               `ompVersion: ${summary.ompVersion}`,
               `platform: ${summary.platform}`,
               `passed: ${passed}`,
@@ -234,25 +292,38 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           LINUX_RESULT: ${{ needs.canary.result }}
           LINUX_VERSION: ${{ needs.canary.outputs.omp_version }}
+          LINUX_REQUESTED_VERSION: ${{ needs.canary.outputs.requested_version }}
+          LINUX_RESOLVED_VERSION: ${{ needs.canary.outputs.resolved_version }}
+          LINUX_BUN_VERSION: ${{ needs.canary.outputs.bun_version }}
+          LINUX_BUN_ENGINE: ${{ needs.canary.outputs.bun_engine }}
           LINUX_STAGE: ${{ needs.canary.outputs.failed_stage }}
           WINDOWS_RESULT: ${{ needs.canary-windows.result }}
           WINDOWS_VERSION: ${{ needs.canary-windows.outputs.omp_version }}
+          WINDOWS_REQUESTED_VERSION: ${{ needs.canary-windows.outputs.requested_version }}
+          WINDOWS_RESOLVED_VERSION: ${{ needs.canary-windows.outputs.resolved_version }}
+          WINDOWS_BUN_VERSION: ${{ needs.canary-windows.outputs.bun_version }}
+          WINDOWS_BUN_ENGINE: ${{ needs.canary-windows.outputs.bun_engine }}
           WINDOWS_STAGE: ${{ needs.canary-windows.outputs.failed_stage }}
         run: |
           set -euo pipefail
           # Validate again across the job/permission boundary. Never copy raw reports into an issue.
           version() { if [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then printf '%s' "$1"; else printf unknown; fi; }
-          stage() { case "$1" in publish|snapshot|stale-generation|view|control|new-generation|fork|branch-rewind|continue|unregister) printf '%s' "$1" ;; *) printf publish ;; esac; }
+          requested() { if [[ "$1" == latest ]]; then printf latest; else version "$1"; fi; }
+          engine() { if [[ "$1" =~ ^[0-9A-Za-z.*+~^\<\>=\|\ -]{1,160}$ ]]; then printf '%s' "$1"; else printf unknown; fi; }
+          stage() { case "$1" in prepare|publish|snapshot|stale-generation|view|control|new-generation|fork|branch-rewind|continue|unregister) printf '%s' "$1" ;; *) printf prepare ;; esac; }
           failures=()
+          context=()
           if [[ "$LINUX_RESULT" == failure ]]; then
-            failures+=("$(version "$LINUX_VERSION") failed at $(stage "$LINUX_STAGE") on Linux")
+            failures+=("$(version "${LINUX_VERSION:-$LINUX_RESOLVED_VERSION}") failed at $(stage "$LINUX_STAGE") on Linux")
+            context+=("Linux: requested OMP $(requested "$LINUX_REQUESTED_VERSION"), resolved OMP $(version "$LINUX_RESOLVED_VERSION"), running Bun $(version "$LINUX_BUN_VERSION"); OMP requires Bun $(engine "$LINUX_BUN_ENGINE").")
           fi
           if [[ "$WINDOWS_RESULT" == failure ]]; then
-            failures+=("$(version "$WINDOWS_VERSION") failed at $(stage "$WINDOWS_STAGE") on Windows")
+            failures+=("$(version "${WINDOWS_VERSION:-$WINDOWS_RESOLVED_VERSION}") failed at $(stage "$WINDOWS_STAGE") on Windows")
+            context+=("Windows: requested OMP $(requested "$WINDOWS_REQUESTED_VERSION"), resolved OMP $(version "$WINDOWS_RESOLVED_VERSION"), running Bun $(version "$WINDOWS_BUN_VERSION"); OMP requires Bun $(engine "$WINDOWS_BUN_ENGINE").")
           fi
           title="Upstream OMP canary: ${failures[0]}"
           if (( ${#failures[@]} > 1 )); then title="$title (and Windows)"; fi
-          body="$(printf '%s. ' "${failures[@]}")Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="$(printf '%s. ' "${failures[@]}")$(printf '\n%s' "${context[@]}")"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           gh label create upstream-canary --repo "$GITHUB_REPOSITORY" --color d73a4a --force >/dev/null
           issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --label upstream-canary --state all --limit 1 --json number --jq '.[0].number // empty')
           if [[ -n "$issue" ]]; then

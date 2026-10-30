@@ -28,6 +28,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
   disturbing the measured browser; prove HTTPS reachability after the journey during equipment
   restoration. Fail precisely before later stages if the path is lost, retaining private
   boolean/timing evidence without automatic remedies.
+- Report the upstream canary's resolved OMP version, pre-flight failures, and Bun engine requirement
+  in summaries and failure issues, and expose successful scheduled runs correctly.
 - Recheck Windows launch and Pixel lifetimes, provider-response deadlines and attached-firewall
   ownership at dispatch; bound development cleanup independently and retain exclusive Pixel
   custody until restoration completes.
