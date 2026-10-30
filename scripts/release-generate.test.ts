@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cloudReleaseEvidence, generateRelease, RELEASE_TEXT, runReleaseGenerate, type ReleaseGenerateOptions } from "./release-generate.ts";
+import { cloudReleaseEvidence, generateRelease, releaseInputPaths, RELEASE_TEXT, runReleaseGenerate, type ReleaseEdits, type ReleaseGenerateOptions } from "./release-generate.ts";
 import type { DeviceCloudProgress } from "./device-cloud-qualification.ts";
 import { historicalTrees, normalizeHistoricalTree } from "./fixtures/release-generate/historical.ts";
 
@@ -21,6 +21,14 @@ const status = await fixture("v0.7.4.status.json");
 // Preserve the recorded fixture; simulate its publication at the transferred repository.
 const publication = JSON.parse(JSON.stringify(await fixture("v0.7.4.publication.json")).replaceAll("https://github.com/alphastorm/omp-session-gateway", "https://github.com/carrythroughsystems/omp-session-gateway"));
 const releaseText = await readFile(new URL("v0.7.4.release-text.json", fixtures), "utf8");
+function applyEdits(tree: Record<string, string>, edits: ReleaseEdits): Record<string, string> {
+  const result = { ...tree };
+  for (const [path, bytes] of Object.entries(edits)) {
+    if (bytes === null) delete result[path];
+    else result[path] = bytes;
+  }
+  return result;
+}
 const prepareOptions: ReleaseGenerateOptions = { command: "prepare", version: "0.7.4", date: "2026-10-03" };
 const approveOptions: ReleaseGenerateOptions = { command: "approve", version: "v0.7.4", date: "2026-10-03", candidateTag: "v0.7.4-prealpha.1", receipt };
 const recordOptions: ReleaseGenerateOptions = { command: "record", version: "v0.7.4", date: "2026-10-03", smoke, status, publication };
@@ -30,10 +38,103 @@ const approveBefore: Record<string, string> = { ...normalizeHistoricalTree(origi
 const approved = generateRelease(approveBefore, approveOptions);
 // The parent has handwritten approval prose. Normalize those same surfaces to the generated
 // approval form; all other parent bytes (including backlog tasks and dated history) stay intact.
-const recordBefore: Record<string, string> = { ...normalizeHistoricalTree(originals["9c0d790^"]!), ...approved };
+const recordBefore = applyEdits(normalizeHistoricalTree(originals["9c0d790^"]!), approved);
 const recorded = generateRelease(recordBefore, recordOptions);
 const cases = { prepare: { before: prepareBefore, options: prepareOptions, result: prepared }, approve: { before: approveBefore, options: approveOptions, result: approved }, record: { before: recordBefore, options: recordOptions, result: recorded } };
 const goldens = await fixture("golden.json") as Record<string, Record<string, string>>;
+const fragmentSample = await fixture("changelog-fragments.json") as {
+  fragments: Record<string, string>; cut: string;
+  subsequentFragments: Record<string, string>; subsequentCut: string;
+};
+
+describe("changelog fragments", () => {
+  const history = "## [v0.7.3] — 2026-10-02\n\n- Immutable predecessor.\n";
+  const empty = `# Changelog\n\n## [Unreleased]\n\n${history}`;
+  const sample = fragmentSample;
+  const summary = (count: number) => `This release uses stock OMP v18.5.1 as its engineering baseline. The ${count} changelog entries below record the changes since v0.7.3. Historical receipts do not qualify these bytes.`;
+  const expected = (count: number, date: string, cut: string) =>
+    `# Changelog\n\n## [Unreleased]\n\n## [v0.7.4] — ${date}\n\n${summary(count)}\n\n${cut}\n\n${history}`;
+  const before = Object.fromEntries(Object.entries(prepareBefore).filter(([path]) => !path.startsWith("changelog.d/")));
+
+  test("prepare consumes sorted fragments in every section with byte-exact output", () => {
+    const tree = { ...before, "CHANGELOG.md": empty, ...sample.fragments,
+      "changelog.d/README.md": "Not a fragment.\n" };
+    const result = generateRelease(tree, prepareOptions);
+    expect(result["CHANGELOG.md"]).toBe(expected(8, prepareOptions.date, sample.cut));
+    for (const path of Object.keys(sample.fragments)) expect(result[path]).toBeNull();
+    expect(result["changelog.d/README.md"]).toBeUndefined();
+    const reversed = Object.fromEntries(Object.entries(tree).reverse());
+    expect(generateRelease(reversed, prepareOptions)).toEqual(result);
+  });
+
+  test("re-prepare folds new fragments into existing sections without duplicate cuts", () => {
+    const first = generateRelease({ ...before, "CHANGELOG.md": empty, ...sample.fragments }, prepareOptions);
+    const tree = { ...applyEdits(before, first), ...sample.subsequentFragments };
+    const options: ReleaseGenerateOptions = { ...prepareOptions, date: "2026-10-04",
+      candidateTag: "v0.7.4-prealpha.2" };
+    const result = generateRelease(tree, options);
+    expect(result["CHANGELOG.md"]).toBe(expected(11, options.date, sample.subsequentCut));
+    expect(JSON.parse(result[RELEASE_TEXT]!).summary).toBe(summary(11));
+    for (const path of Object.keys(sample.subsequentFragments)) expect(result[path]).toBeNull();
+    expect(generateRelease(tree, options)).toEqual(result);
+  });
+
+  test("CLI deletes consumed fragments in prepare and re-prepare but preserves README", async () => {
+    const directory = await materialize({ ...before, "CHANGELOG.md": empty,
+      ...sample.fragments, "changelog.d/README.md": "Not a fragment.\n" });
+    try {
+      const inputs = await releaseInputPaths("prepare", directory);
+      for (const path of Object.keys(sample.fragments)) expect(inputs).toContain(path);
+      expect(inputs).not.toContain("changelog.d/README.md");
+      for (const kind of ["approve", "record"] as const) {
+        expect((await releaseInputPaths(kind, directory)).some(path => path.startsWith("changelog.d/"))).toBe(false);
+      }
+      const changed = await runReleaseGenerate(["prepare", "0.7.4", "--date", prepareOptions.date], directory);
+      for (const path of Object.keys(sample.fragments)) {
+        expect(changed).toContain(path);
+        expect(await Bun.file(join(directory, path)).exists()).toBe(false);
+      }
+      expect(await readFile(join(directory, "CHANGELOG.md"), "utf8")).toBe(expected(8, prepareOptions.date, sample.cut));
+      for (const [path, bytes] of Object.entries(sample.subsequentFragments)) await writeFile(join(directory, path), bytes);
+      await runReleaseGenerate(["prepare", "0.7.4", "--date", "2026-10-04", "--candidate-tag", "v0.7.4-prealpha.2"], directory);
+      expect(await readFile(join(directory, "CHANGELOG.md"), "utf8")).toBe(expected(11, "2026-10-04", sample.subsequentCut));
+      for (const path of Object.keys(sample.subsequentFragments)) expect(await Bun.file(join(directory, path)).exists()).toBe(false);
+      expect(await readFile(join(directory, "changelog.d/README.md"), "utf8")).toBe("Not a fragment.\n");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("empty and single-entry cuts keep count grammar across re-prepare", () => {
+    const zero = generateRelease({ ...before, "CHANGELOG.md": empty }, prepareOptions);
+    expect(JSON.parse(zero[RELEASE_TEXT]!).summary).toContain("no changelog changes were recorded");
+    const tree = applyEdits(before, zero);
+    expect(generateRelease(tree, prepareOptions)["CHANGELOG.md"]).toBe(zero["CHANGELOG.md"]);
+    tree["changelog.d/fixed-only.md"] = "- Only entry.\n";
+    const one = generateRelease(tree, prepareOptions);
+    expect(JSON.parse(one[RELEASE_TEXT]!).summary).toContain("The 1 changelog entry below records");
+    expect(one["CHANGELOG.md"]).toContain("### Fixed\n\n- Only entry.\n");
+  });
+
+  test("invalid input writes nothing; fixing the fragment resumes the same preparation", async () => {
+    const malformed = { ...before, "CHANGELOG.md": empty,
+      "changelog.d/fixed-repair.md": "Not a bullet.\n", "changelog.d/README.md": "Not a fragment.\n" };
+    const directory = await materialize(malformed);
+    try {
+      await expect(runReleaseGenerate(["prepare", "0.7.4", "--date", prepareOptions.date], directory))
+        .rejects.toThrow("one '- ' bullet");
+      for (const [path, bytes] of Object.entries(malformed)) {
+        expect(await readFile(join(directory, path), "utf8"), path).toBe(bytes);
+      }
+      await writeFile(join(directory, "changelog.d/fixed-repair.md"), "- Repaired entry.\n");
+      await runReleaseGenerate(["prepare", "0.7.4", "--date", prepareOptions.date], directory);
+      expect(await Bun.file(join(directory, "changelog.d/fixed-repair.md")).exists()).toBe(false);
+      expect(await readFile(join(directory, "CHANGELOG.md"), "utf8")).toContain("- Repaired entry.");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+    expect(() => generateRelease({ ...before, "CHANGELOG.md": empty.replace("## [Unreleased]\n", "## [Unreleased]\n\n- Direct edit.\n") }, prepareOptions))
+      .toThrow("[Unreleased] must be empty");
+    expect(() => generateRelease({ ...before, "CHANGELOG.md": empty,
+      "changelog.d/unknown-entry.md": "- Valid bullet.\n" }, prepareOptions)).toThrow("invalid changelog fragment name");
+  });
+});
 
 describe("cloud vendor release attribution", () => {
   interface CloudEvidence {
@@ -154,7 +255,7 @@ test("the visible historical archive preserves every replaced v0.7.4 operator fa
 for (const [name, scenario] of Object.entries(cases)) {
   test(`${name}: real v0.7.4 parent produces every full-file golden byte hash`, () => {
     // Keep the historical golden bytes; only newly generated repository links move owners.
-    const actual = Object.fromEntries(Object.entries(scenario.result).map(([path, bytes]) => [path, createHash("sha256").update(bytes.replaceAll("https://github.com/carrythroughsystems/omp-session-gateway", "https://github.com/alphastorm/omp-session-gateway")).digest("hex")]));
+    const actual = Object.fromEntries(Object.entries(scenario.result).filter(([, bytes]) => bytes !== null).map(([path, bytes]) => [path, createHash("sha256").update(bytes!.replaceAll("https://github.com/carrythroughsystems/omp-session-gateway", "https://github.com/alphastorm/omp-session-gateway")).digest("hex")]));
     expect(actual).toEqual(goldens[name]!);
     expect(generateRelease(scenario.before, scenario.options)).toEqual(scenario.result);
   });
@@ -186,6 +287,33 @@ test("approved and published site blocks render public copy and working evidence
   }
 });
 
+const publicNumerals = await fixture("public-numerals.json") as { name: string; summary: string; rendered: string }[];
+for (const { name, summary, rendered } of publicNumerals) {
+  test(`record renders public prose numerals without changing stored evidence: ${name}`, () => {
+    const data = JSON.parse(recordBefore[RELEASE_TEXT]!);
+    data.qualification.lanes.find((lane: { name: string }) => lane.name === "relay").summary = summary;
+    // Replay an existing approval: the public page already has the copy-pass comma, but
+    // release-text still contains the older, ungrouped receipt summary.
+    const result = generateRelease({ ...recordBefore, [RELEASE_TEXT]: JSON.stringify(data) }, recordOptions);
+    expect(result["site/llms.txt"]).toContain(`- relay (1 attempt): ${rendered}`);
+    const evidence = result["site/status/index.html"]!
+      .match(/<tr><td>relay<\/td><td>1<\/td><td>(.*)<\/td><\/tr>/u)![1]!;
+    const text = (value: string) => value
+      .replace(/\[([^\]]+)\]\([^)]+\)/gu, "$1")
+      .replace(/<a href="[^"]*">([^<]+)<\/a>/gu, "$1")
+      .replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+    expect(text(evidence)).toBe(text(rendered));
+    expect(JSON.parse(result[RELEASE_TEXT]!).qualification).toEqual(data.qualification);
+    expect(result["docs/RELEASE_STATUS.md"]).toBe(recorded["docs/RELEASE_STATUS.md"]);
+    expect(result["docs/COMPATIBILITY.md"]).toBe(recorded["docs/COMPATIBILITY.md"]);
+    const replay = applyEdits(recordBefore, result);
+    // Record requires this pre-publication heading; rewind only that precondition.
+    replay["docs/RELEASE_STATUS.md"] = replay["docs/RELEASE_STATUS.md"]!
+      .replace("## Mainline v0.7.4 — published stable", "## Mainline v0.7.4 — qualified; stable publication pending");
+    expect(generateRelease(replay, recordOptions)).toEqual(result);
+  });
+}
+
 test("status evidence escapes HTML before rendering links without linking anchors twice", () => {
   const data = JSON.parse(recordBefore[RELEASE_TEXT]!);
   data.qualification.lanes.find((lane: { name: string }) => lane.name === "debian").summary =
@@ -207,7 +335,8 @@ test("v0.7.3 second sample reproduces every version surface byte-for-byte", () =
   const stable = JSON.parse(before["STABLE_RELEASE.lock.json"]!);
   stable.releaseTag = "v0.7.2";
   before["STABLE_RELEASE.lock.json"] = JSON.stringify(stable);
-  before["CHANGELOG.md"] = "# Changelog\n\n## [Unreleased]\n\n- Qualification tooling.\n\n## [v0.7.2] — 2026-10-01\n";
+  before["CHANGELOG.md"] = "# Changelog\n\n## [Unreleased]\n\n## [v0.7.2] — 2026-10-01\n";
+  before["changelog.d/fixed-qualification.md"] = "- Qualification tooling.\n";
   const result = generateRelease(before, { command: "prepare", version: "0.7.3", date: "2026-10-02" });
   for (const path of paths) expect(result[path], path).toBe(originals["7a5f988"]![path]);
 });
@@ -217,29 +346,31 @@ test("approve reproduces the committed stable lock, not synthetic digests or app
 test("record removes exactly the completed backlog tasks, preserving other work", () => {
   expect(recorded["docs/BACKLOG.md"]!.replace(/<!-- release-generate:release-task:start -->\n\n<!-- release-generate:release-task:end -->\n/u, "")).toBe(originals["9c0d790"]!["docs/BACKLOG.md"]!);
 });
-test("fresh attempts preserve the existing cut and incorporate new Unreleased fixes", () => {
-  const tree = { ...prepareBefore, ...prepared };
-  tree["CHANGELOG.md"] = tree["CHANGELOG.md"]!.replace("## [Unreleased]\n", "## [Unreleased]\n\n### Fixed\n\n- A subsequent fix.\n");
+test("fresh attempts preserve the existing cut and incorporate new fragment fixes", () => {
+  const tree = applyEdits(prepareBefore, prepared);
+  tree["changelog.d/fixed-subsequent.md"] = "- A subsequent fix.\n";
   const options: ReleaseGenerateOptions = { command: "prepare", version: "0.7.4", date: "2026-10-04", candidateTag: "v0.7.4-prealpha.2" };
   const result = generateRelease(tree, options);
   expect(result["CHANGELOG.md"]!.match(/## \[v0.7.4\]/gu)).toHaveLength(1);
   expect(result["CHANGELOG.md"]).toContain("- A subsequent fix.");
   expect(result["CHANGELOG.md"]).toContain("bun scripts/upstream-pins.ts");
   expect(result["docs/RELEASE_STATUS.md"]).toContain("`v0.7.4-prealpha.2`");
-  const repeated = generateRelease({ ...tree, ...result }, options);
-  expect(repeated).toEqual(result);
+  const next = applyEdits(tree, result);
+  expect(applyEdits(next, generateRelease(next, options))).toEqual(next);
 });
 
 test("2026-10-22 prepare recounts 27 to 28 entries when only the prepared count drifted from release-text", () => {
   const before = Object.fromEntries(Object.entries(prepareBefore).map(([path, bytes]) =>
     [path, bytes.replaceAll("0.7.4", "0.7.8").replaceAll("0.7.3", "0.7.7")]));
   const bullets = Array.from({ length: 27 }, (_, index) => `- Prepared change ${index + 1}.`);
-  before["CHANGELOG.md"] = `# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n${bullets.join("\n")}\n\n## [v0.7.7] — 2026-10-21\n\n- Previous immutable release.\n`;
+  for (const path of Object.keys(before)) if (path.startsWith("changelog.d/") && path !== "changelog.d/README.md") delete before[path];
+  before["CHANGELOG.md"] = "# Changelog\n\n## [Unreleased]\n\n## [v0.7.7] — 2026-10-21\n\n- Previous immutable release.\n";
+  for (const [index, bullet] of bullets.entries()) before[`changelog.d/fixed-${String(index).padStart(2, "0")}.md`] = `${bullet}\n`;
   const options: ReleaseGenerateOptions = {
     command: "prepare", version: "0.7.8", date: "2026-10-22", candidateTag: "v0.7.8-prealpha.4",
   };
   const initial = generateRelease(before, options);
-  const tree = { ...before, ...initial };
+  const tree = applyEdits(before, initial);
   const metadata = JSON.parse(tree[RELEASE_TEXT]!);
   expect(metadata.summary).toContain("27 changelog entries");
   tree["CHANGELOG.md"] = tree["CHANGELOG.md"]!
@@ -256,7 +387,8 @@ test("2026-10-22 prepare recounts 27 to 28 entries when only the prepared count 
   expect(result["CHANGELOG.md"]!.match(/## \[v0.7.8\]/gu)).toHaveLength(1);
   expect(result["STABLE_RELEASE.lock.json"]).toBeUndefined();
   expect(result["UPSTREAM.lock.json"]).toBeUndefined();
-  expect(generateRelease({ ...tree, ...result }, nextOptions)).toEqual(result);
+  const nextTree = applyEdits(tree, result);
+  expect(applyEdits(nextTree, generateRelease(nextTree, nextOptions))).toEqual(nextTree);
   for (const field of ["qualification", "publication"]) {
     expect(() => generateRelease({
       ...tree, [RELEASE_TEXT]: JSON.stringify({ ...metadata, [field]: {} }),
@@ -268,9 +400,9 @@ test("2026-10-22 prepare recounts 27 to 28 entries when only the prepared count 
 });
 
 test("minor preparation folds the unpublished patch cut and recounts all entries together", () => {
-  const tree = Object.fromEntries(Object.entries({ ...prepareBefore, ...prepared }).map(([path, bytes]) =>
+  const tree = Object.fromEntries(Object.entries(applyEdits(prepareBefore, prepared)).map(([path, bytes]) =>
     [path, bytes.replaceAll("0.7.4", "0.7.8").replaceAll("0.7.3", "0.7.7")]));
-  tree["CHANGELOG.md"] = tree["CHANGELOG.md"]!.replace("## [Unreleased]\n", "## [Unreleased]\n\n### Added\n\n- Minor fleet configuration.\n");
+  tree["changelog.d/added-minor-fleet.md"] = "- Minor fleet configuration.\n";
   const options = { command: "prepare" as const, version: "0.8.0", date: "2026-10-22", releaseClass: "minor" as const };
   const result = generateRelease(tree, options);
   expect(result["CHANGELOG.md"]).not.toContain("## [v0.7.8]");
@@ -281,13 +413,14 @@ test("minor preparation folds the unpublished patch cut and recounts all entries
   expect(metadata.version).toBe("0.8.0");
   expect(metadata.candidateTag).toBe("v0.8.0-prealpha.1");
   expect(result["CHANGELOG.md"]).toContain(metadata.summary);
-  expect(generateRelease({ ...tree, ...result }, options)).toEqual(result);
+  const nextTree = applyEdits(tree, result);
+  expect(applyEdits(nextTree, generateRelease(nextTree, options))).toEqual(nextTree);
   expect(result["STABLE_RELEASE.lock.json"]).toBeUndefined();
   expect(result["UPSTREAM.lock.json"]).toBeUndefined();
 });
 
 test("minor retarget refuses edited summaries, qualified cuts, wrong classes and version skips", () => {
-  const tree = { ...prepareBefore, ...prepared };
+  const tree = applyEdits(prepareBefore, prepared);
   const options = { command: "prepare" as const, version: "0.8.0", date: "2026-10-22", releaseClass: "minor" as const };
   const metadata = JSON.parse(tree[RELEASE_TEXT]!);
   expect(() => generateRelease({ ...tree, [RELEASE_TEXT]: JSON.stringify({ ...metadata, summary: "hand-edited summary" }) }, options)).toThrow("prepared changelog");
@@ -429,7 +562,10 @@ test("CLI writes only the computed files; missing inputs exit 1 without writes",
   const directory = await materialize(prepareBefore);
   try {
     const changed = await runReleaseGenerate(["prepare", "0.7.4", "--date", "2026-10-03"], directory);
-    for (const path of changed) expect(await readFile(join(directory, path), "utf8")).toBe(prepared[path]!);
+    for (const path of changed) {
+      if (prepared[path] === null) expect(await Bun.file(join(directory, path)).exists()).toBe(false);
+      else expect(await readFile(join(directory, path), "utf8")).toBe(prepared[path]!);
+    }
     const child = Bun.spawn([process.execPath, join(root, "scripts/release-generate.ts"), "record", "v0.7.4", "--date", "2026-10-03"], { cwd: directory, stdout: "pipe", stderr: "pipe" });
     expect(await child.exited).toBe(1);
     expect(await new Response(child.stderr).text()).toContain("missing required --smoke");

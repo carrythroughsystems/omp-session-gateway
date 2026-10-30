@@ -126,6 +126,17 @@ Do not introduce a framework solely for convenience when a small maintained depe
 
 Update the relevant architecture, protocol, operations, compatibility, and security documents in the same pull request as a behavior change. Add an ADR entry to `docs/DECISIONS.md` when changing a previously accepted decision.
 
+## Changelog entries
+
+Changelog entries are `changelog.d/` fragments; never edit `CHANGELOG.md` `[Unreleased]` directly.
+Add one `changelog.d/<section>-<short-slug>.md` file per entry, using `added`, `changed`,
+`deprecated`, `removed`, `fixed`, or `security` and a lowercase, hyphen-separated slug.
+The file contains exactly one `- ` bullet, with any continuation lines indented two spaces,
+no blank lines, lines at most 100 characters, and a trailing LF newline.
+See [fragment rules and example](changelog.d/README.md). Release preparation collects and deletes
+fragments; contributors do not cut or recount release sections by hand. Test-only changes need
+no fragment.
+
 ## Governance
 
 The repository owner is the initial maintainer and final decision maker while the contributor base

@@ -1,6 +1,6 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { assertStableReleaseQualification, nextReleaseVersion, parseReleaseClass, releaseVersion, type ReleaseClass } from "./release-policy.ts";
+import { assertStableReleaseQualification, CHANGELOG_FRAGMENT_PATH, CHANGELOG_SECTIONS, checkChangelogFragment, nextReleaseVersion, parseReleaseClass, releaseVersion, type ReleaseClass } from "./release-policy.ts";
 import { externalCleanupCurrent, validateStableQualificationReceipt } from "./stable-qualification.ts";
 import { historicalPredecessor } from "./post-release-smoke.ts";
 import { parseDeviceCloudProgress, SAMSUNG_MODEL_CODES } from "./device-cloud-qualification.ts";
@@ -17,6 +17,8 @@ const CAMPAIGNS = ["docs/ANDROID.md", "docs/ATTENTION_SPEC.md", "docs/LIFECYCLE_
 const LANES = ["artifacts", "debian", "macos", "ompPublication", "android", "androidPush", "androidPushCleanup", "deviceCloud", "deviceCloudCleanup", "relay", "cleanup", "windows", "windowsCleanup"] as const;
 const EVIDENCE = ["debian", "macos", "windows", "android", "androidPush", "deviceCloud", "ompPublication", "provenance", "secretSinks"];
 export type ReleaseTree = Readonly<Record<string, string>>;
+/** Null entries delete consumed changelog fragments. */
+export type ReleaseEdits = Record<string, string | null>;
 type ObjectValue = Record<string, unknown>;
 type Options = { version: string; date: string } & (
   | { command: "prepare"; candidateTag?: string; releaseClass?: ReleaseClass }
@@ -79,8 +81,16 @@ function escapePattern(value: string): string { return value.replace(/[.*+?^${}(
 function html(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
+/** Group prose quantities at render time, never identifiers or the stored evidence. */
+function publicCopy(value: string): string {
+  // A unit/count noun distinguishes a quantity from a run ID, build, port or generation.
+  // Consume code spans and URLs first so even quantity-looking technical text stays literal.
+  return value.replace(/(`+)[\s\S]*?\1(?!`)|<code\b[^>]*>[\s\S]*?<\/code>|https?:\/\/[^\s)]+|(?<![\p{L}\p{N}_.,:/#=+-])([1-9][0-9]{3,})(?=(?:[ \t]+|-)(?:milliseconds?|ms|seconds?|minutes?|hours?|bytes?|[KMGT]i?B|CPUs?|transitions?|attempts?)\b)/gu,
+    (match, _code: string | undefined, quantity: string | undefined) =>
+      quantity === undefined ? match : quantity.replace(/\B(?=(?:[0-9]{3})+(?![0-9]))/gu, ","));
+}
 function htmlLinks(value: string): string {
-  const escaped = html(value);
+  const escaped = html(publicCopy(value));
   return escaped.replace(/\[([^\]]+)\]\(([^)]+)\)|https:\/\/[^\s)]+/gu,
     (match, label: string | undefined, url: string | undefined) => `<a href="${url ?? match}">${label ?? match}</a>`);
 }
@@ -349,10 +359,25 @@ function campaign(tag: string, previous: string, published: boolean): string {
     : `The ${previous} qualification stays bound to its recorded candidate and devices. The ${tag} campaign must pass these scenarios again on its exact signed bytes before its matrix is qualified. See the [release ledger](RELEASE_STATUS.md).`;
 }
 
+function changelogSections(source: string): Map<string, string[]> {
+  const sections = new Map<string, string[]>(CHANGELOG_SECTIONS.map(section => [section, []]));
+  if (!source.trim()) return sections;
+  for (const block of source.trim().split(/\n(?=### )/u)) {
+    const heading = /^### ([^\n]+)\n\n([\s\S]*)$/u.exec(block);
+    const entries = heading && sections.get(heading[1]!);
+    if (!heading || !entries) throw new Error("prepared changelog has an unknown or missing section");
+    const body = heading[2]!.trim();
+    const bullet = /^- .*(?:\n {2}.*)*/gmu;
+    if (body.replace(bullet, "").trim()) throw new Error("prepared changelog contains non-bullet entries");
+    entries.push(...body.match(bullet) ?? []);
+  }
+  return sections;
+}
+
 /** Computes every edit before the caller writes anything. No clock, Git, network or host effects. */
-export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptions): Record<string, string> {
+export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptions): ReleaseEdits {
   const get = (path: string) => { const value = tree[path]; if (value === undefined) throw new Error(`missing input: ${path}`); return value; };
-  const out: Record<string, string> = {};
+  const out: ReleaseEdits = {};
   const change = (path: string, name: string, value: string) => { out[path] = replaceMarker(out[path] ?? get(path), name, value); };
   if (!/^\d{4}-\d\d-\d\d$/u.test(options.date) || new Date(`${options.date}T00:00:00Z`).toISOString().slice(0, 10) !== options.date) throw new Error("--date must be an explicit calendar date YYYY-MM-DD");
   const version = options.command === "prepare" ? options.version : releaseVersion(options.version);
@@ -388,28 +413,41 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
     }
     out["bun.lock"] = lockfile;
     const changelog = get("CHANGELOG.md");
-    let pending = changelog.match(/\n## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|$)/u)?.[1];
+    const pending = changelog.match(/\n## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|$)/u)?.[1];
     if (pending === undefined) throw new Error("missing unreleased cut");
+    if (pending.trim()) throw new Error("[Unreleased] must be empty; add changelog.d/ fragments instead");
     let changelogBase = changelog;
+    let existing = "";
     if (alreadyPrepared || retarget) {
       equal(data.version, packageVersion, "prepared release text");
       if (!data.summary) throw new Error("prepared release has no summary");
       const section = new RegExp(`\\n## \\[v${escapePattern(String(packageVersion))}\\] — [^\\n]+\\n\\n([\\s\\S]*?)(?=\\n## \\[|$)`, "u");
       const old = changelog.match(section);
-      const oldSummary = old?.[1]?.split("\n\n", 1)[0];
+      const oldSummary = old?.[1]?.split("\n\n", 1)[0]?.trimEnd();
       const countOnly = oldSummary !== undefined && countIndependentSummary(data.summary) !== undefined
         && countIndependentSummary(oldSummary) === countIndependentSummary(data.summary);
       if (!old || oldSummary === undefined || oldSummary !== data.summary &&
         !(countOnly && data.qualification === undefined && data.publication === undefined)) {
         throw new Error("prepared changelog section is missing or edited; only generated count drift before qualification can be recounted");
       }
-      pending = [pending.trim(), old[1]!.slice(oldSummary.length).trim()].filter(Boolean).join("\n\n");
+      existing = old[1]!.slice(oldSummary.length).trim();
       changelogBase = changelog.replace(section, "");
     }
     if (changelogBase.includes(`## [${tag}]`)) throw new Error("duplicate release cut");
-    const bullets = pending.match(/^- .*(?:\n {2}.*)*/gmu) ?? [];
+    const sections = changelogSections(existing);
+    for (const path of Object.keys(tree).filter(path => path.startsWith("changelog.d/") && path !== "changelog.d/README.md").sort()) {
+      const source = get(path);
+      const errors = checkChangelogFragment(path, source);
+      if (errors.length) throw new Error(errors.join("\n"));
+      const section = CHANGELOG_SECTIONS.find(section => section.toLowerCase() === CHANGELOG_FRAGMENT_PATH.exec(path)![1])!;
+      sections.get(section)!.push(source.slice(0, -1));
+      out[path] = null;
+    }
+    const entries = CHANGELOG_SECTIONS.filter(section => sections.get(section)!.length)
+      .map(section => `### ${section}\n\n${sections.get(section)!.join("\n")}`).join("\n\n");
+    const bullets = [...sections.values()].flat();
     const summary = `This release uses stock OMP ${baseline} as its engineering baseline. ${bullets.length ? `The ${bullets.length} changelog ${bullets.length === 1 ? "entry below records" : "entries below record"} the changes since ${previous}.` : `It renews signed-artifact qualification since ${previous}; no changelog changes were recorded.`} Historical receipts do not qualify these bytes.`;
-    out["CHANGELOG.md"] = replaceOne(changelogBase, /\n## \[Unreleased\]\n[\s\S]*?(?=\n## \[|$)/u, `\n## [Unreleased]\n\n## [${tag}] — ${options.date}\n\n${summary}\n${pending.trim() ? `\n${pending.trim()}\n` : ""}`);
+    out["CHANGELOG.md"] = replaceOne(changelogBase, /\n## \[Unreleased\]\n[\s\S]*?(?=\n## \[|$)/u, `\n## [Unreleased]\n\n## [${tag}] — ${options.date}\n\n${summary}\n${entries ? `\n${entries}\n` : ""}`);
     const highlights = bullets.length ? bullets.map(b => b.replace(/\n\s+/gu, " ")).join("\n") : "- Renew signed-artifact qualification; no changelog changes were recorded.";
     const next: ReleaseText = {
       schemaVersion: 1, version, candidateTag, summary,
@@ -492,10 +530,10 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
   }
   const q = data.qualification!;
   const published = options.command === "record";
-  change("docs/COMPATIBILITY.md", "release", claim(q, published));
-  const siteClaim = claim(q, published, `${REPO}/blob/main/docs/RELEASE_STATUS.md`);
+  change("docs/COMPATIBILITY.md", "release", publicCopy(claim(q, published)));
+  const siteClaim = publicCopy(claim(q, published, `${REPO}/blob/main/docs/RELEASE_STATUS.md`));
   change("site/llms.txt", "summary", `# OMP Session Gateway\n\n> Native integration with stock Oh My Pi (OMP) >= 18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. ${phase(q, published)} The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun ${q.bun}, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by the Oh My Pi maintainers.`);
-  change("site/llms.txt", "boundary", `${siteClaim}\n\n${q.lanes.map(l => `- ${l.name} (${l.attempts} attempt${l.attempts === 1 ? "" : "s"}): ${l.summary}`).join("\n")}\n\nThe Mac guest does not qualify physical firmware, FileVault, Secure Boot or startup before login. Cloud devices qualify the browser, not phone-owned Tailscale identity; iPhone Home Screen alerts do not qualify lock-screen presentation. Gateway rollback does not switch OMP. Other hosts and browser builds remain outside this exact matrix. Portal Tunnel and self-hosted/proxied relays are unsupported.`);
+  change("site/llms.txt", "boundary", `${siteClaim}\n\n${q.lanes.map(l => `- ${l.name} (${l.attempts} attempt${l.attempts === 1 ? "" : "s"}): ${publicCopy(l.summary)}`).join("\n")}\n\nThe Mac guest does not qualify physical firmware, FileVault, Secure Boot or startup before login. Cloud devices qualify the browser, not phone-owned Tailscale identity; iPhone Home Screen alerts do not qualify lock-screen presentation. Gateway rollback does not switch OMP. Other hosts and browser builds remain outside this exact matrix. Portal Tunnel and self-hosted/proxied relays are unsupported.`);
   const description = `${phase(q, published)} Stock OMP ${q.baseline}; exact candidate host/client evidence in the release ledger.`;
   change("site/status/index.html", "description", `<meta name="description" content="${html(description)}">`);
   change("site/status/index.html", "og-description", `<meta property="og:description" content="${html(description)}">`);
@@ -505,9 +543,13 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
   return out;
 }
 
-export function releaseInputPaths(command: Options["command"]): string[] {
+export async function releaseInputPaths(command: Options["command"], root = process.cwd()): Promise<string[]> {
   const common = ["package.json", "UPSTREAM.lock.json", "STABLE_RELEASE.lock.json", RELEASE_TEXT, "docs/RELEASE_STATUS.md"];
-  if (command === "prepare") return [...new Set([...common, ...PACKAGES, ...Object.keys(CONSTANTS), "bun.lock", "CHANGELOG.md", ...CAMPAIGNS, "docs/BACKLOG.md"])];
+  if (command === "prepare") {
+    const fragments = (await readdir(resolve(root, "changelog.d"))).filter(name => name !== "README.md")
+      .sort().map(name => `changelog.d/${name}`);
+    return [...new Set([...common, ...PACKAGES, ...Object.keys(CONSTANTS), "bun.lock", "CHANGELOG.md", ...fragments, ...CAMPAIGNS, "docs/BACKLOG.md"])];
+  }
   return [...common, ...CLAIMS, ...(command === "record" ? [...CAMPAIGNS, "docs/BACKLOG.md"] : [])];
 }
 
@@ -529,10 +571,11 @@ export async function runReleaseGenerate(argv: readonly string[], root = process
   const options: Options = command === "prepare" ? { ...base, command, releaseClass: parseReleaseClass(flags["--release-class"]), ...(flags["--candidate-tag"] ? { candidateTag: flags["--candidate-tag"] } : {}) } : command === "approve"
     ? { ...base, command, receipt: await input("--receipt"), candidateTag: flags["--candidate-tag"]! }
     : { ...base, command, smoke: await input("--smoke"), status: await input("--status"), publication: await input("--publication") };
-  const tree = Object.fromEntries(await Promise.all(releaseInputPaths(command).map(async path => [path, await readFile(resolve(root, path), "utf8")])));
+  const tree = Object.fromEntries(await Promise.all((await releaseInputPaths(command, root)).map(async path => [path, await readFile(resolve(root, path), "utf8")])));
   const edits = generateRelease(tree, options);
   const paths = Object.keys(edits).filter(path => edits[path] !== tree[path]).sort();
-  for (const path of paths) await writeFile(resolve(root, path), edits[path]!);
+  for (const path of paths) if (edits[path] !== null) await writeFile(resolve(root, path), edits[path]!);
+  for (const path of paths) if (edits[path] === null) await unlink(resolve(root, path));
   return paths;
 }
 if (import.meta.main) {

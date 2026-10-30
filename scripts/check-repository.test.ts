@@ -1,7 +1,47 @@
 import { expect, test } from "bun:test";
-import { checkDocumentTimers, checkE2EReadiness, checkProviderReads, checkUnsafeFinally, checkWorkflowBunVersions } from "./check-repository.ts";
+import { checkChangelogFile, checkDocumentTimers, checkE2EReadiness, checkProviderReads, checkUnsafeFinally, checkWorkflowBunVersions } from "./check-repository.ts";
 import { readFile } from "node:fs/promises";
 import packageManifest from "../package.json";
+
+test("changelog fragments accept every section, a 100-character line and two-space wrapping", () => {
+  for (const section of ["added", "changed", "deprecated", "removed", "fixed", "security"]) {
+    expect(checkChangelogFile(`changelog.d/${section}-sample-01.md`, `- ${"a".repeat(98)}\n  Continue here.\n`)).toEqual([]);
+  }
+  expect(checkChangelogFile("changelog.d/README.md", "# Fragment instructions\n")).toEqual([]);
+  expect(checkChangelogFile("docs/other.md", "Not a fragment.\n")).toEqual([]);
+});
+
+test.each(["other-entry.md", "fixed-.md", "fixed-UPPER.md", "fixed-under_score.md",
+  "fixed-two--hyphens.md", "fixed-entry.txt", "nested/fixed-entry.md"])("rejects invalid fragment name %s", name => {
+  expect(checkChangelogFile(`changelog.d/${name}`, "- Valid bullet.\n"))
+    .toContain(`changelog.d/${name}: invalid changelog fragment name`);
+});
+
+test.each(["", "- \n", "Not a bullet.\n", "- First.\n- Second.\n", "- First.\n\n",
+  "- First.\n Unindented.\n", "- First.\n   Overindented.\n", "- First.\n\tTabbed.\n",
+  "- First.\n  - Nested.\n", "- First.\n  1. Nested.\n"])("rejects invalid single-bullet layout %j", source => {
+  expect(checkChangelogFile("changelog.d/fixed-layout.md", source))
+    .toContain("changelog.d/fixed-layout.md: fragment must contain one '- ' bullet with two-space continuation lines");
+});
+
+test.each(["- Missing newline.", "- CRLF.\r\n"])("rejects missing LF discipline %j", source => {
+  expect(checkChangelogFile("changelog.d/fixed-newline.md", source))
+    .toContain("changelog.d/fixed-newline.md: fragment must end with an LF newline");
+});
+
+test.each([`- ${"a".repeat(99)}\n`, `- Good.\n  ${"b".repeat(99)}\n`])("rejects overlong fragment lines %j", source => {
+  expect(checkChangelogFile("changelog.d/fixed-wrap.md", source).some(error => error.includes("exceeds 100 characters"))).toBe(true);
+});
+
+test("Unreleased must stay empty while released entries remain untouched", () => {
+  const released = "## [v0.7.3] — 2026-10-02\n\n### Fixed\n\n- Historical entry.\n";
+  expect(checkChangelogFile("CHANGELOG.md", `# Changelog\n\n## [Unreleased]\n\n${released}`)).toEqual([]);
+  for (const pending of ["- Direct edit.\n", "### Added\n\n- Direct edit.\n", "### Fixed\n"]) {
+    expect(checkChangelogFile("CHANGELOG.md", `# Changelog\n\n## [Unreleased]\n\n${pending}\n${released}`))
+      .toEqual(["CHANGELOG.md: [Unreleased] must be empty; add changelog.d/ fragments instead"]);
+  }
+  expect(checkChangelogFile("CHANGELOG.md", "# Changelog\n")).toEqual(["CHANGELOG.md: missing [Unreleased] header"]);
+});
 
 const pinnedBun = packageManifest.packageManager.replace(/^bun@/u, "");
 const bunWorkflow = (setupVersion = pinnedBun, verifyVersion = pinnedBun): string => `

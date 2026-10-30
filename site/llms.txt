@@ -17,14 +17,14 @@ Stable v0.9.0 is published as immutable GitHub Latest. [Release v0.9.0](https://
 - debian (1 attempt): Run 40427270819 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/40427270819); OS/kernel versions and migration counts are not exported.
 - macos (1 attempt): VirtualMac2,1, macOS 27.0 arm64; doctor 18/18, rollback 23/23; native addon a9dda5e6640b173279d738c0d13374fcc5daa409d7167ce9ff54ea56bf5afb30.
 - ompPublication (1 attempt): Stock OMP v18.12.5; generation 1; publication, View/Control, new-generation/fork/resume and revocation.
-- android (1 attempt): Pixel 8 Pro, Android 17 build CP3A.261005.005, Chrome 155.0.8059.84; same-page unlock 7115 ms, Airplane 4425 ms, Doze 176 ms; 7/7 detectable; clean.
+- android (1 attempt): Pixel 8 Pro, Android 17 build CP3A.261005.005, Chrome 155.0.8059.84; same-page unlock 7,115 ms, Airplane 4,425 ms, Doze 176 ms; 7/7 detectable; clean.
 - androidPush (1 attempt): Android 17, Chrome 155.0.8059.84, installed WebAPK; force-stop delivered_while_force_stopped, Doze delivered_after_doze_exit; outcomes are observed variants, not delivery guarantees.
 - androidPushCleanup (1 attempt): Device, browser and fixture restored.
 - deviceCloud (1 attempt): TestingBot, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6.1); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6); BrowserStack, tunnel 8.9: Galaxy S26 (16.0.0, chrome 152.0.7977.54). Home Screen alerts were proven only on the TestingBot iPhone and do not qualify lock-screen presentation.
 - deviceCloudCleanup (1 attempt): Restored.
-- relay (1 attempt): 1800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed.
+- relay (1 attempt): 1,800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed.
 - cleanup (2 attempts): Zero gateway processes, listeners and live OMP hosts.
-- windows (1 attempt): Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.8.0 and fresh standard-account lifecycle; interactive logon, not unattended boot.
+- windows (1 attempt): Windows x86-64 build 26100; 4 CPUs, 8,186 MiB; Administrator upgrade/rollback from v0.8.0 and fresh standard-account lifecycle; interactive logon, not unattended boot.
 - windowsCleanup (1 attempt): Zero instances and firewalls; tailnet node deleted and access vault removed.
 
 The Mac guest does not qualify physical firmware, FileVault, Secure Boot or startup before login. Cloud devices qualify the browser, not phone-owned Tailscale identity; iPhone Home Screen alerts do not qualify lock-screen presentation. Gateway rollback does not switch OMP. Other hosts and browser builds remain outside this exact matrix. Portal Tunnel and self-hosted/proxied relays are unsupported.

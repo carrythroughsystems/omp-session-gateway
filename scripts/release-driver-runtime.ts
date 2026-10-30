@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ORDER_AUTHOR, ORDER_HEAD_PREFIX, REPOSITORY, StaleIntentError, applyDecisionPatch, campaignAttempt, campaignExecution, campaignRetryLaunchState, parseCampaignFailureObservation, parseCampaignRetryPlan, compareVersions, isOrder, nextStep, outsideOrderScope, parseCampaignInfrastructureHold, requestVersion, promotionHold, tick } from "./release-driver.ts";
 import type { CampaignFailureObservation, CampaignInfrastructureHold, Decision, DriverConfig, DriverPort, DriverState, JobObservation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
@@ -152,6 +152,14 @@ interface ApiPr {
 }
 interface WorkflowRun { id: number; run_attempt: number; head_sha: string; head_branch: string; conclusion: string | null; status: string; html_url: string; created_at: string }
 interface JobSpec { kind: "campaign" | "approve" | "smoke"; state: DriverState; root: string }
+interface WorkCheckout { path: string; branch?: string; bytes: number }
+interface WorkPruneResult {
+  operation: "prune";
+  apply: boolean;
+  wouldRemove?: WorkCheckout[];
+  removed?: WorkCheckout[];
+  kept: { path: string; reason: string }[];
+}
 
 /** Failed qualification is retryable, never qualified, once every effect owner proves cleanup. */
 export function assertFailedCampaignCleanup(
@@ -353,7 +361,7 @@ export class StudioDriver implements DriverPort {
     const pr = (await this.api<ApiPr>(`pulls/${number}`))!;
     const [head, files, checks, merge] = await Promise.all([
       this.api<{ tree: { sha: string } }>(`git/commits/${pr.head.sha}`),
-      this.pages<{ filename: string; previous_filename?: string }>(`pulls/${number}/files?per_page=100`),
+      this.pages<{ filename: string; previous_filename?: string; status?: string }>(`pulls/${number}/files?per_page=100`),
       this.gh<{ check_runs: { name: string; status: string; conclusion: string; app: { slug: string } }[] }[]>(["api", "--paginate", "--slurp", `repos/${REPOSITORY}/commits/${pr.head.sha}/check-runs?per_page=100&filter=latest`]),
       pr.merged && pr.merge_commit_sha !== null ? this.api<{ tree: { sha: string }; verification: { verified: boolean } }>(`git/commits/${pr.merge_commit_sha}`) : undefined,
     ]);
@@ -456,6 +464,106 @@ export class StudioDriver implements DriverPort {
   session(kind: JobSpec["kind"], state: DriverState): string {
     const retry = kind === "campaign" && campaignAttempt(state) > 0 ? `-retry-${campaignAttempt(state)}` : "";
     return `omp-release-${state.issue.number}-${state.candidate.replaceAll(".", "-")}-${kind}${retry}`;
+  }
+  jobCheckoutName(kind: JobSpec["kind"], state: DriverState): string {
+    const retry = kind === "campaign" && campaignAttempt(state) > 0 ? `-retry-${campaignAttempt(state)}` : "";
+    return `${state.issue.number}-${state.candidate}-${kind}-job${retry}`;
+  }
+  async workPruneSessions(): Promise<string[]> {
+    const result = await command(["tmux", "list-sessions", "-F", "#{session_name}"], ROOT, this.env, true);
+    if (result.code !== 0 && !/^(?:no server running on |error connecting to .+ \(No such file or directory\)|failed to connect to server: No such file or directory)/u.test(result.err.trim())) {
+      throw new Error("cannot inspect tmux sessions; work pruning refused");
+    }
+    return result.code === 0 ? result.out.split("\n").filter(name => name.startsWith("omp-release-")) : [];
+  }
+  /** The tick mutex is held for apply; previews never create a lock, log or state file. */
+  async pruneWork(apply = false): Promise<WorkPruneResult> {
+    if (apply && (this.plan || this.config.dryRun)) throw new Error("dry-run driver cannot apply work pruning");
+    const state = await this.load();
+    if (state === undefined) throw new Error("work pruning requires a saved release state");
+    compareVersions(state.version, state.version);
+    if (!state.candidate.startsWith(`v${state.version}-prealpha.`)) throw new Error("release state version/candidate differ; work pruning refused");
+    const sessions = new Set(await this.workPruneSessions());
+    if (sessions.size > 0 && !await Bun.file(join(this.config.stateDir, "disabled")).exists()) {
+      throw new Error("enable the kill switch before pruning while a release job is running");
+    }
+    const work = join(await realpath(this.config.stateDir), "work");
+    const info = await lstat(work).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    const candidates: WorkCheckout[] = [], kept: WorkPruneResult["kept"] = [];
+    if (info === undefined) return { operation: "prune", apply, ...(apply ? { removed: candidates } : { wouldRemove: candidates }), kept };
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("work pruning requires a real work directory");
+    const references = new Set<string>();
+    const collect = (value: unknown): void => {
+      if (typeof value === "string") references.add(value);
+      else if (value !== null && typeof value === "object") for (const child of Object.values(value)) collect(child);
+    };
+    collect(state.intent);
+    const protectedPaths = new Set<string>();
+    const jobs = await readdir(join(this.config.stateDir, "jobs"), { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    for (const job of jobs) {
+      if (!job.isDirectory()) continue;
+      const directory = join(this.config.stateDir, "jobs", job.name);
+      const result = await jsonFile<JobObservation>(join(directory, "result.json"));
+      const exit = await jsonFile<number>(join(directory, "exit"));
+      if (result && ["passed", "failed", "infrastructure-hold"].includes(result.status) && Number.isInteger(exit)) continue;
+      const spec = await jsonFile<JobSpec>(join(directory, "spec.json"));
+      if (spec === undefined) continue;
+      if (!["campaign", "approve", "smoke"].includes(spec.kind) || typeof spec.root !== "string" || !isAbsolute(spec.root) ||
+        !Number.isSafeInteger(spec.state?.issue?.number) || !/^v[0-9]+\.[0-9]+\.[0-9]+-prealpha\.[1-9][0-9]*$/u.test(spec.state.candidate)) {
+        throw new Error("invalid non-terminal job specification; work pruning refused");
+      }
+      protectedPaths.add(resolve(spec.root));
+      protectedPaths.add(join(work, this.jobCheckoutName(spec.kind, spec.state)));
+    }
+    // Logical byte estimates include symlinks themselves, never their external targets.
+    const bytes = async (path: string): Promise<number> => {
+      const stat = await lstat(path);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return stat.size;
+      let total = stat.size;
+      for (const entry of await readdir(path)) total += await bytes(join(path, entry));
+      return total;
+    };
+    const listed = await this.git(["worktree", "list", "--porcelain", "-z"]);
+    for (const record of listed.split("\0\0")) {
+      const fields = record.split("\0");
+      const listedPath = fields.find(field => field.startsWith("worktree "))?.slice(9);
+      if (listedPath === undefined) continue;
+      const path = resolve(listedPath);
+      if (dirname(path) !== work) continue;
+      const name = basename(path);
+      const family = /^([1-9][0-9]*)-(v([0-9]+\.[0-9]+\.[0-9]+)-prealpha\.[1-9][0-9]*)-(prepare|approve|record|campaign-job|approve-job|smoke-job)(-retry-[1-9][0-9]*)?$/u.exec(name);
+      const rebuild = /^v([0-9]+\.[0-9]+\.[0-9]+)-rebuild$/u.exec(name);
+      const version = family?.[3] ?? rebuild?.[1];
+      const ref = fields.find(field => field.startsWith("branch "))?.slice(7);
+      const branch = ref?.replace(/^refs\/heads\//u, "");
+      const branchVersion = /^release-driver\/[1-9][0-9]*\/v([0-9]+\.[0-9]+\.[0-9]+)-prealpha\./u.exec(branch ?? "")?.[1];
+      const session = family === null ? undefined :
+        `omp-release-${family[1]}-${family[2]!.replaceAll(".", "-")}-${family[4]!.replace(/-job$/u, "")}${family[5] ?? ""}`;
+      let reason: string | undefined;
+      if (version === undefined || (branch !== undefined && branchVersion === undefined)) reason = "unrecognized driver checkout";
+      else if (version === state.version || branchVersion === state.version) reason = "current release version";
+      else if (rebuild !== null && compareVersions(version, state.version) >= 0) reason = "not an older rebuild";
+      else if (session !== undefined && sessions.has(session)) reason = "live job session";
+      else if (protectedPaths.has(resolve(path))) reason = "non-terminal job specification";
+      else if ([...references].some(value => value === path || value.startsWith(path + sep) ||
+        value === branch || value === ref || value === family?.[2] || value === version || value === `v${version}`)) reason = "current intent reference";
+      if (reason !== undefined) { kept.push({ path, reason }); continue; }
+      const stat = await lstat(path);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(path) !== path) throw new Error("unsafe work checkout; pruning refused");
+      candidates.push({ path, ...(branch === undefined ? {} : { branch }), bytes: await bytes(path) });
+    }
+    if (apply) for (const checkout of candidates) {
+      await this.git(["worktree", "remove", "--force", checkout.path]);
+      await this.git(["worktree", "prune"]);
+      if (checkout.branch !== undefined) await this.git(["branch", "-D", checkout.branch]);
+    }
+    return { operation: "prune", apply, ...(apply ? { removed: candidates } : { wouldRemove: candidates }), kept };
   }
   async campaignWorkerRunning(state: DriverState): Promise<boolean> {
     return (await command(["tmux", "has-session", "-t", this.session("campaign", state)], ROOT, this.env, true)).code === 0;
@@ -1266,7 +1374,7 @@ export class StudioDriver implements DriverPort {
       const source = spec.kind === "campaign" ? state.candidateCommit! : spec.kind === "approve" ? state.approvedHead! : state.stableCommit!;
       const retry = spec.kind === "campaign" && campaignAttempt(state) > 0 ? `-retry-${campaignAttempt(state)}` : "";
       const branch = spec.kind === "campaign" ? `release-driver/${state.issue.number}/${state.candidate}-campaign${retry}` : undefined;
-      const checkout = await this.checkout(`${state.issue.number}-${state.candidate}-${spec.kind}-job${retry}`, source, branch);
+      const checkout = await this.checkout(this.jobCheckoutName(spec.kind, state), source, branch);
       if (await this.git(["rev-parse", "HEAD"], checkout) !== source) throw new Error("job checkout is not its pinned source");
       await command([process.execPath, "install", "--frozen-lockfile"], checkout, this.env);
       if (spec.kind === "campaign") {
@@ -1407,6 +1515,7 @@ export class StudioDriver implements DriverPort {
 async function drive(args: string[]): Promise<unknown> {
   const [mode, spec, ...extra] = args;
   const retry = mode === "retry-device-cloud";
+  const prune = mode === "prune";
   let retryCandidate: string | undefined;
   let retryAttempt: number | undefined;
   if (retry) {
@@ -1417,11 +1526,16 @@ async function drive(args: string[]): Promise<unknown> {
     retryCandidate = args[2];
     retryAttempt = Number(args[4]);
     if (!Number.isSafeInteger(retryAttempt) || retryAttempt > 10_000) throw new Error("invalid retry job attempt");
-  } else if (!["plan", "status", "tick", "worker"].includes(mode ?? "") || extra.length > 0 || (mode === "worker") !== (spec !== undefined)) {
-    throw new Error("usage: bun scripts/release-driver.ts plan|status|tick|worker <private-spec-path>|retry-device-cloud --candidate <tag> --job-attempt <n>");
+  } else if (prune ? extra.length > 0 || (spec !== undefined && spec !== "--apply") :
+    !["plan", "status", "tick", "worker"].includes(mode ?? "") || extra.length > 0 || (mode === "worker") !== (spec !== undefined)) {
+    throw new Error("usage: bun scripts/release-driver.ts plan|status|tick|prune [--apply]|worker <private-spec-path>|retry-device-cloud --candidate <tag> --job-attempt <n>");
   }
-  const config = driverConfig(), plan = mode === "plan" || mode === "status" || config.dryRun;
+  const config = driverConfig(), plan = mode === "plan" || mode === "status" || (prune && spec === undefined) || config.dryRun;
   const driver = new StudioDriver(config, plan);
+  if (prune && plan) {
+    if (spec === "--apply") throw new Error("disable OMP_RELEASE_DRY_RUN before applying work pruning");
+    return driver.pruneWork();
+  }
   if (plan) {
     const readiness = await driver.readiness(await driver.load());
     if (mode === "status") {
@@ -1433,7 +1547,7 @@ async function drive(args: string[]): Promise<unknown> {
     return { ...await tick(driver, config, true), readiness };
   }
   if (process.platform !== "darwin" || (await command([process.execPath, "--version"], ROOT, process.env)).out !== PINNED_BUN_VERSION) throw new Error(`release driver writes require the Studio Darwin host and Bun ${PINNED_BUN_VERSION}`);
-  if (await Bun.file(join(config.stateDir, "disabled")).exists()) return { operation: "idle", detail: "kill switch is enabled" };
+  if (!prune && await Bun.file(join(config.stateDir, "disabled")).exists()) return { operation: "idle", detail: "kill switch is enabled" };
   await privateDirectory(config.stateDir);
   if (mode === "worker") { await driver.worker(spec!); return { operation: "worker", completed: true }; }
   const lockPath = join(config.stateDir, "tick.sqlite");
@@ -1443,6 +1557,7 @@ async function drive(args: string[]): Promise<unknown> {
   try {
     lock.exec("PRAGMA busy_timeout=1000");
     lock.exec("BEGIN IMMEDIATE");
+    if (prune) return await driver.pruneWork(true);
     const state = await driver.load();
     const readiness = await driver.readiness(state);
     await atomicJson(join(config.stateDir, "readiness.json"), readiness);
@@ -1460,7 +1575,7 @@ async function drive(args: string[]): Promise<unknown> {
 export async function runDriver(args: string[]): Promise<unknown> {
   const config = driverConfig();
   const log = async (entry: unknown) => {
-    if (args[0] === "plan" || args[0] === "status" || config.dryRun) return;
+    if (args[0] === "plan" || args[0] === "status" || (args[0] === "prune" && args[1] !== "--apply") || config.dryRun) return;
     try { if (!(await lstat(config.stateDir)).isDirectory()) return; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
     const path = join(config.stateDir, "driver.log");
