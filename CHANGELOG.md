@@ -23,6 +23,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Recheck Windows launch and Pixel lifetimes, provider-response deadlines and attached-firewall
   ownership at dispatch; bound development cleanup independently and retain exclusive Pixel
   custody until restoration completes.
+- Tighten browser-evidence linting for child-block response reassignments and static string aliases,
+  and prove delayed-resume Hide reconciliation retains an unchanged-generation dismissal.
 - Preserve actionable private browser failures and original qualification errors when outcome
   publication fails; bound Wi-Fi-cycle checkpoints by cancellation, the execution deadline and
   30 seconds, retaining unknown mutation status until re-enable and restoring radios on failure.
