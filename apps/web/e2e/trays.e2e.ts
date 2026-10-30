@@ -494,7 +494,8 @@ test("request lifecycle: delayed bfcache resume yields to a foreground launch", 
   try {
     await installSyntheticProductFixture(context, key);
     await page.goto(home.origin);
-    await expect(page.locator(".working-row")).toHaveCount(2);
+    // Observe the complete remote snapshot, not the transient count while it is arriving.
+    await expect(page.locator(".working-row")).toHaveCount(3);
     // Real remote Hides are reconciled only when that source's authoritative snapshot applies.
     await page.getByRole("button", { name: `Hide ${INITIAL_SESSIONS[1]!.title} on this device`, exact: true }).click();
     await page.getByRole("button", { name: `Hide ${INITIAL_SESSIONS[2]!.title} on this device`, exact: true }).click();
