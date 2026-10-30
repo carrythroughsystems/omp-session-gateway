@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { SessionMetadata } from "@omp-session-gateway/protocol";
-import { installSilentWebSocket, startDashboardFixture } from "./fixture-server.ts";
+import { installSilentWebSocket, relaySocketCount, startDashboardFixture } from "./fixture-server.ts";
 
 function working(instanceId: string, startedAt: string, busy = true): SessionMetadata {
   return {
@@ -93,6 +93,74 @@ test("navigation, hide, and group changes animate while routine refreshes do not
     await settled(page);
     expect(await transitions(page)).toEqual([["list"], ["forward"], ["back"], ["list"], ["list"]]);
     expect(await page.locator("[style*='view-transition']").count()).toBe(0);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("a delayed forward transition cannot remount a disposed shell", { tag: "@core" }, async ({ page }) => {
+  const fixture = await startDashboardFixture([FIRST]);
+  try {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await installSilentWebSocket(page);
+    await page.addInitScript(() => {
+      // Defer only forward commits; directory updates and Back keep their ordinary ordering.
+      Object.defineProperty(globalThis, "ViewTransition", {
+        configurable: true,
+        value: class { get types(): Set<string> { return new Set(); } },
+      });
+      document.startViewTransition = ((options: { update: () => void; types: string[] }) => {
+        const done = Promise.withResolvers<void>();
+        const commit = (): void => {
+          options.update();
+          done.resolve();
+        };
+        if (options.types.includes("forward")) {
+          Reflect.set(globalThis, "__ompDeferredForward", commit);
+        } else commit();
+        return {
+          ready: done.promise, finished: done.promise, updateCallbackDone: done.promise,
+          types: new Set(options.types), skipTransition(): void {},
+        };
+      }) as typeof document.startViewTransition;
+    });
+    await page.goto(fixture.origin);
+    await page.locator(".working-row").click();
+    await expect.poll(() => relaySocketCount(page)).toBe(1);
+    await expect.poll(() => page.evaluate(() => typeof Reflect.get(globalThis, "__ompDeferredForward"))).toBe("function");
+    await expect(page.locator(".gateway-shell")).toHaveCount(0);
+
+    fixture.setListFailure("forbidden");
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "unauthorized");
+    await expect(page.locator("#directory-title")).toBeVisible();
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    await page.evaluate(() => {
+      const commit = Reflect.get(globalThis, "__ompDeferredForward") as () => void;
+      Reflect.deleteProperty(globalThis, "__ompDeferredForward");
+      commit();
+    });
+    await expect(page.locator(".gateway-shell")).toHaveCount(0);
+    await expect(page.locator("#directory-title")).toBeVisible();
+    await expect(page.locator("#empty-state")).toBeVisible();
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    expect(await page.evaluate(() => history.state.ompDirectory.version)).toBe(2);
+    expect(fixture.launchRequests).toHaveLength(1);
+
+    // The restored directory still opens normally, with the full-launch Back history shape.
+    fixture.setListFailure(undefined);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await page.locator(".working-row").click();
+    await expect.poll(() => relaySocketCount(page)).toBe(2);
+    await page.evaluate(() => (Reflect.get(globalThis, "__ompDeferredForward") as () => void)());
+    await expect(page.locator(".gateway-shell")).toBeVisible();
+    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    expect(await page.evaluate(() => history.state)).toEqual({ ompCollab: true });
+    await page.goBack();
+    await expect(page.locator("#directory-title")).toBeVisible();
+    await expect(page.locator(".gateway-shell")).toHaveCount(0);
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    expect(await page.evaluate(() => history.state.ompDirectory.version)).toBe(2);
   } finally {
     await fixture.stop();
   }
