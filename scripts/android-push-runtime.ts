@@ -27,6 +27,7 @@ export interface AndroidPushRuntimeOptions {
   readonly qualificationLogs?: Pick<QualificationLogs, "begin" | "end" | "healthy">;
   readonly browserFailure?: QualificationLogs["browserFailure"];
   readonly execution?: PushExecution;
+  readonly nextFailureId?: () => number;
 }
 
 export async function gatewayRawLogsDiscarded(execute: FixtureExecutor): Promise<boolean> {
@@ -252,7 +253,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   let execution = options.execution;
   let phase: AndroidPushPhase = "baseline_captured";
   let failureId = 0;
-  const localFailureId = () => ++failureId;
+  const localFailureId = options.nextFailureId ?? (() => ++failureId);
   const nextFailureId = () => (execution?.nextFailureId ?? localFailureId)();
   const chrome: typeof withAndroidChrome = async (run, context) => {
     try { return await withAndroidChrome(run, context); }
@@ -270,6 +271,14 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       id: nextFailureId(), lane: "androidPush", step: phase, reason: "deadline_exceeded", class: "harness",
       operation: "unknown", elapsedMs: 0, observations: { controllerDeadline: true } },
       execution.signal.aborted ? { cause: execution.signal.reason } : undefined);
+  };
+  const deliveryTimeout = (cause: unknown) => new QualificationFailure({
+    id: nextFailureId(), lane: "androidPush", step: phase, reason: "delivery_timeout", class: "harness",
+    operation: "read_only", elapsedMs: 0, observations: {} }, { cause });
+  const checkDeliveryExecution = (cause?: unknown) => {
+    if (execution !== undefined && (execution.signal.aborted || performance.now() >= execution.deadline)) {
+      throw deliveryTimeout(cause ?? (execution.signal.aborted ? execution.signal.reason : new Error("Android Push execution deadline")));
+    }
   };
   const privacyFailure = (options?: ErrorOptions) => new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
     class: "product", reason: "privacy_failed", operation: "read_only", elapsedMs: 0, observations: {} }, options);
@@ -303,13 +312,19 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   };
   const wait = async (test: () => Promise<boolean>, name: string, milliseconds = 60_000) => {
     const deadline = performance.now() + milliseconds;
-    while (performance.now() < deadline) {
-      checkExecution();
-      const passed = await test();
-      checkExecution();
-      if (performance.now() >= deadline) break;
-      if (passed) return;
-      await runtime.pause(500);
+    try {
+      while (performance.now() < deadline) {
+        checkDeliveryExecution();
+        const passed = await test();
+        checkDeliveryExecution();
+        if (performance.now() >= deadline) break;
+        if (passed) return;
+        await runtime.pause(500);
+      }
+    } catch (error) {
+      rethrowPushSafetyFailure(error);
+      checkDeliveryExecution(error);
+      throw error;
     }
     throw new Error(`Android Push ${name} unavailable`);
   };
@@ -412,16 +427,28 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   const runtime: AndroidPushRuntime = {
     now: () => performance.now(),
     pause: async milliseconds => {
-      checkExecution();
+      checkDeliveryExecution();
       if (execution === undefined) { await Bun.sleep(milliseconds); return; }
       await new Promise<void>((resolve, reject) => {
         const signal = execution!.signal;
-        const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(new Error("Android Push execution cancelled")); };
-        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, Math.min(milliseconds, Math.max(1, execution!.deadline - performance.now())));
+        const remaining = execution!.deadline - performance.now();
+        const expires = milliseconds >= remaining;
+        const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(deliveryTimeout(signal.reason)); };
+        const finish = () => {
+          const remaining = execution!.deadline - performance.now();
+          if (expires && remaining > 0) {
+            timer = setTimeout(finish, Math.max(1, Math.ceil(remaining)));
+            return;
+          }
+          signal.removeEventListener("abort", abort);
+          if (expires) reject(deliveryTimeout(new Error("Android Push execution deadline")));
+          else resolve();
+        };
+        let timer = setTimeout(finish, Math.min(milliseconds, Math.max(1, remaining)));
         signal.addEventListener("abort", abort, { once: true });
         if (signal.aborted) abort();
       });
-      checkExecution();
+      checkDeliveryExecution();
     },
     beforeEffect: async () => { throw new Error("Push runtime has no checkpoint owner"); },
     beginCleanup(context) {
@@ -545,7 +572,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       } catch (error) {
         // A rejected ADB operation can mask a simultaneous cancellation. Preserve both privately,
         // without replacing a stronger typed persistence/containment failure or duplicating roots.
-        if (!(error instanceof QualificationFailure) && !(error instanceof AggregateError)) {
+        if (error instanceof QualificationFailure && error.evidence.lane === "androidPush" && error.evidence.reason === "delivery_timeout" ||
+          !(error instanceof QualificationFailure) && !(error instanceof AggregateError)) {
           error = executionFailure(error);
         }
         throw retain(error);
