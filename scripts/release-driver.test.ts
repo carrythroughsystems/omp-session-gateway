@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import packageManifest from "../package.json";
 
 
 test("local and API control fingerprints normalize the same source framing", async () => {
@@ -76,6 +77,47 @@ import { withReleaseHostLease } from "./release-host-lease.ts";
 import type { QualificationFailureSummary } from "./qualification-failure.ts";
 
 import { REQUIRED_CHECKS, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineSourceHold } from "./release-policy.ts";
+
+test.skipIf(process.platform !== "darwin" || process.arch !== "arm64")("driver readiness admits the packageManager Bun on Darwin arm64", async () => {
+  const root = await mkdtemp(join(tmpdir(), "driver-pinned-readiness-")), bin = join(root, "bin");
+  try {
+    await mkdir(bin);
+    // The platform check must not require a real device, account, network or retained host.
+    for (const name of ["adb", "gh"]) await writeFile(join(bin, name), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+    const child = Bun.spawn([process.execPath, "--eval", `
+import { StudioDriver, driverConfig } from ${JSON.stringify(join(import.meta.dir, "release-driver-runtime.ts"))};
+const readiness = await new StudioDriver(driverConfig(), true).readiness();
+console.log(JSON.stringify(readiness.checks));
+`], {
+      env: { ...process.env, HOME: root, PATH: bin, OMP_RELEASE_STATE_DIR: root,
+        OMP_STABLE_MAC_HOST: "gwqual@mac.example.test", OMP_RELEASE_DRY_RUN: "0" },
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ]);
+    expect(code, stderr).toBe(0);
+    expect(Bun.version).toBe(packageManifest.packageManager.replace(/^bun@/u, ""));
+    expect(JSON.parse(stdout).platform).toBe(true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform !== "darwin")("driver write guard admits the packageManager Bun before honoring the kill switch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "driver-pinned-write-"));
+  try {
+    await writeFile(join(root, "disabled"), "", { mode: 0o600 });
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "release-driver.ts"), "tick"], {
+      env: { ...process.env, HOME: root, OMP_RELEASE_STATE_DIR: root, OMP_RELEASE_DRY_RUN: "0" },
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ]);
+    expect(code, stderr).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ operation: "idle", detail: "kill switch is enabled" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 const authority = { policy: "policy-1", protectedChanges: [], sourceReviewed: true, sourceFresh: true, releaseClassAllowed: true };
 const evidence = { head: "b".repeat(40), tree: "c".repeat(40), candidate: "v0.7.5-prealpha.1", candidateCommit: "e".repeat(40), candidateDigest: "f".repeat(64), policy: authority.policy, steps: ROUTINE_EVIDENCE_STEPS };
 const config = { bot: "alphastorm-release", founder: "alphastorm" };
@@ -1055,7 +1097,7 @@ describe.skipIf(process.platform === "win32")("private smoke worker output", () 
         selected.stableDigest = "a".repeat(64);
         const { runtime, directory, checkout, bin } = await automaticWorkerFixture(root, exitCode, selected, "smoke");
         const home = join(root, "home"), installation = join(home, ".local/state/omp-session-gateway/installation");
-        const bunDirectory = join(home, ".local/lib/omp-session-gateway/bun/v1.4.0");
+        const bunDirectory = join(home, ".local/lib/omp-session-gateway/bun", `v${packageManifest.packageManager.replace(/^bun@/u, "")}`);
         await mkdir(installation, { recursive: true }); await mkdir(bunDirectory, { recursive: true });
         await writeFile(join(installation, "current.json"), JSON.stringify({ versionDirectory: "0.0.0-aaaaaaaaaaaa" }));
         await writeFile(join(bunDirectory, "bun"), "#!/bin/sh\nprintf '%s\\n' '{\"fixture\":true}'\n", { mode: 0o700 });

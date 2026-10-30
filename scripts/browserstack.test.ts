@@ -69,7 +69,7 @@ function retainedReply(reply: RetainedReply): Response {
 function provider(options: {
   raw?: string; log?: string; logType?: string; missingLogs?: boolean; videoStatus?: number; media?: boolean; large?: boolean;
   deletionFails?: boolean; deletionUnverified?: boolean; lingering?: boolean; changed?: boolean;
-  initiallyAbsent?: boolean; disappearsAfter?: number;
+  initiallyAbsent?: boolean; disappearsAfter?: number; loseDeleteResponse?: boolean;
   postDeleteLog?: string; postDeleteSessionRaw?: string; preDeleteSessionRaw?: string; recordAlreadyDeleted?: boolean;
   sessionReply?: RetainedReply; logReply?: RetainedReply; artifactReply?: RetainedReply;
   deleteReply?: RetainedReply; postDeleteArtifactReply?: RetainedReply; nestedLog?: string;
@@ -93,6 +93,7 @@ function provider(options: {
     }
     if (method === "DELETE") {
       if (options.deletionFails) throw new Error("synthetic ambiguous transport failure");
+      if (options.loseDeleteResponse) throw new Error("synthetic lost DELETE response after dispatch");
       if (options.deleteReply !== undefined) {
         if (options.deleteReply.status === 200) deleted = !options.deletionUnverified;
         return retainedReply(options.deleteReply);
@@ -137,12 +138,14 @@ function provider(options: {
   }, { preconnect: () => {} }));
   restore = () => mock.mockRestore();
   let now = 0;
-  let artifacts: CloudArtifact[] = [];
+  let artifacts: CloudArtifact[] = [], removalStarted = false;
   const inspected: TestRecord[] = [];
   const incidents: string[] = [];
   const removal: CloudRecordRemoval = {
     get artifacts() { return artifacts; },
+    get removalStarted() { return removalStarted; },
     get deleted() { return acknowledged; },
+    markRemovalStarted: async () => { removalStarted = true; },
     markDeleted: async () => { acknowledged = true; },
     remember: async (values, incident) => { artifacts = structuredClone([...values]); if (incident !== undefined) incidents.push(incident); },
     inspect: async value => { inspected.push(value); },
@@ -790,6 +793,23 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(fresh.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
     expect(fresh.calls.filter(call => call.url === nestedArtifact)).toHaveLength(1);
     expect(parseDeviceCloudProgress(recovery.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")).toMatchObject({ incident: true, recordDeleted: true, recordRemoved: true });
+  });
+  test("503 BrowserStack lost DELETE response is not replayed by a fresh cleanup API", async () => {
+    const fixture = provider({ loseDeleteResponse: true });
+    const lane = auditedAttempt(fixture);
+    await expect(lane.attempt).rejects.toThrow();
+    const progress = structuredClone(lane.checkpoints.at(-1));
+    expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    restore?.();
+    const fresh = provider();
+    const recovery = auditedAttempt(fresh, { progress });
+    const error = await recovery.attempt.catch(error => error);
+    expect(fresh.calls.filter(call => call.method === "DELETE")).toHaveLength(0);
+    expect(error).toBeInstanceOf(Error);
+    expect(recovery.errors).toContain("BrowserStack record deletion could not be verified");
+    expect(parseDeviceCloudProgress(progress).resources?.find(resource => resource.vendor === "browserstack"))
+      .toMatchObject({ recordRemovalStarted: true, recordRemoved: false });
+    expect(fresh.clock.now()).toBe(180_000);
   });
   test("a malformed DELETE acknowledgement cannot prevent normal absence verification", async () => {
     const fixture = provider({ deleteReply: { text: "SYNTHETIC MALFORMED JSON {", status: 200, type: "application/json" } });

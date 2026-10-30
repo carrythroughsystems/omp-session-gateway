@@ -30,10 +30,10 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
       - name: Verify pinned Bun
         shell: bash
-        run: test "$(bun --version)" = 1.4.0
+        run: test "$(bun --version)" = 1.4.4
       - run: bun install --frozen-lockfile
       # Repository scan, typecheck, web build, every test not bound to another host OS
       # (scripts/test-portable.ts names each exclusion and its reason), and both leak scans.
@@ -54,9 +54,9 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
       - name: Verify pinned Bun
-        run: test "$(bun --version)" = 1.4.0
+        run: test "$(bun --version)" = 1.4.4
       - run: bun install --frozen-lockfile
       # Firefox and WebKit need system libraries the runner image lacks. Bound downloads before
       # installing so a slow mirror can fall back without interrupting a dpkg transaction.
