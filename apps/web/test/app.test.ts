@@ -3364,19 +3364,31 @@ describe("fleet directory bindings", () => {
     });
   }
 
-  test("council476: All hosts names an expired list instead of an unobserved empty directory", async () => {
-    const harness = await bootApp({
-      permission: "denied", initialSessions: [], clientConfig: config,
-      remoteSessions: [session("all-expired")], suffix: "all-expired",
-    });
-    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 1", 100);
-    harness.setRemoteStatus(503);
-    harness.window.dispatchEvent(new Event("online"));
-    await settleUntil(() => harness.pendingDelays().includes(35_000), 100);
-    harness.advanceClock(35_001);
-    harness.window.runTimersWithDelay(35_000);
-    expect(harness.elements.emptyState.textContent).toContain("Session lists expired");
-    harness.window.dispatchEvent(new Event("pagehide"));
+  test.each([0, 1])("council476: All hosts names an expired list instead of an unobserved empty directory (clock step %i ms)", async clockStep => {
+    const previousNow = Date.now;
+    const initialNow = Date.parse("2026-10-25T01:30:00Z");
+    let reads = 0;
+    Date.now = () => initialNow + clockOffset + reads++ * clockStep;
+    let harness: BrowserHarness | undefined;
+    try {
+      harness = await bootApp({
+        permission: "denied", initialSessions: [], clientConfig: config,
+        remoteSessions: [session("all-expired")], suffix: `all-expired-${clockStep}`,
+      });
+      const page = harness;
+      await settleUntil(() => page.elements.directoryCount.textContent === "Live · 1", 100);
+      page.setRemoteStatus(503);
+      page.window.dispatchEvent(new Event("online"));
+      // Stale observation and timer arming can cross a millisecond: run the remaining grace.
+      const graceDelay = 35_000 - clockStep;
+      await settleUntil(() => page.pendingDelays().includes(graceDelay), 100);
+      page.advanceClock(35_001);
+      page.window.runTimersWithDelay(graceDelay);
+      expect(page.elements.emptyState.textContent).toContain("Session lists expired");
+    } finally {
+      harness?.window.dispatchEvent(new Event("pagehide"));
+      Date.now = previousNow;
+    }
   });
 
   for (const exit of ["denied", "scope-cancel"] as const) {
