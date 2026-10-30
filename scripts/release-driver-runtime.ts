@@ -361,7 +361,7 @@ export class StudioDriver implements DriverPort {
     const pr = (await this.api<ApiPr>(`pulls/${number}`))!;
     const [head, files, checks, merge] = await Promise.all([
       this.api<{ tree: { sha: string } }>(`git/commits/${pr.head.sha}`),
-      this.pages<{ filename: string; previous_filename?: string }>(`pulls/${number}/files?per_page=100`),
+      this.pages<{ filename: string; previous_filename?: string; status?: string }>(`pulls/${number}/files?per_page=100`),
       this.gh<{ check_runs: { name: string; status: string; conclusion: string; app: { slug: string } }[] }[]>(["api", "--paginate", "--slurp", `repos/${REPOSITORY}/commits/${pr.head.sha}/check-runs?per_page=100&filter=latest`]),
       pr.merged && pr.merge_commit_sha !== null ? this.api<{ tree: { sha: string }; verification: { verified: boolean } }>(`git/commits/${pr.merge_commit_sha}`) : undefined,
     ]);

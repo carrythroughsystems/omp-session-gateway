@@ -43,7 +43,7 @@ export interface PullRequest {
   mergeVerified?: boolean | undefined;
   behind: boolean;
   checksPassed: boolean;
-  files: { filename: string; previous_filename?: string }[];
+  files: { filename: string; previous_filename?: string; status?: string }[];
   url: string;
 }
 export type Phase = "selected" | "order-updated" | "order-ready" | "order-landed" | "held"

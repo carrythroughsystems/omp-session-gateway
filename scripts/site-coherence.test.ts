@@ -4,6 +4,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ArtworkManifest } from "./media/render-brand-assets.ts";
+import { CHANGELOG_FRAGMENT_PATH } from "./release-policy.ts";
 
 const rootPath = fileURLToPath(new URL("../", import.meta.url));
 const sitePath = join(rootPath, "site");
@@ -89,18 +90,30 @@ test("rollback guidance names the locked release and its predecessor", async () 
 // Work shipped in v0.5.0 kept its "unreleased" labels in README, ANDROID.md and TEST_PLAN.md, and
 // v0.6.2's campaign qualified the cloud-device lane while four docs still promised it "from the next
 // stable release". Dated records (the ledger and ADRs) keep their wording.
-test("docs call work unreleased only while the changelog has unreleased entries", async () => {
+function staleReleaseClaimLines(source: string): number[] {
+  // Inline code names the changelog header or another literal, not a release claim.
+  const text = source.replace(/`[^`\n]+`/gu, literal => " ".repeat(literal.length));
+  return [...text.matchAll(/\bunreleased(?!\s+development\s+targets)\b|\bnext\s+stable\s+(?:release|campaign)\b/giu)]
+    .map(match => text.slice(0, match.index).split("\n").length);
+}
+
+test("release wording checks distinguish literal changelog syntax from current claims", () => {
+  expect(staleReleaseClaimLines("Keep `## [Unreleased]` empty.\nThis feature is unreleased.\nPlan the next stable release.\nUse `[Unreleased]` only as a header.\nUnreleased development targets stay separate."))
+    .toEqual([2, 3]);
+});
+
+test("docs call work unreleased only while changelog fragments are pending", async () => {
   const changelog = await readFile(join(rootPath, "CHANGELOG.md"), "utf8");
   const pending = changelog.split("\n## [Unreleased]\n")[1]?.split("\n## [")[0]?.trim();
   if (pending === undefined) throw new Error("CHANGELOG.md lost its [Unreleased] section");
-  if (pending !== "") return;
+  expect(pending).toBe("");
+  const fragments = await readdir(join(rootPath, "changelog.d"));
+  if (fragments.some(name => CHANGELOG_FRAGMENT_PATH.test(`changelog.d/${name}`))) return;
   const files = await claimSurfaces({ "DECISIONS.md": true, "RELEASE_STATUS.md": true });
   const stale: string[] = [];
   for (const file of files) {
     const text = await readFile(join(rootPath, file), "utf8");
-    for (const match of text.matchAll(/\bunreleased(?!\s+development\s+targets)\b|\bnext\s+stable\s+(?:release|campaign)\b/giu)) {
-      stale.push(`${file}:${text.slice(0, match.index).split("\n").length}`);
-    }
+    stale.push(...staleReleaseClaimLines(text).map(line => `${file}:${line}`));
   }
   expect(stale).toEqual([]);
 });

@@ -36,6 +36,21 @@ export function normalizeHistoricalTree(tree: Tree, { emptyLedger = false }: { e
   const result = { ...tree };
   for (const [path, source] of Object.entries(tree)) {
     let text = source;
+    if (path === "CHANGELOG.md") {
+      const pending = text.match(/\n## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|$)/u)?.[1];
+      if (pending?.trim()) {
+        let index = 0;
+        for (const section of pending.trim().split(/\n(?=### )/u)) {
+          const heading = /^### (Added|Changed|Deprecated|Removed|Fixed|Security)\n\n([\s\S]*)$/u.exec(section);
+          if (!heading) throw new Error("unknown historical changelog section");
+          for (const bullet of heading[2]!.match(/^- .*(?:\n {2}.*)*/gmu) ?? []) {
+            result[`changelog.d/${heading[1]!.toLowerCase()}-${String(++index).padStart(3, "0")}-historical.md`] = `${bullet}\n`;
+          }
+        }
+        text = text.replace(/\n## \[Unreleased\]\n[\s\S]*?(?=\n## \[|$)/u, "\n## [Unreleased]\n");
+      }
+      result["changelog.d/README.md"] = "Historical bullets migrated to fragment inputs for generation tests.\n";
+    }
     if (path === "docs/COMPATIBILITY.md") {
       text = wrap(text, "platforms", matched(text, /\| Surface \| Status \| Tested by \| Qualified on hardware \|[\s\S]*?(?=\n\n)/u));
       text = wrap(text, "release", matched(text, /\*\*(?:Published stable|Qualified; publication pending):\*\*[\s\S]*?(?=\n\nThe qualified scope)/u));
