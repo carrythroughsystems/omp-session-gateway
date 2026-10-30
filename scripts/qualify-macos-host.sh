@@ -48,9 +48,10 @@
 # WHAT THE HOST MAY HAVE
 #
 #   - Optional host-owned ~/.config/omp-qualification/reboot-guard: a regular, owner-executable
-#     file called without arguments on the fixed remote PATH during preflight and immediately
-#     before reboot. Exit zero only when reboot is safe; otherwise explain why and exit nonzero.
-#     The first 400 output bytes are reported on refusal. The guard must be read-only.
+#     file whose presence, type and owner-execute bit are checked without running it at preflight.
+#     It runs without arguments on the fixed remote PATH only at the owned pre-reboot gate.
+#     Exit zero only when reboot is safe; otherwise explain why and exit nonzero. The first 400
+#     output bytes are reported on refusal. The guard should be a prompt, read-only workload check.
 #
 # CERTIFICATES, AND A TRAP WORTH INHERITING
 #
@@ -215,13 +216,18 @@ SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o BatchMode=
 [ -z "${OMP_MAC_SSH_KEY:-}" ] || SSH_OPTS+=(-i "$OMP_MAC_SSH_KEY" -o IdentitiesOnly=yes)
 # Every remote block and its values travel over SSH stdin. Secrets never enter local or remote argv
 # and stay as unexported variables in the one static remote shell that evaluates the supplied block.
-check_reboot_guard() {
-  local guard="$HOME/.config/omp-qualification/reboot-guard" output
+validate_reboot_guard() {
+  local guard="$HOME/.config/omp-qualification/reboot-guard"
   [ -e "$guard" ] || [ -L "$guard" ] || return 0
   if ! { [ -f "$guard" ] && [ -x "$guard" ] && python3 -c 'import os,stat,sys; sys.exit(not (os.stat(sys.argv[1]).st_mode & stat.S_IXUSR))' "$guard"; }; then
     printf "the host's reboot guard must be a regular, owner-executable file: %s\n" "$guard" >&2
     return 1
   fi
+}
+check_reboot_guard() {
+  local guard="$HOME/.config/omp-qualification/reboot-guard" output
+  validate_reboot_guard || return 1
+  [ -e "$guard" ] || [ -L "$guard" ] || return 0
   if ! output="$("$guard" </dev/null 2>&1)"; then
     printf "the host's reboot guard refused: %s\n" "$(printf '%s' "$output" | head -c 400)" >&2
     return 1
@@ -254,7 +260,7 @@ remote_settle() {
 
 remote_dispatch() {
   local script="$1" payload="${2:-}" mode="${3:-run}" bootstrap helpers owner command status=0
-  helpers="$(declare -f count_file_occurrences count_environment_occurrences create_doctor_bundle check_reboot_guard)"
+  helpers="$(declare -f count_file_occurrences count_environment_occurrences create_doctor_bundle validate_reboot_guard check_reboot_guard)"
   script="${helpers}"$'\n'"$script"
   bootstrap='IFS= read -r -d "" PW || exit; IFS= read -r -d "" PORT || exit; IFS= read -r -d "" LOGIN || exit; IFS= read -r -d "" TAG || exit; IFS= read -r -d "" PREVIOUS_TAG || exit; IFS= read -r -d "" OMP_SOURCE_COMMIT || exit; IFS= read -r -d "" OMP_SOURCE_TREE || exit; IFS= read -r -d "" OMP_VERSION || exit; IFS= read -r -d "" BUN_VERSION || exit; IFS= read -r -d "" OMP_NATIVE_TARBALL_SHA256 || exit; IFS= read -r -d "" OMP_NATIVE_BINARY_SHA256 || exit; IFS= read -r -d "" SESSION_LABEL || exit; IFS= read -r -d "" SCRIPT || exit; export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin"; eval "$SCRIPT"'
   owner="$(python3 -c 'import uuid; print(uuid.uuid4())')" || return 125
@@ -310,7 +316,7 @@ preflight() {
   need_command shasum
 
   remote <<'REMOTE' || die "Mac host prerequisite probe failed; no lane was run."
-check_reboot_guard || exit 1
+validate_reboot_guard || exit 1
 S() { if [ -n "$PW" ]; then echo "$PW" | sudo -S -p '' "$@"; else sudo -n "$@"; fi; }
 show() { printf '   %-38s %s\n' "$1:" "$2"; }
 show "host" "$(sw_vers -productName) $(sw_vers -productVersion) $(uname -m)"

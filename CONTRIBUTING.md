@@ -16,7 +16,7 @@ A source checkout is for development and is not signed-artifact qualification.
 
 ## Build from source
 
-Use Bun 1.4.0 in this checkout. A source build does not inherit the signed release's qualification.
+Use Bun 1.4.4 in this checkout. A source build does not inherit the signed release's qualification.
 
 ```sh
 bun install --frozen-lockfile
@@ -53,7 +53,7 @@ For a source-based production install, run `bun run build`, then use the install
 3. Keep the change small enough to review and test.
 4. Add or update relevant behavioral, failure-mode, and secret-non-persistence tests; text-only
    changes do not need new tests that merely assert wording.
-5. Use the pinned Bun 1.4.0 toolchain: `bun install --frozen-lockfile`, then `bun run check`.
+5. Use the pinned Bun 1.4.4 toolchain: `bun install --frozen-lockfile`, then `bun run check`.
    For browser behavior, also run `bun run test:browser` and exercise the changed surface. That
    lane needs Playwright's own Chromium build, which `bun install` does not fetch: run
    `bunx playwright install chromium` on a fresh checkout, and again after a Playwright version

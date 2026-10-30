@@ -114,7 +114,7 @@ async function runOmpCleanup(
       OMP_PIN_SOURCE_COMMIT: "source",
       OMP_PIN_SOURCE_TREE: cleanupSourceTree,
       OMP_PIN_VERSION: cleanupVersion,
-      OMP_PIN_BUN_VERSION: "1.4.0",
+      OMP_PIN_BUN_VERSION: "1.4.4",
       OMP_PIN_NATIVE_TARBALL_SHA256: "tarball",
       OMP_PIN_NATIVE_BINARY_SHA256: "binary",
       OMP_QUAL_NATIVE_FIXTURE: join(home, "native-fixture"),
@@ -208,7 +208,7 @@ test.skipIf(process.platform !== "darwin")("Mac host evidence ignores a sysctl p
   }
 });
 
-test.skipIf(!POSIX).each(["busy", "not executable", "not owner-executable", "directory"] as const)("Mac reboot guard %s refuses preflight before sudo, lanes or receipts", async kind => {
+test.skipIf(!POSIX).each(["not executable", "not owner-executable", "directory"] as const)("Mac reboot guard %s refuses preflight before sudo, lanes or receipts", async kind => {
   const root = await mkdtemp(join(tmpdir(), "omp-mac-guard-"));
   const guard = join(root, ".config", "omp-qualification", "reboot-guard");
   const effect = join(root, "effect");
@@ -216,7 +216,7 @@ test.skipIf(!POSIX).each(["busy", "not executable", "not owner-executable", "dir
   try {
     await mkdir(dirname(guard), { recursive: true });
     if (kind === "directory") await mkdir(guard);
-    else await writeFile(guard, "#!/bin/sh\nprintf 'release runner busy\\n' >&2\nexit 1\n", { mode: kind === "busy" ? 0o700 : kind === "not executable" ? 0o600 : 0o601 });
+    else await writeFile(guard, "#!/bin/sh\nprintf 'release runner busy\\n' >&2\nexit 1\n", { mode: kind === "not executable" ? 0o600 : 0o601 });
     const result = await runHarness(`
 set -euo pipefail
 source "$1"
@@ -232,7 +232,7 @@ lane_install() { : >"$EFFECT_MARKER"; }
 main install
 `, [], { ...environment("a".repeat(64)), HOME: root, REAL_BUN: process.execPath, EFFECT_MARKER: effect, OMP_MAC_RECORD_DIR: receipt });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain(kind === "busy" ? "the host's reboot guard refused: release runner busy" : "the host's reboot guard must be a regular, owner-executable file: " + guard);
+    expect(result.stderr).toContain("the host's reboot guard must be a regular, owner-executable file: " + guard);
     expect(await pathEntryExists(effect)).toBe(false);
     expect(await pathEntryExists(receipt)).toBe(false);
     expect(result.stdout).not.toContain("Lane ");
@@ -241,7 +241,7 @@ main install
   }
 });
 
-test.skipIf(!POSIX)("Mac reboot guard rechecks immediately before shutdown and bounds refusal output to 400 bytes", async () => {
+test.skipIf(!POSIX)("503 Mac reboot guard runs only immediately before shutdown and bounds refusal output to 400 bytes", async () => {
   const root = await mkdtemp(join(tmpdir(), "omp-mac-guard-race-"));
   const guard = join(root, ".config", "omp-qualification", "reboot-guard");
   const shutdown = join(root, "shutdown");
@@ -250,7 +250,7 @@ test.skipIf(!POSIX)("Mac reboot guard rechecks immediately before shutdown and b
     await mkdir(dirname(guard), { recursive: true });
     await mkdir(join(root, ".config", "omp-session-gateway"), { recursive: true });
     await writeFile(join(root, ".config", "omp-session-gateway", "readiness-token"), "synthetic-readiness-token");
-    await writeFile(guard, '#!/bin/sh\n[ "$#" = 0 ] || exit 2\n[ "$PATH" = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin" ] || exit 3\nif [ ! -e "$HOME/admitted" ]; then touch "$HOME/admitted"; exit 0; fi\nprintf "%s" ' + JSON.stringify(busy) + '\nexit 1\n', { mode: 0o700 });
+    await writeFile(guard, '#!/bin/sh\n[ "$#" = 0 ] || exit 2\n[ "$PATH" = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin" ] || exit 3\nprintf "invoked\\n" >>"$HOME/guard-invoked"\nprintf "%s" ' + JSON.stringify(busy) + '\nexit 1\n', { mode: 0o700 });
     const result = await runHarness(`
 set -euo pipefail
 source "$1"
@@ -271,6 +271,7 @@ main persistence
     expect(result.stderr).toContain("the host's reboot guard refused: " + busy.slice(0, 400));
     expect(result.stderr).not.toContain(busy.slice(0, 401));
     expect(result.stdout).not.toContain("reboot issued");
+    expect(await readFile(join(root, "guard-invoked"), "utf8")).toBe("invoked\n");
     expect(await pathEntryExists(shutdown)).toBe(false);
   } finally {
     await rm(root, { recursive: true, force: true });

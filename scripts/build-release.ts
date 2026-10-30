@@ -5,8 +5,10 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 import nerdSymbols from "../apps/web/src/fonts/nerd-symbols/manifest.json";
+import packageManifest from "../package.json";
 
 export const PRODUCT_VERSION = "0.9.0";
+const PINNED_BUN_VERSION = packageManifest.packageManager.replace(/^bun@/u, "");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultReleaseRoot = join(root, "dist", "release");
 const archiveBase = `omp-session-gateway-${PRODUCT_VERSION}-bun`;
@@ -729,7 +731,7 @@ async function buildRelease(): Promise<void> {
           version: PRODUCT_VERSION,
           private: true,
           type: "module",
-          engines: { bun: ">=1.4.0" },
+          engines: { bun: `>=${PINNED_BUN_VERSION}` },
           bin: {
             "omp-gateway": "apps/gateway/src/cli.js",
             "omp-gatewayd": "apps/gateway/src/cli.js",
@@ -745,7 +747,7 @@ async function buildRelease(): Promise<void> {
         {
           product: "OMP Session Gateway",
           version: PRODUCT_VERSION,
-          runtime: "Bun >=1.4.0",
+          runtime: `Bun >=${PINNED_BUN_VERSION}`,
           sourceCommit: source.commit,
           sourceCreated: source.created,
           upstreamCommit: upstream.commit,
