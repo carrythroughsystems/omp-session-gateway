@@ -24,9 +24,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
-- Prove the Pixel tailnet path with a live VPN and owned HTTPS health navigation after every
-  acceptance lock, Airplane and Doze cycle and after equipment restoration; fail precisely before
-  later stages if it is lost, retaining private boolean/timing evidence without automatic remedies.
+- Require the Pixel's live tailnet VPN after every acceptance lock, Airplane and Doze cycle without
+  disturbing the measured browser; prove HTTPS reachability after the journey during equipment
+  restoration. Fail precisely before later stages if the path is lost, retaining private
+  boolean/timing evidence without automatic remedies.
 - Wake and unlock Android, then send HOME before the published-byte smoke's installed-WebAPK
   launch; re-launch once after ten seconds without extending the focus deadline, and retain
   only bounded private activity, power, and keyguard evidence when focus never arrives.

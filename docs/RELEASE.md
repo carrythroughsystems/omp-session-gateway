@@ -1494,16 +1494,18 @@ verifies that exact baseline, rather than unconditionally enabling both radios. 
 Doze and battery reset after a failed radio restoration. Restoration and owned-fixture cleanup
 failures are reported with, never instead of, the primary qualification failure.
 
-After each lock, Airplane and forced-Doze recovery cycle, acceptance independently proves the
-Pixel's tailnet path: up to 60 seconds of one-second polling for a connected VPN agent in the
-`Current Networks:` section of `dumpsys connectivity`, then one owned top-level HTTPS health
-navigation using the same 15-second probe described below. Each recovery adb read is bounded to
-five seconds. This happens after the rendered same-page recovery measurement, so the health
-navigation cannot compete with the PWA's first restored request. Private acceptance evidence
-records only VPN/HTTPS booleans and timings; ICMP observations alone never establish recovery.
-After restoring radios, exiting forced Doze and resetting battery emulation, restoration repeats
-the proof. A lost path raises `AndroidTailnetRecoveryError`; during restoration it is a restoration
-failure, preventing later smoke or qualification stages from using the disconnected Pixel.
+After each lock, Airplane and forced-Doze recovery cycle, acceptance requires the Pixel's
+tailnet VPN to return: up to 60 seconds of one-second polling for a connected VPN agent in the
+`Current Networks:` section of `dumpsys connectivity`. Each recovery adb read is bounded to
+five seconds. This read-only check follows the rendered same-page recovery measurement without
+opening Chrome tabs, changing DevTools forwards or disturbing the measured page's visibility.
+Private acceptance evidence records VPN/HTTPS booleans and timings, with `httpsProbed: false`
+between cycles; ICMP observations alone never establish recovery.
+After the measured journey is over, restoration restores radios, exits forced Doze, resets battery
+emulation, repeats the VPN check and additionally proves the tailnet path with one owned top-level
+HTTPS health navigation using the same 15-second probe described below. A lost path raises
+`AndroidTailnetRecoveryError`; during restoration it is a restoration failure, preventing later
+smoke or qualification stages from using the disconnected Pixel.
 
 Tailscale is not on the release Pixel's Doze whitelist. Forced Doze can terminate its VPN and
 leave the tailnet path down after Doze exits. The operator remedy is to **reconnect Tailscale on

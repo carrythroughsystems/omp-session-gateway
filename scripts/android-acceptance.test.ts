@@ -19,7 +19,7 @@ test("VPN recovery parses only connected agents in the current network list", ()
 });
 
 for (const cycle of ["lock", "airplane", "Doze"] as const) {
-  test(`${cycle} recovery requires a live VPN and exactly one HTTPS navigation`, async () => {
+  test(`${cycle} recovery requires a live VPN without opening a browser`, async () => {
     const calls: string[] = [], pauses: number[] = [], evidence: unknown[] = [];
     let time = 0, probes = 0;
     await requireAndroidAcceptanceTailnetRecovery("https://gateway-fixture.invalid:9443", cycle, async (...args) => {
@@ -29,20 +29,14 @@ for (const cycle of ["lock", "airplane", "Doze"] as const) {
     }, {
       now: () => time,
       pause: async milliseconds => { pauses.push(milliseconds); time += milliseconds; },
-      httpsProbe: async origin => {
-        expect(origin).toBe("https://gateway-fixture.invalid:9443");
-        expect(calls).toHaveLength(3);
-        probes++;
-        time += 25;
-        return true;
-      },
+      httpsProbe: async () => { probes++; return false; },
       recordEvidence: value => { evidence.push(value); },
     });
     expect(calls).toEqual(Array<string>(3).fill("shell dumpsys connectivity"));
     expect(pauses).toEqual([1_000, 1_000]);
-    expect(probes).toBe(1);
+    expect(probes).toBe(0);
     expect(evidence).toEqual([{
-      vpnPresent: true, vpnRecoveredMs: 2_030, httpsProbed: true, httpsReachable: true, httpsProbeMs: 25, recoveredMs: 2_055,
+      vpnPresent: true, vpnRecoveredMs: 2_030, httpsProbed: false, httpsReachable: false, httpsProbeMs: null, recoveredMs: 2_030,
     }]);
   });
 
@@ -70,10 +64,10 @@ for (const cycle of ["lock", "airplane", "Doze"] as const) {
     }]);
   });
 
-  test(`${cycle} recovery fails precisely when VPN exists but HTTPS is unreachable`, async () => {
+  test(`${cycle} recovery ignores HTTPS so it cannot change measured page visibility`, async () => {
     const calls: string[] = [], evidence: unknown[] = [];
     let probes = 0;
-    await expect(requireAndroidAcceptanceTailnetRecovery("https://gateway-fixture.invalid", cycle, async (...args) => {
+    await requireAndroidAcceptanceTailnetRecovery("https://gateway-fixture.invalid", cycle, async (...args) => {
       calls.push(args.join(" "));
       return `Current Networks:\n${VPN}Network Requests:\n`;
     }, {
@@ -81,14 +75,11 @@ for (const cycle of ["lock", "airplane", "Doze"] as const) {
       pause: async () => { throw new Error("a connected VPN must not be polled again"); },
       httpsProbe: async () => { probes++; return false; },
       recordEvidence: value => { evidence.push(value); },
-    })).rejects.toMatchObject({
-      name: "AndroidTailnetRecoveryError", cycle,
-      message: `Pixel tailnet path did not recover after the ${cycle} cycle; reconnect Tailscale on the device (no device settings were changed)`,
     });
     expect(calls).toEqual(["shell dumpsys connectivity"]);
-    expect(probes).toBe(1);
+    expect(probes).toBe(0);
     expect(evidence).toEqual([{
-      vpnPresent: true, vpnRecoveredMs: 0, httpsProbed: true, httpsReachable: false, httpsProbeMs: 0, recoveredMs: null,
+      vpnPresent: true, vpnRecoveredMs: 0, httpsProbed: false, httpsReachable: false, httpsProbeMs: null, recoveredMs: 0,
     }]);
   });
 }
@@ -127,7 +118,7 @@ test("tailnet recovery preserves malformed connectivity and adb transport causes
 
 test("tailnet recovery retains HTTPS containment failures as causes", async () => {
   const cause = new Error("HTTPS browser cleanup failed");
-  await expect(requireAndroidAcceptanceTailnetRecovery("https://gateway-fixture.invalid", "airplane",
+  await expect(requireAndroidAcceptanceTailnetRecovery("https://gateway-fixture.invalid", "restoration",
     async () => `Current Networks:\n${VPN}`, {
       httpsProbe: async () => { throw cause; },
       recordEvidence: evidence => {

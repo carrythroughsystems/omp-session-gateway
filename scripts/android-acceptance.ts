@@ -9,8 +9,9 @@
  *
  * Recovery polling observes the rendered directory and never issues its own fetch. Competing probe
  * requests previously changed the browser connection workload and could consume the first restored
- * request while the PWA remained stale. After polling, a connected VPN and one owned HTTPS health
- * navigation prove the tailnet path independently; device-shell ICMP is only an observation.
+ * request while the PWA remained stale. After polling, bounded adb reads require a connected VPN
+ * without touching the measured browser. An owned HTTPS health navigation proves the path only
+ * during final restoration; device-shell ICMP is only an observation.
  *
  * The radio baseline captured after admission is restored and verified after every phase outcome.
  * Restoration failures are reported with, never instead of, the phase failure. A killed process
@@ -158,7 +159,7 @@ interface AndroidAcceptanceTailnetRecoveryOptions {
   readonly recordEvidence?: (evidence: AndroidAcceptanceTailnetEvidence) => unknown | Promise<unknown>;
 }
 
-/** Observe VPN recovery for at most a minute, then navigate once; never reconnect or change policy. */
+/** Observe VPN recovery for at most a minute; only final restoration may navigate to prove HTTPS. */
 export async function requireAndroidAcceptanceTailnetRecovery(
   origin: string,
   cycle: AndroidAcceptanceCycle,
@@ -184,11 +185,13 @@ export async function requireAndroidAcceptanceTailnetRecovery(
         if (remaining > 0) await pause(Math.min(1_000, remaining));
       }
       if (vpnRecoveredMs === null) throw new AndroidTailnetRecoveryError(cycle);
-      const probedAt = now();
-      httpsProbed = true;
-      try { httpsReachable = await httpsProbe(origin); }
-      finally { httpsProbeMs = Math.round(now() - probedAt); }
-      if (!httpsReachable) throw new AndroidTailnetRecoveryError(cycle);
+      if (cycle === "restoration") {
+        const probedAt = now();
+        httpsProbed = true;
+        try { httpsReachable = await httpsProbe(origin); }
+        finally { httpsProbeMs = Math.round(now() - probedAt); }
+        if (!httpsReachable) throw new AndroidTailnetRecoveryError(cycle);
+      }
       recoveredMs = Math.round(now() - since);
     } catch (error) {
       if (error instanceof AndroidTailnetRecoveryError) throw error;
@@ -213,7 +216,7 @@ function isSamePage(
  * Polls until the directory is reachable, returning milliseconds since the disruption ended.
  *
  * Each attempt also pings the host from the device shell, but a host dropping ICMP makes loss
- * inconclusive. Only after measurement do VPN state and an owned health navigation prove the path.
+ * inconclusive. After measurement, a VPN-only read checks recovery without changing page visibility.
  */
 async function awaitRecovery(
   driver: AndroidChromeDriver,
@@ -240,13 +243,7 @@ async function awaitRecovery(
     record({ ...probe, samePage, presentation, deviceReachable, sinceMs });
     return probe.directoryReady === true && samePage;
   });
-  await requireAndroidAcceptanceTailnetRecovery(origin, cycle, recoveryAdb, {
-    // The PWA still owns port 9222: the disposable health tab needs a separate forward and must not
-    // relaunch Chrome or navigate the measured page. Its execution and cleanup bounds are unchanged.
-    httpsProbe: origin => androidDeviceHttpsReachesOrigin(origin, {
-      chrome: (run, options) => withAndroidChrome(run, { ...options, port: 9223, launchBrowser: false }),
-    }),
-  });
+  await requireAndroidAcceptanceTailnetRecovery(origin, cycle, recoveryAdb);
   return { recoveredMs, deviceReachableFirstMs };
 }
 async function awaitOutage(
@@ -482,7 +479,7 @@ if (import.meta.main) {
   if (!summary.baselineReady) failures.push("baseline directory was not rendered ready");
   if (!summary.samePage) failures.push("PWA reloaded during recovery");
   if (summary.unlockMs === null) failures.push("lock/resume did not recover");
-  // VPN plus HTTPS already proved the path; a host dropping ICMP cannot explain an app failure.
+  // Final restoration proved VPN plus HTTPS; a host dropping ICMP cannot explain an app failure.
   if (summary.airplaneRecoveredMs === null) {
     failures.push("airplane mode: the tailnet path recovered but the app did not recover within the polling window");
   }
