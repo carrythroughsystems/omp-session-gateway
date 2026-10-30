@@ -27,6 +27,7 @@ export interface AndroidPushRuntimeOptions {
   readonly qualificationLogs?: Pick<QualificationLogs, "begin" | "end" | "healthy">;
   readonly browserFailure?: QualificationLogs["browserFailure"];
   readonly execution?: PushExecution;
+  readonly nextFailureId?: () => number;
 }
 
 export async function gatewayRawLogsDiscarded(execute: FixtureExecutor): Promise<boolean> {
@@ -252,7 +253,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   let execution = options.execution;
   let phase: AndroidPushPhase = "baseline_captured";
   let failureId = 0;
-  const localFailureId = () => ++failureId;
+  const localFailureId = options.nextFailureId ?? (() => ++failureId);
   const nextFailureId = () => (execution?.nextFailureId ?? localFailureId)();
   const chrome: typeof withAndroidChrome = async (run, context) => {
     try { return await withAndroidChrome(run, context); }
@@ -325,7 +326,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       checkDeliveryExecution(error);
       throw error;
     }
-    throw deliveryTimeout(new Error(`Android Push ${name} unavailable`));
+    throw new Error(`Android Push ${name} unavailable`);
   };
   const targetForOrigin = async (driver: AndroidChromeDriver): Promise<string | undefined> => {
     const result = await driver.browserSend("Target.getTargets");

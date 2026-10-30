@@ -21,7 +21,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 ### Fixed
 
 - Require alias-matched outbound clear acknowledgements before Android Push overlap recovery
-  re-arms, retain typed delivery timeouts on execution expiry, and keep standalone failure IDs distinct.
+  re-arms using clear-only log windows, retain typed delivery timeouts and late sampling on execution
+  expiry without changing local-timeout fallbacks, and share standalone failure IDs with the runtime.
 - Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
   forever, and stream qualification output into bounded, byte-exact private tails.
 - Retain bounded private smoke-child output and original failure causes before release-driver

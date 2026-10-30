@@ -517,6 +517,42 @@ test.each(["abort", "deadline"] as const)("502 runtime pause %s preserves typed 
   else expect(error.cause).toBeInstanceOf(Error);
 });
 
+test.each(["cellular", "browser"] as const)("502 review local %s timeout keeps its existing fallback attribution", async scenario => {
+  let time = 0;
+  const spies = [
+    spyOn(performance, "now").mockImplementation(() => time),
+    spyOn(Bun, "sleep").mockImplementation(async milliseconds => { time += typeof milliseconds === "number" ? milliseconds : 0; }),
+    spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+    spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+    spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined),
+    spyOn(deviceOperations, "runAdb").mockResolvedValue("NetworkAgentInfo Transports: CELLULAR VALIDATED"),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+  ];
+  const driver = {
+    browserSend: async () => ({ targetInfos: scenario === "browser" ? [] : [{ type: "page", targetId: "synthetic", url: identity.origin + "/" }] }),
+    attachTab: async () => {}, navigate: async () => {},
+    evaluate: async (expression: string) => expression.includes("fetch(") ? false : expression === "document.readyState" ? "complete" :
+      { href: identity.origin + "/", secure: true },
+  };
+  const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
+    (async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome);
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.beforeEffect = async () => {};
+    if (scenario === "cellular") {
+      expect(await runtime.network("cellular")).toBe(false);
+      expect(time).toBeGreaterThanOrEqual(45_000);
+    } else {
+      const error = await runtime.browser().catch(error => error);
+      expect(normalizeQualificationFailures(error)).toMatchObject([{
+        lane: "androidPush", step: "browser_target", reason: "browser_baseline_failed",
+      }]);
+      expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain("Android Push WebAPK target unavailable");
+    }
+  } finally { chrome.mockRestore(); for (const spy of spies) spy.mockRestore(); }
+});
+
 test("ADB cancellation reaps and drains its owned subprocess before returning", async () => {
   const controller = new AbortController();
   const exited = Promise.withResolvers<number>();
