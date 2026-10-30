@@ -65,6 +65,34 @@ function commandOutputTail(previous: Buffer, bytes: Buffer): Buffer {
   const tail = bytes.subarray(-262_144);
   return Buffer.concat([previous.subarray(Math.max(0, previous.length + tail.length - 262_144)), tail]);
 }
+/** A fixed-size byte ring; child chunks never keep an oversized backing buffer alive. */
+export class CommandOutputTail {
+  private buffer: Buffer = Buffer.alloc(0);
+  private length = 0;
+  private end = 0;
+  push(bytes: Uint8Array): void {
+    if (bytes.length === 0) return;
+    if (this.buffer.length === 0) this.buffer = Buffer.alloc(262_144);
+    const chunk = bytes.subarray(-this.buffer.length);
+    const first = Math.min(chunk.length, this.buffer.length - this.end);
+    this.buffer.set(chunk.subarray(0, first), this.end);
+    this.buffer.set(chunk.subarray(first), 0);
+    this.end = (this.end + chunk.length) % this.buffer.length;
+    this.length = Math.min(this.buffer.length, this.length + chunk.length);
+  }
+  bytes(): Buffer {
+    const start = this.length === this.buffer.length ? this.end : 0;
+    return Buffer.concat([this.buffer.subarray(start, this.length), this.buffer.subarray(0, start)]);
+  }
+}
+async function commandTail(argv: string[], cwd: string, env: NodeJS.ProcessEnv, out: CommandOutputTail, err: CommandOutputTail): Promise<number> {
+  const child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const drain = async (stream: ReadableStream<Uint8Array>, tail: CommandOutputTail) => {
+    for await (const chunk of stream) tail.push(chunk);
+  };
+  const [code] = await Promise.all([child.exited, drain(child.stdout, out), drain(child.stderr, err)]);
+  return code;
+}
 async function jsonFile<T>(path: string): Promise<T | undefined> {
   try { return JSON.parse(await readFile(path, "utf8")) as T; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
@@ -1223,7 +1251,7 @@ export class StudioDriver implements DriverPort {
       if (spec.kind !== "approve" || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
     let observedCampaignExit: number | undefined, exitCode = 1;
-    let qualificationOut: Buffer = Buffer.alloc(0), qualificationErr: Buffer = Buffer.alloc(0);
+    const qualificationOut = new CommandOutputTail(), qualificationErr = new CommandOutputTail();
     let smokeOut: Buffer = Buffer.alloc(0), smokeErr: Buffer = Buffer.alloc(0), smokeFailure: Error | undefined;
     let terminal: JobObservation & { evidence?: RoutineEvidence } = { status: "failed",
       detail: spec.kind === "campaign" ? "campaign harness:unclassified_failure" : `${spec.kind} failed; inspect private job logs; no retry` };
@@ -1261,16 +1289,13 @@ export class StudioDriver implements DriverPort {
             if (error.code === "ENOENT") return undefined;
             throw error;
           }) !== undefined) throw new Error("stable machine outcome already exists in this immutable job phase");
-          const result = await command([process.execPath, "run", "qualify:stable", "--", "--tag", state.candidate, ...flags], checkout, { ...env, OMP_STABLE_OUTCOME_FILE: outcomePath }, true,
-            (out, err) => {
-              qualificationOut = commandOutputTail(qualificationOut, out);
-              qualificationErr = commandOutputTail(qualificationErr, err);
-            });
-          if (result.code !== 0) observedCampaignExit = result.code;
-          if (result.code !== 0 && state.qualificationExecution !== undefined) {
+          const code = await commandTail([process.execPath, "run", "qualify:stable", "--", "--tag", state.candidate, ...flags], checkout,
+            { ...env, OMP_STABLE_OUTCOME_FILE: outcomePath }, qualificationOut, qualificationErr);
+          if (code !== 0) observedCampaignExit = code;
+          if (code !== 0 && state.qualificationExecution !== undefined) {
             const expected = campaignExecution(state), outcome = await readQualificationOutcomeFile(outcomePath, expected);
             const original = await readFile(outcomePath);
-            if (result.code !== qualificationOutcomeExitCode(outcome, expected) ||
+            if (code !== qualificationOutcomeExitCode(outcome, expected) ||
               JSON.stringify(parseQualificationOutcome(parseRetainedVendorJson(original.toString()), expected)) !== JSON.stringify(outcome) ||
               (outcome.scope === "preflight") !== (outcome.receipt === undefined) ||
               (flags.includes("--preflight") && outcome.scope !== "preflight")) throw new Error("qualification terminal evidence disagrees");
@@ -1281,16 +1306,16 @@ export class StudioDriver implements DriverPort {
                 !qualificationExecutionsMatch(receipt.execution, expected) ||
                 outcome.scope !== (receipt.rigReadiness?.status === "failed" ? "rigReadiness" : "campaign") ||
                 JSON.stringify(receipt.failureSummary) !== JSON.stringify(outcome.failureSummary)) throw new Error("failed receipt snapshot is invalid");
-              if (result.code === 75) {
+              if (code === 75) {
                 if (expected.campaignAttempt === 2) this.campaignCleanupComplete(receipt, state);
                 else if (this.campaignRetryLanes(receipt, state).length === 0) throw new Error("failed receipt has no restart lanes");
               }
               if (!await immutableJobBytes(join(directory, "failed-qualification.json"), bytes)) throw new Error("failed receipt snapshot already exists");
             } else if (await Bun.file(this.receipt(state)).exists()) throw new Error("preflight failure has a working receipt");
             if (!await immutableJobBytes(join(directory, "failure-outcome.json"), original)) throw new Error("failed outcome already exists");
-            throw new CampaignFailureResult(outcome, result.code);
+            throw new CampaignFailureResult(outcome, code);
           }
-          if (result.code === 75) {
+          if (code === 75) {
             const receipt = await jsonFile<StableQualificationReceipt>(this.receipt(state));
             const hold = this.campaignHoldObservation(state, await readDeviceCloudOutcomeFile(outcomePath), receipt);
             if (hold.scope === "receipt") {
@@ -1299,7 +1324,9 @@ export class StudioDriver implements DriverPort {
             }
             throw new CampaignAvailabilityResult(hold);
           }
-          if (result.code !== 0) throw new Error(`stable qualification exited ${result.code}; inspect private job logs`, { cause: { out: result.out.slice(-262144), err: result.err.slice(-262144) } });
+          if (code !== 0) throw new Error(`stable qualification exited ${code}; inspect private job logs`, {
+            cause: { out: qualificationOut.bytes().toString().trim(), err: qualificationErr.bytes().toString() },
+          });
         };
         // Every retry consumes predecessor authority before its own in-process admission.
         if (!state.resumeDeviceCloud && campaignAttempt(state) === 0) await runCampaign(campaignWorkerArguments(state, executionPath, true));
@@ -1360,7 +1387,7 @@ export class StudioDriver implements DriverPort {
       process.exitCode = exitCode;
       if (spec.kind === "campaign") {
         // Preserve exact child bytes across preflight and campaign before publishing any terminal marker.
-        await retainJobDiagnostics(directory, "qualification", qualificationOut, qualificationErr);
+        await retainJobDiagnostics(directory, "qualification", qualificationOut.bytes(), qualificationErr.bytes());
       } else if (spec.kind === "smoke") {
         await retainJobDiagnostics(directory, "smoke", smokeOut, smokeErr, smokeFailure);
       }
