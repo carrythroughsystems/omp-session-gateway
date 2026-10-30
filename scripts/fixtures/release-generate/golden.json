@@ -23,8 +23,8 @@
     "docs/UPGRADE_ROLLBACK.md": "a46fa8e0dce8d677be732d987ddd36d05d7bf8e574f6ddb5a54a76cc84a7d7e3",
     "README.md": "7e6ac14b9e2bee5b3e12168140b157189297ce6946ec6b75a1f9b9b6af1e221b",
     "docs/COMPATIBILITY.md": "65a696710f00b49342735eca8ea00a7a43fdaeb59b9f15df59a821fbe722ad0c",
-    "site/llms.txt": "d80ffa835c79f4e3e70334010ef03cac604ab70f9a9e6f71ee5095500650801e",
-    "site/status/index.html": "4568c694d1dcf5dc572151fa8939a67e8ce5afc38971d3211bc0d3551829ec3e",
+    "site/llms.txt": "a6125a36ac3785ea58b4b01660fe0db1c223bbd2b648a0563af5e72c7f4b1198",
+    "site/status/index.html": "43ee66422f26be5ddd89b2949fd5e81a41db9a509bcda4be46ba6068af7bf72b",
     "scripts/release-text.json": "d64f8ca5f8c2e822fe3948b23d474f41a21ddce998a732c35576ace4c0729011"
   },
   "record": {
@@ -34,8 +34,8 @@
     "docs/LIFECYCLE_BRANCH_RESUME.md": "af96ec186f09bcee9fedee62055f1ff4c93aad9e3c8a1a2a06b0a227066f4c94",
     "docs/BACKLOG.md": "dc02da70ce5f0c10a4084e8da7e606724268c6699ec99b06f92bded934a972e5",
     "docs/COMPATIBILITY.md": "aceb1f376c6c7d52599c7b352d12ed416a227e2a993f8d709436d00342053949",
-    "site/llms.txt": "c733f022d70f50e28faffede3f1b674f8f40ac285f1cd3057a38c70d4e0ce2ca",
-    "site/status/index.html": "db4b6b37b8253905c6a3a986cdc080fd294c3e70f4f7b0dae61fba042d6ea0ea",
+    "site/llms.txt": "4fedeb0400786179a466c939621eb30e471f8992bf8a1426cdb3c22c5bab5403",
+    "site/status/index.html": "8fdf0b5da505d09231d65c01b9c0e0f873820045ea2097c2fb66deaf743d47c7",
     "scripts/release-text.json": "c61f5af6e6494fc85938439cac2062c4ef16a9b9ebb5e1e8fd65005c48a7b5d6"
   }
 }

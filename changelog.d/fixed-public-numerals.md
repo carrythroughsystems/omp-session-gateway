@@ -1,0 +1,1 @@
+- Keep thousands separators in generated public release quantities without changing stored evidence.
