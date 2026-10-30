@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,7 +7,11 @@ import { runAndroidPush, runAndroidPushReadiness, waitForPushDelivery, emptyPush
   type AndroidPushIdentity, type AndroidPushRuntime, type PushDeviceBaseline, type PushBrowserBaseline, type PushCleanupStep, type TriageAction, type TriageObservation } from "./android-push-qualification.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { observeNotificationDump, parseAndroidUi, NotificationOverlapError, findAndroidNotification, tapAndroidNotification, notificationTopicDigest, notificationMatchesDigest, trackUnchangedNotificationPost } from "./android-notification.ts";
-import { requireAndroidPushDevice } from "./android-push-runtime.ts";
+import { createAndroidPushRuntime, requireAndroidPushDevice } from "./android-push-runtime.ts";
+import * as pushRuntimeOperations from "./android-push-runtime.ts";
+import * as deviceOperations from "./android-device.ts";
+import type { QualificationLogEvent } from "../apps/gateway/src/logger.ts";
+import { pushDeliveryTelemetry } from "./qualification-logs.ts";
 import { webApkTasks, closeWebApk, setupAndroidWebApk, withWebApkSetupRestoration } from "./android-webapk.ts";
 import pushQualificationExtension, { parseFixtureCommand } from "./fixtures/push-qualification-extension.ts";
 import { withDevelopmentPixelLease } from "./android-pixel-lease.ts";
@@ -44,10 +48,10 @@ function fake(options: FakeOptions = {}) {
   const since = (at: number) => new Date(Date.UTC(2026, 0, 1) + at).toISOString();
   const primarySnapshot = (): SessionMetadata | undefined => started ? { instanceId: "synthetic-instance", generation, title: "Synthetic fixture", cwdLabel: "synthetic-project", canView: true, canControl: true,
     inputRequired: asking, busy, startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: since(options.frozenHeartbeat ? 0 : Math.floor(time / 10_000) * 10_000),
-    ...(asking ? { ask: { requestId: `synthetic-request-${request}`, since: since(askedAt) } } : {}) } : undefined;
+    ...(asking ? { ask: { requestId: `synthetic-request-${request}`, since: since(askedAt) }, qualificationPushAlias: 1 } : {}) } : undefined;
   const secondarySnapshot = (): SessionMetadata | undefined => second.started ? { instanceId: SECONDARY, generation: 1, title: "Synthetic fixture", cwdLabel: "synthetic-secondary-project", canView: true, canControl: true,
     inputRequired: second.asking, busy: false, startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: since(Math.floor(time / 10_000) * 10_000),
-    ...(second.asking ? { ask: { requestId: `synthetic-secondary-request-${second.request}`, since: since(second.askedAt) } } : {}) } : undefined;
+    ...(second.asking ? { ask: { requestId: `synthetic-secondary-request-${second.request}`, since: since(second.askedAt) }, qualificationPushAlias: 1 } : {}) } : undefined;
   const sessions = () => [primarySnapshot(), secondarySnapshot()].filter((session): session is SessionMetadata => session !== undefined);
   const heldKey = (session: SessionMetadata) => `${session.instanceId}:${session.ask?.requestId}`;
   const hiddenKey = (session: SessionMetadata) => `${session.instanceId}:${session.generation}`;
@@ -191,6 +195,31 @@ function fake(options: FakeOptions = {}) {
     input: { identity, progress: undefined, runtime, checkpoint: async (p: Record<string, unknown>) => { checkpoints.push(structuredClone(p)); }, pixel: async <T>(_owner: string, action: () => Promise<T>) => action() } };
 }
 
+function eventBackedTelemetry(host: ReturnType<typeof fake>) {
+  const events: QualificationLogEvent[] = [];
+  let sequence = 0, ordinal = 0;
+  const append = (clear: boolean) => {
+    sequence++;
+    const fields = { sequence, request_alias: 1, attention: !clear, clear, activity_stop: false, subscription_replay: false };
+    const event = (name: string, values: Record<string, number | boolean>) => events.push({
+      timestamp: "2026-01-01T00:00:00.000Z", level: "info", index: events.length + 1, event: name, ...values,
+    });
+    event("push.queue_accepted", fields);
+    event("push.send_started", { ...fields, subscriptions: 1 });
+    event("push.send_acknowledged", { sequence, request_alias: 1, elapsed_ms: 1 });
+  };
+  const fixture = host.runtime.fixture, answer = host.runtime.answer, snapshot = host.runtime.snapshot;
+  host.runtime.fixture = async (...args) => {
+    const active = (await snapshot(args[1], args[2]))?.inputRequired === true;
+    await fixture(...args);
+    if (args[0] === "ask" || (args[0] === "answer" || args[0] === "stop") && active) append(args[0] !== "ask");
+  };
+  host.runtime.answer = async () => { await answer(); append(true); };
+  host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: events.length, ordinal: ++ordinal });
+  host.runtime.deliveryTelemetry = async window => pushDeliveryTelemetry(events.filter(event => event.index > window.after));
+  return events;
+}
+
 test.each(["unknown", "accepted", "ambiguous", "privacy", "late", "transient", "old-request", "exhausted"] as const)(
   "delivery recovery refuses unsupported attribution and records %s evidence", async scenario => {
     const host = fake();
@@ -250,6 +279,110 @@ test("effectful readiness restores its exact baseline without awarding qualifica
   expect((result.gcmDiagnostic as Error).message).toBe("GcmService censored sample: Is client connected: true; Reconnect Scheduler Alarm: OFF");
   expect(host.checkpoints.every(checkpoint => !Object.hasOwn(checkpoint, "gcmDiagnostic"))).toBe(true);
   expect(JSON.stringify(result)).not.toContain("GcmService");
+});
+
+test("502 readiness metadata pause cancellation retains a typed delivery timeout", async () => {
+  const host = fake(), controller = new AbortController(), raw = new Error("synthetic metadata pause cancellation");
+  let id = 20;
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
+  const runtime = createAndroidPushRuntime(identity, { execution });
+  host.runtime.snapshot = async () => undefined;
+  host.runtime.pause = milliseconds => {
+    const pending = runtime.pause(milliseconds);
+    controller.abort(raw);
+    return pending;
+  };
+  const error = await runAndroidPushReadiness({ ...host.input, execution }).catch(error => error);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{
+    id: 21, lane: "rigReadiness", step: "pixel_push", reason: "delivery_timeout", class: "harness", operation: "read_only",
+  }]);
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+  expect(host.cleanup).toHaveLength(7);
+});
+
+test("502 execution-less readiness retains two typed leaves with distinct failure IDs", async () => {
+  const host = fake(), checkpoint = host.input.checkpoint;
+  let cleaning = false;
+  host.runtime.browser = async () => { throw new Error("synthetic browser capture failure"); };
+  host.runtime.beginCleanup = () => { cleaning = true; };
+  const error = await runAndroidPushReadiness({ ...host.input, checkpoint: async progress => {
+    await checkpoint(progress);
+    if (cleaning) throw new Error("synthetic restoration checkpoint failure");
+  } }).catch(error => error);
+  const failures = normalizeQualificationFailures(error);
+  expect(failures).toHaveLength(2);
+  expect(failures).toContainEqual(expect.objectContaining({
+    lane: "rigReadiness", step: "browser_capture", reason: "browser_baseline_failed", class: "harness",
+  }));
+  expect(failures).toContainEqual(expect.objectContaining({
+    lane: "androidPushCleanup", step: "containment", reason: "invalid_evidence", class: "harness",
+  }));
+  expect(new Set(failures.map(failure => failure.id)).size).toBe(2);
+  expect(host.cleanup).toHaveLength(7);
+});
+
+test("502 review execution-less readiness shares the real runtime allocator through restoration", async () => {
+  const host = fake(), checkpoint = host.input.checkpoint, createRuntime = pushRuntimeOperations.createAndroidPushRuntime;
+  let cleaning = false;
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const wake = spyOn(deviceOperations, "wakeAndroidDisplay").mockRejectedValue(new Error("synthetic real browser wake failure"));
+  const create = spyOn(pushRuntimeOperations, "createAndroidPushRuntime").mockImplementation((...args) => {
+    const runtime = createRuntime(...args), beginCleanup = runtime.beginCleanup;
+    runtime.preflight = host.runtime.preflight;
+    runtime.device = host.runtime.device;
+    runtime.gcmReadiness = host.runtime.gcmReadiness;
+    runtime.cleanup = host.runtime.cleanup;
+    runtime.beginCleanup = execution => { cleaning = true; beginCleanup?.(execution); };
+    return runtime;
+  });
+  try {
+    const error = await runAndroidPushReadiness({
+      identity, progress: undefined, pixel: host.input.pixel,
+      checkpoint: async progress => {
+        await checkpoint(progress);
+        if (cleaning) throw new Error("synthetic restoration checkpoint failure");
+      },
+    }).catch(error => error);
+    const failures = normalizeQualificationFailures(error);
+    expect(failures).toHaveLength(2);
+    expect(failures).toContainEqual(expect.objectContaining({
+      id: 1, lane: "rigReadiness", step: "browser_wake", reason: "browser_baseline_failed",
+    }));
+    expect(failures).toContainEqual(expect.objectContaining({
+      id: 2, lane: "androidPushCleanup", step: "containment", reason: "invalid_evidence",
+    }));
+    expect(host.cleanup).toHaveLength(7);
+  } finally { create.mockRestore(); wake.mockRestore(); select.mockRestore(); }
+});
+
+test("502 review execution expiry during a delivery pause retains timings and late sampling", async () => {
+  const host = fake(), controller = new AbortController(), raw = new Error("synthetic poll cancellation");
+  let id = 0, time = 0, late = false, sample: (() => Promise<void>) | undefined;
+  const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => ++id };
+  const runtime = createAndroidPushRuntime(identity, { execution });
+  host.runtime.now = () => time;
+  host.runtime.observe = async () => ({ count: late ? 1 : 0, titleMatches: true, bodyMatches: true, forbiddenFound: false });
+  host.runtime.pause = milliseconds => {
+    time += milliseconds;
+    const pending = runtime.pause(milliseconds);
+    controller.abort(raw);
+    return pending;
+  };
+  const metrics = emptyPushDeliveryMetrics();
+  const session: SessionMetadata = { instanceId: "synthetic-delivery", generation: 1, canView: true, canControl: true,
+    inputRequired: true, startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z",
+    ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
+  const error = await waitForPushDelivery({ runtime: host.runtime, session, kind: "attention", detail: "private",
+    phase: "triage_verified", timeout: 60_000, metrics, execution, onTimeout: value => { sample = value; } }).catch(error => error);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{
+    lane: "androidPush", step: "triage_verified", reason: "deadline_exceeded", observations: { firstDeliveryMs: 500, controllerDeadline: true },
+  }]);
+  expect(metrics.deliveryTimings).toEqual([500, 0]);
+  expect(sample).toBeDefined();
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+  late = true; time += 100;
+  await sample?.();
+  expect(metrics).toMatchObject({ latePostCount: 1, latePostMs: 600 });
 });
 
 test("GCM refusal precedes browser and fixture effects and restores the checkpointed radios", async () => {
@@ -943,6 +1076,104 @@ test("overlap recovery cannot reset the phase's consumed delivery re-arm budget"
   });
 });
 
+test.each(["missing", "wrong-alias", "settled"] as const)("502 overlap recovery refuses %s outbound clear proof before another ask", async scenario => {
+  const host = fake(), fixture = host.runtime.fixture, observe = host.runtime.observe;
+  const overlap = new NotificationOverlapError();
+  let asks = 0, overlapped = false, dismissed = false;
+  host.runtime.fixture = async (...args) => { if (args[0] === "ask") asks++; await fixture(...args); };
+  host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1,
+    failures: 0, retryable: false, httpStatus: 0, clearAcknowledged: scenario === "wrong-alias", requestAlias: scenario === "wrong-alias" ? 2 : 1 });
+  host.runtime.assertNotificationOwnership = async () => {
+    if (scenario !== "settled" && asks === 1 && !overlapped) { overlapped = true; throw overlap; }
+  };
+  host.runtime.observe = async (...args) => {
+    if (scenario === "settled" && asks === 1 && !args[0].inputRequired && !overlapped) {
+      overlapped = true; throw overlap;
+    }
+    return observe(...args);
+  };
+  host.runtime.dismissOwned = async () => { dismissed = true; };
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(error).toMatchObject({ evidence: { lane: "androidPush", step: "private_verified", class: "harness", reason: "invalid_evidence" } });
+  expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(overlap.message);
+  expect(asks).toBe(1);
+  expect(dismissed).toBe(false);
+  expect(host.cleanup).toHaveLength(7);
+});
+
+test.each(["pending", "settled", "control"] as const)("502 review overlap recovery proves the %s ask clear from gateway events", async scenario => {
+  const host = fake({ ...(scenario === "pending" ? { overlaps: 1 } : {}) });
+  const events = eventBackedTelemetry(host), observe = host.runtime.observe, snapshot = host.runtime.snapshot, answer = host.runtime.answer;
+  let overlapped = false, controlAnswered = false;
+  host.runtime.observe = async (...args) => {
+    if (scenario === "settled" && !args[0].inputRequired && !overlapped) {
+      overlapped = true; throw new NotificationOverlapError();
+    }
+    return observe(...args);
+  };
+  host.runtime.answer = async () => { await answer(); controlAnswered = true; };
+  host.runtime.snapshot = async (...args) => {
+    const session = await snapshot(...args);
+    if (scenario === "control" && controlAnswered && !session?.inputRequired && !overlapped) {
+      overlapped = true; throw new NotificationOverlapError();
+    }
+    return session;
+  };
+  const result = await runAndroidPush(host.input);
+  expect(result.passed).toBe(true);
+  const phase = scenario === "control" ? "attention_tap_verified" : "private_verified";
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results[phase]).toMatchObject({
+    rearmCount: 1, rearmReason: "unowned_notification_overlap",
+  });
+  expect(events.some(event => event.clear === true)).toBe(true);
+  expect(host.cleanup).toHaveLength(7);
+});
+
+test.each(["stale-delivery", "stale-removal", "triage-clears"] as const)(
+  "502 round2 overlap retains settled clear proof through %s events", async scenario => {
+    const host = fake(), events = eventBackedTelemetry(host);
+    const begin = host.runtime.beginNotificationPhase, fixture = host.runtime.fixture, triage = host.runtime.triage;
+    let phase: string | undefined, overlapped = false, removed = false, triageFinished = false;
+    host.runtime.beginNotificationPhase = async (...args) => { if (args[1] !== undefined) phase = args[1]; await begin(...args); };
+    host.runtime.fixture = async (...args) => {
+      await fixture(...args);
+      if (phase === "stale_taps_verified" && args[0] === "stop" && args[2] === "secondary") removed = true;
+    };
+    host.runtime.triage = async action => {
+      const result = await triage(action);
+      if (phase === "triage_verified" && action?.kind === "showAll") triageFinished = true;
+      return result;
+    };
+    host.runtime.assertNotificationOwnership = async () => {
+      if (overlapped) return;
+      const expiring = phase === "stale_taps_verified" && (await host.runtime.snapshot("", "secondary"))?.inputRequired === true;
+      if (scenario === "stale-delivery" && expiring || scenario === "stale-removal" && removed ||
+        scenario === "triage-clears" && triageFinished) {
+        overlapped = true; throw new NotificationOverlapError();
+      }
+    };
+    expect((await runAndroidPush(host.input)).passed).toBe(true);
+    expect(overlapped).toBe(true);
+    const recovered = scenario === "triage-clears" ? "triage_verified" : "stale_taps_verified";
+    expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results[recovered]).toMatchObject({ rearmCount: 1 });
+    expect(events.filter(event => event.event === "push.queue_accepted" && event.clear === true).length).toBeGreaterThan(1);
+    expect(host.cleanup).toHaveLength(7);
+  });
+
+test("502 round2 invalid overlap clear retains the local clear timeout cause", async () => {
+  const host = fake({ overlaps: 1 });
+  host.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
+  host.runtime.deliveryTelemetry = async () => ({ sufficient: false, subscriptionCount: 1, sends: 1, acknowledgements: 0,
+    failures: 0, retryable: false, httpStatus: 0, clearAcknowledged: false, requestAlias: 1 });
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "invalid_evidence" }]);
+  const messages = privateQualificationFailureDiagnostic(error).map(entry => entry.message);
+  expect(messages).toContain("unowned notification overlapped the owned phase");
+  expect(messages).toContain("qualification androidPush delivery_timeout");
+});
+
 test("a post arriving during timeout cleanup is recorded but never turns the missed ask into a pass", async () => {
   const host = fake();
   const cleanup = host.runtime.cleanup;
@@ -1378,9 +1609,14 @@ test("a foreign post while an owned activity-stop notice shows re-arms without w
 
 test("one foreign post re-arms its phase visibly; a second overlap fails rather than hiding it", async () => {
   const once = fake({ overlaps: 1 });
+  once.runtime.beginDeliveryTelemetry = async phase => ({ lane: "androidPush", phase, after: 0, ordinal: 1 });
+  once.runtime.deliveryTelemetry = async () => ({ sufficient: true, subscriptionCount: 1, sends: 1, acknowledgements: 1,
+    failures: 0, retryable: false, httpStatus: 0, clearAcknowledged: true, requestAlias: 1 });
   expect((await runAndroidPush(once.input)).passed).toBe(true);
   expect(parseAndroidPushProgress(once.checkpoints.at(-1)).results.private_verified).toMatchObject({ rearmCount: 1, rearmReason: "unowned_notification_overlap", delivered: true });
   const twice = fake({ overlaps: 2 });
+  twice.runtime.beginDeliveryTelemetry = once.runtime.beginDeliveryTelemetry;
+  twice.runtime.deliveryTelemetry = once.runtime.deliveryTelemetry;
   await expect(runAndroidPush(twice.input)).rejects.toThrow("unowned notification overlapped");
   expect(parseAndroidPushProgress(twice.checkpoints.at(-1)).results.private_verified).toMatchObject({ rearmCount: 1, rearmReason: "unowned_notification_overlap", deliveryRearmCount: 0 });
   expect(twice.state()).toMatchObject({ started: false, device: baseline, browser: browserBaseline });
