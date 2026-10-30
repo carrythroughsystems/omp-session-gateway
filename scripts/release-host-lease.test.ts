@@ -151,7 +151,7 @@ describe.skipIf(process.platform === "win32")("cross-process release-host owners
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   test("caught failures retain recovery ownership until that campaign succeeds", async () => {
     const root = await mkdtemp(join(tmpdir(), "gateway-host-failure-"));

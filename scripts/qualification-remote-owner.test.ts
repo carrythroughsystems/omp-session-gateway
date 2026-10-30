@@ -7,36 +7,84 @@ import { assertRetainedMacCommandsSettled, runMacScript } from "./stable-qualifi
 const root = resolve(import.meta.dir, "..");
 const helper = join(import.meta.dir, "qualification-remote-owner.sh");
 
-test.skipIf(process.platform !== "darwin")("council498r1 owned OMP PTY keeps its reader in the foreground", async () => {
+async function ownedPtyReader(startupDelayMs: number, reader: string, timeoutSeconds = 10): Promise<{ exitCode: number; stderr: string }> {
   const home = await mkdtemp(join(tmpdir(), "remote-pty-owner-"));
   const id = "11111111-2222-4333-8444-555555555556";
   const child = Bun.spawn(["python3", "-c", `
 import os, pty, select, signal, sys, time
 pid, terminal = pty.fork()
 if pid == 0:
-    os.execv("/bin/bash", ["bash", *sys.argv[1:]])
-os.write(terminal, b"synthetic\\n")
-deadline = time.monotonic() + 2
-while time.monotonic() < deadline:
-    ended, status = os.waitpid(pid, os.WNOHANG)
-    if ended:
-        sys.exit(os.waitstatus_to_exitcode(status))
-    if select.select([terminal], [], [], .05)[0]:
-        try: os.read(terminal, 4096)
-        except OSError: pass
-os.kill(pid, signal.SIGTERM)
-os.waitpid(pid, 0)
-sys.exit(124)
-`, helper, "run", id, "/bin/bash", "-c", 'IFS= read -r line; [ "$line" = synthetic ]'],
-  { env: { ...process.env, HOME: home }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  try { expect(await child.exited).toBe(0); }
+    time.sleep(float(sys.argv[1]) / 1000)
+    os.execv("/bin/bash", ["bash", *sys.argv[3:]])
+reaped = False
+code = 124
+pending = b""
+ready = os.environ["PTY_READER_READY"].encode()
+sent = False
+try:
+    deadline = time.monotonic() + float(sys.argv[2])
+    while time.monotonic() < deadline:
+        ended, status = os.waitpid(pid, os.WNOHANG)
+        if ended:
+            reaped = True
+            code = os.waitstatus_to_exitcode(status)
+            break
+        if select.select([terminal], [], [], .05)[0]:
+            try: pending += os.read(terminal, 4096)
+            except OSError: pass
+            if not sent and ready in pending:
+                os.write(terminal, b"synthetic\\n")
+                sent = True
+            pending = pending[-(len(ready) - 1):]
+    if not reaped:
+        sys.stderr.write("PTY reader deadline exceeded\\n")
+finally:
+    # A stopped owner or its TERM trap can wait forever. Never block in waitpid(pid, 0).
+    for stop in (signal.SIGTERM, signal.SIGKILL):
+        if reaped:
+            break
+        try: os.kill(pid, stop)
+        except ProcessLookupError: pass
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            ended, status = os.waitpid(pid, os.WNOHANG)
+            if ended:
+                reaped = True
+                break
+            time.sleep(.05)
+    os.close(terminal)
+sys.exit(code)
+`, String(startupDelayMs), String(timeoutSeconds), helper, "run", id, "/bin/bash", "-c", reader],
+  { env: { ...process.env, HOME: home, PTY_READER_READY: "reader-ready" }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+  try {
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    return { exitCode, stderr };
+  }
   finally {
     const control = Bun.spawn(["/bin/bash", helper, "settle", id],
       { env: { ...process.env, HOME: home }, stdout: "ignore", stderr: "ignore" });
     await control.exited;
     await rm(home, { recursive: true, force: true });
   }
-}, 25_000);
+}
+
+// The supervisor has 10 s for startup/readiness plus at most 2 s to reap; settle has up to 20 s.
+test.skipIf(process.platform !== "darwin").each([0, 2_500])("council498r1 owned OMP PTY keeps its reader in the foreground (startup delay %i ms)", async startupDelayMs => {
+  // The read builtin emits the prompt only once it starts; prompts need no newline.
+  // Keep the marker in the environment so an echoed command cannot satisfy the handshake.
+  expect(await ownedPtyReader(startupDelayMs, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]')).toEqual({ exitCode: 0, stderr: "" });
+}, 40_000);
+
+test.skipIf(process.platform !== "darwin").each([0, 250])("PTY reader waits for its first output before writing (first output delay %i ms)", async firstOutputDelayMs => {
+  // Hold the first prompt through a one-second read: any input before readiness must fail.
+  expect(await ownedPtyReader(0, `/bin/sleep ${firstOutputDelayMs / 1000}; if IFS= read -r -t 1 line; then exit 91; fi; IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]`)).toEqual({ exitCode: 0, stderr: "" });
+}, 40_000);
+
+test.skipIf(process.platform !== "darwin")("PTY regression supervisor bounds termination of a stopped owner", async () => {
+  expect(await ownedPtyReader(0, 'kill -STOP "$PPID"; IFS= read -r line', 0.5)).toEqual({
+    exitCode: 124, stderr: "PTY reader deadline exceeded\n",
+  });
+}, 40_000);
 
 test("council498r1 every Mac command entry is owned or explicitly effect-free", async () => {
   const orchestrator = await readFile(join(import.meta.dir, "stable-qualification.ts"), "utf8");
