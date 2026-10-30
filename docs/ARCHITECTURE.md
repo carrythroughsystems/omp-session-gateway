@@ -7,7 +7,7 @@
 Stock mainline OMP `>= 18.1.20` owns its collaboration controller and per-host local registry.
 [PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). No fork, custom OMP build, or gateway-specific OMP plugin is required.
 The gateway remains a separate installation: enable `collab.autoStart` once, then start plain
-`omp`. Bun 1.4.0 and TUN-mode Tailscale Serve remain deployment prerequisites; see
+`omp`. Bun 1.4.4 and TUN-mode Tailscale Serve remain deployment prerequisites; see
 [OMP_INTEGRATION.md](OMP_INTEGRATION.md).
 
 `OmpHostReader` reads discovery entries under `~/.omp/run/collab-hosts` (or the configured

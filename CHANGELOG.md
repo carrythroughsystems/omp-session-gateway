@@ -8,6 +8,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Move the toolchain and next release's Bun runtime floor to 1.4.4 for current OMP compatibility
+  and the brotli, HTTP/3 QPACK and compromised emSign trust-store fixes; preserve published qualification.
+  `media:check` stays red until the README media is recaptured under 1.4.4 in a follow-up PR;
+  provenance is never hand-edited.
 - Refresh the README media with seeded Working and Idle activity on every directory row and
   plain-language board copy, and re-render the social preview and banner from committed sources
   (`bun run media:brand`) with the current repository and promise.
@@ -33,12 +37,17 @@ The format is based on Keep a Changelog and Semantic Versioning.
   expiry attribution and abort causes in Push failures, and reject fractional readiness durations.
 - Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
   forever, and stream qualification output into bounded, byte-exact private tails.
+- Keep qualification preflight effect-free, retain Windows cleanup failures across recovery,
+  preserve Pixel cleanup-failure origins, prevent ambiguous BrowserStack record DELETE replay,
+  and restore the Pixel under a fresh owner.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.
-- Let Android acceptance use a bounded, credential-free device-origin HTTPS health probe when
-  VPN-over-Wi-Fi drops ICMP. Retain which probe satisfied admission in private evidence, preserve
-  owned browser cleanup, and keep qualification preflights read-only and ICMP-only.
+- Let Android acceptance use a bounded top-level HTTPS health navigation of an owned tab when
+  the host drops ICMP, for example with macOS firewall stealth mode. Chrome's Local Network Access
+  blocks the same request from an opaque document. Retain which probe satisfied admission in
+  private evidence, preserve owned browser cleanup, and keep qualification preflights read-only
+  and ICMP-only.
 
 ## [v0.9.0] — 2026-10-27
 

@@ -637,7 +637,7 @@ describe("stable qualification read-only admission", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  test.each(["guard=unknown", "guard=refused:f", "guard=refused:" + "61".repeat(401), "guard=invalid:", "guard=passed\nextra"])("Mac admission rejects malformed reboot guard framing without receipts: %s", async guardLine => {
+  test.each(["guard=unknown", "guard=refused:", "guard=passed", "guard=invalid:", "guard=present\nextra"])("Mac admission rejects malformed reboot guard framing without receipts: %s", async guardLine => {
     const root = await mkdtemp(join(tmpdir(), "stable-preflight-guard-protocol-"));
     try {
       const fixture = await preflightFixture(root);
@@ -656,7 +656,7 @@ describe("stable qualification read-only admission", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  test.skipIf(process.platform !== "darwin" || process.arch !== "arm64").each(["busy", "not executable", "directory"] as const)("Mac admission reboot guard %s refuses without lane effects or receipts", async kind => {
+  test.skipIf(process.platform !== "darwin" || process.arch !== "arm64").each(["busy", "not executable", "directory"] as const)("503 Mac admission validates a %s reboot guard without invoking it", async kind => {
     const root = await mkdtemp(join(tmpdir(), "stable-preflight-guard-"));
     const home = join(root, "home");
     const guard = join(home, ".config", "omp-qualification", "reboot-guard");
@@ -665,7 +665,7 @@ describe("stable qualification read-only admission", () => {
     try {
       await mkdir(join(home, ".config", "omp-qualification"), { recursive: true });
       if (kind === "directory") await mkdir(guard);
-      else await writeFile(guard, "#!/bin/sh\nprintf '%s' " + "'" + busy + "'\nexit 1\n", { mode: kind === "busy" ? 0o700 : 0o600 });
+      else await writeFile(guard, "#!/bin/sh\nprintf 'invoked\\n' >>\"$HOME/guard-invoked\"\nprintf '%s' " + "'" + busy + "'\nexit 1\n", { mode: kind === "busy" ? 0o700 : 0o600 });
       const fixture = await preflightFixture(receipts);
       let laneCalls = 0;
       const refusal = async (): Promise<never> => { laneCalls += 1; throw new Error("unexpected lane effect"); };
@@ -681,13 +681,19 @@ describe("stable qualification read-only admission", () => {
           });
           const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
           if (code !== 0) throw new Error(stderr);
-          return stdout.trim();
+          return stdout.trim().replace(/^[^\r\n]+/u, MAC_ENV.OMP_STABLE_MAC_MODEL);
         },
       };
-      const error = await rejectionMessage(runStableQualification(["--tag", TAG], runtime, {
-        windows: lane, androidPush: lane, deviceCloud: lane, createPixelLease: () => createPixelLease(() => {}),
-      }));
-      expect(error).toBe("Stable preflight: " + (kind === "busy" ? "the host's reboot guard refused: " + busy.slice(0, 400) : "the host's reboot guard must be a regular, owner-executable file: " + guard));
+      if (kind === "busy") {
+        expect(await runStableQualification(["--preflight", "--tag", TAG], runtime, admissionLanes()))
+          .toMatchObject({ status: "preflight-passed", effects: "none; bounded read-only prerequisite probes only" });
+      } else {
+        const error = await rejectionMessage(runStableQualification(["--tag", TAG], runtime, {
+          windows: lane, androidPush: lane, deviceCloud: lane, createPixelLease: () => createPixelLease(() => {}),
+        }));
+        expect(error).toBe("Stable preflight: the host's reboot guard must be a regular, owner-executable file: " + guard);
+      }
+      expect(await Bun.file(join(home, "guard-invoked")).exists()).toBe(false);
       expect(laneCalls).toBe(0);
       expect(await Bun.file(join(receipts, "stable-qualification.json")).exists()).toBe(false);
     } finally {
@@ -2793,7 +2799,7 @@ test.skipIf(process.platform !== "darwin" || process.arch !== "arm64")("mainline
   await mkdir(bin, { recursive: true });
   // The helper pins its own PATH, so git cannot be stubbed; route the clone to a closed local port instead.
   await writeFile(join(home, ".gitconfig"), '[url "http://127.0.0.1:1/"]\n\tinsteadOf = https://github.com/can1357/oh-my-pi.git\n');
-  await writeFile(join(bin, "bun"), `#!/bin/sh\nif [ "$1" = --version ]; then echo 1.4.0; fi\nexit 0\n`, { mode: 0o755 });
+  await writeFile(join(bin, "bun"), `#!/bin/sh\nif [ "$1" = --version ]; then echo 1.4.4; fi\nexit 0\n`, { mode: 0o755 });
   try {
     const child = Bun.spawn(["/bin/bash", "scripts/qualify-macos-omp.sh", "build"], {
       cwd: REPOSITORY_ROOT,
@@ -2804,7 +2810,7 @@ test.skipIf(process.platform !== "darwin" || process.arch !== "arm64")("mainline
         OMP_PIN_SOURCE_COMMIT: "a".repeat(40),
         OMP_PIN_SOURCE_TREE: "b".repeat(40),
         OMP_PIN_VERSION: "0.0.0",
-        OMP_PIN_BUN_VERSION: "1.4.0",
+        OMP_PIN_BUN_VERSION: "1.4.4",
         OMP_PIN_NATIVE_TARBALL_SHA256: "c".repeat(64),
         OMP_PIN_NATIVE_BINARY_SHA256: "d".repeat(64),
         OMP_QUAL_SESSION_LABEL: "synthetic",

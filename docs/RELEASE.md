@@ -18,7 +18,7 @@ predecessor rollback boundaries, see [Upgrade and rollback](UPGRADE_ROLLBACK.md)
 This sequence published v0.5.0 (#222–#225) and v0.5.1 (#227–#230). Each step is a separate effect;
 a candidate, a passed receipt, or an approved lock never promotes itself. Work from a clean checkout
 of `main` that matches `origin/main` (`qualify:stable` refuses detached or unpublished commits), with
-pinned Bun `1.4.0` first on `PATH`.
+pinned Bun `1.4.4` first on `PATH`.
 
 The manual path requires an explicit maintainer decision for scope/publication, live qualification
 and installed-byte smoke. The standing routine driver below already has authority for these steps
@@ -252,7 +252,7 @@ not a release-bot self-upgrade. No main changes may land between prepare and app
 ### Repository transfer window (Studio driver)
 
 The installed LaunchAgent is `~/Library/LaunchAgents/com.omp.gateway-release-driver.plist`,
-working in `~/Development/omp-session-gateway` as `gwops`. It invokes pinned Bun 1.4.0 with
+working in `~/Development/omp-session-gateway` as `gwops`. It invokes pinned Bun 1.4.4 with
 `scripts/release-driver.ts tick` every 300 seconds. The repository is the code constant
 `REPOSITORY`, not a plist argument or a gh host setting. The installed checkout does not follow
 main automatically. Its last inspected commit was `d70791bf490e4e38ca743b4738b856784b8ebc4b`.
@@ -262,7 +262,7 @@ main automatically. Its last inspected commit was `d70791bf490e4e38ca743b4738b85
    and unload the timer only after all work is drained:
 
    ```sh
-   export PATH="$HOME/.omp/lane-toolchain/bun-1.4.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+   export PATH="$HOME/.omp/lane-toolchain/bun-1.4.4/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
    state="$HOME/.local/state/omp-session-gateway/release-driver"
    touch "$state/disabled"
    jq '{phase,candidate,intent,job}' "$state/state.json"
@@ -308,6 +308,61 @@ orders/owned PRs. It also addresses comments, PR creation/merges and pushes with
 write redirect behavior is not a cutover guarantee. No state/receipt rewriting is needed for a
 drained driver: historical URLs are evidence, not dispatch targets.
 
+### Bun 1.4.4 host preparation (before the next campaign)
+
+This repository move is not a host deployment or a new qualification. Keep the Studio driver
+disabled and unloaded, with no campaign, worker or shared lease active, throughout toolchain and
+checkout preparation. Do not mutate a pending release's runtime or policy.
+
+For a published-byte smoke of a pre-move release such as v0.9.0, use a pre-move harness checkout
+under Bun 1.4.0, following the [matching-release recovery-checkout pattern](#post-release-local-installation-smoke).
+`post-release-smoke` derives the expected archive runtime and required running Bun from that
+checkout's `packageManager`, not from the release tag alone.
+
+1. As Studio `gwops`, install the official Darwin-arm64 binary at
+   `~/.omp/lane-toolchain/bun-1.4.4/bin/bun`, verifying the downloaded zip against the same
+   release's `SHASUMS256.txt` before extracting it. Seed the persistent runtime used by Android
+   and Windows controller commands from that verified binary, rather than waiting for a smoke:
+
+   ```sh
+   toolchain="$HOME/.omp/lane-toolchain/bun-1.4.4"
+   download="$(mktemp -d)"
+   (
+     set -euo pipefail
+     persistent="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4"
+     cd "$download" &&
+     gh release download bun-v1.4.4 -R oven-sh/bun \
+       -p bun-darwin-aarch64.zip -p SHASUMS256.txt &&
+     awk '$2 == "bun-darwin-aarch64.zip" { print }' SHASUMS256.txt | shasum -a 256 -c &&
+     unzip -q bun-darwin-aarch64.zip &&
+     install -d "$toolchain/bin" &&
+     install -m 755 bun-darwin-aarch64/bun "$toolchain/bin/bun" &&
+     test "$("$toolchain/bin/bun" --version)" = 1.4.4 &&
+     install -d -m 700 "$persistent" &&
+     cp "$toolchain/bin/bun" "$persistent/bun" &&
+     chmod 0755 "$persistent/bun" &&
+     test "$("$persistent/bun" --version)" = 1.4.4
+   ) && rm -rf "$download" && export PATH="$toolchain/bin:$PATH"
+   ```
+
+2. Advance the drained checkout through the Studio installation procedure below, install its
+   frozen dependencies under 1.4.4, and **regenerate the installed driver plist from
+   `scripts/com.omp.gateway-release-driver.plist`**. Merely updating the checkout leaves the old
+   installed executable and PATH in place. Preserve the actual retained-Mac target and reviewed
+   dry-run setting, inspect the read-only plan, then reload the regenerated plist only after the
+   remaining prerequisites agree.
+3. Before the next campaign, satisfy the retained Mac's `~/.bun/bin/bun` and the Linux provisioner's
+   runtime from `UPSTREAM.lock.json.bunVersion`, and the Windows guest runtime and downloaded-zip
+   checksum from `scripts/windows-qualification-pins.json` (`bunVersion`/`bunSha256`). Require their
+   observed versions to agree with the current pin; an older lane installation is not inherited
+   qualification. The next signed candidate must requalify every lane under 1.4.4.
+4. The published-byte smoke verifies the prepared persistent Bun at
+   `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun` before installing the gateway, copying its
+   running Bun there if absent. That persistent copy is distinct from the driver's lane toolchain;
+   keep the service's exact installed Bun path available. Installation re-points the service
+   definition to that Bun, and gateway rollback keeps it
+   ([upgrade and rollback](UPGRADE_ROLLBACK.md)). Published v0.9.0 retains its 1.4.0 qualification.
+
 ### Studio installation (run as gwops after integration)
 
 The bot account is a repository collaborator with write access. Its registered Studio SSH signing
@@ -331,7 +386,7 @@ worker, detached job or host lease remains active: let it finish and retain its 
 owner requires its documented recovery; never delete the lease to make installation proceed.
 
 ```sh
-export PATH="$HOME/.omp/lane-toolchain/bun-1.4.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$HOME/.omp/lane-toolchain/bun-1.4.4/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 state="$HOME/.local/state/omp-session-gateway/release-driver"
 install -d -m 700 "$state"
 touch "$state/disabled"
@@ -954,7 +1009,7 @@ listener and successful doctor, and an unchanged full SHA-256 readiness-token di
 non-identifying `guest reboot changed`, `console login`, and `readiness token preserved` verdicts
 must all be `yes` and are recorded as booleans in the schema-3 Mac evidence.
 On a bare-metal automatic-login host, FileVault must be off. The account needs
-Bun 1.4.0 in `~/.bun/bin`, **stock OMP >=18.1.20 on PATH**, the lane's command-line tools, and a
+Bun 1.4.4 in `~/.bun/bin`, **stock OMP >=18.1.20 on PATH**, the lane's command-line tools, and a
 user-owned TUN-mode Tailscale node. Doctor checks OMP compatibility during install, before the
 `omp-build` lane creates its separate pinned fixture. Install the stock coding-agent package as
 the qualification account, using `packageVersions["@oh-my-pi/pi-coding-agent"]` from
@@ -970,15 +1025,17 @@ path rather than putting `~/qual-tools` ahead of system tools.
 
 On a shared host, the qualification account may provide the optional, host-owned
 `$HOME/.config/omp-qualification/reboot-guard`. It must be a regular file with its owner's
-execute bit set and executable by that account. Both preflights run it without arguments on
-the same fixed remote PATH, before lane effects; persistence runs it again immediately before
+execute bit set and executable by that account. Both preflights validate only its presence,
+type and owner-execute permission; they never execute host-owned guard code. Persistence runs
+it without arguments on the fixed remote PATH only at the owned gate immediately before
 `shutdown -r now`. A missing guard leaves the existing commands unchanged. A present but
 invalid guard refuses preflight and names its exact path.
 
-The guard must be a read-only, prompt check of the host's own workload state: exit zero only
+The guard should be a read-only, prompt check of the host's own workload state: exit zero only
 when reboot is safe, or exit nonzero with a diagnostic explaining why it is not. Refusal reports
 `the host's reboot guard refused: <output>` using the first 400 bytes of combined stdout/stderr;
-no shutdown is invoked. Do not put credentials in diagnostics. Qualification does not install
+the persistence lane fails and no shutdown is invoked. A busy executable guard does not refuse
+read-only admission. Do not put credentials in diagnostics. Qualification does not install
 the guard, know which other workloads run, wait for them, or reserve the host after a successful
 check. The host owner must coordinate workload starts to avoid a race after that check.
 
@@ -1154,6 +1211,15 @@ Later successful cleanup does not erase earlier cleanup failures. Negative clean
 facts, remaining resources, persistence failure or any unsettled remote owner block containment,
 same-candidate eligibility and automatic retirement. Unrestored cloud/Push fixtures retain their
 Mac directory and owner records rather than being destroyed by unrelated Mac teardown.
+Windows cleanup wraps transport errors as `windowsCleanup/containment/containment_unproven`
+with `operation: unknown` and `cleanupVerified: false`, retaining the original typed error only
+as a private cause. Pixel-lease-projected restoration failures already carry negative cleanup
+evidence and retain their original IDs, so dependent refusals keep their collateral origins.
+Its optional private `cleanupFailed` progress fact survives later successful
+resource destruction and is returned in cleanup evidence; it is independent of `cleanupRequired`,
+which may clear after resources are contained. Inline Windows Pixel restoration has a fresh
+ten-minute owner and the campaign's failure allocator, rather than the cancelled primary owner.
+It uses the same fresh-owner policy as the supervisor's thirty-minute containment.
 
 **Deferred installation-state limitation (P2):** readiness uninstall retains the gateway token and
 runtime activation history/current pointer. This gate does not capture, digest-compare or isolate
@@ -1331,8 +1397,11 @@ JSON or restoration approval; a checkpoint-write failure still stops effects.
 When inventory is missing, first verify record/all-six-log absence before reporting it unavailable;
 XML/text artifact 404 bodies and the reviewed media-403 denial are raw-scanned and hostname-censused
 as absence evidence without forcing JSON unless their Content-Type declares it.
-The `audited`, `recordDeleted`, and `recordRemoved` milestones are monotonic. A retry after API
-deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
+The `audited`, `recordRemovalStarted`, `recordDeleted`, and `recordRemoved` milestones are monotonic.
+The private `recordRemovalStarted` claim is durable before dispatching DELETE. A fresh cleanup
+runtime never replays a claimed DELETE, even after a lost response; it performs the existing
+bounded record/log/artifact absence checks and fails if absence cannot be verified. A retry after
+API deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
 from every retained surface, before or after the audit and whatever their HTTP status, are scanned
 before rejection: raw first, then strict canonical JSON and reference discovery for declared JSON.
 This includes rejected DELETE bodies, signed-artifact errors and transient 5xx bodies before a GET
@@ -1357,7 +1426,7 @@ before any new attempt, never guess an ID, discard progress or retry creation bl
 restore any resource/checkpoint sets `pixelUnrestored` and blocks later Pixel lanes.
 
 After the lead confirms no campaign, Pixel operation or retained-Mac use overlaps, select the
-verified Bun 1.4.0 binary on `PATH` (not a newer workstation Bun), then run:
+verified Bun 1.4.4 binary on `PATH` (not a newer workstation Bun), then run:
 
 ```sh
 bun scripts/device-cloud-development.ts \
@@ -1459,25 +1528,24 @@ eligibility is checked before touching the device; protected, soak, old, missing
 non-Control fixtures fail closed.
 
 The Android acceptance journey admits device-origin reachability when ICMP succeeds **or**, after
-ICMP loss, an owned Chrome/CDP HTTPS probe succeeds. The latter performs a TLS-validated GET of
-`/api/v1/health` on the exact configured gateway authority, with cache bypass and no credentials.
-It uses a verified opaque disposable document because Chromium's `includeCredentials: false`
-means same-origin credentials, not unconditional omission. That document's restrictive CSP also
-rejects redirects outside the HTTPS gateway authority. The probe does not navigate the PWA or
-inspect/log response bodies; it closes the returned stream. Its execution deadline is 15 seconds,
-followed by the existing bounded owned target/stream/forward cleanup; late responses or unproven
-cleanup cannot admit the journey.
+ICMP loss, an owned Chrome/CDP top-level HTTPS health navigation succeeds. The host can drop ICMP,
+for example when the macOS application firewall uses stealth mode. Chrome's Local Network Access
+blocks the same tailnet request from an opaque `about:blank` document, so the fallback navigates
+only its owned disposable tab to `/api/v1/health` on the validated, credential-free HTTPS origin.
+Admission requires no navigation error, that exact committed URL (not a redirect or interstitial),
+a 2xx navigation `responseStatus`, and a parsed gateway health body whose `status` is `ready` or
+`degraded`; discovery readiness does not change network reachability. It fetches no capability and
+does not log response bodies or navigate the user's PWA tab. The service worker bypasses both
+navigations and `/api/`, and the health response is `no-store`, so the PWA cache is untouched.
+Its execution deadline is 15 seconds, followed by the existing bounded owned target/forward cleanup;
+late responses or unproven cleanup cannot admit the journey.
 
 Private Android stderr contains a closed `android-reachability` record: the ICMP and HTTPS
 observations and `satisfiedBy` (`icmp`, `https`, or `null`). ICMP loss alone is an observation, not
 a refusal, when the HTTPS alternative succeeds. Both failed probes still refuse before the
 acceptance journey's radio mutations. An adb transport failure remains fatal. No VPN, DNS, firewall,
 credential, or TLS-validation policy is changed. Qualification preflights remain ICMP-only and
-read-only; they never opt into the browser-backed alternative. The CDP
-[Network schema](https://github.com/ChromeDevTools/devtools-protocol/blob/7245ec551bc9d450170193456ab3965bb7e716cb/pdl/domains/Network.pdl)
-and Chromium's
-[resource loader](https://github.com/chromium/chromium/blob/30466547ef3ffed6e21355b0bb457b22a8a4d88e/content/browser/devtools/protocol/devtools_network_resource_loader.cc)
-define the credential/cache behavior used by this probe.
+read-only; they never opt into the browser-backed alternative.
 
 Normal success and failure kill only that tmux session, wait for registry revocation, remove the
 fixture only when its per-run ownership marker still matches, and delete private staging. The stable

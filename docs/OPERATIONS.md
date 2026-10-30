@@ -3,7 +3,7 @@
 ## 1. One-time prerequisites
 
 - Stock mainline OMP `>= 18.1.20` on `PATH`.
-- Bun `1.4.0` installed at a persistent path for the gateway service.
+- Bun `1.4.4` installed at a persistent path for the gateway service.
 - Tailscale installed and signed in to the same tailnet on the gateway host and your phone, with TUN-mode networking on the gateway host (not userspace networking).
 - Tailnet HTTPS and MagicDNS enabled for Tailscale Serve.
 - A tailnet access policy granting only your intended users HTTPS access to the gateway host (example in [`../examples/tailscale-policy.hujson`](../examples/tailscale-policy.hujson)).
@@ -19,7 +19,7 @@ Download the latest release archive from [GitHub Releases](https://github.com/ca
 **Warnings before you run `install`:**
 - If you are upgrading from v0.3.0 or earlier (releases that used `publisher-token`), stop and unregister that service with its own CLI first ([UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md#recover-across-the-v030-boundary)).
 - Run as your normal desktop user, never `root`.
-- Keep `bun` at the persistent path used during `install`; the user service executes that exact path.
+- Keep Bun `1.4.4` at the persistent path used during `install`; the user service executes that exact path.
 
 From the directory containing the verified archive on Linux or macOS, replace the example origin and login with your exact Tailscale HTTPS origin and login:
 
