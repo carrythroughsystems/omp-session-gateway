@@ -413,6 +413,10 @@ GH_CONFIG_DIR="$HOME/.config/gh-release-bot" gh auth status
 # Must print alphastorm-release; do not copy the founder's gh configuration.
 GH_CONFIG_DIR="$HOME/.config/gh-release-bot" gh api user --jq .login
 bun scripts/release-driver.ts plan
+# One-time cleanup of checkouts retained by older driver versions; keep admission disabled.
+# Review wouldRemove paths, local branches and estimated bytes before applying.
+bun scripts/release-driver.ts prune
+OMP_RELEASE_DRY_RUN=0 bun scripts/release-driver.ts prune --apply
 bun --eval 'const template = await Bun.file("scripts/com.omp.gateway-release-driver.plist").text(); await Bun.write(process.env.HOME + "/Library/LaunchAgents/com.omp.gateway-release-driver.plist", template.replaceAll("@HOME@", process.env.HOME));'
 chmod 600 "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
 # Replace this documentation target with the retained guest's actual SSH target.
@@ -469,6 +473,27 @@ Windows retains file sync and atomic rename without the unsupported directory fs
 mutex excludes overlapping ticks. Deterministic release branches, tags, comment markers and tmux
 job ids reconcile a provider write accepted just before a process crash. Plan does not create any
 of these. Bot-owned worktrees under `work/` leave the operator checkout's working tree alone.
+After the `close` transition is durably saved, the driver prunes other releases' recognized
+`work/` checkouts and older `vX.Y.Z-rebuild` checkouts. Every candidate, retry and request family
+for the saved state's current version stays, including after close; it becomes eligible only
+after a later version is selected (automatic pruning waits for that release's close).
+Each removal runs `git worktree remove --force`,
+then `git worktree prune`, then deletes only the local `release-driver/...` branch it held.
+Remote branches and tags are unchanged. A pruning failure becomes a bounded tick warning in
+`driver.log`; it never undoes the saved close or prevents its progress comment.
+
+`bun scripts/release-driver.ts prune` previews that same cleanup without writing state, a mutex,
+logs or Git metadata. Its JSON lists `wouldRemove` paths, local branches and estimated logical
+`bytes` (symlinks are counted, not followed), plus `kept` paths and reasons.
+`bun scripts/release-driver.ts prune --apply` performs it under the tick mutex on the pinned
+Studio toolchain; `OMP_RELEASE_DRY_RUN` must be off. Both modes refuse while admission is armed
+(no `disabled` file) and any driver tmux job is alive. With admission disabled, unrelated cleanup
+is allowed, but a live job's checkout still stays. Pending intent references and non-terminal
+job specifications protect their checkouts even when no session survives; a result without its
+durable exit is not terminal. Missing state or an unreadable job/session inventory refuses cleanup.
+Unrecognized checkouts, work-directory symlinks and checkouts outside `work/` are never removed.
+Neither mode changes `jobs/` evidence, `state.json`, `readiness.json` or the release-host lease.
+
 Intent patches carry explicit `clear` field names for deletion, never `undefined` values that JSON
 would discard. One patch applicator handles first execution and persisted replay; a meta-test covers
 every patch-emitting operation and proves JSON round-trip equality and identical application.
