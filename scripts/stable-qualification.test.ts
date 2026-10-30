@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import * as filesystem from "node:fs/promises";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2307,6 +2308,84 @@ test.skipIf(process.platform === "win32")("bound read-only preflight failure wri
     expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test.skipIf(process.platform === "win32").each(["preflight", "campaign-admission"] as const)(
+  "510 failed %s outcome publication preserves the original typed failure and private cause", async mode => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "stable-outcome-masking-")));
+    try {
+      const executionPath = join(root, "execution.json"), blocked = join(root, "blocked");
+      await writeFile(executionPath, JSON.stringify(receiptExecution()), { mode: 0o600 });
+      await writeFile(blocked, "not a directory", { mode: 0o600 });
+      const fixture = await preflightFixture(root), lanes = admissionLanes();
+      const cause = new Error("synthetic private qualification admission failure");
+      const original = new QualificationFailure({ id: 47, lane: "windows", step: "preflight",
+        class: "infra_transient", reason: "connection_timeout", operation: "read_only", elapsedMs: 1,
+        observations: { transportFailure: true } }, { cause });
+      let admitted = false, leased = false;
+      const error = await runStableQualification(["--tag", TAG, "--execution-file", executionPath,
+        ...(mode === "preflight" ? ["--preflight"] : [])], {
+        ...fixture, environment: { ...fixture.environment, OMP_STABLE_OUTCOME_FILE: join(blocked, "outcome.json") },
+        withReleaseLease: async (_owner, _action) => { leased = true; throw new Error("unexpected release lease"); },
+      }, { ...lanes, windows: { ...lanes.windows, preflight: async () => { admitted = true; throw original; } } }).catch(error => error);
+      expect(admitted).toBe(true); expect(leased).toBe(false);
+      expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toEqual(expect.arrayContaining([
+        cause.message, "qualification outcome file is missing, unsafe or invalid",
+      ]));
+      expect(normalizeQualificationFailures(error)).toEqual([
+        original.evidence, expect.objectContaining({ reason: "unclassified_failure" }),
+      ]);
+      expect(await Bun.file(join(root, "stable-qualification.json")).exists()).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test.skipIf(process.platform === "win32").each(["receipt-read", "outcome-write"] as const)(
+  "510 terminal %s rejection preserves the original campaign failure and private GCM sample", async stage => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "stable-terminal-masking-")));
+    const path = join(root, "stable-qualification.json"), receipt = summarizedReceipt();
+    let reading: ReturnType<typeof spyOn> | undefined;
+    try {
+      receipt.completedAt = new Date().toISOString();
+      receipt.lanes.deviceCloud.evidence!.progress = { epoch: "11111111-2222-4333-8444-555555555555",
+        cleanupRequired: false, resources: [], results: {} };
+      await createReceiptPersister(path, receipt)();
+      const priorDigest = digest(await readFile(path, "utf8")), executionPath = join(root, "execution.json");
+      const next: QualificationExecution = { ...receiptExecution(), campaignAttempt: 1, retryPlanSha256: "d".repeat(64) };
+      await writeFile(executionPath, JSON.stringify(next), { mode: 0o600 });
+      const blocked = join(root, "blocked"); await writeFile(blocked, "not a directory", { mode: 0o600 });
+      const fixture = await preflightFixture(root);
+      const sample = new Error("GcmService censored sample: Is client connected: false; Reconnect Scheduler Alarm: OFF");
+      const original = new QualificationFailure({ id: 47, lane: "windows", step: "preflight",
+        class: "infra_transient", reason: "connection_timeout", operation: "read_only", elapsedMs: 1,
+        observations: { transportFailure: true } }, { cause: sample });
+      const publication = new Error("synthetic terminal receipt read failed");
+      let admitted = false, readFailed = false;
+      const originalRead = filesystem.readFile;
+      if (stage === "receipt-read") reading = spyOn(filesystem, "readFile").mockImplementation((async (...args: Parameters<typeof readFile>) => {
+        if (admitted && args[0] === path && args[1] === undefined) { readFailed = true; throw publication; }
+        return originalRead(...args);
+      }) as typeof readFile);
+      const error = await runStableQualification(["--tag", TAG, "--execution-file", executionPath,
+        "--retry-receipt-sha256", priorDigest], {
+        ...fixture, environment: { ...fixture.environment, OMP_STABLE_OUTCOME_FILE:
+          stage === "outcome-write" ? join(blocked, "outcome.json") : join(root, "outcome.json") },
+      }, { ...resumeModules, deviceCloud: { ...resumeModules.deviceCloud, preflight: async () => {
+        admitted = true; throw original;
+      } } }).catch(error => error);
+      expect(admitted).toBe(true); expect(readFailed).toBe(stage === "receipt-read");
+      expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toEqual(expect.arrayContaining([
+        sample.message, stage === "receipt-read" ? publication.message : "qualification outcome file is missing, unsafe or invalid",
+      ]));
+      expect(normalizeQualificationFailures(error)).toEqual([
+        expect.objectContaining({ lane: "campaign", step: "admission", reason: "connection_timeout" }),
+        expect.objectContaining({ reason: "unclassified_failure" }),
+      ]);
+      const saved = JSON.parse(await readFile(path, "utf8"));
+      expect(saved.status).toBe("failed");
+      expect(saved.failureSummary.failures).toMatchObject([{ lane: "campaign", reason: "connection_timeout" }]);
+      expect(JSON.stringify(saved)).not.toContain(sample.message);
+    } finally { reading?.mockRestore(); await rm(root, { recursive: true, force: true }); }
+  });
+
 test.each(["missing lane record", "passed root owner", "unrepresented failed lane", "extra summary root"] as const)(
   "council R2 receipt graph rejects %s", variant => {
     const receipt = summarizedReceipt();

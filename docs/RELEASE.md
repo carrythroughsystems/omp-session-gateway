@@ -1029,7 +1029,10 @@ connected client proceeds without radio changes. A disconnected client gets exac
 `svc wifi disable`, two-second pause, `svc wifi enable` cycle, then at most 30 seconds to report
 connected. Individual ADB reads/changes are capped at ten seconds and the execution deadline
 still applies independently of that reconnect window: late output cannot replace an in-window
-observation. No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
+observation. Each radio-cycle checkpoint is capped at 30 seconds or the remaining execution
+deadline, whichever is shorter, and observes cancellation. Until enable succeeds, a failed
+cycle reports its operation as unknown and existing Pixel cleanup restores the captured radios.
+No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
 automatic. Any malformed or duplicate connection line, including a label-prefix suffix or
 case/spacing variant beside a valid line, fails as invalid evidence without cycling
 Wi-Fi. In-window disconnected evidence after the bound fails before any ask as `gcm_disconnected`
@@ -1114,7 +1117,8 @@ Private messages are limited to 4 KiB and stacks to 16 KiB; oversized fields are
 scanning, with `truncated: true`. Redaction is flagged with `redacted: true`. The complete compact
 stderr diagnostic and browser file each stay within the driver's 256-KiB retention ceiling, with
 an explicit terminal marker when the cause graph exceeds its byte budget.
-The browser file selects the deepest retained CDP cause and carries redaction/truncation flags
+The browser file selects the deepest retained CDP cause, or the deepest non-synthesized leaf
+when there is no CDP cause (equal-depth leaves keep the earlier primary failure), and carries redaction/truncation flags
 from the entire chain, including omitted siblings. Ordinary errors remain privately reachable
 through deadline, persistence and containment conversions. Nested readiness failures receive the
 same lane remapping and final delivery counters as single failures. These mode-0600 diagnostics
@@ -1139,6 +1143,8 @@ The Push owner retains its transient baseline, while the orchestrator's mirror a
 a durable sidecar write. Even a failed initial checkpoint or repeated restore checkpoint failures
 cannot skip subsequent restoration owners. Failed cleanup persistence cannot claim baseline
 restoration; terminal write failures preserve the original typed cleanup identity and Pixel poisoning.
+Preflight/admission outcome publication and campaign terminal persistence retain both the original
+qualification failure and any publication failure as aggregate siblings, including private causes.
 Later successful cleanup does not erase earlier cleanup failures. Negative cleanup/reconciliation
 facts, remaining resources, persistence failure or any unsettled remote owner block containment,
 same-candidate eligibility and automatic retirement. Unrestored cloud/Push fixtures retain their
