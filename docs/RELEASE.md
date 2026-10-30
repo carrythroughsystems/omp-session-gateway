@@ -314,26 +314,35 @@ This repository move is not a host deployment or a new qualification. Keep the S
 disabled and unloaded, with no campaign, worker or shared lease active, throughout toolchain and
 checkout preparation. Do not mutate a pending release's runtime or policy.
 
+For a published-byte smoke of a pre-move release such as v0.9.0, use a pre-move harness checkout
+under Bun 1.4.0, following the [matching-release recovery-checkout pattern](#post-release-local-installation-smoke).
+`post-release-smoke` derives the expected archive runtime and required running Bun from that
+checkout's `packageManager`, not from the release tag alone.
+
 1. As Studio `gwops`, install the official Darwin-arm64 binary at
    `~/.omp/lane-toolchain/bun-1.4.4/bin/bun`, verifying the downloaded zip against the same
-   release's `SHASUMS256.txt` before extracting it:
+   release's `SHASUMS256.txt` before extracting it. Seed the persistent runtime used by Android
+   and Windows controller commands from that verified binary, rather than waiting for a smoke:
 
    ```sh
-   set -euo pipefail
    toolchain="$HOME/.omp/lane-toolchain/bun-1.4.4"
    download="$(mktemp -d)"
    (
-     cd "$download"
+     set -euo pipefail
+     persistent="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4"
+     cd "$download" &&
      gh release download bun-v1.4.4 -R oven-sh/bun \
-       -p bun-darwin-aarch64.zip -p SHASUMS256.txt
-     awk '$2 == "bun-darwin-aarch64.zip" { print }' SHASUMS256.txt | shasum -a 256 -c
-     unzip -q bun-darwin-aarch64.zip
-     install -d "$toolchain/bin"
-     install -m 755 bun-darwin-aarch64/bun "$toolchain/bin/bun"
-     test "$("$toolchain/bin/bun" --version)" = 1.4.4
-   )
-   rm -rf "$download"
-   export PATH="$toolchain/bin:$PATH"
+       -p bun-darwin-aarch64.zip -p SHASUMS256.txt &&
+     awk '$2 == "bun-darwin-aarch64.zip" { print }' SHASUMS256.txt | shasum -a 256 -c &&
+     unzip -q bun-darwin-aarch64.zip &&
+     install -d "$toolchain/bin" &&
+     install -m 755 bun-darwin-aarch64/bun "$toolchain/bin/bun" &&
+     test "$("$toolchain/bin/bun" --version)" = 1.4.4 &&
+     install -d -m 700 "$persistent" &&
+     cp "$toolchain/bin/bun" "$persistent/bun" &&
+     chmod 0755 "$persistent/bun" &&
+     test "$("$persistent/bun" --version)" = 1.4.4
+   ) && rm -rf "$download" && export PATH="$toolchain/bin:$PATH"
    ```
 
 2. Advance the drained checkout through the Studio installation procedure below, install its
@@ -347,11 +356,12 @@ checkout preparation. Do not mutate a pending release's runtime or policy.
    checksum from `scripts/windows-qualification-pins.json` (`bunVersion`/`bunSha256`). Require their
    observed versions to agree with the current pin; an older lane installation is not inherited
    qualification. The next signed candidate must requalify every lane under 1.4.4.
-4. The published-byte smoke copies and verifies its running Bun at
-   `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun` before installing the gateway. That persistent
-   copy is distinct from the driver's lane toolchain; keep the service's exact installed Bun path
-   available. Installation re-points the service definition to that Bun, and gateway rollback keeps
-   it ([upgrade and rollback](UPGRADE_ROLLBACK.md)). Published v0.9.0 retains its 1.4.0 qualification.
+4. The published-byte smoke verifies the prepared persistent Bun at
+   `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun` before installing the gateway, copying its
+   running Bun there if absent. That persistent copy is distinct from the driver's lane toolchain;
+   keep the service's exact installed Bun path available. Installation re-points the service
+   definition to that Bun, and gateway rollback keeps it
+   ([upgrade and rollback](UPGRADE_ROLLBACK.md)). Published v0.9.0 retains its 1.4.0 qualification.
 
 ### Studio installation (run as gwops after integration)
 
