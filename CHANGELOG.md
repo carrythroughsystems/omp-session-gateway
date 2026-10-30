@@ -23,6 +23,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Keep directory coverage and launch feedback consistent through loading hosts, SSE keepalives,
   terminal session states, and cancelled notification or resume launches; retain the mounted
   generation on View-to-Control and prevent delayed transitions from remounting disposed shells.
+- Require readiness proof on execution-bearing passed qualification receipts, preserve controller
+  expiry attribution and abort causes in Push failures, and reject fractional readiness durations.
 - Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
   forever, and stream qualification output into bounded, byte-exact private tails.
 - Retain bounded private smoke-child output and original failure causes before release-driver
