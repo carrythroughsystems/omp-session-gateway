@@ -1,10 +1,13 @@
 # Release status
 
 <!-- release-generate:current:start -->
-## Mainline v0.9.0 — qualified; stable publication pending
+## Mainline v0.9.0 — published stable
 
 <!-- release-generate:publication:start -->
-**Updated:** 2026-10-27. v0.9.0 is qualified for stable promotion; publication is pending. Published v0.8.0 remains GitHub Latest.
+**Updated:** 2026-10-30. [v0.9.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.9.0) was published at **2026-10-27T01:50:32Z** and is GitHub Latest. [Signed release workflow](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/40434650551).
+
+**Stable source:** `07ef3bb19a9640a241beb04a63f6e1a753caebda`.<br>
+**Stable archive SHA-256:** `91e55b25f5234b6f532f94c4d5bd73ed853a88757fa78bbb9feb66b76e7f208a`.
 <!-- release-generate:publication:end -->
 
 **Candidate:** [v0.9.0-prealpha.7](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.9.0-prealpha.7).<br>
@@ -636,7 +639,45 @@ Schema 3 campaign 2026-10-27T00:30:44.034Z–2026-10-27T01:20:14.105Z; orchestra
 **Runtime equivalence gate:** the approval driver must compare a clean stable-channel build with the qualified candidate before merging. The receipt does not prove that later build comparison. Only release-info.json, SBOM.spdx.json, STABLE_RELEASE.lock.json and schemas/stable-release.schema.json may differ.
 
 <!-- release-generate:smoke:start -->
-Published-byte smoke is pending stable publication.
+### Published-byte Studio/Pixel verification
+
+Recorded 2026-10-30. Published-byte smoke passed against the stable source and digest above. Stock OMP 18.12.5, binary SHA-256 `49c1fc544e893b0fa2218bc5a1222935e4dacf50147b289ce0582f86d2da4a66`; app asset `/assets/app.7727447fff65.js`.
+
+```json
+{
+  "gateway": {
+    "installed": true,
+    "configPreserved": true,
+    "doctorChecks": 18
+  },
+  "tailscaleServe": {
+    "changed": false,
+    "unrelatedMappingsPreserved": true
+  },
+  "android": {
+    "viewReadOnly": true,
+    "controlWritable": true,
+    "capabilitySinksClean": true,
+    "samePageRecovery": true,
+    "installedWebApk": true
+  },
+  "leaveInstalled": {
+    "gateway": true,
+    "mainlineOmp": true,
+    "webApk": true
+  },
+  "status": {
+    "installed": true,
+    "active": true,
+    "ready": true,
+    "diverged": false,
+    "activeVersion": "0.9.0-ba5bb66d6e1a",
+    "serviceVersion": "0.9.0-ba5bb66d6e1a"
+  }
+}
+```
+
+This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
 <!-- release-generate:smoke:end -->
 <!-- release-generate:current:end -->
 
