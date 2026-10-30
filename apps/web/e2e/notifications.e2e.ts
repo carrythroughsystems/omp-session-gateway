@@ -34,6 +34,41 @@ function session(instanceId: string, overrides: Partial<SessionMetadata> = {}): 
   };
 }
 
+async function holdDirectoryEvents(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    // Gate real metadata delivery, not network routing: a service-worker-controlled WebKit page
+    // can bypass Playwright's page routes after the first navigation.
+    const add = EventSource.prototype.addEventListener;
+    const queued: (() => void)[] = [];
+    let held = true;
+    EventSource.prototype.addEventListener = function (
+      this: EventSource, type: string, listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ): void {
+      if (listener === null || !["snapshot", "session_upsert", "session_remove", "keepalive"].includes(type)) {
+        add.call(this, type, listener, options);
+        return;
+      }
+      add.call(this, type, event => {
+        const deliver = (): void => {
+          if (typeof listener === "function") listener.call(this, event);
+          else listener.handleEvent(event);
+        };
+        if (held) queued.push(deliver);
+        else deliver();
+      }, options);
+    } as typeof add;
+    Reflect.set(globalThis, "__releaseDirectoryEvents", () => {
+      held = false;
+      for (const deliver of queued.splice(0)) deliver();
+    });
+  });
+}
+
+async function releaseDirectoryEvents(page: Page): Promise<void> {
+  await page.evaluate(() => (Reflect.get(globalThis, "__releaseDirectoryEvents") as () => void)());
+}
+
 test("activity-stop routes launch View even with a current ask or without Control, without persistent capability sinks", { tag: "@core" }, async ({ page }) => {
   await installSilentWebSocket(page);
   const roomKey = new Uint8Array(32).fill(109);
@@ -97,43 +132,39 @@ test("activity-stop routes launch View even with a current ask or without Contro
 
 test("attention routes still acquire Control only for the exact current request", { tag: "@core" }, async ({ page }) => {
   await installSilentWebSocket(page);
+  await holdDirectoryEvents(page);
   const current = session("attention-route-current-01", { inputRequired: true });
   const requestId = current.ask!.requestId;
   const fixture = await startDashboardFixture([current]);
-  const events = Promise.withResolvers<void>();
   try {
     const route = fixture.origin + "/collab/attention-route-current-01?request=" + requestId;
     await page.goto(route);
     await expect(page.getByRole("application", { name: "OMP collaboration session" })).toBeVisible();
     expect(fixture.launchRequests).toEqual([{ instanceId: current.instanceId, generation: 1, mode: "control", requestId }]);
     await page.goto("about:blank");
-    await page.route("**/api/v1/events", async route => { await events.promise; await route.continue(); });
     fixture.setSnapshot([{ ...current, ask: { ...current.ask!, requestId: "attention-route-new-request" } }]);
     await page.goto(route);
     await expect(page.locator('#status-banner[data-kind="expired"]')).toBeVisible();
     await expect(page).toHaveURL(fixture.origin + "/");
-    events.resolve();
+    await releaseDirectoryEvents(page);
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "ready");
     expect(fixture.launchRequests).toHaveLength(1);
   } finally {
-    events.resolve();
     await fixture.stop();
   }
 });
 
 test("changed, gone, and unavailable stop routes remain in the directory without acquiring capabilities", { tag: "@core" }, async ({ page }) => {
+  await holdDirectoryEvents(page);
   const current = session("stop-expired-instance-01", { generation: 2 });
   const fixture = await startDashboardFixture([current]);
-  let events = Promise.withResolvers<void>();
-  await page.route("**/api/v1/events", async route => { await events.promise; await route.continue(); });
   try {
     for (const sessions of [[current], [], [{ ...current, generation: 1, canView: false, canControl: false }]]) {
-      events = Promise.withResolvers<void>();
       fixture.setSnapshot(sessions);
       await page.goto(fixture.origin + "/collab/stop-expired-instance-01?activity=stopped&generation=1");
       await expect(page.locator('#status-banner[data-kind="expired"]')).toBeVisible();
       await expect(page).toHaveURL(fixture.origin + "/");
-      events.resolve();
+      await releaseDirectoryEvents(page);
       await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "ready");
       await expect(page.getByRole("application", { name: "OMP collaboration session" })).toHaveCount(0);
       expect(fixture.launchRequests).toEqual([]);
@@ -141,7 +172,6 @@ test("changed, gone, and unavailable stop routes remain in the directory without
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     }
   } finally {
-    events.resolve();
     await fixture.stop();
   }
 });
