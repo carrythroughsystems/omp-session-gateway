@@ -676,6 +676,15 @@ export function windowsAndroidCommands(owner: () => WindowsExecutionContext | un
   return { runAdb, requireSingleDevice };
 }
 
+/** The saved Pixel baseline already owns restoration; primary mutation claims cannot fence it. */
+export function windowsPixelRestorationContext(context: WindowsContext, fallback?: WindowsExecutionContext): WindowsContext {
+  const execution = windowsContainmentExecution(10 * 60_000, (context.execution ?? fallback)?.nextFailureId);
+  const assertEffect = () => assertWindowsExecution(execution);
+  return { ...context, execution, assertEffect,
+    beforeEffect: async () => { assertEffect(); },
+    mutation: async (_key, action) => { assertEffect(); return action(); } };
+}
+
 export async function createWindowsRuntime(options: { development?: boolean; execution?: WindowsExecutionContext } = {}): Promise<WindowsRuntime> {
   let execution = options.execution;
   const hostCommand = (argv: readonly string[], settings: Parameters<typeof command>[1] = {}) =>
@@ -874,6 +883,7 @@ if ($exists) {
   };
   const restorePixel = async (context: WindowsContext) => {
     const owner = context.execution ?? execution;
+    const { runAdb, requireSingleDevice } = windowsAndroidCommands(() => owner);
     const access = await existingAccess(context.epoch);
     const baseline = access?.pixelState;
     if (!access) throw Object.assign(new Error("Windows Pixel recovery state is missing"), { pixelUnrestored: true });
@@ -1135,7 +1145,7 @@ if ($exists) {
         primary = error instanceof QualificationFailure || error instanceof AggregateError || pixelUnrestored(error) ? error :
           new Error("Windows physical client failed", { cause: error });
       }
-      try { await restorePixel(context); }
+      try { await restorePixel(windowsPixelRestorationContext(context, execution)); }
       catch (error) {
         if (primary) throw Object.assign(new AggregateError([primary, error], "Windows Pixel and restoration failed"), { pixelUnrestored: true });
         throw error;
