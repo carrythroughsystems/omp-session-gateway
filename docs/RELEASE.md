@@ -440,6 +440,11 @@ exception. Never infer a product or rig cause from that stage alone.
 Qualification and smoke use their existing shared release-host lease (including its durable failed
 owner); the driver never deletes or replaces the database or steals a foreign/live owner.
 A missing worker or an ordinary/non-retryable device/cloud failure enters diagnostic-required.
+An immutable job specification that disagrees with its launch binding also stops in
+diagnostic-required for campaign (including attempt zero), approve-check and smoke jobs. The driver
+records `failedMain`, clears the launch intent and posts the diagnostic progress comment rather than
+re-planning the same immutable mismatch. After approval/publication, preserve the immutable release
+and reconcile manually.
 New-format, fully contained infrastructure failures use the bounded automatic retry contract below;
 neither a raw timeout nor exit 75/143 proves eligibility.
 A missing local approve-check

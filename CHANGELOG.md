@@ -23,6 +23,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Preserve actionable private browser failures and original qualification errors when outcome
   publication fails; bound Wi-Fi-cycle checkpoints by cancellation, the execution deadline and
   30 seconds, retaining unknown mutation status until re-enable and restoring radios on failure.
+- Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
+  forever, and stream qualification output into bounded, byte-exact private tails.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.
