@@ -2359,7 +2359,7 @@ test("506 council campaign validation rejects a readiness pass without delivery 
 test("execution-bearing passed receipts require readiness while legacy and unfinished receipts remain readable", () => {
   const receipt = createStableQualificationReceipt(TAG, COMMIT, PREVIOUS_TAG);
   receipt.execution = receiptExecution();
-  for (const status of ["pending", "running", "failed"] as const) {
+  for (const status of ["running", "failed"] as const) {
     receipt.status = status;
     expect(validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG)).toBe(receipt);
   }

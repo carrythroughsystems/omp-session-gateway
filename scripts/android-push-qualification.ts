@@ -81,7 +81,8 @@ export async function waitForPushDelivery(options: {
     if (reason === "push_service_failure") throw new QualificationFailure({ ...common, reason, class: "infra_transient",
       observations: { ...common.observations, pushServiceFailure: true, retryableStatus: true, httpStatus: status } }, errorOptions);
     if (reason === "invalid_evidence") throw new QualificationFailure({ ...common, reason, class: "harness" }, errorOptions);
-    throw new QualificationFailure({ ...common, reason: controllerDeadline ? "deadline_exceeded" : "delivery_timeout", class: "harness" }, errorOptions);
+    if (controllerDeadline) throw new QualificationFailure({ ...common, reason: "deadline_exceeded", class: "harness" }, errorOptions);
+    throw new QualificationFailure({ ...common, reason: "delivery_timeout", class: "harness" }, errorOptions);
   };
   const checked = (target: SessionMetadata) => checkedDelivery(runtime, target, options.kind, options.detail, () => fail("privacy_failed", 0));
   const timing = metrics.deliveryTimings.length;
