@@ -27,6 +27,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Recheck Windows launch and Pixel lifetimes, provider-response deadlines and attached-firewall
   ownership at dispatch; bound development cleanup independently and retain exclusive Pixel
   custody until restoration completes.
+- Keep directory coverage and launch feedback consistent through loading hosts, SSE keepalives,
+  terminal session states, and cancelled notification or resume launches; retain the mounted
+  generation on View-to-Control, preserve expired-route notices through unchanged snapshots,
+  and prevent delayed transitions from remounting disposed shells.
 - Wake and unlock Android, then send HOME before the published-byte smoke's installed-WebAPK
   launch; re-launch once after ten seconds without extending the focus deadline, and retain
   only bounded private activity, power, and keyguard evidence when focus never arrives.

@@ -1214,8 +1214,6 @@ describe("source-bound session creation", () => {
       const ready = session("creation-banner-0001");
       const harness = await bootApp({
         permission: "denied", initialSessions: [], suffix: `creation-banner-${reason}`, launchGate: gate.promise,
-        // A stale notification locks SSE status changes; the launch must settle its own banner.
-        ...(reason === "discard" ? { pathname: "/collab/synthetic-expired-0001", search: "?activity=stopped&generation=1" } : {}),
         creationResponse: async (path, init) => Response.json(path.endsWith("options") ? choices
           : init.method === "POST" ? { operationId, state: "accepted" }
             : { operationId, state: "ready", updatedAt: new Date().toISOString(), session: { instanceId: ready.instanceId, generation: 1 } }),
@@ -1227,7 +1225,7 @@ describe("source-bound session creation", () => {
       expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
       if (reason === "discard") {
         harness.emit("session_upsert", { type: "session_upsert", revision: 3, session: { ...ready, generation: 2 } });
-        expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+        expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
       } else if (reason === "hidden") harness.setVisibility("hidden");
       else {
         if (reason === "offline") harness.window.dispatchEvent(new Event("offline"));
@@ -1841,6 +1839,7 @@ describe("dashboard attention and notifications", () => {
     expect(harness.fetchLocations.every(path => path === "/")).toBeTrue();
     expect(harness.replacedPaths).toEqual(["/"]);
     expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
+    expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
     harness.emit("keepalive", { type: "keepalive", revision: 1 });
     expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
   });
@@ -1873,6 +1872,7 @@ describe("dashboard attention and notifications", () => {
       search: "?request=stale-request-0001",
       suffix: "stale-attention-route",
       initialSessions: [],
+      listResponse: async () => Response.json({ revision: 2, sessions: [] }),
     });
 
     expect(harness.replacedPaths).toEqual(["/"]);
@@ -2754,6 +2754,258 @@ describe("fleet directory bindings", () => {
     targets: [{ id: "remote", label: "Remote", origin: "https://remote.example" }],
     speech: { browserRecognition: false },
   };
+
+  async function failedControlLaunch(suffix: string) {
+    const home = session(`followups-${suffix}`);
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [home], suffix: `followups-${suffix}`,
+      launchResponse: async (_path, init) => {
+        const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+        return body.mode === "control" ? new Response(null, { status: 503 })
+          : Response.json({ ...body, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+      },
+    });
+    harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.embedCalls.length === 1, 100);
+    const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
+    const live = { phase: "live" as const, endedReason: null, requestPending: false, responsePending: false,
+      loading: null, gatewayHealth: health, relayHealth: health };
+    harness.embedCalls[0]!.onStateChange!(live);
+    harness.body.querySelector(".shell-control")!.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.body.querySelector(".triage-bar")?.dataset.kind === "launch-failed", 100);
+    return { harness, home, live };
+  }
+
+  test("issue479: a local keepalive cannot release a failed Control notice", async () => {
+    const { harness } = await failedControlLaunch("keepalive");
+    try {
+      const notice = harness.body.querySelector(".triage-copy")!.textContent;
+      harness.emit("keepalive", {});
+      expect(harness.body.querySelector(".triage-bar")?.hidden).toBeFalse();
+      expect(harness.body.querySelector(".triage-bar")?.dataset.kind).toBe("launch-failed");
+      expect(harness.body.querySelector(".triage-copy")?.textContent).toBe(notice);
+      expect(harness.launchRequests).toHaveLength(2);
+    } finally { harness.window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  test("issue479: a loading selected remote shows checking coverage after an empty local observation", async () => {
+    const gate = Promise.withResolvers<void>();
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], clientConfig: config, suffix: "followups-loading-remote",
+      remoteResponse: async () => { await gate.promise; return Response.json({ revision: 1, sessions: [] }); },
+    });
+    try {
+      harness.elements.hostPicker.value = "remote\0https://remote.example";
+      harness.elements.hostPicker.dispatchEvent(new Event("change"));
+      expect(harness.elements.emptyState.hidden).toBeFalse();
+      expect(harness.elements.emptyState.textContent).toContain("Checking for sessions");
+      expect(harness.elements.emptyState.querySelector(".empty-coverage")?.textContent).toBe("0 of 1 host up to date. Refreshing the rest.");
+    } finally {
+      gate.resolve();
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      harness.window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
+  test("issue479: View-to-Control never launches a replacement generation", async () => {
+    const home = session("followups-binding", { generation: 1 });
+    const harness = await bootApp({ permission: "denied", initialSessions: [home], suffix: "followups-binding" });
+    try {
+      harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.embedCalls.length === 1, 100);
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: { ...home, generation: 2 } });
+      harness.body.querySelector(".shell-control")!.dispatchEvent(new Event("click"));
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      expect(harness.launchRequests).toHaveLength(1);
+      expect(harness.embedCalls).toHaveLength(1);
+      expect(harness.body.querySelector(".triage-bar")?.dataset.kind).toBe("ended");
+      expect(harness.body.querySelector(".triage-copy")?.textContent).toBe("Session ended");
+    } finally { harness.window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  for (const terminal of ["ended", "forbidden"] as const) {
+    test(`issue479: ${terminal} overrides a launch-failure notice`, async () => {
+      const { harness, live } = await failedControlLaunch(`terminal-${terminal}`);
+      try {
+        harness.embedCalls[0]!.onStateChange!(terminal === "ended"
+          ? { ...live, phase: "ended", endedReason: "Process exited with code 7" }
+          : { ...live, gatewayHealth: { ...live.gatewayHealth, state: "forbidden" } });
+        expect(harness.body.querySelector(".triage-bar")?.hidden).toBeFalse();
+        expect(harness.body.querySelector(".triage-bar")?.dataset.kind).toBe("ended");
+        expect(harness.body.querySelector(".triage-bar")?.dataset.failureKind).toBeUndefined();
+        expect(harness.body.querySelector(".triage-copy")?.textContent).toBe(terminal === "ended"
+          ? "Session ended · exit 7" : "This identity can no longer access the session.");
+        expect(harness.body.querySelector(".conn-chip")?.textContent).toBe(terminal === "ended" ? "Ended" : "Access withdrawn");
+      } finally { harness.window.dispatchEvent(new Event("pagehide")); }
+    });
+  }
+
+  test("issue479: current-session removal overrides a different source's launch failure", async () => {
+    const home = session("followups-ended-home", { inputRequired: true });
+    const remote = session("followups-ended-away", { inputRequired: true });
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [home], clientConfig: config, remoteSessions: [remote],
+      suffix: "followups-ended-metadata",
+      launchResponse: async (path, init) => {
+        if (path.startsWith("https://remote.example")) return new Response(null, { status: 503 });
+        const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+        return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+      },
+    });
+    try {
+      await settleUntil(() => harness.elements.directoryCount.textContent === "2 waiting", 100);
+      const hero = harness.elements.sessionList.querySelector(".queue-hero")!;
+      const open = hero.dataset.sourceKey === "local\0https://sessions.example" ? hero.querySelector(".action-request")
+        : harness.elements.sessionList.querySelectorAll(".queue-row").find(row => row.dataset.sourceKey === "local\0https://sessions.example");
+      open!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.embedCalls.length === 1, 100);
+      const health = { state: "healthy" as const, rttMs: 1, lastSuccessAt: Date.now(), failureSince: null, retryAt: null };
+      harness.embedCalls[0]!.onStateChange!({ phase: "live", endedReason: null, requestPending: true, responsePending: false,
+        loading: null, gatewayHealth: health, relayHealth: health });
+      harness.body.querySelector(".triage-action")!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.body.querySelector(".triage-bar")?.dataset.kind === "launch-failed", 100);
+      harness.emit("session_remove", { type: "session_remove", revision: 2, instanceId: home.instanceId, generation: home.generation });
+      expect(harness.body.querySelector(".conn-chip")?.textContent).toBe("Ended");
+      expect(harness.body.querySelector(".triage-bar")?.dataset.kind).toBe("ended");
+      expect(harness.body.querySelector(".triage-copy")?.textContent).toBe("Session ended");
+    } finally { harness.window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  for (const release of ["dismiss", "metadata", "list"] as const) {
+    test(`issue479: ${release} of a launch failure redraws current connection triage`, async () => {
+      const { harness, home, live } = await failedControlLaunch(`release-${release}`);
+      try {
+        harness.embedCalls[0]!.onStateChange!({ ...live, responsePending: true });
+        expect(harness.body.querySelector(".triage-bar")?.dataset.kind).toBe("launch-failed");
+        if (release === "dismiss") harness.body.querySelector(".gateway-shell")!.dispatchEvent(new Event("pointerdown"));
+        else if (release === "metadata") harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: home });
+        else {
+          harness.setList(2, [home]);
+          harness.window.dispatchEvent(new Event("online"));
+          for (let i = 0; i < 100; i++) await Promise.resolve();
+        }
+        expect(harness.body.querySelector(".conn-chip")?.textContent).toBe("Connected");
+        expect(harness.body.querySelector(".triage-bar")?.hidden).toBeFalse();
+        expect(harness.body.querySelector(".triage-bar")?.dataset.kind).toBe("sending");
+        expect(harness.body.querySelector(".triage-copy")?.textContent).toBe("Sending…");
+      } finally { harness.window.dispatchEvent(new Event("pagehide")); }
+    });
+  }
+
+  for (const entry of ["resume", "notification"] as const) {
+    for (const exit of ["cancel", "discard"] as const) {
+      test(`issue479: ${exit} clears a button-less ${entry} launch banner`, async () => {
+        const gate = Promise.withResolvers<void>();
+        const home = session(`followups-${entry}-${exit}`);
+        let launches = 0;
+        const harness = await bootApp({
+          permission: "denied", initialSessions: [home], suffix: `followups-${entry}-${exit}`,
+          launchResponse: async (_path, init) => {
+            if (++launches === (entry === "resume" ? 2 : 1)) await gate.promise;
+            return Response.json({ ...JSON.parse(String(init.body)), capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+          },
+        });
+        try {
+          if (entry === "resume") {
+            harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+            await settleUntil(() => harness.embedCalls.length === 1, 100);
+            harness.window.dispatchEvent(new Event("pagehide"));
+            const show = new Event("pageshow");
+            Object.defineProperty(show, "persisted", { value: true });
+            harness.window.dispatchEvent(show);
+          } else harness.notify({ version: 2, type: "activity_stop", instanceId: home.instanceId, generation: home.generation });
+          await settleUntil(() => launches === (entry === "resume" ? 2 : 1), 100);
+          expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+          expect(harness.body.querySelector(".gateway-shell")).toBeNull();
+          if (exit === "cancel") {
+            harness.window.dispatchEvent(new Event("pagehide"));
+            expect(harness.launchRequests.at(-1)!.init.signal!.aborted).toBeTrue();
+          } else harness.freeze();
+          gate.resolve();
+          for (let i = 0; i < 100; i++) await Promise.resolve();
+          expect(harness.embedCalls).toHaveLength(entry === "resume" ? 1 : 0);
+          expect(harness.body.querySelector(".gateway-shell")).toBeNull();
+          expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+          expect(harness.elements.statusBanner.hidden).toBeTrue();
+        } finally { gate.resolve(); harness.window.dispatchEvent(new Event("pagehide")); }
+      });
+    }
+  }
+
+  test("issue479: only newer metadata releases a completed expired notification notice", async () => {
+    const home = session("followups-expired-alert");
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [home], pathname: "/collab/", search: "?invalid=1",
+      suffix: "followups-route-unlock",
+    });
+    try {
+      expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+      harness.emit("keepalive", {});
+      expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+      harness.emit("snapshot", { type: "snapshot", revision: 1, sessions: [home] });
+      expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: home });
+      expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+      expect(harness.elements.statusBanner.hidden).toBeTrue();
+    } finally { harness.window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  test("issue479-review: a superseded route cannot unlock a newer pending route", async () => {
+    const first = session("route-owner-first");
+    const second = session("route-owner-second");
+    const firstGate = Promise.withResolvers<void>();
+    const secondGate = Promise.withResolvers<void>();
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [first, second], suffix: "route-owner-sequence",
+      launchResponse: async (path, init) => {
+        await (path.includes(first.instanceId) ? firstGate.promise : secondGate.promise);
+        const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+        return Response.json({ ...body, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+      },
+    });
+    try {
+      harness.notify({ version: 2, type: "activity_stop", instanceId: first.instanceId, generation: first.generation });
+      await settleUntil(() => harness.launchRequests.length === 1, 100);
+      harness.notify({ version: 2, type: "activity_stop", instanceId: second.instanceId, generation: second.generation });
+      await settleUntil(() => harness.launchRequests.length === 2, 100);
+      expect(harness.launchRequests[0]!.init.signal!.aborted).toBeTrue();
+      firstGate.resolve();
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      harness.emit("keepalive", {});
+      expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: second });
+      expect(harness.elements.statusBanner.dataset.kind).toBe("loading");
+      secondGate.resolve();
+      await settleUntil(() => harness.embedCalls.length === 1, 100);
+      expect(harness.body.querySelector(".shell-title")?.textContent).toBe(second.title);
+      expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+    } finally {
+      firstGate.resolve();
+      secondGate.resolve();
+      harness.window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
+  for (const action of ["scope", "launch"] as const) {
+    test(`issue479-review: ${action} releases an unresolved notification route lock`, async () => {
+      const home = session(`route-abandoned-${action}`);
+      const harness = await bootApp({
+        permission: "denied", initialSessions: [home], suffix: `route-abandoned-${action}`,
+        launchResponse: async () => new Response(null, { status: 503 }),
+      });
+      try {
+        harness.notify({ version: 2, type: "activity_stop", instanceId: home.instanceId, generation: home.generation });
+        if (action === "scope") harness.elements.hostPicker.dispatchEvent(new Event("change"));
+        harness.elements.sessionList.querySelector(".working-row")!.dispatchEvent(new Event("click"));
+        await settleUntil(() => harness.elements.statusBanner.dataset.kind === "offline", 100);
+        expect(harness.launchRequests).toHaveLength(1);
+        expect(harness.embedCalls).toHaveLength(0);
+        harness.emit("keepalive", {});
+        expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+        expect(harness.elements.statusBanner.hidden).toBeTrue();
+      } finally { harness.window.dispatchEvent(new Event("pagehide")); }
+    });
+  }
 
   for (const advance of ["next", "hold"] as const) {
     for (const failure of [403, 404, 409, 503, "withdrawn"] as const) {
@@ -3800,32 +4052,43 @@ describe("fleet directory bindings", () => {
   });
 
   test("offline recovery without an online event resumes remote polling and keeps the retained clock", async () => {
-    const home = session("offline-fleet-home");
-    const harness = await bootApp({
-      permission: "denied", initialSessions: [home], remoteSessions: [session("offline-fleet-away")],
-      clientConfig: config, suffix: "offline-fleet-recovery",
-    });
-    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
-    harness.setRemoteStatus(503);
-    harness.setList(2, [home], 503);
-    harness.setOnline(false);
-    harness.window.dispatchEvent(new Event("offline"));
-    await settleUntil(() => harness.pendingDelays().includes(35_000), 100);
-    const facts = harness.elements.sessionList.querySelectorAll(".session-freshness");
-    expect(facts).toHaveLength(2);
-    expect(facts.every(fact => fact.textContent?.startsWith("List as of "))).toBeTrue();
-    expect(harness.elements.statusBanner.children).toHaveLength(1);
-    expect(harness.elements.fleetStatus.children).toHaveLength(0);
-    harness.setOnline(true); // Deliberately do not dispatch `online`.
-    harness.setRemoteStatus(200);
-    harness.setList(3, [home]);
-    harness.runTimers();
-    await settleUntil(() => harness.elements.directoryCount.textContent === "Live · 2", 100);
-    const requests = harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length;
-    harness.window.runTimersWithDelay(10_000);
-    await settleUntil(() => harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length > requests, 100);
-    expect(harness.elements.statusBanner.hidden).toBeTrue();
-    harness.setVisibility("hidden");
+    const previousNow = Date.now;
+    const now = previousNow();
+    // This test asserts exact fake-timer delays; coverage must not let real elapsed milliseconds
+    // shorten the retained observation's 35-second deadline between boot and interruption.
+    Date.now = () => now;
+    let harness: BrowserHarness | undefined;
+    try {
+      const home = session("offline-fleet-home");
+      harness = await bootApp({
+        permission: "denied", initialSessions: [home], remoteSessions: [session("offline-fleet-away")],
+        clientConfig: config, suffix: "offline-fleet-recovery",
+      });
+      const active = harness;
+      await settleUntil(() => active.elements.directoryCount.textContent === "Live · 2", 100);
+      harness.setRemoteStatus(503);
+      harness.setList(2, [home], 503);
+      harness.setOnline(false);
+      harness.window.dispatchEvent(new Event("offline"));
+      await settleUntil(() => active.pendingDelays().includes(35_000), 100);
+      const facts = harness.elements.sessionList.querySelectorAll(".session-freshness");
+      expect(facts).toHaveLength(2);
+      expect(facts.every(fact => fact.textContent?.startsWith("List as of "))).toBeTrue();
+      expect(harness.elements.statusBanner.children).toHaveLength(1);
+      expect(harness.elements.fleetStatus.children).toHaveLength(0);
+      harness.setOnline(true); // Deliberately do not dispatch `online`.
+      harness.setRemoteStatus(200);
+      harness.setList(3, [home]);
+      harness.runTimers();
+      await settleUntil(() => active.elements.directoryCount.textContent === "Live · 2", 100);
+      const requests = harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length;
+      harness.window.runTimersWithDelay(10_000);
+      await settleUntil(() => active.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length > requests, 100);
+      expect(harness.elements.statusBanner.hidden).toBeTrue();
+    } finally {
+      harness?.setVisibility("hidden");
+      Date.now = previousNow;
+    }
   });
 
   test("a retained empty observation says when it was empty, not never checked", async () => {
