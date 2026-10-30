@@ -24,6 +24,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Report the upstream canary's resolved OMP version, pre-flight failures, and Bun engine requirement
+  in summaries and failure issues, and expose successful scheduled runs correctly.
 - Recheck Windows launch and Pixel lifetimes, provider-response deadlines and attached-firewall
   ownership at dispatch; bound development cleanup independently and retain exclusive Pixel
   custody until restoration completes.

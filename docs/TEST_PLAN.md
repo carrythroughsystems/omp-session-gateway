@@ -135,8 +135,11 @@ OMP discovery artifacts are never opened or modified by creation.
 
 The daily [upstream OMP canary](../.github/workflows/upstream-canary.yml) installs latest stock OMP
 into an isolated directory on Linux and, in `canary-windows`, on Windows. Its ordered stages are
-`publish`, `snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`,
-`branch-rewind`, `continue`, and `unregister`. On POSIX it drives a tmux host: `/new` and `/fork`
+`prepare`, `publish`, `snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`,
+`branch-rewind`, `continue`, and `unregister`. The `prepare` pre-flight stage resolves the installed
+package manifest version, checks the running Bun against `engines.bun`, verifies the stock binary,
+and queries its version; a failure before `publish` retains the resolved manifest version.
+On POSIX it drives a tmux host: `/new` and `/fork`
 must keep the instance and increment generation, refuse stale View/Control queries once the new
 generation is visible, and permit fresh links. Fork retains both synthetic prompts in a fresh
 View transcript. Rewind must show the anchored in-memory terminal status (never printed), keep
@@ -857,7 +860,7 @@ Percy re-rendering is neither functional browser coverage nor signed-release dev
 maintainer setup and first-build/deliberate-diff acceptance are in [BrowserStack](BROWSERSTACK.md).
 
 Separately, `upstream-canary.yml` runs `canary` and `canary-windows` daily, by dispatch, and on
-pull requests touching its workflow, scripts, fixture, or registry reader. It runs the ten stages
+pull requests touching its workflow, scripts, fixture, or registry reader. It runs the eleven stages
 listed under Mainline OMP with the strict Windows projection; it is not an every-PR gate and never
 substitutes for signed-candidate qualification. Both Linux and Windows canary lanes run daily in CI;
 exact stage coverage and local macOS evidence are recorded in [LIFECYCLE_BRANCH_RESUME.md](LIFECYCLE_BRANCH_RESUME.md).

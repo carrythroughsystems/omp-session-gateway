@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+  canaryBunEngineError,
   canarySummary,
   CANARY_STAGES,
   hasCanaryPrompt,
@@ -8,9 +14,35 @@ import {
   parseCanaryArgs,
   parseCanarySummary,
   parseOmpVersion,
+  readCanaryPackage,
   windowsArgument,
   windowsHostScript,
 } from "./upstream-canary.ts";
+
+async function withOmpPackage(bunEngine: string, check: (directory: string, binary: string) => Promise<void>): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), "omp-canary-report-test-"));
+  const directory = join(root, "node_modules", "@oh-my-pi", "pi-coding-agent");
+  const binary = join(directory, "dist", "cli.js");
+  try {
+    await mkdir(join(directory, "dist"), { recursive: true });
+    await writeFile(join(directory, "package.json"), JSON.stringify({
+      name: "@oh-my-pi/pi-coding-agent", version: "18.14.0", engines: { bun: bunEngine },
+    }));
+    // A stock-shaped package whose CLI cannot start, as with an incompatible runtime floor.
+    await writeFile(binary, "#!/usr/bin/env bun\nprocess.exit(1);\n", { mode: 0o700 });
+    await check(directory, binary);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+function failedCanary(binary: string) {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("./upstream-canary.ts", import.meta.url)), "--omp", binary], {
+    encoding: "utf8", timeout: 10_000,
+  });
+  expect(result.status).toBe(1);
+  return { summary: parseCanarySummary(result.stdout), stderr: result.stderr };
+}
 
 describe("upstream canary arguments", () => {
   test("accepts a binary path with spaces and an explicit diagnostic model", () => {
@@ -53,21 +85,123 @@ describe("stock OMP version gate", () => {
   });
 });
 
+describe("canary preparation failures", () => {
+  test("retains the installed manifest version when the version query cannot run", async () => {
+    await withOmpPackage(">=1.3.14", async (_directory, binary) => {
+      const { summary, stderr } = failedCanary(binary);
+      expect(stderr).toContain("OMP version query failed");
+      expect(summary.ompVersion).toBe("18.14.0");
+    });
+  });
+
+  test("attributes version-query and stock-binary failures to prepare, not publish", async () => {
+    await withOmpPackage(">=1.3.14", async (directory, binary) => {
+      const nonStock = join(directory, "..", "..", "..", "not-stock.js");
+      await writeFile(nonStock, "#!/usr/bin/env bun\nprocess.exit(1);\n", { mode: 0o700 });
+      for (const target of [binary, nonStock]) {
+        const { summary } = failedCanary(target);
+        expect(summary.failedStage).toBe("prepare");
+        expect(summary.stages.prepare).toBe("failed");
+        expect(summary.stages.publish).toBe("skipped");
+      }
+    });
+  });
+
+  test("compares the installed OMP engine floor with an explicit Bun version", async () => {
+    await withOmpPackage(">=1.4.4", async directory => {
+      const installed = await readCanaryPackage(directory);
+      expect(installed).toEqual({ ompVersion: "18.14.0", bunEngine: ">=1.4.4" });
+      expect(canaryBunEngineError(installed, "1.4.0")).toBe("OMP 18.14.0 requires Bun >=1.4.4; running Bun 1.4.0");
+      expect(canaryBunEngineError(installed, "1.4.4")).toBeUndefined();
+    });
+  });
+
+  test("rejects an incompatible Bun before executing the installed OMP CLI", async () => {
+    await withOmpPackage(">=99.0.0", async (directory, binary) => {
+      const marker = join(directory, "cli-executed");
+      await writeFile(binary, `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(marker)}, "executed");\nprocess.exit(1);\n`);
+      const { summary, stderr } = failedCanary(binary);
+      expect(summary.failedStage).toBe("prepare");
+      expect(summary.ompVersion).toBe("18.14.0");
+      expect(await Bun.file(marker).exists()).toBe(false);
+      expect(stderr).toBe(`prepare: OMP 18.14.0 requires Bun >=99.0.0; running Bun ${Bun.version}\n`);
+    });
+  });
+
+  test("binds both passed outputs to the nonempty requested-or-resolved install version", async () => {
+    const workflow = Bun.YAML.parse(await Bun.file(new URL("../.github/workflows/upstream-canary.yml", import.meta.url)).text()) as {
+      jobs: Record<string, { outputs: Record<string, string>; steps: { id?: string; run?: string }[] }>;
+    };
+    for (const name of ["canary", "canary-windows"]) {
+      const job = workflow.jobs[name]!;
+      expect(job.outputs.passed).toBe("${{ steps.summary.outcome == 'success' && steps.summary.outputs.failed_stage == '' && steps.install.outputs.expected_version != '' && steps.summary.outputs.omp_version == steps.install.outputs.expected_version }}");
+      const install = job.steps.find(step => step.id === "install")!;
+      expect(install.run).toContain('const expectedVersion = process.env.OMP_VERSION === "latest" ? installed.ompVersion : process.env.OMP_VERSION;');
+      expect(install.run).toContain('await appendFile(process.env.GITHUB_OUTPUT, `omp_version=${installed.ompVersion}\\nbun_engine=${installed.bunEngine}\\nexpected_version=${expectedVersion}\\n`);');
+    }
+  });
+
+  test("publishes the resolved version and runtime context even without a canary report", async () => {
+    const workflow = Bun.YAML.parse(await Bun.file(new URL("../.github/workflows/upstream-canary.yml", import.meta.url)).text()) as {
+      jobs: Record<string, { steps: { id?: string; run?: string }[] }>;
+    };
+    const root = await mkdtemp(join(tmpdir(), "omp-canary-summary-test-"));
+    try {
+      for (const [job, platform] of [["canary", "posix"], ["canary-windows", "windows"]] as const) {
+        const step = workflow.jobs[job]!.steps.find(candidate => candidate.id === "summary")!;
+        const stepSummary = join(root, `${platform}-summary`);
+        const stepOutput = join(root, `${platform}-output`);
+        const result = spawnSync("bash", ["-c", step.run!], {
+          cwd: fileURLToPath(new URL("..", import.meta.url)),
+          env: {
+            ...process.env, CANARY_REPORT: join(root, "missing-report"),
+            REQUESTED_OMP_VERSION: "latest", RESOLVED_OMP_VERSION: "18.14.0",
+            BUN_VERSION: "1.4.0", OMP_BUN_ENGINE: ">=1.4.4",
+            GITHUB_STEP_SUMMARY: stepSummary, GITHUB_OUTPUT: stepOutput,
+          },
+          encoding: "utf8", timeout: 10_000,
+        });
+        expect(result.status).toBe(1);
+        expect(parseCanarySummary(result.stdout, platform)).toEqual(canarySummary("18.14.0", 0, "prepare", false, platform));
+        expect(await Bun.file(stepOutput).text()).toBe("omp_version=18.14.0\nfailed_stage=prepare\n");
+        const summary = await Bun.file(stepSummary).text();
+        for (const line of ["requestedOmpVersion: latest", "resolvedOmpVersion: 18.14.0", "bunVersion: 1.4.0", "bunEngine: >=1.4.4"]) {
+          expect(summary).toContain(line);
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("canary public reports", () => {
   test("stops at the first failure and does not claim later stages ran", () => {
     expect(canarySummary("18.3.0", 123, "snapshot")).toEqual({
       ompVersion: "18.3.0", platform: "posix", durationMs: 123, failedStage: "snapshot", discoveryFileRemoved: false,
-      stages: { publish: "passed", snapshot: "failed", "stale-generation": "skipped", view: "skipped", control: "skipped",
+      stages: { prepare: "passed", publish: "passed", snapshot: "failed", "stale-generation": "skipped", view: "skipped", control: "skipped",
         "new-generation": "skipped", fork: "skipped", "branch-rewind": "skipped", continue: "skipped", unregister: "skipped" },
     });
     expect(canarySummary("", 1, "publish").stages).toEqual({
-      publish: "failed", snapshot: "skipped", "stale-generation": "skipped", view: "skipped", control: "skipped",
+      prepare: "passed", publish: "failed", snapshot: "skipped", "stale-generation": "skipped", view: "skipped", control: "skipped",
       "new-generation": "skipped", fork: "skipped", "branch-rewind": "skipped", continue: "skipped", unregister: "skipped",
     });
     expect(canarySummary("18.1.20", 123).stages).toEqual({
-      publish: "passed", snapshot: "passed", "stale-generation": "passed", view: "passed", control: "passed",
+      prepare: "passed", publish: "passed", snapshot: "passed", "stale-generation": "passed", view: "passed", control: "passed",
       "new-generation": "passed", fork: "passed", "branch-rewind": "passed", continue: "passed", unregister: "passed",
     });
+  });
+
+  test("round-trips prepare failures and fills only a missing report version from the manifest", () => {
+    for (const platform of ["posix", "windows"] as const) {
+      const summary = canarySummary("", 0, "prepare", false, platform);
+      expect(summary.stages.prepare).toBe("failed");
+      expect(CANARY_STAGES.filter(stage => stage !== "prepare").every(stage => summary.stages[stage] === "skipped")).toBe(true);
+      expect(parseCanarySummary(JSON.stringify(summary), platform, "18.14.0")).toEqual({ ...summary, ompVersion: "18.14.0" });
+      const resolved = canarySummary("18.13.3", 1, "publish", false, platform);
+      expect(parseCanarySummary(JSON.stringify(resolved), platform, "18.14.0")).toEqual(resolved);
+      expect(() => parseCanarySummary(JSON.stringify(summary), platform, "18.14.0\nprivate-value")).toThrow("invalid canary summary");
+    }
   });
 
   test("admits only the exact successful platform projection, never arbitrary skips", () => {
@@ -86,7 +220,7 @@ describe("canary public reports", () => {
   test("preserves the failure frontier after Windows-only skips and binds reports to their job", () => {
     const summary = canarySummary("18.4.8", 123, "continue", false, "windows");
     expect(summary.stages).toEqual({
-      publish: "passed", snapshot: "passed", "stale-generation": "passed", view: "passed", control: "passed",
+      prepare: "passed", publish: "passed", snapshot: "passed", "stale-generation": "passed", view: "passed", control: "passed",
       "new-generation": "skipped", fork: "skipped", "branch-rewind": "skipped", continue: "failed", unregister: "skipped",
     });
     expect(parseCanarySummary(JSON.stringify(summary), "windows")).toEqual(summary);
