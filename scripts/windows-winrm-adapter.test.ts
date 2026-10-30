@@ -341,6 +341,7 @@ test.each(["GET", "POST"])("501 R2 late provider %s response cannot prove absenc
   try {
     const error = await winrmRuntime.request("https://synthetic.invalid", {}, method, undefined, execution).catch(error => error);
     expect(error).toBeInstanceOf(QualificationFailure);
+    if (!(error instanceof QualificationFailure)) throw new Error("expected typed expired provider response");
     expect(error.evidence).toMatchObject({
       id: 501, reason: "deadline_exceeded", operation: method === "GET" ? "read_only" : "unknown",
       observations: { controllerDeadline: true },
