@@ -218,7 +218,7 @@ synthetic content from `e2e/synthetic-product-fixture.ts`, whose defaults also s
 
 `bun run test:visual:percy` requires `PERCY_TOKEN`, a healthy local Percy server started by the
 pinned CLI, all 21 guarded submissions and a finalized build. Native Node.js (24.22.0 LTS in CI)
-must be on `PATH` for the Percy CLI only; builds and the visual worker stay on Bun 1.4.0. CI
+must be on `PATH` for the Percy CLI only; builds and the visual worker stay on Bun 1.4.4. CI
 passes the executable from its SHA-pinned setup-node step; missing local Node fails closed with
 `reason=node-missing`. Percy must not run under Bun's HTTP compatibility layer.
 Serialized HTML/resources and the
