@@ -1,0 +1,1 @@
+- Run all seven required checks for merge groups and preserve pinned direct release-bot merges.
