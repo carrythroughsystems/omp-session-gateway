@@ -106,7 +106,7 @@ export interface WindowsContext {
   readonly epoch: string;
   readonly identity: WindowsIdentity;
   /** No await may separate this resource/execution admission from guest dispatch. */
-  readonly assertEffect: () => void;
+  readonly assertEffect: (maximumAge?: number) => void;
   readonly beforeEffect: () => Promise<void>;
   /** Durable single-shot claims for qualification; cleanup supplies its idempotent owner. */
   readonly mutation: <T>(key: string, action: () => Promise<T>) => Promise<T>;
