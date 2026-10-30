@@ -78,6 +78,27 @@ test(security): detect capabilities in browser storage
 fix(web): reject stale launch generations
 ```
 
+### Merging with the queue
+
+Once the operator completes the [merge queue rollout](docs/RELEASE.md#merge-queue-rollout-operator-only),
+ordinary PRs enter GitHub's merge queue after review and all seven required checks pass:
+
+```sh
+gh pr merge <number> --repo carrythroughsystems/omp-session-gateway \
+  --squash --match-head-commit <reviewed-head-sha>
+```
+
+The command enqueues; it does not prove the PR has merged. GitHub checks the latest `main` plus
+preceding queued PRs using the same checks on `merge_group`, then squash-merges. Do not refresh
+every green branch just because another queued PR landed, and do not bypass the queue with an
+administrator flag. Sign all commits; queueing does not waive signature or review requirements.
+Until rollout, the existing strict up-to-date merge workflow remains in force.
+
+The release machine user has a narrowly scoped queue-only exception and uses a pinned direct
+REST squash merge. Contributors must not join that bypass team or enqueue generated release
+PRs. During a release window, drain the queue and stop new enqueues until the release record
+lands: the approve receipt binds an exact tree and must not absorb unrelated changes.
+
 ## Security-sensitive contributions
 
 Never use real OMP collaboration links in code, tests, screenshots, recordings, issues, or pull requests. Generate conspicuous synthetic fixtures. Do not add telemetry, third-party browser assets, public listeners, or persistent capability storage.

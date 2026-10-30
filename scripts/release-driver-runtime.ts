@@ -968,7 +968,9 @@ export class StudioDriver implements DriverPort {
       return current;
     }
     if (current.state !== "open" || current.draft || current.behind || !current.checksPassed) throw new StaleIntentError("PR is not eligible for strict checked merge");
-    await command(["gh", "pr", "merge", String(pr.number), "--repo", REPOSITORY, "--squash", "--match-head-commit", pr.head], ROOT, this.env);
+    // gh pr merge enqueues on queue-required branches, even for a queue bypass actor.
+    // Only the queue ruleset is bypassed; classic strict checks/signatures still apply.
+    await this.gh(["api", "--method", "PUT", `repos/${REPOSITORY}/pulls/${pr.number}/merge`, "-f", `sha=${pr.head}`, "-f", "merge_method=squash"]);
     const merged = await this.readPr(pr.number);
     if (!merged.merged || merged.mergedBy !== this.config.bot) throw new Error("pinned merge is not observable as the release bot");
     return merged;

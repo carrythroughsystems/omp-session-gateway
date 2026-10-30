@@ -2115,6 +2115,65 @@ test("runtime adopts an already-accepted pinned bot merge after a crash without 
   expect(await runtime.merge(pr(), false)).toEqual(merged);
 });
 
+test("queue-exempt release merges use the pinned synchronous REST merge and reconcile accepted effects", async () => {
+  class DirectMerge extends StudioDriver {
+    current = pr();
+    writes: string[][] = [];
+    override async readPr() { return this.current; }
+    override async git() { return "installed"; }
+    override async controls() { return new Map<string, string>(); }
+    override async gh<T>(args: string[]): Promise<T | undefined> {
+      this.writes.push(args);
+      this.current = { ...this.current, merged: true, mergedBy: config.bot, state: "closed", mergeCommit: "e".repeat(40), mergeTree: this.current.tree };
+      return { merged: true, sha: this.current.mergeCommit } as T;
+    }
+  }
+  // The predecessor calls `gh pr merge` outside the mocked API seam. Never let a red run
+  // reach the real CLI or credentials; after cutover all effects pass through gh() above.
+  const previousPath = process.env.PATH;
+  let runtime: DirectMerge;
+  try {
+    process.env.PATH = "";
+    runtime = new DirectMerge(driverConfig(), false);
+  } finally { process.env.PATH = previousPath; }
+  const pinned = runtime.current;
+  const merged = await runtime.merge(pinned, false);
+  expect(runtime.writes).toEqual([["api", "--method", "PUT", `repos/${REPOSITORY}/pulls/${pinned.number}/merge`,
+    "-f", `sha=${pinned.head}`, "-f", "merge_method=squash"]]);
+  expect(merged.mergedBy).toBe(config.bot);
+  expect(merged.mergeTree).toBe(pinned.tree);
+  // Existing open PR -> accepted merge -> crash replay never queues or repeats the merge.
+  expect(await runtime.merge(pinned, false)).toEqual(merged);
+  expect(runtime.writes).toHaveLength(1);
+});
+
+test.each(["HTTP 405", "HTTP 409", "queued", "foreign merger"])(
+  "queue-exempt release merges fail closed on %s without an enqueue fallback",
+  async outcome => {
+    class RefusedMerge extends StudioDriver {
+      current = pr();
+      writes = 0;
+      override async readPr() { return this.current; }
+      override async git() { return "installed"; }
+      override async controls() { return new Map<string, string>(); }
+      override async gh<T>(): Promise<T | undefined> {
+        this.writes++;
+        if (outcome.startsWith("HTTP")) throw new Error(outcome);
+        if (outcome === "foreign merger") this.current = { ...this.current, merged: true, mergedBy: config.founder };
+        return { merged: false } as T;
+      }
+    }
+    const runtime = new RefusedMerge(driverConfig(), false);
+    await expect(runtime.merge(runtime.current, false)).rejects.toThrow(
+      outcome.startsWith("HTTP") ? outcome : "pinned merge is not observable as the release bot",
+    );
+    expect(runtime.writes).toBe(1);
+    runtime.current = pr({ behind: true });
+    await expect(runtime.merge(runtime.current, false)).rejects.toThrow(StaleIntentError);
+    expect(runtime.writes).toBe(1);
+  },
+);
+
 test("runtime comment reconciliation ignores impersonated markers and adopts its own accepted comment", async () => {
   class CommentsRuntime extends StudioDriver {
     writes = 0;

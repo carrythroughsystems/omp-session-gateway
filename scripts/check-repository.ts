@@ -556,6 +556,16 @@ export function checkE2EReadiness(relativePath: string, source: string): string[
   return violations;
 }
 
+export function checkWorkflowMergeQueue(name: string, text: string): string[] {
+  if (!["ci.yml", "compatibility.yml", "platform-qualification.yml"].includes(name)) return [];
+  const workflow = Bun.YAML.parse(text) as { on?: Record<string, unknown> };
+  const trigger = workflow.on?.merge_group;
+  if (JSON.stringify(trigger) !== JSON.stringify({ types: ["checks_requested"] })) {
+    return [`${name}: required checks must run on merge_group checks_requested without filters`];
+  }
+  return [];
+}
+
 export function checkWorkflowBunVersions(name: string, text: string, packageManager: string): string[] {
   const failures: string[] = [];
   const version = packageManager.replace(/^bun@/u, "");
@@ -718,7 +728,9 @@ async function main(): Promise<void> {
   const workflows = join(rootPath, ".github/workflows");
   for (const name of await readdir(workflows)) {
     if (!/\.ya?ml$/u.test(name)) continue;
-    errors.push(...checkWorkflowBunVersions(name, await readFile(join(workflows, name), "utf8"), packageJson.packageManager));
+    const source = await readFile(join(workflows, name), "utf8");
+    errors.push(...checkWorkflowBunVersions(name, source, packageJson.packageManager));
+    errors.push(...checkWorkflowMergeQueue(name, source));
   }
 
   const canonicalChecks: Array<[string, string]> = [
