@@ -1,8 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { watch } from "node:fs";
 import { TernCli, matchingTernBasename, parseTernInspection, parseTernJson, sessionBasenameMatches, validateTernRuntime } from "../src/tern-cli.ts";
 import type { TernProfile } from "../src/config.ts";
 
@@ -25,7 +24,10 @@ async function fake(mode = "success", receipt = realReceipt) {
 await fs.writeFile(process.env.HOME + '/pid', String(process.pid));
 await fs.writeFile(process.env.HOME + '/received', JSON.stringify({argv:process.argv.slice(2),env:process.env}));
 const mode = process.env.MODE;
-if(mode === 'timeout') await Bun.sleep(30000);
+if(mode === 'timeout') {
+  await fetch(process.env.READY_URL);
+  await Bun.sleep(30000);
+}
 else if(mode === 'nonzero') process.exit(4);
 else if(mode === 'overflow') process.stdout.write('x'.repeat(1100000));
 else if(mode === 'malformed') console.log('{');
@@ -177,24 +179,42 @@ describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
       .toEqual({ kind: "not_started" });
   });
   test("timeout and cancellation kill and reap children and release the exclusive CLI slot", async () => {
-    // This integration exercises real OS children and their timeout/reaping; fake timers cannot drive the child.
     const fixture = await fake("timeout");
     const cli = new TernCli(fixture.executable, { inspect: 100, create: 100 });
-    expect(await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal)).toEqual({ kind: "unknown" });
-    const pid = Number(await readFile(join(fixture.root, "pid"), "utf8"));
-    expect(() => process.kill(pid, 0)).toThrow();
-    const controller = new AbortController();
-    await rm(join(fixture.root, "pid"));
-    const ready = Promise.withResolvers<void>();
-    const watcher = watch(fixture.root, (_event, name) => {
-      if (name === "pid") { watcher.close(); ready.resolve(); }
-    });
-    const pending = cli.createTab(fixture.copy, fixture.profile, controller.signal);
-    await ready.promise;
-    expect(await cli.inspect(fixture.profile, new AbortController().signal)).toBeUndefined();
-    controller.abort();
-    expect(await pending).toEqual({ kind: "unknown" });
-    expect(await cli.createTab(fixture.copy, { ...fixture.profile, env: { ...fixture.profile.env, MODE: "success" } }, new AbortController().signal))
-      .toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
+    // Drive only the parent's deadline, after the child's loopback readiness handshake.
+    // File-watch notifications can be coalesced; neither they nor a short wall delay prove readiness.
+    vi.useFakeTimers();
+    try {
+      for (const interrupt of ["timeout", "cancellation"]) {
+        const ready = Promise.withResolvers<void>();
+        const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+          ready.resolve();
+          return new Response(null);
+        } });
+        const controller = new AbortController();
+        const profile = { ...fixture.profile, env: { ...fixture.profile.env, READY_URL: server.url.href } };
+        const pending = cli.createTab(fixture.copy, profile, controller.signal);
+        try {
+          await ready.promise;
+          const pid = Number(await readFile(join(fixture.root, "pid"), "utf8"));
+          expect(await cli.inspect(fixture.profile, new AbortController().signal)).toBeUndefined();
+          if (interrupt === "timeout") {
+            vi.advanceTimersByTime(99);
+            expect(() => process.kill(pid, 0)).not.toThrow();
+            vi.advanceTimersByTime(1);
+          } else controller.abort();
+          expect(await pending).toEqual({ kind: "unknown" });
+          expect(() => process.kill(pid, 0)).toThrow();
+        } finally {
+          controller.abort();
+          await pending;
+          await server.stop(true);
+        }
+      }
+      expect(await cli.createTab(fixture.copy, { ...fixture.profile, env: { ...fixture.profile.env, MODE: "success" } }, new AbortController().signal))
+        .toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

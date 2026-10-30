@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test as bunTest, vi } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -28,6 +28,15 @@ import {
 } from "../src/config.ts";
 
 const roots: string[] = [];
+// A cold helper gets two attempts of 45 s plus stderr teardown; warm replies keep their 10 s
+// product deadline. Bun must not delete a fixture while that bounded request is still in flight.
+const WINDOWS_CONFIG_TEST_TIMEOUT_MS = 120_000;
+
+function test(name: string, body: () => void | Promise<void>, timeout?: number): void {
+  // Apply to every sibling, including explicit 20/30 s cases and isolated --test-name-pattern runs.
+  // Keep native Bun defaults and each authored timeout unchanged on non-Windows hosts.
+  bunTest(name, body, process.platform === "win32" ? WINDOWS_CONFIG_TEST_TIMEOUT_MS : timeout);
+}
 
 describe("opt-in Tern configuration", () => {
   const profile = { id: "local", label: " OMP ", argv: ["/synthetic/omp", "--flag"],
@@ -205,6 +214,8 @@ const fakeAcl = {
   exitBeforeReplyOnce: false,
   /** Delays each process's first reply, as PowerShell's cold start does. */
   firstReplyDelayMs: 0,
+  dropReplies: false,
+  kills: 0,
   /** Called as each request reaches the helper, so a test can act at that moment. */
   onRequest: undefined as (() => void) | undefined,
 };
@@ -259,7 +270,9 @@ function installFakePowerShell(): () => void {
     // waiting on a process nobody marked dead.
     let dead = false;
     let replied = false;
+    const delayedReplies = new Set<ReturnType<typeof setTimeout>>();
     const deliver = (reply: Uint8Array): void => {
+      if (dead) return;
       const resolve = waiting;
       waiting = undefined;
       if (resolve === undefined) pending.push(reply);
@@ -292,7 +305,14 @@ function installFakePowerShell(): () => void {
             fakeAcl.onRequest?.();
             const delay = replied ? 0 : fakeAcl.firstReplyDelayMs;
             replied = true;
-            if (delay > 0) setTimeout(() => deliver(reply), delay);
+            if (fakeAcl.dropReplies) continue;
+            if (delay > 0) {
+              const timer = setTimeout(() => {
+                delayedReplies.delete(timer);
+                deliver(reply);
+              }, delay);
+              delayedReplies.add(timer);
+            }
             else deliver(reply);
           }
         },
@@ -320,7 +340,16 @@ function installFakePowerShell(): () => void {
       }),
       ref: (): undefined => undefined,
       unref: (): undefined => undefined,
-      kill: (): undefined => undefined,
+      kill: (): void => {
+        fakeAcl.kills += 1;
+        dead = true;
+        for (const timer of delayedReplies) clearTimeout(timer);
+        delayedReplies.clear();
+        pending.length = 0;
+        const closed = waiting;
+        waiting = undefined;
+        closed?.({ done: true });
+      },
     };
   };
   Bun.spawn = fakeSpawn as unknown as typeof Bun.spawn;
@@ -340,6 +369,7 @@ function installFakePowerShell(): () => void {
     fakeAcl.exitBeforeReply = false;
     fakeAcl.exitBeforeReplyOnce = false;
     fakeAcl.firstReplyDelayMs = 0;
+    fakeAcl.dropReplies = false;
     fakeAcl.onRequest = undefined;
   };
 }
@@ -1730,6 +1760,87 @@ describe("Windows private-path ACL enforcement", () => {
       vi.advanceTimersByTime(11_000);
       expect(await outcome).toBe("resolved");
       expect(fakeAcl.spawns - spawnsBefore).toBe(1);
+    } finally {
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  test("keeps the config fixture alive through a cold reply beyond the portable test budget", async () => {
+    const root = await privateRoot();
+    const path = join(root, "config.json");
+    const restore = installFakePowerShell();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      vi.useFakeTimers();
+      fakeAcl.firstReplyDelayMs = 36_000;
+      const requested = Promise.withResolvers<void>();
+      fakeAcl.onRequest = requested.resolve;
+      const write = writePrivateTextFile(path, JSON.stringify(devDocument()));
+      const withinBudget = Promise.race([
+        write.then(() => "written"),
+        new Promise<string>(resolve => {
+          timer = setTimeout(() => resolve("test timed out before its ACL request"), WINDOWS_CONFIG_TEST_TIMEOUT_MS);
+        }),
+      ]);
+      await requested.promise;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      vi.advanceTimersByTime(36_000);
+      // Settle the real I/O before teardown, even when the budget assertion below fails.
+      await write;
+      expect(await withinBudget).toBe("written");
+      expect(WINDOWS_CONFIG_TEST_TIMEOUT_MS).toBeGreaterThan(2 * 45_000 + 2 * 250);
+      expect((await loadGatewayConfig({ configPath: path })).auth.mode).toBe("dev-localhost");
+    } finally {
+      clearTimeout(timer);
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  test("bounds lost warm and cold replies, discards both helpers, and recovers on the next request", async () => {
+    const path = join(await privateRoot(), "config.json");
+    const restore = installFakePowerShell();
+    try {
+      await writePrivateTextFile(path, "original");
+      const spawnsBefore = fakeAcl.spawns;
+      const killsBefore = fakeAcl.kills;
+      vi.useFakeTimers();
+      fakeAcl.dropReplies = true;
+      const first = Promise.withResolvers<void>();
+      const second = Promise.withResolvers<void>();
+      fakeAcl.onRequest = () => {
+        fakeAcl.onRequest = second.resolve;
+        first.resolve();
+      };
+      let settled = false;
+      const outcome = writePrivateTextFile(path, "replacement").then(
+        () => { settled = true; return undefined; },
+        (error: unknown) => { settled = true; return error; },
+      );
+      await first.promise;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      vi.advanceTimersByTime(9_999);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+      vi.advanceTimersByTime(1);
+      await second.promise;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(fakeAcl.kills - killsBefore).toBe(1);
+      vi.advanceTimersByTime(44_999);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+      vi.advanceTimersByTime(1);
+      const failure = await outcome;
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain("did not reply in time");
+      expect((failure as Error).message).toContain(path);
+      expect(fakeAcl.kills - killsBefore).toBe(2);
+      expect(fakeAcl.spawns - spawnsBefore).toBe(1);
+      fakeAcl.dropReplies = false;
+      await writePrivateTextFile(path, "recovered");
+      expect(await readPrivateTextFile(path, 100)).toBe("recovered");
+      expect(fakeAcl.spawns - spawnsBefore).toBe(2);
     } finally {
       vi.useRealTimers();
       restore();
