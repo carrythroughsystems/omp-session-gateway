@@ -146,7 +146,7 @@ export function credentialExpiry(headers: string, now = Date.now()): { status: "
   return !Number.isFinite(at) ? { status: "unknown" } : { status: at <= now ? "expired" : "valid", expiresAt: new Date(at).toISOString() };
 }
 interface ApiPr {
-  number: number; user: { login: string; type: string }; head: { sha: string; ref: string; repo: { full_name: string } | null };
+  number: number; title: string; user: { login: string; type: string }; head: { sha: string; ref: string; repo: { full_name: string } | null };
   base: { ref: string }; draft: boolean; state: "open" | "closed"; merged: boolean;
   merged_by: { login: string } | null; merge_commit_sha: string | null; mergeable_state: string; html_url: string;
 }
@@ -361,12 +361,12 @@ export class StudioDriver implements DriverPort {
     const pr = (await this.api<ApiPr>(`pulls/${number}`))!;
     const [head, files, checks, merge] = await Promise.all([
       this.api<{ tree: { sha: string } }>(`git/commits/${pr.head.sha}`),
-      this.pages<{ filename: string; previous_filename?: string }>(`pulls/${number}/files?per_page=100`),
+      this.pages<{ filename: string; previous_filename?: string; status?: string }>(`pulls/${number}/files?per_page=100`),
       this.gh<{ check_runs: { name: string; status: string; conclusion: string; app: { slug: string } }[] }[]>(["api", "--paginate", "--slurp", `repos/${REPOSITORY}/commits/${pr.head.sha}/check-runs?per_page=100&filter=latest`]),
       pr.merged && pr.merge_commit_sha !== null ? this.api<{ tree: { sha: string }; verification: { verified: boolean } }>(`git/commits/${pr.merge_commit_sha}`) : undefined,
     ]);
     const runs = checks!.flatMap(page => page.check_runs);
-    return { number, author: pr.user.login, authorType: pr.user.type, headRepository: pr.head.repo?.full_name ?? "",
+    return { number, title: pr.title, author: pr.user.login, authorType: pr.user.type, headRepository: pr.head.repo?.full_name ?? "",
       base: pr.base.ref, headRef: pr.head.ref, head: pr.head.sha, tree: head!.tree.sha, draft: pr.draft,
       state: pr.state, merged: pr.merged, mergedBy: pr.merged_by?.login, mergeCommit: pr.merge_commit_sha ?? undefined,
       mergeTree: merge?.tree.sha, mergeVerified: merge?.verification.verified, behind: pr.mergeable_state === "behind" || pr.mergeable_state === "unknown",
@@ -867,7 +867,7 @@ export class StudioDriver implements DriverPort {
       const prs = await this.pages<{ number: number }>("commits/" + commit.sha + "/pulls?per_page=100");
       let reviewed = false;
       for (const item of prs) {
-        const candidate = (await this.api<ApiPr & { title: string }>("pulls/" + item.number))!;
+        const candidate = (await this.api<ApiPr>("pulls/" + item.number))!;
         if (!candidate.merged || candidate.base.ref !== "main" || candidate.merge_commit_sha !== commit.sha) continue;
         const detail = await this.readPr(item.number);
         const subject = (await this.api<{ message: string }>("git/commits/" + candidate.merge_commit_sha))!.message.split("\n", 1)[0]!;
@@ -1076,7 +1076,11 @@ export class StudioDriver implements DriverPort {
       return current;
     }
     if (current.state !== "open" || current.draft || current.behind || !current.checksPassed) throw new StaleIntentError("PR is not eligible for strict checked merge");
-    await command(["gh", "pr", "merge", String(pr.number), "--repo", REPOSITORY, "--squash", "--match-head-commit", pr.head], ROOT, this.env);
+    // gh pr merge enqueues on queue-required branches, even for a queue bypass actor.
+    // Only the queue ruleset is bypassed; classic strict checks/signatures still apply.
+    await this.gh(["api", "--method", "PUT", `repos/${REPOSITORY}/pulls/${pr.number}/merge`,
+      "-f", `sha=${pr.head}`, "-f", "merge_method=squash",
+      "-f", `commit_title=${current.title} (#${pr.number})`, "-f", "commit_message="]);
     const merged = await this.readPr(pr.number);
     if (!merged.merged || merged.mergedBy !== this.config.bot) throw new Error("pinned merge is not observable as the release bot");
     return merged;
