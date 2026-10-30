@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceRevision": "090be7bcfec8307d4b13029e7df67965dafbf70a",
+  "sourceRevision": "ea7b101b61f0afe753e4dbbc4e4e65c366bf57ed",
   "upstreamClient": {
     "tag": "v18.12.6",
     "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
@@ -8,7 +8,7 @@
   },
   "generatedBy": {
     "command": "bun run media:capture",
-    "bun": "1.4.0",
+    "bun": "1.4.4",
     "typescript": "7.0.2",
     "playwright": "1.62.1",
     "chromium": "151.0.7922.34",
