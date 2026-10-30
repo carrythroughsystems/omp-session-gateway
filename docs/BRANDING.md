@@ -70,9 +70,10 @@ accent.
 
 Sober and exact. Sentence case everywhere except mono eyebrows. No emoji, no
 exclamation marks. Security claims stated as invariants ("Capabilities are
-requested only when you tap an action."). Keep the standing disclaimer:
-"Community project; not affiliated with OMP." Describe stock mainline OMP `>= 18.1.20` as the
-prerequisite, not a gateway-specific build.
+requested only when you tap an action."). Keep the standing disclaimer in prose:
+"Community project; not affiliated with or endorsed by the Oh My Pi maintainers." (rendered artwork
+keeps the short form "Community project; not affiliated with OMP."). Describe stock mainline OMP
+`>= 18.1.20` as the prerequisite, not a gateway-specific build.
 
 ## Message hierarchy
 

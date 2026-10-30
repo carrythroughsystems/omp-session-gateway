@@ -236,7 +236,7 @@ section > .wrap > h2 { max-width: 22ch; }
 .setup-aside { display: grid; gap: 18px; padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); align-self: start; }
 @media (min-width: 900px) {
   .setup-wrap { grid-template-columns: minmax(0, 1fr) 300px; gap: 56px; align-items: start; }
-  .setup-aside { position: sticky; top: 84px; }
+  .setup-aside { order: 1; position: sticky; top: 84px; }
 }
 .setup-aside h3 { font-size: 0.95rem; }
 .setup-aside ul { list-style: none; padding: 0; display: grid; gap: 10px; }

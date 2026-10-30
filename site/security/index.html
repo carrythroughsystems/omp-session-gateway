@@ -43,7 +43,7 @@
 <h1>Private by design, fail-closed by default</h1>
 <p class="lede">Open the session, not a secret link. View can read sensitive work; Control can steer it.
 The gateway treats both as bearer capabilities and fetches one only for an authorized launch.</p>
-<p>Stock OMP <code>&gt;= 18.1.20</code> supplies the native collaboration controller and local registry.
+<p>Stock mainline OMP with <code>collab.autoStart</code> supplies the native collaboration controller and local registry.
 No fork, custom OMP build, or gateway-specific OMP plugin is required. The gateway is still a
 separate installation, and native integration does not relax the boundaries below.</p>
 
@@ -51,30 +51,31 @@ separate installation, and native integration does not relax the boundaries belo
 <ul class="grid three">
 <li><h3>Loopback-only listeners</h3><p>The production HTTP server binds only to <code>127.0.0.1</code> and optionally <code>::1</code>; Tailscale Serve is the only supported remote path and Funnel is never enabled.</p></li>
 <li><h3>Allowlisted tailnet identity</h3><p>Production requires a verified <code>Tailscale-User-Login</code> that matches an exact allowlist, and identity headers are believed only while Tailscale's tunnel device is present. A userspace-networking client makes every peer look local, so the daemon returns <code>403</code> rather than trusting the header.</p></li>
-<li><h3>No gateway capability store</h3><p>View and Control links exist only in live OMP memory, a transient authenticated query and <code>no-store</code> launch response, and volatile client JavaScript. The gateway never stores or caches them, even in its memory-only registry. Never in files, logs, diagnostics, URLs, cookies, push payloads, browser storage, or service-worker caches.</p></li>
-<li><h3>Metadata-only APIs</h3><p>Session-list and SSE responses carry bounded metadata; a capability is fetched only after an explicit tap and only for the expected generation, so stale cards fail instead of receiving a newer secret.</p></li>
+<li><h3>No gateway capability store</h3><p>View and Control links exist only in live OMP memory, a transient authenticated query and <code>no-store</code> launch response, and volatile client JavaScript. The gateway never stores or caches them, even in its memory-only metadata registry. Never in files, logs, diagnostics, URLs, cookies, push payloads, browser storage, or service-worker caches.</p></li>
+<li><h3>Metadata-only APIs</h3><p>Session-list and SSE responses carry bounded metadata; a capability is fetched only after an explicit tap and only for the expected session generation, so stale cards fail instead of receiving a newer secret.</p></li>
 <li><h3>OMP-owned discovery</h3><p>The gateway reads private discovery files and queries each OMP-owned endpoint with its per-host token. Snapshots contain metadata only; a link query resolves one exact generation and role at launch. The gateway never writes or removes OMP's discovery files. Its own readiness token is separate and never sent to OMP.</p></li>
 <li><h3>Generation-bound launch</h3><p>OMP owns host replacement and revocation; stale cards cannot exchange an old generation for a newer capability. The gateway polls every 10 seconds by default. Missing discovery or definitive endpoint failure removes the card; transient query failures retain metadata only until the 35-second TTL expires.</p></li>
 <li><h3>Hardened browser surface</h3><p>Exact <code>Origin</code> validation on state-changing requests, no wildcard CORS, strict CSP, <code>Referrer-Policy: no-referrer</code>, and a service worker that caches only immutable shell assets.</p></li>
 <li><h3>No gateway transcript storage</h3><p>The directory never stores or renders transcripts; opening a session mounts the pinned OMP client, which connects directly through the encrypted relay. The relay still observes connection metadata, timing, and ciphertext sizes. OMP and the chosen model provider retain their own content-handling policies.</p></li>
-<li><h3>Notification detail is a choice</h3><p>Explicit opt-in enables capability-free Push v2 alerts. Private has no body; Session (the default) includes bounded session/project labels. Preview currently falls back to Session. Visible text may persist in notification history, screenshots, or wearables; background delivery is best effort and not in the qualified core matrix.</p></li>
+<li><h3>Notification detail is a choice</h3><p>Explicit opt-in enables capability-free Web Push alerts. Private has no body; Session (the default) includes bounded session and project labels. Preview currently falls back to Session. Visible text may persist in notification history, screenshots, or wearables; background delivery is best effort, with Android force-stop and Doze as observed variants rather than delivery guarantees.</p></li>
 </ul>
 
 <h2>Scope and residual risk</h2>
-<p>Out of scope in v1: mutually untrusted local accounts on a shared shell host, Portal Tunnel, and self-hosted or
+<p>Out of scope: mutually untrusted local accounts on a shared shell host, Portal Tunnel, and self-hosted or
 proxied relays. Every release runs distinctive-synthetic-secret leak scans across logs, storage, caches, URLs, and
 CI artifacts before it is qualified.</p>
 <p>Device lock and prompt tailnet revocation matter: a still-authorized unlocked phone can request
-Control. Passkey verification is proposed, not implemented. The accepted protection against
-upgrades interrupting a pending launch also has an unresolved implementation gap; see
-<a href="https://github.com/alphastorm/omp-session-gateway/blob/main/docs/DECISIONS.md#current-implementation-audit--2026-09-14">ADR-018</a>.</p>
+Control. Passkey verification is proposed, not implemented. Activated shell updates reload only an
+idle directory, though an earlier worker restored by rollback or a tab loaded before the update guard
+can still navigate an active page; see
+<a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/DECISIONS.md#adr-018--activate-pwa-upgrades-automatically-without-interrupting-live-collaboration">ADR-018</a>.</p>
 <p>The full threat model, boundaries, and acceptance gates:
 <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/SECURITY.md">docs/SECURITY.md</a> ·
 report a vulnerability privately via the
 <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/SECURITY.md">security policy</a>.</p>
-<p class="verified">Each stable release's core qualification names its exact OMP, Bun, Debian,
-macOS, and Pixel builds and a 1,800-second relay check, not eight hours; the current release's
-receipts and exclusions are on the <a href="../status/">status page</a>. Testing more platforms and
+<p class="verified">Each stable release's qualification names its exact OMP, Bun, host (Debian,
+macOS guest, Windows), physical Pixel, and cloud-device builds and a 1,800-second relay check, not
+eight hours; the current release's receipts and limits are on the <a href="../status/">status page</a>. Testing more platforms and
 browsers in CI does not change this security boundary.</p>
 </div>
 </section>
