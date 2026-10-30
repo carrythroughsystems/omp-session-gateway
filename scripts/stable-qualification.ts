@@ -125,6 +125,14 @@ function preflightFailures(error: unknown): readonly LaneFailure[] {
       operation: "not_started" }) : item);
 }
 
+/** Outcome publication must not replace the qualification failure it records. */
+async function publishFailureOutcome(original: unknown, publish: () => Promise<void>): Promise<void> {
+  try { await publish(); }
+  catch (publication) {
+    throw new AggregateError([original, publication], "qualification failure and outcome publication both failed");
+  }
+}
+
 function campaignAdmissionFailure(error: unknown, nextFailureId: () => number): AggregateError {
   return new AggregateError(normalizeQualificationFailures(error).map(failure => {
     const known = Object.hasOwn(FAILURE_REASONS.campaign, failure.reason) && failure.class !== "collateral";
@@ -3128,14 +3136,15 @@ export async function runStableQualification(
     try { await preflightStableQualification(options, runtime, lanes); }
     catch (error) {
       if (execution !== undefined && options.outcomeFile !== undefined) {
-        await writeQualificationOutcomeFile(options.outcomeFile, {
+        const outcomeFile = options.outcomeFile;
+        await publishFailureOutcome(error, () => writeQualificationOutcomeFile(outcomeFile, {
           formatVersion: 1, outcome: "qualification-failed", scope: "preflight", execution,
           failureSummary: {
             failures: preflightFailures(error),
             timings: { attemptMs: 0, cleanupMs: 0 },
             containment: { proven: true, cleanupComplete: true, unresolvedMutation: false },
           },
-        });
+        }));
         throw error;
       }
       const outcome = recognizedDeviceCloudOutcome(error);
@@ -3173,13 +3182,16 @@ export async function runStableQualification(
     }
     try { admission = await preflightStableQualification(options, runtime, lanes); }
     catch (error) {
-      if (execution !== undefined && options.outcomeFile !== undefined) await writeQualificationOutcomeFile(options.outcomeFile, {
-        formatVersion: 1, outcome: "qualification-failed", scope: "preflight", execution,
-        failureSummary: {
-          failures: preflightFailures(error),
-          timings: { attemptMs: 0, cleanupMs: 0 }, containment: { proven: true, cleanupComplete: true, unresolvedMutation: false },
-        },
-      });
+      if (execution !== undefined && options.outcomeFile !== undefined) {
+        const outcomeFile = options.outcomeFile;
+        await publishFailureOutcome(error, () => writeQualificationOutcomeFile(outcomeFile, {
+          formatVersion: 1, outcome: "qualification-failed", scope: "preflight", execution,
+          failureSummary: {
+            failures: preflightFailures(error),
+            timings: { attemptMs: 0, cleanupMs: 0 }, containment: { proven: true, cleanupComplete: true, unresolvedMutation: false },
+          },
+        }));
+      }
       throw error;
     }
   }
@@ -3240,16 +3252,20 @@ async function runOwnedStableQualification(
   const run = async () => {
     try { return await runReceiptStableQualification(options, runtime, lanes, receiptPath, receipt, orchestratorCommit, persist, admission); }
     catch (error) {
-      await finalizeCampaignFailure(receipt, error, persist, lanes, { attemptMs: performance.now() - began, cleanupMs: cleanupElapsed(receipt) });
-      if (receipt.execution !== undefined && options.outcomeFile !== undefined) {
-        await writeQualificationOutcomeFile(options.outcomeFile, {
-          formatVersion: 1, outcome: "qualification-failed",
-          scope: receipt.rigReadiness?.status === "failed" ? "rigReadiness" : "campaign",
-          execution: receipt.execution, failureSummary: receipt.failureSummary!,
-          receipt: { sha256: sha256(await readFile(receiptPath)), cleanupDisposition:
-            receipt.failureSummary!.containment.proven && receipt.failureSummary!.containment.cleanupComplete &&
-            !receipt.failureSummary!.containment.unresolvedMutation ? "restored" : "unresolved" },
-        });
+      try {
+        await finalizeCampaignFailure(receipt, error, persist, lanes, { attemptMs: performance.now() - began, cleanupMs: cleanupElapsed(receipt) });
+        if (receipt.execution !== undefined && options.outcomeFile !== undefined) {
+          await writeQualificationOutcomeFile(options.outcomeFile, {
+            formatVersion: 1, outcome: "qualification-failed",
+            scope: receipt.rigReadiness?.status === "failed" ? "rigReadiness" : "campaign",
+            execution: receipt.execution, failureSummary: receipt.failureSummary!,
+            receipt: { sha256: sha256(await readFile(receiptPath)), cleanupDisposition:
+              receipt.failureSummary!.containment.proven && receipt.failureSummary!.containment.cleanupComplete &&
+              !receipt.failureSummary!.containment.unresolvedMutation ? "restored" : "unresolved" },
+          });
+        }
+      } catch (terminal) {
+        throw new AggregateError([error, terminal], "qualification failure and terminal persistence failed");
       }
       throw error;
     }
