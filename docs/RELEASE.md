@@ -1458,7 +1458,9 @@ check preserves that page instead of requiring the directory title. Before launc
 confirms the display is awake and the keyguard dismissed, then sends HOME so Chrome's browser
 task does not keep focus after acceptance. It dispatches the same launcher intent once more if
 the standalone task is still not focused and resumed after ten seconds. Both launches and polling
-share one thirty-second focus deadline; a stalled final adb read and private power/keyguard
+share one thirty-second focus deadline, measured from the first dispatch. Each launcher dispatch
+has a twenty-second adb bound, capped by the remaining focus window; dumpsys and keyevent
+commands retain their five-second bound. A stalled final adb read and private power/keyguard
 sampling each have a five-second command bound plus two-second termination grace, keeping the
 failure path below forty-five seconds from the first launch. A focus timeout keeps the public
 error unchanged; its private cause retains only the last `topResumedActivity` and

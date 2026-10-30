@@ -372,7 +372,7 @@ export async function awaitWebApkActiveTask(
     deadlineMs = 30_000,
     now = Date.now,
   }: {
-    readonly launch: () => Promise<unknown>;
+    readonly launch: (timeoutMs: number) => Promise<unknown>;
     readonly readDeviceState: () => Promise<string>;
     readonly sleep?: (milliseconds: number) => Promise<void>;
     readonly deadlineMs?: number;
@@ -381,7 +381,7 @@ export async function awaitWebApkActiveTask(
 ): Promise<void> {
   const started = now(), deadline = started + deadlineMs, relaunchAt = started + 10_000;
   let activities = "", relaunched = false;
-  await launch();
+  await launch(Math.max(1, Math.min(20_000, deadline - now())));
   while (now() <= deadline) {
     activities = await readActivities();
     const current = now();
@@ -389,7 +389,7 @@ export async function awaitWebApkActiveTask(
     if (current >= deadline) break;
     if (!relaunched && current >= relaunchAt) {
       relaunched = true;
-      await launch();
+      await launch(Math.max(1, Math.min(20_000, deadline - now())));
     } else {
       await pause(Math.min(1_000, deadline - current, relaunched ? Infinity : relaunchAt - current));
     }
@@ -405,22 +405,23 @@ export async function launchInstalledWebApk(
   serial: string,
   packageName: string,
   {
-    command = (...args) => runAdb(serial, args, { timeoutMs: 5_000 }),
+    adb = runAdb,
     unlockKeyguard = () => unlockAndroidKeyguard(serial),
     sleep: pause = sleep,
     now = Date.now,
   }: {
-    readonly command?: AndroidAdbCommand;
+    readonly adb?: typeof runAdb;
     readonly unlockKeyguard?: AndroidKeyguardUnlock;
     readonly sleep?: (milliseconds: number) => Promise<void>;
     readonly now?: () => number;
   } = {},
 ): Promise<void> {
+  const command: AndroidAdbCommand = (...args) => adb(serial, args, { timeoutMs: 5_000 });
   const wakefulness = await wakeAndroidDisplay(command, pause, unlockKeyguard);
   if (wakefulness !== "Awake") throw new Error(`Android display did not wake (observed ${wakefulness})`);
   await command("shell", "input", "keyevent", "KEYCODE_HOME");
   await awaitWebApkActiveTask(() => command("shell", "dumpsys", "activity", "activities"), packageName, {
-    launch: () => command("shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"),
+    launch: timeoutMs => adb(serial, ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"], { timeoutMs }),
     // Five-second adb bounds plus runAdb's two-second kill grace keep timeout diagnostics
     // within fourteen seconds of the focus deadline, even if its final activity read stalls.
     readDeviceState: async () => (await Promise.all([

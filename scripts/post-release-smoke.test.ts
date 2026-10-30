@@ -758,9 +758,10 @@ describe("installed WebAPK focus recovery", () => {
     const events: string[] = [];
     let keyguard = true, clock = 0, launches = 0;
     await launchInstalledWebApk("SYNTHETIC-SMOKE-DEVICE", packageName, {
-      command: async (...args) => {
+      adb: async (_serial, args, options) => {
         const command = args.join(" ");
         events.push(command);
+        expect(options?.timeoutMs).toBe(command.startsWith("shell monkey") ? 20_000 : 5_000);
         if (command === "shell dumpsys power") return "mWakefulness=Awake";
         if (command === "shell dumpsys window") {
           events.push(`keyguard:${keyguard}`);
@@ -788,10 +789,52 @@ describe("installed WebAPK focus recovery", () => {
     expect(events.filter(event => event === launch)).toHaveLength(2);
   });
 
+  test("a slow first launcher dispatch can focus within the unchanged deadline", async () => {
+    let clock = 0, launches = 0, launchedAt = 0;
+    await launchInstalledWebApk("SYNTHETIC-SMOKE-DEVICE", packageName, {
+      adb: async (_serial, args, options) => {
+        const command = args.join(" ");
+        if (command.startsWith("shell monkey")) {
+          expect(options?.timeoutMs).toBe(20_000);
+          launches++;
+          launchedAt = clock;
+          clock += 12_000;
+          return "";
+        }
+        expect(options?.timeoutMs).toBe(5_000);
+        if (command === "shell dumpsys power") return "mWakefulness=Awake";
+        if (command === "shell dumpsys window") return "isKeyguardShowing=false";
+        if (command === "shell dumpsys activity activities") return webApkInFront;
+        return "";
+      },
+      unlockKeyguard: async () => { throw new Error("already unlocked"); },
+      sleep: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    expect(launches).toBe(1);
+    expect(clock - launchedAt).toBe(12_000);
+  });
+
+  test("a delayed re-launch is capped by the remaining thirty-second focus window", async () => {
+    let clock = 0, launches = 0;
+    const bounds: number[] = [];
+    await awaitWebApkActiveTask(async () => launches >= 2 ? webApkInFront : browserInFront, packageName, {
+      launch: async timeoutMs => {
+        bounds.push(timeoutMs);
+        clock += launches++ === 0 ? 12_000 : 18_000;
+      },
+      readDeviceState: async () => { throw new Error("success must not collect diagnostics"); },
+      sleep: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    expect(bounds).toEqual([20_000, 18_000]);
+    expect(clock).toBe(30_000);
+  });
+
   test.each(["Asleep", "Keyguard"])("refuses a device still in %s before HOME or launch", async state => {
     const events: string[] = [];
     await expect(launchInstalledWebApk("SYNTHETIC-SMOKE-DEVICE", packageName, {
-      command: async (...args) => {
+      adb: async (_serial, args) => {
         const command = args.join(" ");
         events.push(command);
         if (command === "shell dumpsys power") return `mWakefulness=${state === "Asleep" ? "Asleep" : "Awake"}`;
