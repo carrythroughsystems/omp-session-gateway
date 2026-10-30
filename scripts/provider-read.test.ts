@@ -123,16 +123,38 @@ test("cancellation during backoff prevents another provider read", async () => {
   expect(calls).toBe(1);
 });
 
-test("one total budget includes reads and backoff and cancels pending transport", async () => {
+test("backoff is charged to the one total budget without another provider read", async () => {
+  let calls = 0;
+  const delays: number[] = [];
+  await expect(readProvider(async () => {
+    calls += 1;
+    return new Response(null, { status: 503 });
+  }, {
+    budgetMs: 20,
+    sleep: async (milliseconds, signal) => {
+      delays.push(milliseconds);
+      if (signal === undefined) throw new Error("expected the budget signal");
+      // Await expiry itself rather than require backoff to beat the budget timer.
+      signal.throwIfAborted();
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
+  })).rejects.toThrow("budget exhausted");
+  expect(calls).toBe(1);
+  expect(delays).toEqual([2_000]);
+});
+
+test("an expiring budget cancels a pending provider read and waits for it to settle", async () => {
   let calls = 0, ended = false;
   await expect(readProvider(async signal => {
     calls += 1;
-    if (calls === 1) return new Response(null, { status: 503 });
-    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    if (!signal.aborted) {
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    }
+    await Bun.sleep(5);
     ended = true;
     throw signal.reason;
-  }, { budgetMs: 20, sleep: async () => { await Bun.sleep(5); } })).rejects.toThrow("budget exhausted");
-  expect(calls).toBe(2);
+  }, { budgetMs: 20 })).rejects.toThrow("budget exhausted");
+  expect(calls).toBe(1);
   expect(ended).toBe(true);
 });
 

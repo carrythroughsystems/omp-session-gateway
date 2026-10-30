@@ -22,6 +22,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 - Require alias-matched outbound clear acknowledgements before Android Push overlap recovery
   re-arms, retain typed delivery timeouts on execution expiry, and keep standalone failure IDs distinct.
+- Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
+  forever, and stream qualification output into bounded, byte-exact private tails.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.
