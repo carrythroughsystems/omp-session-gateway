@@ -345,10 +345,16 @@ describe("Android radio restoration", () => {
 
 describe("authorized Android selection", () => {
   test("untethered admission allows independent networking and redacts an unavailable probe", async () => {
-    await requireAndroidDevicePreconditions(async () => "    Upstream wanted: false\n", { switchesRadios: true, needsNotifications: false });
+    await requireAndroidDevicePreconditions(async (...args) =>
+      args.join(" ") === "shell dumpsys deviceidle whitelist"
+        ? "user,com.tailscale.ipn,10123\n" : "    Upstream wanted: false\n",
+    { switchesRadios: true, needsNotifications: false });
     let failure: unknown;
     try {
-      await requireAndroidDevicePreconditions(async () => { throw new Error("synthetic-private-device"); }, { switchesRadios: true, needsNotifications: false });
+      await requireAndroidDevicePreconditions(async (...args) => {
+        if (args.join(" ") === "shell dumpsys deviceidle whitelist") return "user,com.tailscale.ipn,10123\n";
+        throw new Error("synthetic-private-device");
+      }, { switchesRadios: true, needsNotifications: false });
     } catch (error) { failure = error; }
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).not.toContain("synthetic-private-device");
@@ -408,6 +414,98 @@ describe("authorized Android selection", () => {
     }
     expect(message).toContain("expected one authorized adb device");
     expect(message).not.toContain("private");
+  });
+});
+
+describe("Android Tailscale Doze admission", () => {
+  const remedy = "Tailscale (com.tailscale.ipn) must be on the Pixel's Doze allowlist before qualification or smoke: " +
+    "set Settings → Apps → Tailscale → Battery → Unrestricted, or run " +
+    "adb shell dumpsys deviceidle whitelist +com.tailscale.ipn; no device settings were changed";
+
+  function device(allowlist: string) {
+    const calls: string[][] = [];
+    const state = { allowlist, mutations: 0 };
+    const command = async (...args: string[]) => {
+      calls.push(args);
+      switch (args.join(" ")) {
+        case "shell dumpsys deviceidle whitelist": return state.allowlist;
+        case "shell dumpsys tethering": return "Upstream wanted: false\n";
+        case "shell settings get global zen_mode": return "0\n";
+        default: state.mutations += 1; return "";
+      }
+    };
+    return { calls, state, command };
+  }
+
+  test.each(["user", "system"])("a strict %s allowlist entry admits qualification and smoke read-only", async kind => {
+    for (const needsNotifications of [true, false]) {
+      const pixel = device(`system,com.example.other,10001\r\n${kind},com.tailscale.ipn,10123\r\nuser,com.example.last,10124\r\n`);
+      await requireAndroidDevicePreconditions(pixel.command, { switchesRadios: true, needsNotifications });
+      expect(pixel.calls).toEqual([
+        ["shell", "dumpsys", "deviceidle", "whitelist"],
+        ["shell", "dumpsys", "tethering"],
+        ...(needsNotifications ? [["shell", "settings", "get", "global", "zen_mode"]] : []),
+      ]);
+      expect(pixel.state.mutations).toBe(0);
+    }
+  });
+
+  test("a non-exempt Pixel refuses before mutations until the operator adds the exemption", async () => {
+    const pixel = device("system,com.example.other,10001\n");
+    const journey = async () => {
+      await requireAndroidDevicePreconditions(pixel.command, { switchesRadios: true, needsNotifications: true });
+      await pixel.command("shell", "dumpsys", "deviceidle", "force-idle");
+    };
+    await expect(journey()).rejects.toThrow(remedy);
+    expect(pixel.calls).toEqual([["shell", "dumpsys", "deviceidle", "whitelist"]]);
+    expect(pixel.state.mutations).toBe(0);
+    expect(pixel.state.allowlist).toBe("system,com.example.other,10001\n");
+
+    // A separate, explicit operator setup changes the representative pre-existing state.
+    pixel.state.allowlist += "user,com.tailscale.ipn,10123\n";
+    await requireAndroidDevicePreconditions(pixel.command, { switchesRadios: true, needsNotifications: true });
+    expect(pixel.state.mutations).toBe(0);
+  });
+
+  test.each([
+    "",
+    "user,com.tailscale.ipn.debug,10123",
+    "system,com.tailscale.ipn.debug,10123",
+    "user,other.com.tailscale.ipn,10123",
+    "system-excidle,com.tailscale.ipn,10123",
+    "User,com.tailscale.ipn,10123",
+    "user,com.tailscale.ipn",
+    "user,com.tailscale.ipn,",
+    "user,com.tailscale.ipn,not-a-uid",
+    "user,com.tailscale.ipn,-10123",
+    "user,com.tailscale.ipn,10123.5",
+    "user,com.tailscale.ipn,10123,extra",
+    " user,com.tailscale.ipn,10123",
+    "user, com.tailscale.ipn,10123",
+    "user,com.tailscale.ipn,10123 trailing",
+  ])("malformed or lookalike allowlist evidence does not admit the Pixel: %j", async entry => {
+    const pixel = device(`system,com.example.other,10001\n${entry}\n`);
+    await expect(requireAndroidDevicePreconditions(pixel.command, { switchesRadios: true, needsNotifications: false }))
+      .rejects.toThrow(remedy);
+    expect(pixel.calls).toEqual([["shell", "dumpsys", "deviceidle", "whitelist"]]);
+    expect(pixel.state.mutations).toBe(0);
+  });
+
+  test("an unavailable allowlist probe fails closed with adb details in its private cause only", async () => {
+    const calls: string[][] = [];
+    const transportFailure = new Error("synthetic-private-device");
+    let failure: unknown;
+    try {
+      await requireAndroidDevicePreconditions(async (...args) => {
+        calls.push(args);
+        throw transportFailure;
+      }, { switchesRadios: true, needsNotifications: false });
+    } catch (error) { failure = error; }
+    expect((failure as Error).message).toBe(
+      "cannot verify the Pixel's Tailscale (com.tailscale.ipn) Doze allowlist; restore adb access and retry; no device settings were changed",
+    );
+    expect((failure as Error).cause).toBe(transportFailure);
+    expect(calls).toEqual([["shell", "dumpsys", "deviceidle", "whitelist"]]);
   });
 });
 

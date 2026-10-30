@@ -362,6 +362,17 @@ checkout's `packageManager`, not from the release tag alone.
    keep the service's exact installed Bun path available. Installation re-points the service
    definition to that Bun, and gateway rollback keeps it
    ([upgrade and rollback](UPGRADE_ROLLBACK.md)). Published v0.9.0 retains its 1.4.0 qualification.
+5. Prepare the qualification Pixel once: exempt Tailscale (`com.tailscale.ipn`) from Doze via
+   **Settings → Apps → Tailscale → Battery → Unrestricted**, or explicitly run
+   `adb shell dumpsys deviceidle whitelist +com.tailscale.ipn`. Tailscale recommends unrestricted
+   battery use; the acceptance journey's forced-Doze cycle can otherwise kill its VPN and leave
+   later smoke stages off the tailnet. Read back `adb shell dumpsys deviceidle whitelist` and
+   require a complete `user,com.tailscale.ipn,<uid>` or `system,com.tailscale.ipn,<uid>` line with
+   a decimal UID. Shared device admission requires that exact entry before mutations: stable
+   qualification preflight remains read-only, and published-byte smoke refuses before release
+   download or host changes. An unreadable probe, malformed entry or lookalike package refuses.
+   This is explicit operator setup, never an automatic Tailscale or battery-policy remedy; see
+   [Android device admission](ANDROID.md#device-admission-and-one-time-webapk-setup).
 
 ### Studio installation (run as gwops after integration)
 
@@ -1487,6 +1498,11 @@ is an upgrade smoke and requires an existing installed gateway and Tailscale Ser
 on a fresh host, install the published predecessor first. The smoke installs Bun's global stock
 OMP itself; no separate manual stock-OMP installation is required.
 
+The attached Pixel must have the one-time Tailscale Doze exemption described in
+[host preparation](#bun-144-host-preparation-before-the-next-campaign). The smoke's shared
+read-only admission checks the exact allowlist entry before downloads or host/device mutation;
+it never applies the exemption automatically.
+
 Every release's published-byte result, including any failed first attempt, is recorded in the
 [release ledger](RELEASE_STATUS.md) with its source, digest, preservation, physical-client, and
 cleanup evidence.
@@ -1532,9 +1548,10 @@ HTTPS health navigation using the same 15-second probe described below. A lost p
 `AndroidTailnetRecoveryError`; during restoration it is a restoration failure, preventing later
 smoke or qualification stages from using the disconnected Pixel.
 
-Tailscale is not on the release Pixel's Doze whitelist. Forced Doze can terminate its VPN and
-leave the tailnet path down after Doze exits. The operator remedy is to **reconnect Tailscale on
-the Pixel** before another attempt. No Tailscale/VPN, airplane-mode, DNS, exit-node, firewall or
+Before the Doze exemption became an admission prerequisite, Tailscale was not on the release
+Pixel's Doze whitelist. Forced Doze could terminate its VPN and leave the tailnet path down after
+Doze exited. An already stopped VPN still requires the operator to **reconnect Tailscale on the
+Pixel** before another attempt. No Tailscale/VPN, airplane-mode, DNS, exit-node, firewall or
 battery-policy remedy is automatic; the recovery check changes none of those device settings.
 
 This fork-era example ran from the `v0.2.1` checkout with its own Bun and OMP pins. The later
