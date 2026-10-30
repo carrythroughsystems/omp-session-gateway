@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import packageManifest from "../package.json";
 
 interface WorkflowStep {
   readonly name?: string;
@@ -92,6 +93,7 @@ async function emitCandidateNote(
   const root = await mkdtemp(join(tmpdir(), "omp-release-notes-"));
   try {
     await mkdir(join(root, "scripts"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ packageManager: packageManifest.packageManager }));
     // A fixed release text: this exercises the workflow's rendering, not the current release's prose,
     // which every prepare rewrites.
     await writeFile(
@@ -111,7 +113,7 @@ bun() { return 0; }
 jq() {
   if [ "$2" = ".commit" ]; then printf "%s\n" "${"a".repeat(40)}";
   elif [ "$2" = ".tag" ]; then printf "%s\n" "v18.1.14";
-  elif [ "$3" = "scripts/release-text.json" ]; then command jq "$@";
+  elif [ "$3" = "scripts/release-text.json" ] || [ "$3" = "package.json" ]; then command jq "$@";
   else return 92; fi
 }
 ${runStep("Create complete draft release")}
@@ -154,6 +156,7 @@ test.skipIf(process.platform === "win32")("candidate channels emit one conservat
     expect(emitted.code, emitted.stderr).toBe(0);
     expect(emitted.note).toContain(`## Engineering candidate (${channel} channel)`);
     expect(emitted.note).toContain(`This is a signed ${channel} build from current development source.`);
+    expect(emitted.note).toContain(`- Runtime: Bun ${packageManifest.packageManager.replace(/^bun@/u, "")};`);
     expect(emitted.note).toContain("Historical platform evidence does not transfer.");
     expect(emitted.note).not.toContain("qualified for two hosts and one client");
     expect(emitted.note).not.toContain("last qualified against signed candidate");
