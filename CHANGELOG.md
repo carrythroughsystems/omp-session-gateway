@@ -24,6 +24,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Recheck Windows launch and Pixel lifetimes, provider-response deadlines and attached-firewall
+  ownership at dispatch; bound development cleanup independently and retain exclusive Pixel
+  custody until restoration completes.
 - Keep directory coverage and launch feedback consistent through loading hosts, SSE keepalives,
   terminal session states, and cancelled notification or resume launches; retain the mounted
   generation on View-to-Control, preserve expired-route notices through unchanged snapshots,
