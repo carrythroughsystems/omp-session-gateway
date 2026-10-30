@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, realpath, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { OmpHostReader } from "../apps/gateway/src/omp-registry.ts";
 import type { OmpDiscoveryEntry } from "../packages/protocol/src/types.ts";
 import { fixtureModelError, OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
 import { isStockOmpBinary, parseJsonRecord } from "./post-release-smoke.ts";
 
-export const CANARY_STAGES = ["publish", "snapshot", "stale-generation", "view", "control", "new-generation", "fork", "branch-rewind", "continue", "unregister"] as const;
+export const CANARY_STAGES = ["prepare", "publish", "snapshot", "stale-generation", "view", "control", "new-generation", "fork", "branch-rewind", "continue", "unregister"] as const;
 export type CanaryStage = typeof CANARY_STAGES[number];
 export type CanaryPlatform = "posix" | "windows";
 type StageResult = "passed" | "failed" | "skipped";
@@ -24,6 +24,10 @@ export interface CanaryOptions {
   readonly omp: string;
   /** Diagnostic override only; ordinary runs use the shared fixture arguments unchanged. */
   readonly model?: string;
+}
+export interface CanaryPackage {
+  readonly ompVersion: string;
+  readonly bunEngine: string;
 }
 
 interface CanaryGuestSnapshot {
@@ -74,6 +78,26 @@ export function isSupportedOmpVersion(version: string): boolean {
   return parseOmpVersion(version) === version && Bun.semver.satisfies(version, ">=18.1.20");
 }
 
+/** Read bounded public package metadata without needing OMP to start under this runtime. */
+export async function readCanaryPackage(directory: string): Promise<CanaryPackage> {
+  try {
+    const value: unknown = await Bun.file(join(directory, "package.json")).json();
+    if (typeof value !== "object" || value === null
+      || !("version" in value) || typeof value.version !== "string" || parseOmpVersion(value.version) !== value.version
+      || !("engines" in value) || typeof value.engines !== "object" || value.engines === null
+      || !("bun" in value.engines) || typeof value.engines.bun !== "string"
+      || !/^[0-9A-Za-z.*+~^<>=| -]{1,160}$/u.test(value.engines.bun)) throw new Error();
+    return { ompVersion: value.version, bunEngine: value.engines.bun };
+  } catch {
+    throw new CanaryFailure("invalid OMP package manifest");
+  }
+}
+
+export function canaryBunEngineError(installed: CanaryPackage, bunVersion: string): string | undefined {
+  return Bun.semver.satisfies(bunVersion, installed.bunEngine) ? undefined
+    : `OMP ${installed.ompVersion} requires Bun ${installed.bunEngine}; running Bun ${bunVersion}`;
+}
+
 export function canarySummary(ompVersion: string, durationMs: number, failedStage?: CanaryStage, discoveryFileRemoved = false, platform: CanaryPlatform = "posix"): CanarySummary {
   if (platform === "windows" && failedStage !== undefined && POSIX_STAGES.includes(failedStage)) throw new CanaryFailure("invalid canary summary");
   const failedIndex = failedStage === undefined ? CANARY_STAGES.length : CANARY_STAGES.indexOf(failedStage);
@@ -85,8 +109,9 @@ export function canarySummary(ompVersion: string, durationMs: number, failedStag
 }
 
 /** Reconstruct the public report before sending it to summaries or issue-job outputs. */
-export function parseCanarySummary(text: string, expectedPlatform?: CanaryPlatform): CanarySummary {
+export function parseCanarySummary(text: string, expectedPlatform?: CanaryPlatform, fallbackVersion = ""): CanarySummary {
   try {
+    if (fallbackVersion !== "" && parseOmpVersion(fallbackVersion) !== fallbackVersion) throw new Error();
     const value: unknown = JSON.parse(text);
     if (typeof value !== "object" || value === null || Array.isArray(value)
       || !("ompVersion" in value) || typeof value.ompVersion !== "string"
@@ -98,7 +123,7 @@ export function parseCanarySummary(text: string, expectedPlatform?: CanaryPlatfo
       || !("stages" in value) || typeof value.stages !== "object" || value.stages === null || Array.isArray(value.stages)) throw new Error();
     const failedStage = "failedStage" in value ? CANARY_STAGES.find(stage => stage === value.failedStage) : undefined;
     if ("failedStage" in value && failedStage === undefined) throw new Error();
-    const summary = canarySummary(value.ompVersion, value.durationMs, failedStage, value.discoveryFileRemoved, value.platform);
+    const summary = canarySummary(value.ompVersion || fallbackVersion, value.durationMs, failedStage, value.discoveryFileRemoved, value.platform);
     const stages = value.stages;
     if (Object.keys(stages).length !== CANARY_STAGES.length
       || CANARY_STAGES.some(stage => !(stage in stages) || Reflect.get(stages, stage) !== summary.stages[stage])) throw new Error();
@@ -183,7 +208,7 @@ function windowsEnvironment(home: string, temp: string, path: string): Record<st
 
 async function runCanary(args: readonly string[]): Promise<{ summary: CanarySummary; reason?: string }> {
   const started = performance.now();
-  let stage: CanaryStage = "publish";
+  let stage: CanaryStage = "prepare";
   let ompVersion = "";
   let failedStage: CanaryStage | undefined;
   let reason: string | undefined;
@@ -335,6 +360,10 @@ async function runCanary(args: readonly string[]): Promise<{ summary: CanarySumm
     const binary = await realpath(resolve(options.omp));
     if (!isStockOmpBinary(binary)) throw new CanaryFailure("stock mainline OMP is required");
     stockBinary = binary;
+    const installed = await readCanaryPackage(dirname(dirname(binary)));
+    ompVersion = installed.ompVersion;
+    const engineError = canaryBunEngineError(installed, Bun.version);
+    if (engineError !== undefined) throw new CanaryFailure(engineError);
     root = await mkdtemp(join(tmpdir(), "omp-upstream-canary-"));
     await chmod(root, 0o700);
     const home = join(root, "home");
@@ -352,8 +381,10 @@ async function runCanary(args: readonly string[]): Promise<{ summary: CanarySumm
     }
     discoveryDirectory = join(home, ".omp", "run", "collab-hosts");
     reader = new OmpHostReader({ directory: discoveryDirectory, timeoutMs: 5_000 });
-    ompVersion = parseOmpVersion(ompCommand(binary, ["--version"], "OMP version query failed") ?? "") ?? "";
-    if (!isSupportedOmpVersion(ompVersion)) throw new CanaryFailure("stock OMP >=18.1.20 is required");
+    const queriedVersion = parseOmpVersion(ompCommand(binary, ["--version"], "OMP version query failed") ?? "") ?? "";
+    if (!isSupportedOmpVersion(queriedVersion)) throw new CanaryFailure("stock OMP >=18.1.20 is required");
+    ompVersion = queriedVersion;
+    stage = "publish";
     ompCommand(binary, ["config", "set", "collab.autoStart", "control"], "auto-start configuration failed");
     // A settings write can exit 0 without persisting; the host's own read-back is the proof.
     const readBack = ompCommand(binary, ["config", "get", "collab.autoStart", "--json"], "auto-start read-back failed") ?? "";

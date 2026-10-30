@@ -31,9 +31,12 @@ every session entry, including sibling branches, so transcript content cannot pr
 
 [`scripts/upstream-canary.ts`](../scripts/upstream-canary.ts) runs from the
 [canary workflow](../.github/workflows/upstream-canary.yml) on its daily schedule, by
-`workflow_dispatch`, and on pull requests touching the canary. Its ordered stages are `publish`,
-`snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`,
-`continue`, and `unregister`.
+`workflow_dispatch`, and on pull requests touching the canary. Its ordered stages are `prepare`,
+`publish`, `snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`,
+`branch-rewind`, `continue`, and `unregister`. The `prepare` pre-flight stage resolves the installed
+package manifest version, checks the running Bun against `engines.bun`, verifies the stock binary,
+and queries its version before any lifecycle stage. Pre-flight failures retain the resolved
+manifest version in the report.
 
 On POSIX the tmux host accepts the real slash commands. `new-generation` and `fork` each require
 the same instance and generation + 1; once that generation is visible, old-generation View and
