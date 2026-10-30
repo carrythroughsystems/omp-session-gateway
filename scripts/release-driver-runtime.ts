@@ -539,7 +539,7 @@ export class StudioDriver implements DriverPort {
       const path = resolve(listedPath);
       if (dirname(path) !== work) continue;
       const name = basename(path);
-      const family = /^([1-9][0-9]*)-(v([0-9]+\.[0-9]+\.[0-9]+)-prealpha\.[1-9][0-9]*)-(prepare|approve|record|campaign-job|approve-job|smoke-job)(-retry-[1-9][0-9]*)?$/u.exec(name);
+      const family = /^([1-9][0-9]*)-(v([0-9]+\.[0-9]+\.[0-9]+)-prealpha\.[1-9][0-9]*)-(prepare|approve|record(?:-[0-9a-f]{40})?|campaign-job|approve-job|smoke-job)(-retry-[1-9][0-9]*)?$/u.exec(name);
       const rebuild = /^v([0-9]+\.[0-9]+\.[0-9]+)-rebuild$/u.exec(name);
       const version = family?.[3] ?? rebuild?.[1];
       const ref = fields.find(field => field.startsWith("branch "))?.slice(7);

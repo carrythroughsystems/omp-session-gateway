@@ -2048,7 +2048,10 @@ evidence; unknown mergeability waits. Replacement heads need fresh strict checks
 stale-merge-intent re-plan. Record authority requires the generated record path allowlist and
 unchanged controls between the PR merge base and head; prepare/approve retain the pinned-checkout
 comparison. Treat current main as data: run the installed generator in-process without installing
-or executing the record checkout's code. Adopt a pushed branch without a checkout until regeneration
+or executing the record checkout's code. Before reading content, require every release input to be
+a regular file at its exact canonical checkout path, including consumed changelog fragments; reject
+a symlinked `changelog.d` and limit writes/deletions to verified paths.
+Adopt a pushed branch without a checkout until regeneration
 is required. The smoke worker writes `completedAt`; finish-smoke requires and persists that exact
 timestamp as `smokedAt`, whose UTC date records completion rather than the next tick's observation.
 

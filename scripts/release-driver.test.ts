@@ -313,10 +313,12 @@ describe("release driver work pruning", () => {
       const oldBranch = "release-driver/300/v0.7.4-prealpha.2-prepare";
       const old = await add("300-v0.7.4-prealpha.2-prepare", oldBranch);
       const oldJob = await add("300-v0.7.4-prealpha.2-approve-job");
+      const oldRecord = await add(`300-v0.7.4-prealpha.2-record-${"a".repeat(40)}`);
       const rebuild = await add("v0.7.4-rebuild");
       const current = [
         await add("400-v0.7.5-prealpha.1-prepare", "release-driver/400/v0.7.5-prealpha.1-prepare"),
         await add("399-v0.7.5-prealpha.2-campaign-job-retry-1", "release-driver/399/v0.7.5-prealpha.2-campaign-retry-1"),
+        await add(`400-v0.7.5-prealpha.1-record-${"b".repeat(40)}`),
         await add("v0.7.5-rebuild"), await add("v0.7.6-rebuild"),
       ];
       const outside = join(root, "300-v0.7.4-prealpha.2-record");
@@ -326,9 +328,9 @@ describe("release driver work pruning", () => {
       await writeFile(join(stateDir, "readiness.json"), "readiness sentinel\n");
       const stateBefore = await readFile(join(stateDir, "state.json"), "utf8");
       const result = await runtime.pruneWork(true);
-      expect(result.removed?.map(entry => entry.path).sort()).toEqual([old, oldJob, rebuild].sort());
+      expect(result.removed?.map(entry => entry.path).sort()).toEqual([old, oldJob, oldRecord, rebuild].sort());
       expect(result.removed?.every(entry => entry.bytes > 0)).toBe(true);
-      for (const path of [old, oldJob, rebuild]) expect(await Bun.file(join(path, ".git")).exists()).toBe(false);
+      for (const path of [old, oldJob, oldRecord, rebuild]) expect(await Bun.file(join(path, ".git")).exists()).toBe(false);
       expect((await git(["branch", "--list", oldBranch]))).toBe("");
       const removal = runtime.mutations.findIndex(args => args[1] === "remove" && args[3] === old);
       expect(runtime.mutations.slice(removal, removal + 3)).toEqual([
@@ -358,7 +360,7 @@ describe("release driver work pruning", () => {
       await writeFile(join(directory, "spec.json"), JSON.stringify({ kind: "campaign", state: pendingState, root: join(import.meta.dir, "..") }));
       // A result without its durable exit is not a terminal publication.
       await writeFile(join(directory, "result.json"), JSON.stringify({ status: "passed" }));
-      const disposable = await add("303-v0.7.1-prealpha.1-record");
+      const disposable = await add(`303-v0.7.1-prealpha.1-record-${"c".repeat(40)}`);
       const result = await runtime.pruneWork(true);
       expect(result.removed?.map(entry => entry.path)).toEqual([disposable]);
       for (const path of [live, intent, pending]) expect(await Bun.file(join(path, ".git")).exists()).toBe(true);
@@ -382,7 +384,7 @@ describe("release driver work pruning", () => {
     const { root, runtime, add, git, stateDir } = await pruneFixture();
     try {
       const branch = "release-driver/300/v0.7.4-prealpha.1-record";
-      const old = await add("300-v0.7.4-prealpha.1-record", branch);
+      const old = await add(`300-v0.7.4-prealpha.1-record-${"d".repeat(40)}`, branch);
       const filesBefore = await readdir(stateDir);
       const stateBefore = await readFile(join(stateDir, "state.json"), "utf8");
       const workBefore = await git(["worktree", "list", "--porcelain", "-z"]);
@@ -2230,11 +2232,15 @@ describe("record tracks main", () => {
     }, { command: "prepare", version: "0.7.4", date: preparedDate });
     const approved: Record<string, string> = {
       ...normalizeHistoricalTree(originals["9c0d790^"]!),
-      ...generateRelease({ ...normalizeHistoricalTree(originals["39e3d57^"]!), [RELEASE_TEXT]: prepared[RELEASE_TEXT]! },
-        { command: "approve", version: "v0.7.4", date: preparedDate, candidateTag: "v0.7.4-prealpha.1", receipt: await input("receipt") }),
       "package.json": JSON.stringify({ name: "record-fixture", version: "0.7.4" }),
       "scripts/release-driver.ts": "installed control\n",
     };
+    for (const [path, bytes] of Object.entries(generateRelease({
+      ...normalizeHistoricalTree(originals["39e3d57^"]!), [RELEASE_TEXT]: prepared[RELEASE_TEXT]!,
+    }, { command: "approve", version: "v0.7.4", date: preparedDate, candidateTag: "v0.7.4-prealpha.1", receipt: await input("receipt") }))) {
+      if (bytes === null) delete approved[path];
+      else approved[path] = bytes;
+    }
     delete approved["bun.lock"]; // No dependencies in the isolated CLI fixture.
     const selected: DriverState = {
       ...state("smoking"), version: "0.7.4", candidate: "v0.7.4-prealpha.1", date: preparedDate,

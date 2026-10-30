@@ -246,6 +246,9 @@ checkpoint key; subsequent regeneration still starts from that newer main.
 The record checkout is data only: generation calls the **installed** `runReleaseGenerate` in-process
 against its files, without installing dependencies or running the checkout's generator, imports or
 package lifecycle scripts. Main's code never gains the pinned driver's bot credentials this way.
+Every generator command verifies all release inputs are regular files at their exact canonical
+checkout paths before reading content; symlinked files or escaping parent directories stop generation.
+Prepare also rejects a symlinked `changelog.d`; writes and fragment deletions use only verified paths.
 Current CI tests historical generator fixtures and live claim coherence, not byte equality between
 live generated blocks and main's generator output. New marker/schema or coherence requirements can
 still make an older installed generator fail generation or PR checks. Keep those gates intact and
