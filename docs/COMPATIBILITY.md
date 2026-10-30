@@ -80,7 +80,7 @@ green results cannot be reused. See [browser evidence policy](TEST_PLAN.md#brows
 ## Current claim
 
 <!-- release-generate:release:start -->
-v0.9.0 is qualified for stable promotion; publication is pending. [Release v0.9.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.9.0). Signed candidate v0.9.0-prealpha.7; source b0f07b11e7d4fb2d0afeea7496a77323d6c66d5a; archive SHA-256 d2053558f3ac7dd857db971dcf57757e652e8776de83deb2b9a9138e7457a887. Published v0.8.0 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
+Stable v0.9.0 is published as immutable GitHub Latest. [Release v0.9.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.9.0). Signed candidate v0.9.0-prealpha.7; source b0f07b11e7d4fb2d0afeea7496a77323d6c66d5a; archive SHA-256 d2053558f3ac7dd857db971dcf57757e652e8776de83deb2b9a9138e7457a887. Published v0.8.0 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
 <!-- release-generate:release:end -->
 
 The current Mac host qualification runs in a Virtualization.framework guest (`VirtualMac2,1`),
