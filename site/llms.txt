@@ -1,7 +1,7 @@
 <!-- release-generate:summary:start -->
 # OMP Session Gateway
 
-> Native integration with stock Oh My Pi (OMP) >=18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. v0.9.0 is qualified for stable promotion; publication is pending. The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun 1.4.0, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by OMP.
+> Native integration with stock Oh My Pi (OMP) >= 18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. v0.9.0 is qualified for stable promotion; publication is pending. The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun 1.4.0, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by the Oh My Pi maintainers.
 <!-- release-generate:summary:end -->
 
 ## Supported platforms
@@ -11,7 +11,7 @@
 ## Current qualification boundary
 
 <!-- release-generate:boundary:start -->
-v0.9.0 is qualified for stable promotion; publication is pending. [Release v0.9.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.9.0). Signed candidate v0.9.0-prealpha.7; source b0f07b11e7d4fb2d0afeea7496a77323d6c66d5a; archive SHA-256 d2053558f3ac7dd857db971dcf57757e652e8776de83deb2b9a9138e7457a887. Published v0.8.0 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
+v0.9.0 is qualified for stable promotion; publication is pending. [Release v0.9.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.9.0). Signed candidate v0.9.0-prealpha.7; source b0f07b11e7d4fb2d0afeea7496a77323d6c66d5a; archive SHA-256 d2053558f3ac7dd857db971dcf57757e652e8776de83deb2b9a9138e7457a887. Published v0.8.0 remains the predecessor. Stock OMP v18.12.5 (d5cd750e41fede277f9eb933455da92a0738915e), Bun 1.4.0. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
 
 - artifacts (1 attempt): Signed tag, checksums, GitHub attestations 3/3 and Sigstore bundles 3/3; v0.8.0 verified the same way.
 - debian (1 attempt): Run 40427270819 succeeded (https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/40427270819); OS/kernel versions and migration counts are not exported.
@@ -22,7 +22,7 @@ v0.9.0 is qualified for stable promotion; publication is pending. [Release v0.9.
 - androidPushCleanup (1 attempt): Device, browser and fixture restored.
 - deviceCloud (1 attempt): TestingBot, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6.1); TestingBot, tunnel 4.9: iPad (9th generation) (26.6, safari 26.6); BrowserStack, tunnel 8.9: Galaxy S26 (16.0.0, chrome 152.0.7977.54). Home Screen alerts were proven only on the TestingBot iPhone and do not qualify lock-screen presentation.
 - deviceCloudCleanup (1 attempt): Restored.
-- relay (1 attempt): 1800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed.
+- relay (1 attempt): 1,800 seconds, 2026-10-27T00:47:39.591Z–2026-10-27T01:17:39.605Z; 2 transitions, final phase live. Eight-hour endurance is not claimed.
 - cleanup (2 attempts): Zero gateway processes, listeners and live OMP hosts.
 - windows (1 attempt): Windows x86-64 build 26100; 4 CPUs, 8186 MiB; Administrator upgrade/rollback from v0.8.0 and fresh standard-account lifecycle; interactive logon, not unattended boot.
 - windowsCleanup (1 attempt): Zero instances and firewalls; tailnet node deleted and access vault removed.

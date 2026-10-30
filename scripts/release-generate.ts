@@ -79,6 +79,11 @@ function escapePattern(value: string): string { return value.replace(/[.*+?^${}(
 function html(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
+function htmlLinks(value: string): string {
+  const escaped = html(value);
+  return escaped.replace(/\[([^\]]+)\]\(([^)]+)\)|https:\/\/[^\s)]+/gu,
+    (match, label: string | undefined, url: string | undefined) => `<a href="${url ?? match}">${label ?? match}</a>`);
+}
 function markdown(value: string): string { return value.replaceAll("|", "\\|").replaceAll("\n", " "); }
 /** Only the generated count/grammar may drift; baseline, predecessor and claims stay exact. */
 function countIndependentSummary(value: string): string | undefined {
@@ -299,7 +304,7 @@ function qualification(receiptValue: unknown, candidateTag: string, tag: string,
     androidPushCleanup: "Device, browser and fixture restored.",
     deviceCloud: cloudEvidence.summary,
     deviceCloudCleanup: "Restored.",
-    relay: `${number(relay.durationSeconds, "relay duration")} seconds, ${timestamp(relay.startedAt, "relay start")}–${timestamp(relay.completedAt, "relay completion")}; ${number(relay.transitions, "relay transitions")} transitions, final phase live. Eight-hour endurance is not claimed.`,
+    relay: `${number(relay.durationSeconds, "relay duration").toLocaleString("en-US")} seconds, ${timestamp(relay.startedAt, "relay start")}–${timestamp(relay.completedAt, "relay completion")}; ${number(relay.transitions, "relay transitions")} transitions, final phase live. Eight-hour endurance is not claimed.`,
     cleanup: "Zero gateway processes, listeners and live OMP hosts.",
     windows: `Windows x86-64 build ${number(observations.windowsBuild, "Windows build")}; ${number(observations.cpus, "CPUs")} CPUs, ${number(observations.memoryMiB, "memory")} MiB; Administrator upgrade/rollback from ${previousTag} and fresh standard-account lifecycle; interactive logon, not unattended boot.`,
     windowsCleanup: "Zero instances and firewalls; tailnet node deleted and access vault removed.",
@@ -329,8 +334,8 @@ function phase(q: Qualification, published: boolean): string {
   const tag = String(q.lock.releaseTag);
   return published ? `Stable ${tag} is published as immutable GitHub Latest.` : `${tag} is qualified for stable promotion; publication is pending.`;
 }
-function claim(q: Qualification, published: boolean): string {
-  return `${phase(q, published)} [Release ${q.lock.releaseTag}](${REPO}/releases/tag/${q.lock.releaseTag}). Signed candidate ${q.lock.candidateTag}; source ${q.lock.candidateSourceCommit}; archive SHA-256 ${q.lock.candidateArchiveSha256}. Published ${q.lock.previousTag} remains the predecessor. Stock OMP ${q.baseline} (${q.commit}), Bun ${q.bun}. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). ${published ? "The separate published-byte smoke passed; it does not expand the candidate matrix." : "Stable publication and published-byte smoke are pending."}`;
+function claim(q: Qualification, published: boolean, ledgerUrl = "RELEASE_STATUS.md"): string {
+  return `${phase(q, published)} [Release ${q.lock.releaseTag}](${REPO}/releases/tag/${q.lock.releaseTag}). Signed candidate ${q.lock.candidateTag}; source ${q.lock.candidateSourceCommit}; archive SHA-256 ${q.lock.candidateArchiveSha256}. Published ${q.lock.previousTag} remains the predecessor. Stock OMP ${q.baseline} (${q.commit}), Bun ${q.bun}. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](${ledgerUrl}). ${published ? "The separate published-byte smoke passed; it does not expand the candidate matrix." : "Stable publication and published-byte smoke are pending."}`;
 }
 function laneTable(q: Qualification): string {
   return `| Lane | Attempts | Evidence |\n|---|---|---|\n${q.lanes.map(lane => `| ${lane.name} | ${lane.attempts} | ${markdown(lane.summary)} |`).join("\n")}`;
@@ -488,13 +493,14 @@ export function generateRelease(tree: ReleaseTree, options: ReleaseGenerateOptio
   const q = data.qualification!;
   const published = options.command === "record";
   change("docs/COMPATIBILITY.md", "release", claim(q, published));
-  change("site/llms.txt", "summary", `# OMP Session Gateway\n\n> Native integration with stock Oh My Pi (OMP) >=18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. ${phase(q, published)} The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun ${q.bun}, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by OMP.`);
-  change("site/llms.txt", "boundary", `${claim(q, published)}\n\n${q.lanes.map(l => `- ${l.name} (${l.attempts} attempt${l.attempts === 1 ? "" : "s"}): ${l.summary}`).join("\n")}\n\nThe Mac guest does not qualify physical firmware, FileVault, Secure Boot or startup before login. Cloud devices qualify the browser, not phone-owned Tailscale identity; iPhone Home Screen alerts do not qualify lock-screen presentation. Gateway rollback does not switch OMP. Other hosts and browser builds remain outside this exact matrix. Portal Tunnel and self-hosted/proxied relays are unsupported.`);
+  const siteClaim = claim(q, published, `${REPO}/blob/main/docs/RELEASE_STATUS.md`);
+  change("site/llms.txt", "summary", `# OMP Session Gateway\n\n> Native integration with stock Oh My Pi (OMP) >= 18.1.20. No OMP fork, custom build, gateway-specific OMP plugin or publisher credential. ${phase(q, published)} The separate gateway discovers collaboration-enabled sessions and opens OMP's encrypted View/Control client. Setup requires collab.autoStart, Bun ${q.bun}, gateway installation and TUN-mode Tailscale Serve with Funnel disabled. Community project; not affiliated with or endorsed by the Oh My Pi maintainers.`);
+  change("site/llms.txt", "boundary", `${siteClaim}\n\n${q.lanes.map(l => `- ${l.name} (${l.attempts} attempt${l.attempts === 1 ? "" : "s"}): ${l.summary}`).join("\n")}\n\nThe Mac guest does not qualify physical firmware, FileVault, Secure Boot or startup before login. Cloud devices qualify the browser, not phone-owned Tailscale identity; iPhone Home Screen alerts do not qualify lock-screen presentation. Gateway rollback does not switch OMP. Other hosts and browser builds remain outside this exact matrix. Portal Tunnel and self-hosted/proxied relays are unsupported.`);
   const description = `${phase(q, published)} Stock OMP ${q.baseline}; exact candidate host/client evidence in the release ledger.`;
   change("site/status/index.html", "description", `<meta name="description" content="${html(description)}">`);
   change("site/status/index.html", "og-description", `<meta property="og:description" content="${html(description)}">`);
-  change("site/status/index.html", "status", `<h1>${published ? "Stable" : "Qualified"} ${tag}</h1>\n<p class="lede">${html(claim(q, published).replace(/\[([^\]]+)\]\([^)]+\)/gu, "$1"))}</p>\n<table>\n<tr><th>Lane</th><th>Attempts</th><th>Exact evidence</th></tr>\n${q.lanes.map(l => `<tr><td>${l.name}</td><td>${l.attempts}</td><td>${html(l.summary)}</td></tr>`).join("\n")}\n</table>`);
-  change("site/status/index.html", "verified", `<p class="verified">${html(`${q.lock.candidateTag}: ${q.startedAt}–${q.completedAt}. All thirteen lanes passed. ${published ? "Publication and separate published-byte smoke passed." : "Publication and published-byte smoke are pending."} The approval driver must pass runtime comparison before merging; the campaign receipt alone does not prove that later comparison.`)}</p>`);
+  change("site/status/index.html", "status", `<h1>${published ? "Stable" : "Qualified"} ${tag}</h1>\n<p class="lede">${htmlLinks(siteClaim)}</p>\n<table>\n<tr><th>Lane</th><th>Attempts</th><th>Exact evidence</th></tr>\n${q.lanes.map(l => `<tr><td>${l.name}</td><td>${l.attempts}</td><td>${htmlLinks(l.summary)}</td></tr>`).join("\n")}\n</table>`);
+  change("site/status/index.html", "verified", `<p class="verified">${html(`${q.lock.candidateTag}: ${q.startedAt}–${q.completedAt}. All thirteen lanes passed. ${published ? "Publication and separate published-byte smoke passed." : "Publication and published-byte smoke are pending."} A clean stable-channel build is compared with the qualified candidate before merging; the campaign receipt alone does not prove that comparison.`)}</p>`);
   out[RELEASE_TEXT] = json(data);
   return out;
 }
