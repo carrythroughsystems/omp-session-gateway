@@ -64,8 +64,9 @@ describe("general qualification machine outcome", () => {
     expect(() => parseQualificationOutcome({ ...value, receipt: { ...value.receipt, cleanupDisposition },
       failureSummary: { ...value.failureSummary, containment } })).toThrow();
   });
-  test("council P2 readiness quota and creation allowances are integer counts", () => {
-    for (const observations of [{ quotaObservable: true, quotaAvailable: 1.5 }, { creationAllowance: 1.5 }]) {
+  test("readiness allowances, counts and durations are integers", () => {
+    for (const observations of [{ quotaObservable: true, quotaAvailable: 1.5 }, { creationAllowance: 1.5 },
+      { deliveryMs: 1.5 }, { clearMs: 1.5 }]) {
       expect(() => parseRigReadinessReceipt({ status: "failed", campaignAttempt: 0, observations: { baselineRestored: true, ...observations },
         timings: {}, cleanupDisposition: "restored" })).toThrow();
     }
@@ -82,9 +83,13 @@ describe("general qualification machine outcome", () => {
   });
   test("506 council passed readiness requires positive matching counts and presentation/clear proofs", () => {
     const observations: Record<string, boolean | number> = { baselineRestored: true, pixelReachable: true, pushSent: true,
-      pushAcknowledged: true, pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 2, ackCount: 2 };
+      pushAcknowledged: true, pushPresented: true, pushCleared: true, subscriptionCount: 1, sendCount: 2, ackCount: 2,
+      deliveryMs: 1, clearMs: 2 };
     const base = { status: "passed", campaignAttempt: 0, timings: {}, cleanupDisposition: "restored" };
     expect(parseRigReadinessReceipt({ ...base, observations }).status).toBe("passed");
+    for (const key of ["deliveryMs", "clearMs"]) {
+      expect(() => parseRigReadinessReceipt({ ...base, observations: { ...observations, [key]: 1.5 } })).toThrow();
+    }
     for (const key of ["subscriptionCount", "sendCount", "ackCount", "pixelReachable", "pushSent", "pushAcknowledged", "pushPresented", "pushCleared"]) {
       const missing = { ...observations };
       delete missing[key];

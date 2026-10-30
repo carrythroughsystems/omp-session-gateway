@@ -70,16 +70,21 @@ export async function waitForPushDelivery(options: {
   const nextFailureId = options.nextFailureId ?? (() => options.execution?.nextFailureId() ?? ++localId);
   let session = options.session, window = options.window;
   const fail = (reason: "privacy_failed" | "delivery_timeout" | "invalid_evidence" | "push_service_failure", elapsedMs: number, status = 0, cause?: unknown): never => {
-    const errorOptions = cause !== undefined ? { cause } :
+    const controllerDeadline = reason === "delivery_timeout" && pushBudgetExpired(runtime, options.execution);
+    const errorOptions = controllerDeadline && cause !== undefined && options.execution?.signal.aborted && cause !== options.execution.signal.reason ?
+      { cause: new AggregateError([cause, options.execution.signal.reason], "Push delivery failed during controller abort") } :
+      cause !== undefined ? { cause } :
       options.execution?.signal.aborted ? { cause: options.execution.signal.reason } : undefined;
     const common = { id: nextFailureId(), lane: "androidPush" as const, step: options.phase, elapsedMs: pushMilliseconds(elapsedMs),
       operation: "read_only" as const, observations: { firstDeliveryMs: metrics.firstDeliveryMs, secondDeliveryMs: metrics.secondDeliveryMs,
         rearmCount: metrics.deliveryRearmCount, latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs, clearMs: metrics.clearMs,
-        subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount, ackCount: metrics.ackCount } };
+        subscriptionCount: metrics.subscriptionCount, sendCount: metrics.sendCount, ackCount: metrics.ackCount,
+        ...(controllerDeadline ? { controllerDeadline: true } : {}) } };
     if (reason === "privacy_failed") throw new QualificationFailure({ ...common, reason, class: "product" }, errorOptions);
     if (reason === "push_service_failure") throw new QualificationFailure({ ...common, reason, class: "infra_transient",
       observations: { ...common.observations, pushServiceFailure: true, retryableStatus: true, httpStatus: status } }, errorOptions);
     if (reason === "invalid_evidence") throw new QualificationFailure({ ...common, reason, class: "harness" }, errorOptions);
+    if (controllerDeadline) throw new QualificationFailure({ ...common, reason: "deadline_exceeded", class: "harness" }, errorOptions);
     throw new QualificationFailure({ ...common, reason: "delivery_timeout", class: "harness" }, errorOptions);
   };
   const checked = (target: SessionMetadata) => checkedDelivery(runtime, target, options.kind, options.detail, () => fail("privacy_failed", 0));
@@ -490,10 +495,13 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
     let budgetStart: number | undefined;
     const requireBudget = () => {
       if (!pushBudgetExpired(runtime, input.execution, budgetStart, PUSH_RECOVERY_MS)) return;
+      const controllerDeadline = pushBudgetExpired(runtime, input.execution);
       throw new QualificationFailure({ id: nextFailureId(), lane: "rigReadiness", step: "pixel_push",
-        class: "harness", reason: "delivery_timeout", operation: "read_only",
+        class: "harness", reason: controllerDeadline ? "deadline_exceeded" : "delivery_timeout", operation: "read_only",
         elapsedMs: budgetStart === undefined ? 0 : pushMilliseconds(runtime.now() - budgetStart),
-        observations: { latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs } });
+        observations: { latePostCount: metrics.latePostCount, latePostMs: metrics.latePostMs,
+          ...(controllerDeadline ? { controllerDeadline: true } : {}) } },
+        input.execution?.signal.aborted ? { cause: input.execution.signal.reason } : undefined);
     };
     const waitSnapshot = async (predicate: (session: SessionMetadata) => boolean) => {
       const start = runtime.now(), deadline = start + 90_000;
@@ -656,8 +664,8 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
     };
     const requireExecution = () => {
       if (pushBudgetExpired(runtime, input.execution)) throw new QualificationFailure({
-        id: nextFailureId(), lane: "androidPush", step: activePhase, class: "harness", reason: "delivery_timeout",
-        elapsedMs: phaseElapsed(), operation: "read_only", observations: {} },
+        id: nextFailureId(), lane: "androidPush", step: activePhase, class: "harness", reason: "deadline_exceeded",
+        elapsedMs: phaseElapsed(), operation: "read_only", observations: { controllerDeadline: true } },
         input.execution?.signal.aborted ? { cause: input.execution.signal.reason } : undefined);
     };
     const assertion = (message: string) => Object.assign(new QualificationFailure({
