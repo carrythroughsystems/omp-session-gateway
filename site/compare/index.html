@@ -5,14 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#060809">
-<title>OMP Session Gateway compared — omp-deck, oh-my-portal, claudecodeui, pi-agent-dashboard</title>
+<title>OMP Session Gateway compared — oh-my-portal, claudecodeui, pi-agent-dashboard</title>
 <meta name="description" content="Choose a phone or browser workflow: native stock-OMP session access with OMP Session Gateway, a browser workspace, or remote terminal access. Dated primary sources and support boundaries.">
 <link rel="canonical" href="https://carrythroughsystems.github.io/omp-session-gateway/compare/">
 <link rel="preload" href="../fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="../fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../site.css">
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<meta property="og:title" content="OMP Session Gateway compared — omp-deck, oh-my-portal, claudecodeui, pi-agent-dashboard">
+<meta property="og:title" content="OMP Session Gateway compared — oh-my-portal, claudecodeui, pi-agent-dashboard">
 <meta property="og:description" content="Keep your running OMP terminal sessions, move work to a browser, or reach a remote terminal. Choose by workflow, with dated primary sources.">
 <meta property="og:image" content="https://carrythroughsystems.github.io/omp-session-gateway/og.png">
 <meta property="og:image:width" content="1280">
@@ -45,24 +45,18 @@
 a browser-hosted workspace, and remote shell access solve different problems.</p>
 
 <h2>Keep your running OMP terminal sessions</h2>
-<p><strong>OMP Session Gateway</strong> puts participating interactive sessions on one private mobile
+<p><strong>OMP Session Gateway</strong> puts participating interactive Oh My Pi (OMP) sessions on one private mobile
 page and opens View or Control in OMP's existing encrypted collaboration client. The gateway keeps
-bounded metadata, not transcripts.</p>
-<p><strong>Stock OMP ≥18.1.20 supplies the native registry and controller.</strong> No fork, custom
+bounded session metadata (title, folder, model, uptime, and waiting state), not transcripts.</p>
+<p><strong>Stock OMP ≥ 18.1.20 supplies the native registry and controller.</strong> No fork, custom
 OMP build, or gateway-specific OMP plugin is needed. The gateway remains a separate companion.</p>
-<p><strong>One-time setup:</strong> install the gateway with Bun 1.4.0, enable
-<code>collab.autoStart</code>, and configure TUN-mode Tailscale Serve with an exact user allowlist
-and Funnel disabled. Then start sessions with plain <code>omp</code> — no per-session link copying.
+<p><strong>One-time setup:</strong> install the gateway with the pinned Bun runtime, enable
+<code>collab.autoStart</code> once, and configure TUN-mode Tailscale Serve with an exact user allowlist
+and Funnel disabled. Then start participating sessions with plain <code>omp</code> — no per-session link copying.
 <a href="../#setup">Setup steps</a>.</p>
 
 <h2>Choose a different workflow</h2>
 <ul class="grid">
-<li><h3>A browser-hosted OMP workspace</h3>
-<p><a href="https://github.com/bjb2/omp-deck">omp-deck</a> embeds the OMP SDK in-process and shares
-OMP's session/auth store. Choose it for persistent browser sessions and the work around chat,
-such as kanban, routines, and an inbox; its README says the OMP CLI need not be installed separately.</p>
-<p class="small">Sources: <a href="https://github.com/bjb2/omp-deck/blob/main/README.md">README</a>,
-<a href="https://github.com/bjb2/omp-deck/blob/main/package.json">package</a>.</p></li>
 <li><h3>Agent web chat, sharing, or a remote terminal</h3>
 <p><a href="https://github.com/gosuda/oh-my-portal">oh-my-portal</a> provides skills for several CLI
 agents over Portal tunnels. OMP web chat uses RPC; its optional <code>omp-collab</code> skill also
@@ -93,7 +87,7 @@ Linux, macOS, and Windows hosts and the Chromium, Firefox, and WebKit browser en
 tested in CI, which is not qualification. The <a href="../status/">status page</a> and
 <a href="https://github.com/carrythroughsystems/omp-session-gateway/blob/main/docs/RELEASE_STATUS.md">release ledger</a>
 retain the per-release evidence.</p>
-<p class="verified">Primary READMEs and package metadata checked 2026-09-14. This is a workflow
+<p class="verified">Primary READMEs and package metadata checked 2026-10-29. This is a workflow
 comparison, not a hands-on interoperability test or a security assessment of the other projects.
 Their scope can change; follow the source links before deciding. The upstream
 <a href="https://github.com/can1357/oh-my-pi/discussions/6460">discussion</a> provides further context.</p>
