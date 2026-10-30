@@ -23,6 +23,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Recheck Windows launch and Pixel lifetimes, provider-response deadlines and attached-firewall
   ownership at dispatch; bound development cleanup independently and retain exclusive Pixel
   custody until restoration completes.
+- Preserve actionable private browser failures and original qualification errors when outcome
+  publication fails; bound Wi-Fi-cycle checkpoints by cancellation, the execution deadline and
+  30 seconds, retaining unknown mutation status until re-enable and restoring radios on failure.
 - Require readiness proof on execution-bearing passed qualification receipts, preserve controller
   expiry attribution and abort causes in Push failures, and reject fractional readiness durations.
 - Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
