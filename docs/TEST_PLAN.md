@@ -896,13 +896,17 @@ not current coverage; unknown future versions fail closed. Executed workflow rer
 executions; duplicate observations of one attempt count only once.
 
 `check:repository` scans the entire e2e tree: no `.finished` access (including optional/computed
-literal access), request-finished readiness listeners/waits, or `networkidle` navigation/load
-waits. `waitForResponse()` is reserved for an explicit HTTP-contract assertion on that response
-binding in the same lexical scope (including Promise.all/destructured or awaited-promise forms), never proof that
+access with a statically resolvable string alias), request-finished readiness listeners/waits,
+or `networkidle` navigation/load waits, including unchanged string aliases in an enclosing scope.
+`waitForResponse()` is reserved for an explicit HTTP-contract assertion on that response
+binding in the same lexical scope (including Promise.all/destructured or awaited-promise forms).
+Reassignment in a child block invalidates that exemption; mutation tracking does not cross a
+function/arrow boundary or confuse member writes with binding writes. The assertion is never proof that
 the UI applied a response. Observe an application-state transition instead; the delayed-bfcache
 tray regression changes a local synthetic row label while keeping its remote response held.
 After the foreground shell mounts, it waits for application-owned remote Hide reconciliation
-on a new generation before checking no stale-resume launch occurred; receipt of the response or
+on a new generation and proves a same-apply dismissal with an unchanged generation survives,
+before checking no stale-resume launch occurred; receipt of the response or
 a fixed animation-frame count is not sufficient.
 For **startup-retry** scenarios, install and freeze the clock **before navigation**, so setup
 cannot start a retry that freezing aborts. Repository regression tests pin that ordering in the

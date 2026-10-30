@@ -20,6 +20,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Tighten browser-evidence linting for child-block response reassignments and static string aliases,
+  and prove delayed-resume Hide reconciliation retains an unchanged-generation dismissal.
 - Retain bounded private smoke-child output and original failure causes before release-driver
   terminal evidence, and preserve nested Android command logs before removing smoke staging.
   Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.
