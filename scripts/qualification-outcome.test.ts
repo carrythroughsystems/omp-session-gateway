@@ -10,6 +10,7 @@ import {
 import { parseRetainedVendorJson } from "./device-cloud-record-json.ts";
 import { FAILURE_STEPS, QualificationFailure } from "./qualification-failure.ts";
 import { request } from "./windows-qualification-runtime.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 const privateTmpdir = realpathSync(tmpdir());
 
 const execution = (): QualificationExecution => ({ formatVersion: 1, campaignAttempt: 0, binding: {
@@ -29,7 +30,7 @@ describe("general qualification machine outcome", () => {
       async () => Response.json({ synthetic: true }, { status: 503 }), { preconnect: () => {} }));
     try {
       const failure = await request("https://synthetic.invalid", {}, "GET", undefined,
-        { signal: new AbortController().signal, deadline: performance.now() + 40_000, nextFailureId: () => 1 }).catch(error => error);
+        { signal: new AbortController().signal, deadline: performance.now() + HANG_DEADLINE_MS, nextFailureId: () => 1 }).catch(error => error);
       expect(failure).toBeInstanceOf(QualificationFailure);
       if (!(failure instanceof QualificationFailure)) throw new Error("expected typed Windows admission failure");
       expect(failure.evidence).toMatchObject({ step: "connection", reason: "retryable_service_failure", operation: "read_only" });
@@ -42,7 +43,7 @@ describe("general qualification machine outcome", () => {
       expect(saved.receipt).toBeUndefined();
       expect(qualificationOutcomeExitCode(saved, execution())).toBe(75);
     } finally { transport.mockRestore(); await rm(root, { recursive: true, force: true }); }
-  }, 45_000);
+  }, 2 * HANG_DEADLINE_MS);
   test.each([
     ["restored", false], ["restored", undefined], ["unresolved", true], ["not_required", false],
   ] as const)("council P2 readiness %s cannot contradict baseline %s", (cleanupDisposition, baselineRestored) => {

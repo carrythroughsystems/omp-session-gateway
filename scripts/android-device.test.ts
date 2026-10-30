@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import {
   ANDROID_DIRECTORY_SURFACE_EXPRESSION,
   ANDROID_QUALIFICATION_PIN_KEYCHAIN_SERVICE,
@@ -31,6 +31,9 @@ import {
   wakeAndroidChrome,
   waitForDevtoolsEndpoint,
 } from "./android-device.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 describe("Android network reachability", () => {
   test("unsafe host text is rejected before it reaches the device shell", async () => {
     let commands = 0;

@@ -6,7 +6,7 @@
  * — which failures retire a session, which ones must not, and which refusal reaches the operator —
  * is a property of that wire rather than of the gateway's own code.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,9 @@ import {
   type OmpDiscoveryObservation,
 } from "../src/omp-registry.ts";
 import { SessionRegistry, type SessionActivityStopEvent } from "../src/registry.ts";
+import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+
+setDefaultTimeout(3 * HANG_DEADLINE_MS);
 
 const VIEW_URL = "https://collab.example/#wss://relay.example/r/room.viewkeyviewkeyviewkey";
 const CONTROL_URL = "https://collab.example/#wss://relay.example/r/room.controlkeycontrolkeyctl";
@@ -237,7 +240,7 @@ async function hostDouble(directory: string, options: HostDoubleOptions = {}): P
 }
 
 function reader(directory: string): OmpHostReader {
-  return new OmpHostReader({ directory, timeoutMs: 500 });
+  return new OmpHostReader({ directory, timeoutMs: HANG_DEADLINE_MS });
 }
 
 /** Iterates a real directory in a chosen order, so a budget case cannot pass on a lucky name order. */
@@ -321,7 +324,7 @@ describe("OMP discovery directory", () => {
     const directory = await discoveryDirectory();
     const first = await hostDouble(directory);
     const second = await hostDouble(directory, { instanceId: "bbbb2222cccc3333" });
-    const subject = new OmpHostReader({ directory, maxEntries: 2, timeoutMs: 500 });
+    const subject = new OmpHostReader({ directory, maxEntries: 2, timeoutMs: HANG_DEADLINE_MS });
     expect((await subject.observe()).hosts).toHaveLength(2);
     await first.unpublish();
     await second.unpublish();
@@ -341,7 +344,7 @@ describe("OMP discovery directory", () => {
     for (let index = 0; index < 6; index++) {
       hosts.push(await hostDouble(directory, { instanceId: "aaaa1111bbbb222" + index }));
     }
-    const subject = new OmpHostReader({ directory, maxEntries: 2, timeoutMs: 500 });
+    const subject = new OmpHostReader({ directory, maxEntries: 2, timeoutMs: HANG_DEADLINE_MS });
     const observation = await subject.observe();
     expect(observation.hosts).toHaveLength(2);
     expect(hosts.reduce((count, host) => count + host.requests.length, 0)).toBe(2);
@@ -356,12 +359,8 @@ describe("OMP discovery directory", () => {
       await crashed.stop();
     }
     const live = await hostDouble(directory, { instanceId: "ffff6666aaaa7777" });
-    const subject = new OmpHostReader({
-      directory,
-      maxEntries: 2,
-      timeoutMs: 500,
-      openDirectory: path => orderedDirectory(path, name => (name.startsWith(live.entryId) ? 1 : 0)),
-    });
+    const subject = new OmpHostReader({ directory,
+    maxEntries: 2, timeoutMs: HANG_DEADLINE_MS, openDirectory: path => orderedDirectory(path, name => (name.startsWith(live.entryId) ? 1 : 0)), });
     let admitted: string[] = [];
     for (let round = 0; round < 4 && admitted.length === 0; round++) {
       admitted = (await subject.observe()).hosts.map(host => host.session.instanceId);
@@ -377,7 +376,7 @@ describe("OMP discovery directory", () => {
     const directory = await discoveryDirectory();
     const crashed = await hostDouble(directory, { instanceId: "dddd4444eeee5550" });
     await crashed.stop();
-    const subject = new OmpHostReader({ directory, maxEntries: 1, timeoutMs: 500 });
+    const subject = new OmpHostReader({ directory, maxEntries: 1, timeoutMs: HANG_DEADLINE_MS });
     expect((await subject.observe()).hosts).toEqual([]);
     // Upstream never reuses a publication name, so memory keys on the file itself, not the name.
     const live = await hostDouble(directory, { instanceId: "ffff6666aaaa7777" });
@@ -395,12 +394,8 @@ describe("OMP discovery directory", () => {
       await utimes(join(directory, `${crashed.entryId}.json`), hourAgo, hourAgo);
     }
     const live = await hostDouble(directory, { instanceId: "ffff6666aaaa7777" });
-    const subject = new OmpHostReader({
-      directory,
-      maxEntries: 1,
-      timeoutMs: 500,
-      openDirectory: path => orderedDirectory(path, name => (name.startsWith(live.entryId) ? 1 : 0)),
-    });
+    const subject = new OmpHostReader({ directory,
+    maxEntries: 1, timeoutMs: HANG_DEADLINE_MS, openDirectory: path => orderedDirectory(path, name => (name.startsWith(live.entryId) ? 1 : 0)), });
     const seen = new Set<string>();
     for (let round = 0; round < 15; round++) {
       for (const host of (await subject.observe()).hosts) seen.add(host.session.instanceId);
@@ -414,12 +409,8 @@ describe("OMP discovery directory", () => {
     await writeFile(join(directory, "eeee5555ffff6666.json.tmp"), "{", { mode: 0o600 });
     await writeFile(join(directory, "eeee5555ffff6666.sock"), "", { mode: 0o600 });
     const live = await hostDouble(directory, { instanceId: "ffff6666aaaa7777" });
-    const subject = new OmpHostReader({
-      directory,
-      maxEntries: 1,
-      timeoutMs: 500,
-      openDirectory: path => orderedDirectory(path, name => (name.startsWith(live.entryId) ? 1 : 0)),
-    });
+    const subject = new OmpHostReader({ directory,
+    maxEntries: 1, timeoutMs: HANG_DEADLINE_MS, openDirectory: path => orderedDirectory(path, name => (name.startsWith(live.entryId) ? 1 : 0)), });
     expect((await subject.observe()).hosts.map(host => host.session.instanceId)).toEqual([live.instanceId]);
   });
 
@@ -692,7 +683,8 @@ describe("OMP query transport", () => {
     });
     cleanups.push(async () => server.stop(true));
     if (process.platform !== "win32") await chmod(endpoint, 0o600);
-    const subject = new OmpHostReader({ directory, timeoutMs: 50 });
+    // hang-deadline: behavior-under-test -- a peer holding its side open must time out and close.
+    const subject = new OmpHostReader({ directory, timeoutMs: outcome === "timeout" ? 50 : HANG_DEADLINE_MS });
     const result = await subject.snapshot({
       entryId: "eeee1111bbbb2222",
       version: OMP_REGISTRY_VERSION,
@@ -712,7 +704,7 @@ describe("OMP query transport", () => {
         await Promise.race([
           closed.promise.then(() => true),
           new Promise<boolean>(resolve => {
-            timer = setTimeout(() => resolve(false), 1_000);
+            timer = setTimeout(() => resolve(false), HANG_DEADLINE_MS);
           }),
         ]),
       ).toBe(true);
@@ -739,6 +731,7 @@ describe("OMP query transport", () => {
       const invoked = Promise.withResolvers();
       Bun.connect = options => { callbacks = options.socket; invoked.resolve(); return connecting.promise; };
       let returnedBeforeOpen = false;
+      // hang-deadline: behavior-under-test -- mocked connect opens only after the query times out.
       const pending = new OmpHostReader({ directory, timeoutMs: 10 }).snapshot(entry).then(result => {
         returnedBeforeOpen = true;
         return result;
@@ -763,7 +756,7 @@ describe("OMP query transport", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const timer = setTimeout(() => child.kill(), 3_000);
+    const timer = setTimeout(() => child.kill(), HANG_DEADLINE_MS);
     try {
       const [exitCode, stdout, stderr] = await Promise.all([
         child.exited,
@@ -973,7 +966,7 @@ describe("directory polling", () => {
         '}));',
         'const { OmpHostReader, startHostPoller } = await import(' + JSON.stringify(new URL("../src/omp-registry.ts", import.meta.url).href) + ');',
         'const { SessionRegistry } = await import(' + JSON.stringify(new URL("../src/registry.ts", import.meta.url).href) + ');',
-        'const reader = new OmpHostReader({ directory: ' + JSON.stringify(directory) + ', timeoutMs: 500 });',
+        'const reader = new OmpHostReader({ directory: ' + JSON.stringify(directory) + ', timeoutMs: ' + HANG_DEADLINE_MS + ' });',
         'let now = 0;',
         'const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 2, clock: { monotonicNowMs: () => now, wallNowIso: () => new Date(now).toISOString() } });',
         'const poller = startHostPoller({ reader, registry, intervalMs: 3600000 });',

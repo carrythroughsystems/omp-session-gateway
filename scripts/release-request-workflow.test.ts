@@ -1,7 +1,10 @@
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 interface WorkflowStep {
   readonly id?: string;

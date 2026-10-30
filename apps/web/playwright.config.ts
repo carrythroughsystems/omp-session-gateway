@@ -1,5 +1,6 @@
 import { defineConfig } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import { HANG_DEADLINE_MS } from "../../scripts/test-support.ts";
 
 // Chrome's reduced UA freezes the platform at "Android 10; K" by design; do not
 // "fix" it to report the device's Android 17 version.
@@ -35,6 +36,7 @@ export default defineConfig({
   testDir: fileURLToPath(new URL("./e2e", import.meta.url)),
   testMatch: "*.e2e.ts",
   fullyParallel: false,
+  timeout: 2 * HANG_DEADLINE_MS,
   workers: playwrightWorkers(),
   retries: process.env.CI === "true" || process.env.CI === "1" ? 1 : 0,
   reporter: [["line"], [fileURLToPath(new URL("../../scripts/browser-flake-reporter.ts", import.meta.url)), { lane: "browser-notifications" }]],

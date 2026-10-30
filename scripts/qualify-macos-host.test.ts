@@ -3,9 +3,12 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { assertMacExposureEvidence, loadConfiguredMacTarget, parseStableQualificationArgs } from "./stable-qualification.ts";
 import { PRODUCT_VERSION } from "./build-release.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const POSIX = process.platform !== "win32";
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -306,10 +309,10 @@ main persistence
 `, [], { ...environment("a".repeat(64)), HOME: root, REAL_BUN: process.execPath, SHUTDOWN_MARKER: shutdown });
     expect(result.exitCode).toBe(125); // no changed boot identity: the detached owner remains unresolved
     expect(result.stdout).toContain("reboot issued");
-    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(Date.now() - started).toBeLessThan(HANG_DEADLINE_MS);
     // The shutdown runs in a detached OS process the lane deliberately does not wait for (that is the
     // behavior under test), so there is no promise or event to await: poll its marker, bounded.
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + HANG_DEADLINE_MS;
     while (!(await pathEntryExists(shutdown)) && Date.now() < deadline) await Bun.sleep(100);
     expect(await pathEntryExists(shutdown)).toBe(true);
     const owners = join(root, ".local/state/omp-qualification/command-owners");
@@ -325,7 +328,7 @@ main persistence
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-}, 40_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test.skipIf(!POSIX)("Mac reboot keeps the sudo password in NUL-framed SSH stdin", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "omp-mac-reboot-secret-"));
@@ -379,14 +382,14 @@ issue_reboot
 `, [], { ...environment("a".repeat(64)), HOME: temporaryRoot, OMP_MAC_SUDO_PW: target.sudoPassword, SUDO_CAPTURE: capture });
     expect(result).toEqual({ exitCode: 125, stdout: "", stderr: "" });
     // The shutdown is detached from the session on purpose; its argv capture lands shortly after.
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + HANG_DEADLINE_MS;
     while (!(await pathEntryExists(capture)) && Date.now() < deadline) await Bun.sleep(100);
     expect((await readFile(capture, "utf8")).trim().split("\n")).toEqual(["-n", "shutdown", "-r", "now"]);
     expect((await readdir(join(temporaryRoot, ".local/state/omp-qualification/command-owners"))).length).toBe(1);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
-}, 30_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test.skipIf(!POSIX)("bundle scan keeps readiness token bytes out of subprocess argv", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "omp-mac-bundle-argv-"));

@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, setDefaultTimeout } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runDoctorChecks } from "../src/doctor.ts";
+import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 /**
  * The report is the operator contract: an unsafe topology or an unsupported OMP must stay visible
@@ -50,10 +53,10 @@ describe("doctor reports mainline compatibility and discovery health", () => {
 
   test("withholds trust without a tunnel device and compatibility without a reachable OMP", async () => {
     await isolatedRoot();
-
+  
     const report = await runDoctorChecks({ tunDevicePresent: () => false, ompVersion: async () => undefined,
       ternAvailable: async () => { throw new Error("unconfigured probe must not run"); } });
-
+  
     expect(report.service).toBe("omp-session-gateway");
     expect(report.checks).toMatchObject({
       config: true,
@@ -66,7 +69,7 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     expect(Object.hasOwn(report.checks, "ternAvailable")).toBe(false);
     // Deliberately no assertion on listenerLoopbackOnly: no daemon runs in this isolated root, so
     // false would discriminate nothing about whether topology withholds that secondary claim.
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   test("reports configured Tern availability as an injected boolean without starting a command", async () => {
     const root = await isolatedRoot();
@@ -79,16 +82,16 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     expect(probes).toBe(1);
     expect(report.checks.ternAvailable).toBe(false);
     expect(JSON.stringify(report)).not.toContain("TERN_DOCTOR_PRIVATE_CANARY");
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   test("reports sound trust and compatibility at the minimum mainline release", async () => {
     await isolatedRoot();
-
+  
     const report = await runDoctorChecks({ tunDevicePresent: () => true, ompVersion: async () => "omp/18.1.20\n" });
-
+  
     expect(report.checks.loopbackTrustSound).toBe(true);
     expect(report.checks.compatibility).toBe(true);
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   test("does not let declared trust hide an unsafe topology or an unsupported OMP", async () => {
     const root = await isolatedRoot();
@@ -99,18 +102,18 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     document.auth.trustIdentityWithoutTailnetDevice = true;
     await writeFile(configPath, `${JSON.stringify(document)}\n`);
     await chmod(configPath, 0o600);
-
+  
     const report = await runDoctorChecks({ tunDevicePresent: () => false, ompVersion: async () => "18.1.19" });
-
+  
     // The flag asserts trust; it does not establish it. A host that sets it while running
     // userspace-mode tailscaled must still fail here, or the escape hatch would hide the exposure.
     expect(report.checks.loopbackTrustSound).toBe(false);
     expect(report.checks.compatibility).toBe(false);
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   test("reports an unreadable service manager as failed service checks, not a failed report", async () => {
     await isolatedRoot();
-
+  
     const report = await runDoctorChecks({
       tunDevicePresent: () => true,
       ompVersion: async () => "18.1.20",
@@ -118,7 +121,7 @@ describe("doctor reports mainline compatibility and discovery health", () => {
         throw new Error("cannot read the Windows gateway task's state");
       },
     });
-
+  
     // Checks computed after the service probe still report, so one unreadable manager costs two checks.
     expect(report.checks).toMatchObject({
       config: true,
@@ -127,7 +130,7 @@ describe("doctor reports mainline compatibility and discovery health", () => {
       loopbackTrustSound: true,
       compatibility: true,
     });
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   test("reports a symlinked discovery directory as unreadable without following or removing it", async () => {
     if (process.platform === "win32") return;
@@ -137,7 +140,7 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     await mkdir(join(root, "home", ".omp-test", "run"), { recursive: true, mode: 0o700 });
     await mkdir(target, { mode: 0o700 });
     await symlink(target, directory);
-
+  
     // A fresh runtime receives HOME before any homedir lookup, so this check cannot inherit the
     // runner's original home and mistake an absent directory for the symlink under examination.
     const subprocess = Bun.spawn([
@@ -164,5 +167,5 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     expect(report.checks).toMatchObject({ compatibility: true, discoveryReadable: false, permissions: false });
     expect((await lstat(directory)).isSymbolicLink()).toBe(true);
     expect((await lstat(target)).isDirectory()).toBe(true);
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 });

@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { PRODUCT_VERSION } from "./build-release.ts";
 import {
   assertMacBuildOutput,
@@ -66,6 +66,9 @@ import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQ
 import { pixelUnrestored } from "./restoration.ts";
 import { AndroidBrowserCleanupError } from "./android-device.ts";
 import { pushBrowserCleanupFailure } from "./android-push-runtime.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const TAG = `v${PRODUCT_VERSION}-prealpha.21`;
 // Derived exactly as the orchestrator derives it, so this suite cannot pass against a predecessor
@@ -1515,7 +1518,7 @@ describe("lifecycle HTTP observations", () => {
       canView: true, canControl: true, model: "synthetic-model",
     }] }, { headers: { "cache-control": "no-store" } }) });
     try {
-      const session = await waitForPublishedSession(server.url.origin, "synthetic-label", { timeoutMs: 2_000, matches: card => card.generation === 2 });
+      const session = await waitForPublishedSession(server.url.origin, "synthetic-label", { timeoutMs: HANG_DEADLINE_MS, matches: card => card.generation === 2 });
       expect(session.generation).toBe(2);
       expect(lists).toBe(2);
     } finally { server.stop(true); }
@@ -1538,10 +1541,12 @@ describe("lifecycle HTTP observations", () => {
     try {
       const evidence = await verifyLaunchContracts(server.url.origin, { instanceId: "synthetic-instance", generation: 1 }, "stale");
       expect(evidence.modes).toEqual(["view", "control"].map(mode => ({ mode, status: 409, keys: ["code"], valuePresent: false, noStore: true })));
+      // hang-deadline: behavior-under-test -- HTTP failure must not be mistaken for revocation.
       await expect(waitForRevocation(server.url.origin, "synthetic-label", 10)).rejects.toThrow("did not revoke before the deadline");
     } finally { server.stop(true); }
   });
 
+  // hang-deadline: behavior-under-test -- held HTTP reads must fail as the product deadline.
   test.each([
     ["publication", (origin: string) => waitForPublishedSession(origin, "synthetic-label", { timeoutMs: 20 }), "did not publish before the deadline"],
     ["revocation", (origin: string) => waitForRevocation(origin, "synthetic-label", 20), "did not revoke before the deadline"],
@@ -1697,7 +1702,7 @@ lane_persistence
     expect(stderr).toContain("a changed boot identity");
     expect(stdout + stderr).not.toContain(bootUuid);
     // The shutdown is detached from the session on purpose; its marker lands shortly after the verdict.
-    const markerDeadline = Date.now() + 10_000;
+    const markerDeadline = Date.now() + HANG_DEADLINE_MS;
     while (!(await stat(join(root, "reboot-requested")).then(() => true, () => false)) && Date.now() < markerDeadline) await Bun.sleep(100);
     expect((await stat(join(root, "reboot-requested"))).isFile()).toBe(true);
     const staleOutput = output.split("\n").filter(line => !/^(guest reboot changed|console login|readiness token preserved):/u.test(line)).join("\n") + "\n" + stdout;
@@ -1717,7 +1722,7 @@ lane_persistence
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-}, 30_000);
+}, 2 * HANG_DEADLINE_MS);
 
 describe("resumable receipt lanes", () => {
   test.skipIf(process.platform !== "win32")("Windows refuses private receipt persistence before filesystem effects", async () => {
@@ -2199,7 +2204,7 @@ test("council491 tunnel cancellation settles its pending health read", async () 
   } });
   try {
     const result = waitForTunnelReady(server.port!, () => true,
-      { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 });
+      { signal: controller.signal, deadline: performance.now() + HANG_DEADLINE_MS, nextFailureId: () => 1 });
     setTimeout(() => controller.abort(new Error("synthetic cancellation")), 20);
     await expect(result).rejects.toThrow("synthetic cancellation");
   } finally { server.stop(true); }
@@ -2256,44 +2261,43 @@ test.skipIf(process.platform === "win32")("council498r1 successful remote leader
     if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* Already settled. */ }
     await rm(root, { recursive: true, force: true });
   }
-}, 25_000);
+}, 2 * HANG_DEADLINE_MS);
 
-test.skipIf(process.platform === "win32").each([0, 7, "early-hup"] as const)(
-  "council498 remote owner survives exit %s until acknowledged settlement", async exit => {
-    const root = await mkdtemp(join(tmpdir(), "remote-owner-settlement-"));
-    const owners = join(root, ".local/state/omp-qualification/command-owners");
-    let calls = 0, published = false, done = false, ownerCount = 0;
-    const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async argv => {
-      calls += 1;
-      const primary = calls === 1;
-      const script = primary && exit === "early-hup" ? argv.at(-1)!.replace("set -m", () => "kill -HUP $$\nset -m") : argv.at(-1)!;
-      const child = Bun.spawn(["/bin/bash", "-c", script], {
-        env: { ...process.env, HOME: root }, stdin: "ignore", stdout: "ignore", stderr: "ignore",
-      });
-      const exitCode = await child.exited;
-      if (primary) {
-        const directories = await readdir(owners);
-        ownerCount = directories.length;
-        if (directories[0] !== undefined) {
-          const owner = join(owners, directories[0]);
-          published = await Bun.file(join(owner, "pgid")).exists();
-          done = await Bun.file(join(owner, "done")).exists();
-        }
+test.skipIf(process.platform === "win32").each([0, 7, "early-hup"] as const)("council498 remote owner survives exit %s until acknowledged settlement", async exit => {
+  const root = await mkdtemp(join(tmpdir(), "remote-owner-settlement-"));
+  const owners = join(root, ".local/state/omp-qualification/command-owners");
+  let calls = 0, published = false, done = false, ownerCount = 0;
+  const execute: NonNullable<Parameters<typeof remoteExecutor>[1]> = async argv => {
+    calls += 1;
+    const primary = calls === 1;
+    const script = primary && exit === "early-hup" ? argv.at(-1)!.replace("set -m", () => "kill -HUP $$\nset -m") : argv.at(-1)!;
+    const child = Bun.spawn(["/bin/bash", "-c", script], {
+      env: { ...process.env, HOME: root }, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    });
+    const exitCode = await child.exited;
+    if (primary) {
+      const directories = await readdir(owners);
+      ownerCount = directories.length;
+      if (directories[0] !== undefined) {
+        const owner = join(owners, directories[0]);
+        published = await Bun.file(join(owner, "pgid")).exists();
+        done = await Bun.file(join(owner, "done")).exists();
       }
-      return { exitCode, stdout: "", stderr: "" };
-    };
-    try {
-      const remote = remoteExecutor({ sshDestination: `settlement-${exit}.invalid`, sudoPassword: "" }, execute);
-      const result = await remote(["/bin/bash", "-c", 'for owner in "$HOME"/.local/state/omp-qualification/command-owners/*; do [ -s "$owner/pgid" ] || exit 77; done; exit "$1"', "--",
-        String(exit === "early-hup" ? 0 : exit)]).catch(error => error);
-      expect(ownerCount).toBe(1);
-      expect(done).toBe(true);
-      expect(published).toBe(exit !== "early-hup");
-      expect(calls).toBe(2);
-      expect(result.exitCode).toBe(exit === "early-hup" ? 125 : exit);
-      expect(await readdir(owners)).toEqual([]);
-    } finally { await rm(root, { recursive: true, force: true }); }
-  }, 20_000);
+    }
+    return { exitCode, stdout: "", stderr: "" };
+  };
+  try {
+    const remote = remoteExecutor({ sshDestination: `settlement-${exit}.invalid`, sudoPassword: "" }, execute);
+    const result = await remote(["/bin/bash", "-c", 'for owner in "$HOME"/.local/state/omp-qualification/command-owners/*; do [ -s "$owner/pgid" ] || exit 77; done; exit "$1"', "--",
+      String(exit === "early-hup" ? 0 : exit)]).catch(error => error);
+    expect(ownerCount).toBe(1);
+    expect(done).toBe(true);
+    expect(published).toBe(exit !== "early-hup");
+    expect(calls).toBe(2);
+    expect(result.exitCode).toBe(exit === "early-hup" ? 125 : exit);
+    expect(await readdir(owners)).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 2 * HANG_DEADLINE_MS);
 
 test.skipIf(process.platform === "win32")("council491 remote cancellation reaps a real distinct process group", async () => {
   const root = await mkdtemp(join(tmpdir(), "remote-command-owner-"));
@@ -2314,16 +2318,16 @@ test.skipIf(process.platform === "win32")("council491 remote cancellation reaps 
   try {
     const remote = remoteExecutor({ sshDestination: "local-process-group.invalid" } as Parameters<typeof remoteExecutor>[0], execute);
     const result = remote(["/bin/bash", "-c", 'printf "%s" "$$" > "$1"; sleep 30', "--", ready],
-      { execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 } });
+      { execution: { signal: controller.signal, deadline: performance.now() + 2 * HANG_DEADLINE_MS, nextFailureId: () => 1 } });
     result.catch(() => {});
-    const deadline = performance.now() + 2_000;
+    const deadline = performance.now() + HANG_DEADLINE_MS;
     while (!await Bun.file(ready).exists() && performance.now() < deadline) await Bun.sleep(10);
     const pgid = Number(await readFile(ready, "utf8"));
     controller.abort(new Error("synthetic remote cancellation"));
     await expect(result).rejects.toThrow("synthetic remote cancellation");
     expect(() => process.kill(-pgid, 0)).toThrow();
   } finally { controller.abort(); await rm(root, { recursive: true, force: true }); }
-}, 25_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test.skipIf(process.platform === "win32")("bound read-only preflight failure writes an effect-free outcome without creating a receipt", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "stable-bound-preflight-")));
@@ -2969,11 +2973,11 @@ test.skipIf(process.platform === "win32")("cancellation terminates the owned chi
     {stdin:"ignore",stdout:"inherit",stderr:"inherit"});
     await Bun.write(${JSON.stringify(ready)}, "ready"); await child.exited;`;
   const owner = runPixelRestoringChild([process.execPath, "-e", script], {
-    timeoutMs: 5_000, execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 },
+    timeoutMs: 2 * HANG_DEADLINE_MS, execution: { signal: controller.signal, deadline: performance.now() + 2 * HANG_DEADLINE_MS, nextFailureId: () => 1 },
   });
   owner.catch(() => {});
   try {
-    const until = performance.now() + 2_000;
+    const until = performance.now() + HANG_DEADLINE_MS;
     while (!await Bun.file(ready).exists() && performance.now() < until) await Bun.sleep(5);
     expect(await Bun.file(ready).exists()).toBe(true);
     controller.abort(new DOMException("owned cancellation", "AbortError"));
@@ -3004,6 +3008,7 @@ test("a read-only Android origin refusal leaves the Pixel lease clean for the ne
 });
 
 test("a failed or timed-out Pixel-restoring child refuses every later device lane", async () => {
+  // hang-deadline: behavior-under-test -- exercise the real timeout's termination/poisoning path.
   // Real children: the timeout case needs runCommand's actual SIGTERM of a live process, which fake
   // timers cannot drive. A slow start that trips the 300 ms timeout is flagged the same way.
   for (const child of [["-e", "process.exit(3)"], ["-e", "await Bun.sleep(10_000)"]]) {

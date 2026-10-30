@@ -11,6 +11,7 @@ import {
   SESSION_CREATION_UUID_PATTERN, type FleetSource, type SessionEvent, type SessionMetadata,
   type SessionCreationOptions, type SessionCreationRequest, type SessionCreationState, type SessionCreationError,
 } from "@omp-session-gateway/protocol";
+import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
 
 const MIME_TYPES: Readonly<Record<string, string>> = {
   ".css": "text/css; charset=utf-8",
@@ -60,7 +61,7 @@ export async function readSyntheticAuditAuthority(pipe: string): Promise<Synthet
       const socket = createConnection(pipe);
       let text = "";
       socket.setEncoding("utf8");
-      socket.setTimeout(5_000, () => socket.destroy(new Error("visual log audit: authority timeout")));
+      socket.setTimeout(HANG_DEADLINE_MS, () => socket.destroy(new Error("visual log audit: authority timeout")));
       socket.on("data", chunk => {
         text += chunk;
         if (text.length > 1_024) socket.destroy(new Error("visual log audit: oversized authority"));

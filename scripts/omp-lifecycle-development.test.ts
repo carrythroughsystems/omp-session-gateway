@@ -1,10 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertPrivatePublication, parseDevelopmentArgs } from "./omp-lifecycle-development.ts";
 import upstream from "../UPSTREAM.lock.json";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 test("development mode requires an explicit opt-in for a non-baseline version and rejects malformed flags", () => {
   expect(parseDevelopmentArgs(["--omp", "/synthetic/dist/cli.js"])).toEqual({

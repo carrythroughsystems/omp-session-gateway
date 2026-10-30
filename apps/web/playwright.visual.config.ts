@@ -1,5 +1,6 @@
 import { defineConfig } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import { HANG_DEADLINE_MS } from "../../scripts/test-support.ts";
 
 // Playwright otherwise captures an automatic failure DOM snapshot even when tracing is off.
 process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
@@ -11,8 +12,8 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   preserveOutput: "never",
-  timeout: 30_000,
-  globalTimeout: 12 * 60_000,
+  timeout: 2 * HANG_DEADLINE_MS,
+  globalTimeout: 6 * HANG_DEADLINE_MS,
   outputDir: "../../test-results/visual",
   reporter: [[fileURLToPath(new URL("./visual/safe-reporter.ts", import.meta.url))]],
   use: {

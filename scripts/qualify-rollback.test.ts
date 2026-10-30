@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { releaseVersion } from "./release-policy.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const POSIX = process.platform !== "win32";
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));

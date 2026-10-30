@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,6 +33,9 @@ import {
   runCommand,
   withSmokeDiagnostics,
 } from "./post-release-smoke.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 describe("private nested smoke diagnostics", () => {
   test.each([0, 1])("retains bounded exact nested child bytes before staging cleanup for exit=%i", async exitCode => {
@@ -75,6 +78,7 @@ process.exitCode = ${exitCode};
   test("retains timeout and spawn failures without exposing child bytes", async () => {
     const root = await mkdtemp(join(tmpdir(), "smoke-command-failure-"));
     try {
+      // hang-deadline: behavior-under-test -- timed-out children must retain their private stderr.
       await expect(runCommand("timed smoke", [process.execPath, "-e", 'console.error("PRIVATE-TIMEOUT-CHILD"); await Bun.sleep(60_000);'], {
         timeoutMs: 1_000, logPrefix: join(root, "android-acceptance"),
       })).rejects.toThrow("timed smoke timed out");

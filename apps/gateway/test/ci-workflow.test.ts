@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -6,6 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import packageManifest from "../../../package.json";
 import { checkWorkflowMergeQueue } from "../../../scripts/check-repository.ts";
+import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const workflowPath = join(import.meta.dir, "../../../.github/workflows/ci.yml");
 const validEnvironment = {

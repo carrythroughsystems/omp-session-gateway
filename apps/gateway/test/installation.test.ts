@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -16,6 +16,9 @@ import {
   stageRuntimePayload,
 } from "../src/installation.ts";
 import { serviceDefinition } from "../src/service.ts";
+import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 /** Every Windows task definition names its installing account; any valid SID stands in for it here. */
 const windowsUserSid = "S-1-5-21-1111111111-2222222222-3333333333-1001";
@@ -910,7 +913,7 @@ test("compiles a TypeScript CLI source into the executable it installs", async (
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-}, 30_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test("refuses an unsafe service definition and reads one at exactly the size limit", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-definition-shape-"));

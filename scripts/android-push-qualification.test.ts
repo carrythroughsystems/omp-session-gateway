@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +19,9 @@ import { runFixtureOperation, type FixtureExecutor } from "./push-qualification-
 import { authenticateAndroidNotification, awaitPageExecutionContext, isPushNotificationRoute, holdAndroidNotificationDenial, ownedPushForwards, observePushLaunch } from "./android-push-runtime.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import { QualificationFailure, normalizeQualificationFailures, privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const identity: AndroidPushIdentity = { tag: "v0.6.0-prealpha.1", candidate: { tag: "v0.6.0-prealpha.1", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64), archivePath: "synthetic.tar" },
   omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "c".repeat(40), sourceTree: "d".repeat(40), nativeTarballSha256: "e".repeat(64), nativeBinarySha256: "f".repeat(64) }, origin: "https://gateway.example.test" };
@@ -2017,7 +2020,8 @@ test("495 round2 fixture controller carries its last acknowledged private sessio
   }, true);
   try {
     let command: Record<string, unknown> | undefined;
-    for (let attempt = 0; attempt < 100 && command === undefined; attempt++) {
+    const deadline = performance.now() + HANG_DEADLINE_MS;
+    while (command === undefined && performance.now() < deadline) {
       command = await readFile(join(root, "command.json"), "utf8").then(text => JSON.parse(text)).catch(() => undefined);
       if (command === undefined) await Bun.sleep(5);
     }
@@ -2044,7 +2048,8 @@ test.each([false, true])("495 round2 fixture requires a private command and its 
     await writeFile(join(root, "command.json"), JSON.stringify({ epoch, sequence: 1, operation: "ask", expectedSessionId: "session-before" }), { mode: 0o600 });
     expect(((await stat(join(root, "command.json"))).mode & 0o077) === 0).toBe(process.platform !== "win32");
     let ack: Record<string, unknown> | undefined;
-    for (let attempt = 0; attempt < 100; attempt++) {
+    const deadline = performance.now() + HANG_DEADLINE_MS;
+    while (performance.now() < deadline) {
       ack = await readFile(join(root, "ack.json"), "utf8").then(text => JSON.parse(text)).catch(() => undefined);
       if (ack?.sequence === 1) break;
       await Bun.sleep(5);

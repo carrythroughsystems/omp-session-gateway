@@ -1,10 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseQualificationPins } from "./stable-qualification.ts";
 import { applyUpstreamPins, deriveUpstreamPins, type PinReader, type UpstreamLock, type WindowsPins } from "./upstream-pins.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const VERSION = "18.9.9";
 const COMMIT = "c".repeat(40);

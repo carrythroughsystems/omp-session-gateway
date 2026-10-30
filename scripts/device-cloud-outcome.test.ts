@@ -1,9 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeviceCloudAvailabilityHold } from "./device-cloud-availability.ts";
 import { parseDeviceCloudHoldSet, parseDeviceCloudMachineOutcome, readDeviceCloudOutcomeFile, recognizedDeviceCloudOutcome, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const evidence = { kind: "device-cloud-availability", stage: "preflight", target: "ipad", vendors: ["testingbot"], reason: "pinned-pool-busy", waitedMs: 0 } as const;
 

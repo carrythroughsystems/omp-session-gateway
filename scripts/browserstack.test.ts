@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,9 @@ import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { boundedVendorBytes, boundedVendorText, requireLoopbackListeners } from "./device-cloud-common.ts";
 import type { CloudArtifact, CloudRecordRemoval, TestRecord } from "./device-cloud-common.ts";
 import pins from "./browserstack-pins.json";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const credentials = { username: "synthetic-browserstack-user", accessKey: "synthetic-browserstack-key" };
 const id = "a".repeat(40), build = "b".repeat(40);
@@ -443,7 +446,7 @@ test.skipIf(process.platform !== "darwin")("real process ownership finds and sto
     await child.exited;
     await rm(directory, { recursive: true, force: true });
   }
-}, 15_000);
+}, 2 * HANG_DEADLINE_MS);
 
 describe("BrowserStack allocation attestation", () => {
   const ipad = { capabilities: { platformName: "iOS", browserName: "safari", deviceName: "iPad 10th" }, browser: { family: "ipad", browser: "safari", browserVersion: "27.0", os: "27.0", model: "" }, vendorRecord: { device: "iPad 10th", os: "ios", osVersion: "27.0", browser: "ipad" } } as const;
@@ -1268,7 +1271,7 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(hit).toBeLessThan(audited);
     expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).resources?.find(resource => resource.vendor === "browserstack")?.incident).toBe(true);
     expect(JSON.stringify(lane.checkpoints)).not.toContain(replayWindow);
-  }, 15_000);
+  }, 2 * HANG_DEADLINE_MS);
   test("a 502 unbound reference persists an incident before clean metadata permits deletion", async () => {
     const fixture = provider({
       retry: { surface: "session", reply: {
@@ -1335,7 +1338,7 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(fixture.incidents).toContain("post-audit unvalidated record");
     expect(fixture.calls.filter(call => call.method === "DELETE")).toHaveLength(1);
     expect(fixture.calls.some(call => call.url === nestedArtifact)).toBe(false);
-  }, 15_000);
+  }, 2 * HANG_DEADLINE_MS);
   test("pre-finalization references are unbound even when running metadata reports a build", async () => {
     const fixture = provider({ raw: JSON.stringify({ automation_session: { ...record, status: "running", insights: { reason: nestedArtifact } } }) });
     await expect(fixture.audit()).rejects.toThrow("unbound retained reference");

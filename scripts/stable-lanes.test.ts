@@ -2,10 +2,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { remoteCommandLine, type RemoteExecutor } from "./stable-qualification.ts";
 import { gatewayStreamsDiscarded, PUSH_FIXTURE_FILES, remoteHome, retainedMacCloudFixture, retainedMacLogs, stageRemoteFile } from "./stable-lanes.ts";
 import type { ExternalLaneContext, RetainedMacLaneContext } from "./stable-qualification.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const SCRIPTS = fileURLToPath(new URL(".", import.meta.url));
 

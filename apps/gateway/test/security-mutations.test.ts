@@ -1,8 +1,11 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test, setDefaultTimeout } from "bun:test";
 import { cp, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 /**
  * Named mutations over the security predicates, each of which must fail a named test.
@@ -209,19 +212,19 @@ test.skipIf(!RUNNABLE)("every mutated suite passes before it is mutated", async 
     const baseline = await runTarget(target);
     expect({ target, code: baseline.code }).toEqual({ target, code: 0 });
   }
-}, 120_000);
+}, 6 * HANG_DEADLINE_MS);
 
 for (const mutation of MUTATIONS) {
   test.skipIf(!RUNNABLE)(`removing a guard is caught: ${mutation.name}`, async () => {
     const path = join(tree, mutation.file);
     const original = await readFile(path, "utf8");
-
+  
     // A pattern that no longer matches is a failure, not a skip: a silently inapplicable mutation
     // leaves the suite green while the guard it names is unprotected.
     expect(original.includes(mutation.find)).toBe(true);
     const mutated = original.replaceAll(mutation.find, mutation.replace);
     expect(mutated).not.toBe(original);
-
+  
     try {
       await writeFile(path, mutated);
       const result = await runTarget(mutation.target);
@@ -232,5 +235,5 @@ for (const mutation of MUTATIONS) {
     } finally {
       await writeFile(path, original);
     }
-  }, 120_000);
+  }, 2 * HANG_DEADLINE_MS);
 }

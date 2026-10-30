@@ -1,9 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearReleaseHostLease, withReleaseHostLease } from "./release-host-lease.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 function campaign(directory: string, owner: string) {
   const source = `
@@ -151,7 +154,7 @@ describe.skipIf(process.platform === "win32")("cross-process release-host owners
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   test("caught failures retain recovery ownership until that campaign succeeds", async () => {
     const root = await mkdtemp(join(tmpdir(), "gateway-host-failure-"));

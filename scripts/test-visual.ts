@@ -10,6 +10,7 @@ import { chromium } from "@playwright/test";
 import { startDashboardFixture, type SyntheticFixtureAuthority } from "../apps/web/e2e/fixture-server.ts";
 import { assertPercyLogsSafe } from "../apps/web/visual/snapshot-safety.ts";
 import { VISUAL_CASE_COUNT, VISUAL_PHASES, VISUAL_PROJECTS, VISUAL_STATES, VISUAL_UPLOAD_REASONS } from "../apps/web/visual/safe-reporter.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 export type VisualMode = "local" | "upload";
 export interface VisualProcessResult { code: number; stdout: string; stderr: string }
@@ -122,13 +123,13 @@ export function assertVisualResult(result: VisualProcessResult, upload: boolean)
   }
 }
 
-async function execute(command: string[], environment: NodeJS.ProcessEnv, timeoutMs = 13 * 60_000): Promise<VisualProcessResult> {
+async function execute(command: string[], environment: NodeJS.ProcessEnv, timeoutMs = 7 * HANG_DEADLINE_MS): Promise<VisualProcessResult> {
   const child = Bun.spawn(command, { cwd: ROOT, env: environment, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const stop = (): void => { child.kill("SIGTERM"); };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   const deadline = setTimeout(stop, timeoutMs);
-  const hardDeadline = setTimeout(() => child.kill("SIGKILL"), timeoutMs + 5_000);
+  const hardDeadline = setTimeout(() => child.kill("SIGKILL"), timeoutMs + HANG_DEADLINE_MS);
   try {
     const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
     return { code, stdout, stderr };
@@ -188,8 +189,8 @@ export async function runPercyLogAuditHost(bunExecutable: string): Promise<void>
     let stderr = "";
     child.stdout.on("data", data => { stdout += String(data); });
     child.stderr.on("data", data => { stderr += String(data); });
-    const deadline = setTimeout(() => child.kill("SIGTERM"), 5 * 60_000);
-    const hardDeadline = setTimeout(() => child.kill("SIGKILL"), 5 * 60_000 + 5_000);
+    const deadline = setTimeout(() => child.kill("SIGTERM"), 3 * HANG_DEADLINE_MS);
+    const hardDeadline = setTimeout(() => child.kill("SIGKILL"), 4 * HANG_DEADLINE_MS);
     try {
       const code = await new Promise<number | null>((resolveExit, rejectExit) => {
         child.once("error", rejectExit);
@@ -204,7 +205,7 @@ export async function runPercyLogAuditHost(bunExecutable: string): Promise<void>
     if (!percy.browser.isConnected() ||
       requests.filter((request: { method: string; url: string }) => request.method === "POST" && request.url === "/percy/snapshot").length !== VISUAL_CASE_COUNT) throw new Error();
     const readCliLogs = async (): Promise<unknown[]> => {
-      const response = await fetch(new URL("/test/logs", percy.address()), { signal: AbortSignal.timeout(5_000) });
+      const response = await fetch(new URL("/test/logs", percy.address()), { signal: AbortSignal.timeout(HANG_DEADLINE_MS) });
       const body: unknown = await response.json();
       if (!response.ok || body === null || typeof body !== "object" || !("logs" in body) || !Array.isArray(body.logs)) throw new Error();
       // Exactly the selection used by @percy/core sendBuildLogs; CI-stream entries are excluded.
@@ -241,7 +242,7 @@ export async function requirePercyServer(environment: NodeJS.ProcessEnv): Promis
     const address = new URL(environment.PERCY_SERVER_ADDRESS ?? "http://127.0.0.1:5338");
     if (address.protocol !== "http:" || address.hostname !== "127.0.0.1" || address.username || address.password || address.search || address.hash || address.pathname !== "/") throw new Error();
     reason = "health-unreachable";
-    const response = await fetch(new URL("/percy/healthcheck", address), { signal: AbortSignal.timeout(5_000) });
+    const response = await fetch(new URL("/percy/healthcheck", address), { signal: AbortSignal.timeout(HANG_DEADLINE_MS) });
     reason = "health-status";
     if (!response.ok) throw new Error();
     reason = "health-shape";
@@ -311,7 +312,7 @@ async function runVisualProcess(
     PERCY_LOGS_IN_MEMORY: "1", PERCY_CLIENT_ERROR_LOGS: "false", PERCY_DROPIN_DISABLE: "true",
     // No responsive recapture: also prevents the core's unnecessary startup device lookup.
     PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS: "true",
-  }, 5 * 60_000);
+  }, 5 * HANG_DEADLINE_MS);
   if (audit.code !== 0 || audit.stderr.trim() !== "" || !audit.stdout.split("\n").includes(LOG_AUDIT_SUCCESS)) {
     throw new Error("visual upload: log audit failed");
   }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server } from "node:net";
@@ -12,6 +12,9 @@ import {
 } from "./testingbot.ts";
 import { runOp, startAllowlistProxy, type OpRunner, type ProcessEntry } from "./device-cloud-common.ts";
 import { WebDriverSession, pageEvaluationScript } from "./device-cloud-webdriver.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 // Built at runtime so no token-shaped literal sits in the repository.
 const TOKEN = `ops_${"SYNTHETICserviceAccount".repeat(3)}`;
@@ -235,13 +238,14 @@ describe("TestingBot credentials through the 1Password service account", () => {
 
     test("an op that exits non-zero names its status and first stderr line", async () => {
       await fakeOp('echo "[ERROR] synthetic: invalid service account token" >&2\nexit 1');
-      const failure = await readTestingBotCredentials(tokenFile).catch((error: unknown) => String(error));
+      const failure = await readTestingBotCredentials(tokenFile, (argv, environment) => runOp(argv, environment, HANG_DEADLINE_MS)).catch((error: unknown) => String(error));
       expect(failure).toContain("op whoami exited 1: [ERROR] synthetic: invalid service account token");
       expect(failure).not.toContain("not a service account");
       expect(failure).not.toContain("host-fault");
     });
 
     test("a timed-out identity probe reports a host fault and the installed-path recovery", async () => {
+      // hang-deadline: behavior-under-test -- a stuck op must be killed and reported as a timeout.
       await fakeOp("trap '' TERM\nexec sleep 10");
       const failure = await readTestingBotCredentials(tokenFile, (argv, environment) => runOp(argv, environment, 200)).catch((error: unknown) => String(error));
       expect(failure).toContain("op whoami did not exit within 0.2 s");
@@ -254,7 +258,7 @@ describe("TestingBot credentials through the 1Password service account", () => {
 
     test("an externally signalled identity probe is not misreported as an exec timeout", async () => {
       await fakeOp("kill -TERM $$");
-      const failure = await readTestingBotCredentials(tokenFile).catch((error: unknown) => String(error));
+      const failure = await readTestingBotCredentials(tokenFile, (argv, environment) => runOp(argv, environment, HANG_DEADLINE_MS)).catch((error: unknown) => String(error));
       expect(failure).toContain("terminated by SIGTERM");
       expect(failure).not.toContain("did not exit within");
       expect(failure).not.toContain("hardlink");
@@ -316,12 +320,12 @@ describe("TestingBot tunnel ownership", () => {
     const credentials = { key: KEY, secret: SECRET };
 
     test("refuses a tunnel that listens beyond loopback and leaves it stopped", async () => {
-      await expect(startTunnel(options("java-exposed"), credentials, 20_000)).rejects.toThrow("listens beyond loopback");
+      await expect(startTunnel(options("java-exposed"), credentials, HANG_DEADLINE_MS)).rejects.toThrow("listens beyond loopback");
       expect(await stopTunnel(identifier)).toBe(0);
     });
 
     test("accepts a tunnel that listens on loopback only", async () => {
-      await startTunnel(options("java-loopback"), credentials, 20_000);
+      await startTunnel(options("java-loopback"), credentials, HANG_DEADLINE_MS);
       expect(await stopTunnel(identifier)).toBe(1);
     });
   });

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash, createHmac } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -8,6 +8,9 @@ import { main, pollUntilReady, readinessBudgetMs } from "../src/cli.ts";
 import { defaultGatewayPaths, writePrivateTextFile, type GatewayConfig } from "../src/config.ts";
 import { GATEWAY_VERSION } from "../src/installation.ts";
 import { serviceDefinition } from "../src/service.ts";
+import { HANG_DEADLINE_MS } from "../../../scripts/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 /**
  * Every path the gateway writes to, redirected inside a throwaway root. Service managers key their
@@ -85,13 +88,13 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
   try {
     const result = await Promise.race([
       subprocess.exited.then(exitCode => ({ kind: "exit" as const, exitCode })),
-      Bun.sleep(2_000).then(() => ({ kind: "timeout" as const })),
+      Bun.sleep(HANG_DEADLINE_MS).then(() => ({ kind: "timeout" as const })),
     ]);
     if (result.kind === "timeout") {
       subprocess.kill(9);
       await subprocess.exited;
       // Distinguish a retained handle after bind refusal from a process that never reached it.
-      // Keep the original two-second bound and emit only fixed diagnostic booleans, not output.
+      // Emit only fixed diagnostic booleans, not output; cold startup is not the assertion.
       throw new Error(`gateway remained alive after HTTP startup failed (bindRefused=${occupiedError.test(await stderr)}, listening=${(await stdout).includes('"event":"http.listening"')})`);
     }
     expect(result.exitCode).not.toBe(0);
@@ -101,7 +104,7 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
     if (subprocess.exitCode === null) subprocess.kill(9);
     await rm(root, { recursive: true, force: true });
   }
-}, 10_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test("development serve flags still load authored fleet and speech from the default config path", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-cli-fleet-"));
@@ -125,11 +128,11 @@ test("development serve flags still load authored fleet and speech from the defa
   });
   try {
     let response: Response | undefined;
-    const deadline = Date.now() + readinessBudgetMs();
+    const deadline = Date.now() + HANG_DEADLINE_MS;
     while (Date.now() < deadline) {
       if (subprocess.exitCode !== null) throw new Error(await new Response(subprocess.stderr).text());
       try {
-        response = await fetch(`${origin}/api/v1/client-config`, { signal: AbortSignal.timeout(500) });
+        response = await fetch(`${origin}/api/v1/client-config`, { signal: AbortSignal.timeout(HANG_DEADLINE_MS) });
         break;
       } catch {
         await Bun.sleep(20);
@@ -145,13 +148,13 @@ test("development serve flags still load authored fleet and speech from the defa
     expect(await readFile(configPath, "utf8")).toBe(authored);
   } finally {
     subprocess.kill("SIGTERM");
-    if (!(await Promise.race([subprocess.exited.then(() => true), Bun.sleep(2_000).then(() => false)]))) {
+    if (!(await Promise.race([subprocess.exited.then(() => true), Bun.sleep(HANG_DEADLINE_MS).then(() => false)]))) {
       subprocess.kill(9);
       await subprocess.exited;
     }
     await rm(root, { recursive: true, force: true });
   }
-}, 75_000);
+}, 4 * HANG_DEADLINE_MS);
 
 test.skipIf(process.platform === "win32")("495 R1 graceful daemon shutdown closes the private writer lease before restart", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-cli-log-lease-")));
@@ -166,9 +169,9 @@ test.skipIf(process.platform === "win32")("495 R1 graceful daemon shutdown close
         "--qualification-log-dir", logs], { cwd: REPOSITORY_ROOT, env: sandboxEnvironment(root), stdin: "ignore", stdout: "ignore", stderr: "pipe" });
       try {
         let ready = false;
-        const deadline = Date.now() + 10_000;
+        const deadline = Date.now() + HANG_DEADLINE_MS;
         while (Date.now() < deadline && child.exitCode === null) {
-          try { ready = (await fetch(`${origin}/api/v1/client-config`, { signal: AbortSignal.timeout(500) })).ok; }
+          try { ready = (await fetch(`${origin}/api/v1/client-config`, { signal: AbortSignal.timeout(HANG_DEADLINE_MS) })).ok; }
           catch { /* The isolated daemon has not bound its loopback listener yet. */ }
           if (ready) break;
           await Bun.sleep(20);
@@ -176,7 +179,7 @@ test.skipIf(process.platform === "win32")("495 R1 graceful daemon shutdown close
         expect(ready).toBe(true);
         expect(await readFile(join(logs, "writer"), "utf8")).toBe("active\n");
         child.kill("SIGTERM");
-        expect(await Promise.race([child.exited, Bun.sleep(2_000).then(() => -1)])).toBe(0);
+        expect(await Promise.race([child.exited, Bun.sleep(HANG_DEADLINE_MS).then(() => -1)])).toBe(0);
         expect(await readFile(join(logs, "writer"), "utf8")).toBe("closed\n");
         const [index] = JSON.parse(await readFile(join(logs, "health"), "utf8")) as [number, number];
         expect(index).toBeGreaterThan(lastIndex); lastIndex = index;
@@ -186,7 +189,7 @@ test.skipIf(process.platform === "win32")("495 R1 graceful daemon shutdown close
       }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
-}, 30_000);
+}, 5 * HANG_DEADLINE_MS);
 
 /**
  * The option table in `cli.ts` is the whole guard between a mistyped operator command and a
@@ -243,7 +246,7 @@ async function runInSandbox(
       // A real deadline, not a guessed settling delay: every assertion here is about a CLI that
       // must refuse and exit, so the only thing this races is a hang. The passing path never waits,
       // because `exited` wins as soon as the process is gone.
-      const exited = await Promise.race([subprocess.exited.then(() => true), Bun.sleep(5_000).then(() => false)]);
+      const exited = await Promise.race([subprocess.exited.then(() => true), Bun.sleep(HANG_DEADLINE_MS).then(() => false)]);
       if (!exited) subprocess.kill(9);
       const [stdout, stderr] = await Promise.all([
         new Response(subprocess.stdout).text(),
@@ -308,7 +311,7 @@ describe("command dispatch", () => {
     expect(run.exitCode).toBe(1);
     expect(run.stderr).toContain("unknown command: uninstal");
     expect(run.artifacts).toEqual([]);
-  }, 10_000);
+  }, 2 * HANG_DEADLINE_MS);
 });
 
 describe("per-command option table", () => {
@@ -356,7 +359,7 @@ describe("per-command option table", () => {
         .filter(command => command !== "help" && command !== "--help")
         .sort(),
     );
-  }, 10_000);
+  }, 2 * HANG_DEADLINE_MS);
 });
 
 describe("option arity and values", () => {
@@ -448,7 +451,7 @@ describe("numeric options", () => {
       expect(run.stderr).toContain("http.port must be an integer from 1 to 65535");
       expect(run.artifacts).toEqual([]);
     }
-  }, 20_000);
+  }, 3 * HANG_DEADLINE_MS);
 });
 
 describe("usage and daemon invocation", () => {
@@ -461,7 +464,7 @@ describe("usage and daemon invocation", () => {
     expect(bare.stdout).toBe(help.stdout);
     expect(help.artifacts).toEqual([]);
     expect(bare.artifacts).toEqual([]);
-  }, 15_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   test("a bare invocation means serve only under the daemon binary name", async () => {
     // The substitution keys off `basename(process.argv[1])`, so the only way to exercise it is to
@@ -474,7 +477,7 @@ describe("usage and daemon invocation", () => {
     expect(daemon.exitCode).toBe(1);
     expect(daemon.stderr).toContain("tailscale-serve mode requires an exact HTTPS public origin");
     expect(daemon.artifacts).toEqual([]);
-
+  
     const other = await runInSandbox(async root => {
       await writeFile(join(root, "omp-gateway"), DAEMON_ENTRY);
       return [process.execPath, join(root, "omp-gateway")];
@@ -482,7 +485,7 @@ describe("usage and daemon invocation", () => {
     expect(other.exitCode).toBe(0);
     expect(other.stdout).toContain("Usage:");
     expect(other.artifacts).toEqual([]);
-  }, 15_000);
+  }, 3 * HANG_DEADLINE_MS);
 });
 
 describe("destructive verbs", () => {
@@ -646,7 +649,7 @@ interface SeededRun {
  * than the repository, so a relative write the CLI performs — the diagnostics bundle's default
  * destination is one — lands where `gatewayState` can see it instead of in the checkout.
  */
-async function runSeeded(seed: SandboxSeed, argv: readonly string[], deadlineMs = 15_000): Promise<SeededRun> {
+async function runSeeded(seed: SandboxSeed, argv: readonly string[]): Promise<SeededRun> {
   const root = await mkdtemp(join(tmpdir(), "gateway-cli-state-"));
   try {
     await seedSandbox(root, seed);
@@ -665,7 +668,7 @@ async function runSeeded(seed: SandboxSeed, argv: readonly string[], deadlineMs 
       // because `exited` wins as soon as the process is gone.
       const exited = await Promise.race([
         subprocess.exited.then(() => true),
-        Bun.sleep(deadlineMs).then(() => false),
+        Bun.sleep(HANG_DEADLINE_MS).then(() => false),
       ]);
       if (!exited) subprocess.kill(9);
       const [stdout, stderr] = await Promise.all([
@@ -674,7 +677,7 @@ async function runSeeded(seed: SandboxSeed, argv: readonly string[], deadlineMs 
       ]);
       const exitCode = await subprocess.exited;
       const durationMs = Date.now() - started;
-      if (!exited) throw new Error(`the gateway CLI never exited within ${deadlineMs}ms: ${stderr}`);
+      if (!exited) throw new Error(`the gateway CLI never exited within ${HANG_DEADLINE_MS}ms: ${stderr}`);
       return { exitCode, stdout, stderr, durationMs, before, after: await gatewayState(root) };
     } finally {
       if (subprocess.exitCode === null) subprocess.kill(9);
@@ -752,7 +755,7 @@ describe("rollback refusals against a seeded installation", () => {
       expect(run.stderr).toContain("refusing rollback without an installed gateway service");
       expect(run.after).toEqual(run.before);
     }
-  }, 30_000);
+  }, 3 * HANG_DEADLINE_MS);
 
   const REFUSALS: readonly {
     readonly name: string;
@@ -830,7 +833,7 @@ describe("rollback refusals against a seeded installation", () => {
       // Nothing may move before the target is known: not the pointer, not the service definition,
       // and not the runtime directory `loadReadinessToken` would create one line later.
       expect(run.after).toEqual(run.before);
-    }, 30_000);
+    }, 2 * HANG_DEADLINE_MS);
   }
 });
 
@@ -887,7 +890,7 @@ describe("status JSON contract", () => {
     } finally {
       daemon.stop(true);
     }
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   /**
    * Only a valid proof may set `ready`. Each listener below is a shape a loopback port squatter or a
@@ -931,13 +934,14 @@ describe("status JSON contract", () => {
           diverged: false,
         });
         expect(run.exitCode).toBe(1);
+        // hang-deadline: behavior-under-test -- gatewayReady must bound a held-open response.
         // `gatewayReady` bounds each probe at 1.5s. Without that bound the last listener above
         // holds the connection open forever and `status` never returns for the lane that called it.
         expect(run.durationMs).toBeLessThan(10_000);
       } finally {
         daemon.stop(true);
       }
-    }, 30_000);
+    }, 2 * HANG_DEADLINE_MS);
   }
 
   test.skipIf(!POSIX)("reports nothing at all when the readiness token is not private", async () => {
@@ -946,7 +950,7 @@ describe("status JSON contract", () => {
     expect(run.stderr).toContain("unsafe private file permissions");
     // CI parses stdout. A half-written document would be worse than none.
     expect(run.stdout).toBe("");
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 });
 
 /**
@@ -973,7 +977,7 @@ describe("doctor JSON contract", () => {
     expect(report.checks.config).toBe(false);
     // A report is a read: no bundle unless one was asked for, and no state either way.
     expect(run.after).toEqual(run.before);
-  }, 30_000);
+  }, 2 * HANG_DEADLINE_MS);
 
   test("refuses a malformed --bundle or --output without emitting a report", async () => {
     const refusals: readonly (readonly [readonly string[], string])[] = [
@@ -991,7 +995,7 @@ describe("doctor JSON contract", () => {
       expect(run.stdout).toBe("");
       expect(run.after).toEqual(run.before);
     }
-  }, 60_000);
+  }, 5 * HANG_DEADLINE_MS);
 });
 
 /**
@@ -1095,6 +1099,7 @@ describe("managed-service readiness budget", () => {
  */
 async function runPruningInstall(
   mode: "ready" | "not-ready" | "revert-failure" | "no-start" | "prune-failure",
+  startupDelayMs = 0,
 ): Promise<SandboxRun> {
   return runInSandbox(async root => {
     const entry = join(root, "install-fixture.ts");
@@ -1109,6 +1114,7 @@ import * as service from ${modulePath("service")};
 import { writeGatewayConfigFile } from ${modulePath("config")};
 import { StaticAssetStore } from ${modulePath("static")};
 const mode = ${JSON.stringify(mode)};
+await Bun.sleep(${startupDelayMs});
 const sourceRoot = join(${JSON.stringify(root)}, "source");
 const cliSource = join(sourceRoot, "cli.js");
 for (const directory of ["apps/web/dist", "licenses/collab-web"]) {
@@ -1194,6 +1200,15 @@ try {
 }
 
 describe("install runtime pruning", () => {
+  test("a CLI start slower than the former five-second hang deadline still installs", async () => {
+    // Delay only this child, before its real install work; no product timeout or ambient BUN_* seam.
+    const run = await runPruningInstall("ready", 6_000);
+    expect(run.exitCode).toBe(0);
+    const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+    expect(state.failure).toBe("");
+    expect(state.current).toBe(state.names[34]);
+  }, 2 * HANG_DEADLINE_MS);
+
   test("successful ready install retains only three distinct activations and preserves rollback", async () => {
     const run = await runPruningInstall("ready");
     expect(run.stderr).toBe("");

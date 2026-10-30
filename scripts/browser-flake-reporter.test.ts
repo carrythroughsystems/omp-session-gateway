@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import type { FullConfig, Suite, TestCase } from "@playwright/test/reporter";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +9,9 @@ import {
 } from "./browser-flake-reporter.ts";
 import BrowserFlakeReporter from "./browser-flake-reporter.ts";
 import { completeBrowserRun } from "./test-browser.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const root = resolve(import.meta.dir, "..");
 const metadata: BrowserReportMetadata = {
@@ -163,4 +166,4 @@ test("both nonvisual configurations retry only true/1 CI and disable automatic s
       if (file.includes("compat")) expect(config.projects).toEqual(["desktop-chromium", "desktop-firefox", "desktop-webkit", "iphone-webkit"]);
     }),
   ));
-}, 30_000);
+}, 2 * HANG_DEADLINE_MS);
