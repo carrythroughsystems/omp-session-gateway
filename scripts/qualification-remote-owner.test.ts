@@ -12,9 +12,10 @@ async function ownedPtyReader(startupDelayMs: number, reader: string, timeoutSec
   const id = "11111111-2222-4333-8444-555555555556";
   const child = Bun.spawn(["python3", "-c", `
 import os, pty, select, signal, sys, time
+startup_delay = float(sys.argv[1]) / 1000
 pid, terminal = pty.fork()
 if pid == 0:
-    time.sleep(float(sys.argv[1]) / 1000)
+    time.sleep(startup_delay)
     os.execv("/bin/bash", ["bash", *sys.argv[3:]])
 reaped = False
 code = 124
@@ -22,7 +23,8 @@ pending = b""
 ready = os.environ["PTY_READER_READY"].encode()
 sent = False
 try:
-    deadline = time.monotonic() + float(sys.argv[2])
+    # The fixture's injected sleep must not consume the reader's readiness/exit budget.
+    deadline = time.monotonic() + startup_delay + float(sys.argv[2])
     while time.monotonic() < deadline:
         ended, status = os.waitpid(pid, os.WNOHANG)
         if ended:
@@ -37,7 +39,7 @@ try:
                 sent = True
             pending = pending[-(len(ready) - 1):]
     if not reaped:
-        sys.stderr.write("PTY reader deadline exceeded\\n")
+        sys.stderr.write("PTY reader deadline exceeded (readiness=%s)\\n" % ("observed" if sent else "missing"))
 finally:
     # A stopped owner or its TERM trap can wait forever. Never block in waitpid(pid, 0).
     for stop in (signal.SIGTERM, signal.SIGKILL):
@@ -68,11 +70,17 @@ sys.exit(code)
   }
 }
 
-// The supervisor has 10 s for startup/readiness plus at most 2 s to reap; settle has up to 20 s.
+// Worst default case: 2.5 s injected startup + 10 s readiness/exit + 2 s reap + 20 s settle = 34.5 s.
+// Input still waits for the real read prompt; extending the bound never sends input speculatively.
 test.skipIf(process.platform !== "darwin").each([0, 2_500])("council498r1 owned OMP PTY keeps its reader in the foreground (startup delay %i ms)", async startupDelayMs => {
   // The read builtin emits the prompt only once it starts; prompts need no newline.
   // Keep the marker in the environment so an echoed command cannot satisfy the handshake.
   expect(await ownedPtyReader(startupDelayMs, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]')).toEqual({ exitCode: 0, stderr: "" });
+}, 40_000);
+
+test.skipIf(process.platform !== "darwin")("injected startup delay does not consume the PTY reader budget", async () => {
+  expect(await ownedPtyReader(500, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]', 0.5))
+    .toEqual({ exitCode: 0, stderr: "" });
 }, 40_000);
 
 test.skipIf(process.platform !== "darwin").each([0, 250])("PTY reader waits for its first output before writing (first output delay %i ms)", async firstOutputDelayMs => {
@@ -82,7 +90,7 @@ test.skipIf(process.platform !== "darwin").each([0, 250])("PTY reader waits for 
 
 test.skipIf(process.platform !== "darwin")("PTY regression supervisor bounds termination of a stopped owner", async () => {
   expect(await ownedPtyReader(0, 'kill -STOP "$PPID"; IFS= read -r line', 0.5)).toEqual({
-    exitCode: 124, stderr: "PTY reader deadline exceeded\n",
+    exitCode: 124, stderr: "PTY reader deadline exceeded (readiness=missing)\n",
   });
 }, 40_000);
 
