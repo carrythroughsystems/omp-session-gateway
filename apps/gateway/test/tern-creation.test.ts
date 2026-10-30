@@ -52,6 +52,7 @@ async function fixture(options: FixtureOptions = {}) {
   const spawnGate = Promise.withResolvers<void>();
   const commitGate = Promise.withResolvers<void>();
   const probeGate = Promise.withResolvers<void>();
+  const probeEntered = Promise.withResolvers<void>();
   let commitHeld = false, inspecting = false, collisions = 0;
   const listeners = new Set<(batch: AdoptionObservation) => void>();
   const batch = (hosts: AdoptionObservation["hosts"]): AdoptionObservation => ({ round: polls, startedAt: monotonic,
@@ -101,7 +102,10 @@ async function fixture(options: FixtureOptions = {}) {
         if (inspecting) { collisions++; return undefined; }
         inspecting = true;
         try {
-          if (options.heldAcceptedCommit && commitHeld) await probeGate.promise;
+          if (options.heldAcceptedCommit && commitHeld) {
+            probeEntered.resolve();
+            await probeGate.promise;
+          }
           inspections++;
           if (creates === 0) return options.baselineInspection ?? empty; // availability probes and preflight
           if (options.lateMetadata && inspections >= 3 && inspections <= 5) {
@@ -130,6 +134,7 @@ async function fixture(options: FixtureOptions = {}) {
   const finish = async () => { await completed.promise; await service.stop(); };
   return { service, writes, finish, entered: entered.promise, get creates() { return creates; }, get contents() { return contents; },
     completed: completed.promise, releaseSpawn: spawnGate.resolve, releaseCommit: commitGate.resolve, releaseProbe: probeGate.resolve,
+    probeEntered: probeEntered.promise,
     get collisions() { return collisions; },
     observe(hosts: AdoptionObservation["hosts"]) {
       polls++; monotonic++;
@@ -155,14 +160,13 @@ describe("durable session creation transitions", () => {
     const admitted = f.service.accept("owner", request, () => true);
     await f.entered;
     f.advance(5001);
-    const options = f.service.options();
-    // Let a newly started availability probe reach its CLI await before releasing the disk checkpoint.
-    await Promise.resolve();
+    const inspections = f.inspections;
+    // The reservation must let options finish without starting a competing CLI probe.
+    expect(await f.service.options()).toMatchObject({ available: true });
+    expect(f.inspections).toBe(inspections);
     f.releaseCommit();
     await admitted;
     await f.completed;
-    f.releaseProbe();
-    await options;
     await f.finish();
     expect(f.service.status("owner", operationId)).toMatchObject({ state: "ready" });
     expect(f.collisions).toBe(0);
@@ -177,7 +181,7 @@ describe("durable session creation transitions", () => {
       return true;
     });
     await f.entered;
-    await Promise.resolve();
+    await f.probeEntered;
     f.releaseCommit();
     await admitted;
     expect(f.service.status("owner", operationId)?.state).toBe("accepted");
