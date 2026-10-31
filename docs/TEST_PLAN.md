@@ -22,6 +22,25 @@ These are implementation checks, not a physical-device or background-delivery qu
 
 ## 1. Unit tests
 
+### Real-process hang detection
+
+Use `HANG_DEADLINE_MS` from `apps/gateway/test/test-support.ts` for real subprocess/PTY exits, socket
+readiness/closure, and I/O helper completion. It is 120 seconds: almost four times the longest
+recent hosted timing (30,045.06 ms), and above two 45-second Windows ACL cold attempts plus
+teardown. The source comment links the sampled Compatibility runs. This is a hang guard, not a
+latency contract: success resolves on exit/readiness and never sleeps out the budget. Outer test
+timeouts must exceed all sequential guard windows plus setup and cleanup; start with twice the
+budget, and multiply further for multi-process/PTY supervisors.
+
+`check:repository` rejects shorter literal timers in test races, process-kill watchdogs and
+`AbortSignal.timeout`. A deliberate timeout or fake-clock scenario may keep its short bound with
+`// hang-deadline: behavior-under-test -- reason` on that timer's line or immediately above it.
+Product deadlines, fake timers, injected sleeps, browser UX timing assertions, and poll cadence
+are not hang budgets. Do not enlarge those to fix hosted scheduling delays. The CLI pruning
+regression delays only its child startup by six seconds before exercising the real install.
+Fixture acknowledgement polling also stops on terminal refusal before sequence admission, including
+the Windows rejection of a command that cannot have POSIX-private file mode.
+
 ### OMP discovery, queries, and registry
 
 - exact discovery-file and snapshot/reply validation; unknown versions and malformed or oversized data;

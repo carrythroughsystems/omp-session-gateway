@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { join } from "node:path";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,6 +7,9 @@ import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQ
 import type { WindowsContext, WindowsTransportProbe } from "./windows-stable-qualification";
 import { assertWindowsAllocation, windowsFailure, windowsRemaining } from "./windows-stable-qualification";
 import * as winrmRuntime from "./windows-qualification-runtime";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 test.each(["request", "request-expiry", "launch-fetch", "launch-json", "upload-step", "command"] as const)(
   "509 round2 Windows runtime preserves ordinary %s provenance", async stage => {
@@ -57,7 +60,8 @@ test("509 round2 WinRM invalid-output conversion retains the parsing error", () 
 
 test.each(["cancel", "deadline"] as const)("council498r1 Windows Android subprocess owns %s and cleanup switches owner", async mode => {
   const controller = new AbortController(), killed: string[] = [];
-  let owner = { signal: controller.signal, deadline: performance.now() + (mode === "deadline" ? 20 : 5_000), nextFailureId: () => 301 };
+  // hang-deadline: behavior-under-test -- the deadline branch must cancel the real child.
+  let owner = { signal: controller.signal, deadline: performance.now() + (mode === "deadline" ? 20 : HANG_DEADLINE_MS), nextFailureId: () => 301 };
   const android = winrmRuntime.windowsAndroidCommands(() => owner);
   const result = android.runAdb(undefined, ["devices"], { timeoutMs: 60_000, spawn: (_argv, options) => {
     const child = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 200)"], options);
@@ -67,7 +71,7 @@ test.each(["cancel", "deadline"] as const)("council498r1 Windows Android subproc
   if (mode === "cancel") setTimeout(() => controller.abort(), 20);
   expect(await result).toBe(true);
   expect(killed).toContain("SIGTERM");
-  owner = { signal: new AbortController().signal, deadline: performance.now() + 5_000, nextFailureId: () => 302 };
+  owner = { signal: new AbortController().signal, deadline: performance.now() + HANG_DEADLINE_MS, nextFailureId: () => 302 };
   expect(await android.runAdb(undefined, ["devices"], { spawn: (_argv, options) =>
     Bun.spawn([process.execPath, "-e", 'process.stdout.write("settled")'], options) })).toBe("settled");
 });
@@ -244,6 +248,7 @@ test("raw 143 is not a controller deadline", async () => {
 });
 // Windows terminates the process directly; POSIX signal handlers and SIGKILL escalation do not apply.
 test.skipIf(process.platform === "win32")("a stubborn subprocess gets SIGKILL after grace and both pipes drain before rejection", async () => {
+  // hang-deadline: behavior-under-test -- force timeout and escalation of a deliberately live child.
   const probes: WindowsTransportProbe[] = [];
   const error = await command([process.execPath, "-e",
     'process.on("SIGTERM", () => { process.stdout.write("synthetic-private-output"); }); setInterval(() => {}, 1000);'], {
@@ -266,7 +271,7 @@ test.each([401, 403, 429, 503])("493 R1 contradictory HTTP %s plus reset evidenc
 test("external cancellation reaps the subprocess but cannot become a probe deadline", async () => {
   const controller = new AbortController();
   const stopped = command([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
-    timeoutMs: 5_000, execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 },
+    timeoutMs: HANG_DEADLINE_MS, execution: { signal: controller.signal, deadline: performance.now() + HANG_DEADLINE_MS, nextFailureId: () => 1 },
   });
   setTimeout(() => controller.abort(), 30);
   const error = await stopped.catch(error => error);
@@ -274,6 +279,7 @@ test("external cancellation reaps the subprocess but cannot become a probe deadl
   expect(classifyWindowsCommandFailure(error, true, true).evidence.class).toBe("harness");
 });
 test.each([false, true])("499 R1 execution-clipped helper timer retains controller origin (readOnly=%s)", async readOnly => {
+  // hang-deadline: behavior-under-test -- the controller deadline must win over the command timer.
   const execution = { signal: new AbortController().signal, deadline: performance.now() + 100, nextFailureId: () => 1 };
   const probes: WindowsTransportProbe[] = [];
   const failure = await command([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
@@ -660,7 +666,7 @@ test("R1 cancellation during backoff settles the owned sleep before refusing ano
 test("R1 cancellation after process exit but before checkpoint settlement cannot return success", async () => {
   const controller = new AbortController();
   await expect(command([process.execPath, "-e", "process.stdout.write('ok')"], {
-    execution: { signal: controller.signal, deadline: performance.now() + 5_000, nextFailureId: () => 1 },
+    execution: { signal: controller.signal, deadline: performance.now() + HANG_DEADLINE_MS, nextFailureId: () => 1 },
     transportProbe: async probe => { if (probe.exitedAt !== null) controller.abort(); },
   })).rejects.toThrow("deadline_exceeded");
 });

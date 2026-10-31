@@ -1,13 +1,16 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { assertRetainedMacCommandsSettled, runMacScript } from "./stable-qualification.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(4 * HANG_DEADLINE_MS);
 
 const root = resolve(import.meta.dir, "..");
 const helper = join(import.meta.dir, "qualification-remote-owner.sh");
 
-async function ownedPtyReader(startupDelayMs: number, reader: string, timeoutSeconds = 10, ownerHelper = helper): Promise<{ exitCode: number; stderr: string }> {
+async function ownedPtyReader(startupDelayMs: number, reader: string, timeoutSeconds = HANG_DEADLINE_MS / 1_000, ownerHelper = helper, reapSeconds = HANG_DEADLINE_MS / 1_000): Promise<{ exitCode: number; stderr: string }> {
   const home = await mkdtemp(join(tmpdir(), "remote-pty-owner-"));
   const id = "11111111-2222-4333-8444-555555555556";
   const child = Bun.spawn(["python3", "-c", `
@@ -45,7 +48,7 @@ finally:
             break
         try: os.kill(pid, stop)
         except ProcessLookupError: pass
-        deadline = time.monotonic() + 1
+        deadline = time.monotonic() + ${reapSeconds}
         while time.monotonic() < deadline:
             ended, status = os.waitpid(pid, os.WNOHANG)
             if ended:
@@ -75,13 +78,13 @@ os.execv(sys.argv[1], sys.argv[1:])
   }
 }
 
-// Worst default case: 10 s startup/readiness/exit + 2 s reap + 20 s settle = 32 s < 40 s.
+// Startup/readiness/exit and each of two reap attempts get the shared budget, plus 20 s settle.
 // The reader starts only in the foreground, and input still waits for its real read prompt.
 test.skipIf(process.platform !== "darwin").each([0, 2_500])("council498r1 owned OMP PTY keeps its reader in the foreground (startup delay %i ms)", async startupDelayMs => {
   // The read builtin emits the prompt only once it starts; prompts need no newline.
   // Keep the marker in the environment so an echoed command cannot satisfy the handshake.
   expect(await ownedPtyReader(startupDelayMs, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]')).toEqual({ exitCode: 0, stderr: "" });
-}, 40_000);
+}, 4 * HANG_DEADLINE_MS);
 
 test.skipIf(process.platform !== "darwin")("PTY readiness waits for foreground handoff before sending input", async () => {
   const directory = await mkdtemp(join(tmpdir(), "remote-delayed-foreground-"));
@@ -92,21 +95,22 @@ test.skipIf(process.platform !== "darwin")("PTY readiness waits for foreground h
   // A background read may print its prompt before fg; typing then loses the line on continuation.
   await writeFile(delayedOwner, source.replace(foreground, `/bin/sleep .25\n${foreground}`));
   try {
-    expect(await ownedPtyReader(0, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]', 2, delayedOwner))
+    expect(await ownedPtyReader(0, 'IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]', HANG_DEADLINE_MS / 1_000, delayedOwner))
       .toEqual({ exitCode: 0, stderr: "" });
   } finally { await rm(directory, { recursive: true, force: true }); }
-}, 40_000);
+}, 4 * HANG_DEADLINE_MS);
 
 test.skipIf(process.platform !== "darwin").each([0, 250])("PTY reader waits for its first output before writing (first output delay %i ms)", async firstOutputDelayMs => {
   // Hold the first prompt through a one-second read: any input before readiness must fail.
   expect(await ownedPtyReader(0, `/bin/sleep ${firstOutputDelayMs / 1000}; if IFS= read -r -t 1 line; then exit 91; fi; IFS= read -r -p "$PTY_READER_READY" line; [ "$line" = synthetic ]`)).toEqual({ exitCode: 0, stderr: "" });
-}, 40_000);
+}, 4 * HANG_DEADLINE_MS);
 
 test.skipIf(process.platform !== "darwin")("PTY regression supervisor bounds termination of a stopped owner", async () => {
-  expect(await ownedPtyReader(0, 'kill -STOP "$PPID"; IFS= read -r line', 0.5)).toEqual({
+  // hang-deadline: behavior-under-test -- expire a stopped owner, then force TERM-to-KILL escalation.
+  expect(await ownedPtyReader(0, 'kill -STOP "$PPID"; IFS= read -r line', 0.5, helper, 1)).toEqual({
     exitCode: 124, stderr: "PTY reader deadline exceeded (readiness=missing)\n",
   });
-}, 40_000);
+}, 4 * HANG_DEADLINE_MS);
 
 test("council498r1 every Mac command entry is owned or explicitly effect-free", async () => {
   const orchestrator = await readFile(join(import.meta.dir, "stable-qualification.ts"), "utf8");
@@ -138,51 +142,50 @@ test.skipIf(process.platform === "win32")("council498r1 reboot handoff remains o
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test.skipIf(process.platform === "win32").each([false, true])(
-  "council498r1 actual Mac shell wrapper settles or fences remote work (control unavailable=%s)", async unavailable => {
-    const home = await mkdtemp(join(tmpdir(), "remote-shell-owner-")), bin = join(home, "bin"), ready = join(home, "ready");
-    const controller = new AbortController();
-    const destination = `shell-owner-${unavailable}.invalid`;
-    await mkdir(bin);
-    await writeFile(join(bin, "ssh"), `#!${process.execPath}\nconst input = new Uint8Array(await Bun.stdin.arrayBuffer());
+test.skipIf(process.platform === "win32").each([false, true])("council498r1 actual Mac shell wrapper settles or fences remote work (control unavailable=%s)", async unavailable => {
+  const home = await mkdtemp(join(tmpdir(), "remote-shell-owner-")), bin = join(home, "bin"), ready = join(home, "ready");
+  const controller = new AbortController();
+  const destination = `shell-owner-${unavailable}.invalid`;
+  await mkdir(bin);
+  await writeFile(join(bin, "ssh"), `#!${process.execPath}\nconst input = new Uint8Array(await Bun.stdin.arrayBuffer());
 const child = Bun.spawn(["/bin/bash", "-c", process.argv.at(-1)], {
-  env: { ...process.env, HOME: process.env.SYNTHETIC_REMOTE_HOME }, stdin: input,
-  stdout: "ignore", stderr: "ignore", detached: true
+env: { ...process.env, HOME: process.env.SYNTHETIC_REMOTE_HOME }, stdin: input,
+stdout: "ignore", stderr: "ignore", detached: true
 });
 process.exit(await child.exited);\n`, { mode: 0o700 });
-    const environment = { OMP_MAC_HOST: destination, OMP_MAC_TAG: "v0.7.7-prealpha.21", OMP_MAC_PREVIOUS_TAG: "v0.7.6",
-      OMP_MAC_LOGIN: "synthetic", OMP_MAC_ARCHIVE_SHA256: "b".repeat(64), PATH: `${bin}:${process.env.PATH}`,
-      SYNTHETIC_REMOTE_HOME: home, SYNTHETIC_READY: ready };
-    const execute: NonNullable<Parameters<typeof runMacScript>[4]> = async (argv, options) => {
-      if (argv[0] === "ssh" && unavailable) return { exitCode: 125, stdout: "", stderr: "" };
-      const command = argv[0] === "bash" ? ["/bin/bash", "-c",
-        'source scripts/qualify-macos-host.sh; remote <<\'REMOTE\'\nprintf "%s" "$$" > "$SYNTHETIC_READY"\nsleep 120\nREMOTE'] : [...argv];
-      const child = Bun.spawn(command, { cwd: root, env: { ...process.env, ...environment, ...options?.env },
-        stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-      const cancel = () => child.kill("SIGKILL"); // Simulate local SSH loss, not remote termination.
-      options?.execution?.signal.addEventListener("abort", cancel, { once: true });
-      try { return { exitCode: await child.exited, stdout: "", stderr: "" }; }
-      finally { options?.execution?.signal.removeEventListener("abort", cancel); }
-    };
-    let pid = 0;
-    const result = runMacScript(environment, ["uninstall"], 60_000,
-      { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 301 }, execute).catch(error => error);
-    try {
-      const deadline = performance.now() + 5_000;
-      while (!await Bun.file(ready).exists() && performance.now() < deadline) await Bun.sleep(10);
-      pid = Number(await readFile(ready, "utf8"));
-      controller.abort();
-      await result;
-      if (unavailable) expect(() => assertRetainedMacCommandsSettled(destination)).toThrow();
-      else {
-        expect(() => process.kill(pid, 0)).toThrow();
-        expect(() => assertRetainedMacCommandsSettled(destination)).not.toThrow();
-      }
-    } finally {
-      controller.abort();
-      if (!pid && await Bun.file(ready).exists()) pid = Number(await readFile(ready, "utf8"));
-      if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* Settled already. */ }
-      await result;
-      await rm(home, { recursive: true, force: true });
+  const environment = { OMP_MAC_HOST: destination, OMP_MAC_TAG: "v0.7.7-prealpha.21", OMP_MAC_PREVIOUS_TAG: "v0.7.6",
+    OMP_MAC_LOGIN: "synthetic", OMP_MAC_ARCHIVE_SHA256: "b".repeat(64), PATH: `${bin}:${process.env.PATH}`,
+    SYNTHETIC_REMOTE_HOME: home, SYNTHETIC_READY: ready };
+  const execute: NonNullable<Parameters<typeof runMacScript>[4]> = async (argv, options) => {
+    if (argv[0] === "ssh" && unavailable) return { exitCode: 125, stdout: "", stderr: "" };
+    const command = argv[0] === "bash" ? ["/bin/bash", "-c",
+      'source scripts/qualify-macos-host.sh; remote <<\'REMOTE\'\nprintf "%s" "$$" > "$SYNTHETIC_READY"\nsleep 120\nREMOTE'] : [...argv];
+    const child = Bun.spawn(command, { cwd: root, env: { ...process.env, ...environment, ...options?.env },
+      stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const cancel = () => child.kill("SIGKILL"); // Simulate local SSH loss, not remote termination.
+    options?.execution?.signal.addEventListener("abort", cancel, { once: true });
+    try { return { exitCode: await child.exited, stdout: "", stderr: "" }; }
+    finally { options?.execution?.signal.removeEventListener("abort", cancel); }
+  };
+  let pid = 0;
+  const result = runMacScript(environment, ["uninstall"], 2 * HANG_DEADLINE_MS,
+    { signal: controller.signal, deadline: performance.now() + 2 * HANG_DEADLINE_MS, nextFailureId: () => 301 }, execute).catch(error => error);
+  try {
+    const deadline = performance.now() + HANG_DEADLINE_MS;
+    while (!await Bun.file(ready).exists() && performance.now() < deadline) await Bun.sleep(10);
+    pid = Number(await readFile(ready, "utf8"));
+    controller.abort();
+    await result;
+    if (unavailable) expect(() => assertRetainedMacCommandsSettled(destination)).toThrow();
+    else {
+      expect(() => process.kill(pid, 0)).toThrow();
+      expect(() => assertRetainedMacCommandsSettled(destination)).not.toThrow();
     }
-  }, 35_000);
+  } finally {
+    controller.abort();
+    if (!pid && await Bun.file(ready).exists()) pid = Number(await readFile(ready, "utf8"));
+    if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* Settled already. */ }
+    await result;
+    await rm(home, { recursive: true, force: true });
+  }
+}, 4 * HANG_DEADLINE_MS);

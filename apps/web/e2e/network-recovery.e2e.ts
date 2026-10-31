@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { SessionMetadata } from "@omp-session-gateway/protocol";
 import { startDashboardFixture } from "./fixture-server.ts";
+import { HANG_DEADLINE_MS } from "../../gateway/test/test-support.ts";
 
 function session(): SessionMetadata {
   return {
@@ -75,7 +76,7 @@ test("counterexample: first snapshot failure stays named throughout a pending sc
 });
 
 test("failure states keep stale sessions, exact copy, timestamps, and mobile fit", async ({ context, page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(2 * HANG_DEADLINE_MS);
   const active = session();
   const fixture = await startDashboardFixture([active]);
   const eventRequestCount = (): number =>

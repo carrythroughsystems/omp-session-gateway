@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { SessionMetadata } from "@omp-session-gateway/protocol";
 import { startDashboardFixture, installSilentWebSocket } from "./fixture-server";
+import { HANG_DEADLINE_MS } from "../../gateway/test/test-support.ts";
 
 const shared: SessionMetadata = {
   instanceId: "colliding-session-001", generation: 1, title: "Shared session",
@@ -185,7 +186,7 @@ test("empty incomplete and filtered coverage have content and long failed hosts 
 });
 
 test("offline keeps remote observations stale and scheduled recovery resumes polling without online", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(2 * HANG_DEADLINE_MS);
   const home = await startDashboardFixture([{ ...shared, title: "Home session" }]);
   const away = await startDashboardFixture([{ ...shared, title: "Remote session" }]);
   home.configureFleet("Home", [{ id: "away", label: "Away", origin: away.origin }], [away.origin]);

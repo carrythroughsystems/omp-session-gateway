@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { basename, dirname } from "node:path";
@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LOG_AUDIT_SUCCESS, PERCY_RUNTIME_NOTICE, assertVisualResult, requirePercyServer, runVisual, safeVisualLines, visualEnvironment, visualProcessReasons, type VisualProcessResult } from "./test-visual.ts";
 import { VISUAL_CASE_COUNT, VISUAL_PHASES } from "../apps/web/visual/safe-reporter.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const localSuccess = { code: 0, stdout: `visual: validated=${VISUAL_CASE_COUNT} queued=0 outcome=passed\n`, stderr: "" };
 const uploadSuccess = { code: 0, stdout: `visual: validated=${VISUAL_CASE_COUNT} queued=${VISUAL_CASE_COUNT} outcome=passed\n[percy] Finalized build #1: https://percy.example.test/build/1\n`, stderr: "" };
@@ -76,7 +79,7 @@ test("upload launches the pinned CLI with the Playwright browser and isolated lo
   expect(calls).toHaveLength(3);
   expect(calls[0]?.environment.PERCY_TOKEN).toBeUndefined();
   expect(calls[1]?.environment.PERCY_TOKEN).toBeUndefined();
-  expect(calls[1]?.timeoutMs).toBe(5 * 60_000);
+  expect(calls[1]?.timeoutMs).toBe(5 * HANG_DEADLINE_MS);
   expect(calls[1]?.environment.PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS).toBe("true");
   expect(calls[1]?.command).toContain("--eval");
   expect(calls[2]?.command[0]).toBe("synthetic-node");
@@ -261,7 +264,7 @@ test("the installed Percy API answers health under its native Node runtime", asy
     percy.testing.build = { id: "local-synthetic-build" };
     try {
       await percy.start();
-      const response = await fetch(percy.address() + "/percy/healthcheck", { signal: AbortSignal.timeout(2000) });
+      const response = await fetch(percy.address() + "/percy/healthcheck", { signal: AbortSignal.timeout(${HANG_DEADLINE_MS}) });
       const body = await response.json();
       if (!response.ok || body.success !== true || body.type !== "web" || body.build?.id !== "local-synthetic-build") throw new Error();
       process.stdout.write("local-percy: healthy\\n");
@@ -285,4 +288,4 @@ test("the installed Percy API answers health under its native Node runtime", asy
   expect(code).toBe(0);
   expect(stdout === "local-percy: healthy\n").toBe(true);
   expect(stderr === "").toBe(true);
-}, 30_000);
+}, 2 * HANG_DEADLINE_MS);

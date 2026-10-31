@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,6 +18,9 @@ import {
   windowsArgument,
   windowsHostScript,
 } from "./upstream-canary.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 async function withOmpPackage(bunEngine: string, check: (directory: string, binary: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "omp-canary-report-test-"));
@@ -38,7 +41,7 @@ async function withOmpPackage(bunEngine: string, check: (directory: string, bina
 
 function failedCanary(binary: string) {
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("./upstream-canary.ts", import.meta.url)), "--omp", binary], {
-    encoding: "utf8", timeout: 10_000,
+    encoding: "utf8", timeout: HANG_DEADLINE_MS,
   });
   expect(result.status).toBe(1);
   return { summary: parseCanarySummary(result.stdout), stderr: result.stderr };
@@ -159,7 +162,7 @@ describe("canary preparation failures", () => {
             BUN_VERSION: "1.4.0", OMP_BUN_ENGINE: ">=1.4.4",
             GITHUB_STEP_SUMMARY: stepSummary, GITHUB_OUTPUT: stepOutput,
           },
-          encoding: "utf8", timeout: 10_000,
+          encoding: "utf8", timeout: HANG_DEADLINE_MS,
         });
         expect(result.status).toBe(1);
         expect(parseCanarySummary(result.stdout, platform)).toEqual(canarySummary("18.14.0", 0, "prepare", false, platform));

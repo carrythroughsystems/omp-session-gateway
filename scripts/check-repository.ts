@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkChangelogFragment } from "./release-policy.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 const rootPath = fileURLToPath(new URL("../", import.meta.url));
 
@@ -321,6 +322,64 @@ export function checkUnsafeFinally(relativePath: string, source: string): string
 }
 
 /**
+ * All test races are checked, not just receivers named "subprocess": a helper/alias can own the
+ * real process or socket. Behavioral/fake-clock deadlines need a reason on the timer's own line
+ * or the immediately preceding line. Strings, regexes and comments are not executable timers.
+ */
+export function checkHangDeadlines(relativePath: string, source: string): string[] {
+  if (!/^(?:apps\/[^/]+\/(?:test|e2e)\/.+\.tsx?|scripts\/.+\.test\.ts|scripts\/test-(?:browser|portable|visual)\.ts)$/u.test(relativePath)) return [];
+  const tokens = [...sourceTokens(source, true)];
+  const pairs = new Map<number, number>();
+  const stack: number[] = [];
+  for (const [index, token] of tokens.entries()) {
+    if (["(", "[", "{"].includes(token.value)) stack.push(index);
+    else if ([")", "]", "}"].includes(token.value)) {
+      const open = stack.pop();
+      if (open !== undefined) pairs.set(open, index);
+    }
+  }
+  const races: Array<{ start: number; end: number }> = [];
+  for (const [index, token] of tokens.entries()) {
+    if (token.value === "Promise" && tokens[index + 1]?.value === "." &&
+      tokens[index + 2]?.value === "race" && tokens[index + 3]?.value === "(") {
+      races.push({ start: index + 3, end: pairs.get(index + 3) ?? index + 3 });
+    }
+  }
+  const lines = source.split(/\r\n|[\r\n\u2028\u2029]/u);
+  const violations: string[] = [];
+  for (const [index, token] of tokens.entries()) {
+    if (tokens[index + 1]?.value !== "(") continue;
+    const receiver = tokens[index - 2]?.value;
+    const member = tokens[index - 1]?.value === ".";
+    const abort = member && receiver === "AbortSignal" && token.value === "timeout";
+    const sleep = member && receiver === "Bun" && token.value === "sleep";
+    const timer = token.value === "setTimeout";
+    if (!abort && !sleep && !timer) continue;
+    const end = pairs.get(index + 1);
+    if (end === undefined) continue;
+    let argument = index + 2;
+    if (timer) {
+      for (; argument < end && tokens[argument]?.value !== ","; argument++) {
+        argument = pairs.get(argument) ?? argument;
+      }
+      argument++;
+    }
+    const numeric = tokens[argument];
+    if (numeric === undefined || !/^\d[\d_]*$/u.test(numeric.value) ||
+      ![",", ")"].includes(tokens[argument + 1]?.value ?? "")) continue;
+    const milliseconds = Number(numeric.value.replaceAll("_", ""));
+    if (milliseconds >= HANG_DEADLINE_MS) continue;
+    const killsChild = timer && tokens.slice(index + 2, end).some((part, at, body) =>
+      part.value === "kill" && body[at - 1]?.value === ".");
+    if (!abort && !killsChild && !races.some(race => race.start < index && index < race.end)) continue;
+    const allowance = /\/\/\s*hang-deadline:\s*behavior-under-test\s+--\s+\S/u;
+    if ([lines[token.line - 1], lines[token.line - 2]].some(line => line !== undefined && allowance.test(line))) continue;
+    violations.push(`${relativePath}:${token.line}: literal ${milliseconds}ms hang deadline is below HANG_DEADLINE_MS (${HANG_DEADLINE_MS}); use the shared budget or annotate behavior under test`);
+  }
+  return violations;
+}
+
+/**
  * Document-context web sources schedule every timer through `window` or an injected clock. A bare
  * global timer cannot be cancelled by the page's owner, and in the unit harness it outlives the
  * fake document it would render into: a fleet grace timer once fired during another test file.
@@ -628,6 +687,7 @@ async function main(): Promise<void> {
     errors.push(...checkUnsafeFinally(rel, text));
     errors.push(...checkDocumentTimers(rel, text));
     errors.push(...checkE2EReadiness(rel, text));
+    errors.push(...checkHangDeadlines(rel, text));
     if (rel === "scripts/check-repository.ts") continue;
     // adb argv must be constructed only by its redacting, exit-checking owner, including calls
     // routed through generic subprocess wrappers. The one executable-prerequisite list is not argv.

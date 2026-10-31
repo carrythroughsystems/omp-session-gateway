@@ -142,6 +142,7 @@ test.each(["checkpoint-bound", "execution-deadline", "cancelled", "rejected"] as
           await runtime.cleanup("network", { epoch: "synthetic", device: baseline } as AndroidPushProgress);
           restored = true;
         }).catch(error => error),
+        // hang-deadline: behavior-under-test -- mocked ADB/checkpoints must restore Wi-Fi promptly.
         new Promise<"pending">(resolve => { watchdog = setTimer(() => resolve("pending"), 1_000); }),
       ]);
       expect(error).not.toBe("pending");

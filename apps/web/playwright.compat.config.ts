@@ -1,5 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import { HANG_DEADLINE_MS } from "../gateway/test/test-support.ts";
 
 // The browser-neutral compatibility lane: the `@core` tests of the e2e suite on every major
 // engine, at a desktop size and an iPhone-class size. The deep lane (playwright.config.ts) keeps
@@ -12,6 +13,7 @@ export default defineConfig({
   testMatch: "*.e2e.ts",
   grep: /@core\b/u,
   fullyParallel: false,
+  timeout: 2 * HANG_DEADLINE_MS,
   // One worker: breadth across engines matters here, not throughput, and core tests keep the deep
   // lane's timing bounds.
   workers: 1,
