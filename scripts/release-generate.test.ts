@@ -1,6 +1,6 @@
 import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -532,6 +532,45 @@ async function materialize(tree: Record<string, string>): Promise<string> {
   }
   return directory;
 }
+
+describe("release checkout containment", () => {
+  test.each(["file", "directory"] as const)("record refuses a symlinked %s before any writes", async kind => {
+    const directory = await materialize(recordBefore), outside = await materialize(recordBefore);
+    const path = kind === "file" ? "site/llms.txt" : "site";
+    try {
+      await rm(join(directory, path), { recursive: true });
+      await symlink(join(outside, path), join(directory, path), kind === "file" ? "file" : "dir");
+      for (const [name, value] of Object.entries({ smoke, status, publication })) {
+        await writeFile(join(directory, `${name}.json`), JSON.stringify(value));
+      }
+      await expect(runReleaseGenerate(["record", "v0.7.4", "--date", "2026-10-03",
+        "--smoke", "smoke.json", "--status", "status.json", "--publication", "publication.json"], directory))
+        .rejects.toThrow("release input escapes its checkout: site/llms.txt");
+      for (const [path, bytes] of Object.entries(recordBefore)) expect(await readFile(join(outside, path), "utf8")).toBe(bytes);
+      expect(await readFile(join(directory, "docs/RELEASE_STATUS.md"), "utf8")).toBe(recordBefore["docs/RELEASE_STATUS.md"]!);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+  test.each(["file", "directory"] as const)("prepare refuses a symlinked changelog %s before writes or deletions", async kind => {
+    const fragment = "changelog.d/fixed-outside.md";
+    const tree: Record<string, string> = { ...prepareBefore, [fragment]: "- Preserve outside bytes.\n" };
+    const directory = await materialize(tree), outside = await materialize(tree);
+    const path = kind === "file" ? fragment : "changelog.d";
+    try {
+      await rm(join(directory, path), { recursive: true });
+      await symlink(join(outside, path), join(directory, path), kind === "file" ? "file" : "dir");
+      await expect(runReleaseGenerate(["prepare", "0.7.4", "--date", "2026-10-03"], directory))
+        .rejects.toThrow(`release input escapes its checkout: ${path}`);
+      for (const [path, bytes] of Object.entries(tree)) expect(await readFile(join(outside, path), "utf8")).toBe(bytes);
+      for (const path of ["package.json", "CHANGELOG.md"]) expect(await readFile(join(directory, path), "utf8")).toBe(tree[path]!);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
 
 // The release workflow's shell runs on Linux runners; Windows bash cannot execute the extracted script.
 test.skipIf(process.platform === "win32")("workflow data extraction renders exactly the old v0.7.4 stable, candidate and provenance notes", async () => {

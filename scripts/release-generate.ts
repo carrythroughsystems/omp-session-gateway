@@ -1,5 +1,5 @@
-import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { lstat, readdir, readFile, realpath, unlink, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { assertStableReleaseQualification, CHANGELOG_FRAGMENT_PATH, CHANGELOG_SECTIONS, checkChangelogFragment, nextReleaseVersion, parseReleaseClass, releaseVersion, type ReleaseClass } from "./release-policy.ts";
 import { externalCleanupCurrent, validateStableQualificationReceipt } from "./stable-qualification.ts";
 import { historicalPredecessor } from "./post-release-smoke.ts";
@@ -556,7 +556,7 @@ export async function releaseInputPaths(command: Options["command"], root = proc
 /** CLI errors (including usage/markers/receipt identity) exit 1; success exits 0. */
 export async function runReleaseGenerate(argv: readonly string[], root = process.cwd()): Promise<string[]> {
   const [command, version, ...rest] = argv;
-  if (command !== "prepare" && command !== "approve" && command !== "record") throw new Error("usage: release-generate.ts prepare|approve|record VERSION --date YYYY-MM-DD [inputs]");
+  if (command !== "prepare" && command !== "approve" && command !== "record") throw new Error("usage: release-generate.ts prepare|approve|record VERSION --date YYYY-MM-DD [inputs]; record uses the UTC smoke completion date on current main");
   const allowed = command === "prepare" ? ["--date", "--candidate-tag", "--release-class"] : command === "approve" ? ["--date", "--receipt", "--candidate-tag"] : ["--date", "--smoke", "--status", "--publication"];
   const flags: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {
@@ -566,16 +566,29 @@ export async function runReleaseGenerate(argv: readonly string[], root = process
   }
   for (const flag of allowed) if (!(command === "prepare" && ["--candidate-tag", "--release-class"].includes(flag)) && !flags[flag]) throw new Error(`missing required ${flag}`);
   if (!version) throw new Error("missing release version");
+  const checkout = await realpath(root);
+  if (command === "prepare" && !(await lstat(join(checkout, "changelog.d"))).isDirectory()) {
+    throw new Error("release input escapes its checkout: changelog.d");
+  }
+  const verified = new Map<string, string>();
+  for (const path of await releaseInputPaths(command, checkout)) {
+    const full = join(checkout, path);
+    if (!(await lstat(full)).isFile() || await realpath(full) !== full) {
+      throw new Error(`release input escapes its checkout: ${path}`);
+    }
+    verified.set(path, full);
+  }
   const input = async (flag: string) => JSON.parse(await readFile(resolve(root, flags[flag]!), "utf8")) as unknown;
   const base = { version, date: flags["--date"]! };
   const options: Options = command === "prepare" ? { ...base, command, releaseClass: parseReleaseClass(flags["--release-class"]), ...(flags["--candidate-tag"] ? { candidateTag: flags["--candidate-tag"] } : {}) } : command === "approve"
     ? { ...base, command, receipt: await input("--receipt"), candidateTag: flags["--candidate-tag"]! }
     : { ...base, command, smoke: await input("--smoke"), status: await input("--status"), publication: await input("--publication") };
-  const tree = Object.fromEntries(await Promise.all((await releaseInputPaths(command, root)).map(async path => [path, await readFile(resolve(root, path), "utf8")])));
+  const tree = Object.fromEntries(await Promise.all([...verified].map(async ([path, full]) => [path, await readFile(full, "utf8")])));
   const edits = generateRelease(tree, options);
   const paths = Object.keys(edits).filter(path => edits[path] !== tree[path]).sort();
-  for (const path of paths) if (edits[path] !== null) await writeFile(resolve(root, path), edits[path]!);
-  for (const path of paths) if (edits[path] === null) await unlink(resolve(root, path));
+  for (const path of paths) if (!verified.has(path)) throw new Error(`release output is not a verified input: ${path}`);
+  for (const path of paths) if (edits[path] !== null) await writeFile(verified.get(path)!, edits[path]!);
+  for (const path of paths) if (edits[path] === null) await unlink(verified.get(path)!);
   return paths;
 }
 if (import.meta.main) {

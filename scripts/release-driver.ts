@@ -32,6 +32,7 @@ export interface PullRequest {
   authorType: string;
   headRepository: string;
   base: string;
+  baseCommit?: string;
   headRef: string;
   head: string;
   tree: string;
@@ -43,6 +44,8 @@ export interface PullRequest {
   mergeTree?: string | undefined;
   mergeVerified?: boolean | undefined;
   behind: boolean;
+  /** GitHub's conflict calculation; null means it has not settled yet. */
+  mergeable?: boolean | null;
   checksPassed: boolean;
   files: { filename: string; previous_filename?: string; status?: string }[];
   url: string;
@@ -80,6 +83,8 @@ export interface DriverState {
   stableCommit?: string | undefined;
   stableDigest?: string | undefined;
   publicationRun?: string | undefined;
+  /** Persisted by finish-smoke; record dates never reuse the preparation date. */
+  smokedAt?: string | undefined;
   recordPr?: number | undefined;
   failedMain?: string | undefined;
   /** Retired selections remain auditable; tags, jobs and qualification receipts never move. */
@@ -113,6 +118,8 @@ export interface CampaignInfrastructureHold {
 }
 export interface JobObservation {
   status: "absent" | "running" | "passed" | "failed" | "infrastructure-hold";
+  /** Smoke worker completion, independent of when the next tick observes its result. */
+  completedAt?: string;
   detail?: string;
   availabilityHold?: CampaignInfrastructureHold;
   campaignFailure?: CampaignFailureObservation;
@@ -260,7 +267,7 @@ export interface Decision {
   patch?: { [Key in keyof DriverState]?: Exclude<DriverState[Key], undefined> };
   /** JSON preserves deletion intent; assigning undefined in a persisted patch does not. */
   clear?: (keyof Pick<DriverState, "preparePr" | "orderPr" | "updatedHead" | "candidateCommit" | "candidateDigest" |
-    "approvePr" | "approvedHead" | "approvedTree" | "stableCommit" | "stableDigest" | "publicationRun" |
+    "approvePr" | "approvedHead" | "approvedTree" | "stableCommit" | "stableDigest" | "publicationRun" | "smokedAt" |
     "recordPr" | "failedMain" | "holdReason" | "holdCommit" | "infrastructureHold" | "resumeDeviceCloud" | "macHost" |
     "qualificationExecution" | "retryPlan" | "retryNotBefore">)[];
   holdReason?: RoutineHoldReason;
@@ -367,7 +374,7 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
         ...((state.preparePr ?? repo.prepare?.number) === undefined ? {} : { preparePr: state.preparePr ?? repo.prepare!.number }), failedMain }],
       campaignAttempt: 0,
     }, clear: ["preparePr", "orderPr", "updatedHead", "candidateCommit", "candidateDigest", "approvePr",
-      "approvedHead", "approvedTree", "stableCommit", "stableDigest", "publicationRun", "recordPr",
+      "approvedHead", "approvedTree", "stableCommit", "stableDigest", "publicationRun", "smokedAt", "recordPr",
       "failedMain", "holdReason", "holdCommit", "infrastructureHold", "resumeDeviceCloud", "macHost", "qualificationExecution", "retryPlan", "retryNotBefore"] });
   }
   if (state.phase === "retry-pending") {
@@ -406,6 +413,10 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
     if (prepare && !pr?.merged && repo.main !== state.selectedMain) return routineHold("stale-source");
     const invalid = refuse(pr, config, prepare ? "prepare" : "record");
     if (invalid !== undefined) return decision("stop", "stopped", invalid);
+    if (!prepare && !pr!.merged) {
+      if (pr!.mergeable === null) return idle("waiting for record PR mergeability");
+      if (pr!.behind || pr!.mergeable === false) return decision("update-release-pr", state.phase, "regenerate record PR on current main", { pr: pr! });
+    }
     if (!pr!.merged && pr!.behind && pr!.checksPassed && state.updatedHead !== pr!.head) return decision("update-release-pr", state.phase, "update release PR before strict checked merge", { pr: pr!, patch: { updatedHead: pr!.head } });
     if (!pr!.merged && (pr!.behind || !pr!.checksPassed)) return idle("waiting for strict required PR checks against current main");
     return decision(prepare ? "merge-prepare" : "merge-record", prepare ? "prepared" : "recorded", `merge ${prepare ? "prepare" : "record"} PR with pinned head`, { pr: pr! });
@@ -460,7 +471,12 @@ export function nextStep(state: DriverState | undefined, repo: RepositorySnapsho
         job.detail ?? `${state.phase} process disappeared; inspect private job logs; no retry`);
     if (job?.status !== "passed") return idle(`waiting for detached ${state.phase}`);
     if (state.phase === "qualifying") return decision("finish-campaign", "qualified", `campaign attempt=${campaignAttempt(state)}; all candidate qualification lanes passed`);
-    if (state.phase === "smoking") return decision("finish-smoke", "smoked", "published-byte smoke passed with --force-reinstall and --rebuild-omp");
+    if (state.phase === "smoking") {
+      if (typeof job.completedAt !== "string" || !Number.isFinite(Date.parse(job.completedAt))
+        || new Date(job.completedAt).toISOString() !== job.completedAt) return failure("passed smoke lacks a valid worker completion time");
+      return decision("finish-smoke", "smoked", "published-byte smoke passed with --force-reinstall and --rebuild-omp",
+        { patch: { smokedAt: job.completedAt } });
+    }
     const pr = repo.approve;
     const invalid = refuse(pr, config, "approve");
     if (invalid !== undefined) return routineHold("pr-identity-changed");

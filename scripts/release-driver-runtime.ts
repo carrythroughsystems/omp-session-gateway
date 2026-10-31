@@ -10,6 +10,7 @@ import { assertReleaseTagState } from "./release-tag-state.ts";
 import { releaseAssetNames, verifyReleaseSignatures } from "./post-release-smoke.ts";
 import { downloadReleaseAssets } from "./release-download.ts";
 import { compareReleaseArchives } from "./release-runtime-compare.ts";
+import { runReleaseGenerate } from "./release-generate.ts";
 import { assertCampaignCleanupComplete, assertCampaignRetryEligible, assertDeviceCloudResumeEligible, externalCleanupCurrent, validateStableQualificationReceipt, type StableQualificationLaneModules, type StableQualificationReceipt } from "./stable-qualification.ts";
 import { defaultLaneModules } from "./stable-lanes.ts";
 import { clearReleaseHostLease } from "./release-host-lease.ts";
@@ -147,8 +148,8 @@ export function credentialExpiry(headers: string, now = Date.now()): { status: "
 }
 interface ApiPr {
   number: number; title: string; user: { login: string; type: string }; head: { sha: string; ref: string; repo: { full_name: string } | null };
-  base: { ref: string }; draft: boolean; state: "open" | "closed"; merged: boolean;
-  merged_by: { login: string } | null; merge_commit_sha: string | null; mergeable_state: string; html_url: string;
+  base: { ref: string; sha: string }; draft: boolean; state: "open" | "closed"; merged: boolean;
+  merged_by: { login: string } | null; merge_commit_sha: string | null; mergeable_state: string; mergeable: boolean | null; html_url: string;
 }
 interface WorkflowRun { id: number; run_attempt: number; head_sha: string; head_branch: string; conclusion: string | null; status: string; html_url: string; created_at: string }
 interface JobSpec { kind: "campaign" | "approve" | "smoke"; state: DriverState; root: string }
@@ -367,9 +368,10 @@ export class StudioDriver implements DriverPort {
     ]);
     const runs = checks!.flatMap(page => page.check_runs);
     return { number, title: pr.title, author: pr.user.login, authorType: pr.user.type, headRepository: pr.head.repo?.full_name ?? "",
-      base: pr.base.ref, headRef: pr.head.ref, head: pr.head.sha, tree: head!.tree.sha, draft: pr.draft,
+      base: pr.base.ref, baseCommit: pr.base.sha, headRef: pr.head.ref, head: pr.head.sha, tree: head!.tree.sha, draft: pr.draft,
       state: pr.state, merged: pr.merged, mergedBy: pr.merged_by?.login, mergeCommit: pr.merge_commit_sha ?? undefined,
       mergeTree: merge?.tree.sha, mergeVerified: merge?.verification.verified, behind: pr.mergeable_state === "behind" || pr.mergeable_state === "unknown",
+      mergeable: pr.mergeable_state === "dirty" ? false : pr.mergeable_state === "unknown" ? null : pr.mergeable,
       checksPassed: REQUIRED_CHECKS.every(name => runs.some(run => run.name === name && run.status === "completed" && run.conclusion === "success" && run.app.slug === "github-actions")), files, url: pr.html_url };
   }
   async issues(previous?: TrackingIssue): Promise<TrackingIssue[]> {
@@ -537,7 +539,7 @@ export class StudioDriver implements DriverPort {
       const path = resolve(listedPath);
       if (dirname(path) !== work) continue;
       const name = basename(path);
-      const family = /^([1-9][0-9]*)-(v([0-9]+\.[0-9]+\.[0-9]+)-prealpha\.[1-9][0-9]*)-(prepare|approve|record|campaign-job|approve-job|smoke-job)(-retry-[1-9][0-9]*)?$/u.exec(name);
+      const family = /^([1-9][0-9]*)-(v([0-9]+\.[0-9]+\.[0-9]+)-prealpha\.[1-9][0-9]*)-(prepare|approve|record(?:-[0-9a-f]{40})?|campaign-job|approve-job|smoke-job)(-retry-[1-9][0-9]*)?$/u.exec(name);
       const rebuild = /^v([0-9]+\.[0-9]+\.[0-9]+)-rebuild$/u.exec(name);
       const version = family?.[3] ?? rebuild?.[1];
       const ref = fields.find(field => field.startsWith("branch "))?.slice(7);
@@ -811,7 +813,7 @@ export class StudioDriver implements DriverPort {
     await this.save(next);
     return next;
   }
-  /** Installed controls are the separately reviewed trust root, not candidate-supplied policy. */
+  /** Normalize controls using installed policy; callers choose the authority comparison base. */
   async controls(source: string, local = false): Promise<Map<string, string>> {
     const entries = local
       ? (await this.git(["ls-tree", "-r", source])).split("\n").filter(Boolean).map(line => {
@@ -1015,20 +1017,31 @@ export class StudioDriver implements DriverPort {
     return directory;
   }
   signingArgs(): string[] { return ["-c", "gpg.format=ssh", "-c", `user.signingkey=${this.config.signingKey}`]; }
-  async push(ref: string, cwd = ROOT): Promise<void> {
+  async push(ref: string, cwd = ROOT, expectedHead?: string): Promise<void> {
     if (!(ref.startsWith("refs/heads/release-driver/") || /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+(?:-prealpha\.[1-9][0-9]*)?$/u.test(ref))) throw new Error("driver refuses push outside owned release branches/tags");
-    await this.git(["push", `https://github.com/${REPOSITORY}.git`, `${ref}:${ref}`], cwd);
+    if (expectedHead !== undefined && !ref.startsWith("refs/heads/release-driver/")) throw new Error("driver refuses to replace release tags");
+    await this.git(["push", ...(expectedHead === undefined ? [] : [`--force-with-lease=${ref}:${expectedHead}`]),
+      `https://github.com/${REPOSITORY}.git`, `${expectedHead === undefined ? ref : "HEAD"}:${ref}`], cwd);
   }
   async assertGeneratedControls(pr: PullRequest): Promise<void> {
-    if (!generatedReleaseFilesMatch(generatedReleaseKind(pr.headRef), pr.files)) throw new RoutineHoldError("generated-content-mismatch");
-    const [installed, candidate] = await Promise.all([this.controls(await this.git(["rev-parse", "HEAD"]), true), this.controls(pr.head)]);
-    if ([...new Set([...installed.keys(), ...candidate.keys()])].some(path => installed.get(path) !== candidate.get(path))) throw new RoutineHoldError("generated-content-mismatch");
+    const kind = generatedReleaseKind(pr.headRef);
+    if (!generatedReleaseFilesMatch(kind, pr.files)) throw new RoutineHoldError("generated-content-mismatch");
+    let base: string;
+    if (kind === "record") {
+      if (!pr.baseCommit) throw new RoutineHoldError("missing-evidence");
+      const comparison = await this.api<{ merge_base_commit: { sha: string } }>(`compare/${pr.baseCommit}...${pr.head}`);
+      if (!comparison?.merge_base_commit?.sha) throw new RoutineHoldError("missing-evidence");
+      base = comparison.merge_base_commit.sha;
+    } else base = await this.git(["rev-parse", "HEAD"]);
+    const [trusted, candidate] = await Promise.all([this.controls(base, kind !== "record"), this.controls(pr.head)]);
+    if ([...new Set([...trusted.keys(), ...candidate.keys()])].some(path => trusted.get(path) !== candidate.get(path))) throw new RoutineHoldError("generated-content-mismatch");
   }
   async assertCheckpointAuthor(head: string): Promise<void> {
     const commit = await this.api<{ author: { login: string } | null; commit: { verification: { verified: boolean } } }>("commits/" + head);
     if (commit?.author?.login !== this.config.bot || commit.commit.verification.verified !== true) throw new RoutineHoldError("pr-identity-changed");
   }
-  async openPr(kind: "prepare" | "approve" | "record", state: DriverState): Promise<PullRequest> {
+  async openPr(kind: "prepare" | "approve" | "record", state: DriverState, replace?: PullRequest): Promise<PullRequest> {
+    if (replace !== undefined && kind !== "record") throw new Error("only record PRs may be regenerated");
     const branch = `release-driver/${state.issue.number}/${state.candidate}-${kind}`;
     const existing = await this.pages<ApiPr>(`pulls?state=all&base=main&head=carrythroughsystems:${encodeURIComponent(branch)}&per_page=100`);
     if (existing.length > 1) throw new Error("multiple PRs use the deterministic release branch");
@@ -1037,28 +1050,47 @@ export class StudioDriver implements DriverPort {
       if (pr.author !== this.config.bot || pr.headRepository !== REPOSITORY || pr.base !== "main" || pr.headRef !== branch) throw new RoutineHoldError("pr-identity-changed");
       await this.assertCheckpointAuthor(pr.head);
       await this.assertGeneratedControls(pr);
-      return pr;
+      if (replace === undefined || pr.merged) return pr;
+      if (pr.number !== replace.number || pr.head !== replace.head || pr.tree !== replace.tree) throw new StaleIntentError("record PR changed before regeneration");
+      if (pr.state !== "open" || pr.draft) throw new Error("record PR is not open for regeneration");
     }
-    const source = kind === "prepare" ? state.selectedMain : kind === "approve" ? state.candidateCommit! : state.stableCommit!;
+    if (replace !== undefined && existing.length !== 1) throw new StaleIntentError("record PR disappeared before regeneration");
+    const source = kind === "prepare" ? state.selectedMain : kind === "approve" ? state.candidateCommit!
+      : (await this.api<{ sha: string }>("commits/main"))!.sha;
     const remote = await this.api<{ object: { sha: string } }>(`git/ref/heads/${branch}`, true);
     if (remote !== undefined) await this.assertCheckpointAuthor(remote.object.sha);
-    const directory = await this.checkout(`${state.issue.number}-${state.candidate}-${kind}`, remote?.object.sha ?? source, branch);
-    if (remote === undefined) {
-      const args = [process.execPath, "scripts/release-generate.ts", kind, kind === "prepare" ? state.version : `v${state.version}`, "--date", state.date];
+    if (replace !== undefined && remote?.object.sha !== replace.head) throw new StaleIntentError("record branch changed before regeneration");
+    if (remote === undefined || replace !== undefined) {
+      if (kind === "record" && (!state.smokedAt || !Number.isFinite(Date.parse(state.smokedAt))
+        || new Date(state.smokedAt).toISOString() !== state.smokedAt)) throw new Error("record requires the persisted smoke completion time");
+      // Adopt a pushed branch without a checkout; a source-keyed directory must never hold an older head.
+      const directory = await this.checkout(`${state.issue.number}-${state.candidate}-${kind}${kind === "record" ? "-" + source : ""}`,
+        source, kind === "record" ? undefined : branch);
+      const args = [kind, kind === "prepare" ? state.version : `v${state.version}`,
+        "--date", kind === "record" ? state.smokedAt!.slice(0, 10) : state.date];
       if (kind === "prepare") args.push("--candidate-tag", state.candidate, "--release-class", parseReleaseClass(state.issue.releaseClass));
       if (kind === "approve") args.push("--receipt", this.receipt(state), "--candidate-tag", state.candidate);
       if (kind === "record") args.push("--smoke", join(this.jobDirectory("smoke", state), "smoke.json"), "--status", join(this.jobDirectory("smoke", state), "status.json"), "--publication", join(this.config.stateDir, `${state.candidate}-publication.json`));
       // A committed local head is the crash checkpoint before a push; never regenerate its content.
       if (await this.git(["rev-parse", "HEAD"], directory) === source) {
-        await command([process.execPath, "install", "--frozen-lockfile"], directory, this.env);
-        await command(args, directory, this.env);
+        // Main is record data, not executable authority: never install or run its scripts as the bot.
+        if (kind === "record") await runReleaseGenerate(args, directory);
+        else {
+          await command([process.execPath, "install", "--frozen-lockfile"], directory, this.env);
+          await command([process.execPath, "scripts/release-generate.ts", ...args], directory, this.env);
+        }
         await this.git(["add", "--all"], directory);
         const changed = await this.git(["diff", "--cached", "--name-only"], directory);
         if (changed === "") throw new Error("release generator produced no changes; refusing an empty release PR");
         await this.git([...this.signingArgs(), "commit", "-S", "-m", `${kind === "record" ? "docs" : "chore"}(release): ${kind} v${state.version}`], directory);
       }
-      await this.push(`refs/heads/${branch}`, directory);
+      if (kind === "record") {
+        if (await this.git(["rev-parse", "HEAD^"], directory) !== source) throw new Error("record checkpoint is not a single commit on its main source");
+        await this.git(["verify-commit", "HEAD"], directory);
+      }
+      await this.push(`refs/heads/${branch}`, directory, kind === "record" ? remote?.object.sha ?? "" : undefined);
     }
+    if (replace !== undefined) return this.readPr(replace.number);
     const created = await this.gh<ApiPr>(["api", "--method", "POST", `repos/${REPOSITORY}/pulls`, "-f", `title=${kind === "record" ? "docs" : "chore"}(release): ${kind} v${state.version}`, "-f", `head=${branch}`, "-f", "base=main", "-f", `body=Generated release ${kind} for #${state.issue.number}. ${kind === "approve" ? "Standing routine authority permits only the release bot to merge after exact-head/tree qualification, comparison, policy, smoke-plan and required checks." : "The release driver pins the head when merging."}`]);
     return this.readPr(created!.number);
   }
@@ -1075,7 +1107,7 @@ export class StudioDriver implements DriverPort {
       if (current.mergedBy !== this.config.bot) throw new Error("driver-owned PR merged by another identity");
       return current;
     }
-    if (current.state !== "open" || current.draft || current.behind || !current.checksPassed) throw new StaleIntentError("PR is not eligible for strict checked merge");
+    if (current.state !== "open" || current.draft || current.behind || current.mergeable === false || current.mergeable === null || !current.checksPassed) throw new StaleIntentError("PR is not eligible for strict checked merge");
     // gh pr merge enqueues on queue-required branches, even for a queue bypass actor.
     // Only the queue ruleset is bypassed; classic strict checks/signatures still apply.
     await this.gh(["api", "--method", "PUT", `repos/${REPOSITORY}/pulls/${pr.number}/merge`,
@@ -1267,6 +1299,11 @@ export class StudioDriver implements DriverPort {
       case "update-release-pr": {
         const pr = await this.readPr(step.pr!.number);
         if (step.operation === "update-order" ? !isOrder(pr) || outsideOrderScope(pr).length > 0 : pr.author !== this.config.bot || pr.base !== "main" || pr.headRepository !== REPOSITORY) throw new Error("PR scope/identity changed");
+        if (step.operation === "update-release-pr" && state.phase === "record-open") {
+          if (pr.head !== step.pr!.head || pr.merged || pr.mergeable === null || (!pr.behind && pr.mergeable !== false)) return {};
+          await this.openPr("record", state, pr);
+          return {};
+        }
         if (pr.head !== step.pr!.head || !pr.behind) return {};
         if (!pr.checksPassed) throw new Error("order checks no longer pass");
         await this.gh(["api", "--method", "PUT", `repos/${REPOSITORY}/pulls/${pr.number}/update-branch`, "-f", `expected_head_sha=${pr.head}`]);
@@ -1481,7 +1518,8 @@ export class StudioDriver implements DriverPort {
         candidateCommit: state.candidateCommit!, candidateDigest: state.candidateDigest!, policy: state.authorityPolicy!,
         steps: ROUTINE_EVIDENCE_STEPS,
       } : undefined;
-      terminal = { status: "passed", ...(evidence === undefined ? {} : { evidence }) };
+      terminal = { status: "passed", ...(evidence === undefined ? {} : { evidence }),
+        ...(spec.kind === "smoke" ? { completedAt: new Date().toISOString() } : {}) };
       exitCode = 0;
     } catch (error) {
       exitCode = observedCampaignExit ?? 1;
