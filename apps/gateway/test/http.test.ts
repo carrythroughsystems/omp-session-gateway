@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, setDefaultTimeout } from "bun:test";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,9 @@ import { SessionRegistry } from "../src/registry.ts";
 import { StaticAssetStore } from "../src/static.ts";
 import { SessionCreationProblem, type SessionCreationService } from "../src/tern-creation.ts";
 import type { SessionCreationRequest, SessionCreationReceipt, SessionCreationStatus } from "@omp-session-gateway/protocol";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const viewCapability = ["HTTP", "VIEW", "CANARY", "00000000000000000000"].join("__");
 const controlCapability = ["HTTP", "CONTROL", "CANARY", "00000000000000000000"].join("__");

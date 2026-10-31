@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,9 @@ import type { GatewayConfig } from "../src/config.ts";
 import { SafeLogger } from "../src/logger.ts";
 import { PushService, type PushSendOptions, type PushTransport, webPushOptions } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const endpoint = "https://push.example.test/send/device-subscription";
 const previousKeys: PushSubscriptionKeys = { p256dh: "P".repeat(88), auth: "A".repeat(22) };

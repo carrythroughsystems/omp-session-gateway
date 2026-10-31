@@ -1,10 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkEvidence, mentionsCandidate, parseLedger } from "./check-evidence.ts";
 import { validateEvidenceRecord, type EvidenceAssertion, type EvidenceRecord } from "./evidence-schema.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 /**
  * A ledger fixture with the shapes that matter: a vocabulary table whose statuses sit in the first

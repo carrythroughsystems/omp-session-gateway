@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
@@ -14,6 +14,9 @@ import { firewallEligibility } from "./vultr-target.ts";
 import { createPixelLease, parseQualificationPins } from "./stable-qualification.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import * as windowsLane from "./windows-stable-qualification.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const epoch = "11111111-1111-4111-8111-111111111111";
 const label = windowsCampaignLabel(epoch);
@@ -93,7 +96,7 @@ test("transport command checkpoints first response before exit without copying s
   const script = `process.stderr.write("synthetic-private-output-never-real\\n" + "x".repeat(200) + "\\n");
     process.stderr.write("WINRM_FIRST_");
     setTimeout(() => { process.stderr.write("RESPONSE " + Date.now() + "\\n"); process.stdout.write("bounded-result"); }, 10);`;
-  expect(await windowsCommand([process.execPath, "-e", script], { timeoutMs: 3_000,
+  expect(await windowsCommand([process.execPath, "-e", script], { timeoutMs: HANG_DEADLINE_MS,
     transportProbe: async probe => { await Bun.sleep(1); probes.push({ ...probe }); },
   })).toBe("bounded-result");
   expect(probes).toHaveLength(3);
@@ -107,6 +110,7 @@ test("transport command checkpoints first response before exit without copying s
   expect(Object.keys(probes[2]!).sort()).toEqual(["exitCode", "exitedAt", "firstResponseLatencyMs", "signalAt", "startedAt", "timeoutMs"]);
 });
 test("a timed-out transport command persists signal and exit before its failure escapes", async () => {
+  // hang-deadline: behavior-under-test -- signal and exit must be checkpointed on timeout.
   const probes: WindowsTransportProbe[] = [];
   await expect(windowsCommand([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
     timeoutMs: 50, transportProbe: async probe => { probes.push({ ...probe }); },

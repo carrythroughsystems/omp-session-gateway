@@ -7,6 +7,7 @@
  * file that fails anywhere it is not excluded fails the job.
  */
 import { fileURLToPath } from "node:url";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 interface HostBoundTest {
   readonly platforms: readonly NodeJS.Platform[];
@@ -52,9 +53,9 @@ if (import.meta.main) {
   const files = portableTestFiles(tracked, process.platform);
   const excluded = tracked.length - files.length;
   console.log(`portable tests on ${process.platform}: ${files.length} files, ${excluded} host-bound excluded`);
-  // Explicit ./paths make bun treat each argument as a file rather than a name filter. The bound
-  // matches windows-service-lifecycle, whose ACL helper takes two attempts of up to 10 s each.
-  const child = Bun.spawn([process.execPath, "test", "--timeout", "30000", ...files.map(file => `./${file}`)], {
+  // Explicit ./paths make bun treat each argument as a file rather than a name filter. Leave room
+  // beyond a real-process hang budget for each test's setup and teardown.
+  const child = Bun.spawn([process.execPath, "test", "--timeout", String(2 * HANG_DEADLINE_MS), ...files.map(file => `./${file}`)], {
     cwd: root,
     stdin: "ignore",
     stdout: "inherit",

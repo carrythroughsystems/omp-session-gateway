@@ -6,11 +6,13 @@ import {
   startDashboardFixture,
 } from "./fixture-server.ts";
 import { JOURNEY_VIEW_STATE } from "../../../scripts/browser-journey.ts";
+import { HANG_DEADLINE_MS } from "../../gateway/test/test-support.ts";
 
 const SESSION_TITLE = "Implement seamless registry recovery across long-running upgraded OMP sessions";
 // The ask fixture pins Math.random to 0.5, so the relay socket's jittered retry fires within half of
 // its 30 s backoff cap. Each held reconnect doubles that delay; waiting for the bound keeps recovery
 // assertions independent of how many attempts a slow runner accumulated before the relay returned.
+// hang-deadline: behavior-under-test -- bound the fixture's jittered relay recovery, not a CLI.
 const RELAY_RECOVERY_TIMEOUT_MS = 17_000;
 
 function session(): SessionMetadata {
@@ -323,7 +325,7 @@ test("installed-PWA View and Control mount in the current window without losing 
 });
 
 test("embedded active ask matches the original 3d shell interaction", async ({ page }) => {
-  test.setTimeout(70_000);
+  test.setTimeout(2 * HANG_DEADLINE_MS);
   const roomKey = new Uint8Array(32).fill(37);
   const fixture = await startDashboardFixture([session()], { roomKey });
 

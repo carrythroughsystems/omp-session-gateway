@@ -2,7 +2,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const WINDOWS = process.platform === "win32";
 const guestScript = fileURLToPath(new URL("./windows-qualification-guest.ps1", import.meta.url));
@@ -43,7 +46,7 @@ test.skipIf(!WINDOWS)("a post-install status that trails readiness settles withi
   );
   expect(result.stderr).toBe("");
   expect(result.stdout).toBe("reads=3 ready=True");
-}, 60_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test.skipIf(!WINDOWS)("a status that never settles fails naming every field that did not", async () => {
   const result = await runGuest(
@@ -51,7 +54,7 @@ test.skipIf(!WINDOWS)("a status that never settles fails naming every field that
     "try { Installed '0.7.0' | Out-Null; 'passed' } catch { $_.Exception.Message }",
   );
   expect(result.stdout).toBe("status mismatch: ready,installed,active,authMode,activeVersion");
-}, 60_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test.skipIf(!WINDOWS)("a failing native call names its step, or its executable when unnamed", async () => {
   const result = await runGuest(
@@ -59,7 +62,7 @@ test.skipIf(!WINDOWS)("a failing native call names its step, or its executable w
     "foreach ($call in @({ Run 'cmd.exe' @('/c', 'exit 3') 'bun-install' }, { Run 'cmd.exe' @('/c', 'exit 2') })) { try { & $call | Out-Null; 'passed' } catch { $_.Exception.Message } }",
   );
   expect(result.stdout.split(/\r?\n/u)).toEqual(["native command failed: bun-install exit 3", "native command failed: cmd.exe exit 2"]);
-}, 60_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test.skipIf(!WINDOWS)("stopping OMP leaves a process that reused its stored ID and reports it stopped", async () => {
   const result = await runGuest(
@@ -72,4 +75,4 @@ try {
   );
   expect(result.stderr).toBe("");
   expect(result.stdout).toBe('{"stopped":true} alive=True');
-}, 60_000);
+}, 2 * HANG_DEADLINE_MS);

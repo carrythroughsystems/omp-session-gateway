@@ -2,8 +2,11 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import deletionResponses from "./fixtures/digitalocean-delete-tag-removal.json";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -215,7 +218,7 @@ test.skipIf(process.platform === "win32")("IPv4 readiness exhaustion retains the
   } finally {
     await fixture.dispose();
   }
-}, 15_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test.skipIf(process.platform === "win32")("incomplete create metadata cannot discard the returned cleanup id", async () => {
   const fixture = await dropletHarness({ createBody: { droplet: { ...PROVIDER_DROPLET, tags: null } } });
@@ -314,7 +317,7 @@ test.skipIf(process.platform === "win32")("accepted droplet deletion still requi
   } finally {
     await fixture.dispose();
   }
-}, 15_000);
+}, 2 * HANG_DEADLINE_MS);
 
 for (const status of [204, 404, 500]) {
   test.skipIf(process.platform === "win32")(`droplet DELETE HTTP ${status} determines teardown disposition`, async () => {

@@ -26,11 +26,12 @@ import {
   writeGatewayConfigFile,
   writePrivateTextFile,
 } from "../src/config.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 const roots: string[] = [];
 // A cold helper gets two attempts of 45 s plus stderr teardown; warm replies keep their 10 s
 // product deadline. Bun must not delete a fixture while that bounded request is still in flight.
-const WINDOWS_CONFIG_TEST_TIMEOUT_MS = 120_000;
+const WINDOWS_CONFIG_TEST_TIMEOUT_MS = 2 * HANG_DEADLINE_MS;
 
 function test(name: string, body: () => void | Promise<void>, timeout?: number): void {
   // Apply to every sibling, including explicit 20/30 s cases and isolated --test-name-pattern runs.

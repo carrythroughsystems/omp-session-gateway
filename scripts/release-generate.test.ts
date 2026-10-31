@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 import { cloudReleaseEvidence, generateRelease, releaseInputPaths, RELEASE_TEXT, runReleaseGenerate, type ReleaseEdits, type ReleaseGenerateOptions } from "./release-generate.ts";
 import type { DeviceCloudProgress } from "./device-cloud-qualification.ts";
 import { historicalTrees, normalizeHistoricalTree } from "./fixtures/release-generate/historical.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const fixtures = new URL("./fixtures/release-generate/", import.meta.url);

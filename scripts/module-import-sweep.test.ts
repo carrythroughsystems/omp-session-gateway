@@ -1,6 +1,9 @@
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 /**
  * Imports every server-side source module once.
@@ -65,7 +68,7 @@ test("every server-side module is import-safe", async () => {
   }
 
   expect(failures).toEqual([]);
-}, 60_000);
+}, 2 * HANG_DEADLINE_MS);
 
 test("the sweep covers the modules the gateway actually ships", async () => {
   const modules = sourceModules();

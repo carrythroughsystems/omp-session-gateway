@@ -1,9 +1,12 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test, vi, setDefaultTimeout } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TernCli, matchingTernBasename, parseTernInspection, parseTernJson, sessionBasenameMatches, validateTernRuntime } from "../src/tern-cli.ts";
 import type { TernProfile } from "../src/config.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
+
+setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -105,7 +108,7 @@ describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
     const profile = { ...fixture.profile, argv: [path, ...fixture.profile.argv.slice(1)] };
     expect(await validateTernRuntime({ executable: path,
       projects: [{ id: "main", label: "Main", workingCopies: [fixture.copy] }], profiles: [profile] })).toBe(true);
-    const cli = new TernCli(path);
+    const cli = new TernCli(path, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS });
     expect(await cli.inspect(profile, new AbortController().signal)).toEqual(parseTernInspection(bytes(inspect())));
     expect(await cli.createTab(fixture.copy, profile, new AbortController().signal))
       .toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
@@ -114,12 +117,12 @@ describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
     const invalid = `${path}/`, invalidProfile = { ...profile, argv: [invalid] };
     expect(await validateTernRuntime({ executable: invalid,
       projects: [{ id: "main", label: "Main", workingCopies: [fixture.copy] }], profiles: [invalidProfile] })).toBe(false);
-    expect(await new TernCli(invalid).inspect(profile, new AbortController().signal)).toBeUndefined();
+    expect(await new TernCli(invalid, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS }).inspect(profile, new AbortController().signal)).toBeUndefined();
     expect(await cli.createTab(fixture.copy, invalidProfile, new AbortController().signal)).toEqual({ kind: "not_started" });
   });
   test("uses literal argv, keep-open, canonical executable and only the configured environment", async () => {
     const fixture = await fake();
-    const cli = new TernCli(fixture.executable);
+    const cli = new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS });
     const before = { monotonicMs: performance.now(), wallTimeMs: Date.now() };
     const result = await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal);
     expect(result).toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
@@ -140,7 +143,7 @@ describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
   });
   test("accepts the verbatim pretty-printed three-key Tern 0.9.5 receipt", async () => {
     const fixture = await fake();
-    expect(await new TernCli(fixture.executable).createTab(fixture.copy, fixture.profile, new AbortController().signal))
+    expect(await new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS }).createTab(fixture.copy, fixture.profile, new AbortController().signal))
       .toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
   });
   test("discards bounded additive receipt metadata while preserving a lossless local block", async () => {
@@ -149,7 +152,7 @@ describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
       '{"session":18446744073709551615,"tab":9007199254740995,"block":9007199254740993,"extra":{"nested":["TERN_RECEIPT_PRIVATE_CANARY",1e30]}}',
     ]) {
       const fixture = await fake("success", receipt);
-      const result = await new TernCli(fixture.executable).createTab(fixture.copy, fixture.profile, new AbortController().signal);
+      const result = await new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS }).createTab(fixture.copy, fixture.profile, new AbortController().signal);
       expect(result).toEqual({ kind: "started", blockId: "9007199254740993", spawnedAt: spawnTime });
       expect(JSON.stringify(result)).not.toContain("TERN_RECEIPT_PRIVATE_CANARY");
     }
@@ -163,23 +166,24 @@ describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
     }
     for (const receipt of invalid) {
       const fixture = await fake("success", receipt);
-      expect(await new TernCli(fixture.executable).createTab(fixture.copy, fixture.profile, new AbortController().signal))
+      expect(await new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS }).createTab(fixture.copy, fixture.profile, new AbortController().signal))
         .toEqual({ kind: "unknown" });
     }
   });
   test("classifies malformed, oversized, duplicate, nonzero and remote results as uncertain, never retrying", async () => {
     for (const mode of ["malformed", "overflow", "duplicate", "nonzero", "remote"]) {
       const fixture = await fake(mode);
-      const cli = new TernCli(fixture.executable);
+      const cli = new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS });
       expect(await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal)).toEqual({ kind: "unknown" });
       expect(await cli.inspect(fixture.profile, new AbortController().signal)).toBeUndefined();
     }
     const fixture = await fake();
-    expect(await new TernCli(join(fixture.root, "absent")).createTab(fixture.copy, fixture.profile, new AbortController().signal))
+    expect(await new TernCli(join(fixture.root, "absent"), { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS }).createTab(fixture.copy, fixture.profile, new AbortController().signal))
       .toEqual({ kind: "not_started" });
   });
   test("timeout and cancellation kill and reap children and release the exclusive CLI slot", async () => {
     const fixture = await fake("timeout");
+    // hang-deadline: behavior-under-test -- fake timers expire only after real child readiness.
     const cli = new TernCli(fixture.executable, { inspect: 100, create: 100 });
     // Drive only the parent's deadline, after the child's loopback readiness handshake.
     // File-watch notifications can be coalesced; neither they nor a short wall delay prove readiness.

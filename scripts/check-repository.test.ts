@@ -1,7 +1,48 @@
 import { expect, test } from "bun:test";
-import { checkChangelogFile, checkDocumentTimers, checkE2EReadiness, checkProviderReads, checkUnsafeFinally, checkWorkflowBunVersions } from "./check-repository.ts";
+import { checkChangelogFile, checkDocumentTimers, checkE2EReadiness, checkHangDeadlines, checkProviderReads, checkUnsafeFinally, checkWorkflowBunVersions } from "./check-repository.ts";
 import { readFile } from "node:fs/promises";
 import packageManifest from "../package.json";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+
+test("hang deadlines reject the pre-fix CLI exit race and admit the migrated source", async () => {
+  const path = "apps/gateway/test/cli.test.ts";
+  const before = "const exited = await Promise.race([subprocess.exited.then(() => true), Bun.sleep(5_000).then(() => false)]);";
+  expect(checkHangDeadlines(path, before)).toEqual([
+    `${path}:1: literal 5000ms hang deadline is below HANG_DEADLINE_MS (${HANG_DEADLINE_MS}); use the shared budget or annotate behavior under test`,
+  ]);
+  const after = before.replace("5_000", "HANG_DEADLINE_MS");
+  expect(checkHangDeadlines(path, after)).toEqual([]);
+  const current = await readFile(new URL("../" + path, import.meta.url), "utf8");
+  expect(current).toContain(after);
+  expect(checkHangDeadlines(path, current.replace(after, before))).toHaveLength(1);
+  expect(checkHangDeadlines(path, current)).toEqual([]);
+});
+
+test.each([
+  "await Promise.race([pty.exited, new Promise(resolve => setTimeout(() => resolve(false), 2_500))]);",
+  "await Promise.race([helper(), Bun.sleep(5_000)]);",
+  "await fetch(url, { signal: AbortSignal.timeout(500) });",
+  "const timer = setTimeout(() => child.kill(), 3_000);",
+])("hang deadlines reject short process, helper and socket guards: %s", source => {
+  expect(checkHangDeadlines("scripts/nested/example.test.ts", source)).toHaveLength(1);
+  expect(checkHangDeadlines("apps/web/e2e/fixture.ts", source)).toHaveLength(1);
+  expect(checkHangDeadlines("scripts/production.ts", source)).toEqual([]);
+  expect(checkHangDeadlines("apps/gateway/src/production.ts", source)).toEqual([]);
+});
+
+test("hang deadline allowances must be local, explicit, and include a behavioral reason", () => {
+  const race = "await Promise.race([child.exited, Bun.sleep(50)]);";
+  const allowance = "// hang-deadline: behavior-under-test -- assert the timeout path";
+  expect(checkHangDeadlines("scripts/example.test.ts", allowance + "\n" + race)).toEqual([]);
+  expect(checkHangDeadlines("scripts/example.test.ts", race + " " + allowance)).toEqual([]);
+  for (const comment of ["// behavior under test", "// hang-deadline: behavior-under-test --", allowance + "\n"]) {
+    expect(checkHangDeadlines("scripts/example.test.ts", comment + "\n" + race)).toHaveLength(1);
+  }
+  expect(checkHangDeadlines("scripts/example.test.ts", [
+    `// ${race}`, JSON.stringify(race) + ";", "const pattern = /Bun.sleep(50)/;",
+    `await Promise.race([child.exited, Bun.sleep(${HANG_DEADLINE_MS})]);`,
+  ].join("\n"))).toEqual([]);
+});
 
 test("changelog fragments accept every section, a 100-character line and two-space wrapping", () => {
   for (const section of ["added", "changed", "deprecated", "removed", "fixed", "security"]) {
