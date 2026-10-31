@@ -80,19 +80,26 @@ fix(web): reject stale launch generations
 
 ### Merging with the queue
 
-Once the operator completes the [merge queue rollout](docs/RELEASE.md#merge-queue-rollout-operator-only),
-ordinary PRs enter GitHub's merge queue after review and all seven required checks pass:
+The [merge queue](docs/RELEASE.md#merge-queue-rollout-operator-only) is active on `main` (ruleset
+`main-merge-queue`, since 2026-10-31). Enqueue an ordinary PR after review, once all seven required
+checks pass on its reviewed head:
 
 ```sh
-gh pr merge <number> --repo carrythroughsystems/omp-session-gateway \
-  --squash --match-head-commit <reviewed-head-sha>
+pr_id=$(gh pr view <number> --repo carrythroughsystems/omp-session-gateway --json id --jq .id)
+gh api graphql -f id="$pr_id" -f oid=<reviewed-head-sha> -f query='
+  mutation($id: ID!, $oid: GitObjectID!) {
+    enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $oid}) {
+      mergeQueueEntry { state position }
+    }
+  }'
 ```
 
-The command enqueues; it does not prove the PR has merged. GitHub checks the latest `main` plus
-preceding queued PRs using the same checks on `merge_group`, then squash-merges. Do not refresh
-every green branch just because another queued PR landed, and do not bypass the queue with an
-administrator flag. Sign all commits; queueing does not waive signature or review requirements.
-Until rollout, the existing strict up-to-date merge workflow remains in force.
+`gh pr merge` cannot enqueue here. On a queue branch it requests auto-merge, and this repository
+disables auto-merge: it fails with `Auto merge is not allowed for this repository`. Enqueueing
+does not prove the PR has merged. GitHub tests the latest `main` plus the PRs queued ahead of it
+with the same checks on `merge_group`, then squash-merges. Do not refresh every green branch
+just because another queued PR landed, and do not bypass the queue with an administrator flag.
+Sign all commits; queueing does not waive signature or review requirements.
 
 The release machine user uses a pinned direct REST squash merge with a queue-only exception.
 The founder selected the repository Maintain-role bypass described in the rollout; it applies
