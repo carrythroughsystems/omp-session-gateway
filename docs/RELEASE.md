@@ -303,9 +303,20 @@ not a release-bot self-upgrade. No main changes may land between prepare and app
 
 ### Merge queue rollout (operator only)
 
-Repository changes prepare CI for the queue; they **do not enable it**. The 2026-10-30 inspection
-found a public organization repository, no rulesets, squash-only merges, auto-merge disabled,
-and the classic protection attested above. Keep that entire classic protection unchanged.
+**Status: active since 2026-10-31.** Ruleset `main-merge-queue` (id 26248647) was created
+active after `alphastorm-release` was granted Maintain. Readback showed bot `push=true`,
+`maintain=true`, `admin=false`, bypass `pull_requests_only`, and classic protection byte-identical
+before and after. Repository admins inherit the Maintain bypass: the owner's readback is also
+`pull_requests_only`. That adds no authority, because admins can already edit the ruleset.
+The proof PR #553 was enqueued by the owner. All seven required contexts passed on merge group
+`de9a635`, and `main` advanced to that commit: one parent, subject
+`fix(release): generate record prs on current main and date them by the smoke (#553)`,
+signature verified, `mergedBy=alphastorm`. The bot's direct merge is still unproven until the
+next release. The rollout text below is kept as executed.
+
+The 2026-10-30 inspection found a public organization repository, no rulesets, squash-only
+merges, auto-merge disabled, and the classic protection attested above. Keep that entire classic
+protection unchanged.
 Add one repository branch ruleset containing **only** `merge_queue`, targeting `refs/heads/main`,
 with the repository Maintain role as a PR-only bypass actor, after granting that role to
 `alphastorm-release`. **The founder selected this design; the lead executes the rollout.**
@@ -460,14 +471,22 @@ and `current_user_can_bypass=pull_requests_only`.
 #### Queue verification and next-release fallback
 
 The lead first lands **one ordinary reviewed, signed PR through the active queue**, without
-requesting a release. Use an actor whose ruleset readback is `current_user_can_bypass=never`.
+requesting a release. This repository has no human actor whose readback is
+`current_user_can_bypass=never`: repository admins inherit the Maintain bypass. Instead, prove
+that the PR went through the queue: `isInMergeQueue` and the `merge_group` runs on its group SHA.
 After its seven required checks pass:
 
 ```sh
 gh api "repos/$repo/rulesets/$ruleset_id" --jq .current_user_can_bypass
 ordinary_head=$(gh pr view "$ordinary_pr" --repo "$repo" --json headRefOid --jq .headRefOid)
 ordinary_title=$(gh pr view "$ordinary_pr" --repo "$repo" --json title --jq .title)
-gh pr merge "$ordinary_pr" --repo "$repo" --squash --match-head-commit "$ordinary_head"
+gh api graphql -f id="$(gh pr view "$ordinary_pr" --repo "$repo" --json id --jq .id)" \
+  -f oid="$ordinary_head" -f query='mutation($id: ID!, $oid: GitObjectID!) {
+    enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $oid}) {
+      mergeQueueEntry { state position }
+    }
+  }'
+# gh pr merge would request auto-merge here, which this repository disables.
 gh run list --repo "$repo" --event merge_group \
   --json databaseId,workflowName,headSha,status,conclusion,url
 # Set group_sha to this PR's observed merge-group SHA, not its individual head.
