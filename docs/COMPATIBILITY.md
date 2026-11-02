@@ -93,16 +93,31 @@ and [lifecycle coverage](LIFECYCLE_BRANCH_RESUME.md).
 Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit
 `4999b98bd5`) is the minimum supported host version: set `collab.autoStart`
 ([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
-plain `omp`. The current engineering baseline is `v18.12.5` (`UPSTREAM.lock.json`) and the
+plain `omp`. The current engineering baseline is `v18.16.0` (`UPSTREAM.lock.json`) and the
 qualified host baseline is recorded in the release-generated matrix below, while the independent
 embedded browser client pin is `v18.12.6`.
 Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
 fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
 gateway update.
 
-v18.12.5 (`d5cd750e41fede277f9eb933455da92a0738915e`) keeps registry v1, the discovery file
+v18.16.0 (`650f3a108229ee11bf68ba3377f4e8c3391cd424`) keeps registry v1, the discovery file
 format and query contract, the relay protocol, and `collab.autoStart` behavior unchanged from
-v18.12.3: every relevant path is byte-identical between the two tags except `package.json`, which
+v18.12.5: collaboration settings, slash commands, and `collab-web` `app.tsx` and `lib/client.ts`
+are byte-identical, and `docs/collab.md` changes only table formatting.
+[can1357/oh-my-pi#17699](https://github.com/can1357/oh-my-pi/pull/17699) rewrites registry
+validation as schemas that accept the same discovery and snapshot fields, and
+[can1357/oh-my-pi#17704](https://github.com/can1357/oh-my-pi/pull/17704) moves the relay envelope
+helpers into `packages/wire/src/index.ts` with the same byte layout.
+[can1357/oh-my-pi#16682](https://github.com/can1357/oh-my-pi/pull/16682) keeps a dialog-backed ask
+pending across a host relay reconnect, so `inputRequired` may stay `true` through it;
+[can1357/oh-my-pi#16957](https://github.com/can1357/oh-my-pi/pull/16957) lets the host supersede
+queued streaming `message_update` frames, which the embedded client renders from each cumulative
+message; and [can1357/oh-my-pi#16936](https://github.com/can1357/oh-my-pi/pull/16936) rotates the
+room when a session moves to a sibling file, which the gateway sees as a session replacement. The
+remaining changes touch the CLI guest, the `collab-web` export viewer, and extension and TUI
+surfaces, none of which the gateway reads or sends.
+v18.12.5 (`d5cd750e41fede277f9eb933455da92a0738915e`) in turn kept these contracts unchanged from
+v18.12.3: every relevant path is byte-identical between those tags except `package.json`, which
 only the version bumps change, and `docs/extensions.md`, where
 [can1357/oh-my-pi#16361](https://github.com/can1357/oh-my-pi/pull/16361) documents GitLab MR
 references for the extension `ctx.annotations` diff source, which the gateway neither reads nor
@@ -124,7 +139,8 @@ Since v18.10.2, upstream
 serves the registry over native IPC with the same one-line JSON request and response, a 0600
 socket, overlong paths relocated under the owner-only `/tmp/omp-<euid>`, and same-user peers
 only; the gateway reads the published endpoint verbatim, so its queries are unchanged. No canary,
-candidate, or qualification is claimed for v18.12.5; the matrix below stays bound to v18.10.2.
+candidate, or qualification is claimed for v18.16.0; the release-generated matrix below is
+unchanged.
 As in v18.8.3, upstream
 [can1357/oh-my-pi#14714](https://github.com/can1357/oh-my-pi/pull/14714) stops mirroring frames
 while no guest is joined, and a generated `sessionName` may carry a title-card prefix

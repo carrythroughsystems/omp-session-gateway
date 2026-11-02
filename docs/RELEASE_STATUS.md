@@ -3196,6 +3196,22 @@ This is not a new release, native-device qualification, signed-candidate result,
 Published v0.8.0 and all historical records below retain their original evidence. Rolling back
 to v0.8.0 also restores its v18.4.2 embedded client; the two trees no longer share client bytes.
 
+## Engineering baseline v18.16.0 — source pins only
+
+On 2026-11-02 (#557), `scripts/upstream-pins.ts` derived the stock OMP v18.16.0 source pin
+`650f3a108229ee11bf68ba3377f4e8c3391cd424`, tree `3cccceb37ddce426b454d0abd6ede4e32e02e97f`, and
+the Darwin arm64 and Windows x64 native hashes from official npm tarballs after verifying
+registry integrity. Source review from v18.12.5 found registry v1, the discovery file format and
+socket paths, the relay protocol, and `collab.autoStart` unchanged: can1357/oh-my-pi#17699
+rewrites registry validation with the same accepted fields, #17704 moves the envelope helpers into
+`packages/wire/src/index.ts` with the same layout, #16682 keeps a dialog-backed ask (and
+`inputRequired`) across a host relay reconnect, #16957 supersedes queued streaming
+`message_update` frames that the embedded client renders cumulatively, and #16936 rotates the
+room when a session moves to a sibling file. The remaining changes touch the CLI guest, the
+`collab-web` export viewer, extension and TUI surfaces, and `package.json`; none changes what the
+gateway reads or sends. The embedded client stays at v18.12.6. No canary, candidate, campaign, or
+platform qualification is claimed; the published matrix above is unchanged.
+
 ## Engineering baseline v18.12.5 — source pins only
 
 On 2026-10-21 (#423), `scripts/upstream-pins.ts` derived the stock OMP v18.12.5 source pin

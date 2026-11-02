@@ -946,6 +946,42 @@ published v0.7.6 remains qualified on v18.8.9.
 
 ---
 
+**Engineering baseline update (2026-11-02):** Accept published mainline v18.16.0
+(`650f3a108229ee11bf68ba3377f4e8c3391cd424`, tree `3cccceb37ddce426b454d0abd6ede4e32e02e97f`)
+as the host engineering pin (#557), with registry v1 and minimum host `18.1.20` unchanged.
+`scripts/upstream-pins.ts` derived every pin. Relative to v18.12.5, `settings.ts`,
+`builtin-collaboration.ts`, and `collab-web` `app.tsx` and `lib/client.ts` are byte-identical and
+`docs/collab.md` changes only table formatting
+(`d846b4a6d9982c95179295963aea271ccb695234`), so the discovery file format, socket paths,
+registry v1, the relay protocol, and `collab.autoStart` behavior are unchanged.
+[can1357/oh-my-pi#17699](https://github.com/can1357/oh-my-pi/pull/17699)
+(merge `144bb8c05525efee9d3b15e52daa5350c7e321e0`) rewrites `registry.ts` discovery-file and
+snapshot validation as omptype schemas that accept the same fields and drop undeclared ones, and
+leaves the query request, response, and token check unchanged.
+[#17704](https://github.com/can1357/oh-my-pi/pull/17704)
+(merge `0fb0dbd3433de72db1d5d4574457d60b4b7bcdc8`) moves the relay envelope helpers into
+`packages/wire/src/index.ts` with the same `[4B uint32 BE peerId][sealed payload]` layout.
+[#16682](https://github.com/can1357/oh-my-pi/pull/16682)
+(merge `702d45b015a125e3feeb83cbf64ef1d1f16afe9a`) keeps a dialog-backed pending ask across a
+host relay reconnect, so `inputRequired` may stay `true` through that reconnect; the gateway
+already reads the field as the host's current boolean.
+[#16957](https://github.com/can1357/oh-my-pi/pull/16957)
+(`a0676523f916b1009378bd92ed718af807621734`) lets the host supersede queued `message_update`
+frames of one streaming message; the embedded v18.12.6 client renders each cumulative
+`event.message`, so it shows the same text from fewer updates.
+[#16936](https://github.com/can1357/oh-my-pi/pull/16936)
+(`735deb7cd65f84c5cc4061b6d18ffff86bc40a61`) rotates the room when a session moves to a sibling
+file, which the registry presents as an ordinary session replacement. The remaining changes touch
+the CLI guest, `collab-web` export viewer and job view, extension, TUI, and slash-command surfaces,
+and the version bumps in `package.json`; the gateway reads and sends none of them.
+`@oh-my-pi/pi-wire` 18.16.0 adds the envelope helpers and changes `tsp.ts`, and
+`@oh-my-pi/collab-web` stays 16.3.6; the embedded client keeps its v18.12.6 provenance and wire pin.
+
+This is source review only: no canary, candidate, or qualification is claimed for v18.16.0, and
+published v0.9.0 remains qualified on v18.12.5.
+
+---
+
 **Engineering baseline update (2026-10-21):** Accept published mainline v18.12.5
 (`d5cd750e41fede277f9eb933455da92a0738915e`, tree `1d19bf65af4446fa9bfda4ed0a7d09315b02d9c8`)
 as the host engineering pin (#423), with registry v1 and minimum host `18.1.20` unchanged.
