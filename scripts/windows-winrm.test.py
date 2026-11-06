@@ -1,6 +1,7 @@
 """Portable standard-library tests; no pywinrm, credentials, or network required."""
 import base64
 import contextlib
+import errno
 import io
 import json
 from pathlib import Path
@@ -38,6 +39,10 @@ class MaxRetryError(Exception):
         self.reason = reason
 
 
+class NewConnectionError(Exception):
+    pass
+
+
 def modules():
     protocol = types.ModuleType('winrm.protocol')
     protocol.Protocol = Transport
@@ -47,7 +52,7 @@ def modules():
     exceptions = types.ModuleType('winrm.exceptions')
     exceptions.InvalidCredentialsError, exceptions.WinRMTransportError = InvalidCredentialsError, WinRMTransportError
     urllib = types.ModuleType('urllib3.exceptions')
-    urllib.ProtocolError, urllib.MaxRetryError = ProtocolError, MaxRetryError
+    urllib.ProtocolError, urllib.MaxRetryError, urllib.NewConnectionError = ProtocolError, MaxRetryError, NewConnectionError
     return {'winrm.protocol': protocol, 'requests.exceptions': requests, 'winrm.exceptions': exceptions, 'urllib3.exceptions': urllib}
 
 
@@ -394,6 +399,29 @@ class WinrmFramingTests(unittest.TestCase):
                                              'password': 'synthetic-only', 'script': 'synthetic'})
             self.assertEqual(result['failure']['condition'], 'authentication')
             self.assertEqual(result['failure']['httpStatus'], status)
+
+    def test_refused_or_unreachable_connections_are_transport_conditions(self):
+        # urllib3 raises NewConnectionError from the socket error; requests wraps it in MaxRetryError.
+        for socket_error, condition in ((ConnectionRefusedError(errno.ECONNREFUSED, 'synthetic'), 'connection_reset'),
+                                        (OSError(errno.EHOSTUNREACH, 'synthetic'), 'connection_timeout'),
+                                        (OSError(errno.ENETUNREACH, 'synthetic'), 'connection_timeout')):
+            new_connection = NewConnectionError('synthetic')
+            new_connection.__cause__ = socket_error
+            with self.subTest(errno=socket_error.errno), \
+                    patch.object(Transport, 'open_shell', side_effect=ConnectionError(MaxRetryError(new_connection))):
+                result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                             'password': 'synthetic-only', 'script': 'synthetic', 'readOnly': True})
+            self.assertEqual(result['failure'], {'kind': 'transport', 'stage': 'connection', 'condition': condition,
+                                                 'httpStatus': None, 'disposition': 'not_started'})
+
+    def test_new_connection_wrapper_cannot_borrow_other_causes(self):
+        for cause in (LookupError('synthetic codec'), ValueError(ConnectionRefusedError())):
+            new_connection = NewConnectionError('synthetic')
+            new_connection.__cause__ = cause
+            with patch.object(Transport, 'open_shell', side_effect=ConnectionError(MaxRetryError(new_connection))):
+                result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator',
+                                             'password': 'synthetic-only', 'script': 'synthetic', 'readOnly': True})
+            self.assertEqual(result['failure']['kind'], 'helper')
 
 
 if __name__ == '__main__':

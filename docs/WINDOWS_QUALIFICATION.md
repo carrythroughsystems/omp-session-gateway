@@ -146,9 +146,13 @@ and command disposition. Exception types and status fields supply classification
 messages never do. Controller-authored product assertions remain `product`. Invalid credentials,
 encoding/import failures, malformed guest JSON, arbitrary guest failures, and unexplained process
 exit 143 remain `harness`. A recognized connection/reset/read timeout or retryable HTTP status
-during a declared read-only operation is `infra_transient`. Only a controller-owned deadline
-while its read-only connection probe is pending produces `probe_deadline`. A timer clipped by the
-execution deadline retains controller origin but produces `deadline_exceeded`, not a transient
+during a declared read-only operation is `infra_transient`. A refused connection, the peer's RST
+answering the SYN, reports `connection_reset`; an unreachable or down host or network reports
+`connection_timeout`. Both reach the helper as socket errors under urllib3's `NewConnectionError`
+inside requests' `MaxRetryError`, so a guest still booting toward its WinRM listener is retried
+within the admission and reconnect budgets instead of ending the lane. Only a controller-owned
+deadline while its read-only connection probe is pending produces `probe_deadline`. A timer
+clipped by the execution deadline retains controller origin but produces `deadline_exceeded`, not a transient
 probe failure; numeric exit/signal/timeout observations survive projection. Rejected, already-started
 mutations recheck execution expiry and retain unknown disposition. External cancellation and raw
 exit 143 cannot acquire probe-deadline authority. These are lane failure records, not campaign retry authority.
