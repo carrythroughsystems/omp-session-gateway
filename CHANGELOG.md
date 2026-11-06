@@ -6,6 +6,86 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.9.1] — 2026-11-06
+
+This release uses stock OMP v18.17.0 as its engineering baseline. The 23 changelog entries below record the changes since v0.9.0. Historical receipts do not qualify these bytes.
+
+### Changed
+
+- Move the toolchain and next release's Bun runtime floor to 1.4.4 for current OMP compatibility
+  and the brotli, HTTP/3 QPACK and compromised emSign trust-store fixes; preserve published
+  qualification.
+  `media:check` stays red until the README media is recaptured under 1.4.4 in a follow-up PR;
+  provenance is never hand-edited.
+- Refresh the README media with seeded Working and Idle activity on every directory row and
+  plain-language board copy, and re-render the social preview and banner from committed sources
+  (`bun run media:brand`) with the current repository and promise.
+- Redesign the public site around the product's real screens: a true-size phone capture in the
+  hero, the three-step flow as cropped details of the raw PWA captures, a what-runs-where
+  pipeline, the security invariants as a grid, on-page one-time setup with copy buttons, and a
+  version-free supported/qualified summary. Self-host Space Grotesk and JetBrains Mono latin
+  subsets as first-party site assets, stage the three directory captures at deploy time instead of
+  the composite board, and render the status page's lane table as cards on phones.
+- Run all seven required checks for merge groups and preserve pinned direct release-bot merges.
+- Move the OMP engineering baseline from v18.12.5 through v18.16.0 (#557) to published v18.17.0
+  (#559), with pins derived by `scripts/upstream-pins.ts`. Registry v1, the discovery file format
+  and socket paths, the relay protocol, and `collab.autoStart` are unchanged from v18.12.5, and the
+  embedded client stays at v18.12.6. Exact-version canary run 42239663270 passed all eleven Linux
+  stages and the eight supported Windows stages (`new-generation`, `fork`, and `branch-rewind`
+  skipped by design on Windows) as Tested evidence. No qualification is claimed; published v0.9.0
+  stays qualified on OMP v18.12.5.
+
+### Fixed
+
+- Require the Pixel's live tailnet VPN after every acceptance lock, Airplane and Doze cycle without
+  disturbing the measured browser; prove HTTPS reachability after the journey during equipment
+  restoration. Fail precisely before later stages if the path is lost, retaining private
+  boolean/timing evidence without automatic remedies.
+- Report the upstream canary's resolved OMP version, pre-flight failures, and Bun engine requirement
+  in summaries and failure issues, and expose successful scheduled runs correctly.
+- Recheck Windows launch and Pixel lifetimes, provider-response deadlines and attached-firewall
+  ownership at dispatch; bound development cleanup independently and retain exclusive Pixel
+  custody until restoration completes.
+- Keep directory coverage and launch feedback consistent through loading hosts, SSE keepalives,
+  terminal session states, and cancelled notification or resume launches; retain the mounted
+  generation on View-to-Control, preserve expired-route notices through unchanged snapshots,
+  and prevent delayed transitions from remounting disposed shells.
+- Wake and unlock Android, then send HOME before the published-byte smoke's installed-WebAPK
+  launch; re-launch once after ten seconds without extending the focus deadline, and retain
+  only bounded private activity, power, and keyguard evidence when focus never arrives.
+- Require alias-matched outbound clear acknowledgements before Android Push overlap recovery
+  re-arms using settled clear-only proofs, including removed fixture hosts. Retain typed delivery
+  timeouts and late sampling at actual execution expiry without changing local-timeout or GCM
+  attribution, preserve clear failure causes, and share standalone failure IDs with the runtime.
+- Tighten browser-evidence linting for child-block response reassignments and static string aliases,
+  and prove delayed-resume Hide reconciliation retains an unchanged-generation dismissal.
+- Preserve actionable private browser failures and original qualification errors when outcome
+  publication fails; bound Wi-Fi-cycle checkpoints by cancellation, the execution deadline and
+  30 seconds, retaining unknown mutation status until re-enable and restoring radios on failure.
+- Require readiness proof on execution-bearing passed qualification receipts, preserve controller
+  expiry attribution and abort causes in Push failures, and reject fractional readiness durations.
+- Stop every release-driver job binding mismatch with a durable diagnostic instead of re-planning
+  forever, and stream qualification output into bounded, byte-exact private tails.
+- Keep qualification preflight effect-free, retain Windows cleanup failures across recovery,
+  preserve Pixel cleanup-failure origins, prevent ambiguous BrowserStack record DELETE replay,
+  and restore the Pixel under a fresh owner.
+- Retain bounded private smoke-child output and original failure causes before release-driver
+  terminal evidence, and preserve nested Android command logs before removing smoke staging.
+  Keep public diagnostics sanitized and leave staging intact when diagnostic retention fails.
+- Let Android acceptance use a bounded top-level HTTPS health navigation of an owned tab when
+  the host drops ICMP, for example with macOS firewall stealth mode. Chrome's Local Network Access
+  blocks the same request from an opaque document. Retain which probe satisfied admission in
+  private evidence, preserve owned browser cleanup, and keep qualification preflights read-only
+  and ICMP-only.
+- Require the qualification Pixel to exempt Tailscale from Doze before qualification or smoke,
+  with read-only admission and explicit operator setup to keep forced Doze from dropping the VPN.
+- Prune older release-driver work checkouts after close and offer guarded dry-run/apply cleanup.
+- Keep thousands separators in generated public release quantities without changing stored evidence.
+- Generate release records on current main, refresh stale branches, and use smoke completion dates.
+  Keep generator reads, writes, and consumed-fragment deletions within the checkout.
+- Render OMP 18.17.0 `wait` message lists in View and Control with their senders and bodies
+  instead of an empty `← anyone` card; keep rendering older hosts' single messages (#559).
+
 ## [v0.9.0] — 2026-10-27
 
 This release uses stock OMP v18.12.5 as its engineering baseline. The 56 changelog entries below record the changes since v0.8.0. Historical receipts do not qualify these bytes.
