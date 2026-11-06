@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.9.1] — 2026-11-06
 
-This release uses stock OMP v18.17.0 as its engineering baseline. The 24 changelog entries below record the changes since v0.9.0. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.17.0 as its engineering baseline. The 25 changelog entries below record the changes since v0.9.0. Historical receipts do not qualify these bytes.
 
 ### Changed
 
@@ -88,6 +88,8 @@ This release uses stock OMP v18.17.0 as its engineering baseline. The 24 changel
 - Retry the Windows qualification lane's WinRM admission and read-only probes after a refused
   connection or an unreachable host while a fresh guest boots, instead of ending the lane as a
   `helper_failed` harness error (#565).
+- The background Push qualification lane reconnects the Tailscale VPN when the push socket stalls
+  after Airplane-mode recovery and before releasing the Pixel, avoiding device-side delays (#567).
 
 ## [v0.9.0] — 2026-10-27
 
