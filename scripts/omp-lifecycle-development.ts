@@ -107,6 +107,10 @@ async function attachViewAndControl(origin: string, label: string): Promise<void
   try {
     // Ephemeral context only; no traces, HAR, screenshots, recordings or browser-output forwarding.
     const context = await browser.newContext({ serviceWorkers: "block" });
+    // A fresh context opens the v0.9.0 first-run tray over the directory, which blocks the View
+    // click; record a finished introduction as the dashboard e2e fixtures do.
+    await context.addInitScript(() => localStorage.setItem("omp.sessions.first-run.v1",
+      JSON.stringify({ version: 1, step: "done", updatedAt: "2026-10-24T00:00:00.000Z" })));
     const page = await context.newPage();
     page.setDefaultTimeout(45_000);
     await page.goto(origin);
