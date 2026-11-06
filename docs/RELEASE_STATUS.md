@@ -3196,6 +3196,48 @@ This is not a new release, native-device qualification, signed-candidate result,
 Published v0.8.0 and all historical records below retain their original evidence. Rolling back
 to v0.8.0 also restores its v18.4.2 embedded client; the two trees no longer share client bytes.
 
+## Engineering baseline v18.17.0 — source pins only
+
+On 2026-11-06 (#559), `scripts/upstream-pins.ts` derived the stock OMP v18.17.0 source pin
+`75e7801e247d4e3263439d4cc08ccad60dc64bdd` and tree `e909b5cab080856f64d6d8629ee61be22866a3e5` into
+`UPSTREAM.lock.json`, plus the Darwin arm64 native hashes (tarball
+`d4170a673fd8148e97de4b305a3e9cb6f8104d9958caaf2de8829ea78ffb5c13`, `pi_natives.darwin-arm64.node`
+binary `c7ea1c80d3177ba15f5e69b81b2817b56e56465b96d5ce0293bc5c0f5294be5c` in `UPSTREAM.lock.json`)
+and the Windows x64 baseline native hashes (tarball
+`863d25d724ee3a46d67f138275a0cba07ec12c90e88fd40e04659e4cb08ba4d5`,
+`pi_natives.win32-x64-baseline.node` binary
+`cd21fd9ef2a411a045655bdc3be3c3879761e638ded960a13791125edcc7ac63` in
+`scripts/windows-qualification-pins.json`) from official npm tarballs after verifying registry
+integrity. Source review from v18.16.0 found registry v1, the discovery file format and socket
+paths, the relay protocol, and `collab.autoStart` unchanged:
+`packages/coding-agent/src/collab/host.ts`, `registry.ts`, `settings.ts`,
+`packages/coding-agent/src/slash-commands/builtin-collaboration.ts`, `docs/collab.md`,
+`packages/collab-web/src/app.tsx` and `lib/client.ts`, and `crates/pi-natives/src/ipc/` (`mod.rs`,
+`unix.rs`, `windows.rs`) are byte-identical;
+[can1357/oh-my-pi#17960](https://github.com/can1357/oh-my-pi/pull/17960) and
+[#17997](https://github.com/can1357/oh-my-pi/pull/17997) add extension transcript presenters and
+route the CLI guest in `collab/guest.ts` through `ctx.setCollabGuest()`,
+[#16476](https://github.com/can1357/oh-my-pi/pull/16476) adds an extension link browser,
+[#17961](https://github.com/can1357/oh-my-pi/pull/17961) exposes `getShortcutConflict` and
+keybindings to extensions, [#17848](https://github.com/can1357/oh-my-pi/pull/17848) adds an
+in-session pin indicator and `/unpin` while leaving `/collab`, `/join`, and `/leave` unchanged, and
+upstream direct commits `488cafa0e0`, `fcdda683f1`, `a55b04a332`, and `19ef041ec5` plus version
+bumps touch `packages/wire/src/shell-trace.ts`, `shell-viz.ts`, `index.ts`, and `tsp.ts`,
+`packages/natives/test/ipc.test.ts`, and `package.json`, none of which changes what the gateway
+reads or sends. Upstream direct commit `adcb8800b6` changes a host `wait` tool result's
+`details.waited` from one message object to a list of messages (`null` still means timed out) and
+updates `collab-web` `tool-render/tools/irc.tsx` (embedded-client rendering only, fixed by a
+carried local patch in the embedded `irc`/`wait` renderer recorded in
+`packages/collab-client/upstream/UPSTREAM.json` that accepts both the list and the older single
+message). Exact-version canary run
+[42239663270](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42239663270)
+passed on 2026-11-06 for stock OMP 18.17.0 across all eleven Linux stages (`prepare`, `publish`,
+`snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`,
+`continue`, `unregister`) and the eight supported Windows stages (with `new-generation`, `fork`,
+and `branch-rewind` skipped by design on Windows) as Tested evidence. The embedded client stays at
+v18.12.6. No candidate, campaign, or platform qualification is claimed; the published matrix above
+is unchanged.
+
 ## Engineering baseline v18.16.0 — source pins only
 
 On 2026-11-02 (#557), `scripts/upstream-pins.ts` derived the stock OMP v18.16.0 source pin

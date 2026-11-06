@@ -55,6 +55,48 @@ describe("tool renderers across supported OMP releases", () => {
     expect(html).not.toContain("tv-out-title");
   });
 
+  test("renders every OMP 18.17.0 wait message with its senders and bodies", () => {
+    const html = render({
+      name: "wait",
+      args: {},
+      result: {
+        content: [{ type: "text", text: "[42] Worker: ready\n\n[43] Reviewer: looks good" }],
+        details: {
+          op: "wait",
+          waited: [
+            { id: "42", from: "Worker", to: "Main", body: "ready", ts: 0 },
+            { id: "43", from: "Reviewer", to: "Main", body: "looks good", ts: 1, replyTo: "41" },
+          ],
+        },
+      },
+    });
+    expect(html).toContain('<span class="tv-pattern">← Worker, Reviewer</span>');
+    expect(html).toContain('<span class="tv-muted">2 messages</span>');
+    expect(html).toContain("← Worker");
+    expect(html).toContain("← Reviewer");
+    expect(html).toContain("ready");
+    expect(html).toContain("looks good");
+    expect(html).toContain('<span class="tv-badge">reply</span>');
+    expect(html).not.toContain("tv-out-title");
+  });
+
+  test("renders a one-message wait list with its sender and body", () => {
+    const html = render({
+      name: "wait",
+      args: {},
+      result: {
+        content: [{ type: "text", text: "[42] Worker: ready" }],
+        details: {
+          op: "wait",
+          waited: [{ id: "42", from: "Worker", to: "Main", body: "ready", ts: 0 }],
+        },
+      },
+    });
+    expect(html).toContain('<span class="tv-pattern">← Worker</span>');
+    expect(html).toContain('<span class="tv-muted">ready</span>');
+    expect(html).not.toContain("tv-out-title");
+  });
+
   test("renders settled wait job output", () => {
     const html = render({
       name: "wait",

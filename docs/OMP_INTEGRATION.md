@@ -12,7 +12,7 @@ requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact login allowlist, and th
 | Surface | Pin or contract | Notes |
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
-| Engineering host baseline | `v18.16.0` (`650f3a108229ee11bf68ba3377f4e8c3391cd424`) | Exact OMP source and tree (`3cccceb37ddce426b454d0abd6ede4e32e02e97f`) in `UPSTREAM.lock.json` |
+| Engineering host baseline | `v18.17.0` (`75e7801e247d4e3263439d4cc08ccad60dc64bdd`) | Exact OMP source and tree (`e909b5cab080856f64d6d8629ee61be22866a3e5`) in `UPSTREAM.lock.json` |
 | Embedded browser client | `v18.12.6` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.12.6`) | Independent provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); includes upstream render coalescing and streaming-tail Markdown ([#14728](https://github.com/can1357/oh-my-pi/pull/14728)), linear-time Markdown/math lexing ([#13961](https://github.com/can1357/oh-my-pi/pull/13961), [#14667](https://github.com/can1357/oh-my-pi/pull/14667)), idle agent-drawer polling shutdown, and eval-output rendering. Only pure TypeScript parser sources are vendored, without pi-utils/pi-natives packages. |
 | Gateway runtime | Bun `1.4.4` | Required runtime for the CLI, daemon, and release archives |
 
@@ -24,7 +24,7 @@ For the current published release and its qualified hardware matrix, see
 Under registry v1, the gateway validates the fields it reads and ignores unknown additive fields
 (ADR-028). Any snapshot naming prompt, question, options, prefill, answer, requestId, or count is
 refused. The minimum host version stayed unchanged when the engineering baseline later moved to
-v18.16.0.
+v18.17.0.
 
 Hosts from OMP `18.2.9` onward (upstream
 [PR #12844](https://github.com/can1357/oh-my-pi/pull/12844)) may include optional boolean `busy`
