@@ -10,6 +10,228 @@ import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qua
 import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
 import { notificationTopicDigest } from "./android-notification.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
+const WIFI_CONNECTIVITY = "Current Networks:\n  NetworkAgentInfo{ ni{WIFI CONNECTED} lastValidated }";
+const VPN_CONNECTIVITY = `${WIFI_CONNECTIVITY}\n  NetworkAgentInfo{ ni{VPN CONNECTED} SYNTHETIC-PRIVATE-TRANSPORT-NETWORK }`;
+const DISCONNECT_VPN = "shell am broadcast -a com.tailscale.ipn.DISCONNECT_VPN -n com.tailscale.ipn/.IPNReceiver";
+const CONNECT_VPN = "shell am broadcast -a com.tailscale.ipn.CONNECT_VPN -n com.tailscale.ipn/.IPNReceiver";
+
+test.each(["connected", "settling", "cellular", "vpn-absent", "remedy", "stalled", "vpn-stalled", "no-wifi"] as const)(
+  "567 VPN recovery uses one bounded reconnect for the Wi-Fi push socket (%s)", async scenario => {
+    let time = 0, reads = 0, restored = false;
+    const events: string[] = [], caps: number[] = [];
+    const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+    const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
+      const command = args.join(" "); events.push(command);
+      expect(options?.timeoutMs).toBeGreaterThan(0);
+      expect(options?.timeoutMs).toBeLessThanOrEqual(10_000);
+      if (command === "shell dumpsys activity service GcmService") {
+        reads++; caps.push(options!.timeoutMs!);
+        const connected = ["connected", "cellular", "vpn-absent", "vpn-stalled"].includes(scenario) ||
+          scenario === "settling" && reads >= 4 || scenario === "remedy" && restored;
+        const network = scenario === "cellular" && !restored ? "VPN(17) [MOBILE(0)]" :
+          scenario === "vpn-absent" || scenario === "vpn-stalled" ? "WiFi(1)" : "VPN(17) [WiFi(1)]";
+        return `DeviceID: SYNTHETIC-PRIVATE-TRANSPORT-DEVICE\nIs client connected: ${connected}\n` +
+          `In-use by client: GcmNetwork{123 ${network} SYNTHETIC-PRIVATE-TRANSPORT-NETWORK}\n` +
+          "Received SYNTHETIC-PRIVATE-TRANSPORT-MESSAGE";
+      }
+      if (command === CONNECT_VPN) restored = true;
+      if (command === "shell dumpsys connectivity") return scenario === "vpn-stalled" ||
+        scenario === "vpn-absent" && !restored ? WIFI_CONNECTIVITY : VPN_CONNECTIVITY;
+      return "";
+    });
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.now = () => time;
+      runtime.pause = async milliseconds => { events.push(`pause ${milliseconds}`); time += milliseconds; };
+      runtime.beforeEffect = async () => { events.push("checkpoint"); };
+      const result = await runtime.pushTransport!({ wifi: scenario !== "no-wifi", mobile: true });
+      const stalled = scenario === "stalled" || scenario === "vpn-stalled";
+      expect(result).toBe(!stalled);
+      expect(JSON.stringify(result)).not.toContain("SYNTHETIC-PRIVATE-TRANSPORT");
+      expect(events.filter(event => event === "shell dumpsys connectivity")).toHaveLength(reads);
+      expect(events.some(event => event.startsWith("shell svc") || event.includes("airplane-mode"))).toBe(false);
+      const remedy = ["cellular", "vpn-absent", "remedy", "stalled", "vpn-stalled"].includes(scenario);
+      if (remedy) {
+        expect(events.slice(events.indexOf("checkpoint"), events.indexOf("checkpoint") + 7)).toEqual([
+          "checkpoint", DISCONNECT_VPN, "pause 3000", "checkpoint", CONNECT_VPN,
+          "shell dumpsys activity service GcmService", "shell dumpsys connectivity",
+        ]);
+        expect(events.filter(event => event === DISCONNECT_VPN)).toHaveLength(1);
+        expect(events.filter(event => event === CONNECT_VPN)).toHaveLength(1);
+        expect(time).toBe(stalled ? 63_000 : 18_000);
+        expect(reads).toBe(stalled ? 120 : 31);
+        expect(caps[29]).toBe(500);
+        if (stalled) expect(caps.at(-1)).toBe(500);
+      } else {
+        expect(events.some(event => event === "checkpoint" || event.includes("broadcast"))).toBe(false);
+        expect(reads).toBe(scenario === "no-wifi" ? 0 : scenario === "settling" ? 4 : 1);
+        expect(time).toBe(scenario === "settling" ? 1_500 : 0);
+        if (scenario === "no-wifi") expect(select).not.toHaveBeenCalled();
+      }
+    } finally { adb.mockRestore(); select.mockRestore(); }
+  });
+
+test("567 VPN recovery accepts a socket directly on Wi-Fi when the VPN is present", async () => {
+  const events: string[] = [];
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => {
+    events.push(args.join(" "));
+    if (args.join(" ") === "shell dumpsys connectivity") return VPN_CONNECTIVITY;
+    return "Is client connected: true\nIn-use by client: GcmNetwork{409 WiFi(1)}";
+  });
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.now = () => 0;
+    runtime.pause = async () => { events.push("pause"); };
+    runtime.beforeEffect = async () => { events.push("checkpoint"); };
+    expect(await runtime.pushTransport!({ wifi: true, mobile: true })).toBe(true);
+    expect(events).toEqual(["shell dumpsys activity service GcmService", "shell dumpsys connectivity"]);
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
+test.each([
+  ["duplicate connection", "Is client connected: true\nIs client connected: false", "In-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}"],
+  ["connection suffix", "Is client connected: true\nIs client connected_legacy: true", "In-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}"],
+  ["connection spelling", "IS CLIENT CONNECTED: true", "In-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}"],
+  ["missing network", "Is client connected: true", ""],
+  ["duplicate network", "Is client connected: true", "In-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}\nIn-use by client: GcmNetwork{2 MOBILE(0)}"],
+  ["network spelling", "Is client connected: true", "IN-USE BY CLIENT: GcmNetwork{1 VPN(17) [WiFi(1)]}"],
+  ["network suffix", "Is client connected: true", "In-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}\nIn-use by client_legacy: GcmNetwork{2 MOBILE(0)}"],
+  ["network trailing data", "Is client connected: true", "In-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]} private-trailer"],
+])("567 VPN recovery rejects ambiguous or unsupported GCM flags (%s)", async (_label, connection, network) => {
+  let time = 0, effects = 0;
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) =>
+    args.join(" ") === "shell dumpsys connectivity" ? VPN_CONNECTIVITY :
+      `DeviceID: SYNTHETIC-PRIVATE-TRANSPORT-DEVICE\n${connection}\n${network}`);
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.now = () => time; runtime.pause = async milliseconds => { time += milliseconds; };
+    runtime.beforeEffect = async () => { effects++; };
+    expect(await runtime.pushTransport!({ wifi: true, mobile: false })).toBe(false);
+    expect(time).toBe(63_000); expect(effects).toBe(2);
+  } finally { adb.mockRestore(); select.mockRestore(); }
+});
+
+test.each([["initial", "gcm"], ["initial", "vpn"], ["reconnect", "gcm"], ["reconnect", "vpn"]] as const)(
+  "567 VPN recovery never accepts output after its %s window (%s)", async (stage, lateRead) => {
+    let time = 0, restored = false, effects = 0, late = false;
+    const caps: number[] = [];
+    const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+    const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
+      if (args.join(" ") === CONNECT_VPN) restored = true;
+      if (args[1] !== "dumpsys") return "";
+      caps.push(options!.timeoutMs!);
+      const vpn = args.join(" ") === "shell dumpsys connectivity";
+      if (!late && vpn === (lateRead === "vpn") && (stage === "initial" || restored)) {
+        time = stage === "initial" ? 15_000 : 63_000; late = true;
+      }
+      if (vpn) return VPN_CONNECTIVITY;
+      return `Is client connected: ${stage === "initial" || restored}\nIn-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}`;
+    });
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.now = () => time; runtime.pause = async milliseconds => { time += milliseconds; };
+      runtime.beforeEffect = async () => { effects++; };
+      expect(await runtime.pushTransport!({ wifi: true, mobile: false })).toBe(stage === "initial");
+      expect(effects).toBe(2);
+      expect(caps.every(cap => cap > 0 && cap <= 10_000)).toBe(true);
+    } finally { adb.mockRestore(); select.mockRestore(); }
+  });
+
+test.each(["read", "mutation", "checkpoint", "cancelled", "expired", "typed"] as const)(
+  "567 push transport preserves %s errors without retaining GCM identifiers", async stage => {
+    let time = 0, reads = 0;
+    const controller = new AbortController(), raw = new deviceOperations.AndroidAdbError(23);
+    const typed = new QualificationFailure({ id: 40, lane: "androidPushCleanup", step: "containment",
+      reason: "invalid_evidence", class: "harness", elapsedMs: 0, operation: "unknown", observations: {} });
+    const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 41 };
+    const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+    const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => {
+      if (args.join(" ") === "shell dumpsys connectivity") return VPN_CONNECTIVITY;
+      if (args[1] === "dumpsys") {
+        if (++reads > 1 && stage === "read") throw raw;
+        if (stage === "cancelled") controller.abort(new Error("synthetic transport cancellation"));
+        if (stage === "expired") execution.deadline = 0;
+        return "DeviceID: SYNTHETIC-PRIVATE-TRANSPORT-DEVICE\nIs client connected: false\n" +
+          "In-use by client: GcmNetwork{123 VPN(17) [WiFi(1)] SYNTHETIC-PRIVATE-TRANSPORT-NETWORK}\n" +
+          "Received SYNTHETIC-PRIVATE-TRANSPORT-MESSAGE";
+      }
+      if (stage === "mutation") throw raw;
+      return "";
+    });
+    try {
+      const runtime = createAndroidPushRuntime(identity, { execution });
+      runtime.now = () => time; runtime.pause = async milliseconds => { time += milliseconds; };
+      runtime.beforeEffect = async () => {
+        if (stage === "checkpoint") throw raw;
+        if (stage === "typed") throw typed;
+      };
+      const error = await runtime.pushTransport!({ wifi: true, mobile: false }).catch(error => error);
+      if (stage === "cancelled" || stage === "expired") {
+        expect(normalizeQualificationFailures(error)).toMatchObject([{ lane: "androidPush", reason: "deadline_exceeded" }]);
+      } else expect(error).toBe(stage === "typed" ? typed : raw);
+      expect(JSON.stringify(privateQualificationFailureDiagnostic(error))).not.toContain("SYNTHETIC-PRIVATE-TRANSPORT");
+      expect(normalizeQualificationFailures(error).some(failure => failure.lane === "rigReadiness")).toBe(false);
+    } finally { adb.mockRestore(); select.mockRestore(); }
+  });
+
+test.each([false, true])("567 VPN recovery cleanup checks only a non-Airplane Wi-Fi baseline (mobile=%s)", async mobile => {
+  const restore = spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined);
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockResolvedValue(VPN_CONNECTIVITY);
+  try {
+    for (const [wifi, airplane] of [[true, false], [false, false], [true, true]] as const) {
+      const baseline: PushDeviceBaseline = { wifi, mobile, airplane, forcedDoze: false, batteryOverride: false,
+        awake: true, locked: false, webApkTask: false, chromeNotificationsAllowed: true, webApkNotificationsAllowed: true };
+      const runtime = createAndroidPushRuntime(identity), events: string[] = [];
+      expect(runtime.pushTransport).toBeFunction();
+      runtime.pushTransport = async target => {
+        events.push("transport"); expect(target).toEqual({ wifi, mobile }); return false;
+      };
+      restore.mockImplementation(async () => { events.push("radios"); });
+      adb.mockImplementation(async (_serial, args, options) => {
+        events.push("vpn"); expect(args).toEqual(["shell", "dumpsys", "connectivity"]);
+        expect(options?.timeoutMs).toBeGreaterThan(0); expect(options?.timeoutMs).toBeLessThanOrEqual(10_000);
+        return VPN_CONNECTIVITY;
+      });
+      runtime.device = async () => { events.push("baseline"); return baseline; };
+      await runtime.cleanup("network", { epoch: "synthetic", device: baseline } as AndroidPushProgress);
+      expect(events).toEqual(wifi && !airplane ? ["radios", "transport", "vpn", "baseline"] : ["radios", "baseline"]);
+    }
+  } finally { adb.mockRestore(); select.mockRestore(); restore.mockRestore(); }
+});
+
+test.each([true, false])("567 VPN recovery cleanup requires the VPN to be back (present=%s)", async present => {
+  const restore = spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined);
+  const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+  const adb = spyOn(deviceOperations, "runAdb").mockResolvedValue(present ? VPN_CONNECTIVITY : WIFI_CONNECTIVITY);
+  try {
+    const runtime = createAndroidPushRuntime(identity), events: string[] = [];
+    const baseline = { wifi: true, mobile: true, airplane: false } as PushDeviceBaseline;
+    runtime.pushTransport = async () => { events.push("transport"); return present; };
+    runtime.device = async () => { events.push("baseline"); return baseline; };
+    const cleanup = runtime.cleanup("network", { device: baseline } as AndroidPushProgress);
+    if (present) await cleanup;
+    else await expect(cleanup).rejects.toThrow("Tailscale VPN was not restored after push transport recovery");
+    expect(adb).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(present ? ["transport", "baseline"] : ["transport"]);
+  } finally { adb.mockRestore(); select.mockRestore(); restore.mockRestore(); }
+});
+
+test.each(["adb", "execution"] as const)("567 network cleanup retains push transport %s failures", async stage => {
+  const restore = spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined);
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    const error = stage === "adb" ? new deviceOperations.AndroidAdbError(23) :
+      new QualificationFailure({ id: 1, lane: "androidPush", step: "network_verified", reason: "deadline_exceeded",
+        class: "harness", elapsedMs: 0, operation: "unknown", observations: { controllerDeadline: true } });
+    runtime.pushTransport = async () => { throw error; };
+    runtime.device = async () => { throw new Error("baseline read after failed transport"); };
+    const baseline = { wifi: true, mobile: true, airplane: false } as PushDeviceBaseline;
+    await expect(runtime.cleanup("network", { device: baseline } as AndroidPushProgress)).rejects.toBe(error);
+  } finally { restore.mockRestore(); }
+});
 
 test.each(["connected", "recovered", "disconnected"] as const)("GCM readiness uses one bounded Wi-Fi remedy when %s", async scenario => {
   let time = 0, reads = 0;
@@ -106,6 +328,7 @@ test.each(["checkpoint-bound", "execution-deadline", "cancelled", "rejected"] as
     const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => {
       const command = args.join(" "); commands.push(command);
       if (command === "shell dumpsys activity service GcmService") return "Is client connected: false\nReconnect Scheduler Alarm: OFF";
+      if (command === "shell dumpsys connectivity") return VPN_CONNECTIVITY;
       if (command === "shell svc wifi disable") wifi = false;
       if (command === "shell svc wifi enable") wifi = true;
       return "";
@@ -133,6 +356,8 @@ test.each(["checkpoint-bound", "execution-deadline", "cancelled", "rejected"] as
         if (stage === "cancelled") cancellation = setTimer(() => controller.abort(raw), 20);
         await new Promise<void>(() => {});
       };
+      // Isolate gcmReadiness's checkpoint/cleanup interplay; pushTransport has its own tests.
+      runtime.pushTransport = async () => true;
       runtime.device = async () => ({ ...baseline, wifi });
       const started = performance.now();
       const error = await Promise.race([

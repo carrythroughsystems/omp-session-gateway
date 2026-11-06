@@ -342,6 +342,14 @@ destination page. A missing or ambiguous credential surface still fails while th
   enables mobile data only after Wi-Fi validates: otherwise mobile data validates first, the socket
   opens there, and once Wi-Fi becomes the default network it holds every push until its next
   heartbeat (18.6 minutes on the 2026-09-29 run), which failed that attempt's post-recovery clear.
+  Leaving Airplane after the cellular sub-phase can stall Play Services' path through the Tailscale
+  VPN over Wi-Fi for minutes: on 2026-11-06 it stalled for 11.5 minutes and affected 4 of 13
+  faithful cellular → Airplane → Wi-Fi cycles. A Wi-Fi re-association did not clear it; a VPN
+  reconnect did.
+  Before each Wi-Fi delivery wait, and when cleanup restores Wi-Fi, the lane waits up to 15 seconds
+  for the push socket to connect on Wi-Fi with the VPN present. Otherwise it reconnects the
+  Tailscale VPN once and waits up to 45 seconds. Cleanup fails if the VPN is not back; the delivery
+  wait remains the verdict.
 - A positive control proves the seven historical browser sinks plus notification title/body/data
   are detectable; real launch material stays in page memory during the sweep. URL/history, DOM,
   and resource timings are included. On macOS, `plutil` must confirm both LaunchAgent streams are
