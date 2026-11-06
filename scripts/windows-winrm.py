@@ -14,13 +14,14 @@ from urllib.parse import quote
 try:
     from winrm.protocol import Protocol
     from requests.exceptions import ConnectTimeout, ReadTimeout, ConnectionError as RequestsConnectionError
-    from urllib3.exceptions import ProtocolError, MaxRetryError
+    from urllib3.exceptions import ProtocolError, MaxRetryError, NewConnectionError
     from winrm.exceptions import InvalidCredentialsError, WinRMTransportError
     IMPORT_ERROR = None
 except ImportError as error:
     # Import/encoding faults are helper failures, never transport evidence.
     IMPORT_ERROR = error
-    ConnectTimeout = ReadTimeout = RequestsConnectionError = ProtocolError = MaxRetryError = InvalidCredentialsError = WinRMTransportError = ()
+    ConnectTimeout = ReadTimeout = RequestsConnectionError = ProtocolError = MaxRetryError = NewConnectionError = ()
+    InvalidCredentialsError = WinRMTransportError = ()
 
 # The remote command line is constant. The script and its input travel on the encrypted
 # WinRS input stream, not -EncodedCommand, environment variables, or temporary scripts.
@@ -113,22 +114,30 @@ def failure_detail(error, stage, disposition):
     status = getattr(error, 'code', None)
     status = status if type(status) is int and 100 <= status <= 599 else None
     kind, condition = 'helper', 'helper_failure'
+    socket_condition = connection_failure(error)
     if isinstance(error, InvalidCredentialsError) or (isinstance(error, WinRMTransportError) and status in (401, 403)):
         kind, condition = 'transport', 'authentication'
     elif isinstance(error, ConnectTimeout):
         kind, condition = 'transport', 'connection_timeout'
     elif isinstance(error, ReadTimeout):
         kind, condition = 'transport', 'read_timeout'
-    elif connection_reset(error):
-        kind, condition = 'transport', 'connection_reset'
+    elif socket_condition is not None:
+        kind, condition = 'transport', socket_condition
     elif isinstance(error, WinRMTransportError) and (status == 429 or (status is not None and status >= 500)):
         kind, condition = 'transport', 'retryable_http'
     return {'kind': kind, 'stage': stage, 'condition': condition,
             'httpStatus': status, 'disposition': disposition}
 
 
-def connection_reset(error):
-    """requests/urllib3 wrap socket resets in exception args, never classify their text."""
+# A refused attempt is the peer's RST answering the SYN, the same signal as a reset. An unreachable
+# or down host or network is a connection attempt that never completed, which a booting or
+# rebooting guest produces before its WinRM listener is reachable.
+RESET_ERRNOS = {errno.ECONNRESET, errno.ECONNREFUSED}
+UNREACHABLE_ERRNOS = {getattr(errno, name) for name in ('EHOSTUNREACH', 'ENETUNREACH', 'EHOSTDOWN') if hasattr(errno, name)}
+
+
+def connection_failure(error):
+    """requests/urllib3 wrap socket errors in exception args and causes; never classify their text."""
     pending, seen = [error], set()
     for _ in range(16):
         if not pending:
@@ -137,10 +146,14 @@ def connection_reset(error):
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, ConnectionResetError) or (isinstance(current, OSError) and current.errno == errno.ECONNRESET):
-            return True
+        if isinstance(current, (ConnectionResetError, ConnectionRefusedError)) or (
+                isinstance(current, OSError) and current.errno in RESET_ERRNOS):
+            return 'connection_reset'
+        if isinstance(current, OSError) and current.errno in UNREACHABLE_ERRNOS:
+            return 'connection_timeout'
         if not (isinstance(current, ConnectionError) or isinstance(current, RequestsConnectionError) or
-                isinstance(current, ProtocolError) or isinstance(current, MaxRetryError)):
+                isinstance(current, ProtocolError) or isinstance(current, MaxRetryError) or
+                isinstance(current, NewConnectionError)):
             continue
         nested = list(current.args)
         if current.__cause__ is not None:
@@ -150,7 +163,7 @@ def connection_reset(error):
         if isinstance(current, MaxRetryError):
             nested.append(current.reason)
         pending.extend(item for item in nested if isinstance(item, BaseException))
-    return False
+    return None
 
 
 def main(request=None):
