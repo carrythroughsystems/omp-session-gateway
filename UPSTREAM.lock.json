@@ -1,14 +1,14 @@
 {
   "$schema": "./schemas/upstream-lock.schema.json",
   "status": "pinned-main",
-  "observedAt": "2026-11-02",
+  "observedAt": "2026-11-06",
   "repository": "https://github.com/can1357/oh-my-pi",
-  "tag": "v18.16.0",
-  "commit": "650f3a108229ee11bf68ba3377f4e8c3391cd424",
-  "packageVersion": "18.16.0",
+  "tag": "v18.17.0",
+  "commit": "75e7801e247d4e3263439d4cc08ccad60dc64bdd",
+  "packageVersion": "18.17.0",
   "packageVersions": {
-    "@oh-my-pi/pi-coding-agent": "18.16.0",
-    "@oh-my-pi/pi-wire": "18.16.0",
+    "@oh-my-pi/pi-coding-agent": "18.17.0",
+    "@oh-my-pi/pi-wire": "18.17.0",
     "@oh-my-pi/collab-web": "16.3.6"
   },
   "bunVersion": "1.4.4",
@@ -45,9 +45,9 @@
     "The embedded client keeps its collab-web provenance and npm pi-wire pin at v18.4.2. Upstream collab-web at v18.5.1 differs from v18.4.2 only in its changelog and the transcript/math.ts Markdown performance changes first shipped in v18.4.12; this host-only baseline update does not import them. Client provenance and local modifications remain recorded independently in packages/collab-client/upstream/UPSTREAM.json.",
     "scripts/upstream-pins.ts derived the tag, commit, tree, package versions, and both native pins. The Darwin arm64 native hashes identify the official 18.5.1 npm tarball and its pi_natives.darwin-arm64.node payload; the tarball matched the registry sha512 integrity and sha1 shasum before hashing. These measured source-build inputs are not a qualification result. The script requires every relevant path to exist at the tag: collab settings live in packages/coding-agent/src/collab/settings.ts, and the earlier packages/coding-agent/src/config/settings-schema.ts entry named a file upstream deleted before v18.4.2."
   ],
-  "tree": "3cccceb37ddce426b454d0abd6ede4e32e02e97f",
+  "tree": "e909b5cab080856f64d6d8629ee61be22866a3e5",
   "darwinArm64Native": {
-    "tarballSha256": "7a910be03a22d4540c98398a53ddbe1b758a8d90cb720ffbee3e74dd464b262a",
-    "binarySha256": "7511776f8bc005b739e984315fbedeaae05ab9ea809fee6082a87eef9608553d"
+    "tarballSha256": "d4170a673fd8148e97de4b305a3e9cb6f8104d9958caaf2de8829ea78ffb5c13",
+    "binarySha256": "c7ea1c80d3177ba15f5e69b81b2817b56e56465b96d5ce0293bc5c0f5294be5c"
   }
 }
