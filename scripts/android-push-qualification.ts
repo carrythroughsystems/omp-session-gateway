@@ -260,6 +260,8 @@ export interface AndroidPushRuntime {
   permission(value: "granted" | "denied" | "default"): Promise<void>;
   doze(enabled: boolean): Promise<void>;
   network(value: PushNetwork): Promise<boolean>;
+  /** Best-effort Wi-Fi push socket recovery; delivery remains the verdict. */
+  pushTransport?(target: { wifi: boolean; mobile: boolean }): Promise<boolean>;
   sinks(epoch: string): Promise<Record<string, boolean | number>>;
   cleanup(step: PushCleanupStep, progress: AndroidPushProgress): Promise<void>;
 }
@@ -1093,6 +1095,8 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       await attempt("network_verified", async () => {
         // Each push wait here follows a radio change, so it allows the recovery window.
         if (!await runtime.network("wifi")) throw new Error("Android Push Wi-Fi tailnet path unavailable");
+        // The 2026-11-06 Airplane recovery stalled the VPN's Wi-Fi push socket for 11.5 minutes.
+        await runtime.pushTransport?.({ wifi: true, mobile: true });
         await delivery("private", "attention", true, PUSH_RECOVERY_MS); await clear(PUSH_RECOVERY_MS);
         const cellular = await runtime.network("cellular");
         if (cellular) {
@@ -1110,6 +1114,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         }
         if (offlineWindow !== undefined) await runtime.deliveryTelemetry?.(offlineWindow);
         if (!await runtime.network("wifi")) throw new Error("Android Push restored Wi-Fi tailnet path unavailable");
+        await runtime.pushTransport?.({ wifi: true, mobile: true });
         // Restoring the WebAPK may replay its subscription; that is not the original send.
         const restoredWindow = await runtime.beginDeliveryTelemetry?.(activePhase);
         await delivery("private", "attention", false, PUSH_RECOVERY_MS, restoredWindow);

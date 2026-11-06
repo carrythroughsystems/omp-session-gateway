@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { parsePushConfigResponse, parseSessionListResponse } from "../packages/protocol/src/validation.ts";
 import { PUSH_API_VERSION, type PushDetailLevel, type SessionMetadata } from "../packages/protocol/src/types.ts";
-import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget,
+import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget, parseAndroidVpnNetwork,
   runAdb, wakeAndroidDisplay, unlockAndroidKeyguard, showAndroidPinBouncer, type AndroidAdbCommand, type AndroidChromeDriver, type AndroidExecution } from "./android-device.ts";
 import { closeWebApk, openWebApk, requireWebApk, webApkTasks } from "./android-webapk.ts";
 import { readAndroidUi, findAndroidNotification, tapAndroidNotification, readAndroidNotificationRecords, notificationMatchesDigest, trackUnchangedNotificationPost, NotificationOverlapError, type AndroidUiNode, type NotificationExpectation } from "./android-notification.ts";
@@ -56,6 +56,19 @@ export function qualificationPushAliasFor(session: SessionMetadata, candidates: 
 export function rethrowPushSafetyFailure(error: unknown): void {
   if (pixelUnrestored(error) || !everyError(error, nested =>
     !(nested instanceof QualificationFailure) && !(nested instanceof NotificationOverlapError))) throw error;
+}
+
+/** Closed values only: never retain GCM identifiers, network descriptions or the raw dump. */
+function parseGcmTransport(dump: string): { connected: boolean | undefined; wifi: boolean } {
+  // Candidate detection is broader than the accepted spelling: duplicates and variants fail closed.
+  const flags = [...dump.matchAll(/^[^\S\r\n]*Is[^\S\r\n]*client[^\S\r\n]*connected[^\r\n]*\r?$/gimu)];
+  const connected = flags.length === 1 ?
+    /^[ \t]*Is client connected: (true|false)[ \t]*\r?$/u.exec(flags[0]![0])?.[1] : undefined;
+  const networks = [...dump.matchAll(/^[^\S\r\n]*In-use[^\S\r\n]*by[^\S\r\n]*client[^\r\n]*\r?$/gimu)];
+  const network = networks.length === 1 ?
+    /^[ \t]*In-use by client: GcmNetwork\{\d+ ([^{}\r\n]+)\}[ \t]*\r?$/u.exec(networks[0]![0])?.[1] : undefined;
+  // A socket directly on Wi-Fi or on the VPN over Wi-Fi is the restored path; cellular is not.
+  return { connected: connected === undefined ? undefined : connected === "true", wifi: network?.includes("WiFi(") ?? false };
 }
 
 /** An independent cleanup failure is a harness root; only its containment consequence is collateral. */
@@ -539,18 +552,13 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         // Late output cannot replace the last observation actually made inside this window.
         if (windowDeadline !== undefined && runtime.now() >= windowDeadline) expiredWindow();
         if (runtime.now() >= commandDeadline) fail("deadline_exceeded");
-        // Never retain DeviceID, app/message IDs, network names, endpoints or the raw dump.
-        // Candidate detection is deliberately broader than the one accepted spelling below:
-        // suffixes (including word characters), case and spacing variants must not be ignored.
-        const flags = [...dump.matchAll(/^[^\S\r\n]*Is[^\S\r\n]*client[^\S\r\n]*connected[^\r\n]*\r?$/gimu)];
-        const connected = flags.length === 1 ?
-          /^[ \t]*Is client connected: (true|false)[ \t]*\r?$/u.exec(flags[0]![0])?.[1] ?? "unavailable" : "unavailable";
+        const { connected } = parseGcmTransport(dump);
         const alarm = dump.match(/^[ \t]*Reconnect Scheduler Alarm: (OFF|in PT(?=\d)(?:\d{1,3}H)?(?:\d{1,3}M)?(?:\d{1,3}(?:\.\d{1,3})?S)?)[ \t]*\r?$/mu)?.[1] ?? "unavailable";
-        sample = `Is client connected: ${connected}; Reconnect Scheduler Alarm: ${alarm}`;
-        lastConnected = connected === "unavailable" ? undefined : connected === "true";
-        if (connected === "unavailable") fail("invalid_evidence");
+        sample = `Is client connected: ${connected ?? "unavailable"}; Reconnect Scheduler Alarm: ${alarm}`;
+        lastConnected = connected;
+        if (connected === undefined) fail("invalid_evidence");
         if (windowDeadline !== undefined) reconnectObserved = true;
-        return connected === "true";
+        return connected === true;
       };
       try {
         if (await read()) return { observations: { gcmConnected: true, gcmRemedyApplied }, diagnostic: diagnostic() };
@@ -577,6 +585,43 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           error = executionFailure(error);
         }
         throw retain(error);
+      }
+    },
+    async pushTransport(target) {
+      if (!target.wifi) return true;
+      // Each read keeps its own 10-second bound: clipping it to the poll window killed adb mid-read
+      // on the Studio Pixel (exit 143) and turned a best-effort check into a lane failure.
+      const poll = async (milliseconds: number): Promise<boolean> => {
+        const deadline = runtime.now() + milliseconds;
+        while (runtime.now() < deadline) {
+          checkExecution();
+          const device = await selectDevice();
+          const state = parseGcmTransport(await boundedAdb(device, ["shell", "dumpsys", "activity", "service", "GcmService"], 10_000));
+          checkExecution();
+          if (state.connected === true && state.wifi) {
+            const vpn = parseAndroidVpnNetwork(await boundedAdb(device, ["shell", "dumpsys", "connectivity"], 10_000));
+            checkExecution();
+            if (vpn) return true;
+          }
+          if (runtime.now() < deadline) await runtime.pause(Math.min(500, deadline - runtime.now()));
+        }
+        checkExecution();
+        return false;
+      };
+      // Bound checkpoint persistence and both broadcasts; a direct Wi-Fi socket alone is not ready.
+      const command: AndroidAdbCommand = async (...args) => boundedAdb(await selectDevice(), args, 10_000);
+      try {
+        if (await poll(15_000)) return true;
+        await checkpoint();
+        await command("shell", "am", "broadcast", "-a", "com.tailscale.ipn.DISCONNECT_VPN", "-n", "com.tailscale.ipn/.IPNReceiver");
+        await runtime.pause(3_000);
+        await checkpoint();
+        await command("shell", "am", "broadcast", "-a", "com.tailscale.ipn.CONNECT_VPN", "-n", "com.tailscale.ipn/.IPNReceiver");
+        return await poll(45_000);
+      } catch (error) {
+        rethrowPushSafetyFailure(error);
+        checkExecution();
+        throw error;
       }
     },
     dndOff: async () => (await command("shell", "settings", "get", "global", "zen_mode")).trim() === "0",
@@ -1199,6 +1244,13 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         case "doze": await runtime.doze(false); break;
         case "network": {
           await restoreAndroidRadios(progress.device, command, mutate);
+          // An Airplane baseline intentionally has no live VPN path to recover.
+          if (progress.device.wifi && !progress.device.airplane) {
+            await runtime.pushTransport!({ wifi: true, mobile: progress.device.mobile });
+            const connectivity = await boundedAdb(await selectDevice(), ["shell", "dumpsys", "connectivity"], 10_000);
+            checkExecution();
+            if (!parseAndroidVpnNetwork(connectivity)) throw new Error("Tailscale VPN was not restored after push transport recovery");
+          }
           const after = await runtime.device();
           if (after.wifi !== progress.device.wifi || after.mobile !== progress.device.mobile || after.airplane !== progress.device.airplane) throw new Error("radio baseline was not restored");
           break;

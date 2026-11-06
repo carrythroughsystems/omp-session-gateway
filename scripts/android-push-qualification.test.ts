@@ -1404,6 +1404,54 @@ test("a clear deferred after forced Doze is flushed by resuming the app, and no 
   expect(f.state()).toMatchObject({ started: false, asking: false, device: baseline, browser: browserBaseline, shown: undefined });
 });
 
+test("567 network delivery checks push transport after each Wi-Fi restore and before its wait", async () => {
+  const host = fake(), events: string[] = [], targets: { wifi: boolean; mobile: boolean }[] = [];
+  const network = host.runtime.network, observe = host.runtime.observe;
+  eventBackedTelemetry(host);
+  const begin = host.runtime.beginDeliveryTelemetry!;
+  let phase = "", wifi = false, waiting = false;
+  host.runtime.beginNotificationPhase = async (_epoch, next) => { phase = next ?? ""; };
+  host.runtime.network = async value => {
+    const result = await network(value);
+    wifi = value === "wifi";
+    if (phase === "network_verified") events.push(`network ${value}`);
+    return result;
+  };
+  host.runtime.pushTransport = async target => { targets.push(target); events.push("transport"); return true; };
+  host.runtime.beginDeliveryTelemetry = async next => {
+    if (next === "network_verified" && wifi) { events.push("telemetry"); waiting = true; }
+    return begin(next);
+  };
+  host.runtime.observe = async (...args) => {
+    if (phase === "network_verified" && wifi && waiting && args[0].inputRequired) {
+      events.push("delivery wait"); waiting = false;
+    }
+    return observe(...args);
+  };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(targets).toEqual([{ wifi: true, mobile: true }, { wifi: true, mobile: true }]);
+  const restores = events.flatMap((event, index) => event === "network wifi" ? [index] : []);
+  expect(restores).toHaveLength(2);
+  for (const index of restores) expect(events.slice(index, index + 4)).toEqual([
+    "network wifi", "transport", "telemetry", "delivery wait",
+  ]);
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results.network_verified).toMatchObject({
+    wifiDelivery: true, cellularDelivery: true, airplaneSuppressed: true, recovered: true,
+  });
+});
+
+test("567 a false push transport result still leaves missing delivery as delivery_timeout", async () => {
+  const host = fake({ staleSocket: { ms: 170_000, after: "airplane" } });
+  const targets: { wifi: boolean; mobile: boolean }[] = [];
+  host.runtime.pushTransport = async target => { targets.push(target); return false; };
+  await expect(runAndroidPush(host.input)).rejects.toMatchObject({
+    evidence: { lane: "androidPush", step: "network_verified", class: "harness", reason: "delivery_timeout" },
+  });
+  expect(targets).toEqual([{ wifi: true, mobile: true }, { wifi: true, mobile: true }]);
+  expect(host.state()).toMatchObject({ started: false, asking: false, device: baseline, browser: browserBaseline, shown: undefined });
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+});
+
 // In the first v0.6.1-prealpha.1 campaign, Play Services' push socket reconnected on the return from
 // Airplane mode, delivered the held ask, then died silently: the clear sent right after arrived 61 s
 // after the answer, 0.4 s after the socket reconnected, and the lane had stopped waiting at 60 s. Any
