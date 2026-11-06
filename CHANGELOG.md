@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.9.1] — 2026-11-06
 
-This release uses stock OMP v18.17.0 as its engineering baseline. The 23 changelog entries below record the changes since v0.9.0. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.17.0 as its engineering baseline. The 24 changelog entries below record the changes since v0.9.0. Historical receipts do not qualify these bytes.
 
 ### Changed
 
@@ -85,6 +85,9 @@ This release uses stock OMP v18.17.0 as its engineering baseline. The 23 changel
   Keep generator reads, writes, and consumed-fragment deletions within the checkout.
 - Render OMP 18.17.0 `wait` message lists in View and Control with their senders and bodies
   instead of an empty `← anyone` card; keep rendering older hosts' single messages (#559).
+- Retry the Windows qualification lane's WinRM admission and read-only probes after a refused
+  connection or an unreachable host while a fresh guest boots, instead of ending the lane as a
+  `helper_failed` harness error (#565).
 
 ## [v0.9.0] — 2026-10-27
 
