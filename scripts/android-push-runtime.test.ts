@@ -17,26 +17,32 @@ const CONNECT_VPN = "shell am broadcast -a com.tailscale.ipn.CONNECT_VPN -n com.
 
 test.each(["connected", "settling", "cellular", "vpn-absent", "remedy", "stalled", "vpn-stalled", "no-wifi"] as const)(
   "567 VPN recovery uses one bounded reconnect for the Wi-Fi push socket (%s)", async scenario => {
-    let time = 0, reads = 0, restored = false;
-    const events: string[] = [], caps: number[] = [];
+    const initialWindow = 15_000, recoveryWindow = 45_000, pollPause = 500, reconnectPause = 3_000;
+    // Instant reads: 15 s / 500 ms = 30 initial polls; 45 s / 500 ms = 90 recovery polls.
+    const initialPolls = initialWindow / pollPause, recoveryPolls = recoveryWindow / pollPause, settlingPolls = 4;
+    let time = 0, reads = 0, restored = false, healthySamples = 0, healthy = false;
+    const events: string[] = [];
     const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
     const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
       const command = args.join(" "); events.push(command);
-      expect(options?.timeoutMs).toBeGreaterThan(0);
-      expect(options?.timeoutMs).toBeLessThanOrEqual(10_000);
+      expect(options?.timeoutMs).toBe(10_000);
       if (command === "shell dumpsys activity service GcmService") {
-        reads++; caps.push(options!.timeoutMs!);
+        reads++;
         const connected = ["connected", "cellular", "vpn-absent", "vpn-stalled"].includes(scenario) ||
-          scenario === "settling" && reads >= 4 || scenario === "remedy" && restored;
+          scenario === "settling" && reads >= settlingPolls || scenario === "remedy" && restored;
         const network = scenario === "cellular" && !restored ? "VPN(17) [MOBILE(0)]" :
           scenario === "vpn-absent" || scenario === "vpn-stalled" ? "WiFi(1)" : "VPN(17) [WiFi(1)]";
+        healthy = connected && network.includes("WiFi(");
+        if (healthy) healthySamples++;
         return `DeviceID: SYNTHETIC-PRIVATE-TRANSPORT-DEVICE\nIs client connected: ${connected}\n` +
           `In-use by client: GcmNetwork{123 ${network} SYNTHETIC-PRIVATE-TRANSPORT-NETWORK}\n` +
           "Received SYNTHETIC-PRIVATE-TRANSPORT-MESSAGE";
       }
       if (command === CONNECT_VPN) restored = true;
-      if (command === "shell dumpsys connectivity") return scenario === "vpn-stalled" ||
-        scenario === "vpn-absent" && !restored ? WIFI_CONNECTIVITY : VPN_CONNECTIVITY;
+      if (command === "shell dumpsys connectivity") {
+        expect(healthy).toBe(true); healthy = false;
+        return scenario === "vpn-stalled" || scenario === "vpn-absent" && !restored ? WIFI_CONNECTIVITY : VPN_CONNECTIVITY;
+      }
       return "";
     });
     try {
@@ -48,24 +54,22 @@ test.each(["connected", "settling", "cellular", "vpn-absent", "remedy", "stalled
       const stalled = scenario === "stalled" || scenario === "vpn-stalled";
       expect(result).toBe(!stalled);
       expect(JSON.stringify(result)).not.toContain("SYNTHETIC-PRIVATE-TRANSPORT");
-      expect(events.filter(event => event === "shell dumpsys connectivity")).toHaveLength(reads);
+      expect(events.filter(event => event === "shell dumpsys connectivity")).toHaveLength(healthySamples);
       expect(events.some(event => event.startsWith("shell svc") || event.includes("airplane-mode"))).toBe(false);
       const remedy = ["cellular", "vpn-absent", "remedy", "stalled", "vpn-stalled"].includes(scenario);
       if (remedy) {
-        expect(events.slice(events.indexOf("checkpoint"), events.indexOf("checkpoint") + 7)).toEqual([
+        expect(events.slice(events.indexOf("checkpoint"), events.indexOf("checkpoint") + 6)).toEqual([
           "checkpoint", DISCONNECT_VPN, "pause 3000", "checkpoint", CONNECT_VPN,
-          "shell dumpsys activity service GcmService", "shell dumpsys connectivity",
+          "shell dumpsys activity service GcmService",
         ]);
         expect(events.filter(event => event === DISCONNECT_VPN)).toHaveLength(1);
         expect(events.filter(event => event === CONNECT_VPN)).toHaveLength(1);
-        expect(time).toBe(stalled ? 63_000 : 18_000);
-        expect(reads).toBe(stalled ? 120 : 31);
-        expect(caps[29]).toBe(500);
-        if (stalled) expect(caps.at(-1)).toBe(500);
+        expect(time).toBe(initialWindow + reconnectPause + (stalled ? recoveryWindow : 0));
+        expect(reads).toBe(initialPolls + (stalled ? recoveryPolls : 1));
       } else {
         expect(events.some(event => event === "checkpoint" || event.includes("broadcast"))).toBe(false);
-        expect(reads).toBe(scenario === "no-wifi" ? 0 : scenario === "settling" ? 4 : 1);
-        expect(time).toBe(scenario === "settling" ? 1_500 : 0);
+        expect(reads).toBe(scenario === "no-wifi" ? 0 : scenario === "settling" ? settlingPolls : 1);
+        expect(time).toBe(scenario === "settling" ? (settlingPolls - 1) * pollPause : 0);
         if (scenario === "no-wifi") expect(select).not.toHaveBeenCalled();
       }
     } finally { adb.mockRestore(); select.mockRestore(); }
@@ -114,28 +118,65 @@ test.each([
 });
 
 test.each([["initial", "gcm"], ["initial", "vpn"], ["reconnect", "gcm"], ["reconnect", "vpn"]] as const)(
-  "567 VPN recovery never accepts output after its %s window (%s)", async (stage, lateRead) => {
-    let time = 0, restored = false, effects = 0, late = false;
-    const caps: number[] = [];
+  "567 VPN recovery accepts a healthy sample completing after its %s window (%s)", async (stage, lateRead) => {
+    const initialWindow = 15_000, recoveryWindow = 45_000, reconnectPause = 3_000, pollPause = 500, readDuration = 800;
+    const deadline = stage === "initial" ? initialWindow : initialWindow + reconnectPause + recoveryWindow;
+    const lateStart = deadline - pollPause, starts: number[] = [];
+    let time = 0, restored = false, effects = 0;
     const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
     const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
       if (args.join(" ") === CONNECT_VPN) restored = true;
       if (args[1] !== "dumpsys") return "";
-      caps.push(options!.timeoutMs!);
+      expect(options?.timeoutMs).toBe(10_000);
       const vpn = args.join(" ") === "shell dumpsys connectivity";
-      if (!late && vpn === (lateRead === "vpn") && (stage === "initial" || restored)) {
-        time = stage === "initial" ? 15_000 : 63_000; late = true;
-      }
-      if (vpn) return VPN_CONNECTIVITY;
-      return `Is client connected: ${stage === "initial" || restored}\nIn-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}`;
+      // GCM starts the sample; its follow-up VPN read may finish beyond the window.
+      if (!vpn) { starts.push(time); expect(time).toBeLessThan(restored ? deadline : initialWindow); }
+      const connected = time >= lateStart;
+      if (connected && vpn === (lateRead === "vpn")) time += readDuration;
+      return vpn ? VPN_CONNECTIVITY :
+        `Is client connected: ${connected}\nIn-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}`;
     });
     try {
       const runtime = createAndroidPushRuntime(identity);
       runtime.now = () => time; runtime.pause = async milliseconds => { time += milliseconds; };
       runtime.beforeEffect = async () => { effects++; };
-      expect(await runtime.pushTransport!({ wifi: true, mobile: false })).toBe(stage === "initial");
-      expect(effects).toBe(2);
-      expect(caps.every(cap => cap > 0 && cap <= 10_000)).toBe(true);
+      expect(await runtime.pushTransport!({ wifi: true, mobile: false })).toBe(true);
+      expect(time).toBe(lateStart + readDuration);
+      expect(effects).toBe(stage === "initial" ? 0 : 2);
+      expect(starts.at(-1)).toBe(lateStart);
+      expect(starts).toHaveLength(initialWindow / pollPause + (stage === "reconnect" ? recoveryWindow / pollPause : 0));
+    } finally { adb.mockRestore(); select.mockRestore(); }
+  });
+
+test.each(["reconnected", "stalled"] as const)(
+  "567 VPN recovery never clips a slow read near the poll deadline (%s)", async scenario => {
+    const initialWindow = 15_000, recoveryWindow = 45_000, readDuration = 800, pollPause = 500;
+    // Each failed poll takes 800 ms + 500 ms; its last read may finish after the window.
+    const initialPolls = Math.ceil(initialWindow / (readDuration + pollPause));
+    const recoveryPolls = Math.ceil(recoveryWindow / (readDuration + pollPause));
+    let time = 0, restored = false, deadline = initialWindow;
+    const starts: { at: number; deadline: number }[] = [], caps: number[] = [];
+    const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+    const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
+      if (args.join(" ") === CONNECT_VPN) { restored = true; deadline = time + recoveryWindow; }
+      if (args[1] !== "dumpsys") return "";
+      const vpn = args.join(" ") === "shell dumpsys connectivity";
+      if (!vpn) { starts.push({ at: time, deadline }); expect(time).toBeLessThan(deadline); }
+      caps.push(options!.timeoutMs!);
+      time += readDuration;
+      if (options!.timeoutMs! < readDuration) throw new deviceOperations.AndroidAdbError(143);
+      return vpn ? VPN_CONNECTIVITY :
+        `Is client connected: ${restored && scenario === "reconnected"}\nIn-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}`;
+    });
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.now = () => time; runtime.pause = async milliseconds => { time += milliseconds; };
+      runtime.beforeEffect = async () => {};
+      expect(await runtime.pushTransport!({ wifi: true, mobile: true })).toBe(scenario === "reconnected");
+      expect(caps.every(cap => cap === 10_000)).toBe(true);
+      expect(starts).toHaveLength(initialPolls + (scenario === "stalled" ? recoveryPolls : 1));
+      expect(starts.some(start => start.deadline - start.at < readDuration)).toBe(true);
+      expect(restored).toBe(true);
     } finally { adb.mockRestore(); select.mockRestore(); }
   });
 

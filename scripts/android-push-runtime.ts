@@ -589,24 +589,19 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     },
     async pushTransport(target) {
       if (!target.wifi) return true;
+      // Each read keeps its own 10-second bound: clipping it to the poll window killed adb mid-read
+      // on the Studio Pixel (exit 143) and turned a best-effort check into a lane failure.
       const poll = async (milliseconds: number): Promise<boolean> => {
         const deadline = runtime.now() + milliseconds;
         while (runtime.now() < deadline) {
           checkExecution();
           const device = await selectDevice();
-          if (runtime.now() >= deadline) break;
-          const readDeadline = Math.min(deadline, runtime.now() + 10_000);
-          const dump = await boundedAdb(device, ["shell", "dumpsys", "activity", "service", "GcmService"],
-            Math.max(1, readDeadline - runtime.now()));
+          const state = parseGcmTransport(await boundedAdb(device, ["shell", "dumpsys", "activity", "service", "GcmService"], 10_000));
           checkExecution();
-          if (runtime.now() < readDeadline) {
-            const state = parseGcmTransport(dump);
-            const vpnDeadline = Math.min(deadline, runtime.now() + 10_000);
-            const connectivity = await boundedAdb(device, ["shell", "dumpsys", "connectivity"],
-              Math.max(1, vpnDeadline - runtime.now()));
+          if (state.connected === true && state.wifi) {
+            const vpn = parseAndroidVpnNetwork(await boundedAdb(device, ["shell", "dumpsys", "connectivity"], 10_000));
             checkExecution();
-            if (runtime.now() < vpnDeadline && parseAndroidVpnNetwork(connectivity) &&
-              state.connected === true && state.wifi) return true;
+            if (vpn) return true;
           }
           if (runtime.now() < deadline) await runtime.pause(Math.min(500, deadline - runtime.now()));
         }
