@@ -93,15 +93,40 @@ and [lifecycle coverage](LIFECYCLE_BRANCH_RESUME.md).
 Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit
 `4999b98bd5`) is the minimum supported host version: set `collab.autoStart`
 ([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
-plain `omp`. The current engineering baseline is `v18.16.0` (`UPSTREAM.lock.json`) and the
+plain `omp`. The current engineering baseline is `v18.17.0` (`UPSTREAM.lock.json`) and the
 qualified host baseline is recorded in the release-generated matrix below, while the independent
 embedded browser client pin is `v18.12.6`.
 Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
 fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
 gateway update.
 
-v18.16.0 (`650f3a108229ee11bf68ba3377f4e8c3391cd424`) keeps registry v1, the discovery file
+v18.17.0 (`75e7801e247d4e3263439d4cc08ccad60dc64bdd`) keeps registry v1, the discovery file
 format and query contract, the relay protocol, and `collab.autoStart` behavior unchanged from
+v18.16.0: the collaboration host (`packages/coding-agent/src/collab/host.ts`), registry
+(`registry.ts`), settings (`settings.ts`), collaboration slash commands
+(`packages/coding-agent/src/slash-commands/builtin-collaboration.ts`), `docs/collab.md`,
+`packages/collab-web/src/app.tsx` and `lib/client.ts`, and the `crates/pi-natives/src/ipc/`
+native IPC transport (`mod.rs`, `unix.rs`, `windows.rs`) are byte-identical between the two tags.
+[can1357/oh-my-pi#17960](https://github.com/can1357/oh-my-pi/pull/17960) and
+[#17997](https://github.com/can1357/oh-my-pi/pull/17997) add extension transcript presenters
+(`registerTranscriptPresenter`, `ctx.ui.refreshTranscript`) and route CLI guest claim and release
+in `collab/guest.ts` through `ctx.setCollabGuest()`;
+[#16476](https://github.com/can1357/oh-my-pi/pull/16476) adds an extension link browser that
+editor-area dialogs and asks close before mounting;
+[#17961](https://github.com/can1357/oh-my-pi/pull/17961) exposes `getShortcutConflict` and
+keybindings to extensions; and [#17848](https://github.com/can1357/oh-my-pi/pull/17848) adds an
+in-session pin indicator and `/unpin` (`notifySessionPinChanged`) while leaving `/collab`,
+`/join`, and `/leave` unchanged. Upstream direct commits `488cafa0e0` and `fcdda683f1` add
+`packages/wire/src/shell-trace.ts` and `shell-viz.ts` re-exports to `packages/wire/src/index.ts`
+(leaving the relay envelope helpers and types unchanged), `a55b04a332` updates
+`packages/wire/src/tsp.ts`, `19ef041ec5` hardens `packages/natives/test/ipc.test.ts`, and the
+package manifests bump versions, none of which the gateway reads or sends; `adcb8800b6` changes a
+host `wait` tool result's `details.waited` (`CoordinationDetails.waited`) from one message object
+to a list of messages (`null` still means timed out) and updates `collab-web`
+`tool-render/tools/irc.tsx`, so the embedded client carries a local compatibility patch in its
+`irc`/`wait` renderer (`packages/collab-client/upstream/UPSTREAM.json`) to accept both the list
+and the older single message while keeping its v18.12.6 provenance and `pi-wire` `18.12.6` pin.
+v18.16.0 (`650f3a108229ee11bf68ba3377f4e8c3391cd424`) in turn kept these contracts unchanged from
 v18.12.5: collaboration settings, slash commands, and `collab-web` `app.tsx` and `lib/client.ts`
 are byte-identical, and `docs/collab.md` changes only table formatting.
 [can1357/oh-my-pi#17699](https://github.com/can1357/oh-my-pi/pull/17699) rewrites registry
@@ -138,9 +163,14 @@ Since v18.10.2, upstream
 [`a608a9ca07`](https://github.com/can1357/oh-my-pi/commit/a608a9ca07c9443634e80d877d61c602099dab91)
 serves the registry over native IPC with the same one-line JSON request and response, a 0600
 socket, overlong paths relocated under the owner-only `/tmp/omp-<euid>`, and same-user peers
-only; the gateway reads the published endpoint verbatim, so its queries are unchanged. No canary,
-candidate, or qualification is claimed for v18.16.0; the release-generated matrix below is
-unchanged.
+only; the gateway reads the published endpoint verbatim, so its queries are unchanged.
+Exact-version canary run
+[42239663270](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42239663270)
+passed for stock OMP 18.17.0 on 2026-11-06 across all eleven Linux stages (`prepare`, `publish`,
+`snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`,
+`continue`, `unregister`) and the eight supported Windows stages (with `new-generation`, `fork`,
+and `branch-rewind` skipped by design on Windows) as **Tested** evidence; no candidate or
+qualification is claimed for v18.17.0, and the release-generated matrix below is unchanged.
 As in v18.8.3, upstream
 [can1357/oh-my-pi#14714](https://github.com/can1357/oh-my-pi/pull/14714) stops mirroring frames
 while no guest is joined, and a generated `sessionName` may carry a title-card prefix

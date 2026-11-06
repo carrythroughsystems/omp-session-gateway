@@ -946,6 +946,68 @@ published v0.7.6 remains qualified on v18.8.9.
 
 ---
 
+**Engineering baseline update (2026-11-06):** Accept published mainline v18.17.0
+(`75e7801e247d4e3263439d4cc08ccad60dc64bdd`, tree `e909b5cab080856f64d6d8629ee61be22866a3e5`)
+as the host engineering pin (#559), with registry v1 and minimum host `18.1.20` unchanged.
+`scripts/upstream-pins.ts` derived every pin from official npm tarballs after verifying registry
+integrity. Relative to v18.16.0, `collab/host.ts`, `collab/registry.ts`, `collab/settings.ts`,
+`builtin-collaboration.ts`, `docs/collab.md`, `collab-web` `app.tsx` and `lib/client.ts`, and
+`crates/pi-natives/src/ipc/` (`mod.rs`, `unix.rs`, and `windows.rs`) are byte-identical, so the
+discovery file format, socket paths, registry v1 query/response and token check, the relay
+protocol, and `collab.autoStart` behavior are unchanged.
+[can1357/oh-my-pi#17960](https://github.com/can1357/oh-my-pi/pull/17960)
+(merge `b0b565c1c0`; `9c31dcdd39`, `8e4f72d2fd`) and
+[#17997](https://github.com/can1357/oh-my-pi/pull/17997)
+(merge `7ceb801092`; `b94281fc50`) add extension transcript presenters
+(`registerTranscriptPresenter`, `ctx.ui.refreshTranscript`) in `extension-ui-controller.ts`,
+`modes/types.ts`, and `docs/extensions.md`, and make `collab/guest.ts` claim and release the CLI
+guest through `ctx.setCollabGuest()` instead of assigning `ctx.collabGuest`. The gateway reads
+and sends none of these TUI, extension, or CLI-guest surfaces; `inputRequired` and the ask
+representation are unchanged.
+[#16476](https://github.com/can1357/oh-my-pi/pull/16476)
+(merge `544cacab86`; `d00abaeca7`, `f9eb7ac058`) adds an extension link browser in
+`extension-ui-controller.ts`, `modes/types.ts`, and `docs/extensions.md`; editor-area dialogs and
+asks close it before mounting, a terminal-only surface the gateway neither reads nor sends.
+[#17961](https://github.com/can1357/oh-my-pi/pull/17961)
+(merge `84c92fbbf4`; `ac3305bb7e`) adds `getShortcutConflict` and exposes keybindings to
+extensions in `extension-ui-controller.ts` and `docs/extensions.md`, which the gateway neither
+reads nor sends.
+[#17848](https://github.com/can1357/oh-my-pi/pull/17848)
+(merge `ef3293b64f`; `6ccb40f969`, `c9779c5e06`, `4e9af0ca5e`) adds the in-session pin
+indicator and `/unpin` through `notifySessionPinChanged` in `builtin-registry.ts` and
+`modes/types.ts`; `/collab`, `/join`, and `/leave` are unchanged, so the gateway reads and sends
+the same bytes. Direct commits `488cafa0e0` and `fcdda683f1` visualize bash execution from native
+run traces through new `packages/wire/src/shell-trace.ts` and `shell-viz.ts` and native
+`RunTrace`, `ShellVisualization`, and `runShellMain` exports; `packages/wire/src/index.ts` only
+adds the two shell exports and leaves relay envelope helpers and types unchanged. Direct commit
+`a55b04a332` adds TSP code heat, wash, folds, and overview in `packages/wire/src/tsp.ts`, a Tern
+surface for which the gateway has no reader. Direct commit `adcb8800b6` stops wait peer chatter
+and staggered jobs from chaining waits: `packages/coding-agent/src/tools/wait.ts` now returns
+`details.waited` as a list of messages instead of one message (`null` still means timed out), and
+`packages/collab-web/src/tool-render/tools/irc.tsx` and its test render the list. The embedded
+v18.12.6 client parsed `waited` as one message, so v18.17.0 host wait cards degraded to `← anyone`
+plus raw result text. PR #559 carries a local irc/wait renderer patch accepting the list from
+v18.17.0+ and the single message from older supported hosts. This is an embedded-client rendering
+change only: no frame, protocol, relay, or registry change; the client keeps its v18.12.6
+provenance and pi-wire 18.12.6 pin, with one more carried local patch recorded in
+`packages/collab-client/upstream/UPSTREAM.json`. Direct commit `19ef041ec5` hardens only
+`packages/natives/test/ipc.test.ts`; the IPC sources are unchanged. The remaining changes are
+version bumps and dependency pinning in root `package.json` and package manifests; there is no
+Bun engine or `packageManager` change, and gateway Bun stays `1.4.4`. The gateway's registry and
+relay contract is unchanged. `@oh-my-pi/pi-coding-agent` and `@oh-my-pi/pi-wire` move to 18.17.0,
+and `@oh-my-pi/collab-web` stays 16.3.6.
+
+Exact-version canary run
+[42239663270](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42239663270)
+passed for stock OMP 18.17.0: all eleven Linux stages and the eight supported Windows stages,
+with `new-generation`, `fork`, and `branch-rewind` skipped by design on Windows. This is Tested
+evidence only, not qualification.
+
+This is source review and an exact-version canary only: no candidate or qualification is claimed
+for v18.17.0, and published v0.9.0 remains qualified on v18.12.5.
+
+---
+
 **Engineering baseline update (2026-11-02):** Accept published mainline v18.16.0
 (`650f3a108229ee11bf68ba3377f4e8c3391cd424`, tree `3cccceb37ddce426b454d0abd6ede4e32e02e97f`)
 as the host engineering pin (#557), with registry v1 and minimum host `18.1.20` unchanged.
