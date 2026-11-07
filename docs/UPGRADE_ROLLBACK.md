@@ -55,6 +55,12 @@ it does not restore the predecessor's Bun. After this move, run rollback under t
 
 ### Tern creation on every managed rollback
 
+Install/upgrade preserves optional `tern.window` verbatim, including `""`. The retained
+`v0.9.1` parser rejects that new field, so restoring a window-bearing backup requires a
+window-capable runtime. Managed rollback's existing wholesale `tern` projection removes
+the selector too; the Tern-free document is tested against the exact retained `v0.9.1`
+parser. No running Tern window or OMP process is changed by this config projection.
+
 Every managed `rollback` or `rollback --to` **conservatively disables creation** when `tern` is authored in `config.json`, regardless of the target version ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)), because older runtimes reject unknown root keys:
 
 1. `rollback` atomically writes the **full authored document** to `<configDir>/config.pre-rollback.json` with owner-only (`0600`) permissions. If `<configDir>/config.pre-rollback.json` already exists, `rollback` refuses to overwrite it and aborts before modifying `config.json` or the service (restore or move that backup file first).

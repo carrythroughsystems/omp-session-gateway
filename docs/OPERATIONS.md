@@ -98,6 +98,7 @@ The gateway reads each discovery file's `endpoint` field verbatim because OMP ca
 | `fleet.targets` | `[]` | `0`–`7` `{ id, label, origin }` entries (`id` matches `^[a-z][a-z0-9-]{0,31}$` and `!= "local"`; `label` `1`–`64` code points; canonical `origin != http.publicOrigin`; unique `id` and `origin`) | Remote gateways polled directly by this host's PWA (at most 8 sources total including `local`). |
 | `speech.browserRecognition` | `false` | `true` or `false` | When `true`, sets `Permissions-Policy: microphone=(self)` on document HTML responses and enables the opt-in Web Speech microphone control in writable **Control** sessions. |
 | `tern` | Absent (creation unavailable) | Strict optional section, at most 32 KiB within the 64-KiB config | Administrator-approved new OMP creation on this execution host; see [setup below](#opt-in-tern-session-creation). |
+| `tern.window` | Absent (unchanged CLI default) | String `""` or decimal `"2"`–`"999"` | Optional Tern window slot for both creation and every inspection; never a stable identity or browser-selected value. |
 
 Only `ENOENT` or `ECONNREFUSED` proves a queried OMP host has exited; timeouts, permission or resource errors, and wire errors retain the card until `registry.ttlSeconds` expires. A host absent from OMP's discovery directory is removed on the next poll, and an absent discovery directory is valid when no sessions are sharing.
 
@@ -159,7 +160,15 @@ Opt-in Tern creation (`config.json` → `tern`, [ADR-043](DECISIONS.md#adr-043--
   /opt/homebrew/bin/omp config get collab.autoStart
   ```
 
-- **First-window limitation:** Tern's CLI opens the new tab in Tern's **first window** with `--keep-open`. Keep a Tern window open on the host; if a command fails, inspect that kept-open tab in Tern.
+- **Window targeting:** Tern `0.9.12` (`e498b49`) accepts optional `tern.window`: `""` explicitly
+  selects the first window, and decimal strings `"2"` through `"999"` select other slots (no
+  leading zeros, names, numbers, or whitespace). Omit the field to preserve the CLI's existing
+  default selection, normally the first window, without adding any `--window` argument.
+  Keep the intended window open and stable: keys are reassignable **slots**, not persistent
+  window identities. Closing or reconnecting windows may change which window owns a slot,
+  including between baseline and spawn; the gateway cannot detect that reassignment.
+  Read-only `tern inspect --json --window 2` verifies current slot contents without creating
+  or focusing anything. All creations use `--keep-open`; inspect failed commands in that tab.
 - **Canonical working copies and complete CLI environment:**
   - `executable` (at most 4,096 UTF-8 bytes) and each `profile.argv[0]` (at most 4,096 UTF-8 bytes) must be absolute paths to executable regular files. Executable symlinks are resolved to their canonical target at invocation without rewriting `config.json`.
   - Each `workingCopies[].path` (at most 4,096 UTF-8 bytes) must be an accessible directory whose path equals its `realpath`; symlinks and aliases are rejected.
@@ -184,6 +193,7 @@ Opt-in Tern creation (`config.json` → `tern`, [ADR-043](DECISIONS.md#adr-043--
    {
      "tern": {
        "executable": "/usr/local/bin/tern",
+       "window": "2",
        "projects": [
          {
            "id": "alpha-founder",
@@ -212,6 +222,16 @@ Opt-in Tern creation (`config.json` → `tern`, [ADR-043](DECISIONS.md#adr-043--
    }
    ```
 
+   `window` is optional; remove that line for unchanged default behavior, or use `""` for an
+   explicit first-window binding. With a selector, creation uses
+   `new tab --window KEY --json --keep-open --cwd <path> -- <argv…>`, and every availability,
+   baseline, adoption, and doctor inspect uses `inspect --json --window KEY`. `KEY` is a
+   literal argv element, including the empty string. A missing slot makes the availability
+   probe unavailable or the pre-spawn baseline fail as `failed/preflight_failed` **without
+   starting a command**. No retry removes the selector or falls back to another window.
+   After spawn starts, a nonzero exit stays `outcome_unknown`; after a confirmed block,
+   window closure leads to `started_unavailable` at the adoption deadline, never a respawn.
+
 3. **Apply the configuration and restart the service:**
 
    ```sh
@@ -228,7 +248,7 @@ Opt-in Tern creation (`config.json` → `tern`, [ADR-043](DECISIONS.md#adr-043--
    bun apps/gateway/src/cli.js doctor
    ```
 
-   When `config.tern` is authored, `doctor` prints the 18 base boolean checks plus `"ternAvailable": true` (and exits `0` when all checks pass). `ternAvailable` checks configured runtime paths, `tern inspect --json` usability, and `<stateDir>/session-creations.json` readability without starting OMP.
+   When `config.tern` is authored, `doctor` prints the 18 base boolean checks plus `"ternAvailable": true` (and exits `0` when all checks pass). `ternAvailable` checks configured runtime paths, `tern inspect --json` usability (with the same `--window KEY` when configured), and `<stateDir>/session-creations.json` readability without starting OMP. A missing configured window reports `false`; diagnostics never include its key or raw CLI output.
 
 5. **Create a session from OMP Sessions:**
    Reload the PWA, tap **New session**, select **Host** (skipped with one source) → **Project** → **Working copy** (skipped when one) → **Profile**, optionally enter a **First task** draft (up to 8,000 code points / 32 KiB, kept only in page memory), and tap **Create and open Control**.

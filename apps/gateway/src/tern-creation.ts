@@ -122,7 +122,7 @@ export class SessionCreationService {
     this.#clock = dependencies.clock ?? clock;
     this.#uuid = dependencies.uuid ?? randomUUID;
     this.#revision = parseSessionCreationUuid(this.#uuid());
-    this.#cli = dependencies.cli ?? new TernCli(dependencies.config.tern?.executable ?? "");
+    this.#cli = dependencies.cli ?? new TernCli(dependencies.config.tern?.executable ?? "", undefined, dependencies.config.tern?.window);
     const path = join(dependencies.config.paths.stateDir, "session-creations.json");
     this.#ledger = dependencies.ledger ?? {
       read: () => readPrivateTextFile(path, MAX_LEDGER_BYTES),
@@ -355,6 +355,6 @@ export async function probeTernAvailability(config: GatewayConfig): Promise<bool
     if (!config.tern || !await validateTernRuntime(config.tern)) return false;
     const ledger = await readPrivateTextFile(join(config.paths.stateDir, "session-creations.json"), MAX_LEDGER_BYTES);
     if (ledger !== undefined) validateCreationLedger(ledger);
-    return !!await new TernCli(config.tern.executable!).inspect(config.tern.profiles![0]!, AbortSignal.timeout(5000));
+    return !!await new TernCli(config.tern.executable!, undefined, config.tern.window).inspect(config.tern.profiles![0]!, AbortSignal.timeout(5000));
   } catch { return false; }
 }

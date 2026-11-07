@@ -30,6 +30,7 @@ export interface TernWorkingCopy {
 }
 export interface TernConfig {
   readonly executable?: string;
+  readonly window?: string;
   readonly projects?: readonly { readonly id: string; readonly label: string; readonly workingCopies: readonly TernWorkingCopy[] }[];
   readonly profiles?: readonly TernProfile[];
 }
@@ -655,9 +656,11 @@ export function parseTernConfig(value: unknown): TernConfig {
   };
   try {
     if (Buffer.byteLength(JSON.stringify(value)) > 32 * 1024) return invalid();
-    const record = object(value, ["executable", "projects", "profiles"]);
+    const record = object(value, ["executable", "projects", "profiles", "window"]);
     if (Object.keys(record).length === 0) return {};
     const executable = text(record.executable, 4096, true);
+    if (Object.hasOwn(record, "window") &&
+        (typeof record.window !== "string" || !/^(?:|[2-9]|[1-9][0-9]{1,2})$/u.test(record.window))) return invalid();
     const projects = list(record.projects, 16, value => {
       const project = object(value, ["id", "label", "workingCopies"]);
       return { id: parseFleetSourceId(project.id), label: parseFleetLabel(project.label),
@@ -684,7 +687,7 @@ export function parseTernConfig(value: unknown): TernConfig {
         .some(part => part.length === 0 || !isAbsolute(part))) return invalid();
       return { id: parseFleetSourceId(profile.id), label: parseFleetLabel(profile.label), argv, env };
     });
-    return { executable, projects, profiles };
+    return { executable, projects, profiles, ...(Object.hasOwn(record, "window") ? { window: record.window as string } : {}) };
   } catch {
     return invalid();
   }

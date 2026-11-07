@@ -299,9 +299,22 @@ Tern remains a terminal execution environment with OMP-native discovery ([ADR-03
 
 Configure the optional `tern` section on the **execution host** ([Operations setup](OPERATIONS.md#opt-in-tern-session-creation)). In **OMP Sessions**, **New session** walks through **Host** (when multiple sources exist) → **Project** → **Working copy** (when multiple exist) → **Profile** → **Create and open Control**, with an optional memory-only **First task** draft that seeds the empty Control composer once without auto-sending.
 
-The daemon executes `[executable, "new", "tab", "--json", "--keep-open", "--cwd", path, "--", ...profile.argv]` and polls `tern inspect --json` serially. It decodes unsigned 64-bit IDs losslessly, rejects remote host tags at bit 56 or above, requires an exact 1:1 `block === blocks[].id === panes[].pane` match, and matches the complete `[A-Za-z0-9-]+` `sessionId` token in `basename(omp_session_file)` (minus `.jsonl`) against a post-spawn OMP discovery round without opening the JSONL file. Once a single fresh host binding passes `registry.authorizeLaunch(instanceId, generation, "control")`, status becomes `ready` with `{ instanceId, generation }`, and the browser refreshes the source and runs the ordinary Control launch.
+Without `tern.window`, the daemon executes `[executable, "new", "tab", "--json", "--keep-open", "--cwd", path, "--", ...profile.argv]` and polls `tern inspect --json` serially. It decodes unsigned 64-bit IDs losslessly, rejects remote host tags at bit 56 or above, requires an exact 1:1 `block === blocks[].id === panes[].pane` match, and matches the complete `[A-Za-z0-9-]+` `sessionId` token in `basename(omp_session_file)` (minus `.jsonl`) against a post-spawn OMP discovery round without opening the JSONL file. Once a single fresh host binding passes `registry.authorizeLaunch(instanceId, generation, "control")`, status becomes `ready` with `{ instanceId, generation }`, and the browser refreshes the source and runs the ordinary Control launch.
 
-Tern's CLI opens the tab in the **first window** with `--keep-open`. `profile.env` is the complete environment of the `tern` CLI child and is not assumed to cross Tern's GUI-server RPC boundary into the pane, so OMP's Tern pane environment must already publish into `omp.discoveryDir` with `collab.autoStart = control`. Closing or backgrounding the browser stops watching without stopping the daemon operation or Tern tab; `started_unavailable` and `outcome_unknown` never auto-retry. Native **Open in Tern** handoff is out of scope on every platform: Android Tern `0.9.5` is upstream-blocked ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)) and desktop handoff is deferred.
+For deliberate targeting on Tern `0.9.12` (`e498b49`), add `"window": "2"` beside
+`"executable"` in the [full configuration example](OPERATIONS.md#setup-steps). Optional
+`tern.window` accepts exactly `""` (first window) or decimal strings `"2"` through `"999"`.
+The daemon inserts `["--window", KEY]` after `"new", "tab"` and after `"inspect", "--json"`
+for **every** inspect, including availability, the pre-spawn baseline, adoption, and doctor.
+Missing slots fail preflight before spawn; nonzero spawn exits remain `outcome_unknown`,
+and a window closed during adoption leads to `started_unavailable` at the deadline.
+There is never a retry without the selector or fallback to another window. Window keys are
+reassignable **slots**, not persistent identities; keep the intended window stable.
+Read-only `0.9.12` inspection reconfirmed matching block/pane IDs and `omp_session_file`
+on existing OMP panes; it does not qualify effectful targeted creation.
+
+With the selector absent, Tern's existing default selection is unchanged (normally the
+**first window**); all creations use `--keep-open`. `profile.env` is the complete environment of the `tern` CLI child and is not assumed to cross Tern's GUI-server RPC boundary into the pane, so OMP's Tern pane environment must already publish into `omp.discoveryDir` with `collab.autoStart = control`. Closing or backgrounding the browser stops watching without stopping the daemon operation or Tern tab; `started_unavailable` and `outcome_unknown` never auto-retry. Native **Open in Tern** handoff is out of scope on every platform: Android Tern `0.9.5` is upstream-blocked ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)) and desktop handoff is deferred.
 
 ### Pixel installed-build inventory (2026-10-24)
 

@@ -1316,6 +1316,8 @@ describe("source-bound session creation", () => {
       const states = ["accepted", "launching", "awaiting_omp", "ready"];
       const harness = await bootApp({
         permission: "denied", initialSessions: [], suffix: `creation-progress-steps-${close}`, launchGate: gate.promise,
+        clientConfig: { version: 1, local: { id: "local", label: "Synthetic execution host", origin: "https://sessions.example" },
+          targets: [], speech: { browserRecognition: false } },
         creationResponse: async (path, init) => {
           if (path.endsWith("options")) return Response.json(choices);
           if (init.method === "POST") return Response.json({ operationId, state: "accepted" });
@@ -1325,11 +1327,13 @@ describe("source-bound session creation", () => {
         },
       });
       await open(harness);
+      expect(currentPanel(harness).querySelectorAll("dd").map(value => value.textContent)).toContain("Synthetic execution host");
       seed(harness, "SYNTHETIC_PROGRESS_DRAFT");
       harness.setList(2, [ready]);
       click(harness, "Create and open Control");
       await settleUntil(() => statusReads === 1 && harness.pendingDelays().includes(1_000), 100);
       const initial = currentPanel(harness);
+      expect(initial.textContent).toContain("Starting on Synthetic execution host.");
       const stepStates = (): (string | undefined)[] => currentPanel(harness).querySelectorAll("li").map(step => step.dataset.state);
       expect(initial.querySelectorAll("li").map(step => step.textContent)).toEqual(["Starting in Tern", "Waiting for OMP", "Opening Control"]);
       expect(stepStates()).toEqual(["active", "future", "future"]);

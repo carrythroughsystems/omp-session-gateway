@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { GatewayConfig } from "../src/config.ts";
 import type { AdoptionObservation, AdoptionRefresh } from "../src/omp-registry.ts";
 import { SessionCreationService, SessionCreationProblem, validateCreationLedger, type CreationLedger } from "../src/tern-creation.ts";
@@ -143,6 +146,99 @@ async function fixture(options: FixtureOptions = {}) {
     get subscriptions() { return listeners.size; }, get inspections() { return inspections; },
     advance(ms: number) { now += ms; monotonic += ms; } };
 }
+
+describe.skipIf(process.platform === "win32")("configured window subprocess lifecycle", () => {
+  const roots: string[] = [];
+  afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+  async function windowFixture(mode: "success" | "missing-baseline" | "nonzero-spawn" | "closed-adoption", window?: string) {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "tern-window-")));
+    roots.push(root);
+    const executable = join(root, "tern");
+    await writeFile(executable, `#!${process.execPath}
+import * as fs from "node:fs/promises";
+const args = process.argv.slice(2), home = process.env.HOME;
+await fs.appendFile(home + "/calls", JSON.stringify(args) + "\\n");
+const selector = args.indexOf("--window");
+if (process.env.SELECTED === "true" ? selector < 0 || args[selector + 1] !== process.env.WINDOW : selector >= 0) process.exit(2);
+const calls = (await fs.readFile(home + "/calls", "utf8")).trim().split("\\n").map(line => JSON.parse(line));
+const created = calls.some(call => call[0] === "new");
+if (args[0] === "inspect") {
+  if (process.env.MODE === "missing-baseline" && calls.length > 1 || process.env.MODE === "closed-adoption" && created) process.exit(1);
+  console.log(created ? '{"sessions":[{"tabs":[{"blocks":[{"id":42}]}]}],"panes":[{"pane":42,"omp_session_file":"/synthetic/2026-11-06T00-00-00-000Z_session-one.jsonl"}]}' : '{"sessions":[],"panes":[]}');
+} else {
+  console.log('{"block":42}');
+  if (process.env.MODE === "nonzero-spawn") process.exit(1);
+}
+`);
+    await chmod(executable, 0o700);
+    const selected = window !== undefined;
+    const runtimeProfile = { ...profile, argv: [process.execPath], env: {
+      HOME: root, PATH: dirname(process.execPath), MODE: mode, SELECTED: String(selected), WINDOW: window ?? "",
+    } };
+    const runtimeConfig = { ...config, paths: { ...config.paths, stateDir: root }, tern: {
+      executable, ...(window === undefined ? {} : { window }),
+      projects: [{ id: "project", label: "Project", workingCopies: [{ id: "main", label: "Main", path: root }] }],
+      profiles: [runtimeProfile],
+    } };
+    let offset = 0, polls = 0, uuidCall = 0;
+    const completed = Promise.withResolvers<void>();
+    const service = await SessionCreationService.open({
+      config: runtimeConfig, uuid: () => uuidCall++ === 0 ? revision : operationId,
+      clock: { now: () => Date.now() + offset, monotonic: () => performance.now() + offset,
+        sleep: async () => { offset += 110001; } },
+      ledger: { read: async () => undefined, write: async text => {
+        const state = JSON.parse(text).operations[0].status.state;
+        if (["ready", "failed", "started_unavailable", "outcome_unknown"].includes(state)) completed.resolve();
+      } },
+      registry: { authorizeLaunch: () => ({ status: "ok", session: {} as never }) },
+      poller: {
+        subscribeObservations: () => () => {},
+        refreshForAdoption: async () => ({ status: "ok", observation: {
+          round: ++polls, startedAt: performance.now() + offset, directoryHealthy: true,
+          knownInstanceIds: [], hosts: polls === 1 ? [] : [{ ...host, startedAt: Date.now(), createdAt: Date.now() }],
+        } }),
+      },
+    });
+    expect(await service.options()).toMatchObject({ available: true });
+    return { service, root, async finish() { await completed.promise; await service.stop(); },
+      async calls(): Promise<string[][]> { return (await readFile(join(root, "calls"), "utf8")).trim().split("\n").map(line => JSON.parse(line)); } };
+  }
+  for (const window of [undefined, "", "2"]) {
+    test(`binds availability, baseline, spawn and adoption to ${JSON.stringify(window) ?? "the unchanged default"}`, async () => {
+      const f = await windowFixture("success", window);
+      try {
+        await f.service.accept("owner", request, () => true);
+        await f.finish();
+        expect(f.service.status("owner", operationId)).toMatchObject({ state: "ready" });
+        const selector = window === undefined ? [] : ["--window", window];
+        expect(await f.calls()).toEqual([
+          ["inspect", "--json", ...selector],
+          ["inspect", "--json", ...selector],
+          ["new", "tab", ...selector, "--json", "--keep-open", "--cwd", f.root, "--", await realpath(process.execPath)],
+          ["inspect", "--json", ...selector],
+        ]);
+      } finally { await f.service.stop(); }
+    });
+  }
+  for (const [mode, state, error, creates] of [
+    ["missing-baseline", "failed", "preflight_failed", 0],
+    ["nonzero-spawn", "outcome_unknown", "launch_outcome_unknown", 1],
+    ["closed-adoption", "started_unavailable", "adoption_timeout", 1],
+  ] as const) {
+    test(`${mode} keeps ${state}/${error} without fallback or respawn`, async () => {
+      const f = await windowFixture(mode, "2");
+      try {
+        await f.service.accept("owner", request, () => true);
+        await f.finish();
+        expect(f.service.status("owner", operationId)).toMatchObject({ state, error });
+        expect((await f.calls()).filter(call => call[0] === "new")).toHaveLength(creates);
+        expect((await f.calls()).every(call => call[call.indexOf("--window") + 1] === "2")).toBe(true);
+        expect((await f.service.accept("owner", request, () => { throw new Error("replay cannot spawn"); })).status).toBe(200);
+        expect((await f.calls()).filter(call => call[0] === "new")).toHaveLength(creates);
+      } finally { await f.service.stop(); }
+    });
+  }
+});
 
 describe("durable session creation transitions", () => {
   test("rejects an observation from a pre-spawn CLI hold when the following fresh refresh times out", async () => {

@@ -77,6 +77,22 @@ green results cannot be reused. See [browser evidence policy](TEST_PLAN.md#brows
   [#380](https://github.com/carrythroughsystems/omp-session-gateway/issues/380)'s installed-iPhone
   acceptance is therefore not satisfied yet
   ([TEST_PLAN.md](TEST_PLAN.md#g-tern-multi-host-federation-and-speech-input-acceptance-matrix)).
+
+### Tern window-selector compatibility observation
+
+Read-only installed-CLI probes on the MacBook and Studio confirmed Tern `0.9.12`
+(`e498b49`). On the two-window MacBook, `inspect --json --window KEY` scopes both
+`sessions[]` and `panes[]`; unknown slots make `inspect` and `ls` exit `1` without stdout.
+Existing OMP panes retain matching block/pane IDs and nonempty `omp_session_file` metadata.
+The sanitized selected-window fixture exercises the existing bounded, lossless parser.
+
+Optional administrator-owned `tern.window` selects `""` (first window) or decimal slots
+`"2"`–`"999"` for creation and every inspection. Absence leaves argv unchanged. Keys are
+reassignable slots, not stable window identities; no fallback or selector-free retry is
+permitted. See the [ADR-043 amendment](DECISIONS.md#2026-11-07-amendment--administrator-selected-tern-window-slots).
+These observations are **not** an effectful two-window creation smoke, platform support
+expansion, or release qualification; the effectful smoke remains pending.
+
 ## Current claim
 
 <!-- release-generate:release:start -->
