@@ -325,33 +325,36 @@ export class PushService {
   }
 
   /** Recheck both subscription ownership and the coordinator's authority after acquiring a send slot. */
-  async sendFleet(owner: string, endpoint: string, message: FleetPushMessage, authorized: () => boolean): Promise<void> {
+  async sendFleet(owner: string, endpoint: string, message: FleetPushMessage, authorized: () => boolean): Promise<"delivered" | "gone" | "failed" | "skipped"> {
     const payload = JSON.stringify(parseFleetPushMessage(message));
-    await this.#withSendSlot(async () => {
+    return this.#withSendSlot(async () => {
       const subscription = this.#subscriptions.find(candidate => candidate.endpoint === endpoint && candidate.identityKey === owner);
-      if (subscription === undefined || !this.#identityAllowed(owner) || !authorized()) return;
+      if (subscription === undefined || !this.#identityAllowed(owner) || !authorized()) return "skipped";
       try {
         await this.#transport.send(subscription, payload, {
           subject: VAPID_SUBJECT, publicKey: this.#vapid.publicKey, privateKey: this.#vapid.privateKey, ttlSeconds: PUSH_TTL_SECONDS,
         });
+        return "delivered";
       } catch (error) {
         const code = statusCode(error);
         this.#logger.event("warn", "push.send_failed", { status: code, fleet: true });
         if (code === 404 || code === 410) {
           await this.#mutateSubscriptions(current => current.filter(candidate => !isSameDeliveryTarget(candidate, subscription)));
+          return "gone";
         }
+        return "failed";
       }
     });
   }
 
-  async #withSendSlot(send: () => Promise<void>): Promise<void> {
+  async #withSendSlot<T>(send: () => Promise<T>): Promise<T> {
     if (this.#sending >= 8) {
       const { promise, resolve } = Promise.withResolvers<void>();
       this.#sendWaiters.push(resolve);
       await promise;
     }
     else this.#sending++;
-    try { await send(); }
+    try { return await send(); }
     finally {
       const next = this.#sendWaiters.shift();
       if (next === undefined) this.#sending--;

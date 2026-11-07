@@ -12,12 +12,14 @@ import {
 } from "@omp-session-gateway/protocol";
 import { readPrivateTextFile, writePrivateTextFile } from "./config.ts";
 import { SafeLogger } from "./logger.ts";
+import type { HostPoller } from "./omp-registry.ts";
 import { PushService, type FleetPushRecipient } from "./push.ts";
 import { SessionRegistry } from "./registry.ts";
 
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_QUEUE = 256;
 const RETRY_MAX = 300_000;
+const DELIVERY_RETRY_MS = 30_000;
 
 export interface FleetCoordinatorConfig {
   readonly publicOrigin: string;
@@ -68,6 +70,10 @@ interface Delivery {
   grantId?: string;
   valid?: () => boolean;
 }
+interface PendingDeliveries {
+  attention: Set<string>;
+  clear: Set<string>;
+}
 export interface FleetCoordinatorClock {
   now(): number;
   setTimeout(callback: () => void, ms: number): Timer;
@@ -85,6 +91,7 @@ export interface FleetCoordinatorOptions {
   random?: () => number;
   logger?: SafeLogger;
   discoveryWarm?: () => boolean;
+  subscribeObservations?: HostPoller["subscribeObservations"];
 }
 
 export class FleetCoordinatorProblem extends Error {
@@ -174,6 +181,8 @@ export class FleetCoordinator {
   readonly #pullers = new Map<string, Puller>();
   readonly #queue: Delivery[] = [];
   readonly #inflight = new Set<Promise<void>>();
+  readonly #pendingDeliveries = new Map<Recipient, PendingDeliveries>();
+  readonly #retryDeliveries = new Map<Delivery, number>();
   readonly #unsubscribers: Array<() => void> = [];
   #state: State = { version: 1, epoch: 0, grants: [], recipients: [] };
   #healthy = true;
@@ -187,6 +196,9 @@ export class FleetCoordinator {
   #pendingStops = 0;
   #restartDeadline = 0;
   #restartTimer: Timer | undefined;
+  #retryTimer: Timer | undefined;
+  #retryTimerAt: number | undefined;
+  #persistScheduled = false;
 
   private constructor(options: FleetCoordinatorOptions) {
     this.#config = options.config; this.#push = options.push; this.#registry = options.registry;
@@ -217,6 +229,7 @@ export class FleetCoordinator {
     coordinator.#restartDeadline = coordinator.#clock.now() + 30_000;
     coordinator.#restartTimer = coordinator.#clock.setTimeout(() => coordinator.#scheduleReconcile(), 30_000);
     coordinator.#unsubscribers.push(coordinator.#registry.subscribeWithSnapshot(() => coordinator.#scheduleReconcile()));
+    if (options.subscribeObservations !== undefined) coordinator.#unsubscribers.push(options.subscribeObservations(() => coordinator.#scheduleReconcile()));
     coordinator.#unsubscribers.push(coordinator.#registry.subscribeActivityStops(event => {
       if (coordinator.#restarting || coordinator.#queue.length + coordinator.#pendingStops >= MAX_QUEUE) return;
       coordinator.#pendingStops++;
@@ -238,7 +251,7 @@ export class FleetCoordinator {
     return { healthy: this.#healthy, grants: this.#state.grants.length, recipients: this.#state.recipients.length, queued: this.#queue.length, sending: this.#inflight.size };
   }
   includes(owner: string, endpoint: string): boolean {
-    return this.#healthy && this.#state.recipients.some(recipient => recipient.owner === owner && recipient.key === endpointKey(endpoint));
+    return this.#healthy && this.#state.recipients.some(recipient => recipient.sources.length > 0 && recipient.owner === owner && recipient.key === endpointKey(endpoint));
   }
   subscriptionsChanged(): void { this.#scheduleReconcile(); }
   #subscription(recipient: Recipient): FleetPushRecipient | undefined {
@@ -257,7 +270,14 @@ export class FleetCoordinator {
     }
     return value;
   }
-  #assertHealthy(): void { if (!this.#healthy || this.#stopped) throw new FleetCoordinatorProblem(503, "fleet_unavailable"); }
+  #setKnowledgeState(knowledge: Knowledge, state: FleetSourceState): void {
+    knowledge.state = state;
+    if (state === "unauthorized" || state === "not_enrolled" || state === "unsupported") {
+      knowledge.sessions.clear();
+      knowledge.snapshot = false;
+    }
+  }
+  #assertHealthy(allowStopped = false): void { if (!this.#healthy || this.#stopped && !allowStopped) throw new FleetCoordinatorProblem(503, "fleet_unavailable"); }
   #failClosed(): void {
     this.#healthy = false;
     for (const puller of this.#pullers.values()) puller.abort.abort();
@@ -271,9 +291,18 @@ export class FleetCoordinator {
       await writePrivateTextFile(this.#path, text);
     } catch { this.#failClosed(); throw new FleetCoordinatorProblem(503, "fleet_unavailable"); }
   }
-  #serial(work: () => Promise<void>): Promise<void> {
+  /**
+   * Coalesces confirmed-delivery bookkeeping into one durable write per burst. A crash before the
+   * write only repeats an accepted attention or clear, which the worker deduplicates.
+   */
+  #schedulePersist(): void {
+    if (this.#persistScheduled) return;
+    this.#persistScheduled = true;
+    void this.#serial(async () => { this.#persistScheduled = false; await this.#persist(); }, true).catch(() => undefined);
+  }
+  #serial(work: () => Promise<void>, allowStopped = false): Promise<void> {
     const operation = this.#tail.then(async () => {
-      this.#assertHealthy();
+      this.#assertHealthy(allowStopped);
       this.#mutating = true;
       try { await work(); }
       finally { this.#mutating = false; }
@@ -296,7 +325,7 @@ export class FleetCoordinator {
     this.#state.grants = this.#state.grants.filter(grant => {
       const allowed = this.#push.fleetRecipients().some(subscription => subscription.owner === grant.owner);
       const configured = this.#config.sources.some(source => source.id === grant.sourceId && source.origin === grant.origin);
-      if (!allowed || !configured) { this.#known(grant.owner, grant.sourceId).state = "unauthorized"; return false; }
+      if (!allowed || !configured) { this.#setKnowledgeState(this.#known(grant.owner, grant.sourceId), "unauthorized"); return false; }
       return true;
     });
   }
@@ -348,8 +377,11 @@ export class FleetCoordinator {
     this.#clock.clearTimeout(timer);
     if (result !== "ok") {
       await this.#serial(async () => {
-        if (!grant.active) this.#state.grants = this.#state.grants.filter(value => value !== grant);
-        this.#syncPullers(); await this.#persist();
+        if (!grant.active) {
+          this.#state.grants = this.#state.grants.filter(value => value !== grant);
+          if (this.#grant(owner, grant.sourceId) === undefined) this.#setKnowledgeState(this.#known(owner, grant.sourceId), "not_enrolled");
+        }
+        this.#syncPullers(); await this.#reconcile();
       });
       throw new FleetCoordinatorProblem(result === "grant_rejected" ? 409 : result === "unsupported" ? 404 : 503, result);
     }
@@ -359,7 +391,7 @@ export class FleetCoordinator {
       const grant = this.#state.grants.find(grant => grant.owner === owner && grant.grantId === grantId);
       if (grant !== undefined) {
         this.#state.grants = this.#state.grants.filter(value => value !== grant);
-        if (this.#grant(owner, grant.sourceId) === undefined) this.#known(owner, grant.sourceId).state = "unauthorized";
+        if (this.#grant(owner, grant.sourceId) === undefined) this.#setKnowledgeState(this.#known(owner, grant.sourceId), "unauthorized");
       }
       this.#syncPullers(); await this.#reconcile();
     });
@@ -392,7 +424,7 @@ export class FleetCoordinator {
       const prior = released.findIndex(value => value.sourceId === grant.sourceId);
       if (prior === -1) released.push({ sourceId: grant.sourceId, grantId: grant.grantId });
       else if (grant.active) released[prior] = { sourceId: grant.sourceId, grantId: grant.grantId };
-      this.#known(owner, grant.sourceId).state = "not_enrolled"; return false;
+      this.#setKnowledgeState(this.#known(owner, grant.sourceId), "not_enrolled"); return false;
     });
     return released;
   }
@@ -507,7 +539,9 @@ export class FleetCoordinator {
         const existing = this.#grant(grant.owner, grant.sourceId);
         if (existing === grant || existing?.active !== true) {
           const knowledge = this.#known(grant.owner, grant.sourceId);
-          knowledge.state = result === "grant_rejected" ? "unauthorized" : result === "unsupported" ? "unsupported" : "stale";
+          const state = result === "grant_rejected" ? "unauthorized" : result === "unsupported" ? "unsupported" :
+            knowledge.state === "unauthorized" || knowledge.state === "not_enrolled" || knowledge.state === "unsupported" ? knowledge.state : "stale";
+          this.#setKnowledgeState(knowledge, state);
           knowledge.reported = true;
         }
         if (mismatch) this.#state.grants = this.#state.grants.filter(value => value !== grant);
@@ -546,7 +580,8 @@ export class FleetCoordinator {
       [{ instanceId: session.instanceId, generation: session.generation, requestId: session.ask.requestId }] : []);
     for (const id of recipient.sources) {
       const known = this.#known(recipient.owner, id), source = this.#bindings.get(id);
-      if (source === undefined || (known.state !== "current" && known.state !== "stale" && known.state !== "pending")) continue;
+      if (source === undefined || this.#grant(recipient.owner, id) === undefined ||
+          (known.state !== "current" && known.state !== "stale" && known.state !== "pending")) continue;
       for (const session of known.sessions.values()) if (session.requestId !== undefined) asks.push({ source, instanceId: session.instanceId, generation: session.generation, requestId: session.requestId });
       if (!known.snapshot) for (const ask of recipient.outstanding) if (ask.source === source) asks.push(ask);
     }
@@ -564,8 +599,8 @@ export class FleetCoordinator {
       for (const ask of [...recipient.outstanding]) {
         const id = ask.source === undefined ? undefined : [...this.#bindings].find(([, binding]) => binding === ask.source)?.[0];
         const selected = id !== undefined && recipient.sources.includes(id);
-        const state = id === undefined ? undefined : this.#known(recipient.owner, id).state;
-        const stale = selected && (state === "stale" || state === "pending" || state === "unsupported");
+        const state = id === undefined ? undefined : this.#grant(recipient.owner, id) === undefined ? "not_enrolled" : this.#known(recipient.owner, id).state;
+        const stale = selected && (state === "stale" || state === "pending");
         if (recipient.sources.length === 0 ? ask.source !== undefined : !keys.has(askKey(ask)) && !stale && (ask.source !== undefined || this.#warm())) {
           if (!this.#enqueue(recipient, "clear", ask, id)) this.#deferredClears = true;
         }
@@ -580,8 +615,12 @@ export class FleetCoordinator {
   }
   #enqueue(recipient: Recipient, type: FleetPushMessage["type"], session: FleetFeedSession & { source?: string }, sourceId?: string, valid?: () => boolean): boolean {
     const subscription = this.#subscription(recipient);
-    if (subscription === undefined || this.#queue.length >= MAX_QUEUE || (type === "attention" && recipient.outstanding.length >= MAX_FLEET_OUTSTANDING_ASKS)) return false;
     const source = session.source ?? (sourceId === undefined ? undefined : this.#bindings.get(sourceId));
+    const deliveries = this.#pendingDeliveries.get(recipient);
+    const key = type === "activity_stop" ? undefined : askKey({ ...session, ...(source === undefined ? {} : { source }), requestId: session.requestId! });
+    if (type !== "activity_stop" && deliveries?.[type].has(key!)) return true;
+    if (subscription === undefined || this.#queue.length >= MAX_QUEUE ||
+      (type === "attention" && recipient.outstanding.length + (deliveries?.attention.size ?? 0) >= MAX_FLEET_OUTSTANDING_ASKS)) return false;
     const pending = this.#pending(recipient);
     const common = { version: 3, ...(source === undefined ? {} : { source }), instanceId: session.instanceId, generation: session.generation,
       seq: { epoch: this.#state.epoch, n: ++this.#sequence }, badge: { count: pending.length, complete: recipient.sources.every(id => this.#known(recipient.owner, id).state === "current") } };
@@ -596,9 +635,9 @@ export class FleetCoordinator {
     const message = parseFleetPushMessage({ ...common, type, ...(type === "clear" || type === "attention" ? { requestId: session.requestId } : {}),
       ...(type === "clear" ? {} : { title: type === "attention" ? "OMP session needs attention" : "OMP session activity stopped", ...(body === undefined ? {} : { body }) }) }, this.#labels);
     if (message.type !== "activity_stop") {
-      const ask: FleetPendingAsk = { ...(source === undefined ? {} : { source }), instanceId: session.instanceId, generation: session.generation, requestId: message.requestId };
-      if (type === "attention") recipient.outstanding.push(ask);
-      else recipient.outstanding = recipient.outstanding.filter(previous => askKey(previous) !== askKey(ask));
+      const pending = deliveries ?? { attention: new Set<string>(), clear: new Set<string>() };
+      pending[message.type].add(key!);
+      this.#pendingDeliveries.set(recipient, pending);
     }
     const grantId = sourceId === undefined ? undefined : this.#grant(recipient.owner, sourceId)?.grantId;
     this.#queue.push({ recipient, endpoint: subscription.endpoint, message, ...(grantId === undefined ? {} : { grantId }), ...(valid === undefined ? {} : { valid }) });
@@ -608,7 +647,10 @@ export class FleetCoordinator {
     if (!this.#healthy || this.#stopped || delivery.valid?.() === false) return false;
     const { recipient, message } = delivery;
     if (this.#subscription(recipient) === undefined) return false;
-    if (message.type === "clear") return true;
+    if (message.type === "clear") {
+      const key = askKey(message);
+      return this.#state.recipients.includes(recipient) && recipient.outstanding.some(ask => askKey(ask) === key);
+    }
     if (!this.#state.recipients.includes(recipient) || recipient.sources.length === 0) return false;
     if (message.source === undefined) return true;
     const grant = this.#state.grants.find(grant => grant.grantId === delivery.grantId);
@@ -616,17 +658,82 @@ export class FleetCoordinator {
       this.#bindings.get(grant.sourceId) === message.source && this.#known(grant.owner, grant.sourceId).state === "current" &&
       grant.expiresAt !== undefined && Date.parse(grant.expiresAt) > this.#clock.now();
   }
+  #armDeliveryRetry(): void {
+    const now = this.#clock.now();
+    let earliest: number | undefined;
+    for (const deadline of this.#retryDeliveries.values()) {
+      // Due clears blocked by queue capacity are picked up as the drain opens space.
+      if (deadline > now && (earliest === undefined || deadline < earliest)) earliest = deadline;
+    }
+    if (earliest === this.#retryTimerAt) return;
+    if (this.#retryTimer !== undefined) this.#clock.clearTimeout(this.#retryTimer);
+    this.#retryTimer = undefined; this.#retryTimerAt = earliest;
+    if (earliest !== undefined) this.#retryTimer = this.#clock.setTimeout(() => {
+      this.#retryTimer = undefined; this.#retryTimerAt = undefined;
+      this.#drain();
+    }, earliest - now);
+  }
+  #retryReadyDeliveries(): void {
+    const now = this.#clock.now();
+    let reconcile = false;
+    for (const [delivery, deadline] of this.#retryDeliveries) {
+      if (deadline > now) continue;
+      if (delivery.message.type === "clear" && this.#authorized(delivery)) {
+        if (this.#queue.length >= MAX_QUEUE) continue;
+        // Preserve receipt order even if a newer request's attention overtook this failed clear.
+        this.#queue.push(delivery);
+      } else {
+        this.#releaseDelivery(delivery);
+        reconcile = true;
+      }
+      this.#retryDeliveries.delete(delivery);
+    }
+    this.#armDeliveryRetry();
+    if (reconcile) this.#scheduleReconcile();
+  }
   #drain(): void {
+    if (!this.#healthy || this.#stopped || this.#mutating) return;
+    this.#retryReadyDeliveries();
     while (this.#healthy && !this.#stopped && !this.#mutating && this.#inflight.size < 8 && this.#queue.length > 0) {
       const delivery = this.#queue.shift()!;
+      this.#retryReadyDeliveries();
+      let reconcile = false;
       const task = this.#push.sendFleet(delivery.recipient.owner, delivery.endpoint, delivery.message, () => this.#authorized(delivery))
+        .then(async outcome => {
+          const { recipient, message } = delivery;
+          if (outcome === "delivered") {
+            reconcile = true;
+            // A graceful stop still records accepted in-flight sends before returning.
+            if (message.type !== "activity_stop") await this.#serial(async () => {
+              if (!this.#state.recipients.includes(recipient)) return;
+              const ask: FleetPendingAsk = { ...(message.source === undefined ? {} : { source: message.source }),
+                instanceId: message.instanceId, generation: message.generation, requestId: message.requestId };
+              if (message.type === "attention") recipient.outstanding.push(ask);
+              else recipient.outstanding = recipient.outstanding.filter(previous => askKey(previous) !== askKey(ask));
+              this.#schedulePersist();
+            }, true);
+          } else if (outcome === "skipped") reconcile = true;
+          else if (outcome === "failed" && message.type !== "activity_stop" && !this.#stopped && this.#healthy) {
+            // Keep the reservation through the cooldown: unrelated reconciles cannot hot-loop failures.
+            this.#retryDeliveries.set(delivery, this.#clock.now() + DELIVERY_RETRY_MS);
+            this.#armDeliveryRetry();
+          }
+        })
         .catch(() => this.#logger.event("warn", "fleet.send_failed", { failed: true }))
         .finally(() => {
+          if (!this.#retryDeliveries.has(delivery)) this.#releaseDelivery(delivery);
           this.#inflight.delete(task); this.#drain();
-          if (this.#deferredClears || this.#state.recipients.some(recipient => recipient.sources.length === 0)) this.#scheduleReconcile();
+          if (reconcile || this.#deferredClears || this.#state.recipients.some(recipient => recipient.sources.length === 0)) this.#scheduleReconcile();
         });
       this.#inflight.add(task);
     }
+  }
+  #releaseDelivery(delivery: Delivery): void {
+    const { recipient, message } = delivery;
+    if (message.type === "activity_stop") return;
+    const pending = this.#pendingDeliveries.get(recipient);
+    pending?.[message.type].delete(askKey(message));
+    if (pending?.attention.size === 0 && pending.clear.size === 0) this.#pendingDeliveries.delete(recipient);
   }
   async flush(): Promise<void> {
     do { await this.#tail; await Promise.allSettled([...this.#inflight]); } while (this.#inflight.size > 0 || this.#reconcileScheduled || this.#queue.length > 0);
@@ -635,10 +742,12 @@ export class FleetCoordinator {
     this.#stopped = true;
     for (const unsubscribe of this.#unsubscribers) unsubscribe();
     if (this.#restartTimer !== undefined) this.#clock.clearTimeout(this.#restartTimer);
+    if (this.#retryTimer !== undefined) this.#clock.clearTimeout(this.#retryTimer);
     for (const puller of this.#pullers.values()) puller.abort.abort();
     this.#queue.length = 0;
     await Promise.allSettled([...this.#pullers.values()].map(puller => puller.task));
     await this.#tail; await Promise.allSettled([...this.#inflight]);
+    this.#pendingDeliveries.clear(); this.#retryDeliveries.clear();
   }
 }
 

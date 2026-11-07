@@ -119,9 +119,13 @@ Reconnects back off from one second to five minutes; 401 and 404 retry every fiv
 After selected sources report or 30 seconds elapse, restart reconciliation compares persisted
 outstanding requests with current knowledge: exact clears first, then unseen current asks, never
 stops or repeated alerts. Stale sources retain their outstanding asks. Selection replay is scoped
-to one device. Queue admission persists outstanding identifiers before transport; a full 256-entry
-delivery queue drops new alerts/stops while deferred clears remain represented in the bounded
-outstanding set until queue space opens. Transport rechecks owner, selection, grant and expiry
+to one device. Outstanding identifiers change only after push acceptance; volatile per-recipient
+reservations deduplicate queued/in-flight asks and count pending attentions toward capacity.
+Failed sends retain reservations through each delivery's own 30-second cooldown: outstanding clears
+retry the same envelope and sequence; attentions release for current-ask reconciliation.
+Skipped deliveries release immediately without a cooldown.
+A full 256-entry delivery queue refuses new alerts/stops while deferred clears remain represented
+in the bounded outstanding set until queue space opens. Transport rechecks owner, selection, grant and expiry
 after acquiring its send slot. Corrupt/unwritable state fails fleet routes closed without deleting
 evidence; local alerts fall back to unchanged Push v2. The ordinary directory and capability
 broker remain independent.

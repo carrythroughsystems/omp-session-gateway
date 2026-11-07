@@ -1,19 +1,24 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  EMPTY_FLEET_WORKER_STATE, fleetNotificationTag, fleetOwnerDigest, fleetSourceBinding,
+  EMPTY_FLEET_WORKER_STATE, MAX_FLEET_FEED_EVENT_BYTES, MAX_SESSIONS, fleetNotificationTag, fleetOwnerDigest, fleetSourceBinding,
   parseFleetFeedEvent, parseFleetPushMessage, parseFleetStatusResponse, reduceFleetPush,
   type BrowserPushSubscription, type FleetFeedEvent, type FleetFeedSession, type FleetPushMessage,
   type FleetWorkerState, type FleetDisplayedNotification, type ObservedSessionInput,
 } from "@omp-session-gateway/protocol";
 import { FleetCoordinator, FleetCoordinatorProblem, fleetCoordinatorStateHealthy, type FleetCoordinatorClock, type FleetCoordinatorConfig } from "../src/fleet-coordinator.ts";
+import { FleetSourceService } from "../src/fleet-source.ts";
 import type { GatewayConfig } from "../src/config.ts";
+import { createHttpHandler } from "../src/http.ts";
 import { SafeLogger } from "../src/logger.ts";
+import { OmpHostReader, startHostPoller, type HostPoller, type OmpDiscoveryObservation } from "../src/omp-registry.ts";
 import { PushService, type PushTransport } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
+import { StaticAssetStore } from "../src/static.ts";
 import { diagnosticsBundleBytes } from "../src/diagnostics.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 const instanceId = "synthetic-shared-instance";
 const requestId = "req_0123456789abcdef";
@@ -45,6 +50,7 @@ class Feeds {
   readonly snapshots = new Map<string, { owner: string; sessions: FleetFeedSession[] }>();
   readonly statuses = new Map<string, number>();
   readonly requests: Array<{ url: string; headers: string[]; redirect: string | undefined }> = [];
+  source: FleetSourceService | undefined;
   async register(grantId: string, owner: string, sessions: FleetFeedSession[] = []): Promise<void> {
     this.snapshots.set(grantId, { owner: await fleetOwnerDigest("http://127.0.0.1:4317", owner), sessions });
   }
@@ -55,6 +61,10 @@ class Feeds {
     const status = this.statuses.get(grantId);
     if (status === -1) throw new Error("SYNTHETIC_NETWORK_CANARY");
     if (status !== undefined) return new Response(null, { status });
+    if (this.source !== undefined) {
+      const id = await this.source.authenticate(authorization);
+      return id === undefined ? new Response(null, { status: 401 }) : this.source.feed(id, () => true);
+    }
     const snapshot = this.snapshots.get(grantId);
     let controller!: ReadableStreamDefaultController<Uint8Array>;
     let closed = false;
@@ -76,7 +86,9 @@ class Transport implements PushTransport {
   readonly workers = new Map<string, { state: FleetWorkerState; displayed: FleetDisplayedNotification[] }>();
   readonly gates: Array<() => void> = [];
   block = false;
+  blockType: FleetPushMessage["type"] | undefined;
   failure = 0;
+  failureType: FleetPushMessage["type"] | undefined;
   sending = 0;
   peak = 0;
   async send(subscription: BrowserPushSubscription, payload: string): Promise<void> {
@@ -84,9 +96,15 @@ class Transport implements PushTransport {
     try {
       const value = JSON.parse(payload);
       if (value.version === 2) this.legacy.push(payload);
-      else {
+      else this.calls.push({ endpoint: subscription.endpoint, payload, message: parseFleetPushMessage(value) });
+      if (this.block && (this.blockType === undefined || value.version === 3 && value.type === this.blockType)) {
+        const gate = Promise.withResolvers<void>(); this.gates.push(gate.resolve); await gate.promise;
+      }
+      if (this.failure !== 0 && (this.failureType === undefined || value.version === 3 && value.type === this.failureType)) {
+        throw Object.assign(new Error("SYNTHETIC_PUSH_CANARY"), { statusCode: this.failure });
+      }
+      if (value.version === 3) {
         const message = parseFleetPushMessage(value);
-        this.calls.push({ endpoint: subscription.endpoint, payload, message });
         const worker = this.workers.get(subscription.endpoint) ?? { state: EMPTY_FLEET_WORKER_STATE, displayed: [] };
         const reduction = reduceFleetPush(worker.state, message, worker.displayed, Date.parse("2026-11-07T00:00:00.000Z"));
         worker.state = reduction.state;
@@ -101,8 +119,6 @@ class Transport implements PushTransport {
         }
         this.workers.set(subscription.endpoint, worker);
       }
-      if (this.block) { const gate = Promise.withResolvers<void>(); this.gates.push(gate.resolve); await gate.promise; }
-      if (this.failure !== 0) throw Object.assign(new Error("SYNTHETIC_PUSH_CANARY"), { statusCode: this.failure });
     } finally { this.sending--; }
   }
   release(): void { this.block = false; for (const resolve of this.gates.splice(0)) resolve(); }
@@ -134,9 +150,10 @@ async function fixture(sources = [sourceA, sourceB]) {
   cleanups.push(async () => { transport.release(); await coordinator.stop(); await push.stop(); });
   return { root, config, registry, transport, feeds, clock, logs, push, coordinatorConfig,
     get coordinator() { return coordinator; },
-    async restart(next = coordinatorConfig, warm: () => boolean = () => true) {
+    async restart(next = coordinatorConfig, warm: () => boolean = () => true, subscribeObservations?: HostPoller["subscribeObservations"]) {
       await coordinator.stop();
-      coordinator = await FleetCoordinator.open({ config: next, stateDir: config.paths.stateDir, push, registry, fetch: feeds.fetch, clock, logger, random: () => 0.5, discoveryWarm: warm });
+      coordinator = await FleetCoordinator.open({ config: next, stateDir: config.paths.stateDir, push, registry, fetch: feeds.fetch, clock, logger, random: () => 0.5, discoveryWarm: warm,
+        ...(subscribeObservations === undefined ? {} : { subscribeObservations }) });
       return coordinator;
     },
     async device(owner = alice, device = "one", detailLevel: "private" | "session" | "preview" = "session") {
@@ -148,7 +165,10 @@ async function fixture(sources = [sourceA, sourceB]) {
   };
 }
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
-  for (let attempt = 0; attempt < 300; attempt++) {
+  // Polls a condition over real state-file I/O, which fake timers cannot drive. Bounded by wall
+  // time rather than attempts because Windows timers sleep in coarse ticks.
+  const deadline = performance.now() + HANG_DEADLINE_MS;
+  while (performance.now() < deadline) {
     if (await predicate()) return;
     await Bun.sleep(1);
   }
@@ -156,6 +176,10 @@ async function until(predicate: () => boolean | Promise<boolean>): Promise<void>
 }
 async function settled(coordinator: FleetCoordinator): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>(); setImmediate(resolve); await promise; await coordinator.flush();
+}
+async function outstanding(f: Awaited<ReturnType<typeof fixture>>) {
+  const state = JSON.parse(await readFile(join(f.config.paths.stateDir, "fleet-notifications.json"), "utf8"));
+  return state.recipients.flatMap((recipient: { outstanding: Array<{ source?: string; instanceId: string; generation: number; requestId: string }> }) => recipient.outstanding);
 }
 
 // Every recorded v3 payload is parsed and applied to the real shared reducer by Transport.send.
@@ -237,6 +261,320 @@ describe("fleet coordinator", () => {
     }
   });
 
+  for (const cancellation of ["revoke", "disconnect"] as const) {
+    test(`${cancellation} releases 256 cancelled attention reservations without a retry cooldown`, async () => {
+      const f = await fixture(); const device = await f.device();
+      const sessions = Array.from({ length: 256 }, (_, index) => ({ instanceId: `synthetic-cancelled-${index}`, generation: 1, requestId }));
+      const grant = await f.grant(alice, sourceA.id, sessions);
+      f.transport.block = true;
+      await f.coordinator.select(alice, device, [sourceA.id]); await until(() => f.transport.gates.length === 8);
+      expect(f.coordinator.diagnostics().queued).toBe(248);
+      if (cancellation === "revoke") await f.coordinator.revoke(alice, grant);
+      else {
+        f.feeds.live(grant).close();
+        await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "stale");
+      }
+      f.transport.release(); await settled(f.coordinator);
+      expect(f.transport.calls.filter(call => call.message.type === "attention")).toHaveLength(8);
+      expect([...f.clock.timers.values()].some(timer => timer.at === f.clock.now() + 30_000)).toBe(false);
+      const time = f.clock.now();
+      f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+      expect(f.transport.calls.at(-1)?.message).toMatchObject({ type: "attention", instanceId });
+      expect(f.transport.calls.at(-1)?.message.source).toBeUndefined();
+      expect(f.clock.now()).toBe(time);
+      if (cancellation === "disconnect") {
+        const connections = f.feeds.connections.length;
+        f.clock.advance(1_000);
+        await until(() => f.feeds.connections.length > connections); await settled(f.coordinator);
+        expect((await f.coordinator.status(alice, device)).sources[0]!.state).toBe("current");
+        // The local ask keeps one slot; all remaining capacity is reused by current remote asks.
+        expect(f.transport.calls.filter(call => call.message.type === "attention" && call.message.source !== undefined)).toHaveLength(255);
+        expect(await outstanding(f)).toHaveLength(256);
+        expect(f.clock.now()).toBe(time + 1_000);
+      }
+    });
+  }
+
+  test("restart retries all 20 unaccepted clears with eight in flight and twelve queued at stop", async () => {
+    const f = await fixture(); const device = await f.device();
+    const sessions = Array.from({ length: 20 }, (_, index) => ({ instanceId: `synthetic-clear-${index}`, generation: 1, requestId }));
+    const grant = await f.grant(alice, sourceA.id, sessions);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    expect(await outstanding(f)).toHaveLength(20);
+    f.transport.block = true; f.transport.failure = 500;
+    await f.coordinator.revoke(alice, grant); await until(() => f.transport.gates.length === 8);
+    expect(f.coordinator.diagnostics().queued).toBe(12);
+    const stopping = f.coordinator.stop();
+    f.transport.release(); await stopping;
+    f.transport.failure = 0;
+    const offset = f.transport.calls.length;
+    await f.restart(); await settled(f.coordinator);
+    expect(f.transport.calls.slice(offset).map(call => call.message)).toEqual(sessions.map(session =>
+      expect.objectContaining({ ...session, type: "clear", source: expect.any(String) })));
+    expect(await outstanding(f)).toEqual([]);
+    expect(f.transport.workers.get(device)!.displayed).toEqual([]);
+  });
+
+  for (const type of ["clear", "attention"] as const) {
+    test(`staggered failed ${type} deliveries each wait their own 30-second cooldown`, async () => {
+      const f = await fixture(); const device = await f.device();
+      const first = { instanceId: "synthetic-retry-first", generation: 1, requestId };
+      const second = { instanceId: "synthetic-retry-second", generation: 1, requestId };
+      const grant = await f.grant(alice, sourceA.id, type === "clear" ? [first, second] : []);
+      await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+      await until(() => f.feeds.connections.filter(connection => connection.grantId === grant).length >= 2);
+      const offset = f.transport.calls.length;
+      const send = (session: FleetFeedSession): void => f.feeds.live(grant).send({ version: 1, type: "upsert", session });
+      f.transport.failure = 500;
+      send(type === "clear" ? { instanceId: first.instanceId, generation: 1 } : first); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.instanceId)).toEqual([first.instanceId]);
+      f.clock.advance(29_000);
+      send(type === "clear" ? { instanceId: second.instanceId, generation: 1 } : second); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.instanceId)).toEqual([first.instanceId, second.instanceId]);
+      f.transport.failure = 0; f.clock.advance(1_000); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.instanceId)).toEqual([first.instanceId, second.instanceId, first.instanceId]);
+      f.clock.advance(28_999); await settled(f.coordinator);
+      expect(f.transport.calls).toHaveLength(offset + 3);
+      f.clock.advance(1); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.instanceId)).toEqual([first.instanceId, second.instanceId, first.instanceId, second.instanceId]);
+      expect(f.transport.calls.slice(offset).every(call => call.message.type === type)).toBe(true);
+    });
+
+    test(`a failed ${type} retries once after 30 seconds and changes outstanding only on acceptance`, async () => {
+      const f = await fixture(); const device = await f.device();
+      const ask = { instanceId, generation: 1, requestId };
+      const grant = await f.grant(alice, sourceA.id, [ask]);
+      if (type === "clear") { await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator); }
+      const before = type === "clear" ? [expect.objectContaining(ask)] : [];
+      const after = type === "clear" ? [] : [expect.objectContaining(ask)];
+      const offset = f.transport.calls.length;
+      f.transport.failure = 500;
+      if (type === "clear") await f.coordinator.revoke(alice, grant);
+      else await f.coordinator.select(alice, device, [sourceA.id]);
+      await settled(f.coordinator);
+      expect(await outstanding(f)).toEqual(before);
+      expect(f.transport.calls.slice(offset).map(call => call.message.type)).toEqual([type]);
+      expect([...f.clock.timers.values()].filter(timer => timer.at === f.clock.now() + 30_000)).toHaveLength(1);
+      f.transport.failure = 0;
+      f.clock.advance(29_999); await settled(f.coordinator);
+      expect(await outstanding(f)).toEqual(before);
+      expect(f.transport.calls).toHaveLength(offset + 1);
+      f.clock.advance(1); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.type)).toEqual([type, type]);
+      expect(await outstanding(f)).toEqual(after);
+    });
+
+    test(`reconciles do not duplicate a pending ${type} or persist it before acceptance`, async () => {
+      const f = await fixture(); const device = await f.device();
+      const ask = { instanceId, generation: 1, requestId };
+      const grant = await f.grant(alice, sourceA.id, [ask]);
+      if (type === "clear") { await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator); }
+      const offset = f.transport.calls.length;
+      f.transport.block = true;
+      if (type === "clear") await f.coordinator.revoke(alice, grant);
+      else await f.coordinator.select(alice, device, [sourceA.id]);
+      await until(() => f.transport.gates.length === 1);
+      for (let round = 0; round < 3; round++) await f.coordinator.status(alice, device);
+      expect(f.transport.calls.slice(offset).map(call => call.message.type)).toEqual([type]);
+      expect(f.coordinator.diagnostics().queued).toBe(0);
+      expect(await outstanding(f)).toEqual(type === "clear" ? [expect.objectContaining(ask)] : []);
+      f.transport.release(); await settled(f.coordinator);
+      expect(await outstanding(f)).toEqual(type === "clear" ? [] : [expect.objectContaining(ask)]);
+    });
+  }
+
+  test("a retried clear keeps its original sequence so a replacement attention survives push reordering", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    await until(() => f.feeds.connections.filter(connection => connection.grantId === grant).length >= 2);
+    const originalAttention = f.transport.calls[0]!.message;
+    f.transport.failure = 500; f.transport.failureType = "clear";
+    f.feeds.live(grant).send({ version: 1, type: "upsert", session: { instanceId, generation: 1, requestId: nextRequest } });
+    await settled(f.coordinator);
+    const failedClear = f.transport.calls[1]!.message, replacement = f.transport.calls[2]!.message;
+    expect(failedClear.type).toBe("clear"); expect(replacement.type).toBe("attention");
+    expect(f.transport.workers.get(device)!.displayed[0]?.intent).toMatchObject({ kind: "attention", requestId: nextRequest });
+    f.transport.failure = 0; f.clock.advance(30_000); await settled(f.coordinator);
+    const retriedClear = f.transport.calls[3]!.message;
+    expect(retriedClear).toEqual(failedClear);
+    expect(f.transport.calls[3]!.payload).toBe(f.transport.calls[1]!.payload);
+    const source = await fleetSourceBinding(sourceA.id, sourceA.origin), tag = fleetNotificationTag(source, instanceId);
+    const displayedA: FleetDisplayedNotification = { tag, intent: { kind: "attention", source, instanceId, requestId } };
+    const displayedB: FleetDisplayedNotification = { tag, intent: { kind: "attention", source, instanceId, requestId: nextRequest } };
+    const original = reduceFleetPush(EMPTY_FLEET_WORKER_STATE, originalAttention, [], f.clock.now());
+    const clearedFirst = reduceFleetPush(original.state, retriedClear, [displayedA], f.clock.now());
+    expect(clearedFirst.effects).toContainEqual({ kind: "close", tag, requestId });
+    expect(clearedFirst.state.tombstones[`${source}\0${instanceId}\0${requestId}`]).toBe(f.clock.now());
+    const delayedReplacement = reduceFleetPush(clearedFirst.state, replacement, [], f.clock.now());
+    expect(delayedReplacement.effects).toContainEqual({ kind: "show", tag, renotify: false });
+    const replacedFirst = reduceFleetPush(original.state, replacement, [displayedA], f.clock.now());
+    expect(replacedFirst.effects).toContainEqual({ kind: "show", tag, renotify: true });
+    const clearedAfter = reduceFleetPush(replacedFirst.state, retriedClear, [displayedB], f.clock.now());
+    expect(clearedAfter.effects.filter(effect => effect.kind === "close")).toEqual([]);
+    expect(clearedAfter.state.shown[`${source}\0${instanceId}\0${nextRequest}`]).toBe(f.clock.now());
+    expect(f.transport.workers.get(device)!.displayed).toEqual([displayedB]);
+    expect(await outstanding(f)).toEqual([expect.objectContaining({ instanceId, requestId: nextRequest })]);
+  });
+
+  test("a failed attention is not regenerated after its ask resolves during the cooldown", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    f.transport.failure = 500; await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.feeds.live(grant).send({ version: 1, type: "upsert", session: { instanceId, generation: 1 } }); await settled(f.coordinator);
+    f.transport.failure = 0; f.clock.advance(30_000); await settled(f.coordinator);
+    expect(f.transport.calls.map(call => call.message.type)).toEqual(["attention"]);
+    expect(await outstanding(f)).toEqual([]);
+  });
+
+  test("a failed clear is not retried after its recipient is removed during the cooldown", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.transport.failure = 500; await f.coordinator.revoke(alice, grant); await settled(f.coordinator);
+    await f.push.unsubscribe(alice, { version: 2, endpoint: device }); await settled(f.coordinator);
+    f.transport.failure = 0; f.clock.advance(30_000); await settled(f.coordinator);
+    expect(f.transport.calls.map(call => call.message.type)).toEqual(["attention", "clear"]);
+    expect(f.coordinator.diagnostics().recipients).toBe(0);
+  });
+
+  test("DELETE returns local attention to exact Push v2 while a remote clear is in flight", async () => {
+    const f = await fixture(); const device = await f.device();
+    await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    const assetRoot = join(f.root, "assets"); await mkdir(assetRoot);
+    await writeFile(join(assetRoot, "index.html"), "<!doctype html><title>OMP Sessions</title>");
+    const handler = createHttpHandler({ config: { ...f.config, notifications: { sources: [sourceA.id] } },
+      registry: f.registry, pushService: f.push, fleetCoordinator: f.coordinator,
+      staticAssets: await StaticAssetStore.load(assetRoot), tailnetPresent: () => true,
+      launchResolver: { resolve: async () => ({ status: "missing" as const }) } });
+    f.transport.block = true; f.transport.blockType = "clear";
+    const response = await handler(new Request(`${f.config.http.publicOrigin}/api/v1/push/fleet/recipient`, {
+      method: "DELETE", headers: { Origin: f.config.http.publicOrigin, "Content-Type": "application/json",
+        "Sec-Fetch-Site": "same-origin", "Tailscale-User-Login": alice },
+      body: JSON.stringify({ version: 1, endpoint: device }),
+    }), { address: "127.0.0.1" });
+    expect(response.status).toBe(200); await response.body?.cancel();
+    await until(() => f.transport.gates.length === 1);
+    f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await f.push.flush();
+    const session = f.registry.snapshot().sessions[0]!;
+    expect(f.transport.legacy).toEqual([JSON.stringify({ version: 2, type: "attention", instanceId,
+      generation: 1, requestId: session.ask!.requestId, pendingAskCount: 1,
+      title: "OMP session needs attention", body: "SYNTHETIC_LOCAL_TITLE · SYNTHETIC_LOCAL_PROJECT" })]);
+    expect(f.transport.workers.get(device)!.displayed).toHaveLength(1);
+    f.transport.release(); await settled(f.coordinator);
+    expect(f.transport.workers.get(device)!.displayed).toEqual([]);
+    expect(f.transport.calls.map(call => call.message.type)).toEqual(["attention", "clear"]);
+  });
+
+  test("a 404 reconnect clears exact unsupported-source asks and excludes them from badges", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.feeds.statuses.set(grant, 404); f.feeds.live(grant).close();
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "stale");
+    f.clock.advance(1000);
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "unsupported");
+    await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message).toEqual({ version: 3, type: "clear",
+      source: await fleetSourceBinding(sourceA.id, sourceA.origin), instanceId, generation: 1, requestId,
+      seq: { epoch: f.transport.calls[0]!.message.seq.epoch, n: 2 }, badge: { count: 0, complete: false } });
+    expect(await outstanding(f)).toEqual([]);
+    f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.badge).toEqual({ count: 1, complete: false });
+  });
+
+  test("a transport failure after 401 stays unauthorized without resurrecting cleared asks in badges", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.feeds.statuses.set(grant, 401); f.feeds.live(grant).close();
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "stale");
+    f.clock.advance(1000);
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "unauthorized");
+    await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.type).toBe("clear");
+    const attempts = f.feeds.requests.length; f.feeds.statuses.set(grant, -1); f.clock.advance(300_000);
+    await until(() => f.feeds.requests.length > attempts); await settled(f.coordinator);
+    expect((await f.coordinator.status(alice, device)).sources[0]!.state).toBe("unauthorized");
+    f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.badge).toEqual({ count: 1, complete: false });
+    expect(await outstanding(f)).toHaveLength(1);
+  });
+
+  for (const removal of ["revoke", "release"] as const) {
+    test(`${removal} forgets source knowledge before a failed replacement activation`, async () => {
+      const f = await fixture(); const device = await f.device();
+      const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+      await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+      if (removal === "revoke") await f.coordinator.revoke(alice, grant);
+      else await f.coordinator.select(alice, device, []);
+      await settled(f.coordinator);
+      const replacement = await f.coordinator.createGrant(alice, sourceA.id);
+      if (removal === "release") await f.coordinator.select(alice, device, [sourceA.id]);
+      // Pending replacement knowledge must not reuse the previous grant's snapshot either.
+      f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+      expect(f.transport.calls.at(-1)?.message.badge).toEqual({ count: 1, complete: false });
+      f.feeds.statuses.set(replacement.grantId, -1);
+      await expect(f.coordinator.activate(alice, replacement.grantId)).rejects.toMatchObject({ code: "source_unreachable" });
+      f.registry.reconcile({ observed: [observed(true), { ...observed(true), instanceId: "synthetic-next-local" }], retained: new Set() });
+      await settled(f.coordinator);
+      expect(f.transport.calls.at(-1)?.message.badge).toEqual({ count: 2, complete: false });
+      expect(f.transport.calls.filter(call => call.message.source !== undefined).map(call => call.message.type)).toEqual(["attention", "clear"]);
+    });
+  }
+
+  test("a failed replacement activation cannot keep grant-less outstanding asks in badges or suppress their clears", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.transport.failure = 500; await f.coordinator.revoke(alice, grant); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.type).toBe("clear");
+    expect(await outstanding(f)).toHaveLength(1);
+    const replacement = await f.coordinator.createGrant(alice, sourceA.id);
+    f.feeds.statuses.set(replacement.grantId, -1);
+    await expect(f.coordinator.activate(alice, replacement.grantId)).rejects.toMatchObject({ code: "source_unreachable" });
+    expect((await f.coordinator.status(alice, device)).sources[0]!).toEqual({ sourceId: sourceA.id, state: "not_enrolled", selected: true });
+    f.transport.failure = 0;
+    f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.badge).toEqual({ count: 1, complete: false });
+    f.clock.advance(30_000); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.type).toBe("clear");
+    expect(await outstanding(f)).toEqual([expect.objectContaining({ instanceId })]);
+    expect((await outstanding(f))[0]?.source).toBeUndefined();
+    f.registry.reconcile({ observed: [observed(true), { ...observed(true), instanceId: "synthetic-later-local" }], retained: new Set() });
+    await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message).toMatchObject({ type: "attention", instanceId: "synthetic-later-local", badge: { count: 2, complete: false } });
+    expect((await f.coordinator.status(alice, device)).sources[0]!.state).toBe("not_enrolled");
+    expect(f.transport.workers.get(device)!.displayed.every(value => value.intent.source === undefined)).toBe(true);
+  });
+
+  test("a real source activates and delivers a 1000-session worst-case snapshot to the coordinator", async () => {
+    const f = await fixture(); const device = await f.device();
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: MAX_SESSIONS, requestIdFactory: () => "r".repeat(128) });
+    registry.reconcile({ observed: Array.from({ length: MAX_SESSIONS }, (_, index) => ({
+      ...observed(true), instanceId: `synthetic-${index}`.padEnd(64, "x"), generation: Number.MAX_SAFE_INTEGER,
+    })), retained: new Set() });
+    const config: GatewayConfig = { ...f.config,
+      http: { ...f.config.http, publicOrigin: sourceA.origin, trustedDashboardOrigins: [f.config.http.publicOrigin] },
+      notifications: { coordinators: [{ id: "home", origin: f.config.http.publicOrigin }] },
+      paths: { ...f.config.paths, stateDir: join(f.root, "source-state") } };
+    const source = await FleetSourceService.open({ config, registry, now: f.clock.now,
+      poller: { discoveryWarm: true, subscribeObservations: () => () => {} } });
+    cleanups.push(async () => { await source.stop(); });
+    f.feeds.source = source;
+    const grant = await f.coordinator.createGrant(alice, sourceA.id);
+    await source.create(alice, f.config.http.publicOrigin, grant);
+    await f.coordinator.activate(alice, grant.grantId);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    expect((await f.coordinator.status(alice, device)).sources[0]!.state).toBe("current");
+    expect(f.transport.calls).toHaveLength(256);
+    expect(f.transport.calls.every(call => call.message.type === "attention" &&
+      call.message.generation === Number.MAX_SAFE_INTEGER && call.message.instanceId.length === 64 &&
+      call.message.requestId.length === 128 && call.message.badge.count === MAX_SESSIONS)).toBe(true);
+    expect(await outstanding(f)).toHaveLength(256);
+  });
+
   test("restart advances the epoch and diffs resolved/unseen asks without repeats or stops", async () => {
     const f = await fixture(); const device = await f.device();
     const unchanged = { instanceId: "synthetic-unchanged", generation: 1, requestId };
@@ -254,7 +592,7 @@ describe("fleet coordinator", () => {
     await f.restart(); await settled(f.coordinator); expect(f.transport.calls).toHaveLength(count + 2);
   });
 
-  test("restart with queued old messages preserves outstanding identity and rejects late old epochs", async () => {
+  test("restart records accepted in-flight attentions but never unsent queued asks and rejects late old epochs", async () => {
     const f = await fixture(); const device = await f.device();
     const sessions = Array.from({ length: 20 }, (_, index) => ({ instanceId: `synthetic-queued-${index}`, generation: 1, requestId }));
     const grant = await f.grant(alice, sourceA.id, sessions); f.transport.block = true;
@@ -262,9 +600,10 @@ describe("fleet coordinator", () => {
     const old = f.transport.calls[0]!.message;
     const stopping = f.coordinator.stop(); f.transport.release(); await stopping;
     expect(f.transport.calls).toHaveLength(8);
+    expect(await outstanding(f)).toEqual(sessions.slice(0, 8).map(session => expect.objectContaining(session)));
     await f.feeds.register(grant, alice, [{ instanceId: "synthetic-after-restart", generation: 2, requestId: nextRequest }]);
-    await f.restart(); await until(() => f.transport.calls.length === 29); await settled(f.coordinator);
-    expect(f.transport.calls.slice(8).filter(call => call.message.type === "clear")).toHaveLength(20);
+    await f.restart(); await until(() => f.transport.calls.length === 17); await settled(f.coordinator);
+    expect(f.transport.calls.slice(8).filter(call => call.message.type === "clear")).toHaveLength(8);
     expect(f.transport.calls.slice(8).filter(call => call.message.type === "attention")).toHaveLength(1);
     expect(f.transport.calls.slice(8).every(call => call.message.seq.epoch === old.seq.epoch + 1)).toBe(true);
     const worker = f.transport.workers.get(device)!;
@@ -320,7 +659,7 @@ describe("fleet coordinator", () => {
     f.feeds.statuses.delete(grant); f.clock.advance(1);
     await until(() => f.transport.calls.length === 3); await settled(f.coordinator);
     expect(f.transport.calls.at(-1)?.message.type).toBe("attention");
-    f.feeds.live(grant).raw(`data: ${"x".repeat(70_000)}\n\n`);
+    f.feeds.live(grant).raw(`data: ${"x".repeat(MAX_FLEET_FEED_EVENT_BYTES + 1)}\n\n`);
     await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "stale");
     expect(f.transport.calls).toHaveLength(3);
     f.clock.advance(1000); await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "current");
@@ -374,6 +713,32 @@ describe("fleet coordinator", () => {
     f.clock.advance(30_000); await settled(f.coordinator); expect(f.transport.calls).toHaveLength(count);
     warm = true; await f.coordinator.status(alice, device); await settled(f.coordinator);
     expect(f.transport.calls.at(-1)?.message.type).toBe("clear");
+  });
+
+  test("the first empty discovery observation reconciles local restart clears without the 30-second timer", async () => {
+    const f = await fixture(); const device = await f.device(); await f.grant(alice, sourceA.id);
+    await f.coordinator.select(alice, device, [sourceA.id]);
+    f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+    const local = f.transport.calls.at(-1)!.message;
+    if (local.type !== "attention") throw new Error("attention expected");
+    await f.coordinator.stop();
+    f.registry.reconcile({ observed: [], retained: new Set() }); await f.push.flush();
+    const reader = new OmpHostReader({ directory: f.config.omp.discoveryDir });
+    const round = Promise.withResolvers<OmpDiscoveryObservation>();
+    reader.observe = () => round.promise;
+    const poller = startHostPoller({ reader, registry: f.registry, intervalMs: 60_000 });
+    cleanups.push(async () => { round.resolve({ directoryHealthy: true, retained: new Set(), hosts: [] }); poller.stop(); });
+    const count = f.transport.calls.length, time = f.clock.now();
+    await f.restart(f.coordinatorConfig, () => poller.discoveryWarm, poller.subscribeObservations);
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "current");
+    await settled(f.coordinator); expect(f.transport.calls).toHaveLength(count);
+    round.resolve({ directoryHealthy: true, retained: new Set(), hosts: [] }); await poller.poll();
+    expect(poller.discoveryWarm).toBe(true);
+    await settled(f.coordinator);
+    expect(f.transport.calls.slice(count).map(call => call.message)).toEqual([expect.objectContaining({
+      type: "clear", instanceId, generation: 1, requestId: local.requestId,
+    })]);
+    expect(f.clock.now()).toBe(time);
   });
 
   test("capacity and queue flood stay bounded; every queued alert remains clearable", async () => {

@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   FLEET_PUSH_VERSION,
   MAX_FLEET_BADGE_COUNT,
+  MAX_FLEET_FEED_EVENT_BYTES,
+  MAX_FLEET_FEED_SESSION_BYTES,
+  MAX_SESSIONS,
   ProtocolValidationError,
   fleetGrantVerifier,
   fleetOwnerDigest,
@@ -270,6 +273,21 @@ describe("fleet HTTP and feed contracts", () => {
     expect(parseFleetFeedEvent({ version: 1, type: "stop", instanceId, generation: 3 }).type).toBe("stop");
     reject(() => parseFleetFeedEvent({ version: 1, type: "stop", instanceId, generation: 3, requestId }));
     reject(() => parseFleetFeedEvent({ version: 2, type: "remove", instanceId, generation: 3 }));
+  });
+
+  test("a snapshot admits 1000 worst-case actionable session identities", () => {
+    const sessions = Array.from({ length: MAX_SESSIONS }, (_, index) => ({
+      instanceId: `synthetic-${index}`.padEnd(64, "x"),
+      generation: Number.MAX_SAFE_INTEGER,
+      requestId: "r".repeat(128),
+    }));
+    const snapshot = { version: 1, type: "snapshot", owner: digest,
+      expiresAt: "2026-12-07T00:00:00.000Z", sessions };
+    expect(JSON.stringify(sessions[0]).length).toBeLessThanOrEqual(MAX_FLEET_FEED_SESSION_BYTES);
+    expect(MAX_FLEET_FEED_EVENT_BYTES).toBe(MAX_SESSIONS * MAX_FLEET_FEED_SESSION_BYTES + 4 * 1024);
+    expect(JSON.stringify(snapshot).length).toBeGreaterThan(64 * 1024);
+    expect(JSON.stringify(snapshot).length).toBeLessThanOrEqual(MAX_FLEET_FEED_EVENT_BYTES);
+    expect(parseFleetFeedEvent(snapshot)).toEqual(snapshot as never);
   });
 
   test("only an exact bearer grant credential parses", () => {

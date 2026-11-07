@@ -154,8 +154,10 @@ export class FleetSourceService {
   }
 
   #authorized(grant: SourceGrant): boolean {
-    return this.healthy && this.#grants.get(grant.grantId) === grant && this.#coordinatorAllowed(grant.coordinator) &&
-      this.#ownerAllowed(grant.owner) && Date.parse(grant.expiresAt) > this.#now();
+    const current = this.#grants.get(grant.grantId);
+    return this.healthy && current !== undefined && current.verifier === grant.verifier &&
+      current.owner === grant.owner && current.coordinator === grant.coordinator &&
+      this.#coordinatorAllowed(current.coordinator) && this.#ownerAllowed(current.owner) && Date.parse(current.expiresAt) > this.#now();
   }
 
   #assertAvailable(): void {
@@ -221,9 +223,8 @@ export class FleetSourceService {
       const grant = { ...prior, expiresAt: new Date(this.#now() + FLEET_GRANT_LIFETIME_MS).toISOString() };
       const grants = this.#pruned();
       grants.set(grantId, grant);
-      this.#grants.delete(grantId);
-      this.#connections.get(grantId)?.close();
       await this.#persist(grants);
+      this.#connections.get(grantId)?.close();
       return parseSourceGrantResponse({ version: FLEET_NOTIFICATIONS_VERSION, grantId, expiresAt: grant.expiresAt });
     });
   }
@@ -258,6 +259,7 @@ export class FleetSourceService {
     if (grant === undefined || !this.#authorized(grant) || !stillAuthorized()) throw new FleetSourceProblem(401, "unauthorized");
     const owner = await fleetOwnerDigest(grant.coordinator, grant.owner);
     if (!this.#authorized(grant) || !stillAuthorized()) throw new FleetSourceProblem(401, "unauthorized");
+    const expiresAt = this.#grants.get(grantId)!.expiresAt;
     this.#connections.get(grantId)?.close();
     const encoder = new TextEncoder();
     const pending: QueuedEvent[] = [];
@@ -317,7 +319,7 @@ export class FleetSourceService {
       begun = true;
       retain(this.#registry.subscribeWithSnapshot(event => {
         if (event.type === "snapshot") queue({ version: FLEET_NOTIFICATIONS_VERSION, type: "snapshot", owner,
-          expiresAt: grant.expiresAt, sessions: event.sessions.map(projectSession) });
+          expiresAt, sessions: event.sessions.map(projectSession) });
         else if (event.type === "session_upsert") queue({ version: FLEET_NOTIFICATIONS_VERSION, type: "upsert", session: projectSession(event.session) });
         else queue({ version: FLEET_NOTIFICATIONS_VERSION, type: "remove", instanceId: event.instanceId, generation: event.generation });
       }));
@@ -335,7 +337,7 @@ export class FleetSourceService {
         const expire = (): void => {
           if (!authorized()) { connection.close(); return; }
           // Thirty days exceeds the platform timer's signed 32-bit delay.
-          expiry = setTimeout(expire, Math.min(2_147_483_647, Math.max(0, Date.parse(grant.expiresAt) - this.#now())));
+          expiry = setTimeout(expire, Math.min(2_147_483_647, Math.max(0, Date.parse(expiresAt) - this.#now())));
         };
         expire();
       },

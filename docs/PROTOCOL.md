@@ -397,7 +397,7 @@ or `Sec-Fetch-*` header with `403`, requires the Serve-only loopback topology wi
 evidence, ignores Tailscale identity headers, and accepts only
 `Authorization: Bearer <grantId>.<secret>`. An unknown, expired, revoked, or no-longer-authorized
 grant answers `401` without detail. The response is `text/event-stream`; each `data` line is one
-JSON event whose `type` matches the SSE event name:
+JSON event bounded to 260,096 bytes (`MAX_SESSIONS × 256 + 4 KiB`) whose `type` matches the SSE event name:
 
 ```json
 { "version": 1, "type": "snapshot", "owner": "<43-char owner digest>", "expiresAt": "2026-12-07T00:00:00.000Z",

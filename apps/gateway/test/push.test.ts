@@ -120,6 +120,30 @@ async function createRoot(): Promise<string> {
 }
 
 describe("Web Push service", () => {
+  test.each(["missing subscription", "disallowed identity", "rejected authority"] as const)(
+    "reports skipped fleet delivery for %s without calling transport", async reason => {
+      const root = await createRoot(), gatewayConfig = config(root);
+      const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 }), transport = new RecordingTransport();
+      const service = await PushService.open({ config: gatewayConfig, registry, transport });
+      try {
+        await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+        if (reason === "missing subscription") await service.unsubscribe("dev-localhost", { version: PUSH_API_VERSION, endpoint });
+        if (reason === "disallowed identity") {
+          // Retain the owned subscription while withdrawing the allowlist entry.
+          const auth = gatewayConfig.auth as { mode: GatewayConfig["auth"]["mode"]; allowedLogins: string[] };
+          auth.mode = "tailscale-serve";
+          auth.allowedLogins = [];
+        }
+        const outcome = await service.sendFleet("dev-localhost", endpoint, {
+          version: 3, type: "attention", instanceId: "synthetic-fleet-skipped", generation: 1, requestId: "synthetic-skipped-request",
+          seq: { epoch: 1, n: 1 }, badge: { count: 1, complete: false }, title: "OMP session needs attention",
+        }, () => reason !== "rejected authority");
+        expect(transport.calls).toEqual([]);
+        expect(outcome).toBe("skipped");
+      } finally { await service.stop(); }
+    },
+  );
+
   test("authenticated push config counts eligible global recipients without listing private state", async () => {
     const root = await createRoot();
     const gatewayConfig = config(root), registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });

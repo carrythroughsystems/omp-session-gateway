@@ -2387,6 +2387,7 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   stale source keeps its last-known alerts. When a grant becomes unauthorized or its source leaves
   the configuration, the coordinator clears that source's alerts for the owner's devices and reports
   the source as unauthorized, never as empty.
+  A source answering 404 (`unsupported`) has its alerts cleared like a removed source.
 - **Detail.** The coordinator applies detail before transport. In v3, Private shows fixed titles and
   no body. Session and Preview show, for a remote session, the target's configured label and a
   six-character opaque session suffix, never a title, working-directory label, preview, or path,
@@ -2454,6 +2455,10 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
 - WebKit may count clears, which display nothing, against its silent-push allowance, as it already
   could for Push v2 clears. Delivery stays best effort; a lost clear leaves its alert until the
   next reconciliation or a newer request replaces it.
+- An unchanged request cleared after deauthorization or an unsupported source cannot re-alert within
+  its 30-minute worker tombstone, even after access recovers.
+- If an authorization clear fails and the coordinator restarts while its source is unreachable, the
+  alert may remain until the source becomes reachable, is deselected, or its grant expires.
 - A foreground reconciliation's badge holds only until the next push. A push generated before the
   page's snapshots but delivered after them, or an older reconciliation from a second window, can
   show its older count until the next push or reconciliation; alerts themselves are unaffected.
