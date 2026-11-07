@@ -293,8 +293,9 @@ session-leader pattern. Its TERM/EXIT trap precedes spawning the daemon, and ato
 identify both processes. Stop proves the supervisor, child and backend listener gone within the
 30-second bound before removing their PID files. The restoration owner is fsynced and atomically
 published (including its parent directory) before any coordinator config/service/Serve mutation.
-The supervisor signals its own unreaped child even before exec; external cleanup still verifies
-PID/command ownership before signalling. Pre-owner recovery removes only `owner.json.tmp`, then
+The supervisor signals its own unreaped child even before exec, but never signals a child after
+its normal wait reaped it; external cleanup still verifies PID/command ownership before signalling.
+Pre-owner recovery removes only `owner.json.tmp`, then
 requires the epoch directory to be empty.
 DevTools admission bounds both pending HTTP reads and retries. A worker-only observation may
 reconnect once after contained transport loss, but never wakes/navigates the cold PWA, re-arms

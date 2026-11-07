@@ -213,9 +213,9 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     if (await sourceAlive() !== undefined || await childAlive() !== undefined || !await backendAbsent()) throw new Error("fleet source already running");
     const script = join(root, "source.sh");
     // Keep a uniquely owned parent process; its trap terminates and waits for the daemon child.
-    await atomic(script, ["#!/bin/sh", "child=",
+    await atomic(script, ["#!/bin/sh", "child=", "reaped=0",
       "stop() {", "  trap '' TERM INT", "  trap - EXIT", '  child=${child:-$!}',
-      '  if [ -n "$child" ]; then',
+      '  if [ "$reaped" = 0 ] && [ -n "$child" ]; then',
       `    printf %s "$child" > ${quote(`${childPidPath}.tmp`)} && mv ${quote(`${childPidPath}.tmp`)} ${quote(childPidPath)}`,
       // The parent's own unreaped child cannot be PID-reused, including before env execs Bun.
       '    kill -TERM "$child" 2>/dev/null', '    wait "$child" 2>/dev/null', "  fi", "  exit", "}",
@@ -224,7 +224,7 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
       `env -u XDG_RUNTIME_DIR HOME=${quote(home)} XDG_CONFIG_HOME=${quote(join(home, ".config"))} XDG_STATE_HOME=${quote(join(home, ".local/state"))} ${quote(state.bun)} ${quote(state.cli)} serve &`,
       'child=$!',
       `printf %s "$child" > ${quote(`${childPidPath}.tmp`)} && mv ${quote(`${childPidPath}.tmp`)} ${quote(childPidPath)} || exit 1`,
-      'wait "$child"', ""].join("\n"));
+      'wait "$child"', "reaped=1", ""].join("\n"));
     // Like the existing OMP fixture holder, leave the SSH session before exec. nohup alone
     // does not keep this supervisor alive when the remote command's session is torn down.
     const detach = 'import os,sys; os.setsid(); os.execv("/bin/sh", ["sh", sys.argv[1]])';

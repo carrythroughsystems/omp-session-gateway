@@ -769,9 +769,9 @@ test.each(["stable", "rotated"] as const)("fleet audit requires stable live Cont
   const remote = { instanceId: "synthetic-remote", generation: 2, canView: true, canControl: true, inputRequired: false,
     startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-remote" };
   let scans = 0, launches = 0, controls = 0, hostAudits = 0;
-  const tapped = `https://synthetic.example.test/#synthetic-tapped.${"A".repeat(43)}`;
-  const capabilities = [`https://synthetic.example.test/#synthetic-control.${"B".repeat(43)}`,
-    `https://synthetic.example.test/#synthetic-control.${(scenario === "rotated" ? "C" : "B").repeat(43)}`];
+  const tapped = `https://relay.test/#synthetic-tapped.${"A".repeat(43)}`;
+  const capabilities = [`https://relay.test/#synthetic-control.${"B".repeat(43)}`,
+    `https://relay.test/#synthetic-control.${(scenario === "rotated" ? "C" : "B").repeat(43)}`];
   const storage = { get length() { scans++; return scenario === "rotated" ? 1 : 0; }, key: () => "synthetic-seed", getItem: () => tapped };
   const driver = {
     browserSend: async () => ({ targetInfos: [{ type: "page", targetId: "page", url: identity.origin + "/client/" }] }),
