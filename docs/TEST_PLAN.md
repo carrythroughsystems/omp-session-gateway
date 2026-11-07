@@ -298,6 +298,9 @@ phases run after release, without this observer, and retain the process-cold obs
 After signalling a verified source supervisor once, cleanup tolerates transient loss of its
 command line only while awaiting proven absence/zombie within the existing 30-second bound;
 it never signals an unverified PID or treats a changed command as proof of exit.
+Tap accounting records browser-generated CORS `OPTIONS` preflights separately from launch
+attempts. Every non-OPTIONS request to any launch route still counts, so duplicate POSTs and
+wrong-source/malformed launch attempts cannot be hidden by the cross-origin admission step.
 
 Fleet progress adds only an ownership boolean and a remote notification-topic SHA-256 digest.
 Closed boolean/count results remain additive to receipt schema 3; no source, session, request,

@@ -3,7 +3,7 @@ import * as deviceOperations from "./android-device.ts";
 import * as webApkOperations from "./android-webapk.ts";
 import * as notificationOperations from "./android-notification.ts";
 import { AndroidBrowserCleanupError, AndroidDevtoolsConnectionError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
-import { createAndroidPushRuntime, holdAndroidNotificationDenial, holdPushWorkerObserver, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure } from "./android-push-runtime.ts";
+import { createAndroidPushRuntime, holdAndroidNotificationDenial, holdPushWorkerObserver, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure, pushLaunchRequestKind } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { checkProviderReads } from "./check-repository.ts";
 import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qualification.ts";
@@ -1095,6 +1095,17 @@ test("fleet host commands use the retained executor and exact candidate identity
   expect(checkpoints).toBe(1);
   expect(calls).toEqual([["/synthetic/bun", "/synthetic/scripts/fleet-push-fixture.ts", "source-down",
     `/synthetic/fixtures/fleet-${epoch}`, epoch, identity.origin, "c".repeat(40)]]);
+});
+
+test("cross-origin tap counts its launch, not its CORS admission, and still detects duplicate launches", () => {
+  const url = "https://synthetic.example.test:10443/api/v1/sessions/synthetic/launch";
+  const observe = (methods: unknown[]) => methods.map(method => pushLaunchRequestKind(url, method));
+  expect(observe(["OPTIONS", "POST"])).toEqual(["preflight", "launch"]);
+  expect(observe(["OPTIONS", "POST", "POST"]).filter(kind => kind === "launch")).toHaveLength(2);
+  // No broader method/source filter can hide a malformed or wrong-host launch attempt.
+  for (const method of ["GET", "PUT", undefined]) expect(pushLaunchRequestKind(url, method)).toBe("launch");
+  expect(pushLaunchRequestKind("https://foreign.example.test/api/v1/sessions/other/launch", "POST")).toBe("launch");
+  expect(pushLaunchRequestKind("https://synthetic.example.test/api/v1/sessions", "GET")).toBeUndefined();
 });
 
 test("fleet cleanup before persisted ownership never touches enrollment or a worker", async () => {
