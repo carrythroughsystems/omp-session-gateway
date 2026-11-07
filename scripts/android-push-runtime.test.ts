@@ -652,6 +652,7 @@ test.each(["resolved", "replaced", "stopped", "missing", "transport"] as const)(
           postedAt: 1, seen: true, visibleSince: 1, text: "" }];
       } } } };
     const driver = {
+      onEvent: () => () => {},
       browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
         { type: "page", targetId: "page", url: identity.origin + "/" },
         { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
@@ -1623,6 +1624,7 @@ test("fleet unpatch failure and retry retain host ownership until worker restora
   const events: string[] = [], progress = { epoch: "a3a77f8e-956b-45d0-a684-a33e6b336dc0", fleetPrepared: true } as AndroidPushProgress;
   let owner = true, restored = false;
   const driver = {
+    onEvent: () => () => {},
     browserSend: async (method: string) => {
       if (method === "Target.detachFromTarget") events.push("observer-close");
       return method === "Target.getTargets" ? { targetInfos: [{ type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" }] } :
@@ -1730,6 +1732,7 @@ test.each(["none", "enrollment", "owner", "host", "connection", "mutation"] as c
   let admissions = 0, detached = 0, closed = 0, broken = false;
   const transport = new AndroidDevtoolsConnectionError("websocket_closed", "synthetic observer disconnected");
   const driver = {
+    onEvent: () => () => {},
     browserSend: async (method: string) => { if (method === "Target.detachFromTarget") detached++; return method === "Target.getTargets" ?
       { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
       method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {}; },
@@ -1796,6 +1799,7 @@ test("held worker admission cancellation releases the connection without creatin
   let closes = 0;
   const connect = (async (run: (driver: unknown) => Promise<unknown>) => {
     try { return await run({
+      onEvent: () => () => {},
       browserSend: async (method: string) => {
         methods.push(method);
         return method === "Target.getTargets" ? { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: identity.origin + "/service-worker.js" }] } :
@@ -1806,8 +1810,71 @@ test("held worker admission cancellation releases the connection without creatin
   const observer = await holdPushWorkerObserver(identity.origin, { signal: controller.signal, deadline: performance.now() + 60_000 }, connect);
   controller.abort(cancelled);
   await expect(observer.close()).rejects.toBe(cancelled);
-  expect(methods).toEqual(["Target.getTargets", "Target.attachToTarget", "Target.detachFromTarget"]);
+  expect(methods).toEqual(["Target.getTargets", "Target.attachToTarget", "Target.setDiscoverTargets", "Target.detachFromTarget"]);
   expect(closes).toBe(1);
+});
+
+test.each(["quiet", "replaced", "changed", "foreign"] as const)("held worker timeout retains closed lifecycle diagnostics (%s)", async scenario => {
+  const methods: string[] = [];
+  let listener: (method: string, parameters: Record<string, unknown>) => void = () => {};
+  let removed = 0, evaluations = 0;
+  const failure = new AndroidDevtoolsConnectionError("protocol_timeout", "CDP timeout: Runtime.evaluate");
+  const connect = (async (run: (driver: unknown) => Promise<unknown>) => run({
+    onEvent: (callback: typeof listener) => { listener = callback; return () => { removed++; }; },
+    browserSend: async (method: string) => {
+      methods.push(method);
+      return method === "Target.getTargets" ? { targetInfos: [
+        { type: "service_worker", targetId: "synthetic-held-target", url: identity.origin + "/service-worker.js" },
+      ] } : method === "Target.attachToTarget" ? { sessionId: "synthetic-held-session" } : {};
+    },
+    sessionSend: async (session: string) => {
+      expect(session).toBe("synthetic-held-session"); evaluations++;
+      if (scenario !== "quiet") {
+        const owned = scenario !== "foreign";
+        listener("Target.detachedFromTarget", { sessionId: owned ? session : "synthetic-foreign-session" });
+        listener("Target.targetDestroyed", { targetId: owned ? "synthetic-held-target" : "synthetic-foreign-target" });
+        listener("Target.targetInfoChanged", { targetInfo: { targetId: owned ? "synthetic-held-target" : "synthetic-foreign-target",
+          type: "service_worker", url: scenario === "changed" ? "https://foreign.example.test/service-worker.js" : identity.origin + "/service-worker.js" } });
+        listener("Target.targetCreated", { targetInfo: { targetId: "synthetic-new-target", type: "service_worker",
+          url: (owned ? identity.origin : "https://foreign.example.test") + "/service-worker.js" } });
+      }
+      throw failure;
+    },
+  })) as typeof withAndroidChrome;
+  const observer = await holdPushWorkerObserver(identity.origin, undefined, connect);
+  try {
+    await expect(observer.evaluate("synthetic-private-expression")).rejects.toBe(failure);
+    const diagnostic = privateQualificationFailureDiagnostic(failure).find(entry => entry.message.startsWith("Fleet worker lifecycle: "))!;
+    const zero = { detached: 0, destroyed: 0, changed: 0, identityChanged: 0, sameScriptCreated: 0 };
+    expect(JSON.parse(diagnostic.message.slice("Fleet worker lifecycle: ".length))).toEqual({
+      before: zero, after: ["replaced", "changed"].includes(scenario) ?
+        { detached: 1, destroyed: 1, changed: 1, identityChanged: scenario === "changed" ? 1 : 0, sameScriptCreated: 1 } : zero,
+    });
+    expect(diagnostic.message).not.toContain("synthetic");
+    expect(diagnostic.message).not.toContain(identity.origin);
+    expect(evaluations).toBe(1);
+    expect(removed).toBe(0);
+  } finally { await observer.close(); }
+  expect(removed).toBe(1);
+  expect(methods).toEqual(["Target.getTargets", "Target.attachToTarget", "Target.setDiscoverTargets", "Target.detachFromTarget"]);
+});
+
+test("held worker discovery failure detaches and removes diagnostic subscriptions", async () => {
+  const methods: string[] = [], failure = new Error("synthetic discovery failure");
+  let removed = 0;
+  const connect = (async (run: (driver: unknown) => Promise<unknown>) => run({
+    onEvent: () => () => { removed++; },
+    browserSend: async (method: string) => {
+      methods.push(method);
+      if (method === "Target.setDiscoverTargets") throw failure;
+      return method === "Target.getTargets" ? { targetInfos: [
+        { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
+      ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {};
+    },
+  })) as typeof withAndroidChrome;
+  await expect(holdPushWorkerObserver(identity.origin, undefined, connect)).rejects.toBe(failure);
+  expect(removed).toBe(1);
+  expect(methods).toEqual(["Target.getTargets", "Target.attachToTarget", "Target.setDiscoverTargets", "Target.detachFromTarget"]);
 });
 
 test("R2 fresh request attestation accepts the delivering secondary snapshot and rejects wrong generations", async () => {
