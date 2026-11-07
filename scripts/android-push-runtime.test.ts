@@ -10,6 +10,7 @@ import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qua
 import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
 import { notificationTopicDigest } from "./android-notification.ts";
 import { PUSH_FIXTURE_ASK_BODY } from "./fixtures/push-qualification-extension.ts";
+import { commandPushFixture } from "./push-qualification-fixture.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
 const WIFI_CONNECTIVITY = "Current Networks:\n  NetworkAgentInfo{ ni{WIFI CONNECTED} lastValidated }";
 const VPN_CONNECTIVITY = `${WIFI_CONNECTIVITY}\n  NetworkAgentInfo{ ni{VPN CONNECTED} SYNTHETIC-PRIVATE-TRANSPORT-NETWORK }`;
@@ -1100,6 +1101,31 @@ test("fleet host commands use the retained executor and exact candidate identity
     `/synthetic/fixtures/fleet-${epoch}`, epoch, identity.origin, "c".repeat(40)]]);
 });
 
+test("fixture transport keeps guest script paths POSIX independently of the runner", async () => {
+  const calls: string[][] = [];
+  await commandPushFixture({ root: "/synthetic/fixture", epoch: "synthetic", bun: "/synthetic/bun",
+    binary: "/synthetic/omp", scripts: "/synthetic/scripts" }, "ask",
+  async argv => { calls.push([...argv]); return { exitCode: 0, stdout: "" }; }, true);
+  expect(calls).toEqual([["/synthetic/bun", "/synthetic/scripts/push-qualification-fixture.ts", "ask",
+    "/synthetic/fixture", "synthetic", "/synthetic/omp", "/synthetic/scripts", "guard-session"]]);
+});
+
+test.each(["primary", "secondary", "remote"] as const)("retained %s fixture roots and remote environment remain POSIX", async role => {
+  const calls: string[][] = [], epoch = "a3a77f8e-956b-45d0-a684-a33e6b336dc0";
+  const runtime = createAndroidPushRuntime(identity, { fixtureBase: "/synthetic/fixtures", fixtureScripts: "/synthetic/scripts",
+    fixtureBun: "/synthetic/bun", fixtureBinary: "/synthetic/omp",
+    execute: async argv => { calls.push([...argv]); return { exitCode: 0, stdout: "" }; },
+  });
+  runtime.beforeEffect = async () => {};
+  await runtime.fixture("answer", epoch, role);
+  const fleet = `/synthetic/fixtures/fleet-${epoch}`;
+  const root = role === "remote" ? `${fleet}/omp-push-remote` : `/synthetic/fixtures/${role === "primary" ? "omp-push" : "omp-push-b"}-${epoch}`;
+  expect(calls).toEqual([[
+    ...(role === "remote" ? ["env", `HOME=${fleet}/home`, `XDG_CONFIG_HOME=${fleet}/home/.config`, `XDG_STATE_HOME=${fleet}/home/.local/state`] : []),
+    "/synthetic/bun", "/synthetic/scripts/push-qualification-fixture.ts", "answer", root, epoch, "/synthetic/omp", "/synthetic/scripts",
+  ]]);
+});
+
 test("cross-origin tap counts its launch, not its CORS admission, and still detects duplicate launches", () => {
   const url = "https://synthetic.example.test:10443/api/v1/sessions/synthetic/launch";
   const observe = (methods: unknown[]) => methods.map(method => pushLaunchRequestKind(url, method));
@@ -1112,13 +1138,16 @@ test("cross-origin tap counts its launch, not its CORS admission, and still dete
 });
 
 test("fleet cleanup before persisted ownership never touches enrollment or a worker", async () => {
-  const runtime = createAndroidPushRuntime(identity, { execute: async () => ({ exitCode: 1, stdout: "" }) });
+  const commands: string[][] = [];
+  const runtime = createAndroidPushRuntime(identity, { fixtureBase: "/synthetic/fixtures",
+    execute: async argv => { commands.push([...argv]); return { exitCode: 1, stdout: "" }; } });
   const calls: string[] = [];
   runtime.fleet.host = async operation => { calls.push(operation); };
   runtime.fleet.select = async () => { throw new Error("unowned enrollment touched"); };
   const progress = { epoch: "a3a77f8e-956b-45d0-a684-a33e6b336dc0", fleetPrepared: true } as AndroidPushProgress;
   await runtime.cleanup("fleet", progress);
   expect(calls).toEqual(["restore"]);
+  expect(commands).toEqual([["test", "-f", `/synthetic/fixtures/fleet-${progress.epoch}/owner.json`]]);
   expect(progress.fleetPrepared).toBe(false);
 });
 

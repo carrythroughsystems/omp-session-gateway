@@ -304,6 +304,8 @@ wrong-source/malformed launch attempts cannot be hidden by the cross-origin admi
 The outage phase observes its pending remote row in the open PWA before taking the source down.
 Coverage polls preserve that page instead of reloading away its last-known directory. Wait
 timeouts retain the named observation in private diagnostics, never in receipt fields.
+Paths sent to the retained macOS fixture executor use POSIX separators on every runner OS;
+runner-local file reads keep native paths.
 
 Fleet progress adds only an ownership boolean and a remote notification-topic SHA-256 digest.
 Closed boolean/count results remain additive to receipt schema 3; no source, session, request,
