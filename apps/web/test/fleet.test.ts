@@ -286,6 +286,42 @@ describe("fleet transport", () => {
     transport.setVisible(false);
   });
 
+  test("receipt-captured snapshots wait for the previous request without withdrawing fresh metadata", async () => {
+    const time = new Clock();
+    const first = Promise.withResolvers<Response>();
+    const second = Promise.withResolvers<Response>();
+    let calls = 0;
+    const transport = new FleetTransport(remote, () => {},
+      (async () => await (++calls === 1 ? first.promise : second.promise)) as unknown as typeof fetch, time);
+    transport.setVisible(true);
+    const captured = transport.refreshAfterCurrent();
+    expect(calls).toBe(1);
+    first.resolve(snapshot(1));
+    await flush();
+    expect(calls).toBe(2);
+    expect(transport.status).toBe("fresh");
+    expect(transport.snapshot?.revision).toBe(1);
+    second.resolve(snapshot(2));
+    expect(await captured).toBe("healthy");
+    expect(transport.snapshot?.revision).toBe(2);
+    transport.setVisible(false);
+  });
+
+  test("authorization-captured snapshots permit explicit retry but not background retry after forbidden", async () => {
+    const time = new Clock();
+    let calls = 0;
+    const transport = new FleetTransport(remote, () => {},
+      (async () => ++calls === 1 ? new Response(null, { status: 403 }) : snapshot(2)) as unknown as typeof fetch, time);
+    transport.setVisible(true);
+    expect(await transport.refresh()).toBe("forbidden");
+    expect(await transport.refreshAfterCurrent()).toBe("forbidden");
+    expect(calls).toBe(1);
+    expect(await transport.refreshAfterCurrent(true)).toBe("healthy");
+    expect(calls).toBe(2);
+    expect(transport.status).toBe("fresh");
+    transport.setVisible(false);
+  });
+
   test("ignores late responses from another epoch and aborts without recording a failure", async () => {
     const time = new Clock();
     const first = Promise.withResolvers<Response>();

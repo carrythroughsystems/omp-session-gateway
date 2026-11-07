@@ -3572,7 +3572,7 @@ async function resolvePendingNotificationRoute(): Promise<void> {
           const status = await fleetNotifications.status(subscription?.endpoint);
           const row = status?.sources.find(row => row.sourceId === source.id);
           if (row?.selected !== true || row.state !== "current" ||
-            await remotes.get(key)?.refreshAfterCurrent() !== "healthy") key = undefined;
+            await remotes.get(key)?.refreshAfterCurrent(true) !== "healthy") key = undefined;
           else {
             const current = await fleetNotifications.status(subscription?.endpoint);
             const checked = current?.sources.find(row => row.sourceId === source.id);

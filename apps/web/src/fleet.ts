@@ -193,9 +193,10 @@ export class FleetTransport {
   }
 
   /** A tap or worker reconciliation needs a request started after its authorization/count capture. */
-  async refreshAfterCurrent(): Promise<SnapshotResult> {
+  async refreshAfterCurrent(explicit = false): Promise<SnapshotResult> {
     await this.request?.promise;
-    return await this.refresh(true);
+    // Routine observations must not withdraw still-fresh metadata from an in-flight launch.
+    return await this.refresh(explicit);
   }
 
   async probe(signal: AbortSignal): Promise<SnapshotResult> {

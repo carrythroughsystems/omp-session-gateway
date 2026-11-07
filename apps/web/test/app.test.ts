@@ -4782,6 +4782,44 @@ describe("fleet background notifications", () => {
     harness.setVisibility("hidden");
   });
 
+  test("fleet badge reconciliation does not discard a remote tap's in-flight launch", async () => {
+    const current = session("fleet-reconcile-during-launch");
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const launchGate = Promise.withResolvers<void>();
+    const snapshotEntered = Promise.withResolvers<void>();
+    const snapshotGate = Promise.withResolvers<Response>();
+    let blockSnapshot = false;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], fleetResponse: api.respond, launchGate: launchGate.promise,
+      suffix: "fleet-reconcile-launch-race",
+      remoteResponse: async () => {
+        if (blockSnapshot) { snapshotEntered.resolve(); return await snapshotGate.promise; }
+        return Response.json({ revision: 1, sessions: [current] });
+      },
+    });
+    try {
+      await settleUntil(() => harness.workerMessages.some(message =>
+        (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+      harness.notify({ version: 3, type: "activity_stop",
+        source: await fleetSourceBinding("remote", "https://remote.example"),
+        instanceId: current.instanceId, generation: current.generation });
+      await settleUntil(() => harness.launchRequests.length === 1, 1_000);
+      blockSnapshot = true;
+      harness.elements.settingsButton.dispatchEvent(new Event("click"));
+      await snapshotEntered.promise;
+      launchGate.resolve();
+      await settleUntil(() => harness.embedCalls.length === 1, 1_000);
+      expect(harness.launchRequests).toHaveLength(1);
+      expect(harness.launchRequests[0]!.init.signal!.aborted).toBeFalse();
+    } finally {
+      launchGate.resolve();
+      snapshotGate.resolve(Response.json({ revision: 1, sessions: [current] }));
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      harness.setVisibility("hidden");
+    }
+  });
+
   for (const state of ["stale", "unauthorized", "not_enrolled"] as const) {
     test(`a ${state} remote notification tap issues no launch request or capability`, async () => {
       const current = session("remote-tap-session", { inputRequired: true });

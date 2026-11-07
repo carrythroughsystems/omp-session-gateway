@@ -169,7 +169,7 @@ test("fleet Hosts enroll, partial failure, reload renewal, and released revocati
     expect(api.calls.find(call => call.path === `${away.origin}/api/v1/notification-grants`)?.body)
       .toEqual({ version: 1, grantId: GRANT, verifier: VERIFIER });
     expect(home.requests).toContain("POST /api/v1/push/fleet/status");
-    expect(away.requestLog.some(request => request.method === "OPTIONS" && request.path === "/api/v1/notification-grants" &&
+    expect(away.requestLog.some(request => request.method === "POST" && request.path === "/api/v1/notification-grants" &&
       request.origin === home.origin)).toBe(true);
     expect(api.calls.filter(call => call.path.startsWith(away.origin)).every(call => !call.credentials)).toBe(true);
     expect(api.calls.filter(call => call.path.endsWith("/status")).every(call => call.body.endpoint === ENDPOINT)).toBe(true);
