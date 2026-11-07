@@ -109,6 +109,12 @@ export function observePushLaunch(session: Pick<SessionMetadata, "generation" | 
     modeMatches: "mode" in body && body.mode === (kind === "attention" ? "control" : "view") };
 }
 
+/** CORS admission cannot mint a capability; every other request to a launch route still counts. */
+export function pushLaunchRequestKind(url: string, method: unknown): "preflight" | "launch" | undefined {
+  if (!/\/api\/v1\/sessions\/[^/]+\/launch$/u.test(url)) return;
+  return method === "OPTIONS" ? "preflight" : "launch";
+}
+
 type PermissionConnection = (run: (driver: Pick<AndroidChromeDriver, "browserSend">) => Promise<void>, execution?: AndroidExecution) => Promise<void>;
 
 interface PushWorkerObserver {
@@ -1057,6 +1063,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           observerFailure = `${method}:${message.includes("timeout") ? "timeout" : message.includes("wasn't found") ? "unsupported" : "failed"}`;
         };
         let launches = 0;
+        let preflights = 0;
         let successful = 0;
         let currentGeneration = false;
         let currentRequest = false;
@@ -1134,7 +1141,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             observeRoute(requestUrl);
             if (routeObserved && [identity.origin, remote.origin].some(origin => requestUrl.startsWith(`${origin}/api/`))) apiScrubbed &&= routeScrubbed;
             if (routeObserved && request.url === `${sourceOrigin}/api/v1/sessions`) metadataObserved = true;
-            if (!/\/api\/v1\/sessions\/[^/]+\/launch$/u.test(request.url)) return;
+            const requestKind = pushLaunchRequestKind(request.url, "method" in request ? request.method : undefined);
+            if (requestKind === undefined) return;
+            if (requestKind === "preflight") { preflights++; return; }
             launches++;
             if (request.url !== `${sourceOrigin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`) return;
             if (typeof params.requestId === "string") requests.add(params.requestId);
@@ -1210,7 +1219,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           rethrowPushSafetyFailure(error);
           if (everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
           // Already-observed closed values only: secondary device reads must not mask the cause.
-          const diagnostics = { observerFailure, tabsSeen, pagesSeen, pausedTabs, pausedPages, launches, successful,
+          const diagnostics = { observerFailure, tabsSeen, pagesSeen, pausedTabs, pausedPages, launches, preflights, successful,
             currentGeneration, currentRequest, modeMatches, routeObserved, routeScrubbed, metadataObserved };
           throw new Error(`Android Push tap failed during ${stage}: ${JSON.stringify(diagnostics)}`, { cause: error });
         } finally {
