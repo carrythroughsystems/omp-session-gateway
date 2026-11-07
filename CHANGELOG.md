@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.10.0] — 2026-11-07
 
-This release uses stock OMP v18.18.0 as its engineering baseline. The 16 changelog entries below record the changes since v0.9.1. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.18.0 as its engineering baseline. The 17 changelog entries below record the changes since v0.9.1. Historical receipts do not qualify these bytes.
 
 ### Added
 
@@ -72,6 +72,9 @@ This release uses stock OMP v18.18.0 as its engineering baseline. The 16 changel
 - Before its View, the Windows lane's Pixel check proves the phone's browser reaches the
   collaboration relay, allowing one Tailscale reconnect, and otherwise fails with that cause instead
   of a View timeout.
+- Qualification: an Android Chrome evaluation that CDP rejects because a navigation replaced the
+  page's default execution context now waits up to 15 seconds for a new one, without re-running,
+  re-attaching or navigating; destruction, timeouts and page exceptions still fail at once.
 
 ## [v0.9.1] — 2026-11-06
 
