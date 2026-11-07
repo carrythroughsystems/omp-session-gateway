@@ -1835,7 +1835,7 @@ test.each(["quiet", "replaced", "changed", "foreign", "missing", "ambiguous", "i
         { type: "service_worker", targetId: "synthetic-held-target", url: identity.origin + "/service-worker.js" },
       ] } : method === "Target.attachToTarget" ? { sessionId: "synthetic-held-session" } : {};
     },
-    sessionSend: async (session: string, _method: string, parameters: { expression: string; awaitPromise?: boolean }) => {
+    sessionSend: async (session: string, _method: string, parameters: { expression: string; awaitPromise?: boolean; returnByValue?: boolean }) => {
       expect(session).toBe("synthetic-held-session"); evaluations++;
       if (parameters.awaitPromise !== true) {
         expect(parameters).toEqual({ expression: "1", returnByValue: true });
