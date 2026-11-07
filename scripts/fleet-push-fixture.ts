@@ -83,7 +83,7 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     const beforeServe = await serve(), mapping = JSON.parse(beforeServe);
     if (mapping.TCP?.[FLEET_PUSH_HTTPS_PORT] !== undefined || mapping.Web?.[serveKey] !== undefined) throw new Error("fleet source Serve port already owned");
     const listener = await execute(["lsof", "-nP", `-iTCP:${FLEET_PUSH_BACKEND_PORT}`, "-sTCP:LISTEN"]);
-    if (listener.exitCode === 0 || listener.stdout.trim() !== "") throw new Error("fleet source backend already owned");
+    if (listener.exitCode !== 1 || listener.stdout.trim() !== "") throw new Error("fleet source backend ownership unavailable");
     await mkdir(root, { mode: 0o700 });
     const changedConfig = JSON.stringify({ ...document,
       fleet: { label: FLEET_PUSH_LOCAL_LABEL, targets: [{ id: source.id, label: source.label, origin: source.origin }] },
