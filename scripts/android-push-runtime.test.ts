@@ -6,6 +6,7 @@ import * as notificationOperations from "./android-notification.ts";
 import { AndroidBrowserCleanupError, AndroidDevtoolsConnectionError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
 import { createAndroidPushRuntime, holdAndroidNotificationDenial, holdPushWorkerObserver, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure, pushLaunchRequestKind } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
+import { notificationRoutePath } from "../packages/protocol/src/validation.ts";
 import { checkProviderReads } from "./check-repository.ts";
 import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qualification.ts";
 import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
@@ -1053,6 +1054,99 @@ test.each(["fresh", "late", "ambiguous", "missing"] as const)("worker metadata r
   expect(calls).not.toContain("Page.navigate");
   expect(calls).not.toContain("Target.createTarget");
 });
+
+test.each(["blank-created-first", "other-created-first", "other-attached-first", "owned-created-first",
+  "owned-attached-first", "inventory", "unclaimed", "transition-diagnostic"] as const)(
+  "tap observes retargeted pages and attachment ordering without exposing targets (%s)", async scenario => {
+    const session: SessionMetadata = { instanceId: "fixture-instance-0001", generation: 1, canView: true, canControl: true, inputRequired: true,
+      startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z",
+      ask: { requestId: "synthetic-request-0001", since: "2026-01-01T00:00:00.000Z" } };
+    const owned = scenario.startsWith("owned"), blank = scenario.startsWith("blank");
+    const unrelated = "https://unrelated.example.test/#synthetic-private-capability";
+    const initialUrl = owned ? `${identity.origin}/` : blank ? "about:blank" : unrelated;
+    const targetId = "synthetic-page", autoSession = "synthetic-auto";
+    const events: string[] = [], attached: string[] = [];
+    const network = Promise.withResolvers<void>(), resumed = Promise.withResolvers<void>(), ready = Promise.withResolvers<void>();
+    let listen: (method: string, params: Record<string, unknown>) => void = () => {};
+    const created = () => listen("Target.targetCreated", { targetInfo: { type: "page", targetId, url: initialUrl } });
+    const autoAttached = () => listen("Target.attachedToTarget", { sessionId: autoSession, waitingForDebugger: owned || blank,
+      targetInfo: { type: "page", targetId, url: initialUrl } });
+    const driver = {
+      onEvent: (listener: typeof listen) => { listen = listener; return () => {}; },
+      browserSend: async (method: string) => {
+        if (method === "Target.setDiscoverTargets" && scenario.endsWith("created-first")) created();
+        if (method === "Target.setDiscoverTargets" && ["unclaimed", "transition-diagnostic"].includes(scenario)) created();
+        if (method === "Target.setAutoAttach" && scenario !== "inventory") {
+          autoAttached();
+          if (scenario.endsWith("attached-first")) created();
+        }
+        return { targetInfos: method === "Target.getTargets" && scenario === "inventory" ?
+          [{ type: "page", targetId, url: `${identity.origin}/` }] : [] };
+      },
+      attachTab: async (id: string, protocolSession?: string) => {
+        attached.push(id); events.push(`attach:${protocolSession ?? "manual"}`);
+        if (scenario === "owned-created-first") await ready.promise;
+      },
+      send: async (method: string) => {
+        if (method === "Network.enable") { events.push("network"); network.resolve(); }
+        return {};
+      },
+      sessionSend: async (_id: string, method: string) => {
+        if (method === "Network.enable") { events.push("network"); network.resolve(); }
+        if (method === "Runtime.runIfWaitingForDebugger") { events.push("resume"); resumed.resolve(); }
+        return {};
+      },
+      evaluate: async (expression: string) => {
+        if (scenario === "transition-diagnostic") throw new Error("synthetic observed surface failure");
+        return expression.includes("return { writable:") ? { writable: false, readOnly: false, expired: true, scrubbed: true } : true;
+      },
+    };
+    const spies = [
+      spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+      spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => args.join(" ") === "shell dumpsys window" ? "isKeyguardShowing=false" : ""),
+      spyOn(Bun, "sleep").mockResolvedValue(undefined),
+      spyOn(notificationOperations, "tapAndroidNotification").mockImplementation(async () => {
+        ready.resolve();
+        if (scenario === "unclaimed") return;
+        listen("Target.targetInfoChanged", { targetInfo: { type: "page", targetId,
+          url: identity.origin + notificationRoutePath({ kind: "attention", instanceId: session.instanceId, requestId: session.ask!.requestId }) } });
+        await network.promise;
+        if (owned || blank) await resumed.promise;
+        listen("Page.navigatedWithinDocument", { url: `${identity.origin}/` });
+        listen("Network.requestWillBeSent", { request: { url: `${identity.origin}/api/v1/sessions`, method: "GET" } });
+      }),
+      spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (value: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+    ];
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.beforeEffect = async () => {};
+      runtime.assertNotificationOwnership = async () => {};
+      runtime.lock = async () => {};
+      runtime.pause = async () => { throw new Error("synthetic unclaimed target"); };
+      if (scenario === "unclaimed" || scenario === "transition-diagnostic") {
+        const error = await runtime.tap(session, "attention", true).catch(error => error);
+        expect(error).toBeInstanceOf(Error);
+        expect(error.message).not.toContain(unrelated);
+        expect(error.message).not.toContain(identity.origin);
+        expect(error.message).not.toContain("synthetic-private-capability");
+        const counts = JSON.parse(error.message.slice(error.message.indexOf("{")));
+        expect(counts.pageCategories).toEqual({ owned: scenario === "unclaimed" ? 0 : 1, blank: 0, other: 1,
+          toOwned: scenario === "unclaimed" ? 0 : 1 });
+        expect(counts.attachmentAdmissions).toEqual({ attached: 0, created: 0, changed: scenario === "unclaimed" ? 0 : 1, inventory: 0 });
+        expect(counts.duplicatePausedPages).toBe(0);
+        expect(attached).toHaveLength(scenario === "unclaimed" ? 0 : 1);
+      } else {
+        expect(await runtime.tap(session, "attention", true)).toMatchObject({ launches: 0, successful: 0,
+          scrubbedBeforeNetwork: true, writable: false, readOnly: false, expired: true });
+        expect(attached).toEqual([targetId]);
+        expect(events.filter(event => event === "network")).toHaveLength(1);
+        if (owned || blank) {
+          expect(events.filter(event => event === "resume")).toHaveLength(1);
+          expect(events.indexOf("resume")).toBeGreaterThan(events.indexOf("network"));
+        }
+      }
+    } finally { for (const spy of spies) spy.mockRestore(); }
+  });
 
 test("cancelled runtime pauses stop, cleanup obtains a fresh independent context", async () => {
   const controller = new AbortController();
