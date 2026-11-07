@@ -1,12 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fleetPushFixture, fleetPushSource, fleetFixtureDiagnostic, FLEET_PUSH_BACKEND_PORT, FLEET_PUSH_HTTPS_PORT } from "./fleet-push-fixture.ts";
-import type { FixtureExecutor } from "./push-qualification-fixture.ts";
+import { executeFixture, type FixtureExecutor } from "./push-qualification-fixture.ts";
 import { fleetSourceBinding } from "../packages/protocol/src/fleet.ts";
 import { loadGatewayConfig } from "../apps/gateway/src/config.ts";
+import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 const epoch = "a3a77f8e-956b-45d0-a684-a33e6b336dc0", commit = "c".repeat(40), origin = "https://synthetic.example.test";
 test("helper diagnostics retain guard exceptions and redact capability-bearing causes", () => {
@@ -19,9 +20,10 @@ test("helper diagnostics retain guard exceptions and redact capability-bearing c
   expect(entries[2]?.message).toContain("withheld");
 });
 
-async function fixture(options: { orphanChild?: boolean; listenerRemains?: boolean } = {}) {
+async function fixture(options: { orphanChild?: boolean; listenerRemains?: boolean; bun?: string } = {}) {
   const home = await mkdtemp(join(tmpdir(), "fleet-push-test-")), root = join(home, `fleet-${epoch}`);
   const config = join(home, ".config/omp-session-gateway/config.json"), cli = join(home, "candidate/apps/gateway/src/cli.js");
+  const bun = options.bun ?? process.execPath;
   const original = JSON.stringify({ http: { port: 4317, publicOrigin: origin }, auth: { mode: "tailscale-serve", allowedLogins: ["synthetic@example.test"] } });
   await mkdir(dirname(config), { recursive: true }); await writeFile(config, original, { mode: 0o600 });
   await mkdir(join(home, "candidate")); await writeFile(join(home, "candidate/release-info.json"), JSON.stringify({ sourceCommit: commit }));
@@ -31,7 +33,7 @@ async function fixture(options: { orphanChild?: boolean; listenerRemains?: boole
     const command = argv.join(" "); effects.push(command);
     if (command.includes(fail) && fail !== "") throw new Error("synthetic interruption");
     if (argv[0] === "id") return { exitCode: 0, stdout: "501\n" };
-    if (argv[0] === "plutil") return { exitCode: 0, stdout: JSON.stringify([process.execPath, cli, "serve"]) };
+    if (argv[0] === "plutil") return { exitCode: 0, stdout: JSON.stringify([bun, cli, "serve"]) };
     if (argv[0] === "lsof") return child || spawned && options.listenerRemains ?
       { exitCode: 0, stdout: "synthetic owned backend" } : { exitCode: 1, stdout: "" };
     if (argv[0] === "launchctl") {
@@ -53,7 +55,7 @@ async function fixture(options: { orphanChild?: boolean; listenerRemains?: boole
     }
     if (argv[0] === "ps" && argv.includes("-p")) {
       const parent = argv[3] === "12345", active = parent ? source : child;
-      return { exitCode: active ? 0 : 1, stdout: active ? parent ? `S sh ${join(root, "source.sh")}` : `S ${process.execPath} ${cli} serve` : "" };
+      return { exitCode: active ? 0 : 1, stdout: active ? parent ? `S sh ${join(root, "source.sh")}` : `S ${bun} ${cli} serve` : "" };
     }
     if (argv[0] === "ps" && argv.includes("-axo")) return { exitCode: 0, stdout: source ? `sh ${join(root, "source.sh")}` : "" };
     if (argv.includes("doctor")) await writeFile(argv.at(-1)!, "synthetic redacted support archive");
@@ -91,7 +93,8 @@ test("fleet fixture uses the candidate bytes and restores exact config and Serve
     expect(script.indexOf("trap stop TERM INT EXIT")).toBeLessThan(script.indexOf("env -u XDG_RUNTIME_DIR"));
     expect(script).toContain("source.pid.tmp");
     expect(script).toContain("source-child.pid.tmp");
-    expect(script).toContain('case "$(ps -ww -p "$child" -o command=)"');
+    expect(script).not.toContain('ps -ww -p "$child"');
+    expect(script).toContain('kill -TERM "$child"');
     expect(f.effects.some(command => command.includes("nohup python3") && command.includes("os.setsid()") &&
       command.includes('os.execv("/bin/sh"'))).toBe(true);
     expect(f.state()).toMatchObject({ running: true, source: true });
@@ -159,6 +162,24 @@ test("fleet preparation never adopts an existing unowned directory", async () =>
     await expect(f.run("restore")).rejects.toMatchObject({ code: "ENOTEMPTY" });
     expect(await readFile(f.config, "utf8")).toBe(f.original);
     expect(f.state()).toEqual({ mapping: {}, running: true, source: false });
+  } finally { await f.dispose(); }
+});
+
+test.each([false, true])("pre-owner fleet recovery removes only its pending owner file (foreign=%s)", async foreign => {
+  const f = await fixture();
+  try {
+    await mkdir(f.root); await writeFile(join(f.root, "owner.json.tmp"), '{"interrupted":');
+    if (foreign) await writeFile(join(f.root, "foreign"), "untouched");
+    if (foreign) {
+      await expect(f.run("restore")).rejects.toMatchObject({ code: "ENOTEMPTY" });
+      expect(await readFile(join(f.root, "foreign"), "utf8")).toBe("untouched");
+    } else {
+      await f.run("restore");
+      await expect(readFile(join(f.root, "owner.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    await expect(readFile(join(f.root, "owner.json.tmp"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(f.config, "utf8")).toBe(f.original);
+    expect(f.effects).toEqual([]);
   } finally { await f.dispose(); }
 });
 
@@ -324,6 +345,8 @@ test.each(["durable", "file-sync-fails"] as const)(
         await expect(result).rejects.toThrow("synthetic owner fsync failure");
         expect(f.effects.some(command => command.includes("launchctl bootout") || command.includes("tailscale serve --bg"))).toBe(false);
         expect(await readFile(f.config, "utf8")).toBe(f.original);
+        await f.run("restore");
+        await expect(readFile(join(f.root, "owner.json.tmp"))).rejects.toMatchObject({ code: "ENOENT" });
       }
     } finally { renamed.mockRestore(); opened.mockRestore(); await f.dispose(); }
   });
@@ -342,3 +365,53 @@ test.skipIf(process.platform === "win32")("fleet physical POSIX host refuses mut
     expect(JSON.parse(await readFile(join(f.root, "owner.json"), "utf8")).epoch).toBe(epoch);
   } finally { opened.mockRestore(); await f.dispose(); }
 });
+
+test.skipIf(process.platform === "win32")("fleet supervisor TERM reaps its own child before the gateway exec", async () => {
+  const stubRoot = await mkdtemp(join(tmpdir(), "fleet-preexec-test-")), stub = join(stubRoot, "slow-bun.sh"), fifo = join(stubRoot, "preexec.fifo");
+  const f = await fixture({ bun: stub });
+  let supervisor: ReturnType<typeof Bun.spawn> | undefined, child: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    expect((await executeFixture(["mkfifo", "-m", "600", fifo])).exitCode).toBe(0);
+    await writeFile(stub, `#!/bin/sh\nexec 3< '${fifo.replaceAll("'", "'\\''")}'\n`, { mode: 0o700 });
+    await chmod(stub, 0o700);
+    await f.run("prepare");
+    await rm(join(f.root, "source.pid")); await rm(join(f.root, "source-child.pid"));
+    supervisor = Bun.spawn(["/bin/sh", join(f.root, "source.sh")], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const spawnedBy = supervisor.pid, dispatchDeadline = Date.now() + HANG_DEADLINE_MS;
+    for (;;) {
+      const text = await readFile(join(f.root, "source-child.pid"), "utf8").catch(error => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+        throw error;
+      });
+      if (/^[1-9]\d*$/u.test(text)) { child = Number(text); break; }
+      if (Date.now() >= dispatchDeadline) throw new Error("synthetic pre-exec child did not dispatch");
+      await Bun.sleep(10);
+    }
+    expect(await readFile(join(f.root, "source.pid"), "utf8")).toBe(String(spawnedBy));
+    const before = await executeFixture(["ps", "-ww", "-p", String(child), "-o", "command="]);
+    expect(before.exitCode).toBe(0);
+    expect(before.stdout.trim()).not.toBe(`${stub} ${join(f.home, "candidate/apps/gateway/src/cli.js")} serve`);
+    const stopped = performance.now();
+    supervisor.kill("SIGTERM");
+    // hang-deadline: behavior-under-test -- the fixture's TERM/child-restoration bound is 30 s.
+    const stopBound = 30_000;
+    await Promise.race([supervisor.exited, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("fleet supervisor did not reap its pre-exec child")), stopBound);
+    })]);
+    clearTimeout(timer); timer = undefined;
+    expect(performance.now() - stopped).toBeLessThan(stopBound);
+    const after = await executeFixture(["ps", "-ww", "-p", String(child), "-o", "stat=,command="]);
+    expect(after.exitCode).toBe(1); expect(after.stdout.trim()).toBe("");
+  } finally {
+    clearTimeout(timer);
+    if (supervisor !== undefined && supervisor.exitCode === null) {
+      if (child !== undefined) {
+        const owned = await executeFixture(["ps", "-ww", "-p", String(child), "-o", "command="]);
+        if (owned.stdout.includes(stub)) { try { process.kill(child, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; } }
+      }
+      supervisor.kill("SIGKILL"); await supervisor.exited;
+    }
+    await f.dispose(); await rm(stubRoot, { recursive: true, force: true });
+  }
+}, HANG_DEADLINE_MS);

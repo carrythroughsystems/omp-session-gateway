@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import * as deviceOperations from "./android-device.ts";
 import * as webApkOperations from "./android-webapk.ts";
 import * as notificationOperations from "./android-notification.ts";
@@ -764,10 +765,14 @@ test.each(["idle", "blocked", "unavailable"] as const)("resumed fleet deselectio
   } finally { for (const spy of spies) spy.mockRestore(); }
 });
 
-test("fleet audit fetches the live remote Control material, never an unlaunched View capability", async () => {
+test.each(["stable", "rotated"] as const)("fleet audit requires stable live Control material before scanning (%s)", async scenario => {
   const remote = { instanceId: "synthetic-remote", generation: 2, canView: true, canControl: true, inputRequired: false,
     startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-remote" };
-  let scanned = false;
+  let scans = 0, launches = 0, controls = 0, hostAudits = 0;
+  const tapped = `https://synthetic.example.test/#synthetic-tapped.${"A".repeat(43)}`;
+  const capabilities = [`https://synthetic.example.test/#synthetic-control.${"B".repeat(43)}`,
+    `https://synthetic.example.test/#synthetic-control.${(scenario === "rotated" ? "C" : "B").repeat(43)}`];
+  const storage = { get length() { scans++; return scenario === "rotated" ? 1 : 0; }, key: () => "synthetic-seed", getItem: () => tapped };
   const driver = {
     browserSend: async () => ({ targetInfos: [{ type: "page", targetId: "page", url: identity.origin + "/client/" }] }),
     attachTab: async () => {}, navigate: async () => {},
@@ -779,8 +784,17 @@ test("fleet audit fetches the live remote Control material, never an unlaunched 
         expect(expression).not.toContain('mode:"view"');
         expect(expression).toContain('"/api/v1/sessions/" + "synthetic-remote"');
         expect(expression).toContain("generation:2");
-        scanned = true;
-        return { clean: true, findings: 0 };
+        return runInNewContext(expression, {
+          fetch: async (_url: string, init: { body: string }) => {
+            expect(JSON.parse(init.body)).toEqual({ generation: 2, mode: "control" });
+            return Response.json({ capability: capabilities[launches++] });
+          },
+          localStorage: storage, sessionStorage: storage, document: { cookie: "", referrer: "", documentElement: { outerHTML: "" } },
+          caches: { keys: async () => [] }, indexedDB: { databases: async () => [] },
+          location: { href: identity.origin + "/client/", hash: "", search: "" }, history: { state: null },
+          performance: { getEntriesByType: () => [] },
+          navigator: { serviceWorker: { getRegistration: async () => ({ getNotifications: async () => [] }) } },
+        });
       }
       return true;
     },
@@ -795,10 +809,21 @@ test("fleet audit fetches the live remote Control material, never an unlaunched 
   ];
   try {
     const runtime = createAndroidPushRuntime(identity); runtime.beforeEffect = async () => {};
-    runtime.sinks = async () => ({ clean: true, detectable: true, sinks: 10, findings: 0 });
-    runtime.fleet.host = async operation => { expect(operation).toBe("audit"); };
-    expect(await runtime.fleet.audit("synthetic")).toMatchObject({ clean: true, detectable: true, findings: 0 });
-    expect(scanned).toBe(true);
+    runtime.sinks = async () => { controls++; return { clean: true, detectable: true, sinks: 10, findings: 0 }; };
+    runtime.fleet.host = async operation => { hostAudits++; expect(operation).toBe("audit"); };
+    const result = await runtime.fleet.audit("synthetic").catch(error => error);
+    expect(launches).toBe(2);
+    if (scenario === "rotated") {
+      expect(result).toBeInstanceOf(QualificationFailure);
+      expect(result.evidence).toMatchObject({ lane: "androidPush", reason: "invalid_evidence", operation: "read_only" });
+      expect(result.cause.message).toBe("fleet Control material changed for an unchanged session");
+      expect(scans).toBe(0); expect(controls).toBe(0); expect(hostAudits).toBe(0);
+      const evidence = JSON.stringify(privateQualificationFailureDiagnostic(result));
+      for (const material of [tapped, ...capabilities]) expect(evidence).not.toContain(material);
+    } else {
+      expect(result).toMatchObject({ clean: true, detectable: true, findings: 0 });
+      expect(scans).toBeGreaterThan(0); expect(controls).toBe(1); expect(hostAudits).toBe(1);
+    }
   } finally { for (const spy of spies) spy.mockRestore(); }
 });
 
@@ -1358,7 +1383,6 @@ test("fleet host restore retains the helper exception privately and types contai
 
 test.each(["none", "enrollment", "owner", "host", "connection", "mutation"] as const)("fleet badge observer releases on %s failure", async failure => {
   const fail = failure !== "none";
-  const { runInNewContext } = await import("node:vm");
   const calls: string[] = [], platformCalls: unknown[][] = [];
   const set = (...args: unknown[]) => { platformCalls.push(args); return Promise.resolve(); };
   const clear = () => { platformCalls.push(["clear"]); return Promise.resolve(); };

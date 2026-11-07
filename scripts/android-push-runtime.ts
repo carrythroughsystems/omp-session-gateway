@@ -651,17 +651,22 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       async audit(epoch) {
         const remoteSession = await snapshot(epoch, "remote");
         if (remoteSession === undefined) throw new Error("fleet sink fixture missing");
-        const result = await page(driver => driver.evaluate<Record<string, boolean | number>>(`(async () => {
+        const result = await logEvidence(() => page(driver => driver.evaluate<Record<string, boolean | number>>(`(async () => {
           ${PAGE_PRELUDE}
-          const response = await fetch(${JSON.stringify(remote.origin)} + "/api/v1/sessions/" + ${JSON.stringify(remoteSession.instanceId)} + "/launch",
-            {method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({generation:${remoteSession.generation},mode:"control",requestId:${JSON.stringify(remoteSession.ask?.requestId)}})});
-          if (!response.ok) throw Error("fleet sink launch refused");
-          const payload=await response.json(), raw=payload.capability;
-          if(typeof raw!=="string")throw Error("fleet sink material unavailable");
+          const launch = async () => {
+            const response = await fetch(${JSON.stringify(remote.origin)} + "/api/v1/sessions/" + ${JSON.stringify(remoteSession.instanceId)} + "/launch",
+              {method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({generation:${remoteSession.generation},mode:"control",requestId:${JSON.stringify(remoteSession.ask?.requestId)}})});
+            if (!response.ok) throw Error("fleet sink launch refused");
+            const payload = await response.json();
+            if(typeof payload.capability!=="string")throw Error("fleet sink material unavailable");
+            return payload.capability;
+          };
+          const raw = await launch();
+          if (await launch() !== raw) throw Error("fleet Control material changed for an unchanged session");
           const needles=[raw,...raw.split(/[\\/?#&=]/).filter(part=>part.length>=16)], hits=[];
           await scanSinks(value=>typeof value==="string"&&needles.some(needle=>value.includes(needle)),sink=>hits.push(sink));
           return { clean:hits.length===0, findings:hits.length };
-        })()`));
+        })()`)));
         const controls = await runtime.sinks(epoch);
         await runtime.fleet.host("audit", epoch);
         return { clean: result.clean === true && controls.clean === true, detectable: controls.detectable === true,
