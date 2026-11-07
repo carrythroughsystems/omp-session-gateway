@@ -93,12 +93,29 @@ and [lifecycle coverage](LIFECYCLE_BRANCH_RESUME.md).
 Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit
 `4999b98bd5`) is the minimum supported host version: set `collab.autoStart`
 ([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
-plain `omp`. The current engineering baseline is `v18.17.0` (`UPSTREAM.lock.json`) and the
+plain `omp`. The current engineering baseline is `v18.18.0` (`UPSTREAM.lock.json`) and the
 qualified host baseline is recorded in the release-generated matrix below, while the independent
 embedded browser client pin is `v18.12.6`.
 Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
 fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
 gateway update.
+
+v18.18.0 (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, tree
+`cc847a53faf634167bde0ae8c12cb1d6ef38a412`) keeps those contracts unchanged from v18.17.0:
+the complete `packages/coding-agent/src/collab`, `packages/collab-web`, and
+`crates/pi-natives/src/ipc` trees, collaboration commands, extension UI controller,
+`modes/types.ts`, `docs/collab.md`, `docs/extensions.md`, and `packages/wire/src/index.ts`
+are byte-identical. Upstream
+[`shell-trace.ts`](https://github.com/can1357/oh-my-pi/blob/b5a6b2f7e5b6606b6562e678ead83f21738f34a0/packages/wire/src/shell-trace.ts)
+now permits `string | number[]` for non-UTF-8 bytes in bash `details.trace`, including argv,
+assignments, redirections, unit source, and diagnostics. The current embedded client's JSON/AES
+codec preserves these arrays; its bash renderer does not consume `details.trace` and continues
+to show the command, text, images, and status badges, without shell visualization. This is a
+presentation-only limitation, not an observed discovery, launch, or decoding incompatibility.
+Additive bash `details.cwd` / `cdSeparator` and write `details.touchesNoFiles` are also ignored.
+The upstream codec's shared `asStrictBytes` helper has the same whole-`ArrayBuffer`/copy behavior
+as the embedded codec's local `asStrict`; adopting that helper belongs to the independent client
+refresh, not this host-pin update. Bun remains `1.4.4` (upstream requires `>=1.4.4`).
 
 v18.17.0 (`75e7801e247d4e3263439d4cc08ccad60dc64bdd`) keeps registry v1, the discovery file
 format and query contract, the relay protocol, and `collab.autoStart` behavior unchanged from
@@ -165,12 +182,14 @@ serves the registry over native IPC with the same one-line JSON request and resp
 socket, overlong paths relocated under the owner-only `/tmp/omp-<euid>`, and same-user peers
 only; the gateway reads the published endpoint verbatim, so its queries are unchanged.
 Exact-version canary run
-[42239663270](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42239663270)
-passed for stock OMP 18.17.0 on 2026-11-06 across all eleven Linux stages (`prepare`, `publish`,
+[42337262675](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42337262675)
+passed for stock OMP 18.18.0 on 2026-11-07 at gateway
+`9a3388fd7a96342b1e31989305bf68f6d2958234` across all eleven Linux stages (`prepare`, `publish`,
 `snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`,
 `continue`, `unregister`) and the eight supported Windows stages (with `new-generation`, `fork`,
 and `branch-rewind` skipped by design on Windows) as **Tested** evidence; no candidate or
-qualification is claimed for v18.17.0, and the release-generated matrix below is unchanged.
+qualification is claimed for v18.18.0, and the release-generated matrix below is unchanged.
+The canary does not exercise non-UTF-8 shell-trace rendering.
 As in v18.8.3, upstream
 [can1357/oh-my-pi#14714](https://github.com/can1357/oh-my-pi/pull/14714) stops mirroring frames
 while no guest is joined, and a generated `sessionName` may carry a title-card prefix
