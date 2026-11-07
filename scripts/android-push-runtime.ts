@@ -166,7 +166,18 @@ export async function holdPushWorkerObserver(origin: string, execution?: Android
             try { result = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }); }
             catch (error) {
               let inventory = "not_probed", context = "not_probed";
+              let processes: { total: number; cached: number; frozen: number } | undefined;
               if (error instanceof AndroidDevtoolsConnectionError && error.kind === "protocol_timeout") {
+                try {
+                  const dump = await runAdb(driver.serial, ["shell", "dumpsys", "activity", "processes"],
+                    { timeoutMs: 5_000, ...(execution === undefined ? {} : { signal: execution.signal }) });
+                  const owned = dump.split(/\n\s*\*APP\*/u).slice(1).filter(block => {
+                    const header = block.split("\n", 1)[0] ?? "";
+                    return header.includes(driver.packageName) || header.includes("org.chromium.webapk.");
+                  });
+                  processes = { total: owned.length, cached: owned.filter(block => /\bcached=true\b/u.test(block)).length,
+                    frozen: owned.filter(block => /\bisFrozen=true\b/u.test(block)).length };
+                } catch { /* Diagnostic unavailability must not replace the original timeout. */ }
                 // Diagnose only after the original verdict is fixed. These read-only probes
                 // never resubmit the failed expression or attach/wake another target.
                 try {
@@ -185,7 +196,7 @@ export async function holdPushWorkerObserver(origin: string, execution?: Android
               // Only closed counters enter the private chain; no expression, URL, target/session
               // identifier or protocol payload. A quiet timeout does not prove a busy worker.
               if (error instanceof Error) error.cause = new AggregateError(error.cause === undefined ? [] : [error.cause],
-                `Fleet worker lifecycle: ${JSON.stringify({ before, after: lifecycle, inventory, context })}`);
+                `Fleet worker lifecycle: ${JSON.stringify({ before, after: lifecycle, inventory, context, processes })}`);
               throw error;
             }
             if (result.exceptionDetails !== undefined || result.result === null || typeof result.result !== "object" || !("value" in result.result)) {
@@ -332,6 +343,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   let releasePermission: (() => Promise<void>) | undefined;
   let baselineRecords = new Map<string, number>();
   const observedPosts = new Map<string, { key: string; postedAt: number }>();
+  const verifiedWorkerPosts = new Map<string, { key: string; postedAt: number; instanceId: string; generation: number; requestId: string | undefined }>();
   let execution = options.execution;
   let phase: AndroidPushPhase = "baseline_captured";
   let failureId = 0;
@@ -997,7 +1009,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if (source !== undefined) observedTopics.push(notificationTag(source));
       }
       baselineRecords = new Map((await readAndroidNotificationRecords(command, packageName)).map(record => [record.key, record.postedAt]));
-      observedPosts.clear(); observationArmed = true;
+      observedPosts.clear(); verifiedWorkerPosts.clear(); observationArmed = true;
     },
     async assertNotificationOwnership() {
       await phaseRecords();
@@ -1055,8 +1067,13 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const records = (await phaseRecords()).filter(record => record.tag.endsWith(expected.tag));
       const owned = records[0];
       const forbiddenFound = records.some(record => expected.forbidden.some(value => record.text.includes(value)));
-      if (fleetEnabled && kind === "attention" && records.length === 1) {
-        const matches = await worker<boolean>("observe", `(async () => {
+      if (fleetEnabled && kind === "attention" && records.length === 1 && owned !== undefined) {
+        // Data cannot change without a repost. Reuse only this phase's exact verified OS
+        // record and request; querying a frozen cached worker adds no new identity evidence.
+        const prior = verifiedWorkerPosts.get(expected.tag);
+        const matches = prior?.key === owned.key && prior.postedAt === owned.postedAt &&
+          prior.instanceId === session.instanceId && prior.generation === session.generation && prior.requestId === session.ask?.requestId ||
+          await worker<boolean>("observe", `(async () => {
           const notices = await self.registration.getNotifications({tag:${JSON.stringify(expected.tag)}});
           const data = notices[0]?.data;
           return notices.length === 1 && data?.version === 3 && data.type === "attention" &&
@@ -1066,6 +1083,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         // A replaced request's previous OS row may still be settling. Do not record its post time
         // as the new request's deduplication baseline, or mistake the old row for delivery.
         if (!matches) return { count: 0, titleMatches: false, bodyMatches: false, forbiddenFound };
+        verifiedWorkerPosts.set(expected.tag, { key: owned.key, postedAt: owned.postedAt,
+          instanceId: session.instanceId, generation: session.generation, requestId: session.ask?.requestId });
       }
       if (records.length === 1 && owned !== undefined) {
         if (owned.postedAt <= (baselineRecords.get(owned.key) ?? 0)) throw new Error("owned notification did not advance from its record baseline");
@@ -1078,6 +1097,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     async notificationCleared(session) {
       const tag = notificationTag(session);
       if ((await phaseRecords()).some(record => record.tag.endsWith(tag))) return false;
+      verifiedWorkerPosts.delete(tag);
       return worker<boolean>("notificationCleared", `(async () => (await self.registration.getNotifications({tag:${JSON.stringify(tag)}})).length === 0)()`, true);
     },
     async presentation(session, level) {

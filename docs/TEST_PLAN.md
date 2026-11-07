@@ -308,7 +308,17 @@ The fleet observer is admitted while warm and keeps one browser/worker attachmen
 target) for at most 30 minutes, bounded further by the lane deadline. Fleet result rows mark
 `devtoolsObserver`: these cold-PWA phases prove real delivery, rendering, identity, ordering
 and taps with instrumentation attached, **not process-cold wake semantics**. Loss of the held
-connection fails typed; it is never silently reconnected. Fleet cleanup retains its owner and
+connection fails typed; it is never silently reconnected.
+The same phase may reuse verified worker metadata only for an unchanged OS notification key,
+post timestamp, and exact session generation/request. New or changed records require a fresh
+worker comparison; reposts still fail deduplication and clears still inspect the worker.
+This avoids querying a cached Android process after the system freezer suspends it.
+The restart phase carries its verified badge across the closed-page quiet window only when a
+complete, healthy coordinator telemetry window records zero sends, acknowledgements and failures
+globally; any push activity or unavailable telemetry requires a fresh worker evaluation.
+Worker-evaluation timeouts retain closed lifecycle, inventory, responsiveness and frozen-process
+count diagnostics without changing device freezer settings, waking the page, or retrying a mutation.
+Fleet cleanup retains its owner and
 prepared state until badge unpatch is proven (or the worker is proven restarted), then removes
 host ownership. It releases the observer only after the unpatch attempt, on success or failure.
 Resumed cleanup treats a hidden Hosts section with alerts off as deselected; coordinator grant
