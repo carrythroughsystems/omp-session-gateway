@@ -165,10 +165,27 @@ export async function holdPushWorkerObserver(origin: string, execution?: Android
             let result: Record<string, unknown>;
             try { result = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }); }
             catch (error) {
+              let inventory = "not_probed", context = "not_probed";
+              if (error instanceof AndroidDevtoolsConnectionError && error.kind === "protocol_timeout") {
+                // Diagnose only after the original verdict is fixed. These read-only probes
+                // never resubmit the failed expression or attach/wake another target.
+                try {
+                  const targets = await driver.browserSend("Target.getTargets");
+                  const same = Array.isArray(targets.targetInfos) ? targets.targetInfos.filter((target: Record<string, unknown>) =>
+                    target.type === "service_worker" && target.url === `${origin}/service-worker.js`) : [];
+                  inventory = same.length === 1 ? same[0].targetId === workers[0].targetId ? "same" : "replaced" :
+                    same.length === 0 ? "missing" : "ambiguous";
+                } catch { inventory = "failed"; }
+                try {
+                  const probe = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression: "1", returnByValue: true });
+                  context = probe.exceptionDetails === undefined && (probe.result as { value?: unknown } | undefined)?.value === 1 ?
+                    "responsive" : "invalid";
+                } catch { context = "failed"; }
+              }
               // Only closed counters enter the private chain; no expression, URL, target/session
               // identifier or protocol payload. A quiet timeout does not prove a busy worker.
               if (error instanceof Error) error.cause = new AggregateError(error.cause === undefined ? [] : [error.cause],
-                `Fleet worker lifecycle: ${JSON.stringify({ before, after: lifecycle })}`);
+                `Fleet worker lifecycle: ${JSON.stringify({ before, after: lifecycle, inventory, context })}`);
               throw error;
             }
             if (result.exceptionDetails !== undefined || result.result === null || typeof result.result !== "object" || !("value" in result.result)) {
