@@ -7,6 +7,7 @@ import {
   captureGatewayConfigFile,
   defaultGatewayPaths,
   FLEET_CONFIG_SINCE_VERSION,
+  NOTIFICATIONS_CONFIG_SINCE_VERSION,
   type GatewayConfig,
   loadGatewayConfig,
   loadOrCreateReadinessToken,
@@ -14,6 +15,7 @@ import {
   loopbackHttpOrigin,
   projectPreFleetConfig,
   projectPreTernConfig,
+  projectPreNotificationsConfig,
   publicOriginHttpsPort,
   restoreGatewayConfigFile,
   removeLegacyPublisherToken,
@@ -36,6 +38,7 @@ import {
 import { OmpHostReader, OmpLaunchResolver, startHostPoller } from "./omp-registry.ts";
 import { assertQualificationLogDirectory, QualificationLogSink, SafeLogger } from "./logger.ts";
 import { PushService } from "./push.ts";
+import { FleetSourceService } from "./fleet-source.ts";
 import { SessionCreationService } from "./tern-creation.ts";
 import { SessionRegistry } from "./registry.ts";
 import {
@@ -205,6 +208,8 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     onEvent: (event, detail) => logger.event("info", event, detail),
   });
   const creationService = await SessionCreationService.open({ config, poller, registry });
+  const fleetSourceService = config.notifications?.coordinators?.length
+    ? await FleetSourceService.open({ config, poller, registry }) : undefined;
   let stopping = false;
   let resolveStop: () => void = () => undefined;
   const stopped = new Promise<void>(resolve => {
@@ -230,6 +235,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
       staticAssets,
       logger,
       pushService,
+      ...(fleetSourceService === undefined ? {} : { fleetSourceService }),
       creationService,
       readinessToken: token,
       ...(readinessInstance === undefined ? {} : { readinessInstance }),
@@ -249,12 +255,16 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     clearInterval(loggingHealth);
     poller.stop();
     try {
-      await http?.stop(true);
+      await fleetSourceService?.stop();
     } finally {
       try {
-        await creationService.stop();
+        await http?.stop(true);
       } finally {
-        await pushService.stop();
+        try {
+          await creationService.stop();
+        } finally {
+          await pushService.stop();
+        }
       }
     }
     sink?.close();
@@ -459,6 +469,10 @@ async function runRollback(arguments_: ParsedArguments): Promise<void> {
   const configSnapshot = await captureGatewayConfigFile(config.paths.configPath);
   let projection = configSnapshot.content === undefined
     ? undefined : projectPreTernConfig(JSON.parse(configSnapshot.content) as unknown);
+  if (projection && Bun.semver.order(targetVersion, NOTIFICATIONS_CONFIG_SINCE_VERSION) < 0) {
+    const notifications = projectPreNotificationsConfig(projection.document);
+    projection = { document: notifications.document, removedKeys: [...projection.removedKeys, ...notifications.removedKeys] };
+  }
   if (projection && Bun.semver.order(targetVersion, FLEET_CONFIG_SINCE_VERSION) < 0) {
     const fleet = projectPreFleetConfig(projection.document);
     projection = { document: fleet.document, removedKeys: [...projection.removedKeys, ...fleet.removedKeys] };

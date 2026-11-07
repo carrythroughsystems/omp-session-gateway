@@ -99,6 +99,8 @@ The gateway reads each discovery file's `endpoint` field verbatim because OMP ca
 | `speech.browserRecognition` | `false` | `true` or `false` | When `true`, sets `Permissions-Policy: microphone=(self)` on document HTML responses and enables the opt-in Web Speech microphone control in writable **Control** sessions. |
 | `tern` | Absent (creation unavailable) | Strict optional section, at most 32 KiB within the 64-KiB config | Administrator-approved new OMP creation on this execution host; see [setup below](#opt-in-tern-session-creation). |
 | `tern.window` | Absent (unchanged CLI default) | String `""` or decimal `"2"`–`"999"` | Optional Tern window slot for both creation and every inspection; never a stable identity or browser-selected value. |
+| `notifications.sources` | Absent (no remote notification sources) | 1–7 unique `fleet.targets` ids | Opt-in eligible sources for the home coordinator; never `local`. |
+| `notifications.coordinators` | Absent (source feed disabled) | 1–7 unique `{ id, origin }` peers | Each exact origin must also be trusted in `http.trustedDashboardOrigins`, differ from `http.publicOrigin`, and use HTTPS in production. |
 
 Only `ENOENT` or `ECONNREFUSED` proves a queried OMP host has exited; timeouts, permission or resource errors, and wire errors retain the card until `registry.ttlSeconds` expires. A host absent from OMP's discovery directory is removed on the next poll, and an absent discovery directory is valid when no sessions are sharing.
 
@@ -141,7 +143,52 @@ To list and launch sessions across multiple workstations from one installed **OM
    ```
 
 3. **Verify Tailscale identity and policy on every host:** confirm your user login is in `auth.allowedLogins` on both gateways and that your tailnet policy grants your user-owned browser/phone device HTTPS access to both hosts.
-4. **Apply and reload:** re-run `omp-gateway install --origin <origin> --allow <login>` on each edited host (which preserves `http.trustedDashboardOrigins`, `fleet`, `speech`, and `tern` verbatim and restarts the service), then **reload the installed PWA** so it fetches the updated `GET /api/v1/client-config`.
+4. **Apply and reload:** re-run `omp-gateway install --origin <origin> --allow <login>` on each edited host (which preserves `http.trustedDashboardOrigins`, `fleet`, `speech`, `notifications`, and `tern` verbatim and restarts the service), then **reload the installed PWA** so it fetches the updated `GET /api/v1/client-config`.
+
+### Fleet notification source setup
+
+The source role implements [ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator).
+It does not send remote Web Push or proxy browser launches. The home coordinator alone holds
+grant secrets and sends pushes. Browser/worker enrollment and the coordinator puller are separate
+roles; authoring these keys alone does not enroll a device.
+
+On each source, merge the home origin into both lists:
+
+```json
+{
+  "http": {
+    "trustedDashboardOrigins": ["https://studio.example.ts.net"]
+  },
+  "notifications": {
+    "coordinators": [{ "id": "studio", "origin": "https://studio.example.ts.net" }]
+  }
+}
+```
+
+Keep the source's existing HTTP hostname, port and public origin. Coordinator ids match
+`^[a-z][a-z0-9-]{0,31}$`; ids and origins must each be unique. On the home, the corresponding
+`notifications.sources` array names 1–7 existing `fleet.targets` ids. Omit an unused key instead
+of authoring an empty array. The optional empty `notifications` object enables neither role.
+Unknown keys, nulls, duplicate entries, foreign/untrusted origins and invalid ids fail startup.
+Development permits canonical loopback HTTP origins only in `dev-localhost` mode; production
+requires HTTPS. Install and upgrade preserve the authored section verbatim.
+
+An allowed owner creates, renews or revokes a grant browser-direct from that exact home origin.
+The source keeps at most 16 grants, one per owner/coordinator origin, with 30-day expiry and
+expired-entry pruning. It persists only verifiers in private, atomic
+`<stateDir>/notification-grants.json`, never grant secrets or session metadata. Revocation closes
+the live feed before its durable write completes and answers success only after persistence.
+A failed write disables source grants until restart; corrupt state fails closed without deleting
+evidence. `doctor` reports only the boolean `notificationGrantsHealthy`; support bundles exclude
+both fleet state files. Do not attach either file to an issue or print its contents.
+
+The non-CORS machine feed requires measured Serve-only loopback topology, not a declared browser
+identity-trust override. It rejects all browser contexts and uses the grant credential only on the
+feed. Restart sends heartbeat comments until the first healthy discovery round; reconnect always
+starts with a fresh identifier-only snapshot, never replayed stops. Removing a coordinator, its
+trusted origin, or an owner's allowlist entry blocks further events (apply config edits by
+reinstall/restart). Expiry and revocation also terminate the feed; ordinary View/Control and local
+Web Push are unchanged.
 
 ### Opt-in Tern session creation
 

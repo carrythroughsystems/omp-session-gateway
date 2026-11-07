@@ -26,7 +26,7 @@ bun apps/gateway/src/cli.js status
 bun apps/gateway/src/cli.js doctor
 ```
 
-The installer validates your existing `config.json`, preserves an omitted `--port`, `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `tern`, `readiness-token`, and Web Push state verbatim, and switches `installation/current.json` only after the new service passes its authenticated loopback readiness check. Reinstalling or upgrading never strips `http.trustedDashboardOrigins`, `fleet`, `speech`, or `tern`. If startup or readiness fails, the installer restores the prior configuration, service definition, and verified runtime automatically.
+The installer validates your existing `config.json`, preserves an omitted `--port`, `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `tern`, `notifications`, `readiness-token`, and Web Push state verbatim, and switches `installation/current.json` only after the new service passes its authenticated loopback readiness check. Reinstalling or upgrading never strips `http.trustedDashboardOrigins`, `fleet`, `speech`, `notifications`, or `tern`. If startup or readiness fails, the installer restores the prior configuration, service definition, and verified runtime automatically.
 
 The service definition uses the exact Bun executable running `install`. Installing under Bun
 **1.4.4** re-points the LaunchAgent, systemd unit or Windows task to that Bun; keep its persistent
@@ -64,10 +64,26 @@ parser. No running Tern window or OMP process is changed by this config projecti
 Every managed `rollback` or `rollback --to` **conservatively disables creation** when `tern` is authored in `config.json`, regardless of the target version ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)), because older runtimes reject unknown root keys:
 
 1. `rollback` atomically writes the **full authored document** to `<configDir>/config.pre-rollback.json` with owner-only (`0600`) permissions. If `<configDir>/config.pre-rollback.json` already exists, `rollback` refuses to overwrite it and aborts before modifying `config.json` or the service (restore or move that backup file first).
-2. `rollback` removes `tern` from `<configDir>/config.json` (`projectPreTernConfig`, composed with `projectPreFleetConfig` when the target runtime is also older than `0.8.0`), using the same transactional failure recovery as `install`.
+2. `rollback` removes `tern` from `<configDir>/config.json` (`projectPreTernConfig`, composed with `projectPreNotificationsConfig` below `0.10.0` and `projectPreFleetConfig` below `0.8.0`), using the same transactional failure recovery as `install`.
 3. `rollback` starts and readiness-checks the target runtime while preserving `<stateDir>/session-creations.json` (which older runtimes ignore) and leaving running Tern tabs and OMP processes untouched.
 
 To re-enable creation after installing a creation-capable runtime, copy `<configDir>/config.pre-rollback.json` back to `<configDir>/config.json`, remove `<configDir>/config.pre-rollback.json`, and run `bun apps/gateway/src/cli.js install --origin <origin> --allow <login>` and `bun apps/gateway/src/cli.js doctor` from the verified extraction directory ([Operations](OPERATIONS.md#opt-in-tern-session-creation)). Do not copy a backup containing `tern` onto a runtime that does not support creation.
+
+### Rolling back across the `v0.10.0` notification configuration boundary
+
+Runtimes older than `0.10.0` reject the optional `notifications` root key. Managed rollback
+removes that authored section through `projectPreNotificationsConfig`, composed with the existing
+Tern/fleet projections. There is **one** private `config.pre-rollback.json` containing the full
+original document, not one backup per section; an existing backup is never overwritten. Failed
+activation restores the full authored bytes before repairing the current service definition.
+At or above `0.10.0`, rollback leaves `notifications` unchanged (the independent conservative
+Tern projection still applies).
+
+Both `<stateDir>/notification-grants.json` and `<stateDir>/fleet-notifications.json` remain private
+and untouched for a later re-upgrade; older runtimes ignore them and answer fleet APIs with 404.
+Restore a backup containing `notifications` only on a runtime at least `0.10.0` that understands
+every other saved section, then reinstall/restart. Never copy grant state into diagnostics or
+support archives.
 
 ### Rolling back across the `v0.8.0` fleet and speech configuration boundary
 
@@ -107,7 +123,7 @@ Returning from `v0.4.0+` to `v0.3.0` also requires a stopped transition rather t
 ## What rollback never does
 
 - **Never downgrades, restarts, or reconfigures `omp`:** running OMP processes keep the code and `collab.autoStart` setting they started with.
-- **Never rotates `readiness-token` or silently discards authored configuration:** `readiness-token` is never rotated. Configuration is untouched unless authored `tern` must be projected away on any rollback, or fleet/speech keys must be projected away for a target older than `0.8.0`; save the full authored document to private `config.pre-rollback.json` first and refuse to overwrite an existing backup.
+- **Never rotates `readiness-token` or silently discards authored configuration:** `readiness-token` is never rotated. Configuration is untouched unless authored `tern` must be projected away on any rollback, `notifications` for a target older than `0.10.0`, or fleet/speech keys for a target older than `0.8.0`; save the full authored document to private `config.pre-rollback.json` first and refuse to overwrite an existing backup.
 - **Never stops Tern or clears creation evidence:** preserve the private ledger; tabs and OMP
   processes already started remain running, and uncertain outcomes are never automatically retried.
 - **Never edits Tailscale Serve mappings or tailnet policy:** your external HTTPS origin and allowlist remain in effect.

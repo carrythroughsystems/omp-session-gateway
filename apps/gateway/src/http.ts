@@ -18,9 +18,15 @@ import {
   parseSessionCreationRequest,
   SESSION_CREATION_UUID_PATTERN,
   MAX_SESSION_CREATION_REQUEST_BYTES,
+  MAX_FLEET_REQUEST_BYTES,
+  MAX_SOURCE_FLEET_GRANTS,
+  parseFleetGrantActionRequest,
+  parseSourceGrantRequest,
+  type SourceGrantRequest,
 } from "@omp-session-gateway/protocol";
 import {
   authorizeHttpRequest,
+  authorizeFleetFeedContext,
   isLoopbackAddress,
   requestHasTrustedDashboardContext,
   requestHasValidMutationContext,
@@ -32,6 +38,7 @@ import { SafeLogger } from "./logger.ts";
 import { SessionRegistry } from "./registry.ts";
 import type { PushService } from "./push.ts";
 import { SessionCreationProblem, type SessionCreationService } from "./tern-creation.ts";
+import { FleetSourceProblem, type FleetSourceService } from "./fleet-source.ts";
 
 import { StaticAssetStore } from "./static.ts";
 import type { LaunchResolution } from "./omp-registry.ts";
@@ -216,6 +223,7 @@ export function createHttpHandler(options: {
   readonly launchResolver: LaunchBroker;
   readonly staticAssets: StaticAssetStore;
   readonly pushService?: PushService;
+  readonly fleetSourceService?: FleetSourceService;
   readonly creationService?: Pick<SessionCreationService, "options" | "accept" | "status">;
   readonly logger?: SafeLogger;
   readonly readinessToken?: string;
@@ -238,9 +246,10 @@ export function createHttpHandler(options: {
   const { config, registry, staticAssets, launchResolver } = options;
   const logger = options.logger ?? new SafeLogger();
   const identityCapacity = config.auth.mode === "dev-localhost" ? 1 : config.auth.allowedLogins.length;
-  // Each admitted identity owns three keys (`launch`, `push`, `creation`), so configured identities
+  // Each admitted identity owns four keys (`launch`, `push`, `creation`, `grant`), so configured identities
   // can never deny one another merely by filling the bounded map.
-  const limiter = new LaunchRateLimiter(20, 60_000, Math.max(3, identityCapacity * 3));
+  const limiter = new LaunchRateLimiter(20, 60_000, Math.max(4, identityCapacity * 4));
+  const feedLimiter = new LaunchRateLimiter(20, 60_000, MAX_SOURCE_FLEET_GRANTS * 20);
   const now = options.now ?? Date.now;
   const tailnetPresent = options.tailnetPresent ?? createTailnetPresenceProbe();
   // `tailscale-serve` mode trusts an identity header from any loopback peer, which is only sound
@@ -269,6 +278,12 @@ export function createHttpHandler(options: {
     const requestBootstrap = request.method === "GET" && parseNotificationRoute(url) !== undefined;
     const updateBootstrap = request.method === "GET" && url.pathname === "/update/";
     const origin = request.headers.get("Origin");
+    const sourceRoute = url.pathname === "/api/v1/notification-feed" ||
+      url.pathname === "/api/v1/notification-grants" || url.pathname.startsWith("/api/v1/notification-grants/");
+    if ((config.notifications === undefined && (sourceRoute || url.pathname.startsWith("/api/v1/push/fleet/"))) ||
+        (sourceRoute && !config.notifications?.coordinators?.length)) {
+      return problem(404, "not_found", "Not found");
+    }
     if (
       url.pathname.startsWith("/api/") &&
       !(url.pathname === "/api/v1/health" && request.method === "GET") &&
@@ -316,6 +331,30 @@ export function createHttpHandler(options: {
         );
       }
     }
+    if (url.pathname === "/api/v1/notification-feed" && request.method === "GET") {
+      // The measured topology is mandatory here; the browser harness's declared identity trust
+      // deliberately does not widen the machine credential boundary.
+      const admission = authorizeFleetFeedContext(
+        request, peer, config, config.auth.mode !== "tailscale-serve" || tailnetPresent(),
+      );
+      if (admission === "browser") return problem(403, "forbidden", "Forbidden");
+      if (admission !== "allowed") return problem(401, "unauthorized", "Unauthorized");
+      if (options.fleetSourceService === undefined) return problem(503, "grants_unavailable", "Fleet notifications unavailable");
+      try {
+        const grantId = await options.fleetSourceService.authenticate(request.headers.get("Authorization"));
+        if (grantId === undefined) return problem(401, "unauthorized", "Unauthorized");
+        if (!feedLimiter.allow(grantId, now())) return problem(429, "rate_limited", "Too many requests");
+        const admittedMode = config.auth.mode;
+        const admittedPublicOrigin = config.http.publicOrigin;
+        return await options.fleetSourceService.feed(grantId, () =>
+          config.auth.mode === admittedMode && config.http.publicOrigin === admittedPublicOrigin &&
+          (admittedMode === "dev-localhost" || tailnetPresent()),
+        );
+      } catch (error) {
+        if (error instanceof FleetSourceProblem) return problem(error.status, error.code, "Fleet notifications unavailable");
+        return problem(503, "grants_unavailable", "Fleet notifications unavailable");
+      }
+    }
     const authorization = authorizeHttpRequest(request, peer, config, serveOwnsIdentityHeaders);
     if (!authorization.allowed) {
       logger.event("warn", "http.authorization_denied", {
@@ -336,6 +375,38 @@ export function createHttpHandler(options: {
         speech: { browserRecognition: config.speech.browserRecognition },
       };
       return Response.json(response);
+    }
+    const grantAction = /^\/api\/v1\/notification-grants\/([^/]+)\/(renew|revoke)$/u.exec(url.pathname);
+    if (request.method === "POST" && (url.pathname === "/api/v1/notification-grants" ||
+        (grantAction !== null && SESSION_CREATION_UUID_PATTERN.test(grantAction[1]!)))) {
+      const coordinator = requestHasTrustedDashboardContext(request, config.http.trustedDashboardOrigins);
+      if (coordinator === undefined || !config.notifications?.coordinators?.some(peer => peer.origin === coordinator)) {
+        return problem(403, "forbidden", "Forbidden");
+      }
+      if (!limiter.allow(`${authorization.identityKey}\0grant`, now())) return problem(429, "rate_limited", "Too many requests");
+      let grantRequest: SourceGrantRequest | undefined;
+      try {
+        const body = parseJsonFrame(await readBoundedBody(request, MAX_FLEET_REQUEST_BYTES));
+        if (grantAction === null) grantRequest = parseSourceGrantRequest(body);
+        else parseFleetGrantActionRequest(body);
+      } catch {
+        return problem(400, "bad_request", "Invalid request");
+      }
+      if (options.fleetSourceService === undefined) return problem(503, "grants_unavailable", "Fleet notifications unavailable");
+      try {
+        if (grantRequest !== undefined) {
+          return Response.json(await options.fleetSourceService.create(authorization.identityKey, coordinator, grantRequest), { status: 201 });
+        }
+        if (grantAction === null) return problem(400, "bad_request", "Invalid request");
+        if (grantAction[2] === "renew") {
+          return Response.json(await options.fleetSourceService.renew(authorization.identityKey, coordinator, grantAction[1]!), { status: 200 });
+        }
+        await options.fleetSourceService.revoke(authorization.identityKey, coordinator, grantAction[1]!);
+        return new Response(null, { status: 204 });
+      } catch (error) {
+        if (error instanceof FleetSourceProblem) return problem(error.status, error.code, "Fleet notifications unavailable");
+        return problem(503, "grants_unavailable", "Fleet notifications unavailable");
+      }
     }
     if (url.pathname === "/api/v1/sessions" && request.method === "GET") {
       const snapshot = registry.snapshot();
@@ -536,6 +607,7 @@ export function startHttpServer(options: {
   readonly launchResolver: LaunchBroker;
   readonly staticAssets: StaticAssetStore;
   readonly pushService?: PushService;
+  readonly fleetSourceService?: FleetSourceService;
   readonly creationService?: Pick<SessionCreationService, "options" | "accept" | "status">;
   readonly logger?: SafeLogger;
   readonly readinessToken: string;

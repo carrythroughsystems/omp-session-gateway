@@ -72,6 +72,18 @@ describe("fresh adoption observation ordering", () => {
     return { rounds, registry, poller, next: next.promise };
   }
   const observation: OmpDiscoveryObservation = { hosts: [], retained: new Set(["retained-instance"]), directoryHealthy: true };
+  test("discovery is cold until a healthy reconciled round, not a failed first observation", async () => {
+    const f = controlled();
+    expect(f.poller.discoveryWarm).toBe(false);
+    const cold = f.poller.poll();
+    f.rounds[0]!.resolve({ ...observation, directoryHealthy: false });
+    await cold;
+    expect(f.poller.discoveryWarm).toBe(false);
+    const warm = f.poller.poll();
+    f.rounds[1]!.resolve(observation);
+    await warm;
+    expect(f.poller.discoveryWarm).toBe(true);
+  });
   test("ordinary poll joins the old round while fresh callers share exactly one following round", async () => {
     const f = controlled();
     const ordinary = f.poller.poll();

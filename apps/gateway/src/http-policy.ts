@@ -33,6 +33,7 @@ export function apiSecurityHeaders(): Record<string, string> {
 
 function corsRouteMethod(request: Request): "GET" | "POST" | undefined {
   const pathname = new URL(request.url).pathname;
+  if (isNotificationGrantRoute(pathname)) return "POST";
   if (pathname === "/api/v1/sessions") return "GET";
   if (pathname === "/api/v1/session-creation-options") return "GET";
   if (pathname === "/api/v1/session-creations") return "POST";
@@ -42,11 +43,19 @@ function corsRouteMethod(request: Request): "GET" | "POST" | undefined {
   return undefined;
 }
 
+export function isNotificationGrantRoute(pathname: string): boolean {
+  if (pathname === "/api/v1/notification-grants") return true;
+  const match = /^\/api\/v1\/notification-grants\/([^/]+)\/(?:renew|revoke)$/u.exec(pathname);
+  return match !== null && SESSION_CREATION_UUID_PATTERN.test(match[1]!);
+}
+
 export function corsAdmission(request: Request, config: GatewayConfig): string | undefined {
   const method = corsRouteMethod(request);
   if (method === undefined || (request.method !== method && request.method !== "OPTIONS")) return undefined;
   const origin = request.headers.get("Origin");
   if (origin === null || !config.http.trustedDashboardOrigins.includes(origin)) return undefined;
+  if (isNotificationGrantRoute(new URL(request.url).pathname) &&
+      !config.notifications?.coordinators?.some(peer => peer.origin === origin)) return undefined;
   return origin;
 }
 

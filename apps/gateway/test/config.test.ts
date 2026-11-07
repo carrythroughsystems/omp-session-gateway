@@ -7,6 +7,7 @@ import {
   type ConfigOverrides,
   type GatewayConfig,
   FLEET_CONFIG_SINCE_VERSION,
+  NOTIFICATIONS_CONFIG_SINCE_VERSION,
   assertReadinessTokenPrivate,
   captureGatewayConfigFile,
   defaultGatewayPaths,
@@ -18,6 +19,7 @@ import {
   publicOriginHttpsPort,
   projectPreFleetConfig,
   projectPreTernConfig,
+  projectPreNotificationsConfig,
   parseTernConfig,
   readPrivateTextFile,
   removeLegacyPublisherToken,
@@ -907,6 +909,56 @@ describe("fleet and speech configuration", () => {
   });
 });
 
+describe("fleet notifications configuration", () => {
+  const home = { id: "home", origin: "https://home.example.ts.net" };
+  const target = { id: "remote", label: "Remote", origin: "https://remote.example.ts.net" };
+  const document = () => ({ ...serveDocument({ http: { trustedDashboardOrigins: [home.origin] } }),
+    fleet: { targets: [target] }, notifications: { sources: ["remote"], coordinators: [home] } });
+
+  test("accepts both roles, preserves optional absence and revalidates overridden origins", async () => {
+    expect((await loadDocument(document())).notifications).toEqual(document().notifications);
+    expect((await loadDocument(serveDocument())).notifications).toBeUndefined();
+    expect((await loadDocument({ ...serveDocument(), notifications: {} })).notifications).toEqual({});
+    await expect(loadDocument(document(), { publicOrigin: home.origin })).rejects.toThrow();
+    const dev = { ...devDocument({ http: { trustedDashboardOrigins: ["http://127.0.0.1:4318"] } }),
+      notifications: { coordinators: [{ id: "home", origin: "http://127.0.0.1:4318" }] } };
+    expect((await loadDocument(dev)).notifications).toEqual(dev.notifications);
+  });
+
+  test("strictly rejects unknown, empty, duplicate, untrusted, noncanonical and oversized notification sets", async () => {
+    for (const notifications of [null, [], { extra: true }, { sources: [] }, { sources: ["local"] },
+      { sources: ["missing"] }, { sources: ["remote", "remote"] }, { sources: [null] }, { sources: null },
+      { sources: Array.from({ length: 8 }, (_, i) => `host-${i}`) }, { coordinators: [] }, { coordinators: null },
+      { coordinators: [home, home] }, { coordinators: [home, { ...home, id: "other" }] },
+      { coordinators: [home, { id: "home", origin: target.origin }] },
+      { coordinators: [{ ...home, unknown: true }] }, { coordinators: [{ id: "Home", origin: home.origin }] },
+      { coordinators: [{ id: "home" }] }, { coordinators: [{ id: "home", origin: target.origin }] },
+      { coordinators: [{ ...home, origin: "https://gateway.example.ts.net" }] },
+      { coordinators: [{ ...home, origin: "http://127.0.0.1:4318" }] },
+      { coordinators: [{ ...home, origin: home.origin + "/" }] },
+      { coordinators: Array.from({ length: 8 }, (_, i) => ({ id: `host-${i}`, origin: `https://host-${i}.example.ts.net` })) },
+    ]) await expect(loadDocument({ ...document(), notifications })).rejects.toThrow();
+    const peers = Array.from({ length: 7 }, (_, i) => ({ id: `home-${i}`, origin: `https://home-${i}.example.ts.net` }));
+    const targets = Array.from({ length: 7 }, (_, i) => ({ id: `remote-${i}`, label: "Remote", origin: `https://remote-${i}.example.ts.net` }));
+    const maximum = { ...serveDocument({ http: { trustedDashboardOrigins: peers.map(peer => peer.origin) } }),
+      fleet: { targets }, notifications: { sources: targets.map(target => target.id), coordinators: peers } };
+    expect((await loadDocument(maximum)).notifications).toEqual(maximum.notifications);
+  });
+
+  test("rollback projection removes only notifications and composes without mutating authored keys", () => {
+    expect(NOTIFICATIONS_CONFIG_SINCE_VERSION).toBe("0.10.0");
+    const before = { ...document(), tern: {}, speech: {} };
+    const original = JSON.stringify(before);
+    const projected = projectPreNotificationsConfig(projectPreTernConfig(before).document);
+    expect(projected.removedKeys).toEqual(["notifications"]);
+    expect(projected.document.fleet).toEqual(before.fleet);
+    const legacy = projectPreFleetConfig(projected.document).document;
+    expect(legacy).toEqual(serveDocument());
+    expect(JSON.stringify(before)).toBe(original);
+    expect(projectPreNotificationsConfig(serveDocument()).removedKeys).toEqual([]);
+  });
+});
+
 describe("registry bounds admission", () => {
   test("refuses a heartbeat outside its bounds or of the wrong shape", async () => {
     for (const heartbeatSeconds of [1, 61, 10.5, "10", true]) {
@@ -1520,7 +1572,7 @@ describe("production config authoring", () => {
     expect((await loadGatewayConfig({ configPath: paths.configPath })).omp).toEqual(priorDocument.omp);
   }, 20_000);
 
-  test("preserves authored fleet, speech and tern sections verbatim on reinstall and leaves unchanged bytes alone", async () => {
+  test("preserves authored fleet, speech, tern and notifications verbatim on reinstall and leaves unchanged bytes alone", async () => {
     const paths = await isolatedHome();
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
     const document = {
@@ -1530,6 +1582,7 @@ describe("production config authoring", () => {
         targets: [{ id: "remote", label: " Remote\u202e ", origin: "https://remote.example.ts.net" }],
       },
       speech: { browserRecognition: true },
+      notifications: { sources: ["remote"], coordinators: [{ id: "home", origin: "https://dashboard.example.ts.net" }] },
       tern: { executable: "/synthetic/tern", window: "2", projects: [{ id: "project", label: " Project\u202e ",
         workingCopies: [{ id: "main", label: " Main ", path: "/synthetic/work" }] }],
         profiles: [{ id: "omp", label: " OMP ", argv: ["/synthetic/omp"], env: { HOME: "/synthetic", PATH: "/bin" } }] },
@@ -1545,6 +1598,7 @@ describe("production config authoring", () => {
     expect(rewritten.fleet).toEqual(document.fleet);
     expect(rewritten.speech).toEqual(document.speech);
     expect(rewritten.tern).toEqual(document.tern);
+    expect(rewritten.notifications).toEqual(document.notifications);
     const loaded = await loadGatewayConfig();
     expect(loaded.fleet.label).toBe("Studio é");
     expect(loaded.fleet.targets[0]?.label).toBe("Remote");

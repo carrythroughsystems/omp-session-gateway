@@ -9,6 +9,7 @@ import { defaultGatewayPaths, writePrivateTextFile, type GatewayConfig } from ".
 import { GATEWAY_VERSION } from "../src/installation.ts";
 import { serviceDefinition } from "../src/service.ts";
 import { HANG_DEADLINE_MS } from "./test-support.ts";
+import { fleetGrantVerifier } from "@omp-session-gateway/protocol";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
@@ -106,7 +107,7 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
   }
 }, 2 * HANG_DEADLINE_MS);
 
-test("development serve flags still load authored fleet and speech from the default config path", async () => {
+test("development serve loads preserved config and wires the real notification source lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-cli-fleet-"));
   const portReservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
   const port = portReservation.port!;
@@ -119,6 +120,7 @@ test("development serve flags still load authored fleet and speech from the defa
     http: { trustedDashboardOrigins: ["http://127.0.0.1:4412"] },
     fleet: { label: "Dev studio", targets: [{ id: "dev-target", label: "Other dev host", origin: "http://127.0.0.1:4413" }] },
     speech: { browserRecognition: true },
+    notifications: { sources: ["dev-target"], coordinators: [{ id: "home", origin: "http://127.0.0.1:4412" }] },
   })}\n`;
   await writePrivateTextFile(configPath, authored);
   const subprocess = Bun.spawn([
@@ -145,6 +147,26 @@ test("development serve flags still load authored fleet and speech from the defa
       targets: [{ id: "dev-target", label: "Other dev host", origin: "http://127.0.0.1:4413" }],
       speech: { browserRecognition: true },
     });
+    expect(await readFile(configPath, "utf8")).toBe(authored);
+    const grantId = "a1111111-b222-4333-8444-c55555555555";
+    const secret = "SYNTHETIC_CLI_FLEET_SECRET_CANARY".padEnd(43, "0");
+    const grantHeaders = { Origin: "http://127.0.0.1:4412", "Content-Type": "application/json" };
+    const create = await fetch(`${origin}/api/v1/notification-grants`, { method: "POST", headers: grantHeaders,
+      body: JSON.stringify({ version: 1, grantId, verifier: await fleetGrantVerifier(grantId, secret) }) });
+    expect(create.status).toBe(201);
+    const feed = await fetch(`${origin}/api/v1/notification-feed`, {
+      headers: { Authorization: `Bearer ${grantId}.${secret}`, Accept: "text/event-stream" },
+      signal: AbortSignal.timeout(HANG_DEADLINE_MS),
+    });
+    expect(feed.status).toBe(200);
+    const stream = feed.body!.getReader();
+    expect(new TextDecoder().decode((await stream.read()).value)).toContain("event: snapshot\n");
+    const revoke = await fetch(`${origin}/api/v1/notification-grants/${grantId}/revoke`, {
+      method: "POST", headers: grantHeaders, body: '{"version":1}',
+    });
+    expect(revoke.status).toBe(204);
+    expect((await stream.read()).done).toBe(true);
+    expect(JSON.parse(await readFile(join(root, "state/omp-session-gateway/notification-grants.json"), "utf8")).grants).toEqual([]);
     expect(await readFile(configPath, "utf8")).toBe(authored);
   } finally {
     subprocess.kill("SIGTERM");
@@ -1264,6 +1286,7 @@ async function runFleetRollback(
   mode: "success" | "existing-backup" | "failed-start" = "success",
   authored: "all" | "defaults" | "none" = "all",
   tern = false,
+  notifications = false,
 ): Promise<SandboxRun> {
   return runInSandbox(async root => {
     const entry = join(root, "rollback-fixture.ts");
@@ -1290,6 +1313,8 @@ if (authored !== "none") {
   } : {};
   document.speech = { browserRecognition: authored === "all" };
 }
+if (${JSON.stringify(notifications)}) document.notifications = authored === "all"
+  ? { sources: ["remote"], coordinators: [{ id: "home", origin: "https://dashboard.example.ts.net" }] } : {};
 const before = JSON.stringify(document) + " \n";
 await writePrivateTextFile(config.paths.configPath, before);
 config = await loadGatewayConfig();
@@ -1339,6 +1364,31 @@ console.log(JSON.stringify({
 }
 
 describe("rollback fleet configuration projection", () => {
+  test("projects notifications below 0.10.0 with one backup composed with fleet and Tern", async () => {
+    for (const version of ["0.7.8", "0.9.1", "0.10.0-beta.1", "0.10.0"]) {
+      const run = await runFleetRollback(version, "success", "all", true, true);
+      const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+      expect(state.failure).toBe("");
+      expect(state.backup).toBe(state.before);
+      expect(JSON.parse(state.after).tern).toBeUndefined();
+      expect(JSON.parse(state.after).notifications).toEqual(version === "0.10.0" ? JSON.parse(state.before).notifications : undefined);
+      expect(state.installed[0].document).toEqual(JSON.parse(state.after));
+      expect(JSON.parse(state.after).fleet).toEqual(version === "0.7.8" ? undefined : JSON.parse(state.before).fleet);
+    }
+  });
+  test("notification-only rollback refuses backup overwrite and restores authored bytes on failure", async () => {
+    for (const mode of ["existing-backup", "failed-start"] as const) {
+      const run = await runFleetRollback("0.9.1", mode, "none", false, true);
+      const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+      expect(state.after).toBe(state.before);
+      expect(state.backup).toBe(mode === "existing-backup" ? "earlier backup\n" : state.before);
+      expect(state.installed).toHaveLength(mode === "existing-backup" ? 0 : 2);
+      expect(state.activated).toBe(false);
+    }
+    const run = await runFleetRollback("0.10.0", "success", "all", false, true);
+    const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+    expect(state.after).toBe(state.before); expect(state.backup).toBeNull();
+  });
   test("every managed rollback projects authored Tern away while preserving newer fleet settings and full backup", async () => {
     for (const version of ["0.7.8", "0.8.0", "0.9.0"]) {
       const run = await runFleetRollback(version, "success", "all", true);

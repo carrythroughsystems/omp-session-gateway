@@ -56,6 +56,7 @@ function manifest(): string {
         "full filesystem paths, browser storage, relay frames, and raw logs",
         "session creation ledgers and request payloads",
         "creation executable argv/env and raw Tern inspection output",
+        "notification-grants.json and fleet-notifications.json, including fleet verifiers and secrets",
       ],
     },
     null,
