@@ -128,7 +128,8 @@ for (const state of VISUAL_STATES) {
       });
       phase = "directory";
       await page.goto(fixture.origin, { waitUntil: "domcontentloaded" });
-      await page.locator(state === "directory-empty" ? ".empty-state" : state === "directory-needs-you" || state === "collab-control-ask" ? ".queue-hero" : ".all-clear-summary").waitFor();
+      // The empty state renders as `limited` until the alert-coverage check settles; capture the settled state.
+      await page.locator(state === "directory-empty" ? '.empty-state[data-state="empty"]' : state === "directory-needs-you" || state === "collab-control-ask" ? ".queue-hero" : ".all-clear-summary").waitFor();
       if (state === "directory-all-clear" || state === "settings-enabled-session") {
         phase = "alerts";
         await page.evaluate(async () => navigator.serviceWorker.ready);
