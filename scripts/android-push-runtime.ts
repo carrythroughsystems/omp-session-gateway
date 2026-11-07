@@ -135,30 +135,56 @@ export async function holdPushWorkerObserver(origin: string, execution?: Android
     const attached = await driver.browserSend("Target.attachToTarget", { targetId: workers[0].targetId, flatten: true });
     if (typeof attached.sessionId !== "string") throw new Error("fleet worker attachment unavailable");
     const sessionId = attached.sessionId;
+    const lifecycle = { detached: 0, destroyed: 0, changed: 0, identityChanged: 0, sameScriptCreated: 0 };
+    const stopEvents = driver.onEvent((method, parameters) => {
+      if (method === "Target.detachedFromTarget" && parameters.sessionId === sessionId) lifecycle.detached++;
+      if (method === "Target.targetDestroyed" && parameters.targetId === workers[0].targetId) lifecycle.destroyed++;
+      const info = parameters.targetInfo as Record<string, unknown> | undefined;
+      if (method === "Target.targetInfoChanged" && info?.targetId === workers[0].targetId) {
+        lifecycle.changed++;
+        if (info.type !== "service_worker" || info.url !== `${origin}/service-worker.js`) lifecycle.identityChanged++;
+      }
+      if (method === "Target.targetCreated" && info?.targetId !== workers[0].targetId &&
+        info?.type === "service_worker" && info.url === `${origin}/service-worker.js`) lifecycle.sameScriptCreated++;
+    });
     const abort = () => release.reject(execution?.signal.reason ?? new Error("fleet worker observer cancelled"));
     const timer = setTimeout(() => release.reject(new AndroidDevtoolsConnectionError("protocol_timeout", "Fleet worker observer lifetime exceeded")),
       Math.max(1, Math.min(30 * 60_000, execution === undefined ? Infinity : execution.deadline - performance.now())));
     execution?.signal.addEventListener("abort", abort, { once: true });
     if (execution?.signal.aborted) abort();
     try {
-      ready.resolve({
-        async evaluate<T>(expression: string): Promise<T> {
-          if (ended !== undefined) throw ended;
-          if (closed) throw new Error("fleet worker observer already closed");
-          const result = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-          if (result.exceptionDetails !== undefined || result.result === null || typeof result.result !== "object" || !("value" in result.result)) {
-            throw new Error("fleet worker observation failed");
-          }
-          return result.result.value as T;
-        },
-        close() {
-          closed = true;
-          return closing ??= (async () => { release.resolve(); await session; })();
-        },
-      });
-      await runWithRestoration("fleet observer attachment", () => release.promise,
+      await runWithRestoration("fleet observer attachment", async () => {
+        // Discovery is read-only. Same-script targets are diagnostic candidates, not proof of
+        // registration identity: never replace the attachment or re-arm badge state from them.
+        await driver.browserSend("Target.setDiscoverTargets", { discover: true });
+        ready.resolve({
+          async evaluate<T>(expression: string): Promise<T> {
+            if (ended !== undefined) throw ended;
+            if (closed) throw new Error("fleet worker observer already closed");
+            const before = { ...lifecycle };
+            let result: Record<string, unknown>;
+            try { result = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }); }
+            catch (error) {
+              // Only closed counters enter the private chain; no expression, URL, target/session
+              // identifier or protocol payload. A quiet timeout does not prove a busy worker.
+              if (error instanceof Error) error.cause = new AggregateError(error.cause === undefined ? [] : [error.cause],
+                `Fleet worker lifecycle: ${JSON.stringify({ before, after: lifecycle })}`);
+              throw error;
+            }
+            if (result.exceptionDetails !== undefined || result.result === null || typeof result.result !== "object" || !("value" in result.result)) {
+              throw new Error("fleet worker observation failed");
+            }
+            return result.result.value as T;
+          },
+          close() {
+            closed = true;
+            return closing ??= (async () => { release.resolve(); await session; })();
+          },
+        });
+        await release.promise;
+      },
         [async () => { await driver.browserSend("Target.detachFromTarget", { sessionId }); }]);
-    } finally { clearTimeout(timer); execution?.signal.removeEventListener("abort", abort); }
+    } finally { stopEvents(); clearTimeout(timer); execution?.signal.removeEventListener("abort", abort); }
   }, { port: 9237, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
   void session.catch(error => { ended = error; ready.reject(error); });
   return ready.promise;
