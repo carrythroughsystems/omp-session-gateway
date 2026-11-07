@@ -16,7 +16,10 @@ import { everyError, pixelUnrestored } from "./restoration.ts";
 import { FAILURE_LIMITS, PUSH_BROWSER_STEPS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
 import type { QualificationLogWindow, PushDeliveryTelemetry } from "./qualification-logs.ts";
 import { parsePixelBaseline, type PixelBaseline } from "./android-device.ts";
-import { runFleetPushPhases, FLEET_PUSH_PHASES, FLEET_PUSH_RESULT_FIELDS, type FleetPushRuntime } from "./android-push-fleet.ts";
+import { Database } from "bun:sqlite";
+import { withReleaseHostLease } from "./release-host-lease.ts";
+import { runFleetPushPhases, FLEET_PUSH_PHASES, FLEET_PUSH_RESULT_FIELDS, FLEET_PUSH_DEVELOPMENT_STEPS,
+  type FleetPushRuntime, type FleetPushDevelopmentStep } from "./android-push-fleet.ts";
 
 export interface PushExecution { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
 export interface PushDeliveryMetrics {
@@ -281,11 +284,13 @@ export interface AndroidPushRuntime {
  * Steady-state waits keep the one-minute bound.
  */
 const PUSH_RECOVERY_MS = 160_000;
+const LEGACY_PUSH_TAIL_PHASES = ["force_stop_verified", "permission_verified", "lock_resume_verified",
+  "network_verified", "doze_verified", "forbidden_sinks_verified"] as const;
 
 export const ANDROID_PUSH_PHASES = ["baseline_captured", "subscription_ready", "private_verified", "session_verified", "preview_verified",
   "attention_tap_verified", "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified",
   ...FLEET_PUSH_PHASES,
-  "force_stop_verified", "permission_verified", "lock_resume_verified", "network_verified", "doze_verified", "forbidden_sinks_verified",
+  ...LEGACY_PUSH_TAIL_PHASES,
   "evidence_complete", "restored"] as const;
 export type AndroidPushPhase = (typeof ANDROID_PUSH_PHASES)[number];
 export interface AndroidPushProgress extends Record<string, unknown> {
@@ -666,6 +671,16 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
 }
 
 export async function runAndroidPush(input: LaneInput): Promise<Record<string, unknown>> {
+  return runAndroidPushLane(input);
+}
+
+/** Tested evidence only: never accepts a partial selection through the release lane entrypoint. */
+export async function runAndroidPushDevelopmentStep(input: LaneInput, step: FleetPushDevelopmentStep): Promise<Record<string, unknown>> {
+  if (!Object.hasOwn(FLEET_PUSH_DEVELOPMENT_STEPS, step)) throw new Error("unknown Android Push development step");
+  return runAndroidPushLane(input, step);
+}
+
+async function runAndroidPushLane(input: LaneInput, developmentStep?: FleetPushDevelopmentStep): Promise<Record<string, unknown>> {
   let localId = 0;
   const nextFailureId = () => input.execution?.nextFailureId() ?? ++localId;
   const bind = binding(input.identity);
@@ -846,6 +861,8 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       return { session: observed, milliseconds: pushMilliseconds(runtime.now() - start) };
     };
     const attempt = async (phase: AndroidPushPhase, action: () => Promise<void>): Promise<void> => {
+      if (developmentStep !== undefined && !FLEET_PUSH_PHASES.some(value => value === phase) &&
+        !(developmentStep === "legacy-tail" && LEGACY_PUSH_TAIL_PHASES.some(value => value === phase))) return;
       activePhase = phase; phaseStarted = runtime.now(); metrics = emptyPushDeliveryMetrics();
       armedAsks.clear();
       for (let index = 0; index < 2; index += 1) {
@@ -1094,7 +1111,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         await staleTap(expiring, "expired-host");
         await finish("stale_taps_verified", { resolved: true, rearmed: true, replaced: true, expired: true, launches: 0, scrubbed: true, replayed: true });
       });
-      await runFleetPushPhases({ runtime, progress, save, attempt, finish, fixture, snapshot, delivered, clear, wait, assertion });
+      await runFleetPushPhases({ runtime, progress, save, attempt, finish, fixture, snapshot, delivered, clear, wait, assertion }, developmentStep);
       await attempt("force_stop_verified", async () => {
         // Its privacy check reads Private notices; the triage and delayed-tap phases leave Session.
         await runtime.detail("private"); await runtime.forceStop(); await fixture("ask");
@@ -1207,7 +1224,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {} });
         await finish("forbidden_sinks_verified", sinks);
       });
-      await finish("evidence_complete", { passed: !progress.results.network_verified?.blocked });
+      if (developmentStep === undefined) await finish("evidence_complete", { passed: !progress.results.network_verified?.blocked });
     } catch (error) { primary = error; }
     let cleanup: Record<string, unknown>;
     runtime.beginCleanup?.();
@@ -1225,14 +1242,60 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       throw failure;
     }
     if (primary !== undefined) throw primary;
-    return { epoch: progress.epoch, binding: bind, passed: progress.results.evidence_complete?.passed === true,
+    return { epoch: progress.epoch, binding: bind,
+      ...(developmentStep === undefined ? { passed: progress.results.evidence_complete?.passed === true } :
+        { development: true, qualified: false, step: developmentStep, passed: !progress.results.network_verified?.blocked }),
       platform: admission, ompVersion: input.identity.omp.version, bunVersion: input.identity.omp.bunVersion, phases: progress.results, cleanup };
   });
 }
 
+export function parseAndroidPushDevelopmentArguments(argv: readonly string[]): {
+  mode: "development" | "development-step" | "cleanup"; archive: string; step?: FleetPushDevelopmentStep;
+} {
+  const [mode, first, second] = argv;
+  if (mode === "development-step" && argv.length === 3 && first !== undefined && second &&
+    Object.hasOwn(FLEET_PUSH_DEVELOPMENT_STEPS, first)) {
+    return { mode, archive: second, step: first as FleetPushDevelopmentStep };
+  }
+  if ((mode === "development" || mode === "cleanup") && argv.length === 2 && first) return { mode, archive: first };
+  throw new Error(`usage: android-push-qualification.ts development|cleanup <published-archive> | development-step <${Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS).join("|")}> <published-archive>`);
+}
+
+/** Shares the campaign lock inode; only explicit cleanup may resume this development owner. */
+export async function withAndroidPushDevelopmentLease<T>(action: () => Promise<T>, restored: () => boolean,
+  options: { cleanup?: boolean; scope?: "installed" | "retained-guest"; hostDirectory?: string; pixelDirectory?: string } = {}): Promise<T> {
+  const hostDirectory = options.hostDirectory ?? join(homedir(), ".local/state/omp-session-gateway/release-host");
+  const prefix = `PushLane androidPush ${options.scope ?? "installed"} development:`;
+  let owner = `${prefix}${randomUUID()}`;
+  if (await Bun.file(join(hostDirectory, "lease.sqlite")).exists()) {
+    const database = new Database(join(hostDirectory, "lease.sqlite"), { readonly: true });
+    try {
+      const previous = database.query<{ owner: string }, []>("SELECT owner FROM campaign").get();
+      if (previous !== null) {
+        if (!options.cleanup || !previous.owner.startsWith(prefix)) throw new Error("release-host campaign lease exists; refusing development run");
+        owner = previous.owner;
+      }
+    } finally { database.close(); }
+  }
+  let primary: unknown;
+  const result = await withReleaseHostLease(owner, async () => {
+    let entered = false;
+    try {
+      return await withDevelopmentPixelLease(owner, () => { entered = true; return action(); }, restored,
+        options.pixelDirectory ?? "/tmp/omp-gw-pixel.lock", options.cleanup === true);
+    } catch (error) {
+      // A restored failed step releases ownership; unproven restoration retains both leases.
+      if (entered && !restored()) throw error;
+      primary = error;
+      return undefined;
+    }
+  }, hostDirectory);
+  if (primary !== undefined) throw primary;
+  return result as T;
+}
+
 if (import.meta.main) {
-  const [mode, archive] = process.argv.slice(2);
-  if (!["development", "cleanup"].includes(mode ?? "") || archive === undefined) throw new Error("usage: android-push-qualification.ts development|cleanup <published-archive>");
+  const { mode, archive, step } = parseAndroidPushDevelopmentArguments(process.argv.slice(2));
   const config = await loadGatewayConfig();
   const installed = await currentInstalledRuntime(config);
   if (installed === undefined) throw new Error("development run needs an installed gateway; it never installs one");
@@ -1253,7 +1316,7 @@ if (import.meta.main) {
   const path = join(directory, "progress.json");
   let progress: unknown = await readFile(path, "utf8").then(text => JSON.parse(text)).catch(error => { if (error.code === "ENOENT") return undefined; throw error; });
   // A restored attempt for another candidate, origin or OMP pin needs no cleanup: keep it beside the new one.
-  if (mode === "development" && progress !== undefined) {
+  if (mode !== "cleanup" && progress !== undefined) {
     const previous = parseAndroidPushProgress(progress);
     if (!previous.cleanupRequired && previous.binding !== binding(identity)) {
       await rename(path, join(directory, `progress-${previous.epoch}-restored.json`));
@@ -1266,11 +1329,11 @@ if (import.meta.main) {
     if (typeof progress !== "object" || progress === null || !("phase" in progress) || next.phase !== progress.phase) console.log(JSON.stringify({ phase: next.phase }));
     progress = next;
   };
-  const pixel = async <T>(_owner: string, action: () => Promise<T>): Promise<T> => {
-    return withDevelopmentPixelLease("PushLane androidPush", action, () => progress === undefined || !androidPushNeedsCleanup(progress), "/tmp/omp-gw-pixel.lock", true);
-  };
   try {
-    const result = await (mode === "cleanup" ? cleanupAndroidPush : runAndroidPush)({ identity, progress, checkpoint, pixel });
+    const result = await withAndroidPushDevelopmentLease(async () => {
+      const input = { identity, progress, checkpoint, pixel: async <T>(_owner: string, action: () => Promise<T>) => action() };
+      return mode === "cleanup" ? cleanupAndroidPush(input) : step === undefined ? runAndroidPush(input) : runAndroidPushDevelopmentStep(input, step);
+    }, () => progress === undefined || !androidPushNeedsCleanup(progress), { cleanup: mode === "cleanup" });
     await writeFile(join(directory, "tested-evidence.json"), JSON.stringify({ development: true, qualified: false, gatewayVersion: release.version, result }), { mode: 0o600 });
     console.log(JSON.stringify({ development: true, qualified: false, gatewayVersion: release.version, result }));
   } catch (error) {

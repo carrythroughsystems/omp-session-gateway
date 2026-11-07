@@ -944,9 +944,6 @@ export async function waitForDevtoolsEndpoint(
     `DevTools endpoint never accepted a connection${code}`, { cause: lastError });
 }
 
-/** Only this protocol rejection proves that an expression never started, unlike a page exception. */
-class MissingDefaultExecutionContextError extends Error {}
-
 /** Resource ownership that could not be discharged, without device identities in its evidence. */
 export class AndroidBrowserCleanupError extends AggregateError {
   readonly pixelUnrestored = true;

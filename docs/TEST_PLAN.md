@@ -260,6 +260,34 @@ after clear; `replayed: true` proves handling, not push delivery ordering or del
 below distinguish the new physical checks from broader acceptance. Develop with the pinned Bun:
 `OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development "$PUBLISHED_ARCHIVE"`.
 Restored development progress from another candidate/origin/pin is archived automatically.
+For one remaining fleet step instead of a full lane, use:
+
+```sh
+OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development-step coordinator-restart "$PUBLISHED_ARCHIVE"
+```
+
+The step names are `coordinator-restart`, `revocation`, `fleet-sinks`, `fleet-restoration`, and
+`legacy-tail`. Each starts from a fresh epoch, captures the Pixel baseline, starts the local fixture,
+subscribes, prepares the same isolated source/config/Serve mapping and grants through PWA enrollment,
+and admits the warm worker observer once. It skips the earlier local and fleet checks, not their
+assertions inside the selected step. `fleet-sinks` first performs the real remote Control tap and
+answer/clear needed to scan that exact live capability; `legacy-tail` first restores the fleet
+source and releases the observer, then runs force-stop, permission, lock/resume, network, Doze and
+the legacy sink sweep together. Every outcome attempts the existing Pixel and fleet restoration.
+Partial runs never set `evidence_complete`; their private `tested-evidence.json` explicitly names
+the step and records `development: true, qualified: false`.
+
+Both development modes refuse any existing release-host campaign lease row or held Pixel lock.
+An unrestored attempt retains ownership: stop and use
+`bun scripts/android-push-qualification.ts cleanup "$PUBLISHED_ARCHIVE"` for that same identity;
+do not remove either lock or start another iteration. This CLI needs an already installed disposable
+gateway matching the archive; it does not install or replace a retained guest's baseline. The Studio
+operator's private `fleet-step-runner.ts` wraps `runAndroidPushDevelopmentStep(input, step)` with the
+existing retained-guest backup/install/byte-exact restore proof and supplies qualification logs.
+Run that wrapper only after the release campaign closes. Aim for about ten minutes per iteration,
+not a timing guarantee: cold delivery, radio recovery and restoration keep their original bounds.
+Repeat each remaining step 2–3 times successfully, then run one full acceptance lane. Unit or
+step-runner evidence alone does not satisfy the release qualification gate.
 Follow [ANDROID.md](ANDROID.md#physical-background-push-lane) before running a stable campaign;
 the [specialized checklist](ATTENTION_SPEC.md#specialized-triage-and-delayed-tap-acceptance--qualification-pending)
 remains unchecked until that exact signed candidate passes.
@@ -309,10 +337,15 @@ target) for at most 30 minutes, bounded further by the lane deadline. Fleet resu
 `devtoolsObserver`: these cold-PWA phases prove real delivery, rendering, identity, ordering
 and taps with instrumentation attached, **not process-cold wake semantics**. Loss of the held
 connection fails typed; it is never silently reconnected.
-The same phase may reuse verified worker metadata only for an unchanged OS notification key,
-post timestamp, and exact session generation/request. New or changed records require a fresh
-worker comparison; reposts still fail deduplication and clears still inspect the worker.
-This avoids querying a cached Android process after the system freezer suspends it.
+Notification observation reads Android `dumpsys notification` first. The same phase reuses the
+worker's metadata for an unchanged OS key/post timestamp, still comparing the exact source,
+instance, request, version and type; a verified generation cannot silently change. Even mismatched
+metadata is cached until the OS record changes, so a pending replacement cannot repeatedly evaluate
+a frozen worker. Missing records report missing and invalidate delivery metadata; changed/new
+records query freshly after the observed delivery, and reposts still fail deduplication. A clear
+queries the worker only after observed OS presence becomes absence, retaining both the zero-OS
+and zero-worker assertion; unchanged absence reuses that verdict. Initial absence without a
+delivery/clear transition cannot prove fleet clearance. No freezer setting or worker wake changes.
 The restart phase carries its verified badge across the closed-page quiet window only when a
 complete, healthy coordinator telemetry window records zero sends, acknowledgements and failures
 globally; any push activity or unavailable telemetry requires a fresh worker evaluation.

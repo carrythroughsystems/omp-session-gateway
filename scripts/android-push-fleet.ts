@@ -8,6 +8,14 @@ import type { FleetFixtureOperation } from "./fleet-push-fixture.ts";
 export const FLEET_PUSH_PHASES = ["fleet_enrolled", "fleet_private_verified", "fleet_session_verified", "fleet_preview_verified",
   "fleet_race_verified", "fleet_taps_verified", "fleet_stale_taps_verified", "fleet_outage_verified", "fleet_restart_verified",
   "fleet_revocation_verified", "fleet_sinks_verified", "fleet_restored"] as const;
+export const FLEET_PUSH_DEVELOPMENT_STEPS = {
+  "coordinator-restart": "fleet_restart_verified",
+  revocation: "fleet_revocation_verified",
+  "fleet-sinks": "fleet_sinks_verified",
+  "fleet-restoration": "fleet_restored",
+  "legacy-tail": "legacy-tail",
+} as const;
+export type FleetPushDevelopmentStep = keyof typeof FLEET_PUSH_DEVELOPMENT_STEPS;
 export const FLEET_PUSH_RESULT_FIELDS = {
   fleet_enrolled: ["selected", "covered", "distinctOrigins", "devtoolsObserver"],
   fleet_private_verified: ["local", "remote", "identity", "previewFallback", "deduplicated", "devtoolsObserver"],
@@ -50,13 +58,14 @@ interface FleetPhaseContext {
 }
 
 /** Additional phases of androidPush, sharing its checkpoints, failure typing and restoration owner. */
-export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
+export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushDevelopmentStep): Promise<void> {
   const { runtime: r, progress: p, fixture, snapshot, delivered, clear, wait, assertion } = c;
   const f = r.fleet;
   let observerAttached = false;
   let sinkAudit: Record<string, boolean | number> | undefined;
   let activePhase: AndroidPushPhase = "fleet_enrolled";
   const attempt: FleetPhaseContext["attempt"] = (phase, action) => {
+    if (step !== undefined && phase !== "fleet_enrolled" && phase !== FLEET_PUSH_DEVELOPMENT_STEPS[step]) return Promise.resolve();
     activePhase = phase;
     return c.attempt(phase, action);
   };
@@ -93,6 +102,16 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
       throw assertion("Fleet remote stale tap issued a launch or did not expire");
     }
   };
+  const controlTap = async (role: "primary" | "remote") => {
+    await cold(); const session = await ask(role);
+    const tap = await r.tap(session, "attention", false);
+    if (tap.launches !== 1 || tap.successful !== 1 || !tap.currentGeneration || !tap.currentRequest || !tap.scrubbedBeforeNetwork || !tap.writable) {
+      throw assertion("Fleet tap did not launch the exact source and request");
+    }
+    await r.answer(); await snapshot(s => !s.inputRequired, role); await clear(60_000, role);
+    // Audit the exact live Control launch before replacing or stopping its fixture.
+    if (role === "remote") sinkAudit = await f.audit(p.epoch);
+  };
   await attempt("fleet_enrolled", async () => {
     p.fleetPrepared = true;
     await c.save();
@@ -107,6 +126,14 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     if (!coverage.selected || coverage.state !== "current" || !coverage.covered) throw assertion("Fleet Hosts toggle did not enroll the source");
     await finish("fleet_enrolled", { selected: true, covered: true, distinctOrigins: true });
   });
+  if (step !== undefined) {
+    await f.armBadgeObserver(); observerAttached = true;
+    if (step === "legacy-tail") {
+      // Match the full lane's tail boundary without claiming the restoration phase passed.
+      await r.cleanup("fleet", p); await c.save();
+      return;
+    }
+  }
   for (const detail of ["private", "session", "preview"] as const) {
     await attempt(`fleet_${detail}_verified`, async () => {
       await cold(detail);
@@ -150,17 +177,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await finish("fleet_race_verified", { concurrent: true, exactClear: true, replacement: true, badgeReconciled: true });
   });
   await attempt("fleet_taps_verified", async () => {
-    for (const role of ["primary", "remote"] as const) {
-      await cold(); const session = await ask(role);
-      const tap = await r.tap(session, "attention", false);
-      if (tap.launches !== 1 || tap.successful !== 1 || !tap.currentGeneration || !tap.currentRequest || !tap.scrubbedBeforeNetwork || !tap.writable) {
-        throw assertion("Fleet tap did not launch the exact source and request");
-      }
-      await r.answer(); await snapshot(s => !s.inputRequired, role); await clear(60_000, role);
-      // Scan the same live Control capability the installed PWA just handled, before the
-      // delayed-tap phase replaces/stops this remote fixture and invalidates that material.
-      if (role === "remote") sinkAudit = await f.audit(p.epoch);
-    }
+    for (const role of ["primary", "remote"] as const) await controlTap(role);
     await finish("fleet_taps_verified", { local: true, remote: true, exactRequest: true, scrubbed: true });
   });
   await attempt("fleet_stale_taps_verified", async () => {
@@ -244,6 +261,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await finish("fleet_revocation_verified", { unauthorized: true, cleared: true, launches: 0 });
   });
   await attempt("fleet_sinks_verified", async () => {
+    if (step === "fleet-sinks") await controlTap("remote");
     const audit = sinkAudit;
     if (audit === undefined) throw assertion("Fleet sink sweep did not observe the PWA's live remote Control launch");
     if (audit.clean !== true || audit.detectable !== true || audit.findings !== 0) throw assertion("Fleet forbidden sink sweep failed");

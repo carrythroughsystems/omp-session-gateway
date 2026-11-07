@@ -21,6 +21,9 @@ import { pixelUnrestored } from "./restoration.ts";
 import { QualificationFailure, normalizeQualificationFailures, privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 import { FLEET_PUSH_PHASES } from "./android-push-fleet.ts";
+import { FLEET_PUSH_DEVELOPMENT_STEPS, type FleetPushDevelopmentStep } from "./android-push-fleet.ts";
+import { runAndroidPushDevelopmentStep, parseAndroidPushDevelopmentArguments, withAndroidPushDevelopmentLease } from "./android-push-qualification.ts";
+import { Database } from "bun:sqlite";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
@@ -1583,6 +1586,109 @@ test("queue order, Hold, Hide and delayed taps pass on the device and leave no l
   expect(final.results.stale_taps_verified).toMatchObject({ resolved: true, rearmed: true, replaced: true, expired: true, launches: 0, replayed: true });
   expect(final.secondaryNotificationTopicDigest).toBe(notificationTopicDigest(`omp-attention-${SECONDARY}`));
   expect(f.state()).toMatchObject({ started: false, secondaryStarted: false, localRecords: 0, shown: undefined, device: baseline, browser: browserBaseline });
+});
+
+test.each(Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS) as FleetPushDevelopmentStep[])(
+  "development step %s prepares once, runs only its selection, and restores", async step => {
+    const host = fake(), operations: string[] = [], taps: string[] = [];
+    const { host: operation } = host.runtime.fleet, tap = host.runtime.tap;
+    let attached = false, admissions = 0;
+    host.runtime.fleet.host = async (op, epoch) => { operations.push(op); await operation(op, epoch); };
+    host.runtime.fleet.armBadgeObserver = async () => { if (!attached) { admissions++; attached = true; } };
+    const cleanup = host.runtime.cleanup;
+    host.runtime.cleanup = async (phase, progress) => { await cleanup(phase, progress); if (phase === "fleet") attached = false; };
+    host.runtime.forceStop = async () => { expect(attached).toBe(false); };
+    host.runtime.tap = async (...args) => { taps.push(args[0].instanceId); return tap(...args); };
+    const result = await runAndroidPushDevelopmentStep(host.input, step);
+    expect(result).toMatchObject({ development: true, qualified: false, step, passed: true });
+    expect(operations.filter(op => op === "prepare")).toHaveLength(1);
+    expect(admissions).toBe(1);
+    const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+    const selected = FLEET_PUSH_DEVELOPMENT_STEPS[step];
+    expect(Object.keys(progress.results).filter(phase => phase.startsWith("fleet_"))).toEqual(
+      selected === "legacy-tail" ? ["fleet_enrolled"] : ["fleet_enrolled", selected]);
+    expect(progress.results.private_verified).toBeUndefined();
+    expect(progress.results.evidence_complete).toBeUndefined();
+    expect(progress.results.force_stop_verified !== undefined).toBe(step === "legacy-tail");
+    if (step === "fleet-sinks") {
+      expect(taps).toEqual([REMOTE]);
+      expect(progress.results.fleet_sinks_verified).toMatchObject({ clean: true, detectable: true, findings: 0 });
+    }
+    expect(androidPushNeedsCleanup(progress)).toBe(false);
+    expect(host.state()).toMatchObject({ started: false, remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
+  });
+
+test.each(Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS) as FleetPushDevelopmentStep[])(
+  "development step %s restores after every effect interruption", async step => {
+    const successful = fake(); await runAndroidPushDevelopmentStep(successful.input, step);
+    for (let failAfter = 1; failAfter <= successful.state().effects; failAfter++) {
+      const host = fake({ failAfter });
+      await expect(runAndroidPushDevelopmentStep(host.input, step)).rejects.toThrow("synthetic interruption");
+      expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+      expect(host.state()).toMatchObject({ started: false, remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
+    }
+  });
+
+test("development selection refuses unknown steps before admission and parses exact argv", async () => {
+  const host = fake();
+  await expect(runAndroidPushDevelopmentStep(host.input, "fleet_private_verified" as FleetPushDevelopmentStep)).rejects.toThrow("unknown");
+  expect(host.checkpoints).toHaveLength(0);
+  for (const step of Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS)) {
+    expect(parseAndroidPushDevelopmentArguments(["development-step", step, "published.tar"])).toEqual({
+      mode: "development-step", step, archive: "published.tar",
+    });
+  }
+  for (const mode of ["development", "cleanup"]) expect(parseAndroidPushDevelopmentArguments([mode, "published.tar"])).toEqual({ mode, archive: "published.tar" });
+  for (const args of [[], ["development-step", "revocation"], ["development-step", "unknown", "published.tar"],
+    ["development-step", "revocation", "published.tar", "extra"], ["development", "published.tar", "extra"]]) {
+    expect(() => parseAndroidPushDevelopmentArguments(args)).toThrow("usage:");
+  }
+});
+
+test.skipIf(process.platform === "win32").each(["campaign", "pixel", "restored-failure", "unrestored-failure"] as const)(
+  "development lease refuses contention and retains only unresolved effects (%s)", async scenario => {
+    const root = await mkdtemp(join(tmpdir(), "push-step-lease-"));
+    const hostDirectory = join(root, "host"), pixelDirectory = join(root, "pixel");
+    await mkdir(hostDirectory, { mode: 0o700 });
+    const path = join(hostDirectory, "lease.sqlite");
+    await writeFile(path, "", { mode: 0o600 });
+    const db = new Database(path);
+    db.exec("CREATE TABLE campaign (id INTEGER PRIMARY KEY CHECK (id = 1), owner TEXT NOT NULL)");
+    if (scenario === "campaign") db.query("INSERT INTO campaign VALUES (1, ?)").run("synthetic-release");
+    db.close();
+    if (scenario === "pixel") await mkdir(pixelDirectory, { mode: 0o700 });
+    let called = false;
+    try {
+      await expect(withAndroidPushDevelopmentLease(async () => { called = true; throw new Error("synthetic step failure"); },
+        () => !["pixel", "unrestored-failure"].includes(scenario), { hostDirectory, pixelDirectory })).rejects.toThrow();
+      expect(called).toBe(scenario.endsWith("failure"));
+      const read = new Database(path, { readonly: true });
+      try { expect(read.query("SELECT owner FROM campaign").get() !== null).toBe(["campaign", "unrestored-failure"].includes(scenario)); }
+      finally { read.close(); }
+      expect(await stat(pixelDirectory).then(() => true, () => false)).toBe(["pixel", "unrestored-failure"].includes(scenario));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test.skipIf(process.platform === "win32")("installed cleanup cannot retire a retained-guest restoration owner", async () => {
+  const root = await mkdtemp(join(tmpdir(), "push-step-scope-"));
+  const hostDirectory = join(root, "host"), pixelDirectory = join(root, "pixel");
+  try {
+    await expect(withAndroidPushDevelopmentLease(async () => { throw new Error("synthetic unrestored guest"); },
+      () => false, { scope: "retained-guest", hostDirectory, pixelDirectory })).rejects.toThrow("synthetic unrestored guest");
+    await expect(withAndroidPushDevelopmentLease(async () => { throw new Error("must not enter"); },
+      () => true, { cleanup: true, hostDirectory, pixelDirectory })).rejects.toThrow("campaign lease exists");
+    await expect(withAndroidPushDevelopmentLease(async () => { throw new Error("must not enter"); },
+      () => true, { scope: "retained-guest", hostDirectory, pixelDirectory })).rejects.toThrow("campaign lease exists");
+    expect(await stat(pixelDirectory).then(() => true)).toBe(true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("development restoration failure retains cleanup obligation and refuses the next iteration", async () => {
+  const host = fake({ cleanupFail: "fleet" });
+  await expect(runAndroidPushDevelopmentStep(host.input, "fleet-restoration")).rejects.toMatchObject({ pixelUnrestored: true });
+  const progress = host.checkpoints.at(-1);
+  expect(androidPushNeedsCleanup(progress)).toBe(true);
+  await expect(runAndroidPushDevelopmentStep({ ...host.input, progress }, "revocation")).rejects.toThrow("requires cleanup");
 });
 
 test("fleet phases share androidPush receipts and restore their isolated source before the legacy radio phases", async () => {

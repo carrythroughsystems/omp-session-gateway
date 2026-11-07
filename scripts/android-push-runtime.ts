@@ -343,7 +343,10 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   let releasePermission: (() => Promise<void>) | undefined;
   let baselineRecords = new Map<string, number>();
   const observedPosts = new Map<string, { key: string; postedAt: number }>();
-  const verifiedWorkerPosts = new Map<string, { key: string; postedAt: number; instanceId: string; generation: number; requestId: string | undefined }>();
+  type WorkerIdentity = { count: number; version?: number; type?: string; source?: string; instanceId?: string; requestId?: string };
+  const verifiedWorkerPosts = new Map<string, { key: string; postedAt: number; metadata: WorkerIdentity; generation?: number }>();
+  const clearedWorkerPosts = new Map<string, boolean>();
+  const presentWorkerTopics = new Set<string>();
   let execution = options.execution;
   let phase: AndroidPushPhase = "baseline_captured";
   let failureId = 0;
@@ -1008,8 +1011,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         const source = await snapshot(epoch, "remote");
         if (source !== undefined) observedTopics.push(notificationTag(source));
       }
-      baselineRecords = new Map((await readAndroidNotificationRecords(command, packageName)).map(record => [record.key, record.postedAt]));
-      observedPosts.clear(); verifiedWorkerPosts.clear(); observationArmed = true;
+      const records = await readAndroidNotificationRecords(command, packageName);
+      baselineRecords = new Map(records.map(record => [record.key, record.postedAt]));
+      observedPosts.clear(); verifiedWorkerPosts.clear(); clearedWorkerPosts.clear(); presentWorkerTopics.clear();
+      for (const topic of observedTopics) if (records.some(record => record.tag.endsWith(topic))) presentWorkerTopics.add(topic);
+      observationArmed = true;
     },
     async assertNotificationOwnership() {
       await phaseRecords();
@@ -1067,27 +1073,36 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const records = (await phaseRecords()).filter(record => record.tag.endsWith(expected.tag));
       const owned = records[0];
       const forbiddenFound = records.some(record => expected.forbidden.some(value => record.text.includes(value)));
+      if (records.length === 1 && owned !== undefined && owned.postedAt <= (baselineRecords.get(owned.key) ?? 0)) {
+        throw new Error("owned notification did not advance from its record baseline");
+      }
+      if (records.length > 0) { presentWorkerTopics.add(expected.tag); clearedWorkerPosts.delete(expected.tag); }
+      else verifiedWorkerPosts.delete(expected.tag);
       if (fleetEnabled && kind === "attention" && records.length === 1 && owned !== undefined) {
-        // Data cannot change without a repost. Reuse only this phase's exact verified OS
-        // record and request; querying a frozen cached worker adds no new identity evidence.
-        const prior = verifiedWorkerPosts.get(expected.tag);
-        const matches = prior?.key === owned.key && prior.postedAt === owned.postedAt &&
-          prior.instanceId === session.instanceId && prior.generation === session.generation && prior.requestId === session.ask?.requestId ||
-          await worker<boolean>("observe", `(async () => {
+        // Read Android first. Even a negative metadata verdict is immutable for this OS
+        // record: a different request cannot arrive without changing its key/post time.
+        let prior = verifiedWorkerPosts.get(expected.tag);
+        if (prior?.key !== owned.key || prior.postedAt !== owned.postedAt) {
+          const metadata = await worker<WorkerIdentity>("observe", `(async () => {
           const notices = await self.registration.getNotifications({tag:${JSON.stringify(expected.tag)}});
           const data = notices[0]?.data;
-          return notices.length === 1 && data?.version === 3 && data.type === "attention" &&
-            data.source === ${remoteIds.has(session.instanceId) ? JSON.stringify(remote.binding) : "undefined"} &&
-            data.instanceId === ${JSON.stringify(session.instanceId)} && data.requestId === ${JSON.stringify(session.ask?.requestId)};
+          return {count: notices.length, version: data?.version, type: data?.type,
+            source: data?.source, instanceId: data?.instanceId, requestId: data?.requestId};
         })()`);
+          prior = { key: owned.key, postedAt: owned.postedAt, metadata };
+          verifiedWorkerPosts.set(expected.tag, prior);
+        }
+        const data = prior.metadata;
+        const matches = data.count === 1 && data.version === 3 && data.type === "attention" &&
+          data.source === (remoteIds.has(session.instanceId) ? remote.binding : undefined) &&
+          data.instanceId === session.instanceId && data.requestId === session.ask?.requestId &&
+          (prior.generation === undefined || prior.generation === session.generation);
         // A replaced request's previous OS row may still be settling. Do not record its post time
         // as the new request's deduplication baseline, or mistake the old row for delivery.
         if (!matches) return { count: 0, titleMatches: false, bodyMatches: false, forbiddenFound };
-        verifiedWorkerPosts.set(expected.tag, { key: owned.key, postedAt: owned.postedAt,
-          instanceId: session.instanceId, generation: session.generation, requestId: session.ask?.requestId });
+        prior.generation = session.generation;
       }
       if (records.length === 1 && owned !== undefined) {
-        if (owned.postedAt <= (baselineRecords.get(owned.key) ?? 0)) throw new Error("owned notification did not advance from its record baseline");
         try { trackUnchangedNotificationPost(observedPosts, session, kind, owned); } catch (error) { throw privacyFailure({ cause: error }); }
       }
       return { count: records.length, titleMatches: records.length === 1 && owned?.title === expected.title,
@@ -1096,9 +1111,21 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     },
     async notificationCleared(session) {
       const tag = notificationTag(session);
-      if ((await phaseRecords()).some(record => record.tag.endsWith(tag))) return false;
+      if ((await phaseRecords()).some(record => record.tag.endsWith(tag))) {
+        presentWorkerTopics.add(tag); clearedWorkerPosts.delete(tag);
+        return false;
+      }
       verifiedWorkerPosts.delete(tag);
-      return worker<boolean>("notificationCleared", `(async () => (await self.registration.getNotifications({tag:${JSON.stringify(tag)}})).length === 0)()`, true);
+      if (fleetEnabled) {
+        const prior = clearedWorkerPosts.get(tag);
+        if (prior !== undefined) return prior;
+        // No observed delivery/clear means no thaw evidence. An absent OS row alone is
+        // not the worker's authoritative clear proof; fail closed without waking it.
+        if (!presentWorkerTopics.delete(tag)) return false;
+      }
+      const cleared = await worker<boolean>("notificationCleared", `(async () => (await self.registration.getNotifications({tag:${JSON.stringify(tag)}})).length === 0)()`, true);
+      if (fleetEnabled) clearedWorkerPosts.set(tag, cleared);
+      return cleared;
     },
     async presentation(session, level) {
       await mutate("shell", "input", "keyevent", "224");

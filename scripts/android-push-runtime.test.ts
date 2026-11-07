@@ -774,7 +774,7 @@ test("fleet replacement observation never hides forbidden content in a mismatche
       { type: "page", targetId: "page", url: identity.origin + "/" },
       { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
     ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
-    sessionSend: async () => ({ result: { value: false } }),
+    sessionSend: async () => ({ result: { value: { count: 1, version: 3, type: "attention", instanceId: session.instanceId, requestId: "synthetic-old-request" } } }),
     attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
     evaluate: async (expression: string) => expression === "document.readyState" ? "complete" :
       expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
@@ -826,7 +826,7 @@ test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
       spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
       spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
       spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
-      spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++reads === 1 || osCount === 0 ? [] : [{
+      spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++reads > 1 && osCount === 0 ? [] : [{
         key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
         title: "OMP session needs attention", body: "", text: "",
       }]),
@@ -839,23 +839,30 @@ test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
       await runtime.beginNotificationPhase("synthetic", "fleet_private_verified");
       expect(await runtime.notificationCleared(session)).toBe(cleared);
       expect(workerReads).toBe(osCount === 0 ? 1 : 0);
+      // Rechecking unchanged absence never evaluates a worker Android may now have frozen.
+      expect(await runtime.notificationCleared(session)).toBe(cleared);
+      expect(workerReads).toBe(osCount === 0 ? 1 : 0);
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
-test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch", "phase"] as const)(
+test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch", "phase", "missing", "reappeared", "privacy", "late-snapshot"] as const)(
   "fleet metadata reuse is bound to the exact phase record (%s)", async scenario => {
     let session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
       startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
       ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
     const record = { key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
       title: "OMP session needs attention", body: "", text: "" };
-    let records: typeof record[] = [], workerReads = 0, matches = scenario !== "mismatch";
+    let records: typeof record[] = [], workerReads = 0, matches = !["mismatch", "late-snapshot"].includes(scenario), frozen = false;
     const driver = {
       browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
         { type: "page", targetId: "page", url: identity.origin + "/" },
         { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
       ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
-      sessionSend: async () => { workerReads++; return { result: { value: matches } }; },
+      sessionSend: async () => {
+        if (frozen) throw new Error("unchanged OS record evaluated in a frozen worker");
+        workerReads++; return { result: { value: { count: 1, version: 3, type: "attention",
+          instanceId: session.instanceId, requestId: matches ? session.ask?.requestId : "synthetic-other-request" } } };
+      },
       attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
       evaluate: async (expression: string) => expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
     };
@@ -873,6 +880,8 @@ test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch"
       runtime.beforeEffect = async () => {}; runtime.dndOff = async () => true;
       await runtime.fleet.select(true);
       await runtime.beginNotificationPhase("synthetic", "fleet_restart_verified");
+      expect(await runtime.notificationCleared(session)).toBe(false);
+      expect(workerReads).toBe(0); // Never infer worker clearance from initial OS absence.
       records = [record];
       expect((await runtime.observe(session, "attention", "private")).count).toBe(matches ? 1 : 0);
       expect(workerReads).toBe(1);
@@ -884,9 +893,23 @@ test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch"
       if (scenario === "request") { session = { ...session, ask: { ...session.ask!, requestId: "synthetic-new-request" } }; matches = false; }
       if (scenario === "generation") { session = { ...session, generation: 2 }; matches = false; }
       if (scenario === "mismatch") matches = true;
+      if (scenario === "late-snapshot") session = { ...session, ask: { ...session.ask!, requestId: "synthetic-other-request" } };
+      if (["missing", "reappeared"].includes(scenario)) {
+        records = [];
+        frozen = true;
+        expect((await runtime.observe(session, "attention", "private")).count).toBe(0);
+        expect(workerReads).toBe(1);
+        if (scenario === "reappeared") { records = [record]; frozen = false; }
+      }
+      if (scenario === "privacy") records = [{ ...record, text: PUSH_FIXTURE_ASK_BODY }];
+      if (["unchanged", "request", "generation", "mismatch", "privacy", "late-snapshot"].includes(scenario)) frozen = true;
       if (["repost", "new-key"].includes(scenario)) await expect(runtime.observe(session, "attention", "private")).rejects.toBeInstanceOf(QualificationFailure);
-      else expect((await runtime.observe(session, "attention", "private")).count).toBe(matches ? 1 : 0);
-      expect(workerReads).toBe(scenario === "unchanged" ? 1 : 2);
+      else {
+        const observed = await runtime.observe(session, "attention", "private");
+        expect(observed.count).toBe(["request", "generation", "mismatch", "missing"].includes(scenario) ? 0 : 1);
+        expect(observed.forbiddenFound).toBe(scenario === "privacy");
+      }
+      expect(workerReads).toBe(["repost", "new-key", "phase", "reappeared"].includes(scenario) ? 2 : 1);
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
