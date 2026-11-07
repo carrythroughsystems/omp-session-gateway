@@ -1633,12 +1633,12 @@ test("development selection refuses unknown steps before admission and parses ex
   const host = fake();
   await expect(runAndroidPushDevelopmentStep(host.input, "fleet_private_verified" as FleetPushDevelopmentStep)).rejects.toThrow("unknown");
   expect(host.checkpoints).toHaveLength(0);
-  for (const step of Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS)) {
+  for (const step of Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS) as FleetPushDevelopmentStep[]) {
     expect(parseAndroidPushDevelopmentArguments(["development-step", step, "published.tar"])).toEqual({
       mode: "development-step", step, archive: "published.tar",
     });
   }
-  for (const mode of ["development", "cleanup"]) expect(parseAndroidPushDevelopmentArguments([mode, "published.tar"])).toEqual({ mode, archive: "published.tar" });
+  for (const mode of ["development", "cleanup"] as const) expect(parseAndroidPushDevelopmentArguments([mode, "published.tar"])).toEqual({ mode, archive: "published.tar" });
   for (const args of [[], ["development-step", "revocation"], ["development-step", "unknown", "published.tar"],
     ["development-step", "revocation", "published.tar", "extra"], ["development", "published.tar", "extra"]]) {
     expect(() => parseAndroidPushDevelopmentArguments(args)).toThrow("usage:");
