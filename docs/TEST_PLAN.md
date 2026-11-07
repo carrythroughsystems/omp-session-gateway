@@ -264,6 +264,94 @@ Follow [ANDROID.md](ANDROID.md#physical-background-push-lane) before running a s
 the [specialized checklist](ATTENTION_SPEC.md#specialized-triage-and-delayed-tap-acceptance--qualification-pending)
 remains unchecked until that exact signed candidate passes.
 
+The same `androidPush` lane now requires twelve `fleet_*` phases after the existing delayed-tap
+phase; it does not create another release lane or replace any earlier check. The candidate is
+the coordinator. An epoch-owned source uses the same candidate bytes, a separate HOME/state and
+OMP discovery directory, backend port 14318, and a distinct Tailscale Serve HTTPS origin on port
+10443. Setup refuses existing fleet enrollment state, occupied ports, or another Serve owner.
+This is a representative isolated server identity, not evidence of a second physical computer.
+Enrollment uses the installed Pixel PWA's Settings → Hosts switch. The phases require concurrent
+local/remote asks, all three detail levels (fleet Preview falls back to Session), exact-source
+Control taps, resolved/replaced/expired remote taps without a launch, clear-before-rearm races,
+source stale/last-known recovery, coordinator restart without repeats, grant revocation,
+replacement/deduplication, foreground reconciliation, and privacy sink scans on both identities.
+Clear proof requires both OS records and worker notifications to be absent on the session's tag,
+independent of request ID; delivery still matches the exact request. Restart answers the remote
+ask while the coordinator is down, then proves its old alert closed while the local alert stayed
+unchanged, before arming a new remote ask. The expired-host replay must close before re-baselining.
+The remote sink sweep runs while the remote session launched by the PWA's real Control tap is
+still alive, using that same generation's Control capability and the detectable positive control;
+two identical-generation Control launches must return equal capability bytes in page memory
+before scanning. An unstable capability is typed invalid evidence; no value leaves the page.
+`fleet_sinks_verified` records those closed observations after the other fleet checks.
+Remote notification ownership includes the origin-bound fleet binding; local tags stay unchanged.
+Private alerts intentionally look identical: concurrent ownership, privacy and deduplication use
+the OS records and worker metadata, then each source's lock-screen row is observed alone after
+authoritatively resolving its peer. The lane never guesses between indistinguishable Private rows.
+The source supervisor detaches from the remote SSH session using the existing fixture's Python
+session-leader pattern. Its TERM/EXIT trap precedes spawning the daemon, and atomic PID files
+identify both processes. Stop proves the supervisor, child and backend listener gone within the
+30-second bound before removing their PID files. The restoration owner is fsynced and atomically
+published (including its parent directory) before any coordinator config/service/Serve mutation.
+The supervisor signals its own unreaped child even before exec, but never signals a child after
+its normal wait reaped it; external cleanup still verifies PID/command ownership before signalling.
+Pre-owner recovery removes only `owner.json.tmp`, then
+requires the epoch directory to be empty.
+DevTools admission bounds both pending HTTP reads and retries. A worker-only observation may
+reconnect once after contained transport loss, but never wakes/navigates the cold PWA, re-arms
+lost observer state, or replays an evaluated mutation. Missing workers and product assertions
+remain failures. Exhaustion records `androidPush / invalid_evidence` with the transport flag;
+private diagnostics retain the underlying error and stack. Host-helper restoration failures
+record `androidPushCleanup / fleet / containment_unproven`, preserving the helper exception
+privately without exporting its text in the receipt.
+The fleet observer is admitted while warm and keeps one browser/worker attachment (no page
+target) for at most 30 minutes, bounded further by the lane deadline. Fleet result rows mark
+`devtoolsObserver`: these cold-PWA phases prove real delivery, rendering, identity, ordering
+and taps with instrumentation attached, **not process-cold wake semantics**. Loss of the held
+connection fails typed; it is never silently reconnected.
+The same phase may reuse verified worker metadata only for an unchanged OS notification key,
+post timestamp, and exact session generation/request. New or changed records require a fresh
+worker comparison; reposts still fail deduplication and clears still inspect the worker.
+This avoids querying a cached Android process after the system freezer suspends it.
+The restart phase carries its verified badge across the closed-page quiet window only when a
+complete, healthy coordinator telemetry window records zero sends, acknowledgements and failures
+globally; any push activity or unavailable telemetry requires a fresh worker evaluation.
+Worker-evaluation timeouts retain closed lifecycle, inventory, responsiveness and frozen-process
+count diagnostics without changing device freezer settings, waking the page, or retrying a mutation.
+Fleet cleanup retains its owner and
+prepared state until badge unpatch is proven (or the worker is proven restarted), then removes
+host ownership. It releases the observer only after the unpatch attempt, on success or failure.
+Resumed cleanup treats a hidden Hosts section with alerts off as deselected; coordinator grant
+removal remains required by host restoration. The unchanged legacy force-stop and Doze
+phases run after release, without this observer, and retain the process-cold observations.
+After signalling a verified source supervisor once, cleanup tolerates transient loss of its
+command line only while awaiting proven absence/zombie within the existing 30-second bound;
+it never signals an unverified PID or treats a changed command as proof of exit.
+Tap accounting records browser-generated CORS `OPTIONS` preflights separately from launch
+attempts. Every non-OPTIONS request to any launch route still counts, so duplicate POSTs and
+wrong-source/malformed launch attempts cannot be hidden by the cross-origin admission step.
+The outage phase observes its pending remote row in the open PWA before taking the source down,
+and asserts that the row is still present once the source is stale.
+Coverage polls preserve that page instead of reloading away its last-known directory. Wait
+timeouts retain the phase/step and last badge count/completeness plus the forwarded platform
+badge call in private diagnostics, never in receipt fields. Both omitted and explicit `undefined`
+`setAppBadge` arguments mean an incomplete zero-count marker, not a complete empty badge.
+Paths sent to the retained macOS fixture executor use POSIX separators on every runner OS;
+runner-local file reads keep native paths.
+
+Fleet progress adds only an ownership boolean and a remote notification-topic SHA-256 digest.
+Closed boolean/count results remain additive to receipt schema 3; no source, session, request,
+grant secret, endpoint, or capability enters the receipt. Cleanup restores the exact coordinator
+configuration and Serve baseline, removes only the source mapping it owns, revokes enrollment,
+stops the source fixture/daemon, and restores badge observers before the existing notification,
+subscription/preference, browser, radio and device cleanup. An interrupted setup or unsuccessful
+restoration retains `cleanupRequired`; it cannot produce `restored`. Development results remain
+**Tested**, never **Qualified**, and must name any PR5 scratch candidate and incomplete phases.
+The development target must be disposable and home-only; never run these host mutations against
+the founder's gateway. A foreign live notification overlap is partial evidence, not a fleet pass.
+The existing home-only retry still requires its exact outbound-clear proof; fleet transactions
+fail closed on the first overlap because they cannot safely reuse that home-registry alias proof.
+
 Configured-Mac regressions require an explicit SSH destination and expected hardware model, reject
 unsafe password-file ownership/mode/type, and prove that an omitted password file reaches
 `sudo -n` through SSH stdin. Read-only admission rejects a measured hardware mismatch before
@@ -605,13 +693,15 @@ Their measured assertions do not prove an unobserved interval between samples; u
    handling evidence, not evidence of Web Push delay or ordering.
 10. Verify one notification per instance, silent duplicate updates, authoritative clear, and `setAppBadge`/`clearAppBadge` pending counts.
     The detail and `clear_verified` phases prove delivery/clear; `triage_verified` also requires
-    held asks to remain in the authoritative pending count. Badge counts are not observed on the
-    Pixel. On 2026-10-01, the installed WebAPK there (Chrome 154) exposed `setAppBadge` and
-    `clearAppBadge`, but the count is shown by the launcher, which the lane does not read. Badge
-    calls stay covered by the service-worker unit tests.
+    held asks to remain in the authoritative pending count. Fleet phases additionally observe the
+    real worker's `setAppBadge`/`clearAppBadge` calls through an in-memory wrapper that forwards
+    every call unchanged and is removed during restoration. They require aggregate counts and
+    the incomplete, zero-count flag during a source outage. A positive numeric badge cannot
+    express completeness; the Hosts row proves coverage separately. The Pixel launcher glyph
+    itself is not read, so these calls do not claim visual launcher-badge qualification.
 11. Force-stop/disable Chrome notifications and exercise Android battery policy; record best-effort failure behavior without claiming guaranteed delivery.
     `force_stop_verified`, `permission_verified`, and `doze_verified` keep their existing physical
-    observations after the two new phases; lock/resume and network phases remain required.
+    observations after triage, delayed-tap and fleet phases; lock/resume and network phases remain required.
 12. Install a changed shell while the directory is idle; the new worker activates and loads it without Refresh. Repeat during pending/active collaboration; the capability-bearing client remains mounted until ordinary Back/Leave, then the updated directory loads automatically.
     This worker-update scenario is not covered by the new triage/delayed-tap phases.
 13. Hold the oldest request from the dashboard and from an active collaboration shell. Verify the

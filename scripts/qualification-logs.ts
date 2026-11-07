@@ -206,7 +206,7 @@ export function createQualificationLogs(options: { execute: FixtureExecutor; rem
         actionable.reduce((deepest, entry) => entry.path.split(".").length > deepest.path.split(".").length ?
           entry : deepest, actionable[0] ?? chain[0]!);
       const bytes = JSON.stringify({ substep, message: cause.message,
-        cdpMethod: method.exec(cause.message)?.[1] ?? null, elapsedMs,
+        cdpMethod: method.exec(cause.message)?.[1] ?? null, elapsedMs, privateQualificationFailure: chain,
         ...(chain.some(entry => entry.truncated) ? { truncated: true } : {}),
         ...(chain.some(entry => entry.redacted) ? { redacted: true } : {}) }) + "\n";
       if (Buffer.byteLength(bytes) > PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES) throw new Error("private browser diagnostic exceeds byte limit");

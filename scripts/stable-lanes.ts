@@ -41,6 +41,9 @@ export const PUSH_FIXTURE_FILES = [
   "omp-fixture.ts",
   "omp-fixture.json",
   "fixtures/push-qualification-extension.ts",
+  "fleet-push-fixture.ts",
+  "capability-leak-rules.ts",
+  "identifier-leak-rules.ts",
 ] as const;
 const FIXTURE_OPERATION_TIMEOUT_MS = 3 * 60 * 1_000;
 

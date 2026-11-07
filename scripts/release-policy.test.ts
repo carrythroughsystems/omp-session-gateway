@@ -71,6 +71,11 @@ describe("standing routine release authority", () => {
   test("DB-R4 cleanup predicate binding belongs to the protected authority surface", () => {
     expect(routineProtectedPath("scripts/stable-lanes.ts")).toBe(true);
   });
+  test("fleet Push helpers retain their existing lane siblings' implementation classification", () => {
+    for (const path of ["scripts/android-push-fleet.ts", "scripts/fleet-push-fixture.ts"]) {
+      expect(routinePathClassification(path)?.authority).toBe(false);
+    }
+  });
   test("browser flake reporting and maintenance remain implementation checks, not release authority", () => {
     for (const path of ["scripts/browser-flake-reporter.ts", "scripts/browser-flake-budget.ts", ".github/workflows/browser-flake-budget.yml"]) {
       expect(routinePathClassification(path)?.authority).toBe(false);

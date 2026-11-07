@@ -33,6 +33,7 @@ import {
   restoreAndroidRadios,
   wakeAndroidChrome,
   waitForDevtoolsEndpoint,
+  AndroidDevtoolsConnectionError,
 } from "./android-device.ts";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
@@ -1021,6 +1022,28 @@ describe("Android DevTools endpoint wait", () => {
     await expect(failure).rejects.toThrow("DevTools endpoint never accepted a connection (ECONNRESET)");
     expect(clock.elapsed).toBeGreaterThanOrEqual(30_000);
     expect(clock.elapsed).toBeLessThan(32_000);
+  });
+
+  test("bounds a pending request even if its implementation ignores cancellation", async () => {
+    // hang-deadline: behavior-under-test -- the endpoint admission bound, not a process watchdog.
+    const failure = await waitForDevtoolsEndpoint("http://127.0.0.1:9222/json/version",
+      async () => new Promise<Response>(() => {}), undefined, 15).catch(error => error);
+    expect(failure).toBeInstanceOf(AndroidDevtoolsConnectionError);
+    expect(failure.kind).toBe("endpoint_timeout");
+    expect(failure.cause.name).toBe("TimeoutError");
+  });
+
+  test("retains the exact reset cause and does not swallow controller cancellation", async () => {
+    const original = reset(), clock = virtualClock();
+    const failure = await waitForDevtoolsEndpoint("synthetic", async () => { throw original; }, clock, 5).catch(error => error);
+    expect(failure.kind).toBe("endpoint_reset");
+    expect(failure.cause).toBe(original);
+    const controller = new AbortController(), cancelled = new Error("synthetic cancellation");
+    let calls = 0;
+    await expect(waitForDevtoolsEndpoint("synthetic", async () => {
+      calls++; controller.abort(cancelled); throw original;
+    }, clock, 5, controller.signal)).rejects.toBe(cancelled);
+    expect(calls).toBe(1);
   });
 });
 

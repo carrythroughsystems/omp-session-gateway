@@ -28,6 +28,7 @@ import { DeviceCloudAvailabilityHold, parseDeviceCloudHold } from "./device-clou
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 import { findIdentifierLeaks } from "./identifier-leak-rules.ts";
 import { pixelUnrestored } from "./restoration.ts";
+import { FLEET_PUSH_PHASES } from "./android-push-fleet.ts";
 
 export type LaneFailureClass = "product" | "infra_transient" | "harness" | "collateral";
 export type OperationDisposition = "not_started" | "read_only" | "confirmed" | "unknown";
@@ -90,6 +91,7 @@ export const FAILURE_STEPS = {
   android: ["admission", "launch", "journey", "cleanup"],
   androidPush: ["baseline_captured", "subscription_ready", "private_verified", "session_verified", "preview_verified",
     "attention_tap_verified", "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified",
+    ...FLEET_PUSH_PHASES,
     "force_stop_verified", "permission_verified", "lock_resume_verified", "network_verified", "doze_verified", "forbidden_sinks_verified",
     "evidence_complete", "restored", ...PUSH_BROWSER_STEPS],
   windows: ["preflight", "connection", "command", "output", "upload", "intent_checkpointed", "firewall_created", "instance_created",
@@ -100,7 +102,7 @@ export const FAILURE_STEPS = {
     "standard_readiness_rotated", "standard_candidate_uninstalled", "evidence_complete"],
   deviceCloud: ["preflight", "allocation", "attempt_started", "fixture_ready", "tunnel_ready", "iphone_verified", "ipad_verified",
     "android_verified", "records_audited", "evidence_complete", "restored"],
-  androidPushCleanup: ["fixtureAsk", "notifications", "browser", "doze", "network", "task", "fixture", "containment"],
+  androidPushCleanup: ["fixtureAsk", "notifications", "browser", "doze", "network", "task", "fixture", "fleet", "containment"],
   windowsCleanup: ["reconnect", "stopOmp", "uninstall", "resetServe", "logout", "instance", "firewall", "tailnet", "pixelRestore", "vault", "containment"],
   deviceCloudCleanup: ["sessions", "audit", "records", "tunnels", "fixture", "pixelRestore", "containment"],
   cleanup: ["omp", "gateway", "serve", "artifacts", "containment"],

@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
 import { PUSH_FIXTURE_COMMANDS, type PushFixtureCommand } from "./fixtures/push-qualification-extension.ts";
 
@@ -28,7 +28,7 @@ export async function commandPushFixture(
   guardSession = false,
 ): Promise<void> {
   const result = await execute([
-    location.bun, join(location.scripts, "push-qualification-fixture.ts"), operation,
+    location.bun, posix.join(location.scripts, "push-qualification-fixture.ts"), operation,
     location.root, location.epoch, location.binary, location.scripts,
     ...(guardSession ? ["guard-session"] : []),
   ]);

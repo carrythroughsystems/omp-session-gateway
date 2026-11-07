@@ -143,6 +143,25 @@ test("cloud transport may retry only GET, and record DELETE is never replayed", 
   expect(checkProviderReads("scripts/device-cloud-webdriver.ts", cancellable.replace(": await send()", ": await readProvider(send)"))).toHaveLength(1);
 });
 
+test("fleet Push review admits only the exact owned gateway targets", async () => {
+  const file = "scripts/android-push-runtime.ts";
+  const targets = [
+    '`${role === "remote" ? remote.origin : identity.origin}/api/v1/sessions`',
+    '`${identity.origin}/api/v1/health`',
+    '"/api/v1/push/fleet/status"',
+    '${JSON.stringify(remote.origin)} + "/api/v1/notification-grants/" + row.grantId + "/revoke"',
+    '${JSON.stringify(remote.origin)} + "/api/v1/sessions/" + ${JSON.stringify(remoteSession.instanceId)} + "/launch"',
+  ];
+  for (const target of targets) {
+    const source = `await fetch(${target}, { method: "POST" });`;
+    expect(checkProviderReads(file, source)).toEqual([]);
+    expect(checkProviderReads("scripts/unreviewed-runtime.ts", source)).toHaveLength(1);
+    expect(checkProviderReads(file, source.replace("/api/v1", "/api/unreviewed"))).toHaveLength(1);
+  }
+  expect(checkProviderReads(file, 'await fetch("https://synthetic-provider.invalid", {});')).toHaveLength(1);
+  expect(checkProviderReads(file, await readFile(new URL("../" + file, import.meta.url), "utf8"))).toEqual([]);
+});
+
 test.each(["plain", "signal"] as const)("Windows guarded %s dispatcher retains exact GET-only retry admission", shape => {
   const parameters = shape === "plain" ? "()" : "(readSignal: AbortSignal = signal)";
   const localGuard = shape === "plain" ? 'if (deadline !== undefined) windowsRemaining(started, deadline, performance.now(), execution, "not_started");' : "";

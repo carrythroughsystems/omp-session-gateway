@@ -16,10 +16,11 @@ import { webApkTasks, closeWebApk, setupAndroidWebApk, withWebApkSetupRestoratio
 import pushQualificationExtension, { parseFixtureCommand } from "./fixtures/push-qualification-extension.ts";
 import { withDevelopmentPixelLease } from "./android-pixel-lease.ts";
 import { runFixtureOperation, type FixtureExecutor } from "./push-qualification-fixture.ts";
-import { authenticateAndroidNotification, awaitPageExecutionContext, isPushNotificationRoute, holdAndroidNotificationDenial, ownedPushForwards, observePushLaunch } from "./android-push-runtime.ts";
+import { authenticateAndroidNotification, isPushNotificationRoute, holdAndroidNotificationDenial, ownedPushForwards, observePushLaunch } from "./android-push-runtime.ts";
 import { pixelUnrestored } from "./restoration.ts";
 import { QualificationFailure, normalizeQualificationFailures, privateQualificationFailureDiagnostic } from "./qualification-failure.ts";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+import { FLEET_PUSH_PHASES } from "./android-push-fleet.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
@@ -31,18 +32,23 @@ const browserBaseline: PushBrowserBaseline = { subscribed: true, permission: "gr
 interface FakeOptions { failAfter?: number; forceDelivery?: boolean; dozeDelivery?: boolean; dozeHeld?: boolean; deferredAfterDoze?: boolean; staleSocket?: { ms: number; after: "airplane" | "any" }; cellular?: boolean; duplicate?: boolean; wrongTap?: boolean; cleanupFail?: PushCleanupStep; dndFlipAfter?: number; overlaps?: number; frozenHeartbeat?: boolean; browserPermission?: PushBrowserBaseline["permission"]; shutdownNotification?: boolean;
   /** Holds delivery after the denied-to-granted permission transition. */ permissionRecoveryMs?: number;
   /** The directory shows the waiting asks newest first. */ wrongOrder?: boolean; /** That triage control reaches the gateway. */ triageMutation?: TriageAction["kind"]; /** A delayed stale tap still launches. */ staleLaunch?: boolean;
-  /** A foreign post arrives while an owned activity-stop notice is showing. */ foreignDuringStop?: boolean }
+  /** A foreign post arrives while an owned activity-stop notice is showing. */ foreignDuringStop?: boolean;
+  fleetFailure?: "enrollment" | "badge" | "revocation" | "sinks" | "remote-tap" | "remote-stale-tap" | "retained" |
+    "clear" | "race-clear" | "restart-clear" | "stale-row" | "stopped-replay" }
 const SECONDARY = "synthetic-secondary";
+const REMOTE = "synthetic-remote";
 function fake(options: FakeOptions = {}) {
   let overlaps = options.overlaps ?? 0; let foreignDuringStop = options.foreignDuringStop === true;
   let time = 0; let effects = 0; let started = false; let generation = 1; let request = 0; let askedAt = 0;
   let asking = false; let busy = false; let stopped = false; let forced = false; let asleep = false; let offline = false; let dozed = false; let deferredClear = false;
   let socketStaleUntil = -Infinity; let heldAsk = false; let heldClear = false;
-  let shown: "attention" | "activity_stop" | undefined;
+  let shown: "attention" | "activity_stop" | undefined, phase = "";
   // The subscription detail each notice was sent at: a Private notice has no body.
   let shownDetail = browserBaseline.detail;
   // `clearing`: the gateway's clear for a removed host's ask is still in flight to the device.
   const second = { started: false, asking: false, request: 0, askedAt: 0, shown: false, clearing: false, detail: browserBaseline.detail };
+  const remote = { ...second, shownRequest: "", generation: 1, prepared: false, selected: false, online: true, coordinator: true, revoked: false };
+  let tappedRole: "primary" | "remote" = "primary";
   // The installed app's device-local Hold and Hide records, keyed as the app keys them.
   const held = new Set<string>(); const hidden: string[] = []; let toastUntil = -Infinity;
   const initialBrowser = { ...browserBaseline, permission: options.browserPermission ?? browserBaseline.permission };
@@ -55,7 +61,13 @@ function fake(options: FakeOptions = {}) {
   const secondarySnapshot = (): SessionMetadata | undefined => second.started ? { instanceId: SECONDARY, generation: 1, title: "Synthetic fixture", cwdLabel: "synthetic-secondary-project", canView: true, canControl: true,
     inputRequired: second.asking, busy: false, startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: since(Math.floor(time / 10_000) * 10_000),
     ...(second.asking ? { ask: { requestId: `synthetic-secondary-request-${second.request}`, since: since(second.askedAt) }, qualificationPushAlias: 1 } : {}) } : undefined;
-  const sessions = () => [primarySnapshot(), secondarySnapshot()].filter((session): session is SessionMetadata => session !== undefined);
+  const remoteSnapshot = (): SessionMetadata | undefined => {
+    if (!remote.started) return;
+    const { ask: _ask, ...local } = primarySnapshot()!;
+    return { ...local, instanceId: REMOTE, generation: remote.generation, inputRequired: remote.asking, busy: false,
+      ...(remote.asking ? { ask: { requestId: `synthetic-remote-request-${remote.request}`, since: since(remote.askedAt) }, qualificationPushAlias: 1 } : {}) };
+  };
+  const sessions = () => [primarySnapshot(), secondarySnapshot(), remoteSnapshot()].filter((session): session is SessionMetadata => session !== undefined);
   const heldKey = (session: SessionMetadata) => `${session.instanceId}:${session.ask?.requestId}`;
   const hiddenKey = (session: SessionMetadata) => `${session.instanceId}:${session.generation}`;
   // As the app does on every snapshot: a record outlives neither its request nor its generation.
@@ -67,7 +79,8 @@ function fake(options: FakeOptions = {}) {
     reconcile();
     const bySince = (left: SessionMetadata, right: SessionMetadata) => (left.ask?.since ?? "").localeCompare(right.ask?.since ?? "");
     const isHeld = (session: SessionMetadata) => session.inputRequired && held.has(heldKey(session));
-    const waiting = sessions().filter(session => session.inputRequired && !isHeld(session)).sort(bySince).map(session => session.instanceId);
+    const waiting = sessions().filter(session => session.inputRequired && !isHeld(session) &&
+      !(session.instanceId === REMOTE && !remote.online && options.fleetFailure === "stale-row")).sort(bySince).map(session => session.instanceId);
     const heldIds = sessions().filter(isHeld).sort(bySince).map(session => session.instanceId);
     const working = sessions().filter(session => !session.inputRequired && !hidden.includes(hiddenKey(session))).map(session => session.instanceId);
     const attention = waiting.length + heldIds.length;
@@ -80,6 +93,33 @@ function fake(options: FakeOptions = {}) {
   };
   const effect = async (action: () => void) => { await runtime.beforeEffect(); effects++; action(); if (effects === options.failAfter) throw new Error("synthetic interruption"); };
   const runtime: AndroidPushRuntime = {
+    fleet: {
+      binding: "a".repeat(22),
+      host: async operation => { await effect(() => {
+        if (operation === "prepare") remote.prepared = true;
+        if (operation === "source-down") remote.online = false;
+        if (operation === "source-up") remote.online = true;
+        if (operation === "coordinator-down") remote.coordinator = false;
+        if (operation === "coordinator-up") {
+          remote.coordinator = true;
+          if (options.fleetFailure !== "restart-clear" || phase !== "fleet_restart_verified") {
+            remote.shown = remote.asking; remote.shownRequest = `synthetic-remote-request-${remote.request}`;
+          }
+        }
+        if (operation === "restore") remote.prepared = false;
+      }); },
+      select: async enabled => { await effect(() => { remote.selected = enabled; remote.revoked = false; }); },
+      coverage: async () => ({ selected: remote.selected, state: options.fleetFailure === "enrollment" ? "pending" :
+        remote.revoked ? "unauthorized" : remote.online ? "current" : "stale", covered: remote.online && !remote.revoked }),
+      armBadgeObserver: async () => {},
+      observeBadge: async () => ({ count: options.fleetFailure === "badge" ? 9 : Number(asking) + Number(remote.asking && !remote.revoked),
+        complete: remote.online && !remote.revoked,
+        ...(options.fleetFailure === "badge" ? { call: { method: "setAppBadge" as const, arguments: 1, argument: 9 } } : {}) }),
+      revoke: async () => { await effect(() => {
+        if (options.fleetFailure !== "revocation") { remote.revoked = true; remote.shown = false; }
+      }); },
+      audit: async () => ({ clean: options.fleetFailure !== "sinks", detectable: true, sinks: 10, findings: options.fleetFailure === "sinks" ? 1 : 0 }),
+    },
     now: () => time, beforeEffect: async () => {},
     deliveryOwnership: async () => 1,
     subscriptionCount: async () => 1,
@@ -94,9 +134,24 @@ function fake(options: FakeOptions = {}) {
     },
     preflight: async () => ({ android: "17", browser: "153.0.8010.52", webApk: true, dndOff: true }),
     dndOff: async () => options.dndFlipAfter === undefined || effects < options.dndFlipAfter,
-    beginNotificationPhase: async () => {}, assertNotificationOwnership: async () => { if (overlaps > 0) { overlaps--; throw new NotificationOverlapError(); } },
+    beginNotificationPhase: async (_epoch, current) => { phase = current ?? phase; }, assertNotificationOwnership: async () => { if (overlaps > 0) { overlaps--; throw new NotificationOverlapError(); } },
     device: async () => ({ ...device }), browser: async () => ({ ...browser }),
     async fixture(operation, _epoch, role = "primary") { await effect(() => {
+      if (role === "remote") {
+        if (operation === "start") remote.started = true;
+        else if (operation === "ask") {
+          remote.asking = true; remote.request++; remote.askedAt = time; remote.shown = remote.coordinator && !remote.revoked;
+          remote.shownRequest = `synthetic-remote-request-${remote.request}`; remote.detail = browser.detail;
+        }
+        else if (operation === "answer") {
+          remote.asking = false;
+          if (remote.coordinator && options.fleetFailure !== "clear" &&
+            !(options.fleetFailure === "race-clear" && phase === "fleet_race_verified")) remote.shown = false;
+        }
+        else if (operation === "replace") remote.generation++;
+        else if (operation === "stop") { remote.clearing = remote.shown; remote.started = false; remote.asking = false; }
+        return;
+      }
       if (role === "secondary") {
         if (operation === "start") second.started = true;
         else if (operation === "ask") { second.asking = true; second.request++; second.askedAt = time; second.shown = browser.permission === "granted"; second.detail = browser.detail; }
@@ -113,12 +168,18 @@ function fake(options: FakeOptions = {}) {
       if (operation === "replace") generation++;
       if (operation === "stop") started = false;
     }); },
-    snapshot: async (_epoch, role = "primary") => role === "secondary" ? secondarySnapshot() : primarySnapshot(),
+    snapshot: async (_epoch, role = "primary") => role === "remote" ? remoteSnapshot() : role === "secondary" ? secondarySnapshot() : primarySnapshot(),
     detail: async level => { await effect(() => { browser.detail = level; browser.subscribed = true; }); },
     closePwa: async () => { await effect(() => { device.webApkTask = false; }); },
     openPwa: async () => { await effect(() => { device.webApkTask = true; forced = false; if (deferredClear) { shown = undefined; deferredClear = false; } show(); }); },
     lock: async () => { await effect(() => { device.locked = true; device.awake = false; }); },
     observe: async (session, kind, detail) => {
+      if (session.instanceId === REMOTE) {
+        if (remote.clearing) { remote.clearing = false; remote.shown = false; }
+        return { count: remote.shown && session.ask?.requestId === remote.shownRequest &&
+          !(options.fleetFailure === "retained" && !remote.online) ? 1 : 0,
+          titleMatches: true, bodyMatches: (remote.detail === "private") === (detail === "private"), forbiddenFound: false };
+      }
       // Waiting lets an in-flight removal clear land.
       if (session.instanceId === SECONDARY && second.clearing) { second.shown = false; second.clearing = false; }
       // As on the device, a host has one owned tag, whichever kind of notice it shows.
@@ -127,9 +188,26 @@ function fake(options: FakeOptions = {}) {
       if (notice === "activity_stop" && foreignDuringStop) { foreignDuringStop = false; throw new NotificationOverlapError(); }
       return { count: notice === undefined ? 0 : options.duplicate ? 2 : 1, titleMatches: notice === kind, bodyMatches: notice === kind && sentPrivate === (detail === "private"), forbiddenFound: false };
     },
+    notificationCleared: async session => {
+      if (session.instanceId === REMOTE) {
+        if (remote.clearing) { remote.clearing = false; remote.shown = false; }
+        return !remote.shown;
+      }
+      return (await runtime.observe(session, "attention", "private")).count === 0;
+    },
     dismissOwned: async () => { await effect(() => { shown = undefined; second.shown = false; second.clearing = false; }); },
-    presentation: async () => device.locked && shown === "attention",
+    presentation: async session => device.locked && (session.instanceId === REMOTE ? remote.shown : shown === "attention"),
     async tap(session, kind, stale) { await effect(() => { if (session.instanceId === SECONDARY) second.shown = false; else shown = undefined; device.webApkTask = true; });
+      if (session.instanceId === REMOTE) {
+        tappedRole = "remote";
+        if (remote.started || options.fleetFailure !== "stopped-replay") remote.shown = false;
+        const live = remoteSnapshot();
+        const current = !remote.revoked && live?.generation === session.generation && live?.ask?.requestId === session.ask?.requestId;
+        const launches = current || options.fleetFailure === "remote-stale-tap" ? 1 : 0;
+        return { launches, successful: launches, currentGeneration: current, currentRequest: current && options.fleetFailure !== "remote-tap",
+          scrubbedBeforeNetwork: true, writable: current, readOnly: false, expired: !current };
+      }
+      tappedRole = "primary";
       const live = sessions().find(item => item.instanceId === session.instanceId);
       const current = live !== undefined && live.generation === session.generation && (kind === "activity_stop" || live.ask?.requestId === session.ask?.requestId);
       const launches = current || (stale && kind === "attention" && options.staleLaunch === true) ? 1 : 0;
@@ -158,6 +236,9 @@ function fake(options: FakeOptions = {}) {
       return directory(mutations);
     },
     replay: async session => {
+      if (session.instanceId === REMOTE) {
+        await effect(() => { remote.shown = true; remote.shownRequest = session.ask!.requestId; remote.detail = browser.detail; device.webApkTask = false; }); return;
+      }
       // As on the device: launching the app re-saves its subscription, and the gateway re-sends each
       // current ask, replacing a replay on the same tag. The runtime refuses that state.
       const live = sessions().find(item => item.instanceId === session.instanceId);
@@ -166,7 +247,7 @@ function fake(options: FakeOptions = {}) {
       if (session.instanceId === SECONDARY && second.clearing) throw new Error("Android Push replayed notification unavailable");
       await effect(() => { if (session.instanceId === SECONDARY) { second.shown = true; second.detail = browser.detail; } else { shown = "attention"; shownDetail = browser.detail; } device.webApkTask = false; });
     },
-    answer: async () => { await effect(() => { asking = false; shown = undefined; }); },
+    answer: async () => { await effect(() => { if (tappedRole === "remote") { remote.asking = false; remote.shown = false; } else { asking = false; shown = undefined; } }); },
     forceStop: async () => { await effect(() => { forced = true; shown = undefined; }); },
     permission: async value => { await effect(() => {
       if (browser.permission === "denied" && value === "granted" && options.permissionRecoveryMs !== undefined) socketStaleUntil = time + options.permissionRecoveryMs;
@@ -183,7 +264,7 @@ function fake(options: FakeOptions = {}) {
       if (stale !== undefined && changed && !offline && (stale.after === "any" || returning)) socketStaleUntil = time + stale.ms;
     }); return value !== "cellular" || options.cellular !== false; },
     sinks: async () => ({ clean: true, detectable: true, gatewayLogsDiscarded: true, gatewayStructuredLogsSafe: true }),
-    async cleanup(step) { cleanup.push(step);
+    async cleanup(step, progress) { cleanup.push(step);
       if (step === options.cleanupFail) throw new Error("synthetic cleanup failure");
       if (step === "fixtureAsk") { asking = false; second.asking = false; }
       if (step === "notifications") { shown = undefined; second.shown = false; second.clearing = false; reconcile(); }
@@ -192,9 +273,10 @@ function fake(options: FakeOptions = {}) {
       if (step === "network") { device.wifi = baseline.wifi; device.mobile = baseline.mobile; device.airplane = baseline.airplane; }
       if (step === "task") { device.webApkTask = baseline.webApkTask; device.locked = baseline.locked; device.awake = baseline.awake; }
       if (step === "fixture") { started = false; second.started = false; if (options.shutdownNotification) shown = "activity_stop"; }
+      if (step === "fleet") { remote.started = false; remote.asking = false; remote.shown = false; remote.prepared = false; remote.selected = false; progress.fleetPrepared = false; }
     },
   };
-  return { runtime, cleanup, checkpoints, state: () => ({ started, asking, browser, device, shown, effects, stopped, secondaryStarted: second.started, localRecords: held.size + hidden.length }),
+  return { runtime, cleanup, checkpoints, state: () => ({ started, asking, browser, device, shown, effects, stopped, secondaryStarted: second.started, localRecords: held.size + hidden.length, remoteStarted: remote.started, fleetPrepared: remote.prepared }),
     input: { identity, progress: undefined, runtime, checkpoint: async (p: Record<string, unknown>) => { checkpoints.push(structuredClone(p)); }, pixel: async <T>(_owner: string, action: () => Promise<T>) => action() } };
 }
 
@@ -668,7 +750,7 @@ test.each(["normal", "rearm", "doze"] as const)("500 %s clear includes metadata 
   }
   await expect(runAndroidPush(host.input)).rejects.toMatchObject({ evidence: { reason: "delivery_timeout" } });
   expect(delayed).toBe(true);
-  expect(host.cleanup).toHaveLength(7);
+  expect(host.cleanup).toHaveLength(stage === "doze" ? 8 : 7);
   if (stage !== "doze") expect(asks).toBe(1);
 });
 
@@ -789,7 +871,7 @@ test.each(["metadata", "phase", "elapsed"] as const)("495 round2 qualification c
   if (stage === "metadata") expect(error.evidence.observations.controllerDeadline).toBeUndefined();
   else expect(error.evidence.observations.controllerDeadline).toBe(true);
   if (stage === "phase") expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(abortCause.message);
-  expect(host.cleanup).toHaveLength(7);
+  expect(host.cleanup).toHaveLength(stage === "phase" || stage === "elapsed" ? 8 : 7);
 });
 
 test("R1 fractional monotonic measurements remain typed and R4 telemetry errors retain late sampling", async () => {
@@ -1131,7 +1213,7 @@ test.each(["pending", "settled", "control"] as const)("502 review overlap recove
     rearmCount: 1, rearmReason: "unowned_notification_overlap",
   });
   expect(events.some(event => event.clear === true)).toBe(true);
-  expect(host.cleanup).toHaveLength(7);
+  expect(host.cleanup).toHaveLength(8);
 });
 
 test.each(["stale-delivery", "stale-removal", "triage-clears"] as const)(
@@ -1162,7 +1244,7 @@ test.each(["stale-delivery", "stale-removal", "triage-clears"] as const)(
     const recovered = scenario === "triage-clears" ? "triage_verified" : "stale_taps_verified";
     expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results[recovered]).toMatchObject({ rearmCount: 1 });
     expect(events.filter(event => event.event === "push.queue_accepted" && event.clear === true).length).toBeGreaterThan(1);
-    expect(host.cleanup).toHaveLength(7);
+    expect(host.cleanup).toHaveLength(8);
   });
 
 test("502 round2 invalid overlap clear retains the local clear timeout cause", async () => {
@@ -1503,6 +1585,312 @@ test("queue order, Hold, Hide and delayed taps pass on the device and leave no l
   expect(f.state()).toMatchObject({ started: false, secondaryStarted: false, localRecords: 0, shown: undefined, device: baseline, browser: browserBaseline });
 });
 
+test("fleet phases share androidPush receipts and restore their isolated source before the legacy radio phases", async () => {
+  const host = fake();
+  let warm = false, attached = false, admissions = 0, coldReads = 0, phase = "";
+  const { detail, closePwa, observe, cleanup, beginNotificationPhase, forceStop, doze } = host.runtime;
+  const badge = host.runtime.fleet.observeBadge;
+  host.runtime.detail = async level => { await detail(level); warm = true; };
+  host.runtime.closePwa = async () => { await closePwa(); warm = false; };
+  host.runtime.fleet.armBadgeObserver = async () => {
+    expect(warm).toBe(true);
+    if (!attached) { admissions++; attached = true; }
+  };
+  host.runtime.beginNotificationPhase = async (epoch, current) => { phase = current ?? phase; await beginNotificationPhase(epoch, current); };
+  host.runtime.fleet.observeBadge = async () => {
+    expect(attached).toBe(true); if (!warm) coldReads++;
+    return badge();
+  };
+  host.runtime.observe = async (...args) => {
+    if (phase.startsWith("fleet_") && phase !== "fleet_enrolled") expect(attached).toBe(true);
+    return observe(...args);
+  };
+  host.runtime.cleanup = async (step, progress) => {
+    try { await cleanup(step, progress); } finally { if (step === "fleet") attached = false; }
+  };
+  host.runtime.forceStop = async () => { expect(attached).toBe(false); await forceStop(); };
+  host.runtime.doze = async active => { if (active) expect(attached).toBe(false); await doze(active); };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(admissions).toBe(1); expect(coldReads).toBeGreaterThan(0); expect(attached).toBe(false);
+  const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+  for (const phase of FLEET_PUSH_PHASES) {
+    expect(progress.results[phase]).toMatchObject({ dndOff: true, phaseElapsedMs: expect.any(Number),
+      devtoolsObserver: !["fleet_enrolled", "fleet_restored"].includes(phase) });
+  }
+  expect(progress.results.fleet_race_verified).toMatchObject({ concurrent: true, exactClear: true, replacement: true, badgeReconciled: true });
+  expect(progress.results.fleet_preview_verified?.previewFallback).toBe(true);
+  expect(progress.results.fleet_stale_taps_verified).toMatchObject({ resolved: true, replaced: true, expired: true, launches: 0, replayed: true });
+  expect(progress.results.fleet_restart_verified).toMatchObject({ exactClear: true, noRepeats: true, newAsk: true });
+  expect(progress.fleetPrepared).toBe(false);
+  expect(host.cleanup.filter(step => step === "fleet")).toHaveLength(1);
+  expect(host.state()).toMatchObject({ remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
+  expect(JSON.stringify(progress)).not.toContain("synthetic-remote-request");
+});
+
+test.each(FLEET_PUSH_PHASES)("fleet interruption at %s retains failure and restores all owned resources", async phase => {
+  const host = fake(), begin = host.runtime.beginNotificationPhase;
+  let failed = false;
+  host.runtime.beginNotificationPhase = async (epoch, current) => {
+    if (!failed && current === phase) { failed = true; throw new Error("synthetic fleet interruption"); }
+    await begin(epoch, current);
+  };
+  await expect(runAndroidPush(host.input)).rejects.toThrow("synthetic fleet interruption");
+  expect(failed).toBe(true);
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  expect(host.state()).toMatchObject({ remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
+});
+
+test("fleet Private proves concurrent records but never guesses between identical lock-screen rows", async () => {
+  const host = fake(), presentation = host.runtime.presentation, observe = host.runtime.observe;
+  let phase: string | undefined, concurrent = false, privateRows = 0;
+  host.runtime.beginNotificationPhase = async (_epoch, value) => { phase = value; };
+  const pending = async () => Number((await host.runtime.snapshot("", "primary"))?.inputRequired === true) +
+    Number((await host.runtime.snapshot("", "remote"))?.inputRequired === true);
+  host.runtime.observe = async (...args) => {
+    if (phase === "fleet_private_verified" && await pending() === 2) concurrent = true;
+    return observe(...args);
+  };
+  host.runtime.presentation = async (...args) => {
+    if (phase === "fleet_private_verified") { expect(await pending()).toBe(1); privateRows++; }
+    return presentation(...args);
+  };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(concurrent).toBe(true); expect(privateRows).toBe(2);
+});
+
+test("fleet outage establishes the visible remote state before each source interruption", async () => {
+  const host = fake();
+  let phase = "", observed = false, settled = false, interruptions = 0;
+  const begin = host.runtime.beginNotificationPhase, triage = host.runtime.triage, control = host.runtime.fleet!.host;
+  host.runtime.beginNotificationPhase = async (...args) => { phase = args[1] ?? ""; await begin(...args); };
+  host.runtime.triage = async (...args) => {
+    const view = await triage(...args);
+    if (phase === "fleet_outage_verified") {
+      expect(host.state().device.webApkTask).toBe(true);
+      const remote = await host.runtime.snapshot("", "remote");
+      observed = remote?.ask !== undefined && view.waiting.includes(remote.instanceId);
+      settled = remote !== undefined && remote.ask === undefined && view.working.includes(remote.instanceId);
+    }
+    return view;
+  };
+  host.runtime.fleet!.host = async (...args) => {
+    if (phase === "fleet_outage_verified" && args[0] === "source-down") {
+      expect(interruptions === 0 ? observed : settled).toBe(true);
+      interruptions++;
+    }
+    await control(...args);
+  };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(interruptions).toBe(2);
+});
+
+test.each(["delayed", "waiting", "missing"] as const)(
+  "fleet empty outage waits for the page snapshot, not only a cleared worker badge (%s)", async scenario => {
+    const host = fake();
+    let phase = "", interruptions = 0, settledReads = 0, settledObserved = false;
+    const begin = host.runtime.beginNotificationPhase, triage = host.runtime.triage, control = host.runtime.fleet!.host;
+    host.runtime.beginNotificationPhase = async (...args) => { phase = args[1] ?? ""; await begin(...args); };
+    host.runtime.triage = async (...args) => {
+      const view = await triage(...args), remote = await host.runtime.snapshot("", "remote");
+      if (phase !== "fleet_outage_verified" || remote?.ask !== undefined || interruptions !== 1) return view;
+      settledReads++;
+      // The worker already reports zero from the push clear; the page is still behind.
+      expect(await host.runtime.fleet!.observeBadge()).toMatchObject({ count: 0, complete: true });
+      if (scenario === "missing" || scenario === "waiting" || settledReads < 3) return {
+        ...view, waiting: scenario === "missing" ? [] : [REMOTE], working: view.working.filter(id => id !== REMOTE),
+      };
+      settledObserved = true;
+      return view;
+    };
+    host.runtime.fleet!.host = async (...args) => {
+      if (phase === "fleet_outage_verified" && args[0] === "source-down") {
+        if (interruptions === 1) expect(settledObserved).toBe(true);
+        interruptions++;
+      }
+      await control(...args);
+    };
+    if (scenario === "delayed") {
+      expect((await runAndroidPush(host.input)).passed).toBe(true);
+      expect(settledReads).toBe(3); expect(interruptions).toBe(2);
+    } else {
+      const error = await runAndroidPush(host.input).catch(error => error);
+      expect(error.evidence).toMatchObject({ step: "fleet_outage_verified", reason: "delivery_timeout" });
+      expect(interruptions).toBe(1); expect(settledObserved).toBe(false);
+    }
+  });
+
+test.each([false, true])("fleet clear checks the tag after the answered snapshot loses its request (missing=%s)", async missing => {
+  const host = fake(missing ? { fleetFailure: "clear" } : {}), observe = host.runtime.observe;
+  let settledDeliveryRead = false;
+  const cleared = host.runtime.notificationCleared;
+  host.runtime.notificationCleared = async session => {
+    if (session.instanceId === REMOTE && !session.inputRequired) {
+      expect(session.ask).toBeUndefined();
+      expect((await observe(session, "attention", "private")).count).toBe(0);
+      settledDeliveryRead = true;
+    }
+    return cleared(session);
+  };
+  const result = await runAndroidPush(host.input).catch(error => error);
+  if (missing) {
+    expect(result).toBeInstanceOf(QualificationFailure);
+    expect(result.evidence.step).toBe("fleet_private_verified");
+    expect(result.cause.message).toContain("authoritative clear");
+  } else expect(result.passed).toBe(true);
+  expect(settledDeliveryRead).toBe(true);
+});
+
+test.each(["race", "restart"] as const)("fleet %s refuses to conceal a missing old clear with a same-session re-arm", async scenario => {
+  const host = fake({ fleetFailure: scenario === "race" ? "race-clear" : "restart-clear" });
+  const phase = `fleet_${scenario}_verified`;
+  const begin = host.runtime.beginNotificationPhase, fixture = host.runtime.fixture, control = host.runtime.fleet.host;
+  const events: string[] = [];
+  let current = "", stopped = false;
+  host.runtime.beginNotificationPhase = async (...args) => { current = args[1] ?? ""; await begin(...args); };
+  host.runtime.fixture = async (...args) => {
+    if (current === phase && args[2] === "remote") {
+      events.push(args[0]);
+      if (args[0] === "answer" && scenario === "restart") expect(stopped).toBe(true);
+    }
+    await fixture(...args);
+  };
+  host.runtime.fleet.host = async (...args) => {
+    if (args[0] === "coordinator-down") stopped = true;
+    if (args[0] === "coordinator-up") stopped = false;
+    await control(...args);
+  };
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(error.evidence.step).toBe(phase);
+  expect(error.cause.message).toContain(scenario === "restart" ? "restart remote exact clear" : "authoritative clear");
+  expect(events.filter(event => event === "ask")).toHaveLength(1);
+  expect(events.slice(0, 2)).toEqual(["ask", "answer"]);
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+});
+
+test.each(["zero", "send", "send-mismatch", "unavailable", "absent"] as const)(
+  "fleet restart retains the quiet badge only with complete zero-send telemetry (%s)", async scenario => {
+    const host = fake(), events = eventBackedTelemetry(host);
+    const begin = host.runtime.beginNotificationPhase, pause = host.runtime.pause, fixture = host.runtime.fixture;
+    const badge = host.runtime.fleet.observeBadge, telemetry = host.runtime.deliveryTelemetry!;
+    let phase = "", quiet = false, quietReads = 0, windows = 0;
+    host.runtime.beginNotificationPhase = async (...args) => { phase = args[1] ?? ""; await begin(...args); };
+    host.runtime.pause = async milliseconds => {
+      await pause(milliseconds);
+      if (phase === "fleet_restart_verified" && milliseconds === 21_000) {
+        quiet = true;
+        if (scenario.startsWith("send")) events.push({ index: events.length + 1, timestamp: "2026-01-01T00:00:00.000Z",
+          level: "info", event: "push.send_started", sequence: 999, request_alias: 0, clear: true, subscriptions: 1 });
+      }
+    };
+    host.runtime.fixture = async (...args) => { if (quiet && args[0] === "ask") quiet = false; await fixture(...args); };
+    host.runtime.fleet.observeBadge = async () => {
+      if (quiet) {
+        quietReads++;
+        if (scenario === "send-mismatch") return { count: 9, complete: true };
+      }
+      return badge();
+    };
+    host.runtime.deliveryTelemetry = async window => {
+      if (quiet) { windows++; if (scenario === "unavailable") throw new Error("synthetic log unavailable"); }
+      return telemetry(window);
+    };
+    if (scenario === "absent") { delete host.runtime.beginDeliveryTelemetry; delete host.runtime.deliveryTelemetry; }
+    const result = await runAndroidPush(host.input).catch(error => error);
+    if (scenario === "send-mismatch") {
+      expect(result).toBeInstanceOf(QualificationFailure);
+      expect(result.evidence.step).toBe("fleet_restart_verified");
+      expect(privateQualificationFailureDiagnostic(result).map(entry => entry.message).join("\n")).toContain("restart-no-repeat");
+    } else expect(result.passed).toBe(true);
+    expect(quietReads === 0).toBe(scenario === "zero");
+    if (scenario !== "absent") expect(windows).toBeGreaterThan(0);
+    expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  });
+
+test("fleet outage rejects a stale source whose directory drops the waiting row", async () => {
+  const host = fake({ fleetFailure: "stale-row" });
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(error.evidence.step).toBe("fleet_outage_verified");
+  expect(error.message).toContain("stale directory dropped");
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results.fleet_outage_verified?.lastKnownKept).toBeUndefined();
+});
+
+test("fleet sinks scan while the PWA's tapped remote Control session is still alive", async () => {
+  const host = fake(), tap = host.runtime.tap, audit = host.runtime.fleet.audit;
+  let launched: SessionMetadata | undefined, swept = false;
+  host.runtime.tap = async (...args) => {
+    const result = await tap(...args);
+    if (args[0].instanceId === REMOTE && !args[2]) launched = args[0];
+    return result;
+  };
+  host.runtime.fleet.audit = async epoch => {
+    expect(launched).toBeDefined();
+    const current = await host.runtime.snapshot(epoch, "remote");
+    expect(current?.instanceId).toBe(launched!.instanceId);
+    expect(current?.generation).toBe(launched!.generation);
+    swept = true;
+    return audit(epoch);
+  };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(swept).toBe(true);
+});
+
+test("fleet stopped-session replay must close before the notification owner is re-baselined", async () => {
+  const host = fake({ fleetFailure: "stopped-replay" }), begin = host.runtime.beginNotificationPhase;
+  let baselines = 0;
+  host.runtime.beginNotificationPhase = async (...args) => {
+    if (args[1] === "fleet_stale_taps_verified") baselines++;
+    await begin(...args);
+  };
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(error.evidence.step).toBe("fleet_stale_taps_verified");
+  expect(error.cause.message).toContain("stopped remote replay close");
+  expect(baselines).toBe(1);
+});
+
+test.each([
+  ["enrollment", "fleet_enrolled"], ["badge", "fleet_private_verified"], ["remote-tap", "fleet_taps_verified"],
+  ["remote-stale-tap", "fleet_stale_taps_verified"], ["retained", "fleet_outage_verified"],
+  ["revocation", "fleet_revocation_verified"], ["sinks", "fleet_sinks_verified"],
+] as const)("fleet %s contradiction fails at its named phase without adapting observations", async (fleetFailure, phase) => {
+  const host = fake({ fleetFailure });
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(error.evidence.step).toBe(phase);
+  if (fleetFailure === "badge") {
+    const diagnostics = privateQualificationFailureDiagnostic(error).map(entry => entry.message).join("\n");
+    expect(diagnostics).toContain("fleet_private_verified/concurrent");
+    expect(diagnostics).toContain('last observation {"count":9,"complete":true,"call":{"method":"setAppBadge","arguments":1,"argument":9}}');
+  }
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  expect(host.state()).toMatchObject({ remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
+});
+
+test("fleet restoration failure cannot set restored or release the cleanup obligation", async () => {
+  const host = fake({ cleanupFail: "fleet" });
+  await expect(runAndroidPush(host.input)).rejects.toMatchObject({ pixelUnrestored: true });
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(true);
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).fleetPrepared).toBe(true);
+  expect(() => parseAndroidPushProgress({ ...host.checkpoints.at(-1), phase: "restored", cleanupRequired: false })).toThrow("fleet restoration state");
+});
+
+test("fleet exported receipts reject synthetic secrets, raw topics and enrollment metadata", async () => {
+  const host = fake();
+  await runAndroidPush(host.input);
+  const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+  const canary = `https://synthetic.example.test/#synthetic-fleet.${"X".repeat(43)}`;
+  for (const field of ["secret", "endpoint", "grantId", "sourceId", "requestId", "identity"]) {
+    expect(() => parseAndroidPushProgress({ ...progress, results: {
+      ...progress.results, fleet_sinks_verified: { clean: true, [field]: canary },
+    } })).toThrow("unsafe Android Push evidence");
+  }
+  expect(() => parseAndroidPushProgress({ ...progress, remoteNotificationTopicDigest: "omp-attention-synthetic-binding-instance" }))
+    .toThrow("notification ownership");
+  expect(JSON.stringify(progress)).not.toContain(canary);
+});
+
 test.each([
   ["a directory that does not queue asks in arrival order", { wrongOrder: true }, "arrival order"],
   ["a Hold that reaches the gateway", { triageMutation: "hold" }, "on this device alone"],
@@ -1691,6 +2079,23 @@ test("one foreign post re-arms its phase visibly; a second overlap fails rather 
   await expect(runAndroidPush(twice.input)).rejects.toThrow("unowned notification overlapped");
   expect(parseAndroidPushProgress(twice.checkpoints.at(-1)).results.private_verified).toMatchObject({ rearmCount: 1, rearmReason: "unowned_notification_overlap", deliveryRearmCount: 0 });
   expect(twice.state()).toMatchObject({ started: false, device: baseline, browser: browserBaseline });
+});
+
+test("fleet overlap restores without replaying an enrollment or remote-clear transaction", async () => {
+  const host = fake(), observe = host.runtime.observe;
+  let phase: string | undefined, attempts = 0;
+  host.runtime.beginNotificationPhase = async (_epoch, value) => {
+    phase = value;
+    if (value === "fleet_private_verified") attempts++;
+  };
+  host.runtime.observe = async (...args) => {
+    if (phase === "fleet_private_verified") throw new NotificationOverlapError();
+    return observe(...args);
+  };
+  await expect(runAndroidPush(host.input)).rejects.toThrow("unowned notification overlapped");
+  expect(attempts).toBe(1);
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1))).toMatchObject({ phase: "restored", cleanupRequired: false, fleetPrepared: false });
+  expect(host.state()).toMatchObject({ started: false, device: baseline, browser: browserBaseline });
 });
 
 test("missing cellular path is a named blocked sub-phase, not a passed network matrix", async () => {
@@ -1896,24 +2301,6 @@ test("a collapsed group hides each child's template and origin, so selection exp
   expect(selected.target.y).toBeGreaterThan(400);
   expect(selected.rowNodes.some(node => node.text === owned)).toBe(true);
   expect(selected.rowNodes.some(node => node.text === "daily.example.test" || node.text === generic.body)).toBe(false);
-});
-
-test("an attached page is used only once its document answers; the context race is retried, nothing else is", async () => {
-  // The v0.7.2-prealpha.1 campaign's third Push attempt died in stale_taps_verified with
-  // "CDP Runtime.evaluate: Cannot find default execution context": the WebAPK had just been
-  // reopened and its document was still being swapped under the attachment (2026-10-02).
-  let clock = 0;
-  const pause = async (milliseconds: number) => { clock += milliseconds; };
-  let calls = 0;
-  await awaitPageExecutionContext(async () => { calls++; if (calls < 3) throw new Error("CDP Runtime.evaluate: Cannot find default execution context"); return "complete"; }, pause, 15_000, () => clock);
-  expect(calls).toBe(3);
-  expect(clock).toBe(500);
-  const other = new Error("CDP Runtime.evaluate: Execution context was destroyed");
-  await expect(awaitPageExecutionContext(async () => { throw other; }, pause, 15_000, () => clock)).rejects.toBe(other);
-  let attempts = 0;
-  await expect(awaitPageExecutionContext(async () => { attempts++; throw new Error("CDP Runtime.evaluate: Cannot find default execution context"); }, pause, 1_000, () => clock))
-    .rejects.toThrow("Cannot find default execution context");
-  expect(attempts).toBe(5);
 });
 
 test("task removal ignores retained focus references and waits for active task withdrawal", async () => {

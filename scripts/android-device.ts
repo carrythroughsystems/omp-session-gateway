@@ -820,28 +820,54 @@ export async function wakeAndroidChrome(
  * silent for over nine seconds while in the foreground (2026-09-29). The wait is a deadline rather
  * than an attempt count, and its failure names the last connection error's code.
  */
+export class AndroidDevtoolsConnectionError extends Error {
+  constructor(readonly kind: "endpoint_timeout" | "endpoint_reset" | "websocket_timeout" | "websocket_closed" | "protocol_timeout",
+    message: string, options?: ErrorOptions) { super(message, options); }
+}
+
+/** Only a protocol rejection proves that the expression never started, not a page exception. */
+class MissingDefaultExecutionContextError extends Error {}
+
 export async function waitForDevtoolsEndpoint(
   url: string,
-  request: (url: string) => Promise<Response> = fetch,
+  request: (url: string, options: { signal: AbortSignal }) => Promise<Response> = fetch,
   clock: { readonly now: () => number; readonly sleep: (milliseconds: number) => Promise<void> } = {
     now: Date.now,
     sleep: Bun.sleep,
   },
   waitMs = DEVTOOLS_ENDPOINT_WAIT_MS,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const deadline = clock.now() + waitMs;
   let lastError: unknown;
   for (let attempt = 1; ; attempt += 1) {
+    signal?.throwIfAborted();
+    const controller = new AbortController();
+    const cancel = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", cancel, { once: true });
+    const timer = setTimeout(() => controller.abort(new DOMException("DevTools endpoint request timed out", "TimeoutError")),
+      Math.max(1, Math.min(5_000, deadline - clock.now())));
+    let abort: (() => void) | undefined;
     try {
-      return await request(url);
+      return await Promise.race([request(url, { signal: controller.signal }), new Promise<never>((_, reject) => {
+        abort = () => reject(controller.signal.reason);
+        controller.signal.addEventListener("abort", abort, { once: true });
+        if (controller.signal.aborted) abort();
+      })]);
     } catch (error) {
+      signal?.throwIfAborted();
       lastError = error;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+      if (abort !== undefined) controller.signal.removeEventListener("abort", abort);
     }
     if (clock.now() >= deadline) break;
-    await clock.sleep(Math.min(attempt * 250, 2_000));
+    await clock.sleep(Math.min(attempt * 250, 2_000, deadline - clock.now()));
   }
   const code = lastError instanceof Error && "code" in lastError && typeof lastError.code === "string" ? ` (${lastError.code})` : "";
-  throw new Error(`DevTools endpoint never accepted a connection${code}`, { cause: lastError });
+  throw new AndroidDevtoolsConnectionError(code.includes("ECONNRESET") || code.includes("ECONNREFUSED") ? "endpoint_reset" : "endpoint_timeout",
+    `DevTools endpoint never accepted a connection${code}`, { cause: lastError });
 }
 
 /** Resource ownership that could not be discharged, without device identities in its evidence. */
@@ -881,9 +907,14 @@ export async function withAndroidChrome<T>(
     // Acquisition can succeed remotely before cancellation rejects its local acknowledgement.
     await adb(serial, ["forward", "tcp:" + port, target.devtoolsSocket]);
     const endpointResponse = await waitForDevtoolsEndpoint("http://127.0.0.1:" + port + "/json/version",
-      () => { check(); return fetch("http://127.0.0.1:" + port + "/json/version", execution === undefined ? {} : {
-        signal: AbortSignal.any([execution.signal, AbortSignal.timeout(Math.max(1, execution.deadline - performance.now()))]) }); },
-      { now: () => performance.now(), sleep: async milliseconds => { check(); await Bun.sleep(milliseconds); check(); } });
+      async (_url, { signal }) => {
+        check();
+        const response = await fetch("http://127.0.0.1:" + port + "/json/version", { signal });
+        return new Response(await response.text(), { status: response.status });
+      },
+      { now: () => performance.now(), sleep: async milliseconds => { check(); await Bun.sleep(milliseconds); check(); } },
+      execution === undefined ? DEVTOOLS_ENDPOINT_WAIT_MS : Math.max(1, Math.min(DEVTOOLS_ENDPOINT_WAIT_MS, execution.deadline - performance.now())),
+      execution?.signal);
     if (!endpointResponse.ok) throw new Error("DevTools endpoint metadata request failed");
     // Deliberately outside the retry: a well-formed reply from the wrong browser is a hard failure,
     // never a transient. Desktop Chrome on this workstation answers remote-debugging ports too.
@@ -938,23 +969,38 @@ export async function withAndroidChrome<T>(
     const entry = pending.get(message.id);
     if (entry === undefined) return;
     pending.delete(message.id);
-    if (message.error) entry.reject(new Error(`CDP ${entry.method}: ${message.error.message}`));
+    if (message.error) {
+      const ErrorType = entry.method === "Runtime.evaluate" && message.error.message === "Cannot find default execution context"
+        ? MissingDefaultExecutionContextError : Error;
+      entry.reject(new ErrorType(`CDP ${entry.method}: ${message.error.message}`));
+    }
     else entry.resolve(message.result ?? {});
   };
+  socket.onclose = event => {
+    const error = new AndroidDevtoolsConnectionError("websocket_closed", `DevTools WebSocket closed (${event.code})`);
+    rejectOpening?.(error);
+    for (const entry of pending.values()) entry.reject(error);
+    pending.clear();
+  };
 
-  const send = (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) =>
+  const sendOnce = (method: string, parameters: Record<string, unknown>, destination: string | undefined, cleanup: boolean, until: number) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
       if (!cleanup) check();
+      if (socket.readyState !== WebSocket.OPEN) {
+        reject(new AndroidDevtoolsConnectionError("websocket_closed", "DevTools WebSocket is not open")); return;
+      }
+      if (performance.now() >= until) {
+        reject(new AndroidDevtoolsConnectionError("protocol_timeout", `CDP timeout: ${method}`)); return;
+      }
       const id = (nextId += 1);
       const timeout = () => {
-        if (pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
+        if (pending.delete(id)) reject(new AndroidDevtoolsConnectionError("protocol_timeout", `CDP timeout: ${method}`));
       };
-      let timer = setTimeout(timeout, cleanup ? 10_000 : CALL_TIMEOUT_MS), cancelled = false;
+      let timer = setTimeout(timeout, Math.max(1, until - performance.now())), cancelled = false;
       pending.set(id, { method, cleanup,
         cancel() { if (!cancelled) { cancelled = true; clearTimeout(timer); timer = setTimeout(timeout, 10_000); } },
         resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
       const frame: Record<string, unknown> = { id, method, params: parameters };
-      const destination = explicitSession ?? (useSession ? sessionId : undefined);
       if (destination !== undefined) frame.sessionId = destination;
       // A lost create acknowledgement is an unresolved mutation, even after its bounded
       // response route expires. Never pretend that deleting the route removed the target.
@@ -962,6 +1008,36 @@ export async function withAndroidChrome<T>(
       try { socket.send(JSON.stringify(frame)); }
       catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
     });
+
+  const send = async (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) => {
+    // Pin the attachment for the whole call, even if another target is admitted while waiting.
+    const destination = explicitSession ?? (useSession ? sessionId : undefined);
+    const until = Math.min(performance.now() + (cleanup ? 10_000 : CALL_TIMEOUT_MS), cleanup ? Infinity : execution?.deadline ?? Infinity);
+    let contextUntil: number | undefined;
+    for (;;) {
+      try { return await sendOnce(method, parameters, destination, cleanup, until); }
+      catch (error) {
+        if (!(error instanceof MissingDefaultExecutionContextError) || parameters.contextId !== undefined ||
+          parameters.uniqueContextId !== undefined) throw error;
+        contextUntil ??= Math.min(until, performance.now() + 15_000);
+        // Attachment readiness is not document readiness: a later navigation can replace the
+        // default context. Probe only, without waking/navigating/re-attaching the page or worker.
+        // Do not resend the original expression until a default context answers. Destruction,
+        // disconnect, timeout and page exceptions can follow execution and must never retry it.
+        for (;;) {
+          if (!cleanup) check();
+          if (performance.now() >= contextUntil) throw error;
+          await Bun.sleep(Math.min(250, contextUntil - performance.now()));
+          try {
+            evaluationValue(await sendOnce("Runtime.evaluate", { expression: "void 0", returnByValue: true }, destination, cleanup, contextUntil));
+            break;
+          } catch (probeError) {
+            if (!(probeError instanceof MissingDefaultExecutionContextError)) throw probeError;
+          }
+        }
+      }
+    }
+  };
 
   const closeTarget = async (cleanup = cleaning) => {
     if (targetId === undefined) return;
@@ -975,7 +1051,7 @@ export async function withAndroidChrome<T>(
   let result!: T;
   try {
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => finish(new Error("DevTools WebSocket open timeout")),
+      const timer = setTimeout(() => finish(new AndroidDevtoolsConnectionError("websocket_timeout", "DevTools WebSocket open timeout")),
         execution === undefined ? OPEN_TIMEOUT_MS : Math.max(1, Math.min(OPEN_TIMEOUT_MS, execution.deadline - performance.now())));
       const finish = (error?: Error) => {
         clearTimeout(timer); rejectOpening = undefined;
@@ -983,7 +1059,9 @@ export async function withAndroidChrome<T>(
       };
       rejectOpening = finish;
       socket.onopen = () => finish();
-      socket.onerror = () => finish(new Error("DevTools WebSocket failed; is Chrome awake and adb forwarding?"));
+      socket.onerror = event => finish(new AndroidDevtoolsConnectionError("websocket_closed",
+        "DevTools WebSocket failed; is Chrome awake and adb forwarding?",
+        { cause: "error" in event ? event.error : new Error(event.type) }));
       try { check(); } catch { finish(new Error("Android browser execution cancelled")); }
     });
 
