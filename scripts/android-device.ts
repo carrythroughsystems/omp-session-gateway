@@ -899,6 +899,9 @@ export class AndroidDevtoolsConnectionError extends Error {
     message: string, options?: ErrorOptions) { super(message, options); }
 }
 
+/** Only a protocol rejection proves that the expression never started, not a page exception. */
+class MissingDefaultExecutionContextError extends Error {}
+
 export async function waitForDevtoolsEndpoint(
   url: string,
   request: (url: string, options: { signal: AbortSignal }) => Promise<Response> = fetch,
@@ -1060,9 +1063,11 @@ export async function withAndroidChrome<T>(
   const sendOnce = (method: string, parameters: Record<string, unknown>, destination: string | undefined, cleanup: boolean, until: number) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
       if (!cleanup) check();
-      if (performance.now() >= until) { reject(new AndroidDevtoolsConnectionError("protocol_timeout", `CDP timeout: ${method}`)); return; }
       if (socket.readyState !== WebSocket.OPEN) {
         reject(new AndroidDevtoolsConnectionError("websocket_closed", "DevTools WebSocket is not open")); return;
+      }
+      if (performance.now() >= until) {
+        reject(new AndroidDevtoolsConnectionError("protocol_timeout", `CDP timeout: ${method}`)); return;
       }
       const id = (nextId += 1);
       const timeout = () => {
@@ -1082,9 +1087,9 @@ export async function withAndroidChrome<T>(
     });
 
   const send = async (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) => {
-    // Pin the attachment for the whole call, even if another target is attached while waiting.
+    // Pin the attachment for the whole call, even if another target is admitted while waiting.
     const destination = explicitSession ?? (useSession ? sessionId : undefined);
-    const until = performance.now() + (cleanup ? 10_000 : CALL_TIMEOUT_MS);
+    const until = Math.min(performance.now() + (cleanup ? 10_000 : CALL_TIMEOUT_MS), cleanup ? Infinity : execution?.deadline ?? Infinity);
     let contextUntil: number | undefined;
     for (;;) {
       try { return await sendOnce(method, parameters, destination, cleanup, until); }
@@ -1092,11 +1097,10 @@ export async function withAndroidChrome<T>(
         if (!(error instanceof MissingDefaultExecutionContextError) || parameters.contextId !== undefined ||
           parameters.uniqueContextId !== undefined) throw error;
         contextUntil ??= Math.min(until, performance.now() + 15_000);
-        // Attachment readiness is not document readiness: a navigation can replace the default
-        // context (v0.10.0-prealpha.4's Push browser baseline). Probe only, without waking,
-        // navigating or re-attaching, and resend the original expression only after a default
-        // context answers. Destruction, timeout and page exceptions can follow execution and
-        // never retry.
+        // Attachment readiness is not document readiness: a later navigation can replace the
+        // default context. Probe only, without waking/navigating/re-attaching the page or worker.
+        // Do not resend the original expression until a default context answers. Destruction,
+        // disconnect, timeout and page exceptions can follow execution and must never retry it.
         for (;;) {
           if (!cleanup) check();
           if (performance.now() >= contextUntil) throw error;

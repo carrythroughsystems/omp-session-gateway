@@ -13,6 +13,7 @@ import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQ
 import { notificationTopicDigest } from "./android-notification.ts";
 import { PUSH_FIXTURE_ASK_BODY } from "./fixtures/push-qualification-extension.ts";
 import { commandPushFixture } from "./push-qualification-fixture.ts";
+import { fleetPushSource } from "./fleet-push-fixture.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
 const WIFI_CONNECTIVITY = "Current Networks:\n  NetworkAgentInfo{ ni{WIFI CONNECTED} lastValidated }";
 const VPN_CONNECTIVITY = `${WIFI_CONNECTIVITY}\n  NetworkAgentInfo{ ni{VPN CONNECTED} SYNTHETIC-PRIVATE-TRANSPORT-NETWORK }`;
@@ -918,6 +919,13 @@ test.each(["browser_wake", "browser_webapk", "browser_forward", "browser_target"
       expect(error).toMatchObject({ evidence: { lane: "androidPush", step, reason: "browser_baseline_failed", class: "harness" } });
       expect(JSON.stringify(normalizeQualificationFailures(error))).not.toContain(failure.message);
       expect(diagnostic).toMatchObject({ substep: step, error: failure, elapsedMs: expect.any(Number) });
+      if (step === "browser_context" || step === "browser_notification_state") {
+        const site = privateQualificationFailureDiagnostic(error).map(entry => entry.message)
+          .find(message => message.startsWith("Android Push evaluate site:"));
+        expect(site).toBe(`Android Push evaluate site: page/browser/${step === "browser_context" ? "context" : "action"}/1`);
+        expect(site).not.toContain(failure.message);
+        expect(site).not.toContain(identity.origin);
+      }
     } finally { chrome.mockRestore(); for (const spy of spies) spy.mockRestore(); }
   });
 
@@ -1146,6 +1154,152 @@ test.each(["blank-created-first", "other-created-first", "other-attached-first",
         }
       }
     } finally { for (const spy of spies) spy.mockRestore(); }
+  });
+
+test.each(["page", "gesture", "worker", "same-target-tap", "pinned-session", "racing-context", "destroyed",
+  "page-exception", "timeout", "disconnected", "aborted", "context-deadline", "execution-deadline", "explicit-context"] as const)(
+  "CDP default-context recovery preserves mutation and stale-tap safety (%s)", async scenario => {
+    const source = fleetPushSource(identity.origin);
+    const session: SessionMetadata = { instanceId: "fixture-instance-0001", generation: 1, canView: true, canControl: true, inputRequired: true,
+      cwdLabel: "omp-push-remote", startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z",
+      ask: { requestId: "synthetic-request-0001", since: "2026-01-01T00:00:00.000Z" } };
+    const calls: { method: string; sessionId?: string; params: Record<string, unknown> }[] = [], adb: string[][] = [];
+    const controller = new AbortController(), rejected = Promise.withResolvers<void>();
+    const original = "++globalThis.syntheticMutation";
+    let clock = performance.now(), executed = 0, originals = 0, probes = 0, context = false;
+    let socket!: Socket;
+    const stream = (text: string) => new ReadableStream<Uint8Array>({ start(value) { value.enqueue(new TextEncoder().encode(text)); value.close(); } });
+    const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+      adb.push(argv);
+      return { stdout: stream(argv.includes("devices") ? "List of devices attached\nsynthetic device\n" :
+        argv.includes("package") ? "versionName=153.0.0.0" : argv.includes("window") ? "isKeyguardShowing=false" : ""),
+      stderr: stream(""), exited: Promise.resolve(0), kill() {} };
+    }) as typeof Bun.spawn);
+    const fetchMock = spyOn(globalThis, "fetch").mockImplementation((async (url: URL | RequestInfo) => Response.json(String(url).endsWith("/api/v1/sessions") ?
+      { revision: 1, sessions: [session] } :
+      { "Android-Package": "com.android.chrome", Browser: "Chrome/153.0.0.0",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9238/devtools/browser/synthetic" })) as typeof fetch);
+    const now = spyOn(performance, "now").mockImplementation(() => clock);
+    const sleep = spyOn(Bun, "sleep").mockImplementation(async milliseconds => { clock += Number(milliseconds); });
+    const realSocket = globalThis.WebSocket, nativeTimeout = globalThis.setTimeout;
+    // The protocol timeout itself is under test; all I/O is the in-memory fake.
+    const timers = scenario === "timeout" ? spyOn(globalThis, "setTimeout").mockImplementation(((callback: TimerHandler, milliseconds?: number, ...args: unknown[]) =>
+      nativeTimeout(callback, milliseconds !== undefined && milliseconds > 1_000 ? 5 : milliseconds, ...args)) as typeof setTimeout) : undefined;
+    class Socket {
+      static OPEN = 1;
+      readyState = Socket.OPEN;
+      onmessage?: (event: { data: string }) => void;
+      onopen?: () => void;
+      onclose?: (event: { code: number }) => void;
+      constructor() { socket = this; queueMicrotask(() => this.onopen?.()); }
+      emit(method: string, params: Record<string, unknown>) {
+        this.onmessage?.({ data: JSON.stringify({ method, params, sessionId: "page-session" }) });
+      }
+      close() { this.readyState = 3; this.onclose?.({ code: 1000 }); }
+      send(frame: string) {
+        const message = JSON.parse(frame); calls.push(message);
+        const reply = (result: unknown) => queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result }) }));
+        const fail = (text: string) => queueMicrotask(() => {
+          this.onmessage?.({ data: JSON.stringify({ id: message.id, error: { code: -32000, message: text } }) });
+          rejected.resolve();
+          if (scenario === "aborted") controller.abort();
+        });
+        if (message.method === "Runtime.evaluate") {
+          if (message.params.expression === "void 0") {
+            probes++;
+            if (probes === 1 || scenario === "context-deadline" || scenario === "execution-deadline") {
+              fail("Cannot find default execution context"); return;
+            }
+            context = true;
+            this.emit("Runtime.executionContextCreated", { context: { id: probes, auxData: { isDefault: true, frameId: "main-frame" } } });
+            reply({ result: { type: "undefined" } }); return;
+          }
+          originals++;
+          if (["destroyed", "page-exception", "timeout", "disconnected"].includes(scenario)) {
+            executed++;
+            if (scenario === "timeout") return;
+            if (scenario === "disconnected") { this.close(); return; }
+            if (scenario === "page-exception") {
+              reply({ exceptionDetails: { text: "Cannot find default execution context" } }); return;
+            }
+            fail("Execution context was destroyed."); return;
+          }
+          if (!context || scenario === "racing-context" && originals === 2) {
+            context = false;
+            fail("Cannot find default execution context"); return;
+          }
+          executed++;
+          reply({ result: { value: scenario === "same-target-tap" ?
+            message.params.expression.includes("return { writable:") ?
+              { writable: false, readOnly: false, expired: true, scrubbed: true } : true : executed } });
+          return;
+        }
+        reply(message.method === "Browser.getVersion" ? { product: "Chrome/153.0.0.0" } :
+          message.method === "Target.getTargets" ? { targetInfos: [{ type: "page", targetId: "existing-page", url: `${identity.origin}/` }] } :
+          message.method === "Target.attachToTarget" ? { sessionId: message.params.targetId === "replacement-page" ? "replacement-session" : "page-session" } : {});
+      }
+    }
+    globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+    const tap = spyOn(notificationOperations, "tapAndroidNotification").mockImplementation(async () => {
+      const url = identity.origin + notificationRoutePath({ kind: "attention", instanceId: session.instanceId,
+        requestId: session.ask!.requestId, source: source.binding });
+      // No new Target event: Page and Network domains must survive this document replacement.
+      socket.emit("Page.frameStartedNavigating", { frameId: "main-frame", url });
+      socket.emit("Runtime.executionContextDestroyed", { executionContextId: 1 });
+      socket.emit("Runtime.executionContextsCleared", {});
+      socket.emit("Page.frameNavigated", { frame: { id: "main-frame", url } });
+      socket.emit("Page.navigatedWithinDocument", { frameId: "main-frame", url: `${identity.origin}/` });
+      socket.emit("Network.requestWillBeSent", { request: { url: `${source.origin}/api/v1/sessions`, method: "GET" } });
+    });
+    try {
+      if (scenario === "same-target-tap") {
+        const runtime = createAndroidPushRuntime(identity);
+        runtime.beforeEffect = async () => {};
+        runtime.assertNotificationOwnership = async () => {};
+        runtime.lock = async () => {};
+        await runtime.snapshot("synthetic", "remote");
+        expect(await runtime.tap(session, "attention", true)).toMatchObject({
+          launches: 0, successful: 0, scrubbedBeforeNetwork: true, expired: true, writable: false, readOnly: false,
+        });
+        expect(calls.filter(call => call.method === "Network.enable")).toHaveLength(1);
+        expect(calls.filter(call => call.method === "Target.attachToTarget")).toHaveLength(1);
+        expect(executed).toBe(2); // Destination and surface reads, each evaluated once.
+      } else {
+        const result = withAndroidChrome(async driver => {
+          await driver.attachTab("existing-page");
+          socket.emit("Runtime.executionContextDestroyed", { executionContextId: 1 });
+          socket.emit("Runtime.executionContextsCleared", {});
+          const value = scenario === "gesture" ? driver.send("Runtime.evaluate", { expression: original, userGesture: true }) :
+            scenario === "worker" ? driver.sessionSend("worker-session", "Runtime.evaluate", { expression: original, awaitPromise: true, returnByValue: true }) :
+            scenario === "explicit-context" ? driver.send("Runtime.evaluate", { expression: original, contextId: 99 }) :
+            driver.evaluate<number>(original);
+          if (scenario === "pinned-session") { await rejected.promise; await driver.attachTab("replacement-page"); }
+          return value;
+        }, { port: 9238, launchBrowser: false, ...(["aborted", "execution-deadline"].includes(scenario) ?
+          { execution: { signal: controller.signal, deadline: clock + (scenario === "execution-deadline" ? 300 : 60_000) } } : {}) });
+        if (["page", "gesture", "worker", "pinned-session", "racing-context"].includes(scenario)) {
+          expect(await result).toEqual(["gesture", "worker"].includes(scenario) ? { result: { value: 1 } } : 1);
+          expect(executed).toBe(1);
+          expect(originals).toBe(scenario === "racing-context" ? 3 : 2);
+          const evaluations = calls.filter(call => call.method === "Runtime.evaluate");
+          expect(evaluations.every(call => call.sessionId === (scenario === "worker" ? "worker-session" : "page-session"))).toBe(true);
+          if (scenario === "gesture") expect(evaluations.filter(call => call.params.expression === original).every(call => call.params.userGesture === true)).toBe(true);
+        } else {
+          await expect(result).rejects.toThrow();
+          expect(originals).toBe(1);
+          if (["destroyed", "page-exception", "timeout", "disconnected"].includes(scenario)) {
+            expect(executed).toBe(1); expect(probes).toBe(0);
+          } else expect(executed).toBe(0);
+          if (scenario === "context-deadline") expect(probes).toBeLessThanOrEqual(60);
+        }
+      }
+      expect(calls.some(call => call.method === "Target.createTarget" || call.method === "Page.navigate")).toBe(false);
+      expect(adb.some(argv => argv.includes("monkey") || argv.includes("am"))).toBe(false);
+      expect(adb.some(argv => argv.includes("--remove"))).toBe(true);
+    } finally {
+      tap.mockRestore(); timers?.mockRestore(); sleep.mockRestore(); now.mockRestore();
+      globalThis.WebSocket = realSocket; fetchMock.mockRestore(); spawn.mockRestore();
+    }
   });
 
 test("cancelled runtime pauses stop, cleanup obtains a fresh independent context", async () => {
@@ -1444,7 +1598,7 @@ test("fleet unpatch failure and retry retain host ownership until worker restora
   } finally { chrome.mockRestore(); }
 });
 
-test.each(["recovered", "exhausted", "product", "cleanup"] as const)("unheld worker connection %s remains bounded and cold", async scenario => {
+test.each(["recovered", "exhausted", "product", "cleanup", "evaluation"] as const)("unheld worker connection %s remains bounded and cold", async scenario => {
   let calls = 0;
   const retained: unknown[] = [];
   const transport = new AndroidDevtoolsConnectionError("endpoint_timeout", "synthetic endpoint timeout",
@@ -1454,7 +1608,10 @@ test.each(["recovered", "exhausted", "product", "cleanup"] as const)("unheld wor
     browserSend: async (method: string) => method === "Target.getTargets" ?
       { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
       method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {},
-    sessionSend: async () => ({ result: { value: { count: 2, complete: true } } }),
+    sessionSend: async () => {
+      if (scenario === "evaluation") throw product;
+      return { result: { value: { count: 2, complete: true } } };
+    },
   };
   const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
     (async (run: (driver: unknown) => Promise<unknown>, options: { launchBrowser?: boolean }) => {
@@ -1470,7 +1627,11 @@ test.each(["recovered", "exhausted", "product", "cleanup"] as const)("unheld wor
     if (scenario === "recovered") expect(await runtime.fleet.observeBadge()).toEqual({ count: 2, complete: true });
     else {
       const failure = await runtime.fleet.observeBadge().catch(error => error);
-      if (scenario === "product") expect(failure).toBe(product);
+      if (scenario === "product" || scenario === "evaluation") {
+        expect(failure).toBe(product);
+        if (scenario === "evaluation") expect(privateQualificationFailureDiagnostic(failure).map(entry => entry.message))
+          .toContain("Android Push evaluate site: worker/observeBadge");
+      }
       else if (scenario === "exhausted") {
         expect(failure).toBeInstanceOf(QualificationFailure);
         expect(failure.evidence).toMatchObject({ lane: "androidPush", reason: "invalid_evidence",
