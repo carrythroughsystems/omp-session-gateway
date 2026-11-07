@@ -64,3 +64,18 @@ test("detects discovery credentials and collaboration fragments without a URL pr
 test("does not flag documented placeholders or ordinary URLs", () => {
   expect(findCapabilityLeaks("https://host.tailnet.ts.net <roomId>.<key> Authorization: Bearer <token>")).toEqual([]);
 });
+
+test("detects fleet grant bearers without echoing their credential material", () => {
+  const grantId = ["a1111111", "b222", "4333", "8444", "c55555555555"].join("-");
+  const credential = [grantId, "SYNTHETIC_FLEET_GRANT_".padEnd(43, "x")].join(".");
+  for (const text of [credential, JSON.stringify({ authorization: `Bearer ${credential}` }),
+    `Authorization: Bearer ${credential}`, `https://example.test/?credential=${credential}`]) {
+    const findings = findCapabilityLeaks(text).filter(finding => finding.label === "fleet grant bearer");
+    expect(findings).toEqual([{ label: "fleet grant bearer", byteOffset: text.indexOf(credential) }]);
+    expect(JSON.stringify(findings).includes(credential)).toBe(false);
+  }
+  for (const text of ["<uuid>.<43-char base64url>", grantId, `${grantId}.short`,
+    `${credential}x`, `prefix_${credential}`, credential.replace("-4333-", "-3333-")]) {
+    expect(findCapabilityLeaks(text).some(finding => finding.label === "fleet grant bearer")).toBe(false);
+  }
+});

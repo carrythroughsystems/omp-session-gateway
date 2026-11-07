@@ -27,6 +27,10 @@ const patterns: readonly (readonly [string, RegExp])[] = [
     "OMP bare capability",
     /(?<![A-Za-z0-9_./#-])[A-Za-z0-9_-]{10,64}(?:[.#]|%23)(?:[A-Za-z0-9_-]{43}|[A-Za-z0-9_-]{64})(?![A-Za-z0-9_-])/giu,
   ],
+  [
+    "fleet grant bearer",
+    /(?<![A-Za-z0-9_.-])[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/giu,
+  ],
   ["long Bearer token", /Authorization\s*:\s*Bearer\s+[A-Za-z0-9._~-]{40,}/giu],
   [
     "gateway readiness token",

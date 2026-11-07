@@ -527,6 +527,28 @@ recording, raw SDK log or Percy output is retained as a CI artifact.
 - browser subscription -> gateway private state -> false-to-true registry transition -> selected-detail push -> service-worker notification;
 - true-to-false/removal closes the per-instance notification, updates the badge, and cannot clear a re-armed request; `404`/`410` removes the endpoint;
 - notification route revalidates exact current request identity and Control availability before the ordinary generation-bound launch;
+
+### Fleet notifications: two-gateway automated scope
+
+`apps/gateway/test/fleet-two-gateway.test.ts` runs under `bun test` in
+`implementation-checks` and the Linux, macOS, and Windows `portable-source` lanes, without a
+platform skip. These rows describe **Tested** scope when those named lanes are green
+(ADR-030 / [status vocabulary](COMPATIBILITY.md#status-vocabulary)), not physical Push,
+platform support, or release qualification.
+
+| Scenario | Assertion |
+|---|---|
+| Browser-direct enrollment and narrow credentials | Two real loopback HTTP gateways use separate origins/state directories; pending verifier → source grant → activation → device selection uses the actual routes. A grant bearer cannot reach another coordinator/source API or launch, and the machine pull carries no owner headers. |
+| Same instance on local and remote hosts | Parsed v3 envelopes run through the shared worker reducer: distinct source-qualified tags and request IDs coexist with badge 2; Session/Preview remote bodies contain only configured label and suffix, Private has no body. |
+| Resolution, live stop, revocation | Exact request/generation clears preserve the local ask; only an observed busy → idle edge produces a stop. Source revocation closes its feed, becomes unauthorized, and clears only that owner's selected devices. |
+| Coordinator/source restart and outage | A persisted coordinator epoch advances; outstanding diff clears resolved asks, alerts unseen asks, and neither repeats unchanged asks nor invents stops. A cold, empty source registry emits only heartbeats until real discovery warms; an unreachable source retains its ask with an incomplete badge. |
+| Owner/device isolation and leak boundaries | Two owners each have selected/unselected devices and different detail preferences. Cross-owner selection/activation/renewal is refused; one owner's revocation leaves the other covered. Remote title/cwd/preview canaries and grant secrets are scanned across payloads, feeds, both gateways' logs, state files, and diagnostics archives; secrets are permitted only in coordinator fleet state. |
+
+`scripts/capability-leak-rules.test.ts` additionally exercises the fleet grant bearer's UUIDv4
+and 43-character base64url shape in bare, JSON, authorization, and URL text. The capability
+scanner checks repository files; the identifier scanner remains limited to non-credential
+personal/infrastructure identifiers.
+
 ## 4. End-to-end acceptance scenarios
 
 ### A. Automatic discovery
