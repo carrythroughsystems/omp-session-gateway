@@ -1083,3 +1083,106 @@ test("a page-side exception from Runtime.evaluate is the step's failure, never a
     .toThrow("CDP Runtime.evaluate: TypeError: Cannot read properties of undefined (reading 'ready')");
   expect(() => evaluationValue({ exceptionDetails: { exceptionId: 2, text: "Uncaught" } })).toThrow("CDP Runtime.evaluate: Uncaught");
 });
+
+// v0.10.0-prealpha.4's Push lane failed its browser baseline 2.4 s in with "CDP Runtime.evaluate:
+// Cannot find default execution context": a navigation had replaced the attached page's context.
+test.each(["page", "gesture", "worker", "pinned-session", "racing-context", "destroyed", "page-exception", "timeout",
+  "aborted", "context-deadline", "execution-deadline", "explicit-context"] as const)(
+  "a missing default context waits for a new one without re-running or redirecting the expression (%s)", async scenario => {
+    const calls: { method: string; sessionId?: string; params: Record<string, unknown> }[] = [], adb: string[][] = [];
+    const controller = new AbortController(), rejected = Promise.withResolvers<void>();
+    const original = "++globalThis.syntheticMutation";
+    let clock = performance.now(), executed = 0, originals = 0, probes = 0, context = false;
+    let socket!: Socket;
+    const stream = (text: string) => new ReadableStream<Uint8Array>({ start(value) { value.enqueue(new TextEncoder().encode(text)); value.close(); } });
+    const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+      adb.push(argv);
+      return { stdout: stream(argv.includes("devices") ? "List of devices attached\nsynthetic device\n" :
+        argv.includes("package") ? "versionName=153.0.0.0" : ""), stderr: stream(""), exited: Promise.resolve(0), kill() {} };
+    }) as unknown as typeof Bun.spawn);
+    const fetchMock = spyOn(globalThis, "fetch").mockImplementation((async () => Response.json({
+      "Android-Package": "com.android.chrome", Browser: "Chrome/153.0.0.0",
+      webSocketDebuggerUrl: "ws://127.0.0.1:9238/devtools/browser/synthetic" })) as unknown as typeof fetch);
+    const now = spyOn(performance, "now").mockImplementation(() => clock);
+    const sleep = spyOn(Bun, "sleep").mockImplementation(async milliseconds => { clock += Number(milliseconds); });
+    const realSocket = globalThis.WebSocket, nativeTimeout = globalThis.setTimeout;
+    // The protocol timeout itself is under test; all I/O is the in-memory fake.
+    const timers = scenario === "timeout" ? spyOn(globalThis, "setTimeout").mockImplementation(((callback: TimerHandler, milliseconds?: number, ...args: unknown[]) =>
+      nativeTimeout(callback, milliseconds !== undefined && milliseconds > 1_000 ? 5 : milliseconds, ...args)) as typeof setTimeout) : undefined;
+    class Socket {
+      static OPEN = 1;
+      readyState = Socket.OPEN;
+      onmessage?: (event: { data: string }) => void;
+      onopen?: () => void;
+      constructor() { socket = this; queueMicrotask(() => this.onopen?.()); }
+      close() { this.readyState = 3; }
+      send(frame: string) {
+        const message = JSON.parse(frame); calls.push(message);
+        const reply = (result: unknown) => queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result }) }));
+        const fail = (text: string) => queueMicrotask(() => {
+          this.onmessage?.({ data: JSON.stringify({ id: message.id, error: { code: -32000, message: text } }) });
+          rejected.resolve();
+          if (scenario === "aborted") controller.abort();
+        });
+        if (message.method === "Runtime.evaluate") {
+          if (message.params.expression === "void 0") {
+            probes++;
+            if (probes === 1 || scenario === "context-deadline" || scenario === "execution-deadline") {
+              fail("Cannot find default execution context"); return;
+            }
+            context = true;
+            reply({ result: { type: "undefined" } }); return;
+          }
+          originals++;
+          if (["destroyed", "page-exception", "timeout"].includes(scenario)) {
+            executed++;
+            if (scenario === "timeout") return;
+            if (scenario === "page-exception") { reply({ exceptionDetails: { text: "Cannot find default execution context" } }); return; }
+            fail("Execution context was destroyed."); return;
+          }
+          if (!context || scenario === "racing-context" && originals === 2) {
+            context = false;
+            fail("Cannot find default execution context"); return;
+          }
+          executed++;
+          reply({ result: { value: executed } }); return;
+        }
+        reply(message.method === "Browser.getVersion" ? { product: "Chrome/153.0.0.0" } :
+          message.method === "Target.attachToTarget" ? { sessionId: message.params.targetId === "replacement-page" ? "replacement-session" : "page-session" } : {});
+      }
+    }
+    globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+    try {
+      const result = withAndroidChrome(async driver => {
+        await driver.attachTab("existing-page");
+        const value = scenario === "gesture" ? driver.send("Runtime.evaluate", { expression: original, userGesture: true }) :
+          scenario === "worker" ? driver.sessionSend("worker-session", "Runtime.evaluate", { expression: original, awaitPromise: true, returnByValue: true }) :
+          scenario === "explicit-context" ? driver.send("Runtime.evaluate", { expression: original, contextId: 99 }) :
+          driver.evaluate<number>(original);
+        if (scenario === "pinned-session") { await rejected.promise; await driver.attachTab("replacement-page"); }
+        return value;
+      }, { port: 9238, launchBrowser: false, ...(["aborted", "execution-deadline"].includes(scenario) ?
+        { execution: { signal: controller.signal, deadline: clock + (scenario === "execution-deadline" ? 300 : 60_000) } } : {}) });
+      if (["page", "gesture", "worker", "pinned-session", "racing-context"].includes(scenario)) {
+        expect(await result).toEqual(["gesture", "worker"].includes(scenario) ? { result: { value: 1 } } : 1);
+        expect(executed).toBe(1);
+        expect(originals).toBe(scenario === "racing-context" ? 3 : 2);
+        const evaluations = calls.filter(call => call.method === "Runtime.evaluate");
+        expect(evaluations.every(call => call.sessionId === (scenario === "worker" ? "worker-session" : "page-session"))).toBe(true);
+        if (scenario === "gesture") expect(evaluations.filter(call => call.params.expression === original).every(call => call.params.userGesture === true)).toBe(true);
+      } else {
+        await expect(result).rejects.toThrow();
+        expect(originals).toBe(1);
+        if (["destroyed", "page-exception", "timeout"].includes(scenario)) {
+          expect(executed).toBe(1); expect(probes).toBe(0);
+        } else expect(executed).toBe(0);
+        if (scenario === "context-deadline") expect(probes).toBeLessThanOrEqual(60);
+      }
+      expect(calls.some(call => call.method === "Target.createTarget" || call.method === "Page.navigate")).toBe(false);
+      expect(adb.some(argv => argv.includes("monkey") || argv.includes("am"))).toBe(false);
+      expect(adb.some(argv => argv.includes("--remove"))).toBe(true);
+    } finally {
+      timers?.mockRestore(); sleep.mockRestore(); now.mockRestore();
+      globalThis.WebSocket = realSocket; fetchMock.mockRestore(); spawn.mockRestore();
+    }
+  });
