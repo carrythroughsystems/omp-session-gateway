@@ -6,13 +6,14 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { SecretCapability, type ObservedSessionInput } from "@omp-session-gateway/protocol";
+import { SecretCapability, fleetOwnerDigest, MAX_PUSH_ENDPOINT_BYTES, parsePushSubscriptionRequest, type ObservedSessionInput } from "@omp-session-gateway/protocol";
 import type { GatewayConfig } from "../src/config.ts";
 import { requestHasTrustedDashboardContext, requestHasValidMutationContext } from "../src/auth.ts";
 import { createHttpHandler, startHttpServer } from "../src/http.ts";
 import { finalizeHttpResponse } from "../src/http-policy.ts";
 import { QualificationLogSink, SafeLogger } from "../src/logger.ts";
 import { PushService } from "../src/push.ts";
+import { FleetCoordinator } from "../src/fleet-coordinator.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { StaticAssetStore } from "../src/static.ts";
 import { SessionCreationProblem, type SessionCreationService } from "../src/tern-creation.ts";
@@ -1041,6 +1042,57 @@ describe("HTTP boundary", () => {
         )
       ).status,
     ).toBe(400);
+  });
+
+  test("coordinator routes are opt-in, same-origin, owner-bound, bounded and no-store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gateway-http-fleet-"));
+    const base = config();
+    const source = { id: "remote", label: "Remote", origin: "https://remote.example.test" };
+    const gatewayConfig: GatewayConfig = {
+      ...base, notifications: { sources: [source.id] }, fleet: { label: "Home", targets: [source] },
+      paths: { configDir: join(root, "config"), stateDir: join(root, "state"), runtimeDir: join(root, "run"),
+        tokenPath: join(root, "config", "readiness-token"), configPath: join(root, "config", "config.json") },
+    };
+    const registry = populatedRegistry();
+    const push = await PushService.open({ config: gatewayConfig, registry, transport: { async send() {} } });
+    // A valid endpoint at the push contract's byte limit makes status/selection bodies exceed 4 KiB.
+    const prefix = "https://push.example.test/send/synthetic-fleet-http-";
+    const endpoint = prefix + "x".repeat(MAX_PUSH_ENDPOINT_BYTES - prefix.length);
+    await push.subscribe("allowed@example.com", parsePushSubscriptionRequest({ version: 2, subscription: { endpoint, expirationTime: null, keys: { p256dh: "P".repeat(88), auth: "A".repeat(22) } } }));
+    const digest = await fleetOwnerDigest(origin, "allowed@example.com");
+    const coordinator = await FleetCoordinator.open({
+      config: { publicOrigin: origin, ownLabel: "Home", sources: [source] }, push, registry, stateDir: gatewayConfig.paths.stateDir,
+      fetch: (async (_input: string | URL | Request, _init?: RequestInit) => new Response(`event: snapshot\ndata: ${JSON.stringify({ version: 1, type: "snapshot", owner: digest, expiresAt: "2030-01-01T00:00:00.000Z", sessions: [] })}\n\n`, { headers: { "Content-Type": "text/event-stream" } })) as typeof fetch,
+    });
+    const handler = createTestHttpHandler({ config: gatewayConfig, registry, staticAssets: assets, pushService: push, fleetCoordinator: coordinator });
+    const mutation = (path: string, body: unknown, method = "POST", headers: Record<string, string> = {}): Request =>
+      request(`/api/v1/push/fleet/${path}`, { method, headers: { Origin: origin, "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+    try {
+      for (const notifications of [undefined, { coordinators: [{ id: "home", origin: "https://home.example.test" }] }]) {
+        const { notifications: _notifications, ...ordinaryConfig } = gatewayConfig;
+        const disabled = createTestHttpHandler({ config: { ...ordinaryConfig, ...(notifications === undefined ? {} : { notifications }) }, registry, staticAssets: assets });
+        expect((await disabled(mutation("status", { version: 1 }), peer)).status).toBe(404);
+      }
+      expect((await handler(mutation("status", { version: 1 }, "POST", { Origin: source.origin }), peer)).status).toBe(403);
+      expect((await handler(mutation("status", { version: 1 }, "POST", { "Sec-Fetch-Site": "cross-site" }), peer)).status).toBe(403);
+      expect((await handler(mutation("status", { version: 1 }, "POST", { "Content-Type": "text/plain" }), peer)).status).toBe(415);
+      expect((await handler(mutation("status", { version: 1, prompt: "SYNTHETIC_CONTENT" }), peer)).status).toBe(400);
+      expect((await handler(mutation("status", { version: 1, extra: "x".repeat(4096) }), peer)).status).toBe(400);
+      expect((await handler(mutation("status", { version: 1, endpoint: "https://push.example.test/other" }), peer)).status).toBe(409);
+      const created = await handler(mutation("grants", { version: 1, sourceId: source.id }), peer);
+      expect(created.status).toBe(201); expect(created.headers.get("Cache-Control")).toContain("no-store");
+      const grant = await created.json() as { grantId: string; verifier: string };
+      expect(Object.keys(grant).sort()).toEqual(["grantId", "verifier", "version"]);
+      expect((await handler(mutation(`grants/${grant.grantId}/activate`, { version: 1 }), peer)).status).toBe(204);
+      const selected = await handler(mutation("recipient", { version: 1, endpoint, sources: [source.id] }, "PUT"), peer);
+      expect(selected.status).toBe(200); expect(selected.headers.get("Access-Control-Allow-Origin")).toBeNull();
+      const status = await handler(mutation("status", { version: 1, endpoint }), peer);
+      expect(status.status).toBe(200); expect(status.headers.get("Cache-Control")).toContain("no-store");
+      expect((await status.json() as { sources: { selected: boolean }[] }).sources[0]?.selected).toBe(true);
+      expect((await handler(mutation("recipient", { version: 1, endpoint }, "DELETE"), peer)).status).toBe(200);
+      expect((await handler(mutation(`grants/${grant.grantId}/revoke`, { version: 1 }), peer)).status).toBe(204);
+      await coordinator.flush();
+    } finally { await coordinator.stop(); await push.stop(); await rm(root, { recursive: true, force: true }); }
   });
 
   test("authenticates and strictly validates persistent browser push subscriptions", async () => {

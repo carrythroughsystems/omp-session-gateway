@@ -12,6 +12,7 @@ import {
 } from "./config.ts";
 import { OmpHostReader } from "./omp-registry.ts";
 import { probeTernAvailability } from "./tern-creation.ts";
+import { fleetCoordinatorStateHealthy } from "./fleet-coordinator.ts";
 import { notificationGrantsHealthy } from "./fleet-source.ts";
 import type { DoctorReport } from "./diagnostics.ts";
 import { type UserServiceStatus, userServiceStatus } from "./service.ts";
@@ -453,6 +454,9 @@ export async function runDoctorChecks(
   }
   if (config.notifications?.coordinators?.length) {
     checks.notificationGrantsHealthy = await notificationGrantsHealthy(config);
+  }
+  if (config.notifications?.sources?.length) {
+    checks.fleetNotificationsHealthy = await fleetCoordinatorStateHealthy(config.paths.stateDir);
   }
   checks.assets = await localAssetsPresent();
   checks.compatibility = await ompVersionSupported(options.ompVersion ?? installedOmpVersion);

@@ -190,6 +190,40 @@ trusted origin, or an owner's allowlist entry blocks further events (apply confi
 reinstall/restart). Expiry and revocation also terminate the feed; ordinary View/Control and local
 Web Push are unchanged.
 
+### Fleet notification home setup
+
+Use an always-on gateway as the installed PWA's home. On that home, list eligible target ids:
+
+```json
+{
+  "notifications": { "sources": ["laptop"] }
+}
+```
+
+The id must already exist in `fleet.targets`; configure the home in that source's coordinator and
+trusted-origin lists above. Configuration alone sends nothing: each owner needs a stored home
+push subscription, a browser-direct grant at the source, and a per-device selection. Fleet routes
+remain same-origin and return 404 unless the coordinator role is configured. An activation waits
+at most five seconds for the source snapshot; `grant_rejected` needs renewed approval,
+`source_unreachable` needs connectivity/discovery recovery, and `unsupported` needs a source upgrade.
+
+Coverage is separate from notification permission. A disconnected source stays stale with its
+last-known asks; it never produces an all-clear. The home retries transient failures with bounded
+backoff and authorization/unsupported answers every five minutes. Configured source hosts bypass
+proxy environment variables so grant credentials reach only their configured origins.
+
+The private `<stateDir>/fleet-notifications.json` contains grant secrets, source selections and
+outstanding ask identities, not titles, paths, previews or endpoints. Do not copy it between homes,
+print it, or attach it to support reports. `doctor` exposes only `fleetNotificationsHealthy`;
+support bundles exclude both fleet state files. Corruption or a failed atomic write disables fleet
+routes with 503 and preserves the file for private recovery; local alerts fall back to unchanged
+Push v2, which fleet-capable workers still render as local notifications. Fix permissions or restore a trusted
+private backup and restart; do not delete the file to hide corruption. Restart advances the epoch
+and reconciles exact outstanding requests after source snapshots or 30 seconds, preserving stale
+alerts and never replaying stops. Removing/re-pointing a source clears its old binding's alerts.
+Disabling the last selecting device discards its owner's grant secret and reports the released grant
+for browser-direct revocation at that source. Unselected legacy subscriptions keep Push v2.
+
 ### Opt-in Tern session creation
 
 Opt-in Tern creation (`config.json` → `tern`, [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)) lets **OMP Sessions** start a new interactive `omp` process in a Tern tab on the execution host from administrator-approved project, working-copy, and profile choices, then open it in **Control**. It is absent by default (`not_configured`); ordinary session discovery and View/Control launches do not require Tern.
