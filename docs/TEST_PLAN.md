@@ -301,6 +301,9 @@ it never signals an unverified PID or treats a changed command as proof of exit.
 Tap accounting records browser-generated CORS `OPTIONS` preflights separately from launch
 attempts. Every non-OPTIONS request to any launch route still counts, so duplicate POSTs and
 wrong-source/malformed launch attempts cannot be hidden by the cross-origin admission step.
+The outage phase observes its pending remote row in the open PWA before taking the source down.
+Coverage polls preserve that page instead of reloading away its last-known directory. Wait
+timeouts retain the named observation in private diagnostics, never in receipt fields.
 
 Fleet progress adds only an ownership boolean and a remote notification-topic SHA-256 digest.
 Closed boolean/count results remain additive to receipt schema 3; no source, session, request,

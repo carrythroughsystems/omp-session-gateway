@@ -719,8 +719,9 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       const evidence = { id: nextFailureId(), lane: "androidPush" as const, step: activePhase,
         class: "harness" as const, operation: "read_only" as const,
         elapsedMs: pushMilliseconds(runtime.now() - start), observations: { timeoutMs: timeout } };
-      if (name === "metadata") throw new QualificationFailure({ ...evidence, reason: "delivery_metadata_timeout" });
-      throw new QualificationFailure({ ...evidence, reason: "delivery_timeout" });
+      const diagnostic = { cause: new Error(`Android Push wait expired: ${name}`) };
+      if (name === "metadata") throw new QualificationFailure({ ...evidence, reason: "delivery_metadata_timeout" }, diagnostic);
+      throw new QualificationFailure({ ...evidence, reason: "delivery_timeout" }, diagnostic);
     };
     const snapshot = async (predicate: (s: SessionMetadata) => boolean, role: PushFixtureRole = "primary") => wait("metadata", async () => {
       const session = await runtime.snapshot(progress.epoch, role);

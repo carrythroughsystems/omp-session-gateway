@@ -163,6 +163,9 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
   });
   await attempt("fleet_outage_verified", async () => {
     await cold(); const remote = await ask("remote");
+    // Last-known asks belong to the open page's observed directory, not a fresh offline page.
+    await r.openPwa();
+    await wait("visible fleet ask before outage", async () => (await r.triage()).waiting.includes(remote.instanceId) ? true : undefined);
     await f.host("source-down", p.epoch);
     await wait("stale fleet source", async () => (await f.coverage()).state === "stale" ? true : undefined);
     await delivered(remote); await badge(1, false);

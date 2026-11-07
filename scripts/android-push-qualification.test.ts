@@ -66,7 +66,7 @@ function fake(options: FakeOptions = {}) {
     return { ...local, instanceId: REMOTE, generation: remote.generation, inputRequired: remote.asking, busy: false,
       ...(remote.asking ? { ask: { requestId: `synthetic-remote-request-${remote.request}`, since: since(remote.askedAt) }, qualificationPushAlias: 1 } : {}) };
   };
-  const sessions = () => [primarySnapshot(), secondarySnapshot()].filter((session): session is SessionMetadata => session !== undefined);
+  const sessions = () => [primarySnapshot(), secondarySnapshot(), remoteSnapshot()].filter((session): session is SessionMetadata => session !== undefined);
   const heldKey = (session: SessionMetadata) => `${session.instanceId}:${session.ask?.requestId}`;
   const hiddenKey = (session: SessionMetadata) => `${session.instanceId}:${session.generation}`;
   // As the app does on every snapshot: a record outlives neither its request nor its generation.
@@ -1632,6 +1632,31 @@ test("fleet Private proves concurrent records but never guesses between identica
   expect(concurrent).toBe(true); expect(privateRows).toBe(2);
 });
 
+test("fleet outage establishes a visible remote ask before interrupting its source", async () => {
+  const host = fake();
+  let phase = "", observed = false, interruptions = 0;
+  const begin = host.runtime.beginNotificationPhase, triage = host.runtime.triage, control = host.runtime.fleet!.host;
+  host.runtime.beginNotificationPhase = async (...args) => { phase = args[1]; await begin(...args); };
+  host.runtime.triage = async (...args) => {
+    const view = await triage(...args);
+    if (phase === "fleet_outage_verified") {
+      expect(host.state().device.webApkTask).toBe(true);
+      const remote = await host.runtime.snapshot("", "remote");
+      observed = remote?.ask !== undefined && view.waiting.includes(remote.instanceId);
+    }
+    return view;
+  };
+  host.runtime.fleet!.host = async (...args) => {
+    if (phase === "fleet_outage_verified" && args[0] === "source-down") {
+      expect(observed).toBe(true);
+      interruptions++;
+    }
+    await control(...args);
+  };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(interruptions).toBe(2);
+});
+
 test.each([
   ["enrollment", "fleet_enrolled"], ["badge", "fleet_private_verified"], ["remote-tap", "fleet_taps_verified"],
   ["remote-stale-tap", "fleet_stale_taps_verified"], ["retained", "fleet_outage_verified"],
@@ -1641,6 +1666,7 @@ test.each([
   const error = await runAndroidPush(host.input).catch(error => error);
   expect(error).toBeInstanceOf(QualificationFailure);
   expect(error.evidence.step).toBe(phase);
+  if (fleetFailure === "badge") expect(error.cause.message).toBe("Android Push wait expired: fleet badge reconciliation");
   expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
   expect(host.state()).toMatchObject({ remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
 });
