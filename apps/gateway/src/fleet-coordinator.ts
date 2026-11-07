@@ -3,7 +3,7 @@ import { join } from "node:path";
 import {
   MAX_COORDINATOR_FLEET_GRANTS, MAX_FLEET_FEED_EVENT_BYTES, MAX_FLEET_OUTSTANDING_ASKS,
   MAX_SESSIONS, fleetGrantVerifier, fleetOwnerDigest, fleetSessionSuffix, fleetSourceBinding,
-  newFleetGrantSecret, parseClientConfigResponse, parseFleetBearer, parseFleetFeedEvent,
+  newFleetGrantSecret, parseClientConfigResponse, parseFleetBearer, parseFleetFeedEvent, parseFleetOrigin,
   parseFleetGrantCreateResponse, parseFleetPushMessage, parseFleetRecipientResponse,
   parseFleetStatusResponse, parseSourceGrantResponse,
   type FleetFeedEvent, type FleetFeedSession, type FleetPendingAsk, type FleetPushMessage,
@@ -113,12 +113,12 @@ function parseState(value: unknown): State {
       !Array.isArray(raw.recipients) || raw.recipients.length > 8) throw new Error("invalid fleet state");
   const grants = raw.grants.map(value => {
     const grant = record(value, ["owner", "sourceId", "origin", "grantId", "secret", "active"], ["expiresAt"]);
-    const peer = parseClientConfigResponse({ version: 1, local: { id: "local", origin: "http://127.0.0.1", label: "Local" },
-      targets: [{ id: grant.sourceId, origin: grant.origin, label: "Source" }], speech: { browserRecognition: false } }).targets[0]!;
+    const sourceId = parseFleetRecipientResponse({ version: 1, sources: [grant.sourceId], released: [] }).sources[0]!;
+    const origin = parseFleetOrigin(grant.origin);
     const bearer = parseFleetBearer(`Bearer ${String(grant.grantId)}.${String(grant.secret)}`);
-    if (bearer === undefined || typeof grant.active !== "boolean") throw new Error("invalid fleet state");
+    if (bearer === undefined || typeof grant.active !== "boolean" || (grant.active && grant.expiresAt === undefined)) throw new Error("invalid fleet state");
     const expiry = grant.expiresAt === undefined ? {} : { expiresAt: parseSourceGrantResponse({ version: 1, grantId: bearer.grantId, expiresAt: grant.expiresAt }).expiresAt };
-    return { owner: owner(grant.owner), sourceId: peer.id, origin: peer.origin, ...bearer, active: grant.active, ...expiry };
+    return { owner: owner(grant.owner), sourceId, origin, ...bearer, active: grant.active, ...expiry };
   });
   const recipients = raw.recipients.map(value => {
     const recipient = record(value, ["key", "owner", "sources", "outstanding"]);

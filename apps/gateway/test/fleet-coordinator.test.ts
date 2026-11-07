@@ -444,6 +444,19 @@ describe("fleet coordinator", () => {
     expect(await readFile(path, "utf8")).toBe("{SYNTHETIC_CORRUPTION}");
   });
 
+  test("restart accepts a canonical port-80 source and fails closed on active grants missing expiry", async () => {
+    const f = await fixture([{ ...sourceA, origin: "http://127.0.0.1" }]); const device = await f.device();
+    await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    await f.restart(); await settled(f.coordinator); expect(f.coordinator.healthy).toBe(true);
+    expect(await fleetCoordinatorStateHealthy(f.config.paths.stateDir)).toBe(true);
+    await f.coordinator.stop();
+    const path = join(f.config.paths.stateDir, "fleet-notifications.json"), state = JSON.parse(await readFile(path, "utf8"));
+    delete state.grants[0].expiresAt; await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+    await f.restart(); expect(f.coordinator.healthy).toBe(false);
+    expect(await fleetCoordinatorStateHealthy(f.config.paths.stateDir)).toBe(false);
+  });
+
   test("real fetch bypasses dead HTTP/HTTPS proxies for the configured host", async () => {
     const previous = { HTTPS_PROXY: process.env.HTTPS_PROXY, HTTP_PROXY: process.env.HTTP_PROXY, NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
     const digest = await fleetOwnerDigest("http://127.0.0.1:4317", alice);
