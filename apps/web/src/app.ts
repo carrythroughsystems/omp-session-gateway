@@ -2387,9 +2387,10 @@ function renderDirectory(arrived = false): void {
 function renderEmptyState(): void {
   emptyState.querySelector(".empty-state-detail")?.remove();
   const coverage = scopeCoverage();
-  const notificationComplete = notificationCoverageComplete();
   const uncovered = fleetNotificationRows.filter(row => row.selected && row.state !== "current")
     .map(row => configuredNotificationSource(row.sourceId)?.label).filter(label => label !== undefined);
+  // Unknown alert coverage still blocks All clear, but is not evidence of a missing host.
+  const notificationIncomplete = !notificationCoverageComplete() && uncovered.length > 0;
   const filtered = selectedScope !== "all";
   const observations = [...sources.keys()].filter(key => !filtered || key === selectedScope).map(sourceAvailability);
   const observation = observations.length === 1 ? observations[0] : undefined;
@@ -2400,13 +2401,13 @@ function renderEmptyState(): void {
     (source.status === "fresh" || source.status === "refreshing" || source.status === "stale"));
   const sharedTime = observations[0]?.time;
   const sharedInstant = observations[0]?.observedAt;
-  emptyState.dataset.state = coverage.complete && notificationComplete && !filtered ? "empty" : "limited";
+  emptyState.dataset.state = coverage.complete && !notificationIncomplete && !filtered ? "empty" : "limited";
   if (emptyState.dataset.state === "empty") return;
   const body = document.createElement("div");
   body.className = "empty-state-detail";
   const title = denied ? "Sessions are hidden"
     : withdrawn ? "Session list withdrawn"
-    : !notificationComplete ? "Host coverage incomplete"
+    : notificationIncomplete ? "Host coverage incomplete"
     : coverage.complete ? "No sessions on this host"
       : expired ? observation === undefined ? "Session lists expired" : "Session list expired"
         : retainedEmpty ? observations.every(source => source.observedAt === sharedInstant)
@@ -2415,7 +2416,7 @@ function renderEmptyState(): void {
             : observation !== undefined ? "This host has not been checked" : "No sessions to show yet";
   const detail = denied ? "Ask the gateway operator to restore access."
     : withdrawn ? "A fresh authorized list is needed before showing sessions."
-    : !notificationComplete ? `Known work only. Alerts unavailable for ${uncovered.join(", ")}.`
+    : notificationIncomplete ? `Known work only. Alerts unavailable for ${uncovered.join(", ")}.`
     : coverage.complete ? "Choose another host or start a session here."
     : !coverage.failed ? retainedEmpty ? "Checking for updates before confirming this list is still empty."
       : "Waiting for the remaining hosts before confirming this list is empty."
