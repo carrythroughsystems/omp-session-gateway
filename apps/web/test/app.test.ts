@@ -444,6 +444,7 @@ interface BrowserHarness {
   readonly unsubscribeRequests: unknown[];
   readonly subscriptionCalls: { subscribe: number; unsubscribe: number };
   readonly workerMessages: unknown[];
+  readonly appBadge: { count: number | undefined; updates: (number | undefined)[] };
   readonly replacedPaths: readonly string[];
   readonly window: FakeWindow;
   readonly localStorage: FakeStorage;
@@ -507,6 +508,7 @@ async function bootApp(options: {
   readonly workerResponse?: unknown;
   readonly workerReply?: (message: unknown) => unknown;
   readonly workerV3?: boolean;
+  readonly beforeNotificationReady?: (clock: FakeWindow) => Promise<void>;
   readonly notificationTrace?: string[];
   readonly fleetResponse?: (path: string, init: RequestInit) => Promise<Response>;
   readonly permissionResult?: NotificationPermission;
@@ -631,6 +633,7 @@ async function bootApp(options: {
     return () => { disposals.count += 1; };
   };
   const workerMessages: unknown[] = [];
+  const appBadge = { count: 0 as number | undefined, updates: [] as (number | undefined)[] };
   let hangingListRequests = 0;
   let failedListRequests = 0;
   const permissionRequests = { count: 0 };
@@ -693,7 +696,8 @@ async function bootApp(options: {
           : { type: "omp-notification-support-response", version: 2 });
         if (typeof response === "object" && response !== null && "received" in response) options.notificationTrace?.push("receipt");
         const reply = options.workerReply === undefined ? response : options.workerReply(message);
-        if (reply !== undefined) transfer[0]?.postMessage(reply);
+        if (reply instanceof Promise) void reply.then(value => { if (value !== undefined) transfer[0]?.postMessage(value); });
+        else if (reply !== undefined) transfer[0]?.postMessage(reply);
       },
     },
     pushManager,
@@ -720,7 +724,11 @@ async function bootApp(options: {
     },
     startMessages: { value(): void {} },
   });
-  const navigator = { serviceWorker, onLine: true };
+  const navigator = {
+    serviceWorker, onLine: true,
+    async setAppBadge(count?: number): Promise<void> { appBadge.count = count; appBadge.updates.push(count); },
+    async clearAppBadge(): Promise<void> { appBadge.count = 0; appBadge.updates.push(0); },
+  };
   const fetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const path = typeof input === "string" ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
     fetchPaths.push(path);
@@ -806,6 +814,7 @@ async function bootApp(options: {
 
   // app.ts bootstraps at import time, so a cache-busted test module is required for an isolated page.
   await import(`../src/app.ts?${options.suffix}`);
+  await options.beforeNotificationReady?.(window);
   await settleUntil(() => notificationButton.textContent !== "Checking background alerts…");
   if (options.initialListStatus === undefined || options.initialListStatus === 200) {
     await settleUntil(() => FakeEventSource.instances.length === 1);
@@ -841,6 +850,7 @@ async function bootApp(options: {
     unsubscribeRequests,
     subscriptionCalls,
     workerMessages,
+    appBadge,
     replacedPaths: history.replaced,
     reloads,
     window,
@@ -4644,7 +4654,12 @@ function notificationApi(initial: readonly FleetSourceStatus[]) {
         api.rows = api.rows.map(row => ({ ...row, state: "current", grantId: fleetGrantId, expiresAt: fleetExpiry() }));
         return new Response(null, { status: 204 });
       }
-      if (path.endsWith("/revoke")) return new Response(null, { status: 204 });
+      if (path.endsWith("/revoke")) {
+        api.rows = api.rows.map(row => row.grantId === undefined || !path.endsWith(`/${row.grantId}/revoke`) ? row : {
+          sourceId: row.sourceId, selected: row.selected, state: "not_enrolled",
+        });
+        return new Response(null, { status: 204 });
+      }
       if (path.endsWith("/recipient")) {
         const selected = (body.sources ?? []) as string[];
         const released = api.rows.filter(row => row.selected && !selected.includes(row.sourceId) && row.grantId !== undefined)
@@ -4666,6 +4681,437 @@ function setHostSwitch(harness: BrowserHarness, index: number, checked: boolean)
 }
 
 describe("fleet background notifications", () => {
+  test("round 2 residual: a hidden tap waits for visibility and its source refresh, then is consumed once", async () => {
+    const current = session("residual-hidden-remote", { inputRequired: true });
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const refresh = Promise.withResolvers<void>();
+    let blocked = false;
+    let snapshots = 0;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], fleetResponse: api.respond, suffix: "residual-hidden-held",
+      remoteResponse: async () => {
+        snapshots++;
+        if (blocked) await refresh.promise;
+        return Response.json({ revision: snapshots, sessions: [current] });
+      },
+    });
+    try {
+      await settleUntil(() => harness.workerMessages.some(message =>
+        (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      harness.setVisibility("hidden");
+      const before = api.calls.length;
+      blocked = true;
+      harness.notify({ version: 3, type: "attention", source: await fleetSourceBinding("remote", "https://remote.example"),
+        instanceId: current.instanceId, requestId: current.ask!.requestId });
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(api.calls).toHaveLength(before);
+      expect(harness.launchRequests).toHaveLength(0);
+      const previousSnapshots = snapshots;
+      harness.setVisibility("visible");
+      await settleUntil(() => snapshots > previousSnapshots, 1_000);
+      expect(harness.launchRequests).toHaveLength(0);
+      refresh.resolve();
+      await settleUntil(() => harness.embedCalls.length === 1, 1_000);
+      harness.setVisibility("hidden");
+      harness.setVisibility("visible");
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.launchRequests).toHaveLength(1);
+      expect(harness.embedCalls).toHaveLength(1);
+    } finally {
+      refresh.resolve();
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      harness.setVisibility("hidden");
+    }
+  });
+
+  for (const stage of ["status", "launch"] as const) {
+    test(`round 2 residual: visibility changes during the tap's ${stage} await cannot discard its launch`, async () => {
+      const current = session(`residual-visible-${stage}`, { inputRequired: true });
+      const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+      const pending = Promise.withResolvers<void>();
+      const visibilityRefresh = Promise.withResolvers<void>();
+      let armed = false;
+      let statusReads = 0;
+      let awaiting = false;
+      let blockSnapshots = false;
+      const harness = await bootApp({
+        permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+        initialSessions: [], suffix: `residual-tap-await-${stage}`,
+        fleetResponse: async (path, init) => {
+          if (armed && path.endsWith("/status") && ++statusReads === 2 && stage === "status") {
+            awaiting = true;
+            await pending.promise;
+          }
+          return await api.respond(path, init);
+        },
+        remoteResponse: async () => {
+          if (blockSnapshots) await visibilityRefresh.promise;
+          return Response.json({ revision: 1, sessions: [current] });
+        },
+        launchResponse: async (_path, init) => {
+          if (stage === "launch") { awaiting = true; await pending.promise; }
+          const body = JSON.parse(String(init.body)) as { mode: string; generation: number };
+          return Response.json({ mode: body.mode, generation: body.generation,
+            capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
+        },
+      });
+      try {
+        await settleUntil(() => harness.workerMessages.some(message =>
+          (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+        armed = true;
+        harness.notify({ version: 3, type: "attention", source: await fleetSourceBinding("remote", "https://remote.example"),
+          instanceId: current.instanceId, requestId: current.ask!.requestId });
+        await settleUntil(() => awaiting, 1_000);
+        blockSnapshots = true;
+        harness.setVisibility("hidden");
+        harness.setVisibility("visible");
+        for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+        pending.resolve();
+        await settleUntil(() => harness.embedCalls.length === 1, 1_000);
+        expect(harness.launchRequests).toHaveLength(1);
+        expect(harness.launchRequests[0]!.init.signal!.aborted).toBeFalse();
+        expect(harness.elements.statusBanner.dataset.kind).not.toBe("expired");
+      } finally {
+        pending.resolve();
+        visibilityRefresh.resolve();
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+        harness.setVisibility("hidden");
+      }
+    });
+  }
+
+  for (const stage of ["renew", "recipient"] as const) {
+    test(`round 2 residual: failed ${stage} of an unselected existing grant restores legacy mode`, async () => {
+      const api = notificationApi([{ sourceId: "remote", state: "current", selected: false, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+      const harness = await bootApp({
+        permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+        initialSessions: [], suffix: `residual-mode-existing-${stage}`,
+        fleetResponse: async (path, init) => path.endsWith(`/${stage}`)
+          ? new Response(null, { status: 503 }) : await api.respond(path, init),
+      });
+      try {
+        await settleUntil(() => harness.workerMessages.some(message =>
+          (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+        setHostSwitch(harness, 0, true);
+        await settleUntil(() => harness.elements.notificationHosts.querySelector(".notification-host-error") !== null &&
+          harness.elements.notificationHosts.querySelector("input")?.disabled === false, 1_000);
+        expect(harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-mode").at(-1))
+          .toEqual({ type: "omp-notification-mode", version: 3, fleet: false });
+        expect(api.rows[0]!.selected).toBeFalse();
+      } finally { harness.setVisibility("hidden"); }
+    });
+  }
+
+  test("round 2 residual: failed Reconnect of the sole selected host retains fleet mode", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "unauthorized", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    api.activationFailure = { status: 503, code: "source_unreachable" };
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], fleetResponse: api.respond, suffix: "residual-mode-reconnect",
+    });
+    try {
+      await settleUntil(() => harness.workerMessages.some(message =>
+        (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+      harness.elements.notificationHosts.querySelector("button")!.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.elements.notificationHosts.querySelector(".notification-host-error") !== null &&
+        harness.elements.notificationHosts.querySelector("input")?.disabled === false, 1_000);
+      expect(harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-mode").at(-1))
+        .toEqual({ type: "omp-notification-mode", version: 3, fleet: true });
+      expect(api.rows[0]!.selected).toBeTrue();
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("round 2 residual: a failed post-attempt mode reset retries on the next visibility trigger", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: false, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    let failReset = false;
+    let resets = 0;
+    let workerFleet = false;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], suffix: "residual-mode-reset-retry",
+      fleetResponse: async (path, init) => {
+        if (path.endsWith("/renew")) { failReset = true; return new Response(null, { status: 503 }); }
+        return await api.respond(path, init);
+      },
+      workerReply: message => {
+        const request = message as { type: string; version: number; fleet?: boolean };
+        if (request.type === "omp-notification-mode") {
+          if (!request.fleet && failReset && ++resets === 1) return { type: "omp-notification-mode-failed", version: 3 };
+          workerFleet = request.fleet!;
+          return { type: "omp-notification-mode-set", version: 3 };
+        }
+        return request.version === 3 ? { type: "omp-notification-support-response", version: 3, received: 0 }
+          : { type: "omp-notification-support-response", version: 2 };
+      },
+    });
+    try {
+      await settleUntil(() => harness.workerMessages.some(message =>
+        (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      setHostSwitch(harness, 0, true);
+      await settleUntil(() => failReset, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(resets).toBe(1);
+      expect(workerFleet).toBeTrue();
+      harness.setVisibility("hidden");
+      harness.setVisibility("visible");
+      await settleUntil(() => resets === 2, 1_000);
+      expect(workerFleet).toBeFalse();
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("round 2 residual: visibility status refresh cannot change worker mode during enrollment", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "not_enrolled", selected: false }]);
+    const grant = Promise.withResolvers<void>();
+    let creating = false;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], suffix: "residual-mode-enrollment-owner",
+      fleetResponse: async (path, init) => {
+        if (path.endsWith("/fleet/grants")) { creating = true; await grant.promise; }
+        return await api.respond(path, init);
+      },
+    });
+    try {
+      await settleUntil(() => harness.workerMessages.some(message =>
+        (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+      harness.elements.settingsButton.dispatchEvent(new Event("click"));
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      setHostSwitch(harness, 0, true);
+      await settleUntil(() => creating, 1_000);
+      const mark = harness.workerMessages.length;
+      const statuses = api.calls.filter(call => call.path.endsWith("/status")).length;
+      harness.setVisibility("hidden");
+      harness.setVisibility("visible");
+      await settleUntil(() => api.calls.filter(call => call.path.endsWith("/status")).length > statuses, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.workerMessages.slice(mark).filter(message =>
+        (message as { type: string }).type === "omp-notification-mode")).toHaveLength(0);
+      grant.resolve();
+      await settleUntil(() => harness.elements.notificationHosts.querySelector("input")?.checked === true &&
+        harness.elements.notificationHosts.querySelector("input")?.disabled === false, 1_000);
+    } finally {
+      grant.resolve();
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      harness.setVisibility("hidden");
+    }
+  });
+
+  test("round 2 residual: a failed fleet-mode apply stays incomplete and retries when Settings opens", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    let modes = 0;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [session("residual-mode-apply-home")], fleetResponse: api.respond, suffix: "residual-mode-apply-retry",
+      workerReply: message => {
+        const request = message as { type: string; version: number };
+        if (request.type === "omp-notification-mode") return {
+          type: ++modes === 1 ? "omp-notification-mode-failed" : "omp-notification-mode-set", version: 3,
+        };
+        return request.version === 3 ? { type: "omp-notification-support-response", version: 3, received: 0 }
+          : { type: "omp-notification-support-response", version: 2 };
+      },
+    });
+    try {
+      await settleUntil(() => modes === 1, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("Host coverage incomplete");
+      harness.elements.settingsButton.dispatchEvent(new Event("click"));
+      await settleUntil(() => modes === 2, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-mode").at(-1))
+        .toEqual({ type: "omp-notification-mode", version: 3, fleet: true });
+      expect(harness.elements.notificationHosts.querySelector("input")?.checked).toBeTrue();
+      expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("All clear");
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("round 2 residual: a recovered cold-status retry reconciles the worker", async () => {
+    const current = session("residual-cold-remote", { inputRequired: true });
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    let failed = false;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [session("residual-cold-home")], remoteSessions: [current], suffix: "residual-cold-reconcile",
+      fleetResponse: async (path, init) => {
+        if (!failed && path.endsWith("/status")) { failed = true; return new Response(null, { status: 503 }); }
+        return await api.respond(path, init);
+      },
+    });
+    try {
+      await settleUntil(() => failed, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.pendingDelays()).toContain(10_000);
+      harness.window.runTimersWithDelay(10_000);
+      await settleUntil(() => harness.elements.notificationHosts.querySelector(".notification-host-status")?.textContent === "Covered", 1_000);
+      await settleUntil(() => harness.workerMessages.some(message =>
+        (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+      expect(harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-reconcile").at(-1))
+        .toMatchObject({ pending: [{ instanceId: current.instanceId }], badge: { count: 1, complete: true } });
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("round 2 residual: selection changed during reconciliation queues a fresh second reconciliation", async () => {
+    const current = session("residual-dirty-remote", { inputRequired: true });
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const snapshot = Promise.withResolvers<void>();
+    let snapshots = 0;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], fleetResponse: api.respond, suffix: "residual-dirty-reconcile",
+      remoteResponse: async () => {
+        if (++snapshots === 2) await snapshot.promise;
+        return Response.json({ revision: snapshots, sessions: [current] });
+      },
+    });
+    try {
+      await settleUntil(() => snapshots === 2, 1_000);
+      setHostSwitch(harness, 0, false);
+      await settleUntil(() => api.rows[0]!.selected === false, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      snapshot.resolve();
+      await settleUntil(() => harness.elements.notificationHosts.querySelector("input")?.disabled === false, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      const messages = harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-reconcile");
+      expect(messages.length).toBeGreaterThanOrEqual(2);
+      expect(messages.at(-1)).toMatchObject({ fresh: ["local"], pending: [], badge: { count: 0, complete: true } });
+    } finally { snapshot.resolve(); harness.setVisibility("hidden"); }
+  });
+
+  for (const reset of ["404", "deselection"] as const) {
+    for (const localCount of [0, 2]) {
+      test(`round 2 residual: acknowledged ${reset} legacy mode replaces the fleet badge with ${localCount} local asks`, async () => {
+        const current = session("residual-badge-remote", { inputRequired: true });
+        const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+        const harness = await bootApp({
+          permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+          initialSessions: [session("residual-badge-home-1", { inputRequired: localCount > 0 }),
+            session("residual-badge-home-2", { inputRequired: localCount > 0 }),
+            session("residual-badge-view-only", { inputRequired: true, canControl: false })],
+          remoteSessions: [current], fleetResponse: api.respond, suffix: `residual-badge-${reset}-${localCount}`,
+        });
+        try {
+          await settleUntil(() => harness.workerMessages.some(message =>
+            (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+          harness.appBadge.count = localCount + 1;
+          const before = harness.appBadge.updates.length;
+          if (reset === "404") { api.unsupported = true; harness.elements.settingsButton.dispatchEvent(new Event("click")); }
+          else setHostSwitch(harness, 0, false);
+          await settleUntil(() => api.calls.filter(call => call.path.endsWith("/status")).length >= (reset === "404" ? 2 : 3), 1_000);
+          for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+          expect(harness.appBadge.updates.length).toBeGreaterThan(before);
+          expect(harness.appBadge.count).toBe(localCount);
+        } finally { harness.setVisibility("hidden"); }
+      });
+    }
+  }
+
+  test("round 2 residual: a v3 reply delayed beyond two seconds stays unknown until the five-second bound", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const support = Promise.withResolvers<unknown>();
+    let supports = 0;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [session("residual-support-home")], remoteSessions: [], fleetResponse: api.respond,
+      suffix: "residual-support-delayed",
+      workerReply: message => {
+        const request = message as { type: string; version: number };
+        if (request.version === 2) return { type: "omp-notification-support-response", version: 2 };
+        if (request.type === "omp-notification-mode") return { type: "omp-notification-mode-set", version: 3 };
+        if (++supports === 1) return support.promise;
+        return { type: "omp-notification-support-response", version: 3, received: 0 };
+      },
+      beforeNotificationReady: async clock => {
+        await settleUntil(() => supports === 1, 1_000);
+        clock.runTimersWithDelay(2_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+        try {
+          const title = (document as unknown as FakeDocument).querySelector("#session-list")!.querySelector(".all-clear-title")?.textContent;
+          expect(title).toBe("Host coverage incomplete");
+          expect(clock.pendingDelays()).toContain(5_000);
+        } finally { support.resolve({ type: "omp-notification-support-response", version: 3, received: 0 }); }
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      },
+    });
+    try {
+      await settleUntil(() => harness.elements.notificationHosts.querySelector(".notification-host-status")?.textContent === "Covered", 1_000);
+      expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("All clear");
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("round 2 residual: a timed-out v3 reply is unknown and retried by visibility", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    let supports = 0;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [session("residual-support-timeout-home")], remoteSessions: [], fleetResponse: api.respond,
+      suffix: "residual-support-timeout",
+      workerReply: message => {
+        const request = message as { type: string; version: number };
+        if (request.version === 2) return { type: "omp-notification-support-response", version: 2 };
+        if (request.type === "omp-notification-mode") return { type: "omp-notification-mode-set", version: 3 };
+        if (++supports === 1) return undefined;
+        return { type: "omp-notification-support-response", version: 3, received: 0 };
+      },
+      beforeNotificationReady: async clock => {
+        await settleUntil(() => supports === 1, 1_000);
+        clock.runTimersWithDelay(2_000);
+        clock.runTimersWithDelay(5_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      },
+    });
+    try {
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("Host coverage incomplete");
+      expect(supports).toBe(1);
+      expect(api.calls).toHaveLength(0);
+      harness.setVisibility("hidden");
+      harness.setVisibility("visible");
+      await settleUntil(() => harness.elements.notificationHosts.querySelector(".notification-host-status")?.textContent === "Covered", 1_000);
+      expect(supports).toBeGreaterThan(1);
+      expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("All clear");
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("round 2 residual: a warm v3 support timeout withdraws complete coverage until its next reply", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    let drop = false;
+    let supports = 0;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [session("residual-support-warm-home")], remoteSessions: [], fleetResponse: api.respond,
+      suffix: "residual-support-warm-timeout",
+      workerReply: message => {
+        const request = message as { type: string; version: number };
+        if (request.version === 2) return { type: "omp-notification-support-response", version: 2 };
+        if (request.type === "omp-notification-mode") return { type: "omp-notification-mode-set", version: 3 };
+        supports++;
+        return drop ? undefined : { type: "omp-notification-support-response", version: 3, received: 0 };
+      },
+    });
+    try {
+      await settleUntil(() => harness.workerMessages.some(message =>
+        (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      const before = supports;
+      drop = true;
+      harness.elements.settingsButton.dispatchEvent(new Event("click"));
+      await settleUntil(() => supports > before, 1_000);
+      harness.window.runTimersWithDelay(2_000);
+      harness.window.runTimersWithDelay(5_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("Host coverage incomplete");
+      drop = false;
+      harness.setVisibility("hidden");
+      harness.setVisibility("visible");
+      await settleUntil(() => harness.elements.sessionList.querySelector(".all-clear-title")?.textContent === "All clear", 1_000);
+      expect(supports).toBeGreaterThan(before + 1);
+    } finally { harness.setVisibility("hidden"); }
+  });
+
   for (const failure of ["lost", "storage"] as const) {
     test(`focused remediation: ${failure} fleet-mode acknowledgment prevents every grant mutation`, async () => {
       const api = notificationApi([{ sourceId: "remote", state: "not_enrolled", selected: false }]);
@@ -4718,14 +5164,16 @@ describe("fleet background notifications", () => {
       try {
         await settleUntil(() => harness.elements.notificationHosts.querySelectorAll("input").length === 1, 1_000);
         setHostSwitch(harness, 0, true);
-        await settleUntil(() => harness.elements.notificationHosts.querySelector(".notification-host-error")?.textContent === "source_unreachable", 1_000);
+        await settleUntil(() => harness.elements.notificationHosts.querySelector(".notification-host-error")?.textContent === "source_unreachable" &&
+          harness.elements.notificationHosts.querySelector("input")?.disabled === false, 1_000);
         expect(api.calls.filter(call => call.path.endsWith("/revoke")).map(call => call.path)).toEqual([
           `/api/v1/push/fleet/grants/${fleetGrantId}/revoke`,
           `https://remote.example/api/v1/notification-grants/${fleetGrantId}/revoke`,
         ]);
         expect(harness.elements.notificationHosts.querySelector(".notification-host")?.dataset.state).toBe("not_enrolled");
         expect(harness.elements.notificationHosts.querySelector("input")?.checked).toBeFalse();
-        expect(harness.workerMessages.at(-1)).toEqual({ type: "omp-notification-mode", version: 3, fleet: false });
+        expect(harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-mode").at(-1))
+          .toEqual({ type: "omp-notification-mode", version: 3, fleet: false });
       } finally { harness.setVisibility("hidden"); }
     });
   }
@@ -4768,8 +5216,8 @@ describe("fleet background notifications", () => {
     });
   }
 
-  for (const becomingVisible of [false, true]) {
-    test(`focused remediation: a hidden remote tap survives ${becomingVisible ? "a visibility transition" : "remaining hidden"}`, async () => {
+  for (const visibilityDuringRefresh of [false, true]) {
+    test(`focused remediation: a hidden remote tap waits for focus and survives ${visibilityDuringRefresh ? "another visibility transition" : "its refresh"}`, async () => {
       const current = session("hidden-current-remote", { inputRequired: true });
       const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
       const gate = Promise.withResolvers<Response>();
@@ -4777,7 +5225,7 @@ describe("fleet background notifications", () => {
       const signals: AbortSignal[] = [];
       const harness = await bootApp({
         permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
-        initialSessions: [], fleetResponse: api.respond, suffix: `fleet-hidden-tap-${becomingVisible}`,
+        initialSessions: [], fleetResponse: api.respond, suffix: `fleet-hidden-tap-${visibilityDuringRefresh}`,
         remoteResponse: async init => {
           if (block) { signals.push(init.signal!); return (await gate.promise).clone(); }
           return Response.json({ revision: 1, sessions: [current] });
@@ -4790,8 +5238,12 @@ describe("fleet background notifications", () => {
         block = true;
         harness.notify({ version: 3, type: "attention", source: await fleetSourceBinding("remote", "https://remote.example"),
           instanceId: current.instanceId, requestId: current.ask!.requestId });
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+        expect(signals).toHaveLength(0);
+        expect(harness.launchRequests).toHaveLength(0);
+        harness.setVisibility("visible");
         await settleUntil(() => signals.length > 0, 1_000);
-        if (becomingVisible) harness.setVisibility("visible");
+        if (visibilityDuringRefresh) { harness.setVisibility("hidden"); harness.setVisibility("visible"); }
         expect(signals[0]!.aborted).toBeFalse();
         gate.resolve(Response.json({ revision: 2, sessions: [current] }));
         await settleUntil(() => harness.launchRequests.length === 1, 1_000);

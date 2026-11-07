@@ -3,7 +3,9 @@
   page; configured host order breaks ties, and that in-memory order resets after a cold load.
   Badge reconciliation keeps fresh hosts usable while a notification's launch is in flight.
   Unsupported or unselected fleets do not poll in the directory; Hold and Requeue stay device-local.
-  Enrollment requires durable worker opt-in and cleans up failed grants at both hosts. Legacy resets
-  retry until acknowledged, and unknown coverage retries without claiming All clear. Badge counts
-  exclude withdrawn hosts; Reconnect replaces rejected grants. Alert taps work before focus and keep
-  the selected directory scope.
+  Enrollment owns worker mode until it finishes, then follows actual device selection even on
+  failure; unacknowledged mode changes retry on the next foreground trigger. Legacy resets replace
+  the fleet badge with local asks. Unknown worker support and coverage never claim All clear;
+  recovered or superseded observations reconcile again. Badge counts exclude withdrawn hosts;
+  Reconnect replaces rejected grants. Alert taps wait for focus and its refresh, keep their source
+  stable through launch, and preserve the selected directory scope.
