@@ -23,6 +23,10 @@ import {
   parseFleetGrantActionRequest,
   parseSourceGrantRequest,
   type SourceGrantRequest,
+  parseFleetStatusRequest,
+  parseFleetGrantCreateRequest,
+  parseFleetRecipientRequest,
+  parseFleetRecipientRemoveRequest,
 } from "@omp-session-gateway/protocol";
 import {
   authorizeHttpRequest,
@@ -37,6 +41,7 @@ import type { GatewayConfig } from "./config.ts";
 import { SafeLogger } from "./logger.ts";
 import { SessionRegistry } from "./registry.ts";
 import type { PushService } from "./push.ts";
+import { FleetCoordinatorProblem, type FleetCoordinator } from "./fleet-coordinator.ts";
 import { SessionCreationProblem, type SessionCreationService } from "./tern-creation.ts";
 import { FleetSourceProblem, type FleetSourceService } from "./fleet-source.ts";
 
@@ -224,6 +229,7 @@ export function createHttpHandler(options: {
   readonly staticAssets: StaticAssetStore;
   readonly pushService?: PushService;
   readonly fleetSourceService?: FleetSourceService;
+  readonly fleetCoordinator?: FleetCoordinator;
   readonly creationService?: Pick<SessionCreationService, "options" | "accept" | "status">;
   readonly logger?: SafeLogger;
   readonly readinessToken?: string;
@@ -506,6 +512,49 @@ export function createHttpHandler(options: {
     }
 
 
+    // Coordinator routes are deliberately same-origin and isolated from source grant CORS.
+    if (url.pathname.startsWith("/api/v1/push/fleet/")) {
+      const coordinator = options.fleetCoordinator;
+      if (coordinator === undefined) return problem(404, "not_found", "Not found");
+      const action = /^\/api\/v1\/push\/fleet\/grants\/([^/]+)\/(activate|revoke)$/u.exec(url.pathname);
+      const supported = request.method === "POST" && (
+        url.pathname === "/api/v1/push/fleet/status" || url.pathname === "/api/v1/push/fleet/grants" ||
+        (action !== null && SESSION_CREATION_UUID_PATTERN.test(action[1] ?? ""))
+      ) || url.pathname === "/api/v1/push/fleet/recipient" && (request.method === "PUT" || request.method === "DELETE");
+      if (!supported) return problem(404, "not_found", "Not found");
+      if (!requestHasValidMutationContext(request, config.http.publicOrigin)) return problem(403, "forbidden", "Forbidden");
+      if (request.headers.get("Content-Type")?.toLowerCase() !== "application/json") return problem(415, "unsupported_media_type", "Expected application/json");
+      if (!limiter.allow(`${authorization.identityKey}\0push`, now())) return problem(429, "rate_limited", "Too many requests");
+      try {
+        const body = parseJsonFrame(await readBoundedBody(request, MAX_FLEET_REQUEST_BYTES));
+        const owner = authorization.identityKey;
+        if (url.pathname === "/api/v1/push/fleet/status") {
+          const parsed = parseFleetStatusRequest(body);
+          return Response.json(await coordinator.status(owner, parsed.endpoint));
+        }
+        if (url.pathname === "/api/v1/push/fleet/grants") {
+          const parsed = parseFleetGrantCreateRequest(body);
+          return Response.json(await coordinator.createGrant(owner, parsed.sourceId), { status: 201 });
+        }
+        if (action !== null) {
+          parseFleetGrantActionRequest(body);
+          if (action[2] === "activate") await coordinator.activate(owner, action[1]!);
+          else await coordinator.revoke(owner, action[1]!);
+          return new Response(null, { status: 204 });
+        }
+        if (request.method === "PUT") {
+          const parsed = parseFleetRecipientRequest(body);
+          return Response.json(await coordinator.select(owner, parsed.endpoint, parsed.sources));
+        }
+        const parsed = parseFleetRecipientRemoveRequest(body);
+        return Response.json(await coordinator.select(owner, parsed.endpoint, []));
+      } catch (error) {
+        if (error instanceof ProtocolValidationError) return problem(400, "bad_request", "Invalid request");
+        if (error instanceof FleetCoordinatorProblem) return problem(error.status, error.code, "Fleet notifications unavailable");
+        return problem(503, "fleet_unavailable", "Fleet notifications unavailable");
+      }
+    }
+
     const launchMatch = /^\/api\/v1\/sessions\/([^/]{1,384})\/launch$/u.exec(url.pathname);
     if (launchMatch !== null && request.method === "POST") {
       const encodedInstanceId = launchMatch[1];
@@ -608,6 +657,7 @@ export function startHttpServer(options: {
   readonly staticAssets: StaticAssetStore;
   readonly pushService?: PushService;
   readonly fleetSourceService?: FleetSourceService;
+  readonly fleetCoordinator?: FleetCoordinator;
   readonly creationService?: Pick<SessionCreationService, "options" | "accept" | "status">;
   readonly logger?: SafeLogger;
   readonly readinessToken: string;

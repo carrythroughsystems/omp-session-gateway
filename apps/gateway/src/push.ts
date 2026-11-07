@@ -11,6 +11,8 @@ import {
   type PushUnsubscribeRequest,
   type SessionEvent,
   type SessionMetadata,
+  type FleetPushMessage,
+  parseFleetPushMessage,
   parseJsonFrame,
   parsePushSubscriptionRequest,
 } from "@omp-session-gateway/protocol";
@@ -46,6 +48,17 @@ interface VapidKeyPair {
 interface StoredPushSubscription extends BrowserPushSubscription {
   readonly identityKey: string;
   readonly detailLevel: PushDetailLevel;
+}
+
+export interface FleetPushRecipient {
+  readonly endpoint: string;
+  readonly owner: string;
+  readonly detailLevel: PushDetailLevel;
+}
+
+export interface FleetPushAdapter {
+  includes(owner: string, endpoint: string): boolean;
+  subscriptionsChanged(): void;
 }
 
 interface PushState {
@@ -241,6 +254,9 @@ export class PushService {
   #unsubscribeRegistry: (() => void) | undefined;
   #unsubscribeActivityStops: (() => void) | undefined;
   #stopped = false;
+  #fleet: FleetPushAdapter | undefined;
+  #sending = 0;
+  readonly #sendWaiters: Array<() => void> = [];
 
   private constructor(options: {
     config: GatewayConfig;
@@ -288,6 +304,57 @@ export class PushService {
     let subscriptionCount = 0;
     for (const subscription of this.#subscriptions) if (this.#identityAllowed(subscription.identityKey)) subscriptionCount++;
     return { version: PUSH_API_VERSION, applicationServerKey: this.#vapid.publicKey, subscriptionCount };
+  }
+
+  attachFleet(adapter: FleetPushAdapter): void {
+    this.#fleet = adapter;
+  }
+
+  fleetRecipients(): readonly FleetPushRecipient[] {
+    return this.#subscriptions.filter(subscription => this.#identityAllowed(subscription.identityKey)).map(subscription => ({
+      endpoint: subscription.endpoint, owner: subscription.identityKey, detailLevel: subscription.detailLevel,
+    }));
+  }
+
+  fleetLocalBody(session: SessionMetadata, detailLevel: PushDetailLevel, label: string): string | undefined {
+    if (detailLevel === "private") return undefined;
+    const body = sessionNotificationBody(session, "session");
+    return [...(body === undefined ? label : `${label} · ${body}`)].slice(0, 256).join("");
+  }
+
+  /** Recheck both subscription ownership and the coordinator's authority after acquiring a send slot. */
+  async sendFleet(owner: string, endpoint: string, message: FleetPushMessage, authorized: () => boolean): Promise<void> {
+    const payload = JSON.stringify(parseFleetPushMessage(message));
+    await this.#withSendSlot(async () => {
+      const subscription = this.#subscriptions.find(candidate => candidate.endpoint === endpoint && candidate.identityKey === owner);
+      if (subscription === undefined || !this.#identityAllowed(owner) || !authorized()) return;
+      try {
+        await this.#transport.send(subscription, payload, {
+          subject: VAPID_SUBJECT, publicKey: this.#vapid.publicKey, privateKey: this.#vapid.privateKey, ttlSeconds: PUSH_TTL_SECONDS,
+        });
+      } catch (error) {
+        const code = statusCode(error);
+        this.#logger.event("warn", "push.send_failed", { status: code, fleet: true });
+        if (code === 404 || code === 410) {
+          await this.#mutateSubscriptions(current => current.filter(candidate => !isSameDeliveryTarget(candidate, subscription)));
+        }
+      }
+    });
+  }
+
+  async #withSendSlot(send: () => Promise<void>): Promise<void> {
+    if (this.#sending >= 8) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      this.#sendWaiters.push(resolve);
+      await promise;
+    }
+    else this.#sending++;
+    try { await send(); }
+    finally {
+      const next = this.#sendWaiters.shift();
+      if (next === undefined) this.#sending--;
+      else next();
+    }
   }
 
   async subscribe(identityKey: string, request: PushSubscriptionRequest): Promise<PushDetailLevel> {
@@ -506,12 +573,13 @@ export class PushService {
     requestAlias = 0,
   ): Promise<void> {
     const subscriptions = (selectedSubscriptions ?? this.#subscriptions).filter(subscription =>
-      this.#identityAllowed(subscription.identityKey),
+      this.#identityAllowed(subscription.identityKey) && !this.#fleet?.includes(subscription.identityKey, subscription.endpoint),
     );
     if (subscriptions.length === 0) return;
     const stale: StoredPushSubscription[] = [];
     await Promise.all(
-      subscriptions.map(async subscription => {
+      subscriptions.map(subscription => this.#withSendSlot(async () => {
+        if (!this.#identityAllowed(subscription.identityKey) || this.#fleet?.includes(subscription.identityKey, subscription.endpoint)) return;
         const message = messageFor(subscription);
         const start = performance.now();
         this.#logger.event("info", "push.send_started", { sequence, request_alias: requestAlias, attention: message.type === "attention", clear: message.type === "clear",
@@ -529,7 +597,7 @@ export class PushService {
           this.#logger.event("warn", "push.send_failed", { sequence, request_alias: requestAlias, elapsed_ms: performance.now() - start, status: code });
           if (code === 404 || code === 410) stale.push(subscription);
         }
-      }),
+      })),
     );
     if (stale.length > 0) {
       let removed = 0;
@@ -552,6 +620,7 @@ export class PushService {
       const state: PushState = { version: PUSH_STATE_VERSION, vapid: this.#vapid, subscriptions: next };
       await writePrivateTextFile(this.#path, `${JSON.stringify(state, null, 2)}\n`);
       this.#subscriptions = next;
+      this.#fleet?.subscriptionsChanged();
     });
     this.#mutationTail = operation.catch(() => undefined);
     await operation;

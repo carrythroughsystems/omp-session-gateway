@@ -124,6 +124,14 @@ describe("fleet push messages", () => {
     expect(parseFleetPushMessage({ ...local, body: "MacBook · Fix payment retry · checkout-service" }, labels).type).toBe("attention");
   });
 
+  test("configured-label validation permits retired-binding clears but never retired-binding alerts", () => {
+    const labels = new Map([[binding, "Studio"]]);
+    const { body: _body, title: _title, requestId: _request, ...session } = attention;
+    expect(parseFleetPushMessage({ ...session, source: otherBinding, type: "clear", requestId }, labels).type).toBe("clear");
+    reject(() => parseFleetPushMessage({ ...session, source: otherBinding, type: "attention", requestId, title: "OMP session needs attention" }, labels));
+    reject(() => parseFleetPushMessage({ ...session, source: otherBinding, type: "activity_stop", title: "OMP session activity stopped" }, labels));
+  });
+
   test("reject malformed ordering, badge, and binding fields", () => {
     reject(() => parseFleetPushMessage({ ...attention, seq: { epoch: 0, n: 1 } }));
     reject(() => parseFleetPushMessage({ ...attention, seq: { epoch: 1, n: 0 } }));

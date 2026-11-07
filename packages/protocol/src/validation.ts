@@ -1037,8 +1037,9 @@ function fleetBody(record: JsonRecord, instanceId: string, remoteLabels?: Readon
 
 /**
  * A fleet push for one recipient: content-free, capability-free, and at most 3 KiB of JSON. The
- * coordinator passes `remoteLabels` before sending, so a remote message must name a configured
- * binding and carry exactly that source's label; the worker, which has no configuration, checks shape.
+ * coordinator passes `remoteLabels` before sending, so a remote alert must name a configured
+ * binding and carry exactly that source's label. Clears may name retired bindings for restart
+ * reconciliation; the worker, which has no configuration, checks shape.
  */
 export function parseFleetPushMessage(value: unknown, remoteLabels?: ReadonlyMap<string, string>): FleetPushMessage {
   const record = boundedRecord(value, MAX_FLEET_PUSH_BYTES);
@@ -1053,7 +1054,8 @@ export function parseFleetPushMessage(value: unknown, remoteLabels?: ReadonlyMap
     seq: parseFleetSequence(record.seq),
     badge: parseFleetBadge(record.badge),
   } as const;
-  if (remoteLabels !== undefined && session.source !== undefined && !remoteLabels.has(session.source)) throw new ProtocolValidationError();
+  if ((record.type === "attention" || record.type === "activity_stop") &&
+      remoteLabels !== undefined && session.source !== undefined && !remoteLabels.has(session.source)) throw new ProtocolValidationError();
   if (record.type === "attention") {
     requireExactKeys(record, [...common, "requestId", "title"], ["source", "body"]);
     if (record.title !== "OMP session needs attention") throw new ProtocolValidationError();
