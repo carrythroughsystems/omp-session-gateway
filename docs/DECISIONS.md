@@ -946,6 +946,45 @@ published v0.7.6 remains qualified on v18.8.9.
 
 ---
 
+**Engineering baseline update (2026-11-07):** Accept published mainline v18.18.0
+(`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, tree `cc847a53faf634167bde0ae8c12cb1d6ef38a412`)
+as the host engineering pin, with registry v1 and minimum host `18.1.20` unchanged.
+`scripts/upstream-pins.ts` derived every pin from official npm tarballs after verifying registry
+integrity; independent measurements reproduced both native tarball and binary hashes. The
+published agent requires Bun `>=1.4.4`, so the gateway's Bun `1.4.4` pin is unchanged.
+Relative to v18.17.0, the complete `packages/coding-agent/src/collab`,
+`packages/collab-web`, and `crates/pi-natives/src/ipc` trees, collaboration commands,
+extension UI controller, `modes/types.ts`, `docs/collab.md`, `docs/extensions.md`, and
+`packages/wire/src/index.ts` are byte-identical. Discovery files, socket paths, registry
+queries, relay framing, and `collab.autoStart` therefore retain the reviewed contract.
+
+Upstream
+[`packages/wire/src/shell-trace.ts`](https://github.com/can1357/oh-my-pi/blob/b5a6b2f7e5b6606b6562e678ead83f21738f34a0/packages/wire/src/shell-trace.ts)
+now accepts `ShellTraceBytes = string | number[]` for non-UTF-8 run bytes in bash
+`details.trace`: argv, assignments, redirection targets, unit source, and diagnostics/history.
+The current embedded v18.12.6 client neither imports the shell-trace validator nor renders the
+trace; it preserves arrays through the unchanged JSON/AES codec and retains its bash command,
+text, images, and status badges. The residual gap is shell visualization, a presentation-only
+limitation rather than an observed transport failure. Bash results additionally stamp
+`details.cwd` / `cdSeparator` and omit traces when `display.shellVisualization` is disabled;
+write results can add `details.touchesNoFiles`. The current client ignores these additive
+details and still displays the original bash command, including any leading `cd`.
+The upstream codec now uses the pure `asStrictBytes` helper instead of its local `asStrict`;
+their whole-buffer fast path and copy fallback are equivalent. No codec runtime incompatibility
+was found. Keep the embedded source and npm wire pin at v18.12.6 in this host-only change;
+the independent client refresh owns source/helper adoption.
+
+Exact-version canary run
+[42337262675](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42337262675)
+passed on 2026-11-07 for stock OMP 18.18.0 at gateway
+`9a3388fd7a96342b1e31989305bf68f6d2958234`: all eleven Linux stages and eight supported
+Windows stages, with `new-generation`, `fork`, and `branch-rewind` skipped by design on Windows.
+This is Tested evidence only and does not exercise non-UTF-8 shell-trace rendering.
+No candidate or qualification is claimed for v18.18.0; published v0.9.1 remains qualified on
+v18.17.0, and its release-generated matrix is unchanged.
+
+---
+
 **Engineering baseline update (2026-11-06):** Accept published mainline v18.17.0
 (`75e7801e247d4e3263439d4cc08ccad60dc64bdd`, tree `e909b5cab080856f64d6d8629ee61be22866a3e5`)
 as the host engineering pin (#559), with registry v1 and minimum host `18.1.20` unchanged.

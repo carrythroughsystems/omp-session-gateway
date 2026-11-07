@@ -3871,6 +3871,44 @@ This is not a new release, native-device qualification, signed-candidate result,
 Published v0.8.0 and all historical records below retain their original evidence. Rolling back
 to v0.8.0 also restores its v18.4.2 embedded client; the two trees no longer share client bytes.
 
+## Engineering baseline v18.18.0 — source pins and canary
+
+On 2026-11-07, `scripts/upstream-pins.ts` derived stock OMP v18.18.0 source pin
+`b5a6b2f7e5b6606b6562e678ead83f21738f34a0` and tree
+`cc847a53faf634167bde0ae8c12cb1d6ef38a412` into `UPSTREAM.lock.json`, plus the Darwin arm64
+native hashes (tarball `224c63e88de989a6845ee44d65ff720e767f830873e7ffbb567cc23dfb229ae4`,
+`pi_natives.darwin-arm64.node` binary
+`2145111837cbd80379249b7709bb482ad379620e6f438f30c8037b25137f8bc0`) and Windows x64 baseline
+native hashes (tarball `aff055796866fa83519f455ac1c373d31b4fdc2f3ba8a3642d30a71c1a972536`,
+`pi_natives.win32-x64-baseline.node` binary
+`c2a36754b0032168bfa94146917c6f4936c19f5e4b1b414387c57786fd13ffaf` in
+`scripts/windows-qualification-pins.json`). Independent downloads reproduced these hashes after
+matching each registry sha512 integrity and sha1 shasum. The installable agent reports
+`omp/18.18.0` and requires Bun `>=1.4.4`; gateway Bun stays `1.4.4`.
+
+Compared with v18.17.0, the complete collaboration, collab-web, and native IPC trees,
+collaboration commands, extension UI controller, `modes/types.ts`, `docs/collab.md`,
+`docs/extensions.md`, and `packages/wire/src/index.ts` are byte-identical. Registry v1,
+discovery/query, relay framing, and `collab.autoStart` are unchanged. The shell-trace wire
+types now allow `string | number[]` for non-UTF-8 run bytes in bash `details.trace`. The current
+v18.12.6 embedded client preserves the JSON arrays but ignores trace visualization, retaining
+its command, text, images, and status badges. It also ignores additive bash `cwd` /
+`cdSeparator` and write `touchesNoFiles` details. The upstream codec's shared `asStrictBytes`
+helper and the embedded codec's local `asStrict` have equivalent byte-buffer handling; no
+runtime decoding incompatibility was found. Client source, helper, and npm wire refresh
+remain a separate change.
+
+Exact-version canary run
+[42337262675](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42337262675)
+passed on 2026-11-07 for stock OMP 18.18.0 at gateway
+`9a3388fd7a96342b1e31989305bf68f6d2958234`: all eleven Linux stages (`prepare`, `publish`,
+`snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`,
+`continue`, `unregister`) and eight supported Windows stages, with `new-generation`, `fork`,
+and `branch-rewind` skipped by design on Windows. This is Tested evidence, not non-UTF-8
+shell-trace rendering proof or qualification. No candidate, campaign, or platform qualification
+is claimed for v18.18.0; published v0.9.1 retains its v18.17.0 qualification and the published
+matrix above is unchanged.
+
 ## Engineering baseline v18.17.0 — source pins only
 
 On 2026-11-06 (#559), `scripts/upstream-pins.ts` derived the stock OMP v18.17.0 source pin
