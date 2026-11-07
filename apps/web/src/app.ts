@@ -246,7 +246,8 @@ let collabShellDisposedOnPageHide = false;
 let disposedShellResume: DisposedShellResume | undefined;
 let currentNotificationDetail: PushDetailLevel = "session";
 let notificationWorkerV3 = false;
-let fleetNotificationsOffered = false;
+let fleetNotificationsOffered: boolean | undefined;
+let notificationConfigSignature: string | undefined;
 let fleetNotificationRows: readonly FleetSourceStatus[] = [];
 const fleetNotificationErrors = new Map<string, string>();
 const fleetNotificationBusy = new Set<string>();
@@ -336,8 +337,9 @@ function setNotificationControl(state: NotificationControlState): void {
 function openAlerts(): void {
   if (creation.isActive) cancelLaunch();
   creation.cancel("competing");
-  tray.open({ id: "alerts", title: "Background alerts", tone: "neutral", body: alertsPanel });
-  if (notificationState === "enabled") void reconcileFleetNotifications();
+  tray.open({ id: "alerts", title: "Background alerts", tone: "neutral", body: alertsPanel },
+    { onClose: scheduleFleetStatusRefresh });
+  if (notificationState === "enabled") void reconcileFleetNotifications(true);
 }
 
 /** A missing record is fresh; malformed or inaccessible storage never forces an introduction. */
@@ -413,7 +415,11 @@ function firstRunPanel(step: Exclude<FirstRunStep, "done">): TrayPanel {
     title: step === "connected" ? "Connected" : step === "alerts" ? "Background alerts" : "View or Control",
     tone: "neutral", body, actions: [next],
     ...(step === "connected" ? { leadingLabel: "Skip introduction" } : {}),
-    onShow: () => writeFirstRunStep(step),
+    onShow: () => {
+      writeFirstRunStep(step);
+      if (step === "alerts" && notificationState === "enabled") void reconcileFleetNotifications(true);
+      else scheduleFleetStatusRefresh();
+    },
   };
 }
 
@@ -426,7 +432,10 @@ function maybeStartFirstRun(): void {
   firstRunStarted = true;
   const parents = step === "connected" ? [] : [firstRunPanel("connected")];
   if (step === "modes") parents.push(firstRunPanel("alerts"));
-  tray.open(firstRunPanel(step), { parents, onClose: () => writeFirstRunStep("done") });
+  tray.open(firstRunPanel(step), { parents, onClose: () => {
+    writeFirstRunStep("done");
+    scheduleFleetStatusRefresh();
+  } });
 }
 
 function isNotificationSupportResponse(value: unknown): boolean {
@@ -572,7 +581,39 @@ async function releaseFleetGrants(released: readonly { sourceId: string; grantId
   }));
 }
 
-async function refreshFleetNotifications(renew = true): Promise<void> {
+function notificationSettingsOpen(): boolean {
+  return trayHost.open && !trayHost.matches(".tray-closing") &&
+    (tray.id === "alerts" || tray.id === "detail" || tray.id === "first-run-alerts");
+}
+
+function shouldRefreshFleetStatus(probe = false): boolean {
+  return probe || fleetNotificationsOffered === undefined ||
+    (fleetNotificationsOffered && (fleetNotificationRows.some(row => row.selected) || notificationSettingsOpen()));
+}
+
+function scheduleFleetStatusRefresh(): void {
+  if (fleetStatusTimer !== undefined) window.clearTimeout(fleetStatusTimer);
+  fleetStatusTimer = undefined;
+  if (notificationState !== "enabled" || document.visibilityState !== "visible" || !notificationWorkerV3 ||
+    fleetNotificationsOffered !== true || !shouldRefreshFleetStatus()) return;
+  fleetStatusTimer = window.setTimeout(() => {
+    fleetStatusTimer = undefined;
+    if (notificationState === "enabled" && document.visibilityState === "visible" &&
+      fleetNotificationsOffered === true && shouldRefreshFleetStatus()) void refreshFleetNotifications();
+  }, 10_000);
+}
+
+/** An unsupported coordinator is probed again only after configuration changes or Settings opens. */
+function observeNotificationConfig(config: Awaited<ReturnType<typeof loadClientConfig>>): boolean {
+  const signature = JSON.stringify(config ?? null);
+  if (notificationConfigSignature === signature) return false;
+  notificationConfigSignature = signature;
+  if (fleetNotificationsOffered === false) fleetNotificationsOffered = undefined;
+  return true;
+}
+
+async function refreshFleetNotifications(renew = true, probe = false): Promise<void> {
+  if (!probe && fleetNotificationsOffered === false) return;
   if (fleetStatusRequest !== undefined) return await fleetStatusRequest;
   fleetStatusRequest = (async () => {
     const subscription = await notificationRegistration?.pushManager.getSubscription();
@@ -605,11 +646,7 @@ async function refreshFleetNotifications(renew = true): Promise<void> {
     } finally {
       renderNotificationHosts();
       render();
-      if (fleetStatusTimer !== undefined) window.clearTimeout(fleetStatusTimer);
-      fleetStatusTimer = undefined;
-      if (notificationState === "enabled" && document.visibilityState === "visible" && notificationWorkerV3) {
-        fleetStatusTimer = window.setTimeout(() => { fleetStatusTimer = undefined; void refreshFleetNotifications(); }, 10_000);
-      }
+      scheduleFleetStatusRefresh();
     }
   })();
   try { await fleetStatusRequest; } finally { fleetStatusRequest = undefined; }
@@ -660,14 +697,14 @@ async function changeNotificationHost(source: FleetSource, enabled: boolean): Pr
   }
 }
 
-async function reconcileFleetNotifications(): Promise<void> {
-  if (!notificationWorkerV3 || notificationState !== "enabled") return;
+async function reconcileFleetNotifications(probe = false): Promise<void> {
+  if (!notificationWorkerV3 || notificationState !== "enabled" || !shouldRefreshFleetStatus(probe)) return;
   if (fleetReconciliation !== undefined) return await fleetReconciliation;
   fleetReconciliation = (async () => {
     // Capture first. Never reuse a snapshot request started before this worker reply.
     const received = await notificationReceiptCount();
     if (received === undefined) return;
-    await refreshFleetNotifications();
+    await refreshFleetNotifications(true, probe);
     const selected = fleetNotificationRows.filter(row => row.selected);
     if (!fleetNotificationsOffered || selected.length === 0) return;
     const fresh: string[] = [];
@@ -1519,8 +1556,10 @@ function renderFleetStatus(): void {
 }
 
 async function initializeFleet(): Promise<void> {
+  let notificationConfigChanged = false;
   try {
     const config = await loadClientConfig(location.origin);
+    notificationConfigChanged = observeNotificationConfig(config);
     if (config !== undefined) {
       // Identity is already origin-bound. Keep in-flight creation intents on this same source.
       localSource.label = config.local.label;
@@ -1551,6 +1590,7 @@ async function initializeFleet(): Promise<void> {
   renderNotificationHosts();
   for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
   renderFleetStatus();
+  if (notificationConfigChanged) void reconcileFleetNotifications();
 }
 
 function elapsedLabel(startedAt: number): string {
@@ -3562,9 +3602,10 @@ async function resolvePendingNotificationRoute(): Promise<void> {
       try {
         // A warm page's bootstrap configuration may predate a target removal or origin change.
         const config = await loadClientConfig(location.origin);
+        if (observeNotificationConfig(config)) void reconcileFleetNotifications();
         const target = config?.targets.find(target => target.id === source.id);
         // This binding was derived with fleetSourceBinding; require those exact inputs still.
-        if (target === undefined || target.origin !== source.origin) key = undefined;
+        if (target === undefined || target.origin !== source.origin || fleetNotificationsOffered === false) key = undefined;
         else {
           const registration = notificationRegistration ?? await applicationWorkerRegistration;
           const subscription = await registration?.pushManager.getSubscription();

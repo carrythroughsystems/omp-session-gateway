@@ -4664,6 +4664,142 @@ function setHostSwitch(harness: BrowserHarness, index: number, checked: boolean)
 }
 
 describe("fleet background notifications", () => {
+  test("a v3 page probes a 404 coordinator once across forty seconds and never mutates Hold/Requeue/Show all", async () => {
+    const first = session("unsupported-hold-first", { inputRequired: true });
+    const second = session("unsupported-hold-second", { inputRequired: true });
+    const working = session("unsupported-hidden-session");
+    const api = notificationApi([]);
+    api.unsupported = true;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true,
+      initialSessions: [first, second, working], fleetResponse: api.respond, suffix: "fleet-404-local-triage",
+    });
+    try {
+      await settleUntil(() => api.calls.length === 1, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      for (let tick = 0; tick < 4; tick++) {
+        harness.advanceClock(10_000);
+        harness.window.runTimersWithDelay(10_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      }
+      expect(api.calls.map(call => call.path)).toEqual(["/api/v1/push/fleet/status"]);
+      const requests = harness.fetchPaths.length;
+      openHeroOptions(harness)!.dispatchEvent(new Event("click"));
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      expect(harness.elements.sessionList.querySelector(".held-row")?.dataset.instanceId).toBe(first.instanceId);
+      harness.elements.sessionList.querySelector(".held-requeue")!.dispatchEvent(new Event("click"));
+      expect(harness.elements.sessionList.querySelector(".queue-hero")?.dataset.instanceId).toBe(first.instanceId);
+      harness.elements.sessionList.querySelector(".dismiss-session")!.dispatchEvent(new Event("click"));
+      harness.runUndoTimer();
+      harness.elements.sessionList.querySelector(".dismissed-control")!.querySelector("button")!.dispatchEvent(new Event("click"));
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.fetchPaths).toHaveLength(requests);
+      expect(api.calls).toHaveLength(1);
+      expect(harness.subscriptionRequests).toHaveLength(1);
+      expect(harness.launchRequests).toHaveLength(0);
+      harness.setVisibility("hidden");
+      harness.setVisibility("visible");
+      harness.window.dispatchEvent(new Event("online"));
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(api.calls).toHaveLength(1);
+      harness.elements.settingsButton.dispatchEvent(new Event("click"));
+      await settleUntil(() => api.calls.length === 2, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      for (let tick = 0; tick < 4; tick++) {
+        harness.advanceClock(10_000);
+        harness.window.runTimersWithDelay(10_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      }
+      expect(api.calls).toHaveLength(2);
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("an offered fleet with no selection polls only while Settings is open", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: false, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], remoteSessions: [], fleetResponse: api.respond, suffix: "fleet-unselected-no-poll",
+    });
+    const statuses = (): number => api.calls.filter(call => call.path.endsWith("/status")).length;
+    try {
+      await settleUntil(() => statuses() === 1, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      for (let tick = 0; tick < 4; tick++) {
+        harness.advanceClock(10_000);
+        harness.window.runTimersWithDelay(10_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      }
+      expect(statuses()).toBe(1);
+      harness.elements.settingsButton.dispatchEvent(new Event("click"));
+      await settleUntil(() => statuses() === 2, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      harness.window.runTimersWithDelay(10_000);
+      await settleUntil(() => statuses() === 3, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      harness.elements.trayHost.querySelector(".tray-leading")!.dispatchEvent(new Event("click"));
+      harness.window.runTimersWithDelay(350);
+      for (let tick = 0; tick < 4; tick++) {
+        harness.advanceClock(10_000);
+        harness.window.runTimersWithDelay(10_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      }
+      expect(statuses()).toBe(3);
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("an unsupported coordinator is reprobed after an observed client-config change, not a tap with unchanged config", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: false, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    api.unsupported = true;
+    let config = fleetPageConfig;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true,
+      clientConfigResponse: () => Response.json(config), initialSessions: [], remoteSessions: [],
+      fleetResponse: api.respond, suffix: "fleet-404-config-change",
+    });
+    const data = { version: 3, type: "activity_stop",
+      source: await fleetSourceBinding("remote", "https://remote.example"), instanceId: "absent-session", generation: 1 };
+    try {
+      await settleUntil(() => api.calls.length === 1, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      harness.notify(data);
+      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "expired", 1_000);
+      expect(api.calls).toHaveLength(1);
+      api.unsupported = false;
+      config = { ...fleetPageConfig, local: { ...fleetPageConfig.local, label: "Home changed" } };
+      harness.notify(data);
+      await settleUntil(() => !harness.elements.notificationHosts.hidden, 1_000);
+      expect(api.calls.filter(call => call.path.endsWith("/status")).length).toBeGreaterThan(1);
+      expect(harness.launchRequests).toHaveLength(0);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("a selected fleet polls in the directory and stops when its last selection is removed", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], remoteSessions: [], fleetResponse: api.respond, suffix: "fleet-selected-poll",
+    });
+    const statuses = (): number => api.calls.filter(call => call.path.endsWith("/status")).length;
+    try {
+      await settleUntil(() => harness.workerMessages.some(message =>
+        (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
+      harness.window.runTimersWithDelay(10_000);
+      await settleUntil(() => statuses() === 2, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      api.rows = api.rows.map(row => ({ ...row, selected: false }));
+      harness.window.runTimersWithDelay(10_000);
+      await settleUntil(() => statuses() === 3, 1_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      for (let tick = 0; tick < 4; tick++) {
+        harness.advanceClock(10_000);
+        harness.window.runTimersWithDelay(10_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      }
+      expect(statuses()).toBe(3);
+    } finally { harness.setVisibility("hidden"); }
+  });
+
   test("renders exact per-host partial coverage without changing the permission/subscription control", async () => {
     const states = ["current", "pending", "stale", "unauthorized", "not_enrolled", "unsupported", "current"] as const;
     const targets = states.map((_state, index) => ({ id: `host-${index}`, label: `Host ${index}`, origin: `https://host-${index}.example` }));
