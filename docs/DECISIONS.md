@@ -1703,6 +1703,29 @@ the working receipt advances. Ordinary and missing-worker failures retain the ex
 diagnostic/new-request/next-prealpha policy. This exception never makes infrastructure a
 qualification pass and grants no automatic retries or lease takeover.
 
+**Amendment — 2026-11-06 (failed-campaign settlement from owner proof):** Lanes type the failures
+they observe. A device-cloud journey failure on a recorded session is `journey_failed` at its
+target's `*_verified` step, a retained-record audit verdict is `audit_failed` at `records_audited`,
+and the Windows physical client's navigation or page-load failure is `navigation_failed` at
+`pixel_verified`; none may carry `operation: unknown`. An untyped error stays
+`unclassified_failure` with unknown disposition at the phase its lane last checkpointed while it
+owned effects.
+
+Containment may settle an `unknown` failure, or a `confirmed` failure of a lane owning outside
+resources (Windows, device cloud, background Push, readiness), only from that lane's own cleanup,
+passed for the same epoch with a residue sweep: zero `omp-winqual-` instances, firewall groups and
+tailnet nodes, plus a verified Pixel baseline once Windows held the Pixel; every recorded cloud
+session ended and audited and zero active vendor sessions for the attempt; a verified Pixel
+baseline after background Push; an owner-bound `restored` readiness record. Absent, failed,
+inconclusive or epoch-mismatched proof leaves the mutation unresolved, and sweeps never change a
+cleanup verdict. The installed driver re-derives this proof before its existing bounded
+self-clear, which keeps every other condition: no live probe, retry, waiver, gate change, lease
+takeover or new authority path. A foreign owner, live worker or receipt digest mismatch still
+refuses. Failed campaigns whose owners prove no residue no longer wait on a maintainer; receipts
+written before the sweeps, and any unproven residue, keep the maintainer stop. Confirmed failures of
+those lanes now also need the sweep before retirement; retry eligibility is unchanged because it
+admits only effect-free infrastructure and collateral failures.
+
 ## ADR-035 — Advisory Percy review of capability-free serialized fixtures
 
 **Status:** Accepted

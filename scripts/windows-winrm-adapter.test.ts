@@ -682,6 +682,20 @@ test("R1 typed helper conversion retains bounded redacted diagnostics only in it
   expect(((failure as Error).cause as Error).message).toContain("synthetic-codec");
   expect(JSON.stringify(failure)).not.toContain("synthetic-codec");
 });
+test("565 a malformed helper frame keeps the exception class in the private chain", () => {
+  // Shape observed on the v0.9.1-prealpha.2 admission probe: the request's "transport" action
+  // redacted winrm's transport.py frames, and the controller dropped the whole diagnostic.
+  let failure: unknown;
+  try { windowsWinrmResult({ ...transportResult(), diagnostic: "ConnectionError",
+    failure: { ...transportResult().failure, kind: "helper", condition: "helper_failure" },
+    exception: { type: "ConnectionError", message: "synthetic refusal", uploadStep: null,
+      frames: [{ file: "protocol.py", line: 193, function: "open_shell" }, { file: "[REDACTED].py", line: 323, function: "send_message" }] },
+  }, true); } catch (error) { failure = error; }
+  expect(normalizeQualificationFailures(failure)).toMatchObject([{ reason: "helper_failed", operation: "read_only" }]);
+  const messages = privateQualificationFailureDiagnostic(failure).map(entry => entry.message);
+  expect(messages).toContain('ConnectionError; {"type":"ConnectionError"}');
+  expect(messages.join("\n")).not.toContain("synthetic refusal");
+});
 test("R2 a resumed legacy staging phase cannot turn an absent upload claim into fresh authority", async () => {
   let writes = 0;
   await expect(winrmRuntime.windowsUploadOnce({

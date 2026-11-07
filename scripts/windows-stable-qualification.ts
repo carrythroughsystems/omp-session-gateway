@@ -7,6 +7,7 @@ import { firewallEligibility, instanceEligibility, QUAL_LABEL_PREFIX } from "./v
 import { FAILURE_LIMITS, FAILURE_REASONS, parseLaneFailure, QualificationFailure } from "./qualification-failure.ts";
 import type { FailureObservations, LaneStep, OperationDisposition } from "./qualification-failure.ts";
 import { pixelUnrestored } from "./restoration.ts";
+import type { PixelBaseline } from "./android-device.ts";
 
 /** Structurally shared with the orchestrator; cleanup receives its own fresh execution. */
 export interface WindowsExecutionContext { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
@@ -146,6 +147,10 @@ export interface WindowsRuntime {
   pixel(context: WindowsContext): Promise<Record<string, unknown>>;
   restorePixel(context: WindowsContext): Promise<void>;
   deleteTailnet(context: WindowsContext): Promise<void>;
+  /** Read-only: tailnet nodes of every qualification epoch (prefix-wide), for cleanup proof only. */
+  tailnetResidue(): Promise<number>;
+  /** Read-only Pixel reference state, for cleanup proof only; never a remedy. */
+  pixelBaseline?(context: WindowsContext): Promise<PixelBaseline>;
 }
 const PHASES = ["intent_checkpointed", "firewall_created", "instance_created", "transport_ready", "toolchain_staged",
   "predecessor_installed", "candidate_upgraded", "reboot_requested", "prelogin_verified", "postlogin_ready",
@@ -763,6 +768,16 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   await runtime.sleep(5_000);
   await attempt("instanceResidue", async () => { requireFact(!(await runtime.provider.instances()).some(item => item.label?.startsWith(QUAL_LABEL_PREFIX)), "instance residue"); });
   await attempt("firewallResidue", async () => { requireFact(!(await runtime.provider.firewalls()).some(item => item.description?.startsWith(QUAL_LABEL_PREFIX)), "firewall residue"); });
+  // Proof for settlement only, never a cleanup verdict: an unreadable listing records no count.
+  let tailnetNodesRemaining: number | undefined;
+  try { assertWindowsExecution(input.execution); tailnetNodesRemaining = await runtime.tailnetResidue(); }
+  catch { tailnetNodesRemaining = undefined; }
+  // The physical client held the Pixel from pixel_verified on; prove its reference state the same way.
+  let pixelBaseline: PixelBaseline | undefined;
+  if (runtime.pixelBaseline !== undefined && PHASES.indexOf(progress.phase) >= PHASES.indexOf("pixel_verified")) {
+    try { pixelBaseline = await input.pixel("windows-cleanup", () => runtime.pixelBaseline!(context), input.execution); }
+    catch { pixelBaseline = undefined; }
+  }
   if (guestErrors.length > 0 && !instanceAbsent) failed("guestContainment",
     new Error("Windows guest containment failed", { cause: new AggregateError(guestErrors) }));
   if (!containmentCommitted) progress.cleanupRequired = failures.length > 0;
@@ -784,6 +799,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   if (failures.length) throw new AggregateError(causes, `Windows retirement failed: ${failures.join(", ")}`,
     { cause: new AggregateError(checkpointErrors, "Windows retirement diagnostics") });
   return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,
+    ...(tailnetNodesRemaining === undefined ? {} : { tailnetNodesRemaining }), ...(pixelBaseline === undefined ? {} : { pixelBaseline }),
     guestCleanupFailures: guestErrors.length, guestCommandsSkipped, ...(progress.cleanupFailed ? { cleanupFailed: true } : {}) };
 }
 

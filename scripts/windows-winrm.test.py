@@ -172,6 +172,21 @@ class WinrmFramingTests(unittest.TestCase):
         self.assertIsNone(result['exception']['uploadStep'])
         self.assertNotIn('private:secret', json.dumps(result))
 
+    def test_request_value_naming_a_frame_stays_parseable_for_the_controller(self):
+        # The v0.9.1-prealpha.2 admission probe sent action "transport", which redacted winrm's
+        # transport.py frames to "[REDACTED].py"; the controller then dropped the whole exception.
+        def transport(*_args):
+            raise ConnectionError('synthetic refusal')
+        with patch.object(Transport, 'open_shell', transport):
+            result = self.run_entrypoint({'host': '192.0.2.10', 'username': 'Administrator', 'password': 'synthetic-only',
+                                          'script': 'synthetic', 'input': {'action': 'transport'}, 'readOnly': True})
+        detail = result['exception']
+        self.assertEqual(detail['type'], 'ConnectionError')
+        self.assertEqual(detail['frames'][-1]['function'], '<redacted>')
+        for frame in detail['frames']:
+            self.assertRegex(frame['file'], r'^[A-Za-z0-9_.<>-]{1,120}$')
+            self.assertRegex(frame['function'], r'^[A-Za-z0-9_.<>-]{1,120}$')
+
     def test_first_response_marker_precedes_guest_execution_and_has_no_payload(self):
         original = Transport.run_command
         def after_first_response(instance, *args, **options):

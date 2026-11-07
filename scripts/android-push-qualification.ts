@@ -15,6 +15,7 @@ import { executeFixture } from "./push-qualification-fixture.ts";
 import { everyError, pixelUnrestored } from "./restoration.ts";
 import { FAILURE_LIMITS, PUSH_BROWSER_STEPS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
 import type { QualificationLogWindow, PushDeliveryTelemetry } from "./qualification-logs.ts";
+import type { PixelBaseline } from "./android-device.ts";
 
 export interface PushExecution { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
 export interface PushDeliveryMetrics {
@@ -262,6 +263,8 @@ export interface AndroidPushRuntime {
   network(value: PushNetwork): Promise<boolean>;
   /** Best-effort Wi-Fi push socket recovery; delivery remains the verdict. */
   pushTransport?(target: { wifi: boolean; mobile: boolean }): Promise<boolean>;
+  /** Read-only proof for failed-campaign settlement; it changes neither radios nor the VPN. */
+  pixelBaseline?(): Promise<PixelBaseline>;
   sinks(epoch: string): Promise<Record<string, boolean | number>>;
   cleanup(step: PushCleanupStep, progress: AndroidPushProgress): Promise<void>;
 }
@@ -429,11 +432,15 @@ export async function cleanupAndroidPush(input: LaneInput): Promise<Record<strin
   const nextFailureId = () => input.execution?.nextFailureId() ?? ++localId;
   const progress = parseAndroidPushProgress(input.progress);
   if (progress.binding !== binding(input.identity)) throw new Error("Android Push progress belongs to a different candidate or origin");
-  if (!progress.cleanupRequired) return { epoch: progress.epoch, restored: true };
   const runtime = input.runtime ?? createAndroidPushRuntime(input.identity, {
     nextFailureId, ...(input.execution === undefined ? {} : { execution: input.execution }) });
-  runtime.beginCleanup?.(input.execution);
-  return input.pixel("androidPush-cleanup", () => restore(input, runtime, progress, nextFailureId));
+  if (progress.cleanupRequired) runtime.beginCleanup?.(input.execution);
+  return input.pixel("androidPush-cleanup", async () => {
+    const evidence = progress.cleanupRequired ? await restore(input, runtime, progress, nextFailureId) : { epoch: progress.epoch, restored: true };
+    // Proof for settlement only, never a cleanup verdict: an unreadable Pixel records no baseline.
+    try { return runtime.pixelBaseline === undefined ? evidence : { ...evidence, pixelBaseline: await runtime.pixelBaseline() }; }
+    catch { return evidence; }
+  });
 }
 
 /** Effectful readiness only. The internal result includes private GCM context, not receipt data. */

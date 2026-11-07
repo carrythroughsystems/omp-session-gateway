@@ -13,6 +13,7 @@ import * as windowsRuntime from "./windows-qualification-runtime.ts";
 import { firewallEligibility } from "./vultr-target.ts";
 import { createPixelLease, parseQualificationPins } from "./stable-qualification.ts";
 import { pixelUnrestored } from "./restoration.ts";
+import { AndroidNavigationFailure } from "./android-device.ts";
 import * as windowsLane from "./windows-stable-qualification.ts";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
@@ -231,6 +232,7 @@ function fixture(options: { development?: boolean; fail?: WindowsGuestAction; pr
     pixel: async () => { events.push("physicalPixel"); return { pixelIdentityAccepted: true, viewReadOnly: true, controlWritable: true, promptAccepted: true, returnedToDirectory: true }; },
     restorePixel: async () => { events.push("pixelRestored"); },
     deleteTailnet: async () => { events.push("tailnetDeleted"); },
+    tailnetResidue: async () => 0,
   };
   // Installation readiness is not the automatic post-reboot readiness sample.
   const originalGuest = runtime.guest;
@@ -354,6 +356,53 @@ describe("Windows qualification ownership and failure paths", () => {
     expect(f.progress).toMatchObject({ cleanupRequired: false, cleanupFailed: true });
     expect(f.instances).toEqual([]);
     expect(f.firewalls).toEqual([]);
+  });
+  test.each([[0, 0], [2, 2], ["unreadable", undefined]] as const)(
+    "cleanup records prefix-wide tailnet residue %p as proof without changing its verdict", async (residue, recorded) => {
+      const f = fixture();
+      await f.run();
+      f.runtime.tailnetResidue = residue === "unreadable" ? async () => { throw new Error("synthetic listing failure"); } : async () => residue;
+      const evidence = await f.clean();
+      expect(evidence).toMatchObject({ instancesRemaining: 0, firewallsRemaining: 0, vaultRemoved: true });
+      if (recorded === undefined) expect(Object.hasOwn(evidence, "tailnetNodesRemaining")).toBe(false);
+      else expect(evidence.tailnetNodesRemaining).toBe(recorded);
+    });
+  test.each(["navigation", "page-load"] as const)("a physical-client %s failure is a typed confirmed outcome at pixel_verified", async kind => {
+    const f = fixture();
+    f.runtime.pixel = async () => { throw windowsRuntime.windowsPhysicalClientFailure(new AndroidNavigationFailure(kind, "synthetic private navigation detail")); };
+    const error = await f.run().catch(error => error);
+    expect(normalizeQualificationFailures(error)).toMatchObject([{ lane: "windows", step: "pixel_verified", reason: "navigation_failed",
+      class: "harness", operation: "confirmed" }]);
+    expect(JSON.stringify(normalizeQualificationFailures(error))).not.toContain("synthetic private navigation detail");
+    expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain("synthetic private navigation detail");
+  });
+  test("any other physical-client error stays unclassified and unknown at pixel_verified", async () => {
+    const f = fixture();
+    f.runtime.pixel = async () => { throw windowsRuntime.windowsPhysicalClientFailure(new Error("synthetic CDP failure")); };
+    expect(normalizeQualificationFailures(await f.run().catch(error => error))).toMatchObject([{ step: "pixel_verified",
+      reason: "unclassified_failure", operation: "unknown" }]);
+  });
+  test.each([["toolchain_staged", false], ["pixel_verified", true], ["evidence_complete", true]] as const)(
+    "cleanup after %s reads the Pixel baseline under the cleanup lease only once the client held it", async (reached, read) => {
+      const f = fixture(reached === "toolchain_staged" ? { fail: "stage" } : {});
+      if (reached === "pixel_verified") f.runtime.pixel = async () => { throw new Error("synthetic physical-client failure"); };
+      await f.run().catch(() => undefined);
+      expect((f.progress as { phase: string }).phase).toBe(reached);
+      const owners: string[] = [], baseline = { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true };
+      f.runtime.pixelBaseline = async () => baseline;
+      const evidence = await cleanupWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, runtime: f.runtime,
+        pixel: async (owner, action) => { owners.push(owner); return action(); } });
+      expect(Object.hasOwn(evidence, "pixelBaseline")).toBe(read);
+      if (read) expect(evidence.pixelBaseline).toEqual(baseline);
+      expect(owners.every(owner => owner === "windows-cleanup")).toBe(true);
+    });
+  test("an unreadable Pixel baseline records no proof and keeps the cleanup verdict", async () => {
+    const f = fixture();
+    await f.run();
+    f.runtime.pixelBaseline = async () => { throw new Error("synthetic adb failure"); };
+    const evidence = await f.clean();
+    expect(evidence).toMatchObject({ instancesRemaining: 0, vaultRemoved: true });
+    expect(Object.hasOwn(evidence, "pixelBaseline")).toBe(false);
   });
   test("council498r1 Windows Pixel projection preserves poison origins through later cleanup", async () => {
     const f = fixture();

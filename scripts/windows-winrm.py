@@ -86,7 +86,11 @@ def exception_detail(error, request):
                       '[REDACTED_HEADER]', text)
         return re.sub(r'\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+', '[REDACTED_URL]', text)
     def frame_name(value):
-        return redact(value) if re.fullmatch(r'[A-Za-z0-9_.<>-]{1,120}', value) else '<unknown>'
+        # A request value can name a dependency file (action "transport" vs winrm/transport.py); the
+        # controller drops frames carrying redaction brackets, so keep the placeholder parseable.
+        if not re.fullmatch(r'[A-Za-z0-9_.<>-]{1,120}', value):
+            return '<unknown>'
+        return value if redact(value) == value else '<redacted>'
     frames = deque(maxlen=16)
     for frame, line in traceback.walk_tb(error.__traceback__):
         filename = frame.f_code.co_filename.replace('\\', '/').rsplit('/', 1)[-1]

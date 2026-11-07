@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { DeviceCloudAvailabilityHold } from "./device-cloud-availability.ts";
 import {
-  FAILURE_LIMITS, QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailure,
-  parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationRetryEligible, qualificationPreflightFailuresEffectFree,
-  type LaneFailure, type QualificationFailureSummary,
+  FAILURE_LIMITS, FAILURE_REASONS, FAILURE_STEPS, KNOWN_OUTCOME_REASONS, QualificationFailure, privateQualificationFailureDiagnostic,
+  normalizeQualificationFailures, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary,
+  qualificationRetryEligible, qualificationPreflightFailuresEffectFree, type LaneFailure, type QualificationFailureLane, type QualificationFailureSummary,
 } from "./qualification-failure.ts";
 
 const root = (): LaneFailure => ({ id: 1, lane: "windows", step: "transport_ready", class: "infra_transient",
@@ -13,6 +13,17 @@ const collateral = (): LaneFailure => ({ id: 2, lane: "ompPublication", step: "c
 const summary = (): QualificationFailureSummary => ({ failures: [root(), collateral()], timings: { attemptMs: 100_000, cleanupMs: 1_000 },
   containment: { proven: true, cleanupComplete: true, unresolvedMutation: false } });
 const secret = "SYNTHETIC_PRIVATE_FAILURE_SENTINEL";
+
+test("no lane can record a known outcome with unknown effects", () => {
+  const known = (Object.entries(FAILURE_REASONS) as [QualificationFailureLane, Record<string, string>][]).flatMap(([lane, reasons]) =>
+    KNOWN_OUTCOME_REASONS.filter(reason => Object.hasOwn(reasons, reason)).map(reason => ({ lane, reason, class: reasons[reason] })));
+  expect(new Set(known.map(item => item.reason))).toEqual(new Set(KNOWN_OUTCOME_REASONS));
+  for (const item of known) {
+    const failure = { ...item, id: 1, step: FAILURE_STEPS[item.lane][0], elapsedMs: 0, observations: {} };
+    expect(() => new QualificationFailure({ ...failure, operation: "unknown" } as LaneFailure)).toThrow("invalid qualification failure evidence");
+    for (const operation of ["read_only", "confirmed"] as const) expect(parseLaneFailure({ ...failure, operation }).operation).toBe(operation);
+  }
+});
 
 test.each(["interrupted", "nested"] as const)("509 round2 strips %s opt-outs before scanning and emitting identifiers", variant => {
   const marker = "identifier-leak-allow";

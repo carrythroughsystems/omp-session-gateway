@@ -402,6 +402,18 @@ export class BrowserStackApi {
       plan.team_parallel_sessions_max_allowed !== pins.entitlement.parallelSessions) throw new Error("BrowserStack Automate Mobile entitlement no longer matches reviewed metadata");
   }
 
+  /** Read-only residue sweep: the account's running plus queued sessions, a superset of one attempt's. */
+  async activeSessions(): Promise<number> {
+    const response = await this.#get("/plan.json");
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`BrowserStack plan read failed with HTTP ${response.status}`); }
+    const plan = parseRetainedVendorJson(await boundedVendorText(response, "BrowserStack"));
+    const running = isRecord(plan) ? plan.parallel_sessions_running : undefined, queued = isRecord(plan) ? plan.queued_sessions : undefined;
+    if (!Number.isSafeInteger(running) || !Number.isSafeInteger(queued) || (running as number) < 0 || (queued as number) < 0) {
+      throw new Error("BrowserStack returned an invalid session count");
+    }
+    return (running as number) + (queued as number);
+  }
+
   /** Catalog eligibility, not free-device availability. Missing aliases are never generalized. */
   async devices(target: "ipad" | "android"): Promise<readonly CloudDevice[]> {
     const response = await this.#get("/browsers.json");

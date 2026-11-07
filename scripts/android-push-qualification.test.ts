@@ -1537,6 +1537,22 @@ test("failed cleanup remains resumable and later cleanup attempts every step", a
   expect(f.state()).toMatchObject({ started: false, device: baseline, browser: browserBaseline, shown: undefined });
 });
 
+test.each([["dirty", true], ["dirty", false], ["restored", true], ["restored", "unreadable"]] as const)(
+  "%s cleanup records the read-only Pixel baseline (%p) as proof without changing its verdict", async (state, probe) => {
+    const options: FakeOptions = state === "dirty" ? { cleanupFail: "browser" } : {};
+    const f = fake(options);
+    await runAndroidPush(f.input).catch(() => undefined);
+    const progress = f.checkpoints.at(-1);
+    expect(androidPushNeedsCleanup(progress)).toBe(state === "dirty");
+    delete options.cleanupFail;
+    const baselineProof = { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: probe === true, gcmConnectedOnWifi: true };
+    f.input.runtime!.pixelBaseline = async () => { if (probe === "unreadable") throw new Error("synthetic adb failure"); return baselineProof; };
+    const result = await cleanupAndroidPush({ ...f.input, progress });
+    expect(result).toMatchObject({ epoch: parseAndroidPushProgress(progress).epoch, restored: true });
+    if (probe === "unreadable") expect(Object.hasOwn(result, "pixelBaseline")).toBe(false);
+    else expect(result.pixelBaseline).toEqual(baselineProof);
+  });
+
 test("a notification arriving during fixture shutdown is removed before cleanup succeeds", async () => {
   const f = fake({ shutdownNotification: true });
   await runAndroidPush(f.input);

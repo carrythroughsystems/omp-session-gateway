@@ -98,6 +98,11 @@ export function tunnelIdentifier(epoch: string): string {
   return `omp-dc-${epoch.slice(0, 8)}`;
 }
 
+/** Every TestingBot session of one attempt carries this build, the residue sweep's scope. */
+export function testingBotBuild(epoch: string): string {
+  return `qualify:stable ${epoch.slice(0, 8)}`;
+}
+
 /**
  * Read-only admission: Java runs, the service account yields the TestingBot credentials, and the
  * vendor catalog still offers a pinned model for every target.
@@ -515,7 +520,7 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
         "appium:deviceName": device.name, "appium:platformVersion": device.version,
         "tb:options": {
           realDevice: true, tunnelIdentifier: tunnelIdentifier(attempt.epoch), name: `omp-session-gateway ${target}`,
-          build: `qualify:stable ${attempt.epoch.slice(0, 8)}`, screenrecorder: false, screenshot: false,
+          build: testingBotBuild(attempt.epoch), screenrecorder: false, screenshot: false,
           recordLogs: false, public: false, idletimeout: 180, maxduration: 1_800,
         },
       };
@@ -671,6 +676,13 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
     removeRecord: async (reference, removal) => {
       if (reference.vendor === "testingbot") return;
       await (await browserStack()).api.deleteRecord(reference.sessionId, removal);
+    },
+    activeVendorSessions: async (epoch, vendors) => {
+      let active = 0;
+      for (const vendor of vendors) {
+        active += vendor === "testingbot" ? await api.activeBuildSessions(testingBotBuild(epoch)) : await (await browserStack()).api.activeSessions();
+      }
+      return active;
     },
     launch: (session, mode) => launchLink(origin, session, mode, execution?.signal),
     removeWorkspace: async epoch => {
