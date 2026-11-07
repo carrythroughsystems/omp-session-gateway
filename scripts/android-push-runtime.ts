@@ -471,7 +471,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     if (records.some(record => record.tag.includes("omp-attention-") && !observedTopics.some(topic => record.tag.endsWith(topic)) && baselineRecords.get(record.key) !== record.postedAt)) throw new NotificationOverlapError();
     return records;
   };
-  const worker = async <T>(operation: "armBadgeObserver" | "observeBadge" | "observe" | "notificationCleared" | "restoreBadgeObserver",
+  const worker = async <T>(operation: "armBadgeObserver" | "observeBadge" | "observe" | "notificationCleared" | "restoreBadgeObserver" | "replay",
     expression: string, readOnly = false): Promise<T> => {
     const errors: unknown[] = [], started = performance.now();
     for (let attempt = 0; ; attempt++) {
@@ -1333,7 +1333,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       // on this tag, replacing the replay. A newer ask therefore needs the app already open.
       const live = remoteIds.has(session.instanceId) ? await snapshot(currentEpoch, "remote") :
         [await snapshot(currentEpoch), await snapshot(currentEpoch, "secondary")].find(candidate => candidate?.instanceId === session.instanceId);
-      if (live?.ask !== undefined && live.ask.requestId !== session.ask.requestId &&
+      if (fleetObserver === undefined && live?.ask !== undefined && live.ask.requestId !== session.ask.requestId &&
         webApkTasks(await command("shell", "dumpsys", "activity", "activities"), expected.packageName).length === 0) {
         throw new Error("Android Push replay over a newer ask needs the app already open");
       }
@@ -1343,12 +1343,23 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const options = { tag: expected.tag, icon: "/icon-192.png", badge: "/icon-192.png", ...(expected.body === "" ? {} : { body: expected.body }),
         data: { version: fleetEnabled ? 3 : PUSH_API_VERSION, type: "attention", instanceId: session.instanceId, requestId: session.ask.requestId,
           ...(remoteIds.has(session.instanceId) ? { source: remote.binding } : {}) } };
-      await page("replay", async driver => {
+      if (fleetObserver !== undefined) {
+        // Reopening the directory can reconcile away the deliberately stale replay before
+        // its OS observation. Seed it through the already-held worker with the page closed.
+        await runtime.closePwa();
         await runtime.beforeEffect();
-        await driver.evaluate(`(async () => {
-          await (await navigator.serviceWorker.ready).showNotification(${JSON.stringify(expected.title)}, ${JSON.stringify(options)});
+        await worker("replay", `(async () => {
+          await self.registration.showNotification(${JSON.stringify(expected.title)}, ${JSON.stringify(options)});
+          return true;
         })()`);
-      });
+      } else {
+        await page("replay", async driver => {
+          await runtime.beforeEffect();
+          await driver.evaluate(`(async () => {
+            await (await navigator.serviceWorker.ready).showNotification(${JSON.stringify(expected.title)}, ${JSON.stringify(options)});
+          })()`);
+        });
+      }
       try {
         await wait(async () => {
           const records = await posted();
