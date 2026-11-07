@@ -1,13 +1,19 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { DEVICE_CLOUD_PROFILES, DEVICE_CLOUD_TARGETS, SAMSUNG_MODEL_CODES, eligibleDevice } from "./device-cloud-qualification.ts";
+import {
+  ALLOCATION_REPORT_EXPRESSION, DEVICE_CLOUD_PROFILES, DEVICE_CLOUD_TARGETS, SAMSUNG_MODEL_CODES,
+  eligibleDevice, type BrowserAllocationReport, type DeviceCloudIdentity, type DeviceCloudTargetAttempt,
+} from "./device-cloud-qualification.ts";
 import { deviceCloudHolds } from "./device-cloud-availability.ts";
 import { recognizedDeviceCloudOutcome } from "./device-cloud-outcome.ts";
-import { DEVICE_WAIT_MS, admitDeviceCloud, deviceCloudVendor, freeDevice, installHomeScreenApp, type DeviceCloudAdmissionDependencies } from "./device-cloud-runtime.ts";
+import { DEVICE_WAIT_MS, admitDeviceCloud, createDeviceCloudRuntime, deviceCloudVendor, freeDevice, installHomeScreenApp, type DeviceCloudAdmissionDependencies } from "./device-cloud-runtime.ts";
+import * as testingbot from "./testingbot.ts";
 import { TestingBotApi, TestingBotNativeSession } from "./testingbot.ts";
-import { WebDriverError, type WebDriverSession } from "./device-cloud-webdriver.ts";
+import { WebDriverError, WebDriverSession } from "./device-cloud-webdriver.ts";
 import type { CloudDevice } from "./device-cloud-common.ts";
 import { abortablePause } from "./provider-read.ts";
+import { JOURNEY_VIEW_STATE } from "./browser-journey.ts";
+import type { QualificationExecutionContext } from "./stable-qualification.ts";
 
 const epoch = "11111111-2222-4333-8444-555555555555";
 const catalog: readonly CloudDevice[] = [
@@ -141,6 +147,164 @@ describe("allocation availability races and bounded wait", () => {
     ] }, "iphone", DEVICE_CLOUD_PROFILES.iphone, epoch, time);
     expect(device).toEqual(catalog[0]!);
     expect(time.waits).toEqual([]);
+  });
+});
+
+describe("first-visit service worker settling", () => {
+  const restores: (() => void)[] = [];
+  afterEach(() => { for (const restore of restores.splice(0).reverse()) restore(); });
+
+  async function fixture(options: {
+    readonly unsettledReads?: number;
+    readonly rejectedReads?: number;
+    readonly execution?: QualificationExecutionContext;
+  } = {}) {
+    const time = clock();
+    const now = spyOn(Date, "now").mockImplementation(time.now);
+    const sleep = spyOn(Bun, "sleep").mockImplementation(milliseconds => time.pause(Number(milliseconds)));
+    const credentials = spyOn(testingbot, "readTestingBotCredentials")
+      .mockResolvedValue({ key: "synthetic-key", secret: "synthetic-secret" });
+    const devices = spyOn(TestingBotApi.prototype, "devices").mockResolvedValue([catalog[2]!]);
+    const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+      stdout: new Response("candidate/apps/web/dist/assets/app.abc123.js\n").body!,
+      exited: Promise.resolve(0), kill() {},
+    })) as unknown as typeof Bun.spawn);
+    restores.push(() => now.mockRestore(), () => sleep.mockRestore(), () => credentials.mockRestore(),
+      () => devices.mockRestore(), () => spawn.mockRestore());
+    const effects: string[] = [];
+    const results: boolean[] = [];
+    let navigations = 0, reads = 0;
+    let workerExpression: string | undefined;
+    const session = {
+      vendor: "testingbot", id: "synthetic-session-0001", signal: options.execution?.signal,
+      async navigate() { navigations += 1; effects.push("navigate"); },
+      async evaluate<T>(expression: string): Promise<T> {
+        if (expression === ALLOCATION_REPORT_EXPRESSION) {
+          effects.push("attest");
+          return {
+            family: "android", browser: "chrome", browserVersion: "145.0.7632.159",
+            os: "16.0.0", model: "SM-S942B",
+          } satisfies BrowserAllocationReport as T;
+        }
+        if (navigations === 1) {
+          workerExpression = expression;
+          reads += 1;
+          if (reads <= (options.rejectedReads ?? 0)) {
+            effects.push("read-rejected");
+            throw new Error("SYNTHETIC_FIRST_VISIT_EVALUATION_DETAIL");
+          }
+          const unsettled = reads <= (options.rejectedReads ?? 0) + (options.unsettledReads ?? 0);
+          const settled = await new Function("navigator", `return ${expression};`)({
+            serviceWorker: { getRegistration: async () => ({
+              installing: unsettled ? { state: "installing" } : null,
+              waiting: null, active: unsettled ? null : { state: "activated" },
+            }) },
+          }) as boolean;
+          results.push(settled);
+          effects.push(settled ? "settled" : "unsettled");
+          return settled as T;
+        }
+        if (expression === JOURNEY_VIEW_STATE) return { readOnly: true, controlVisible: true, rootMounted: true } as T;
+        if (expression.includes("sendInitiallyDisabled")) return { writable: true, sendInitiallyDisabled: true } as T;
+        if (expression.includes("missedCount")) return { complete: true, missedCount: 0, residualCount: 0 } as T;
+        if (expression.includes("findingCount")) return { launchStatus: 200, launchNoStore: true, findingCount: 0 } as T;
+        if (expression.includes("serviceWorker")) { effects.push("journey-shell"); return "ready" as T; }
+        return true as T;
+      },
+    } as unknown as WebDriverSession;
+    const create = spyOn(WebDriverSession, "create").mockImplementation(async (_vendor, _username, _password, _capabilities, created) => {
+      await created(session.id);
+      return { session, capabilities: { platformName: "Android", browserName: "chrome" } };
+    });
+    restores.push(() => create.mockRestore());
+    const identity: DeviceCloudIdentity = {
+      tag: "v0.9.1-prealpha.4",
+      candidate: { tag: "v0.9.1-prealpha.4", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64), archivePath: "/synthetic/archive.tar" },
+      omp: {
+        bunVersion: "1.4.4", sourceCommit: "c".repeat(40), sourceTree: "d".repeat(40), version: "18.1.20",
+        nativeTarballSha256: "e".repeat(64), nativeBinarySha256: "f".repeat(64),
+      },
+      origin: "https://fixture.invalid",
+    };
+    const runtime = await createDeviceCloudRuntime({
+      identity, workspace: "/synthetic/workspace", environment: {},
+      ...(options.execution === undefined ? {} : { execution: options.execution }),
+      fixture: async () => { throw new Error("verification must not stage a fixture"); },
+    });
+    const attempt: DeviceCloudTargetAttempt = {
+      epoch,
+      session: {
+        instanceId: "instance-live", generation: 1, cwdLabel: "synthetic-live", model: "fixture/model",
+        startedAt: "2026-10-23T00:00:00.000Z", lastSeenAt: "2026-10-23T00:00:00.000Z",
+        canView: true, canControl: true, inputRequired: false,
+      },
+      allocating: async () => {}, startingTunnel: async () => {}, created: async () => {},
+    };
+    return { verify: () => runtime.verify("android", attempt), time, effects, results,
+      reads: () => reads, expression: () => workerExpression };
+  }
+
+  test.each([0, 1])("settles before the journey's first navigation after transient rejected reads (%d)", async rejectedReads => {
+    const lane = await fixture({ unsettledReads: 3, rejectedReads });
+    await expect(lane.verify()).resolves.toMatchObject({ viewReadOnly: true, controlWritable: true });
+    expect(lane.effects.slice(0, 7 + rejectedReads)).toEqual([
+      "navigate", "attest", ...Array(rejectedReads).fill("read-rejected"),
+      "unsettled", "unsettled", "unsettled", "settled", "navigate",
+    ]);
+    expect(lane.results).toEqual([false, false, false, true]);
+    expect(lane.time.waits).toEqual(Array(3 + rejectedReads).fill(500));
+  });
+
+  test("an unsettled first visit exhausts only the bounded wait and still runs the journey gate", async () => {
+    const lane = await fixture({ unsettledReads: Infinity });
+    await expect(lane.verify()).resolves.toMatchObject({ returnedToDirectory: true });
+    expect(lane.time.now()).toBe(60_000);
+    expect(lane.time.waits).toEqual(Array(120).fill(500));
+    expect(lane.reads()).toBe(121);
+    expect(lane.results.every(result => result === false)).toBe(true);
+    expect(lane.effects).toContain("journey-shell");
+    expect(lane.effects.filter(effect => effect === "navigate")).toHaveLength(3);
+  });
+
+  test("cancellation during the abortable pause propagates without navigating into the journey", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("outer cancelled", "AbortError");
+    const lane = await fixture({ unsettledReads: Infinity,
+      execution: { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 },
+    });
+    const waits: number[] = [];
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((_callback: () => void, milliseconds: number) => {
+      waits.push(milliseconds);
+      queueMicrotask(() => controller.abort(reason));
+      return 0;
+    }) as unknown as typeof setTimeout);
+    restores.push(() => timer.mockRestore());
+    await expect(lane.verify()).rejects.toBe(reason);
+    expect(waits).toEqual([500]);
+    expect(lane.reads()).toBe(1);
+    expect(lane.effects).toEqual(["navigate", "attest", "unsettled"]);
+  });
+
+  test("the first-visit expression returns only booleans for absent, changing and failed registrations", async () => {
+    const lane = await fixture();
+    await lane.verify();
+    const expression = lane.expression();
+    expect(expression).toBeDefined();
+    const evaluate = new Function("navigator", `return ${expression};`);
+    const active = { state: "activated", scriptURL: "SYNTHETIC_PAGE_DETAIL_NOT_FOR_RESULTS" };
+    for (const registration of [
+      undefined, { installing: active, waiting: null, active }, { installing: null, waiting: active, active },
+      { installing: null, waiting: null, active: null },
+      { installing: null, waiting: null, active: { state: "activating" } },
+      { installing: null, waiting: null, active: { state: "redundant" } },
+    ]) {
+      expect(await evaluate({ serviceWorker: { getRegistration: async () => registration } })).toBe(false);
+    }
+    expect(await evaluate({})).toBe(false);
+    expect(await evaluate({ serviceWorker: { getRegistration: async () => { throw new Error(active.scriptURL); } } })).toBe(false);
+    expect(await evaluate({ serviceWorker: { getRegistration: async () => ({
+      installing: null, waiting: null, active,
+    }) } })).toBe(true);
   });
 });
 

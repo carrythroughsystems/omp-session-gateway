@@ -564,6 +564,25 @@ export async function createDeviceCloudRuntime(options: DeviceCloudRuntimeOption
         browser: reported,
         ...(vendorRecord === undefined ? {} : { vendorRecord }),
       });
+      // Attestation installs the release worker before the journey navigates again. A navigation in
+      // flight during activation's clients.claim() can stay uncontrolled for its document's lifetime
+      // (TestingBot Galaxy S25/S24, v0.9.1-prealpha.4); the journey's gate remains the verdict.
+      const FIRST_VISIT_WORKER_WAIT_MS = 60_000;
+      const workerDeadline = Date.now() + FIRST_VISIT_WORKER_WAIT_MS;
+      const workerSettledExpression = `(async () => {
+        try {
+          const registration = await navigator.serviceWorker?.getRegistration("/");
+          return registration !== undefined && registration.installing === null &&
+            registration.waiting === null && registration.active?.state === "activated";
+        } catch { return false; }
+      })()`;
+      for (;;) {
+        execution?.signal.throwIfAborted();
+        const settled = await session.evaluate<boolean>(workerSettledExpression).catch(() => false);
+        execution?.signal.throwIfAborted();
+        if (settled === true || Date.now() >= workerDeadline) break;
+        await abortablePause(Math.min(500, workerDeadline - Date.now()), execution?.signal);
+      }
       let journey: Awaited<ReturnType<typeof runCollaborationJourney>>;
       try { journey = await runCollaborationJourney(session, { origin, label, promptMarker: PROMPT_MARKER, expectedAppAsset: appAsset }); }
       catch (error) { execution?.signal.throwIfAborted(); throw new DeviceCloudJourneyFailure("collaboration", error); }

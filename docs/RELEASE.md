@@ -913,6 +913,10 @@ automatic retry across policy fingerprints. Keep the driver disabled while the f
 
 ### Bounded device-cloud journey retries
 
+Before the collaboration journey's first navigation, each attested directory visit gets up to
+60 seconds for its release worker to settle, avoiding the TestingBot Galaxy S25/S24 `uncontrolled`
+stall observed in `v0.9.1-prealpha.4` without changing the journey's installed-shell readiness verdict.
+
 Within one `deviceCloud` invocation, each iPhone, iPad or Samsung journey may retry once after
 an ordinary post-attestation collaboration or Home Screen journey failure. Only that journey
 gets a fresh device session: the candidate, retained-Mac fixture, live OMP generation, tunnels,
