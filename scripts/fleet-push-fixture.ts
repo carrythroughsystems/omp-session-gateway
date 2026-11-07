@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { executeFixture, type FixtureExecutor } from "./push-qualification-fixture.ts";
@@ -115,7 +115,15 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
       notifications: { sources: [source.id] } });
     state = { epoch, origin, commit, config, changedConfig, plist, bun, cli, serve: beforeServe, fleetStateAbsent: true };
     // Persist restoration authority before touching the service, config, or Serve mapping.
-    await writeFile(statePath, JSON.stringify(state), { mode: 0o600, flag: "wx" });
+    const pendingOwner = `${statePath}.tmp`;
+    const owner = await open(pendingOwner, "wx", 0o600);
+    try {
+      await owner.writeFile(JSON.stringify(state));
+      await owner.sync();
+    } finally { await owner.close(); }
+    await rename(pendingOwner, statePath);
+    const directory = await open(root, "r");
+    try { await directory.sync(); } finally { await directory.close(); }
     await mkdir(join(home, ".config/omp-session-gateway"), { recursive: true, mode: 0o700 });
     await mkdir(join(home, ".omp/run/collab-hosts"), { recursive: true, mode: 0o700 });
     await atomic(sourceConfigPath, JSON.stringify({ http: { hostname: "127.0.0.1", port: FLEET_PUSH_BACKEND_PORT,
@@ -134,17 +142,27 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     await rmdir(root).catch(error => { if (!absent(error)) throw error; });
     return;
   }
-  const sourcePidPath = join(root, "source.pid");
-  const sourceAlive = async (): Promise<number | undefined> => {
+  const sourcePidPath = join(root, "source.pid"), childPidPath = join(root, "source-child.pid");
+  const sourceCommand = `${state.bun} ${state.cli} serve`;
+  const alive = async (path: string, command: string): Promise<number | undefined> => {
     let text: string;
-    try { text = await readFile(sourcePidPath, "utf8"); } catch (error) { if (absent(error)) return; throw error; }
+    try { text = await readFile(path, "utf8"); } catch (error) { if (absent(error)) return; throw error; }
     if (!/^[1-9]\d*$/u.test(text)) throw new Error("invalid fleet source PID");
     const pid = Number(text);
     const result = await execute(["ps", "-ww", "-p", text, "-o", "stat=,command="]);
-    if (result.exitCode !== 0) return;
+    if (result.exitCode === 1 && result.stdout.trim() === "") return;
+    if (result.exitCode !== 0) throw new Error("fleet source process probe failed");
     if (result.stdout.trimStart().startsWith("Z")) return;
-    if (!result.stdout.includes(join(root, "source.sh"))) throw new FleetSourceOwnershipError("fleet source process ownership changed");
+    if (!result.stdout.includes(command)) throw new FleetSourceOwnershipError("fleet source process ownership changed");
     return pid;
+  };
+  const sourceAlive = () => alive(sourcePidPath, join(root, "source.sh"));
+  const childAlive = () => alive(childPidPath, sourceCommand);
+  const backendAbsent = async () => {
+    const listener = await execute(["lsof", "-nP", `-iTCP:${FLEET_PUSH_BACKEND_PORT}`, "-sTCP:LISTEN"]);
+    if (listener.exitCode === 1 && listener.stdout.trim() === "") return true;
+    if (listener.exitCode !== 0) throw new Error("fleet source backend probe failed");
+    return false;
   };
   const stopSource = async () => {
     const pid = await sourceAlive();
@@ -152,33 +170,55 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
       const processes = await run(["ps", "-ww", "-axo", "command="]);
       if (processes.includes(join(root, "source.sh"))) throw new Error("fleet source dispatch has no settled PID owner");
     }
-    if (pid !== undefined) {
-      await run(["kill", "-TERM", String(pid)]);
-      const deadline = Date.now() + 30_000;
-      for (;;) {
-        let unsettled: unknown;
-        try { if (await sourceAlive() === undefined) break; }
-        catch (error) {
-          // After TERM, ps can see the exiting process without its former command line.
-          // This is not proof of exit: keep waiting for absence/zombie, never signal it again.
-          if (!(error instanceof FleetSourceOwnershipError)) throw error;
-          unsettled = error;
-        }
-        if (Date.now() >= deadline) throw new Error("fleet source did not stop", { cause: unsettled });
-        await Bun.sleep(100);
+    if (pid !== undefined) await run(["kill", "-TERM", String(pid)]);
+    const deadline = Date.now() + 30_000;
+    let childSignalled = false;
+    for (;;) {
+      let unsettled: unknown, parentGone = false, childGone = false;
+      try { parentGone = await sourceAlive() === undefined; }
+      catch (error) {
+        // Command loss while exiting is not exit proof or permission to signal that PID again.
+        if (!(error instanceof FleetSourceOwnershipError)) throw error;
+        unsettled = error;
       }
+      try {
+        const child = await childAlive();
+        childGone = child === undefined;
+        if (parentGone && child !== undefined && !childSignalled) {
+          await run(["kill", "-TERM", String(child)]);
+          childSignalled = true;
+        }
+      } catch (error) {
+        if (!(error instanceof FleetSourceOwnershipError)) throw error;
+        unsettled = error;
+      }
+      if (parentGone && childGone && await backendAbsent()) break;
+      if (Date.now() >= deadline) throw new Error("fleet source did not stop", { cause: unsettled });
+      await Bun.sleep(100);
     }
+    await rm(sourcePidPath, { force: true });
+    await rm(childPidPath, { force: true });
   };
   if (operation === "source-down" || operation === "restore") await stopSource();
   if (operation === "coordinator-down") await service(false, state);
   if (operation === "coordinator-up") await service(true, state);
   if (operation === "source-up" || operation === "prepare") {
-    if (await sourceAlive() !== undefined) throw new Error("fleet source already running");
+    if (await sourceAlive() !== undefined || await childAlive() !== undefined || !await backendAbsent()) throw new Error("fleet source already running");
     const script = join(root, "source.sh");
     // Keep a uniquely owned parent process; its trap terminates and waits for the daemon child.
-    await atomic(script, ["#!/bin/sh", `printf %s $$ > ${quote(sourcePidPath)}`,
+    await atomic(script, ["#!/bin/sh", "child=",
+      "stop() {", "  trap '' TERM INT", "  trap - EXIT", '  child=${child:-$!}',
+      '  if [ -n "$child" ]; then',
+      `    printf %s "$child" > ${quote(`${childPidPath}.tmp`)} && mv ${quote(`${childPidPath}.tmp`)} ${quote(childPidPath)}`,
+      `    case "$(ps -ww -p "$child" -o command=)" in`,
+      `      ${quote(sourceCommand)}) kill -TERM "$child" 2>/dev/null ;;`,
+      "    esac", '    wait "$child" 2>/dev/null', "  fi", "  exit", "}",
+      "trap stop TERM INT EXIT",
+      `printf %s $$ > ${quote(`${sourcePidPath}.tmp`)} && mv ${quote(`${sourcePidPath}.tmp`)} ${quote(sourcePidPath)} || exit 1`,
       `env -u XDG_RUNTIME_DIR HOME=${quote(home)} XDG_CONFIG_HOME=${quote(join(home, ".config"))} XDG_STATE_HOME=${quote(join(home, ".local/state"))} ${quote(state.bun)} ${quote(state.cli)} serve &`,
-      'child=$!', 'trap \'kill -TERM "$child" 2>/dev/null; wait "$child"; exit\' TERM INT', 'wait "$child"', ""].join("\n"));
+      'child=$!',
+      `printf %s "$child" > ${quote(`${childPidPath}.tmp`)} && mv ${quote(`${childPidPath}.tmp`)} ${quote(childPidPath)} || exit 1`,
+      'wait "$child"', ""].join("\n"));
     // Like the existing OMP fixture holder, leave the SSH session before exec. nohup alone
     // does not keep this supervisor alive when the remote command's session is torn down.
     const detach = 'import os,sys; os.setsid(); os.execv("/bin/sh", ["sh", sys.argv[1]])';
@@ -186,7 +226,7 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     const deadline = Date.now() + 30_000;
     while (true) {
       const result = await execute(["curl", "--silent", "--fail", "--max-time", "2", `http://127.0.0.1:${FLEET_PUSH_BACKEND_PORT}/api/v1/health`]);
-      if (result.exitCode === 0 && await sourceAlive() !== undefined) break;
+      if (result.exitCode === 0 && await sourceAlive() !== undefined && await childAlive() !== undefined) break;
       if (Date.now() >= deadline) throw new Error("fleet source readiness unavailable");
       await Bun.sleep(100);
     }

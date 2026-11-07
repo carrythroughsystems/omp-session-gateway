@@ -245,6 +245,8 @@ export interface AndroidPushRuntime {
   openPwa(): Promise<void>;
   lock(): Promise<void>;
   observe(session: SessionMetadata, kind: "attention" | "activity_stop", detail: PushDetailLevel): Promise<NotificationObservation>;
+  /** Both the OS and worker have no notification on this session's tag, regardless of request. */
+  notificationCleared(session: SessionMetadata): Promise<boolean>;
   presentation(session: SessionMetadata, detail: PushDetailLevel): Promise<boolean>;
   tap(session: SessionMetadata, kind: "attention" | "activity_stop", stale: boolean): Promise<PushTapObservation>;
   /** Reads the installed app's directory, after performing `action` when one is given. */
@@ -631,7 +633,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       while (true) {
         const observed = await runtime.observe(settled, "attention", "private");
         requireBudget();
-        if (observed.count === 0) break;
+        if (observed.count === 0 && await runtime.notificationCleared(settled)) break;
         await runtime.pause(500);
         requireBudget();
       }
@@ -794,7 +796,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         const current = await runtime.snapshot(progress.epoch, role);
         if (current === undefined || current.inputRequired) return undefined;
         await proveAskClear(role);
-        return (await runtime.observe(current, "attention", "private")).count === 0 ? true : undefined;
+        return await runtime.notificationCleared(current) ? true : undefined;
       }, timeout, start);
       metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - start);
     };
@@ -827,7 +829,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
             const current = await runtime.snapshot(progress.epoch);
             if (current === undefined || current.inputRequired) return undefined;
             return await proveAskClear("primary") && armedAsks.get("primary")?.clearAlias === old.qualificationPushAlias &&
-              (await runtime.observe(current, "attention", detail)).count === 0 ? current : undefined;
+              await runtime.notificationCleared(current) ? current : undefined;
           }, timeout, clearing);
           lateDelivery = undefined;
           metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - clearing);
@@ -1189,7 +1191,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           return current !== undefined && !current.inputRequired ? current : undefined;
         }, 60_000, clearing);
         await runtime.openPwa();
-        await wait("authoritative clear after Doze", async () => (await runtime.observe(settled, "attention", "private")).count === 0 ? true : undefined, 60_000, clearing);
+        await wait("authoritative clear after Doze", async () => await runtime.notificationCleared(settled) ? true : undefined, 60_000, clearing);
         await proveAskClear("primary");
         await runtime.closePwa();
         await finish("doze_verified", { variant: duringDoze ? "delivered_during_doze" : afterExit ? "delivered_after_doze_exit" : "undelivered_after_doze_exit" });

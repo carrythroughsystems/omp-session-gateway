@@ -272,15 +272,25 @@ OMP discovery directory, backend port 14318, and a distinct Tailscale Serve HTTP
 This is a representative isolated server identity, not evidence of a second physical computer.
 Enrollment uses the installed Pixel PWA's Settings → Hosts switch. The phases require concurrent
 local/remote asks, all three detail levels (fleet Preview falls back to Session), exact-source
-Control taps, resolved/replaced/expired remote taps without a launch, clear/new-request races,
+Control taps, resolved/replaced/expired remote taps without a launch, clear-before-rearm races,
 source stale/last-known recovery, coordinator restart without repeats, grant revocation,
 replacement/deduplication, foreground reconciliation, and privacy sink scans on both identities.
+Clear proof requires both OS records and worker notifications to be absent on the session's tag,
+independent of request ID; delivery still matches the exact request. Restart answers the remote
+ask while the coordinator is down, then proves its old alert closed while the local alert stayed
+unchanged, before arming a new remote ask. The expired-host replay must close before re-baselining.
+The remote sink sweep runs while the remote session launched by the PWA's real Control tap is
+still alive, using that same generation's Control capability and the detectable positive control;
+`fleet_sinks_verified` records those closed observations after the other fleet checks.
 Remote notification ownership includes the origin-bound fleet binding; local tags stay unchanged.
 Private alerts intentionally look identical: concurrent ownership, privacy and deduplication use
 the OS records and worker metadata, then each source's lock-screen row is observed alone after
 authoritatively resolving its peer. The lane never guesses between indistinguishable Private rows.
 The source supervisor detaches from the remote SSH session using the existing fixture's Python
-session-leader pattern; its owned PID and script remain the authority for outage and cleanup.
+session-leader pattern. Its TERM/EXIT trap precedes spawning the daemon, and atomic PID files
+identify both processes. Stop proves the supervisor, child and backend listener gone within the
+30-second bound before removing their PID files. The restoration owner is fsynced and atomically
+published (including its parent directory) before any coordinator config/service/Serve mutation.
 DevTools admission bounds both pending HTTP reads and retries. A worker-only observation may
 reconnect once after contained transport loss, but never wakes/navigates the cold PWA, re-arms
 lost observer state, or replays an evaluated mutation. Missing workers and product assertions
@@ -292,8 +302,11 @@ The fleet observer is admitted while warm and keeps one browser/worker attachmen
 target) for at most 30 minutes, bounded further by the lane deadline. Fleet result rows mark
 `devtoolsObserver`: these cold-PWA phases prove real delivery, rendering, identity, ordering
 and taps with instrumentation attached, **not process-cold wake semantics**. Loss of the held
-connection fails typed; it is never silently reconnected. Fleet cleanup restores the wrappers
-and releases that connection on success or failure. The unchanged legacy force-stop and Doze
+connection fails typed; it is never silently reconnected. Fleet cleanup retains its owner and
+prepared state until badge unpatch is proven (or the worker is proven restarted), then removes
+host ownership. It releases the observer only after the unpatch attempt, on success or failure.
+Resumed cleanup treats a hidden Hosts section with alerts off as deselected; coordinator grant
+removal remains required by host restoration. The unchanged legacy force-stop and Doze
 phases run after release, without this observer, and retain the process-cold observations.
 After signalling a verified source supervisor once, cleanup tolerates transient loss of its
 command line only while awaiting proven absence/zombie within the existing 30-second bound;
@@ -301,7 +314,8 @@ it never signals an unverified PID or treats a changed command as proof of exit.
 Tap accounting records browser-generated CORS `OPTIONS` preflights separately from launch
 attempts. Every non-OPTIONS request to any launch route still counts, so duplicate POSTs and
 wrong-source/malformed launch attempts cannot be hidden by the cross-origin admission step.
-The outage phase observes its pending remote row in the open PWA before taking the source down.
+The outage phase observes its pending remote row in the open PWA before taking the source down,
+and asserts that the row is still present once the source is stale.
 Coverage polls preserve that page instead of reloading away its last-known directory. Wait
 timeouts retain the named observation in private diagnostics, never in receipt fields.
 Paths sent to the retained macOS fixture executor use POSIX separators on every runner OS;
