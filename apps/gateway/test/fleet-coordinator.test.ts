@@ -8,7 +8,7 @@ import {
   type BrowserPushSubscription, type FleetFeedEvent, type FleetFeedSession, type FleetPushMessage,
   type FleetWorkerState, type FleetDisplayedNotification, type ObservedSessionInput,
 } from "@omp-session-gateway/protocol";
-import { FleetCoordinator, FleetCoordinatorProblem, type FleetCoordinatorClock, type FleetCoordinatorConfig } from "../src/fleet-coordinator.ts";
+import { FleetCoordinator, FleetCoordinatorProblem, fleetCoordinatorStateHealthy, type FleetCoordinatorClock, type FleetCoordinatorConfig } from "../src/fleet-coordinator.ts";
 import type { GatewayConfig } from "../src/config.ts";
 import { SafeLogger } from "../src/logger.ts";
 import { PushService, type PushTransport } from "../src/push.ts";
@@ -150,7 +150,7 @@ async function fixture(sources = [sourceA, sourceB]) {
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
   for (let attempt = 0; attempt < 300; attempt++) {
     if (await predicate()) return;
-    const { promise, resolve } = Promise.withResolvers<void>(); setImmediate(resolve); await promise;
+    await Bun.sleep(1);
   }
   throw new Error("condition did not settle");
 }
@@ -254,6 +254,24 @@ describe("fleet coordinator", () => {
     await f.restart(); await settled(f.coordinator); expect(f.transport.calls).toHaveLength(count + 2);
   });
 
+  test("restart with queued old messages preserves outstanding identity and rejects late old epochs", async () => {
+    const f = await fixture(); const device = await f.device();
+    const sessions = Array.from({ length: 20 }, (_, index) => ({ instanceId: `synthetic-queued-${index}`, generation: 1, requestId }));
+    const grant = await f.grant(alice, sourceA.id, sessions); f.transport.block = true;
+    await f.coordinator.select(alice, device, [sourceA.id]); await until(() => f.transport.gates.length === 8);
+    const old = f.transport.calls[0]!.message;
+    const stopping = f.coordinator.stop(); f.transport.release(); await stopping;
+    expect(f.transport.calls).toHaveLength(8);
+    await f.feeds.register(grant, alice, [{ instanceId: "synthetic-after-restart", generation: 2, requestId: nextRequest }]);
+    await f.restart(); await until(() => f.transport.calls.length === 29); await settled(f.coordinator);
+    expect(f.transport.calls.slice(8).filter(call => call.message.type === "clear")).toHaveLength(20);
+    expect(f.transport.calls.slice(8).filter(call => call.message.type === "attention")).toHaveLength(1);
+    expect(f.transport.calls.slice(8).every(call => call.message.seq.epoch === old.seq.epoch + 1)).toBe(true);
+    const worker = f.transport.workers.get(device)!;
+    expect(reduceFleetPush(worker.state, old, worker.displayed, f.clock.now()).effects).toEqual([]);
+    expect(worker.displayed.map(value => value.intent.instanceId)).toEqual(["synthetic-after-restart"]);
+  });
+
   test("restart clears unauthorized, removed, repointed, and deselected bindings; stale stays outstanding", async () => {
     for (const mode of ["unauthorized", "removed", "repointed", "deselected", "stale"] as const) {
       const f = await fixture(); const device = await f.device(); const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
@@ -279,13 +297,36 @@ describe("fleet coordinator", () => {
       catch (error) { expect(error instanceof FleetCoordinatorProblem && error.status === http && error.code === code).toBe(true); }
     }
     const hanging = await f.coordinator.createGrant(alice, sourceA.id);
-    const pending = f.coordinator.activate(alice, hanging.grantId);
-    const rejection = expect(pending).rejects.toMatchObject({ status: 503, code: "source_unreachable" });
-    await until(() => f.feeds.connections.some(connection => connection.grantId === hanging.grantId)); f.clock.advance(5_000); await rejection;
+    const pending = f.coordinator.activate(alice, hanging.grantId).catch((error: unknown) => error);
+    await until(() => f.feeds.connections.some(connection => connection.grantId === hanging.grantId));
+    f.clock.advance(5_000);
+    expect(await pending).toMatchObject({ status: 503, code: "source_unreachable" });
     const mismatch = await f.coordinator.createGrant(alice, sourceA.id); await f.feeds.register(mismatch.grantId, bob);
     await expect(f.coordinator.activate(alice, mismatch.grantId)).rejects.toMatchObject({ status: 409, code: "grant_rejected" });
     const state = JSON.parse(await readFile(join(f.config.paths.stateDir, "fleet-notifications.json"), "utf8")); expect(state.grants).toHaveLength(0);
     await expect(f.coordinator.createGrant("not-subscribed@example.test", sourceA.id)).rejects.toMatchObject({ status: 409 });
+  });
+
+  test("authorization retry recovers after renewal; malformed and oversized feeds retain stale asks", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.feeds.statuses.set(grant, 401); f.feeds.live(grant).close();
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "stale");
+    f.clock.advance(1000);
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "unauthorized"); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.type).toBe("clear");
+    const attempts = f.feeds.requests.length; f.clock.advance(299_999); await settled(f.coordinator); expect(f.feeds.requests).toHaveLength(attempts);
+    f.feeds.statuses.delete(grant); f.clock.advance(1);
+    await until(() => f.transport.calls.length === 3); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.type).toBe("attention");
+    f.feeds.live(grant).raw(`data: ${"x".repeat(70_000)}\n\n`);
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "stale");
+    expect(f.transport.calls).toHaveLength(3);
+    f.clock.advance(1000); await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "current");
+    f.feeds.live(grant).raw('event: upsert\ndata: {\"version\":1,\"type\":\"upsert\",\"session\":{\"instanceId\":\"synthetic-instance\",\"generation\":1,\"preview\":\"SYNTHETIC_FORBIDDEN\"}}\n\n');
+    await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "stale");
+    expect(f.transport.calls).toHaveLength(3);
   });
 
   test("legacy payload and state bytes remain identical; fleet private/session/preview stay bounded", async () => {
@@ -300,6 +341,39 @@ describe("fleet coordinator", () => {
     expect(f.transport.calls.filter(call => call.endpoint === privateDevice).every(call => !("body" in call.message))).toBe(true);
     expect(f.transport.calls.find(call => call.endpoint === device && call.message.source === undefined)?.message).toMatchObject({ body: "Home · SYNTHETIC_LOCAL_TITLE · SYNTHETIC_LOCAL_PROJECT" });
     expect(f.transport.calls.some(call => call.endpoint === legacy)).toBe(false);
+    f.registry.reconcile({ observed: [observed(false)], retained: new Set() }); await f.push.flush(); await settled(f.coordinator);
+    expect(f.transport.legacy.at(-1)).toBe(JSON.stringify({ version: 2, type: "clear", instanceId, requestId: session.ask!.requestId, pendingAskCount: 0 }));
+    f.registry.reconcile({ observed: [{ ...observed(false), busy: true }], retained: new Set() });
+    f.registry.reconcile({ observed: [{ ...observed(false), busy: false }], retained: new Set() }); await f.push.flush(); await settled(f.coordinator);
+    expect(f.transport.legacy.at(-1)).toBe(JSON.stringify({ version: 2, type: "activity_stop", instanceId, generation: 1, pendingAskCount: 0, title: "OMP session activity stopped", body: "SYNTHETIC_LOCAL_TITLE · SYNTHETIC_LOCAL_PROJECT" }));
+    expect(await readFile(join(f.config.paths.stateDir, "push-state.json"), "utf8")).toBe(before);
+  });
+
+  test("startup discovery cannot downgrade persisted fleet recipients to v2 while state loads", async () => {
+    const f = await fixture(); const device = await f.device(); await f.grant(alice, sourceA.id);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator); await f.coordinator.stop(); await f.push.stop();
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 1000 });
+    const push = await PushService.open({ config: { ...f.config, notifications: { sources: [sourceA.id] } }, registry, transport: f.transport, logger: new SafeLogger({ write() {} }) });
+    registry.reconcile({ observed: [observed(true)], retained: new Set() });
+    await Bun.sleep(1); expect(f.transport.legacy).toHaveLength(0);
+    const coordinator = await FleetCoordinator.open({ config: f.coordinatorConfig, push, registry, stateDir: f.config.paths.stateDir, fetch: f.feeds.fetch, clock: f.clock });
+    try {
+      await push.flush(); await until(() => f.transport.calls.length > 0); await settled(coordinator);
+      expect(f.transport.legacy).toHaveLength(0);
+      expect(f.transport.calls[0]?.message).toMatchObject({ version: 3, type: "attention", instanceId });
+    } finally { await coordinator.stop(); await push.stop(); }
+  });
+
+  test("restart waits for local discovery or its 30-second deadline without clearing cold local asks", async () => {
+    const f = await fixture(); const device = await f.device(); await f.grant(alice, sourceA.id);
+    await f.coordinator.select(alice, device, [sourceA.id]); f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+    const count = f.transport.calls.length; await f.coordinator.stop();
+    f.registry.reconcile({ observed: [], retained: new Set() }); await f.push.flush();
+    let warm = false; await f.restart(f.coordinatorConfig, () => warm); await settled(f.coordinator);
+    expect(f.transport.calls).toHaveLength(count);
+    f.clock.advance(30_000); await settled(f.coordinator); expect(f.transport.calls).toHaveLength(count);
+    warm = true; await f.coordinator.status(alice, device); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.type).toBe("clear");
   });
 
   test("capacity and queue flood stay bounded; every queued alert remains clearable", async () => {
@@ -318,6 +392,20 @@ describe("fleet coordinator", () => {
     await expect(FleetCoordinator.open({ config: { ...f.coordinatorConfig, sources: Array.from({ length: 8 }, (_, index) => ({ id: `source-${index}`, origin: `https://source-${index}.example.test`, label: "Source" })) }, push: f.push, registry: f.registry, stateDir: f.config.paths.stateDir })).rejects.toThrow();
   });
 
+  test("a flood exceeding the delivery queue never drops clears across recipients", async () => {
+    const f = await fixture(); const one = await f.device(alice, "one"), two = await f.device(alice, "two");
+    const sessions = Array.from({ length: 256 }, (_, index) => ({ instanceId: `synthetic-clear-flood-${index}`, generation: 1, requestId }));
+    const grant = await f.grant(alice, sourceA.id, sessions);
+    await f.coordinator.select(alice, one, [sourceA.id]); await settled(f.coordinator);
+    await f.coordinator.select(alice, two, [sourceA.id]); await settled(f.coordinator);
+    expect(f.transport.calls).toHaveLength(512);
+    f.transport.block = true; await f.coordinator.revoke(alice, grant); await until(() => f.transport.gates.length === 8);
+    expect(f.coordinator.diagnostics().queued).toBeLessThanOrEqual(256);
+    f.transport.release(); await settled(f.coordinator);
+    expect(f.transport.calls.filter(call => call.message.type === "clear")).toHaveLength(512);
+    expect(f.transport.workers.get(one)!.displayed).toHaveLength(0); expect(f.transport.workers.get(two)!.displayed).toHaveLength(0);
+  });
+
   test("eviction and unsubscribe remove recipient state; corruption fails closed without deleting evidence", async () => {
     const f = await fixture(); const device = await f.device(); await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
     f.transport.failure = 410; await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
@@ -326,6 +414,7 @@ describe("fleet coordinator", () => {
     await f.push.unsubscribe(alice, { version: 2, endpoint: next }); await settled(f.coordinator); expect(f.coordinator.diagnostics().recipients).toBe(0);
     await f.coordinator.stop(); const path = join(f.config.paths.stateDir, "fleet-notifications.json"); await writeFile(path, "{SYNTHETIC_CORRUPTION}", { mode: 0o600 });
     await f.restart(); expect(f.coordinator.healthy).toBe(false); await expect(f.coordinator.status(alice)).rejects.toMatchObject({ status: 503 });
+    expect(await fleetCoordinatorStateHealthy(f.config.paths.stateDir)).toBe(false);
     expect(await readFile(path, "utf8")).toBe("{SYNTHETIC_CORRUPTION}");
   });
 
@@ -338,7 +427,7 @@ describe("fleet coordinator", () => {
     expect(visible.includes(secret)).toBe(false); expect(visible.includes(device)).toBe(false);
     const archive = diagnosticsBundleBytes({ service: "omp-session-gateway", checks: { fleetHealthy: f.coordinator.healthy } }).toString(); expect(archive.includes(secret)).toBe(false);
     expect((await readFile(join(f.config.paths.stateDir, "fleet-notifications.json"), "utf8")).includes(device)).toBe(false);
-    for (const line of f.logs) { const entry = JSON.parse(line); for (const [key, value] of Object.entries(entry)) if (!["time", "level", "event"].includes(key)) expect(typeof value === "boolean" || typeof value === "number").toBe(true); }
+    for (const line of f.logs) { const entry = JSON.parse(line); for (const [key, value] of Object.entries(entry)) if (!["timestamp", "level", "event"].includes(key)) expect(typeof value === "boolean" || typeof value === "number").toBe(true); }
   });
 
   test("real fetch bypasses dead HTTP/HTTPS proxies for the configured host", async () => {

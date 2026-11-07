@@ -514,8 +514,9 @@ export function createHttpHandler(options: {
 
     // Coordinator routes are deliberately same-origin and isolated from source grant CORS.
     if (url.pathname.startsWith("/api/v1/push/fleet/")) {
+      if (!config.notifications?.sources?.length) return problem(404, "not_found", "Not found");
       const coordinator = options.fleetCoordinator;
-      if (coordinator === undefined) return problem(404, "not_found", "Not found");
+      if (coordinator === undefined) return problem(503, "fleet_unavailable", "Fleet notifications unavailable");
       const action = /^\/api\/v1\/push\/fleet\/grants\/([^/]+)\/(activate|revoke)$/u.exec(url.pathname);
       const supported = request.method === "POST" && (
         url.pathname === "/api/v1/push/fleet/status" || url.pathname === "/api/v1/push/fleet/grants" ||

@@ -184,6 +184,7 @@ export class FleetCoordinator {
   #deferredClears = false;
   #restarting = true;
   #mutating = false;
+  #pendingStops = 0;
   #restartDeadline = 0;
   #restartTimer: Timer | undefined;
 
@@ -217,7 +218,8 @@ export class FleetCoordinator {
     coordinator.#restartTimer = coordinator.#clock.setTimeout(() => coordinator.#scheduleReconcile(), 30_000);
     coordinator.#unsubscribers.push(coordinator.#registry.subscribeWithSnapshot(() => coordinator.#scheduleReconcile()));
     coordinator.#unsubscribers.push(coordinator.#registry.subscribeActivityStops(event => {
-      if (coordinator.#restarting) return;
+      if (coordinator.#restarting || coordinator.#queue.length + coordinator.#pendingStops >= MAX_QUEUE) return;
+      coordinator.#pendingStops++;
       void coordinator.#serial(async () => {
         if (!coordinator.#registry.isCurrentActivityStop(event)) return;
         const current = coordinator.#registry.authorizeLaunch(event.session.instanceId, event.session.generation, "view");
@@ -225,7 +227,7 @@ export class FleetCoordinator {
         for (const recipient of coordinator.#state.recipients) coordinator.#enqueue(recipient, "activity_stop", event.session, undefined,
           () => coordinator.#registry.isCurrentActivityStop(event));
         await coordinator.#persist();
-      }).catch(() => undefined);
+      }).catch(() => undefined).finally(() => { coordinator.#pendingStops--; });
     }));
     await coordinator.#serial(async () => { coordinator.#prune(); coordinator.#syncPullers(); await coordinator.#reconcile(); });
     return coordinator;
@@ -324,6 +326,7 @@ export class FleetCoordinator {
       this.#state.grants.push(grant);
       result = parseFleetGrantCreateResponse({ version: 1, grantId: grant.grantId, verifier: await fleetGrantVerifier(grant.grantId, grant.secret) });
       if (this.#grant(owner, sourceId) === grant) this.#known(owner, sourceId).state = "pending";
+      this.#syncPullers();
       await this.#persist();
     });
     return result;
@@ -332,8 +335,17 @@ export class FleetCoordinator {
     this.#assertHealthy();
     const grant = this.#state.grants.find(grant => grant.owner === owner && grant.grantId === grantId);
     if (grant === undefined || !this.#push.fleetRecipients().some(subscription => subscription.owner === owner)) throw new FleetCoordinatorProblem(409, "grant_rejected");
-    const puller = this.#pullers.get(grantId) ?? this.#startPuller(grant, true);
-    const result = await puller.first;
+    let puller = this.#pullers.get(grantId);
+    if (puller?.settled && this.#known(owner, grant.sourceId).state !== "current") {
+      puller.abort.abort();
+      await puller.task;
+      puller = undefined;
+    }
+    puller ??= this.#startPuller(grant, true);
+    const timeout = Promise.withResolvers<Activation>();
+    const timer = this.#clock.setTimeout(() => timeout.resolve("source_unreachable"), 5_000);
+    const result = await Promise.race([puller.first, timeout.promise]);
+    this.#clock.clearTimeout(timer);
     if (result !== "ok") {
       await this.#serial(async () => {
         if (!grant.active) this.#state.grants = this.#state.grants.filter(value => value !== grant);
@@ -450,7 +462,10 @@ export class FleetCoordinator {
                 const bytes = Buffer.byteLength(line);
                 if (bytes > MAX_FLEET_FEED_EVENT_BYTES) throw new Error("feed bound");
                 if (line.startsWith(":")) {
-                  if (received) { this.#clock.clearTimeout(deadline); deadline = this.#clock.setTimeout(cancel, 45_000); }
+                  if (received) {
+                    this.#clock.clearTimeout(deadline);
+                    deadline = this.#clock.setTimeout(cancel, Math.min(45_000, Math.max(0, Date.parse(grant.expiresAt!) - this.#clock.now())));
+                  }
                   continue;
                 }
                 eventBytes += bytes;
@@ -472,7 +487,8 @@ export class FleetCoordinator {
                       await this.#accept(grant, event);
                     });
                     received = true; result = "ok"; backoff = 1_000;
-                    this.#clock.clearTimeout(deadline); deadline = this.#clock.setTimeout(cancel, 45_000);
+                    this.#clock.clearTimeout(deadline);
+                    deadline = this.#clock.setTimeout(cancel, Math.min(45_000, Math.max(0, Date.parse(grant.expiresAt!) - this.#clock.now())));
                     if (!puller.settled) { puller.settled = true; puller.resolve("ok"); }
                     if (!this.#selected(grant)) { puller.abort.abort(); break; }
                   }
@@ -488,9 +504,12 @@ export class FleetCoordinator {
       if (puller.abort.signal.aborted || this.#stopped || !this.#healthy || !this.#state.grants.includes(grant)) return;
       if (grant.expiresAt !== undefined && Date.parse(grant.expiresAt) <= this.#clock.now()) result = "grant_rejected";
       await this.#serial(async () => {
-        const knowledge = this.#known(grant.owner, grant.sourceId);
-        knowledge.state = result === "grant_rejected" ? "unauthorized" : result === "unsupported" ? "unsupported" : "stale";
-        knowledge.reported = true;
+        const existing = this.#grant(grant.owner, grant.sourceId);
+        if (existing === grant || existing?.active !== true) {
+          const knowledge = this.#known(grant.owner, grant.sourceId);
+          knowledge.state = result === "grant_rejected" ? "unauthorized" : result === "unsupported" ? "unsupported" : "stale";
+          knowledge.reported = true;
+        }
         if (mismatch) this.#state.grants = this.#state.grants.filter(value => value !== grant);
         await this.#reconcile();
       });

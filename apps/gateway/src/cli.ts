@@ -39,6 +39,7 @@ import { OmpHostReader, OmpLaunchResolver, startHostPoller } from "./omp-registr
 import { assertQualificationLogDirectory, QualificationLogSink, SafeLogger } from "./logger.ts";
 import { PushService } from "./push.ts";
 import { FleetSourceService } from "./fleet-source.ts";
+import { FleetCoordinator } from "./fleet-coordinator.ts";
 import { SessionCreationService } from "./tern-creation.ts";
 import { SessionRegistry } from "./registry.ts";
 import {
@@ -210,6 +211,19 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
   const creationService = await SessionCreationService.open({ config, poller, registry });
   const fleetSourceService = config.notifications?.coordinators?.length
     ? await FleetSourceService.open({ config, poller, registry }) : undefined;
+  const fleetCoordinator = config.notifications?.sources?.length
+    ? await FleetCoordinator.open({
+      config: {
+        publicOrigin: config.http.publicOrigin,
+        ownLabel: config.fleet.label,
+        sources: config.fleet.targets.filter(source => config.notifications?.sources?.includes(source.id)),
+      },
+      stateDir: config.paths.stateDir,
+      push: pushService,
+      registry,
+      logger,
+      discoveryWarm: () => poller.discoveryWarm,
+    }) : undefined;
   let stopping = false;
   let resolveStop: () => void = () => undefined;
   const stopped = new Promise<void>(resolve => {
@@ -236,6 +250,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
       logger,
       pushService,
       ...(fleetSourceService === undefined ? {} : { fleetSourceService }),
+      ...(fleetCoordinator === undefined ? {} : { fleetCoordinator }),
       creationService,
       readinessToken: token,
       ...(readinessInstance === undefined ? {} : { readinessInstance }),
@@ -263,7 +278,8 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
         try {
           await creationService.stop();
         } finally {
-          await pushService.stop();
+          try { await fleetCoordinator?.stop(); }
+          finally { await pushService.stop(); }
         }
       }
     }

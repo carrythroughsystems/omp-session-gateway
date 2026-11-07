@@ -68,7 +68,8 @@ Responsibilities:
 
 The registry is intentionally empty after daemon restart. The next host poll repopulates it; no capability store exists.
 
-`apps/gateway/src/cli.ts:runServe()` owns `SessionCreationService`, `FleetSourceService`, the poller, HTTP server, and
+`apps/gateway/src/cli.ts:runServe()` owns `SessionCreationService`, `FleetSourceService`,
+`FleetCoordinator`, the poller, HTTP server, and
 shutdown, just as it owns `PushService`; `service.ts` remains OS-service installation code.
 `tern-creation.ts` owns serialized admission, a private capability-free
 `<stateDir>/session-creations.json` ledger, state transitions, and adoption. `tern-cli.ts` owns
@@ -98,6 +99,31 @@ Corruption preserves evidence and disables fleet routes with 503 without disabli
 directory/launch access. Doctor emits a boolean health finding; support archives never read
 either fleet state file. The coordinator puller and PWA enrollment are separate roles and are
 not implemented by this source service.
+
+#### Fleet notification coordinator
+
+`fleet-coordinator.ts` owns the home role: at most 32 owner/source grants, eight recipients keyed
+by endpoint SHA-256, and 256 outstanding ask identities per recipient in private atomic
+`fleet-notifications.json`. It persists `max(previous epoch + 1, Unix seconds)` before delivery;
+one receipt counter spans all recipients within that epoch. `push-state.json` and legacy v2
+payloads are unchanged. The push service supplies the existing owner-bound subscriptions,
+VAPID transport and a shared eight-send semaphore; opted-in recipients receive validated v3
+messages for both local and selected remote sources.
+
+Each selected active grant owns one bounded SSE puller to its exact configured origin. It sends
+only the grant Authorization and SSE Accept headers, refuses redirects, and adds configured hosts
+to runtime proxy bypass lists. Snapshots verify the coordinator-bound owner digest before changing
+knowledge. Network failure retains stale asks; authorization failure clears that source's alerts.
+Reconnects back off from one second to five minutes; 401 and 404 retry every five minutes.
+
+After selected sources report or 30 seconds elapse, restart reconciliation compares persisted
+outstanding requests with current knowledge: exact clears first, then unseen current asks, never
+stops or repeated alerts. Stale sources retain their outstanding asks. Selection replay is scoped
+to one device. Queue admission persists outstanding identifiers before transport; a full 256-entry
+delivery queue drops new alerts/stops while deferred clears remain represented in the bounded
+outstanding set until queue space opens. Transport rechecks owner, selection, grant and expiry
+after acquiring its send slot. Corrupt/unwritable state fails fleet routes closed without deleting
+evidence; the ordinary directory and capability broker remain independent.
 
 ### 1.4 OMP Sessions PWA
 

@@ -255,6 +255,7 @@ export class PushService {
   #unsubscribeActivityStops: (() => void) | undefined;
   #stopped = false;
   #fleet: FleetPushAdapter | undefined;
+  readonly #fleetReady = Promise.withResolvers<void>();
   #sending = 0;
   readonly #sendWaiters: Array<() => void> = [];
 
@@ -308,6 +309,7 @@ export class PushService {
 
   attachFleet(adapter: FleetPushAdapter): void {
     this.#fleet = adapter;
+    this.#fleetReady.resolve();
   }
 
   fleetRecipients(): readonly FleetPushRecipient[] {
@@ -402,6 +404,7 @@ export class PushService {
   async stop(): Promise<void> {
     if (this.#stopped) return;
     this.#stopped = true;
+    this.#fleetReady.resolve();
     this.#unsubscribeRegistry?.();
     this.#unsubscribeRegistry = undefined;
     this.#unsubscribeActivityStops?.();
@@ -572,6 +575,12 @@ export class PushService {
     subscriptionReplay = false,
     requestAlias = 0,
   ): Promise<void> {
+    // Discovery may finish while the coordinator is still loading private recipient state.
+    // Do not downgrade those devices to v2 during that startup window.
+    if (this.#config.notifications?.sources?.length && this.#fleet === undefined) {
+      await this.#fleetReady.promise;
+      if (this.#fleet === undefined) return;
+    }
     const subscriptions = (selectedSubscriptions ?? this.#subscriptions).filter(subscription =>
       this.#identityAllowed(subscription.identityKey) && !this.#fleet?.includes(subscription.identityKey, subscription.endpoint),
     );
