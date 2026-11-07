@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { executeFixture, type FixtureExecutor } from "./push-qualification-fixture.ts";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
+import { findIdentifierLeaks } from "./identifier-leak-rules.ts";
 
 export const FLEET_PUSH_SOURCE_ID = "push-qualification";
 export const FLEET_PUSH_SOURCE_LABEL = "Qualification source";
@@ -28,6 +29,29 @@ interface FixtureState {
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const absent = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
+/** Private helper response, consumed in memory by the controller; never receipt evidence. */
+export function fleetFixtureDiagnostic(error: unknown): { message: string; stack: string }[] {
+  const seen = new Set<Error>(), entries: { message: string; stack: string }[] = [];
+  const redact = (text: string) => {
+    if (Buffer.byteLength(text) > 4096) return "[oversized helper diagnostic withheld]";
+    return text.split("\n").map(line => {
+      while (line.includes("identifier-leak-allow")) line = line.replaceAll("identifier-leak-allow", "");
+      if (findCapabilityLeaks(line).length) return "[capability-bearing helper diagnostic withheld]";
+      for (const finding of findIdentifierLeaks(line)) line = line.replaceAll(finding.match, `[redacted ${finding.label}]`);
+      return line;
+    }).join("\n");
+  };
+  const visit = (value: unknown) => {
+    if (entries.length >= 16 || !(value instanceof Error) || seen.has(value)) return;
+    seen.add(value);
+    entries.push({ message: redact(value.message), stack: redact(value.stack ?? value.message) });
+    visit(value.cause);
+    if (value instanceof AggregateError) for (const child of value.errors) visit(child);
+  };
+  visit(error);
+  return entries;
+}
+
 /** Runs on the lane host. No grants, subscriptions, capabilities or raw daemon output are copied. */
 export async function fleetPushFixture(operation: FleetFixtureOperation, root: string, epoch: string, origin: string,
   commit: string, execute: FixtureExecutor = executeFixture, homeDirectory = homedir()): Promise<void> {
@@ -40,7 +64,7 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
   const sourceConfigPath = join(home, ".config/omp-session-gateway/config.json");
   const run = async (argv: readonly string[]) => {
     const result = await execute(argv);
-    if (result.exitCode !== 0) throw new Error("fleet fixture command failed");
+    if (result.exitCode !== 0) throw new Error(`fleet fixture ${argv[0]} command exited ${result.exitCode}`);
     return result.stdout;
   };
   const serve = async () => run(["tailscale", "serve", "status", "--json"]);
@@ -212,5 +236,8 @@ if (import.meta.main) {
       !root || !epoch || !origin || !commit || extra.length) throw new Error("invalid fleet fixture arguments");
     await fleetPushFixture(operation as FleetFixtureOperation, root, epoch, origin, commit);
     console.log(JSON.stringify({ completed: true }));
-  } catch { console.error("Fleet Push fixture operation failed"); process.exitCode = 1; }
+  } catch (error) {
+    console.log(JSON.stringify({ completed: false, diagnostic: fleetFixtureDiagnostic(error) }));
+    console.error("Fleet Push fixture operation failed"); process.exitCode = 1;
+  }
 }

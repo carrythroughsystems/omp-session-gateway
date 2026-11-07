@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { parsePushConfigResponse, parseSessionListResponse } from "../packages/protocol/src/validation.ts";
 import { PUSH_API_VERSION, type PushDetailLevel, type SessionMetadata } from "../packages/protocol/src/types.ts";
-import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget, parseAndroidVpnNetwork, parseGcmTransport, readPixelBaseline, ensureAndroidPublicDns,
+import { AndroidBrowserCleanupError, AndroidDevtoolsConnectionError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget, parseAndroidVpnNetwork, parseGcmTransport, readPixelBaseline, ensureAndroidPublicDns,
   runAdb, wakeAndroidDisplay, unlockAndroidKeyguard, showAndroidPinBouncer, type AndroidAdbCommand, type AndroidChromeDriver, type AndroidExecution } from "./android-device.ts";
 import { closeWebApk, openWebApk, requireWebApk, webApkTasks } from "./android-webapk.ts";
 import { readAndroidUi, findAndroidNotification, tapAndroidNotification, readAndroidNotificationRecords, notificationMatchesDigest, trackUnchangedNotificationPost, NotificationOverlapError, type AndroidUiNode, type NotificationExpectation } from "./android-notification.ts";
@@ -259,12 +259,17 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   let execution = options.execution;
   let phase: AndroidPushPhase = "baseline_captured";
   let failureId = 0;
+  let connectionDiagnosticWritten = false;
   const localFailureId = options.nextFailureId ?? (() => ++failureId);
   const nextFailureId = () => (execution?.nextFailureId ?? localFailureId)();
   const chrome: typeof withAndroidChrome = async (run, context) => {
     try { return await withAndroidChrome(run, context); }
     catch (error) {
       if (error instanceof AndroidBrowserCleanupError) throw pushBrowserCleanupFailure(error, nextFailureId);
+      if (error instanceof AndroidDevtoolsConnectionError) throw new QualificationFailure({
+        id: nextFailureId(), lane: "androidPush", step: phase, class: "harness", reason: "invalid_evidence",
+        operation: "unknown", elapsedMs: 0, observations: { transportFailure: true },
+      }, { cause: error });
       throw error;
     }
   };
@@ -412,19 +417,44 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     if (records.some(record => record.tag.includes("omp-attention-") && !observedTopics.some(topic => record.tag.endsWith(topic)) && baselineRecords.get(record.key) !== record.postedAt)) throw new NotificationOverlapError();
     return records;
   };
-  const worker = async <T>(expression: string): Promise<T> => chrome(async driver => {
-    const inventory = await driver.browserSend("Target.getTargets");
-    const workers = Array.isArray(inventory.targetInfos) ? inventory.targetInfos.filter((target: Record<string, unknown>) =>
-      target.type === "service_worker" && target.url === `${identity.origin}/service-worker.js`) : [];
-    if (workers.length !== 1) throw new Error("fleet worker observer unavailable");
-    const attached = await driver.browserSend("Target.attachToTarget", { targetId: workers[0].targetId, flatten: true });
-    if (typeof attached.sessionId !== "string") throw new Error("fleet worker attachment unavailable");
-    try {
-      const result = await driver.sessionSend(attached.sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-      if (result.exceptionDetails !== undefined || result.result === null || typeof result.result !== "object" || !("value" in result.result)) throw new Error("fleet worker observation failed");
-      return result.result.value as T;
-    } finally { await driver.browserSend("Target.detachFromTarget", { sessionId: attached.sessionId }); }
-  }, { port: 9238, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
+  const worker = async <T>(expression: string, readOnly = false): Promise<T> => {
+    const errors: unknown[] = [], started = performance.now();
+    for (let attempt = 0; ; attempt++) {
+      let evaluated = false;
+      try { return await withAndroidChrome(async driver => {
+        const inventory = await driver.browserSend("Target.getTargets");
+        const workers = Array.isArray(inventory.targetInfos) ? inventory.targetInfos.filter((target: Record<string, unknown>) =>
+          target.type === "service_worker" && target.url === `${identity.origin}/service-worker.js`) : [];
+        if (workers.length !== 1) throw new Error("fleet worker observer unavailable");
+        const attached = await driver.browserSend("Target.attachToTarget", { targetId: workers[0].targetId, flatten: true });
+        if (typeof attached.sessionId !== "string") throw new Error("fleet worker attachment unavailable");
+        const sessionId = attached.sessionId;
+        return runWithRestoration("fleet worker attachment", async () => {
+          evaluated = true;
+          const result = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+          if (result.exceptionDetails !== undefined || result.result === null || typeof result.result !== "object" || !("value" in result.result)) throw new Error("fleet worker observation failed");
+          return result.result.value as T;
+        }, [async () => { await driver.browserSend("Target.detachFromTarget", { sessionId }); }]);
+      }, { port: 9238, launchBrowser: false, ...(execution === undefined ? {} : { execution }) }); }
+      catch (error) {
+        if (error instanceof AndroidBrowserCleanupError) throw pushBrowserCleanupFailure(error, nextFailureId);
+        rethrowPushSafetyFailure(error);
+        if (!(error instanceof AndroidDevtoolsConnectionError)) throw error;
+        errors.push(error);
+        if (!connectionDiagnosticWritten && options.browserFailure !== undefined) {
+          await options.browserFailure("browser_forward", error, Math.round(performance.now() - started));
+          connectionDiagnosticWritten = true;
+        }
+        // Recreate only a contained transport. Never wake Chrome, navigate, replay a mutation,
+        // re-arm lost badge state, or turn a missing worker/product assertion into a retry.
+        if (attempt === 0 && (!evaluated || readOnly)) { checkExecution(); continue; }
+        throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
+          class: "harness", reason: "invalid_evidence", operation: evaluated && !readOnly ? "unknown" : "read_only",
+          elapsedMs: Math.round(performance.now() - started), observations: { transportFailure: true, attempts: attempt + 1 } },
+          { cause: new AggregateError(errors, "Fleet worker DevTools connection failed") });
+      }
+    }
+  };
   // A pending filesystem checkpoint must not pin the radio cycle past cancellation or its bound.
   const checkpoint = async (): Promise<void> => {
     checkExecution();
@@ -455,7 +485,24 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if (operation === "prepare") fleetPrepared = true;
         const result = await execute([options.fixtureBun ?? process.execPath,
           join(options.fixtureScripts ?? import.meta.dir, "fleet-push-fixture.ts"), operation, fleetRoot(epoch), epoch, identity.origin, identity.candidate.sourceCommit]);
-        if (result.exitCode !== 0) throw new Error(`fleet host ${operation} failed`);
+        if (result.exitCode !== 0) {
+          let cause: Error;
+          try {
+            const reply = JSON.parse(result.stdout);
+            if (!Array.isArray(reply.diagnostic) || reply.diagnostic.length > 16) throw new Error("missing helper diagnostic");
+            cause = new AggregateError(reply.diagnostic.map((entry: { message?: unknown; stack?: unknown }) => {
+              if (typeof entry.message !== "string" || typeof entry.stack !== "string") throw new Error("invalid helper diagnostic");
+              return Object.assign(new Error(entry.message), { stack: entry.stack });
+            }), `fleet host ${operation} failed`);
+          } catch { cause = new Error(`fleet host ${operation} failed without a diagnostic`); }
+          throw new QualificationFailure(operation === "restore" ? {
+            id: nextFailureId(), lane: "androidPushCleanup", step: "fleet", class: "harness", reason: "containment_unproven",
+            operation: "unknown", elapsedMs: 0, observations: { exitCode: result.exitCode, cleanupVerified: false },
+          } : {
+            id: nextFailureId(), lane: "androidPush", step: phase, class: "harness", reason: "invalid_evidence",
+            operation: "unknown", elapsedMs: 0, observations: { exitCode: result.exitCode },
+          }, { cause });
+        }
         if (operation === "restore") fleetPrepared = false;
         if (operation === "prepare" || operation === "coordinator-up" || operation === "restore") {
           await wait(async () => {
@@ -520,7 +567,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if (!armed) throw new Error("fleet platform badge API unavailable");
       },
       async observeBadge() {
-        return (await worker<{ count: number; complete: boolean } | null>("self.__ompQualificationBadge?.observation ?? null")) ?? undefined;
+        return (await worker<{ count: number; complete: boolean } | null>("self.__ompQualificationBadge?.observation ?? null", true)) ?? undefined;
       },
       async revoke() {
         await page(async driver => {

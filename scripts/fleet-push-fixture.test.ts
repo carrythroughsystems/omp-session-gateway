@@ -2,12 +2,22 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fleetPushFixture, fleetPushSource, FLEET_PUSH_BACKEND_PORT, FLEET_PUSH_HTTPS_PORT } from "./fleet-push-fixture.ts";
+import { fleetPushFixture, fleetPushSource, fleetFixtureDiagnostic, FLEET_PUSH_BACKEND_PORT, FLEET_PUSH_HTTPS_PORT } from "./fleet-push-fixture.ts";
 import type { FixtureExecutor } from "./push-qualification-fixture.ts";
 import { fleetSourceBinding } from "../packages/protocol/src/fleet.ts";
 import { loadGatewayConfig } from "../apps/gateway/src/config.ts";
 
 const epoch = "a3a77f8e-956b-45d0-a684-a33e6b336dc0", commit = "c".repeat(40), origin = "https://synthetic.example.test";
+test("helper diagnostics retain guard exceptions and redact capability-bearing causes", () => {
+  const exact = new Error("fleet grants or recipients remain enrolled");
+  const secret = `https://synthetic.example.test/#synthetic-test.${"X".repeat(43)}`;
+  const entries = fleetFixtureDiagnostic(new AggregateError([exact, new Error(secret)], "fleet restore failed"));
+  expect(entries[1]?.message).toBe(exact.message);
+  expect(entries[1]?.stack).toContain("fleet-push-fixture.test.ts");
+  expect(JSON.stringify(entries)).not.toContain(secret);
+  expect(entries[2]?.message).toContain("withheld");
+});
+
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), "fleet-push-test-")), root = join(home, `fleet-${epoch}`);
   const config = join(home, ".config/omp-session-gateway/config.json"), cli = join(home, "candidate/apps/gateway/src/cli.js");
