@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
-import { fleetSourceBinding, type FleetSourceStatus, type SessionMetadata } from "@omp-session-gateway/protocol";
+import {
+  fleetSourceBinding, parseFleetStatusRequest, parseFleetGrantCreateRequest, parseFleetGrantActionRequest,
+  parseFleetRecipientRequest, parseFleetRecipientRemoveRequest, parseSourceGrantRequest,
+  type FleetSourceStatus, type SessionMetadata,
+} from "@omp-session-gateway/protocol";
 import { startDashboardFixture, installSilentWebSocket, type DashboardFixture } from "./fixture-server";
 import { installSyntheticProductFixture, GATEWAY_WAITING, GATEWAY_WORKING } from "./synthetic-product-fixture";
 
@@ -51,43 +55,41 @@ async function pushProfile(page: Page, oldWorker = false): Promise<void> {
   }, { endpoint: ENDPOINT, oldWorker });
 }
 
-async function fleetApi(page: Page, home: DashboardFixture, away: DashboardFixture, initial: FleetSourceStatus = row("current")) {
+function fleetApi(home: DashboardFixture, away: DashboardFixture, initial: FleetSourceStatus = row("current")) {
   const api = {
     current: initial,
     unsupported: false,
     activationFailure: undefined as { status: number; code: string } | undefined,
     calls: [] as { path: string; method: string; body: Record<string, unknown>; credentials: boolean }[],
   };
-  await page.route("**/api/v1/push/fleet/**", async route => {
-    const request = route.request();
-    const path = new URL(request.url()).pathname;
-    const body = request.postDataJSON() as Record<string, unknown>;
-    api.calls.push({ path, method: request.method(), body, credentials: request.headers().authorization !== undefined });
-    if (api.unsupported) { await route.fulfill({ status: 404, body: "" }); return; }
-    if (path.endsWith("/status")) await route.fulfill({ json: { version: 1, sources: [api.current] } });
-    else if (path.endsWith("/fleet/grants")) await route.fulfill({ status: 201, json: { version: 1, grantId: GRANT, verifier: VERIFIER } });
-    else if (path.endsWith("/activate")) {
-      if (api.activationFailure !== undefined) await route.fulfill({ status: api.activationFailure.status, json: { code: api.activationFailure.code } });
-      else { api.current = row("current", api.current.selected); await route.fulfill({ status: 204 }); }
+  // WebKit bypasses Playwright page.route for requests passing through a controlling worker.
+  // Serve the protocol mocks at the HTTP boundary, keeping the real worker and CORS/preflights.
+  home.configureNotifications((path, method, value, credentials) => {
+    const body: Record<string, unknown> = path.endsWith("/status") ? { ...parseFleetStatusRequest(value) }
+      : path.endsWith("/fleet/grants") ? { ...parseFleetGrantCreateRequest(value) }
+        : path.endsWith("/recipient") ? method === "DELETE" ? { ...parseFleetRecipientRemoveRequest(value) }
+          : { ...parseFleetRecipientRequest(value) } : { ...parseFleetGrantActionRequest(value) };
+    api.calls.push({ path, method, body, credentials });
+    if (api.unsupported) return new Response(null, { status: 404 });
+    if (path.endsWith("/status")) return Response.json({ version: 1, sources: [api.current] });
+    if (path.endsWith("/fleet/grants")) return Response.json({ version: 1, grantId: GRANT, verifier: VERIFIER }, { status: 201 });
+    if (path.endsWith("/activate")) {
+      if (api.activationFailure !== undefined) return Response.json({ code: api.activationFailure.code }, { status: api.activationFailure.status });
+      api.current = row("current", api.current.selected);
     } else if (path.endsWith("/recipient")) {
       const selected = (body.sources as string[] | undefined)?.includes("remote") ?? false;
       const released = api.current.selected && !selected ? [{ sourceId: "remote", grantId: GRANT }] : [];
       api.current = { ...api.current, selected };
-      await route.fulfill({ json: { version: 1, sources: selected ? ["remote"] : [], released } });
-    } else await route.fulfill({ status: 204 });
-  });
-  await page.route(`${away.origin}/api/v1/notification-grants**`, async route => {
-    const request = route.request();
-    const path = new URL(request.url()).pathname;
-    const headers = { "Access-Control-Allow-Origin": home.origin, "Vary": "Origin", "Cache-Control": "no-store" };
-    if (request.method() === "OPTIONS") {
-      await route.fulfill({ status: 204, headers: { ...headers, "Access-Control-Allow-Methods": "POST", "Access-Control-Allow-Headers": "Content-Type" } });
-      return;
+      return Response.json({ version: 1, sources: selected ? ["remote"] : [], released });
     }
-    api.calls.push({ path: away.origin + path, method: request.method(), body: request.postDataJSON() as Record<string, unknown>,
-      credentials: request.headers().cookie !== undefined || request.headers().authorization !== undefined });
-    await route.fulfill(path.endsWith("/revoke") ? { status: 204, headers }
-      : { status: path.endsWith("/renew") ? 200 : 201, headers, json: { version: 1, grantId: GRANT, expiresAt: expiry() } });
+    return new Response(null, { status: 204 });
+  });
+  away.configureNotifications((path, method, value, credentials) => {
+    const body = path === "/api/v1/notification-grants" ? { ...parseSourceGrantRequest(value) }
+      : { ...parseFleetGrantActionRequest(value) };
+    api.calls.push({ path: away.origin + path, method, body, credentials });
+    return path.endsWith("/revoke") ? new Response(null, { status: 204 })
+      : Response.json({ version: 1, grantId: GRANT, expiresAt: expiry() }, { status: path.endsWith("/renew") ? 200 : 201 });
   });
   return api;
 }
@@ -149,7 +151,7 @@ test("fleet Hosts enroll, partial failure, reload renewal, and released revocati
   const away = await startDashboardFixture([]);
   configure(home, away);
   await pushProfile(page);
-  const api = await fleetApi(page, home, away, row("not_enrolled", false));
+  const api = fleetApi(home, away, row("not_enrolled", false));
   try {
     await page.goto(home.origin);
     await page.locator("#settings").click();
@@ -166,6 +168,9 @@ test("fleet Hosts enroll, partial failure, reload renewal, and released revocati
     await expect(page.locator("#notify")).toHaveText("Disable background alerts");
     expect(api.calls.find(call => call.path === `${away.origin}/api/v1/notification-grants`)?.body)
       .toEqual({ version: 1, grantId: GRANT, verifier: VERIFIER });
+    expect(home.requests).toContain("POST /api/v1/push/fleet/status");
+    expect(away.requestLog.some(request => request.method === "OPTIONS" && request.path === "/api/v1/notification-grants" &&
+      request.origin === home.origin)).toBe(true);
     expect(api.calls.filter(call => call.path.startsWith(away.origin)).every(call => !call.credentials)).toBe(true);
     expect(api.calls.filter(call => call.path.endsWith("/status")).every(call => call.body.endpoint === ENDPOINT)).toBe(true);
     api.current = { ...row("stale"), expiresAt: new Date(Date.now() + 9 * 24 * 60 * 60 * 1_000).toISOString() };
@@ -190,7 +195,7 @@ test("stale, revoked, unknown and rebound-origin fleet taps never reach any laun
   const away = await startDashboardFixture([shared]);
   configure(home, away);
   await pushProfile(page);
-  const api = await fleetApi(page, home, away);
+  const api = fleetApi(home, away);
   const binding = await fleetSourceBinding("remote", away.origin);
   try {
     for (const [state, source] of [["stale", binding], ["unauthorized", binding], ["current", "X".repeat(22)],
@@ -215,7 +220,7 @@ test("a remote stop revalidates only its exact source and opens View", { tag: ["
   configure(home, away);
   await pushProfile(page);
   await installSilentWebSocket(page);
-  await fleetApi(page, home, away);
+  fleetApi(home, away);
   const binding = await fleetSourceBinding("remote", away.origin);
   try {
     await page.goto(`${home.origin}/collab/${shared.instanceId}?activity=stopped&generation=${shared.generation}&source=${binding}`);
@@ -237,7 +242,7 @@ test("a warm page refuses an old binding after the configured source origin is r
   configure(home, away);
   await pushProfile(page);
   await installSilentWebSocket(page);
-  await fleetApi(page, home, away);
+  fleetApi(home, away);
   const binding = await fleetSourceBinding("remote", away.origin);
   try {
     await page.goto(home.origin);
@@ -262,7 +267,7 @@ for (const oldWorker of [false, true]) {
     const away = await startDashboardFixture([]);
     configure(home, away);
     await pushProfile(page, oldWorker);
-    const api = await fleetApi(page, home, away);
+    const api = fleetApi(home, away);
     api.unsupported = !oldWorker;
     try {
       await page.goto(home.origin);
@@ -305,7 +310,7 @@ for (const surface of ["view", "ask", "composer", "photo", "speech", "first-task
       }
       Object.defineProperty(window, "SpeechRecognition", { configurable: true, value: Recognition });
     });
-    const api = await fleetApi(page, home, away);
+    const api = fleetApi(home, away);
     const binding = await fleetSourceBinding("remote", away.origin);
     const task = "FLEET_SYNTHETIC_FIRST_TASK_DRAFT";
     try {
