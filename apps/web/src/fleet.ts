@@ -6,6 +6,12 @@ import {
   MAX_SESSION_CREATION_OPTIONS_BYTES, MAX_SESSION_CREATION_STATUS_BYTES,
   type SessionCreationOptions, type SessionCreationRequest, type SessionCreationReceipt, type SessionCreationStatus,
   type ClientConfigResponse, type FleetSource, type SessionListResponse,
+  MAX_FLEET_STATUS_BYTES, MAX_FLEET_REQUEST_BYTES,
+  parseFleetStatusRequest, parseFleetStatusResponse,
+  parseFleetGrantCreateRequest, parseFleetGrantCreateResponse, parseFleetGrantActionRequest,
+  parseSourceGrantRequest, parseSourceGrantResponse,
+  parseFleetRecipientRequest, parseFleetRecipientRemoveRequest, parseFleetRecipientResponse,
+  type FleetStatusResponse, type FleetGrantCreateResponse, type FleetRecipientResponse, type SourceGrantResponse,
 } from "@omp-session-gateway/protocol";
 import type { SourceStatus } from "./availability";
 
@@ -186,6 +192,12 @@ export class FleetTransport {
     return promise;
   }
 
+  /** A tap or worker reconciliation needs a request started after its authorization/count capture. */
+  async refreshAfterCurrent(): Promise<SnapshotResult> {
+    await this.request?.promise;
+    return await this.refresh(true);
+  }
+
   async probe(signal: AbortSignal): Promise<SnapshotResult> {
     if (signal.aborted) return "unavailable";
     // Cancelling a consumer must not cancel the directory's coalesced request.
@@ -240,6 +252,95 @@ export class FleetTransport {
         }
       }
     }
+  }
+}
+
+type FleetNotificationProblem = "grant_rejected" | "source_unreachable" | "unsupported" | "unauthorized" | "unavailable";
+export class FleetNotificationError extends Error {
+  constructor(readonly code: FleetNotificationProblem) { super(code); }
+}
+
+/** Browser-direct grants only: a verifier passes through memory; no feed credential reaches a page. */
+export class FleetNotificationTransport {
+  constructor(
+    private readonly fetcher: typeof fetch = fetch,
+    private readonly time: FleetClock = clock,
+  ) {}
+
+  async status(endpoint?: string): Promise<FleetStatusResponse | undefined> {
+    try {
+      return await this.request("/api/v1/push/fleet/status", "POST",
+        parseFleetStatusRequest({ version: 1, ...(endpoint === undefined ? {} : { endpoint }) }), parseFleetStatusResponse);
+    } catch (error) {
+      if (error instanceof FleetNotificationError && error.code === "unsupported") return undefined;
+      throw error;
+    }
+  }
+
+  create(sourceId: string): Promise<FleetGrantCreateResponse> {
+    return this.request("/api/v1/push/fleet/grants", "POST",
+      parseFleetGrantCreateRequest({ version: 1, sourceId }), parseFleetGrantCreateResponse);
+  }
+
+  authorize(source: FleetSource, grant: FleetGrantCreateResponse): Promise<SourceGrantResponse> {
+    return this.request("/api/v1/notification-grants", "POST", parseSourceGrantRequest(grant), parseSourceGrantResponse, source);
+  }
+
+  renew(source: FleetSource, grantId: string): Promise<SourceGrantResponse> {
+    return this.request(`/api/v1/notification-grants/${parseSessionCreationUuid(grantId)}/renew`, "POST",
+      parseFleetGrantActionRequest({ version: 1 }), parseSourceGrantResponse, source);
+  }
+
+  activate(grantId: string): Promise<void> {
+    return this.request(`/api/v1/push/fleet/grants/${parseSessionCreationUuid(grantId)}/activate`, "POST",
+      parseFleetGrantActionRequest({ version: 1 }), () => undefined);
+  }
+
+  revoke(grantId: string, source?: FleetSource): Promise<void> {
+    const prefix = source === undefined ? "/api/v1/push/fleet/grants" : "/api/v1/notification-grants";
+    return this.request(`${prefix}/${parseSessionCreationUuid(grantId)}/revoke`, "POST",
+      parseFleetGrantActionRequest({ version: 1 }), () => undefined, source);
+  }
+
+  recipient(endpoint: string, sources: readonly string[]): Promise<FleetRecipientResponse> {
+    return this.request("/api/v1/push/fleet/recipient", sources.length === 0 ? "DELETE" : "PUT",
+      sources.length === 0 ? parseFleetRecipientRemoveRequest({ version: 1, endpoint })
+        : parseFleetRecipientRequest({ version: 1, endpoint, sources }), parseFleetRecipientResponse);
+  }
+
+  private async request<T>(
+    path: string, method: string, payload: unknown, parse: (value: unknown) => T, source?: FleetSource,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timeout = this.time.setTimeout(() => controller.abort(), path.endsWith("/activate") ? 10_000 : 5_000);
+    try {
+      const fetchRequest = this.fetcher;
+      const response = await fetchRequest(`${source?.origin ?? ""}${path}`, {
+        method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        cache: "no-store", credentials: source === undefined ? "same-origin" : "omit",
+        redirect: "error", ...(source === undefined ? {} : { mode: "cors" as const }), signal: controller.signal,
+      });
+      if (controller.signal.aborted) throw new FleetNotificationError("source_unreachable");
+      if (!response.ok) {
+        let code: FleetNotificationProblem = response.status === 404 ? "unsupported"
+          : response.status === 403 ? "unauthorized" : "unavailable";
+        if (response.status === 409 || response.status === 503) {
+          try {
+            const problem = await boundedJson(response, MAX_FLEET_REQUEST_BYTES, true);
+            if (typeof problem === "object" && problem !== null && "code" in problem &&
+              ((response.status === 409 && problem.code === "grant_rejected") ||
+                (response.status === 503 && problem.code === "source_unreachable"))) code = problem.code;
+          } catch { /* Never retain arbitrary problem content. */ }
+        }
+        throw new FleetNotificationError(code);
+      }
+      const value = parse(response.status === 204 ? undefined : await boundedJson(response, MAX_FLEET_STATUS_BYTES, true));
+      if (controller.signal.aborted) throw new FleetNotificationError("source_unreachable");
+      return value;
+    } catch (error) {
+      if (error instanceof FleetNotificationError) throw error;
+      throw new FleetNotificationError("source_unreachable");
+    } finally { this.time.clearTimeout(timeout); }
   }
 }
 

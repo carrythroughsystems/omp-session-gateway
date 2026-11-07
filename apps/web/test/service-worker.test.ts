@@ -1,4 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
+import { parseNotificationData } from "@omp-session-gateway/protocol";
+import vectors from "../../../packages/protocol/test/vectors/fleet-ordering.json" with { type: "json" };
 
 const GLOBAL_NAMES = [
   "addEventListener",
@@ -12,6 +14,7 @@ const GLOBAL_NAMES = [
   "__LAZY_ASSETS__",
   "__CACHE_NAME__",
   "skipWaiting",
+  "indexedDB",
 ] as const;
 const nativeGlobals = Object.fromEntries(
   GLOBAL_NAMES.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
@@ -77,6 +80,7 @@ const clients = {
 const shownNotifications: Array<{
   readonly title: string;
   readonly body: string;
+  readonly tag: string;
   readonly options: NotificationOptions;
   readonly data: unknown;
   closed: boolean;
@@ -91,6 +95,7 @@ const registration = {
     shownNotifications.push({
       title,
       body: options.body ?? "",
+      tag: options.tag ?? "",
       options,
       data: options.data,
       closed: false,
@@ -102,16 +107,17 @@ const registration = {
       },
     });
   },
-  async getNotifications(options: { readonly tag: string }): Promise<typeof shownNotifications> {
+  async getNotifications(options: { readonly tag?: string } = {}): Promise<typeof shownNotifications> {
     const observed = notificationRead;
     notificationRead = undefined;
     if (observed !== undefined) queueMicrotask(observed);
-    return shownNotifications.filter(notification => notification.options.tag === options.tag && !notification.closed);
+    return shownNotifications.filter(notification => (options.tag === undefined || notification.options.tag === options.tag) && !notification.closed);
   },
 };
 const badgeState = {
-  set: [] as number[],
+  set: [] as (number | undefined)[],
   clears: 0,
+  current: undefined as [number, boolean] | undefined,
 };
 
 
@@ -144,11 +150,13 @@ Object.defineProperties(globalThis, {
   navigator: {
     configurable: true,
     value: {
-      async setAppBadge(value: number): Promise<void> {
+      async setAppBadge(value?: number): Promise<void> {
         badgeState.set.push(value);
+        badgeState.current = [value ?? 0, value !== undefined];
       },
       async clearAppBadge(): Promise<void> {
         badgeState.clears += 1;
+        badgeState.current = [0, true];
       },
     },
   },
@@ -158,9 +166,176 @@ Object.defineProperties(globalThis, {
   __CACHE_NAME__: { configurable: true, value: "omp-sessions-shell-current" },
 });
 
-// The worker installs global listeners at import time, so this cache-busted import is the test boundary.
-const serviceWorkerTestModule = "../src/service-worker.ts?service-worker-contract";
-await import(serviceWorkerTestModule);
+type VectorStep = Record<string, unknown>;
+const vectorBindings = vectors.defaults as Record<string, string>;
+const vectorBinding = (token: unknown): string | undefined =>
+  token === undefined ? undefined : vectorBindings[token as string] ?? token as string;
+
+async function workerMessage(data: unknown): Promise<unknown> {
+  let completion: Promise<unknown> | undefined;
+  let response: unknown;
+  listener("message")({
+    data,
+    ports: [{ postMessage(value: unknown): void { response = value; } }],
+    waitUntil(promise: Promise<unknown>): void { completion = promise; },
+  });
+  await completion;
+  return response;
+}
+
+async function settledPush(message: unknown): Promise<void> {
+  const delivery = push(message);
+  for (let turn = 0; turn < 60; turn++) await Promise.resolve();
+  jest.runAllTimers();
+  await delivery;
+}
+
+describe("fleet vectors through the actual worker listeners and durable store", () => {
+  for (const scenario of vectors.scenarios) {
+    test(scenario.name, async () => {
+      shownNotifications.length = 0;
+      badgeState.current = undefined;
+      let alerts = 0;
+      let captured = 0;
+      if ("fleet" in scenario && scenario.fleet) {
+        expect(await workerMessage({ type: "omp-notification-mode", version: 3, fleet: true }))
+          .toEqual({ type: "omp-notification-mode-set", version: 3 });
+      }
+      for (const step of scenario.steps as VectorStep[]) {
+        const before = shownNotifications.length;
+        const live = new Set(shownNotifications.filter(notification => !notification.closed).map(notification => notification.tag));
+        if ("advance" in step) jest.advanceTimersByTime(step.advance as number);
+        else if ("restart" in step) {
+          const persisted = structuredClone(database.values.get("worker"));
+          await restartWorker();
+          expect(database.values.get("worker")).toEqual(persisted);
+        } else if ("capture" in step) {
+          const response = await workerMessage({ type: "omp-notification-support-request", version: 3 }) as { received: number };
+          captured = response.received;
+        } else if ("push" in step) {
+          const message = step.push as VectorStep;
+          const [epoch, n] = message.seq as [number, number];
+          const [count, complete] = message.badge as [number, boolean];
+          const source = vectorBinding(message.source);
+          await settledPush({
+            version: 3, type: message.type, instanceId: message.instanceId, generation: 1,
+            ...(source === undefined ? {} : { source }), seq: { epoch, n }, badge: { count, complete },
+            ...(message.type === "clear" ? {} : { title: message.type === "attention" ? "OMP session needs attention" : "OMP session activity stopped" }),
+            ...(message.requestId === undefined ? {} : { requestId: message.requestId }),
+          });
+        } else if ("legacy" in step) {
+          const message = step.legacy as VectorStep;
+          await settledPush({ version: 2, ...message, ...(message.type === "clear" ? {} : {
+            generation: 1, title: message.type === "attention" ? "OMP session needs attention" : "OMP session activity stopped",
+          }) });
+        } else {
+          const snapshot = step.reconcile as VectorStep;
+          const [count, complete] = snapshot.badge as [number, boolean];
+          const delivery = workerMessage({
+            type: "omp-notification-reconcile", version: 3, asOf: { received: captured },
+            fresh: (snapshot.fresh as string[]).map(token => token === "local" ? token : vectorBinding(token)),
+            pending: snapshot.pending, badge: { count, complete },
+          });
+          for (let turn = 0; turn < 60; turn++) await Promise.resolve();
+          jest.runAllTimers();
+          await delivery;
+        }
+        for (const notification of shownNotifications.slice(before)) {
+          if (!live.has(notification.tag) || (notification.options as NotificationOptions & { renotify: boolean }).renotify) alerts++;
+        }
+      }
+      const displayed = shownNotifications.filter(notification => !notification.closed).map(notification => {
+        const intent = parseNotificationData(notification.data)!;
+        return `${notification.tag}|${intent.kind}|${intent.kind === "attention" ? intent.requestId : intent.generation}`;
+      }).sort();
+      expect(displayed).toEqual([...scenario.expect.displayed].sort());
+      // A positive platform badge exposes only the count; completeness matters at zero (flag/clear).
+      const appliedBadge = badgeState.current as [number, boolean] | undefined;
+      expect(appliedBadge?.[0]).toBe(scenario.expect.badge[0] as number);
+      if (scenario.expect.badge[0] === 0) expect(appliedBadge?.[1]).toBe(scenario.expect.badge[1] as boolean);
+      expect(alerts).toBe(scenario.expect.alerts);
+      const stored = JSON.stringify([...database.values]);
+      for (const field of ["title", "body", "endpoint", "capability", "verifier", "secret"]) expect(stored).not.toContain(`\"${field}\"`);
+    });
+  }
+
+  test("v3 support captures the serialized receipt count and rejects malformed handshakes", async () => {
+    await settledPush({
+      version: 2, type: "clear", instanceId: "receipt-count-session", requestId: "receipt_request_0001", pendingAskCount: 0,
+    });
+    expect(await workerMessage({ type: "omp-notification-support-request", version: 3 }))
+      .toEqual({ type: "omp-notification-support-response", version: 3, received: 1 });
+    expect(await workerMessage({ type: "omp-notification-support-request", version: 3, extra: true })).toBeUndefined();
+  });
+
+  test("a blocked IndexedDB falls back to the same in-memory reducer without losing in-worker tombstones", async () => {
+    Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: { open(): never { throw new Error("synthetic storage denied"); } } });
+    await restartWorker();
+    shownNotifications.length = 0;
+    const message = { version: 2, instanceId: "fallback-session-001", requestId: "fallback_request_0001", pendingAskCount: 0 };
+    await settledPush({ ...message, type: "clear" });
+    await settledPush({ ...message, type: "attention", generation: 1, title: "OMP session needs attention" });
+    expect(shownNotifications).toHaveLength(0);
+  });
+
+  test("zero incomplete coverage shows the platform flag; only zero complete clears it", async () => {
+    badgeState.set.length = 0;
+    badgeState.clears = 0;
+    const message = { version: 3, type: "clear", instanceId: "fleet-badge-session", generation: 1, requestId: "fleet_badge_request_0001" };
+    await settledPush({ ...message, seq: { epoch: 1, n: 1 }, badge: { count: 0, complete: false } });
+    expect(badgeState.set).toEqual([undefined]);
+    expect(badgeState.clears).toBe(0);
+    await settledPush({ ...message, seq: { epoch: 1, n: 2 }, badge: { count: 0, complete: true } });
+    expect(badgeState.clears).toBe(1);
+    await settledPush({ ...message, seq: { epoch: 1, n: 1 }, badge: { count: 8, complete: true } });
+    expect(badgeState.set).toEqual([undefined]);
+  });
+});
+
+// Transactions commit structured clones, so a new worker instance cannot reuse the previous heap.
+function workerDatabase(): { readonly factory: IDBFactory; readonly values: Map<string, unknown> } {
+  const values = new Map<string, unknown>();
+  let created = false;
+  const database = {
+    close(): void {},
+    createObjectStore(): void { created = true; },
+    transaction(): unknown {
+      const transaction = {
+        oncomplete: undefined as (() => void) | undefined,
+        objectStore: () => ({
+          get(key: string): unknown {
+            const request = { result: structuredClone(values.get(key)) };
+            queueMicrotask(() => transaction.oncomplete?.());
+            return request;
+          },
+          put(value: unknown, key: string): void {
+            values.set(key, structuredClone(value));
+            queueMicrotask(() => transaction.oncomplete?.());
+          },
+        }),
+      };
+      return transaction;
+    },
+  };
+  const factory = {
+    open(): unknown {
+      const request = { result: database, onupgradeneeded: undefined as (() => void) | undefined, onsuccess: undefined as (() => void) | undefined };
+      queueMicrotask(() => {
+        if (!created) request.onupgradeneeded?.();
+        request.onsuccess?.();
+      });
+      return request;
+    },
+  } as unknown as IDBFactory;
+  return { factory, values };
+}
+
+let workerInstance = 0;
+let database = workerDatabase();
+async function restartWorker(): Promise<void> {
+  listeners.clear();
+  await import(`../src/service-worker.ts?service-worker-contract-${++workerInstance}`);
+}
 
 function listener(type: string): (event: unknown) => void {
   const registered = listeners.get(type);
@@ -183,7 +358,12 @@ function nextNotificationRead(): Promise<void> {
   return new Promise(resolve => { notificationRead = resolve; });
 }
 
-beforeEach(() => { jest.useFakeTimers({ now: 0 }); });
+beforeEach(async () => {
+  jest.useFakeTimers({ now: 0 });
+  database = workerDatabase();
+  Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: database.factory });
+  await restartWorker();
+});
 afterEach(async () => {
   try {
     jest.runAllTimers();
@@ -349,8 +529,8 @@ describe("notification service worker", () => {
     const read = nextNotificationRead();
     const clearing = push(clearFor(message));
     await read;
-    expect(current.closed).toBeTrue();
     await clearing;
+    expect(current.closed).toBeTrue();
   });
 
   test("a replacement push queued during settle remains displayed after the old clear", async () => {
@@ -407,11 +587,11 @@ describe("notification service worker", () => {
     const read = nextNotificationRead();
     const clearing = push(clearFor(message));
     await read;
-    expect(current.closed).toBeTrue();
     await clearing;
+    expect(current.closed).toBeTrue();
   });
 
-  test("changed attention title or body replaces the displayed content", async () => {
+  test("a duplicate attention never re-shows content, even if its presentation changes", async () => {
     shownNotifications.length = 0;
     const message = { ...attention, instanceId: "push-content-timing-0001" };
     await registration.showNotification("Older attention title", {
@@ -421,24 +601,24 @@ describe("notification service worker", () => {
     const first = shownNotifications.at(-1)!;
     await push(message);
     const second = shownNotifications.at(-1)!;
-    expect(first.closed).toBeTrue();
-    expect(second.title).toBe(message.title);
+    expect(first.closed).toBeFalse();
+    expect(second).toBe(first);
     await push({ ...message, body: "Updated session detail" });
-    expect(second.closed).toBeTrue();
+    expect(second.closed).toBeFalse();
     expect(shownNotifications.filter(notification => !notification.closed).map(({ title, body }) => ({ title, body })))
-      .toEqual([{ title: message.title, body: "Updated session detail" }]);
+      .toEqual([{ title: "Older attention title", body: message.body }]);
   });
 
-  test("an identical replay re-shows a dismissed notification", async () => {
+  test("an identical replay does not re-alert a dismissed request", async () => {
     shownNotifications.length = 0;
     const message = { ...attention, instanceId: "push-dismissed-timing-0001" };
     await push(message);
     const dismissed = shownNotifications.at(-1)!;
     dismissed.close();
     await push(message);
-    expect(shownNotifications.at(-1)).not.toBe(dismissed);
+    expect(shownNotifications.at(-1)).toBe(dismissed);
     expect(shownNotifications.filter(notification => !notification.closed).map(notification => notification.data))
-      .toEqual([{ version: 2, type: "attention", instanceId: message.instanceId, requestId: message.requestId }]);
+      .toEqual([]);
   });
 
   test("a worker with no local display timestamp clears a persisted notification immediately", async () => {
@@ -452,8 +632,8 @@ describe("notification service worker", () => {
     const read = nextNotificationRead();
     const clearing = push(clearFor(message));
     await read;
-    expect(persisted.closed).toBeTrue();
     await clearing;
+    expect(persisted.closed).toBeTrue();
   });
 
   function tap(data?: unknown): Promise<void> {
@@ -478,6 +658,27 @@ describe("notification service worker", () => {
     requestId: "push-request-identity-0001",
   };
   const attentionRoute = "/collab/push-instance-000001?request=push-request-identity-0001";
+
+  test("hands exact v3 remote metadata to an open page and keeps the binding in a cold stop route", async () => {
+    const posted: unknown[] = [];
+    const source = vectors.defaults.studio;
+    const data = { ...attentionData, version: 3, source };
+    clientState.opened.length = 0;
+    clientState.windows = [{
+      url: "https://sessions.example/",
+      async focus(): Promise<unknown> { return this; },
+      postMessage(message: unknown, transfer: readonly MessagePort[]): void {
+        posted.push(message);
+        transfer[0]?.postMessage({ type: "omp-notification-route-accepted", version: 3 });
+      },
+    }];
+    await tap(data);
+    expect(posted).toEqual([{ type: "omp-notification-route", version: 3, data }]);
+    expect(clientState.opened).toEqual([]);
+    clientState.windows = [];
+    await tap({ version: 3, type: "activity_stop", source, instanceId: data.instanceId, generation: 3 });
+    expect(clientState.opened).toEqual([`/collab/${data.instanceId}?activity=stopped&generation=3&source=${source}`]);
+  });
 
   test("hands a tap to the open page, which Chromium reports by creation URL, and never navigates it", async () => {
     // A live `/client/` collaboration still reports the `/` it was created at (Chrome 154 WebAPK),
@@ -603,7 +804,7 @@ describe("notification service worker", () => {
     const { type: _type, ...attentionFields } = stop;
     const attention = {
       ...attentionFields, type: "attention", title: "OMP session needs attention",
-      requestId: clear.requestId, pendingAskCount: 1,
+      requestId: "push-request-activity-0002", pendingAskCount: 1,
     };
     await push(attention);
     expect(displayedStop.closed).toBeTrue();
@@ -613,7 +814,7 @@ describe("notification service worker", () => {
     expect(shownNotifications.filter(notification => !notification.closed)).toEqual([displayedAttention]);
     expect(badgeState.set.at(-1)).toBe(1);
     jest.advanceTimersByTime(2_000);
-    await push(clear);
+    await push({ ...clear, requestId: attention.requestId });
     expect(displayedAttention.closed).toBeTrue();
     await push(stop);
     expect(shownNotifications.filter(notification => !notification.closed).map(notification => notification.data))
@@ -629,10 +830,10 @@ describe("notification service worker", () => {
     shownNotifications.length = 0;
     await Promise.all([
       push(stop),
-      push({ ...attentionFields, type: "attention", title: "OMP session needs attention", requestId: clear.requestId, pendingAskCount: 1 }),
+      push({ ...attentionFields, type: "attention", title: "OMP session needs attention", requestId: "push-request-overlap-0003", pendingAskCount: 1 }),
     ]);
     expect(shownNotifications.filter(notification => !notification.closed).map(notification => notification.data))
-      .toEqual([{ version: 2, type: "attention", instanceId: stop.instanceId, requestId: clear.requestId }]);
+      .toEqual([{ version: 2, type: "attention", instanceId: stop.instanceId, requestId: "push-request-overlap-0003" }]);
     expect(fetched).toEqual([]);
     expect(cachePuts).toEqual([]);
   });

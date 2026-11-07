@@ -3,6 +3,7 @@ import type { FleetSource, SessionCreationOptions } from "@omp-session-gateway/p
 import {
   FleetTransport, sourceKey, sessionKey, readSourceRecords, HELD_KEY, DISMISSED_KEY, boundedJson,
   SessionCreationTransport, CreationTransportError, readCreationPreferences, writeCreationPreferences, CREATION_PREFERENCES_KEY,
+  FleetNotificationTransport,
 } from "../src/fleet";
 
 const local: FleetSource = { id: "local", label: "Home", origin: "https://home.example" };
@@ -44,6 +45,73 @@ const creationRequest = { clientOperationId: operationId, revision, projectId: "
 const creationOptions: SessionCreationOptions = { version: 1, revision, available: true, projects: [
   { id: "project", label: "Project", workingCopies: [{ id: "main", label: "Main" }] },
 ], profiles: [{ id: "omp", label: "OMP" }] };
+
+describe("fleet notification transport", () => {
+  const grantId = "71000000-0000-4000-8000-000000000001";
+  const verifier = "FLEET_SYNTHETIC_VERIFIER_".padEnd(43, "v");
+  const endpoint = "https://push.example.test/send/FLEET_SYNTHETIC_ENDPOINT";
+
+  test("validates every HTTP body and uses exact credential-free source origins without redirects", async () => {
+    const requests: { path: string; init: RequestInit }[] = [];
+    const transport = new FleetNotificationTransport((async (url, init) => {
+      const path = String(url);
+      requests.push({ path, init: init! });
+      if (path.endsWith("/status")) return Response.json({ version: 1, sources: [] });
+      if (path.endsWith("/fleet/grants")) return Response.json({ version: 1, grantId, verifier }, { status: 201 });
+      if (path.endsWith("/activate") || path.endsWith("/revoke")) return new Response(null, { status: 204 });
+      if (path.endsWith("/recipient")) return Response.json({ version: 1, sources: [], released: [{ sourceId: remote.id, grantId }] });
+      return Response.json({ version: 1, grantId, expiresAt: "2026-12-07T00:00:00.000Z" });
+    }) as typeof fetch, new Clock());
+    await transport.status(endpoint);
+    const grant = await transport.create(remote.id);
+    await transport.authorize(remote, grant);
+    await transport.activate(grantId);
+    await transport.renew(remote, grantId);
+    await transport.recipient(endpoint, [remote.id]);
+    await transport.recipient(endpoint, []);
+    await transport.revoke(grantId);
+    await transport.revoke(grantId, remote);
+    for (const request of requests) {
+      expect(request.init).toMatchObject({ cache: "no-store", redirect: "error", headers: { "Content-Type": "application/json" } });
+      expect(request.init.credentials).toBe(request.path.startsWith(remote.origin) ? "omit" : "same-origin");
+      expect(request.init.mode).toBe(request.path.startsWith(remote.origin) ? "cors" : undefined);
+      expect(JSON.stringify(request.init)).not.toContain("Authorization");
+      expect(request.path).not.toContain("notification-feed");
+    }
+    expect(JSON.parse(String(requests[2]!.init.body))).toEqual({ version: 1, grantId, verifier });
+    expect(requests[5]!.init.method).toBe("PUT");
+    expect(requests[6]!.init.method).toBe("DELETE");
+    expect(() => transport.recipient(endpoint, ["local"])).toThrow();
+    expect(requests).toHaveLength(9);
+  });
+
+  test("old status is unsupported; activation problems keep only their closed code and never retry", async () => {
+    const missing = new FleetNotificationTransport((async () => new Response(null, { status: 404 })) as unknown as typeof fetch, new Clock());
+    expect(await missing.status(endpoint)).toBeUndefined();
+    await expect(missing.authorize(remote, { version: 1, grantId, verifier })).rejects.toMatchObject({ code: "unsupported" });
+    for (const [status, code] of [[409, "grant_rejected"], [503, "source_unreachable"], [404, "unsupported"]] as const) {
+      let calls = 0;
+      const transport = new FleetNotificationTransport((async () => {
+        calls++;
+        return Response.json({ code, message: "FLEET_SYNTHETIC_DO_NOT_EXPOSE" }, { status });
+      }) as unknown as typeof fetch, new Clock());
+      await expect(transport.activate(grantId)).rejects.toMatchObject({ code, message: code });
+      expect(calls).toBe(1);
+    }
+  });
+
+  test("rejects malformed, duplicate-key, oversized, and missing grant identity/status fields", async () => {
+    for (const body of [
+      '{"version":1,"version":1,"sources":[]}',
+      JSON.stringify({ version: 1, sources: [{ sourceId: "remote", selected: true, state: "current" }] }),
+      JSON.stringify({ version: 1, sources: [], secret: "FLEET_SYNTHETIC_SECRET" }),
+      " ".repeat(64 * 1024),
+    ]) {
+      const transport = new FleetNotificationTransport((async () => new Response(body)) as unknown as typeof fetch, new Clock());
+      await expect(transport.status(endpoint)).rejects.toMatchObject({ code: "source_unreachable" });
+    }
+  });
+});
 
 describe("session creation transport", () => {
   test("uses same-origin locally and exact credential-free CORS remotely for every route", async () => {
