@@ -93,12 +93,24 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
       await Promise.all([fixture("ask"), fixture("ask", "remote")]);
       const local = await snapshot(s => s.inputRequired), remote = await snapshot(s => s.inputRequired, "remote");
       await delivered(local, "attention", detail); await delivered(remote, "attention", detail);
-      if (!await r.presentation(local, detail) || !await r.presentation(remote, detail)) throw assertion("Fleet host identity or privacy presentation differed");
       await badge(2, true);
       await r.pause(21_000);
       // observe() also compares OS post timestamps: replacing the same request fails deduplication.
       await delivered(local, "attention", detail); await delivered(remote, "attention", detail);
-      await clear(); await clear(60_000, "remote"); await badge(0, true);
+      if (detail === "private") {
+        // Private rows deliberately have identical title/body. Keep the concurrent OS/tag/badge
+        // proof above, then prove each lock-screen row alone instead of guessing which row is which.
+        await clear(60_000, "remote");
+        if (!await r.presentation(local, detail)) throw assertion("Fleet home Private presentation differed");
+        await clear(); await cold(detail);
+        const isolatedRemote = await ask("remote", detail);
+        if (!await r.presentation(isolatedRemote, detail)) throw assertion("Fleet remote Private presentation differed");
+        await clear(60_000, "remote");
+      } else {
+        if (!await r.presentation(local, detail) || !await r.presentation(remote, detail)) throw assertion("Fleet host identity or privacy presentation differed");
+        await clear(); await clear(60_000, "remote");
+      }
+      await badge(0, true);
       await finish(`fleet_${detail}_verified`, { local: true, remote: true, identity: true, previewFallback: detail === "preview", deduplicated: true });
     });
   }

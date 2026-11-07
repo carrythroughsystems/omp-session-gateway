@@ -1589,6 +1589,24 @@ test.each(FLEET_PUSH_PHASES)("fleet interruption at %s retains failure and resto
   expect(host.state()).toMatchObject({ remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
 });
 
+test("fleet Private proves concurrent records but never guesses between identical lock-screen rows", async () => {
+  const host = fake(), presentation = host.runtime.presentation, observe = host.runtime.observe;
+  let phase: string | undefined, concurrent = false, privateRows = 0;
+  host.runtime.beginNotificationPhase = async (_epoch, value) => { phase = value; };
+  const pending = async () => Number((await host.runtime.snapshot("", "primary"))?.inputRequired === true) +
+    Number((await host.runtime.snapshot("", "remote"))?.inputRequired === true);
+  host.runtime.observe = async (...args) => {
+    if (phase === "fleet_private_verified" && await pending() === 2) concurrent = true;
+    return observe(...args);
+  };
+  host.runtime.presentation = async (...args) => {
+    if (phase === "fleet_private_verified") { expect(await pending()).toBe(1); privateRows++; }
+    return presentation(...args);
+  };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(concurrent).toBe(true); expect(privateRows).toBe(2);
+});
+
 test.each([
   ["enrollment", "fleet_enrolled"], ["badge", "fleet_private_verified"], ["remote-tap", "fleet_taps_verified"],
   ["remote-stale-tap", "fleet_stale_taps_verified"], ["retained", "fleet_outage_verified"],
