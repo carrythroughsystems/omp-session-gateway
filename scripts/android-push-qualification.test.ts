@@ -1636,7 +1636,7 @@ test("fleet outage establishes a visible remote ask before interrupting its sour
   const host = fake();
   let phase = "", observed = false, interruptions = 0;
   const begin = host.runtime.beginNotificationPhase, triage = host.runtime.triage, control = host.runtime.fleet!.host;
-  host.runtime.beginNotificationPhase = async (...args) => { phase = args[1]; await begin(...args); };
+  host.runtime.beginNotificationPhase = async (...args) => { phase = args[1] ?? ""; await begin(...args); };
   host.runtime.triage = async (...args) => {
     const view = await triage(...args);
     if (phase === "fleet_outage_verified") {
