@@ -654,6 +654,89 @@ test("509 round2 runtime privacy conversion preserves ordinary notification erro
   } finally { for (const spy of spies) spy.mockRestore(); }
 });
 
+test.each(["resolved", "replaced", "stopped", "missing", "transport"] as const)(
+  "fleet stale replay seeds the held worker with the directory closed (%s)", async scenario => {
+    const source = fleetPushSource(identity.origin), events: string[] = [];
+    const session: SessionMetadata = { instanceId: "remote-synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
+      startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-remote",
+      ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
+    const primary = { ...session, instanceId: "primary-synthetic", cwdLabel: "omp-push-synthetic" };
+    let stale = false, closed = false, replaying = false, clock = 0, admissions = 0, mutations = 0;
+    let records: Awaited<ReturnType<typeof notificationOperations.readAndroidNotificationRecords>> = [];
+    const transport = new AndroidDevtoolsConnectionError("websocket_closed", "synthetic replay disconnect");
+    const context = { navigator: { setAppBadge: async () => {}, clearAppBadge: async () => {} },
+      self: { registration: { showNotification: async (title: string, options: { tag: string; data: unknown; body?: string }) => {
+        mutations++; events.push("show");
+        expect(closed).toBe(true);
+        expect(options.data).toEqual({ version: 3, type: "attention", instanceId: session.instanceId,
+          requestId: session.ask!.requestId, source: source.binding });
+        if (scenario === "transport") throw transport;
+        if (scenario !== "missing") records = [{ key: "synthetic", tag: options.tag, title, body: options.body ?? "",
+          postedAt: 1, seen: true, visibleSince: 1, text: "" }];
+      } } } };
+    const driver = {
+      browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
+        { type: "page", targetId: "page", url: identity.origin + "/" },
+        { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
+      ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
+      attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
+      evaluate: async (expression: string) => {
+        if (replaying) throw new Error("reopening the directory reconciles away stale notifications");
+        return expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true;
+      },
+      sessionSend: async (_session: string, _method: string, parameters: { expression: string }) =>
+        ({ result: { value: await runInNewContext(parameters.expression, context) } }),
+    };
+    const spies = [
+      spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: URL | RequestInfo) => Response.json({
+        revision: 1, sessions: String(url).startsWith(source.origin) ? stale ?
+          scenario === "stopped" ? [] : [{ ...session, inputRequired: scenario === "replaced",
+            ask: scenario === "replaced" ? { ...session.ask!, requestId: "synthetic-new-request" } : undefined }] : [session] : [primary],
+      }), { preconnect: globalThis.fetch.preconnect })),
+      spyOn(performance, "now").mockImplementation(() => clock),
+      spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+      spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+      spyOn(deviceOperations, "runAdb").mockResolvedValue(""),
+      spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+      spyOn(webApkOperations, "openWebApk").mockImplementation(async () => {
+        if (replaying) throw new Error("replay must not reopen the PWA");
+      }),
+      spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => records),
+      spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
+        (async (run: (driver: unknown) => Promise<unknown>) => { admissions++; return run(driver); }) as typeof withAndroidChrome),
+    ];
+    const runtime = createAndroidPushRuntime({ ...identity, candidate: { tag: "v0.9.1", sourceCommit: "c".repeat(40),
+      archiveSha256: "d".repeat(64), archivePath: "/synthetic/candidate.tar" } }, { execute: async () => ({ exitCode: 0, stdout: "" }) });
+    runtime.beforeEffect = async () => { events.push("checkpoint"); };
+    runtime.pause = async milliseconds => { clock += milliseconds; };
+    runtime.closePwa = async () => { closed = true; events.push("close"); };
+    try {
+      await runtime.fleet.host("prepare", "synthetic");
+      await runtime.fleet.select(true);
+      await runtime.fixture("answer", "synthetic", "remote");
+      await runtime.beginNotificationPhase("synthetic", "fleet_stale_taps_verified");
+      await runtime.fleet.armBadgeObserver();
+      stale = true; replaying = true; events.length = 0;
+      const beforeAdmissions = admissions;
+      if (scenario === "missing") await expect(runtime.replay(session)).rejects.toThrow("replayed notification unavailable");
+      else if (scenario === "transport") {
+        const failure = await runtime.replay(session).catch(error => error);
+        expect(failure.evidence).toMatchObject({ class: "harness", reason: "invalid_evidence", operation: "unknown",
+          observations: { transportFailure: true, attempts: 1 } });
+        expect(privateQualificationFailureDiagnostic(failure).some(entry => entry.message.includes("worker/replay"))).toBe(true);
+      } else await runtime.replay(session);
+      expect(admissions).toBe(beforeAdmissions);
+      expect(mutations).toBe(1);
+      expect(events.slice(0, 3)).toEqual(["close", "checkpoint", "show"]);
+      expect(clock).toBe(scenario === "missing" ? 15_000 : 0);
+    } finally {
+      replaying = false;
+      runtime.fleet.select = async () => {};
+      await runtime.cleanup("fleet", { epoch: "synthetic", fleetPrepared: true } as AndroidPushProgress);
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
 test("fleet coverage polls retain the open page's last-known directory without navigation", async () => {
   let navigations = 0;
   const coverage = { selected: true, state: "stale", covered: false };
