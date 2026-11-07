@@ -366,16 +366,20 @@ test.skipIf(process.platform === "win32")("fleet physical POSIX host refuses mut
   } finally { opened.mockRestore(); await f.dispose(); }
 });
 
-test.skipIf(process.platform === "win32")("fleet supervisor TERM reaps its own child before the gateway exec", async () => {
+test.skipIf(process.platform === "win32").each(["term", "normal"] as const)("fleet supervisor signals only its unreaped child (%s)", async scenario => {
   const stubRoot = await mkdtemp(join(tmpdir(), "fleet-preexec-test-")), stub = join(stubRoot, "slow-bun.sh"), fifo = join(stubRoot, "preexec.fifo");
+  const kills = join(stubRoot, "signals");
   const f = await fixture({ bun: stub });
   let supervisor: ReturnType<typeof Bun.spawn> | undefined, child: number | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    expect((await executeFixture(["mkfifo", "-m", "600", fifo])).exitCode).toBe(0);
-    await writeFile(stub, `#!/bin/sh\nexec 3< '${fifo.replaceAll("'", "'\\''")}'\n`, { mode: 0o700 });
+    if (scenario === "term") expect((await executeFixture(["mkfifo", "-m", "600", fifo])).exitCode).toBe(0);
+    await writeFile(stub, scenario === "term" ? `#!/bin/sh\nexec 3< '${fifo.replaceAll("'", "'\\''")}'\n` : "#!/bin/sh\nexit 0\n", { mode: 0o700 });
     await chmod(stub, 0o700);
     await f.run("prepare");
+    const scriptPath = join(f.root, "source.sh"), script = await readFile(scriptPath, "utf8");
+    // Observe the generated supervisor's own signal calls, forwarding them unchanged.
+    await writeFile(scriptPath, script.replace("#!/bin/sh\n", `#!/bin/sh\nkill() { printf '%s\\n' "$*" >> '${kills.replaceAll("'", "'\\''")}'; command kill "$@"; }\n`));
     await rm(join(f.root, "source.pid")); await rm(join(f.root, "source-child.pid"));
     supervisor = Bun.spawn(["/bin/sh", join(f.root, "source.sh")], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     const spawnedBy = supervisor.pid, dispatchDeadline = Date.now() + HANG_DEADLINE_MS;
@@ -389,11 +393,13 @@ test.skipIf(process.platform === "win32")("fleet supervisor TERM reaps its own c
       await Bun.sleep(10);
     }
     expect(await readFile(join(f.root, "source.pid"), "utf8")).toBe(String(spawnedBy));
-    const before = await executeFixture(["ps", "-ww", "-p", String(child), "-o", "command="]);
-    expect(before.exitCode).toBe(0);
-    expect(before.stdout.trim()).not.toBe(`${stub} ${join(f.home, "candidate/apps/gateway/src/cli.js")} serve`);
+    if (scenario === "term") {
+      const before = await executeFixture(["ps", "-ww", "-p", String(child), "-o", "command="]);
+      expect(before.exitCode).toBe(0);
+      expect(before.stdout.trim()).not.toBe(`${stub} ${join(f.home, "candidate/apps/gateway/src/cli.js")} serve`);
+    }
     const stopped = performance.now();
-    supervisor.kill("SIGTERM");
+    if (scenario === "term") supervisor.kill("SIGTERM");
     // hang-deadline: behavior-under-test -- the fixture's TERM/child-restoration bound is 30 s.
     const stopBound = 30_000;
     await Promise.race([supervisor.exited, new Promise<never>((_resolve, reject) => {
@@ -403,6 +409,8 @@ test.skipIf(process.platform === "win32")("fleet supervisor TERM reaps its own c
     expect(performance.now() - stopped).toBeLessThan(stopBound);
     const after = await executeFixture(["ps", "-ww", "-p", String(child), "-o", "stat=,command="]);
     expect(after.exitCode).toBe(1); expect(after.stdout.trim()).toBe("");
+    if (scenario === "term") expect((await readFile(kills, "utf8")).trim()).toBe(`-TERM ${child}`);
+    else await expect(readFile(kills)).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     clearTimeout(timer);
     if (supervisor !== undefined && supervisor.exitCode === null) {
