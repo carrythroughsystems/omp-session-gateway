@@ -11,6 +11,8 @@ export interface AndroidCollabSmokeOptions {
   readonly expectedAppAsset?: string;
   readonly allowDisposableTarget: boolean;
   readonly execution?: AndroidExecution;
+  /** Force-stop the browser before launching it, for a Pixel consumer that follows radio changes. */
+  readonly freshBrowser?: boolean;
 }
 
 export interface AndroidCollabSmokeResult {
@@ -114,7 +116,7 @@ export async function runAndroidCollabSmoke(options: AndroidCollabSmokeOptions):
       androidPackageVersion: driver.androidPackageVersion,
       ...journeyResult,
     };
-  }, options.execution === undefined ? {} : { execution: options.execution });
+  }, { ...(options.execution === undefined ? {} : { execution: options.execution }), ...(options.freshBrowser === true ? { freshBrowser: true } : {}) });
 }
 
 if (import.meta.main) {

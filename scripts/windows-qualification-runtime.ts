@@ -1146,8 +1146,10 @@ if ($exists) {
         assertWindowsExecution(context.execution ?? execution);
         const owner = context.execution ?? execution;
         assertWindowsPixelDispatch(context);
+        // This consumer can follow the Push lane's radio sequence on the shared Pixel; start Chrome
+        // fresh so a wedged network stack cannot masquerade as a Windows relay failure.
         const smoke = await runAndroidCollabSmoke({ origin: String(access.origin), label: sessionLabel, allowDisposableTarget: true,
-          ...(owner === undefined ? {} : { execution: owner }) });
+          freshBrowser: true, ...(owner === undefined ? {} : { execution: owner }) });
         // Serve must supply the user identity for this exact-login, production-mode gateway.
         result = { pixelIdentityAccepted: true, viewReadOnly: smoke.viewReadOnly, controlWritable: smoke.controlWritable, promptAccepted: smoke.promptAccepted, returnedToDirectory: smoke.returnedToDirectory };
       } catch (error) {

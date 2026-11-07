@@ -787,6 +787,10 @@ export async function requireSingleDevice(
 /**
  * Starts Chrome and waits for it to leave a cached process state. A cached Chrome accepts the
  * DevTools socket and never answers, so skipping this turns every later call into a timeout.
+ * `fresh` force-stops the browser first: a Chrome process that lived through another lane's
+ * Wi-Fi → cellular → Airplane → Wi-Fi sequence kept reaching tailnet origins while its relay
+ * connections failed ("Relay unavailable", v0.10.0-prealpha.1/.2), the wedge USAGE tells users to
+ * clear with Force stop.
  */
 export async function wakeAndroidChrome(
   serial: string,
@@ -794,9 +798,11 @@ export async function wakeAndroidChrome(
   command: AndroidAdbCommand = (...args) => runAdb(serial, args),
   pause: (milliseconds: number) => Promise<void> = milliseconds => Bun.sleep(milliseconds),
   unlockKeyguard: AndroidKeyguardUnlock = () => unlockAndroidKeyguard(serial),
+  fresh = false,
 ): Promise<void> {
   const wakefulness = await wakeAndroidDisplay(command, pause, unlockKeyguard);
   if (wakefulness !== "Awake") throw new Error(`Android display did not wake (observed ${wakefulness})`);
+  if (fresh) await command("shell", "am", "force-stop", target.packageName);
   await command("shell", "am", "start", "-W", "-n", target.activity, "-a", "android.intent.action.MAIN");
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const state = await command(
@@ -855,7 +861,7 @@ export class AndroidBrowserCleanupError extends AggregateError {
 /** Drive real Android Chrome; unproven target/forward cleanup poisons device containment. */
 export async function withAndroidChrome<T>(
   run: (driver: AndroidChromeDriver) => Promise<T>,
-  options: { readonly port?: number; readonly launchBrowser?: boolean;
+  options: { readonly port?: number; readonly launchBrowser?: boolean; readonly freshBrowser?: boolean;
     readonly execution?: { readonly signal: AbortSignal; readonly deadline: number } } = {},
 ): Promise<T> {
   const execution = options.execution;
@@ -874,7 +880,7 @@ export async function withAndroidChrome<T>(
   const packageVersion = parseAndroidPackageVersion(await adb(serial, ["shell", "dumpsys", "package", target.packageName]));
   if (options.launchBrowser !== false) await wakeAndroidChrome(serial, target, (...args) => adb(serial, args),
     async milliseconds => { check(); await Bun.sleep(milliseconds); check(); },
-    () => unlockAndroidKeyguard(serial, undefined, undefined, execution));
+    () => unlockAndroidKeyguard(serial, undefined, undefined, execution), options.freshBrowser === true);
 
   let socket: WebSocket;
   try {

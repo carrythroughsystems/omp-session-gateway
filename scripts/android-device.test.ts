@@ -708,6 +708,29 @@ describe("Android display bootstrap", () => {
     expect((failure as Error).message).toBe("Android display did not wake (observed Dreaming)");
     expect(calls.some(args => args[1] === "am" && args[2] === "start")).toBe(false);
   });
+  test.each([true, false])("a fresh launch force-stops the browser only after waking and before the Activity start (fresh=%s)", async fresh => {
+    const calls: string[] = [];
+    await wakeAndroidChrome(
+      "serial",
+      target,
+      async (...args) => {
+        calls.push(args.join(" "));
+        if (args[1] === "dumpsys" && args[2] === "power") return "mWakefulness=Awake";
+        if (args[1] === "dumpsys" && args[2] === "window") return "isKeyguardShowing=false";
+        return "";
+      },
+      async () => {},
+      async () => {},
+      fresh,
+    );
+    const stop = calls.indexOf("shell am force-stop com.android.chrome");
+    const start = calls.findIndex(call => call.startsWith("shell am start -W"));
+    expect(start).toBeGreaterThan(-1);
+    if (fresh) {
+      expect(stop).toBeGreaterThan(calls.findIndex(call => call === "shell dumpsys power"));
+      expect(stop).toBeLessThan(start);
+    } else expect(stop).toBe(-1);
+  });
 
   test("parses keyguard state and rejects missing state", () => {
     expect(parseKeyguardShowing("  isKeyguardShowing=true\n")).toBe(true);
