@@ -88,7 +88,41 @@ On iPhone and iPad, Safari in a browser tab shows `Background alerts unavailable
 
 Push delivery uses a 5-minute time-to-live and is best-effort: brief turns between 10-second discovery polls can be missed, and on Android force-stop and Doze are observed variants rather than delivery guarantees. See [exact qualified combinations and evidence](COMPATIBILITY.md#current-claim).
 
-Background alerts and the app icon badge cover **this host only**. The Settings sheet states this scope explicitly; remote hosts in `fleet.targets` do not send Web Push through your home gateway, and holding an ask on a remote host never closes a local notification. If you want background alerts from a remote workstation, open that workstation's own HTTPS origin and install its PWA separately.
+By default, background alerts and the app icon badge cover **this host only** (`Alerts cover this host (<label>) only.`), and holding an ask on a remote host never closes a local notification.
+
+### Alerts from other hosts
+
+One installed **OMP Sessions** app can also receive background alerts from selected remote hosts through its home gateway (the gateway you installed the app from, which coordinates and sends every push).
+
+**Prerequisites:**
+
+- The administrators of the home gateway and each remote gateway have opted in: each remote host lists the home gateway in `notifications.coordinators` and `http.trustedDashboardOrigins` ([Fleet notification source setup in `OPERATIONS.md`](OPERATIONS.md#fleet-notification-source-setup)), and the home gateway lists that remote host's `fleet.targets` ID in `notifications.sources` ([Fleet notification home setup in `OPERATIONS.md`](OPERATIONS.md#fleet-notification-home-setup)).
+- The home gateway must stay awake and reachable (`This home gateway sends all enabled hosts' alerts. Fleet alerts need it awake and reachable.`). While the home gateway is asleep or offline, no fleet alert is sent; install the app from an always-on gateway.
+
+**Turn a host on or off:**
+
+1. Open **Settings** in the top-right masthead and enable background alerts on this device if they are not already on. The **Hosts** section appears only when the home gateway is configured with `notifications.sources` and background alerts are enabled.
+2. Under **Hosts**, turn on the switch next to each remote host you want alerts from. Turning a host on registers or renews a 30-day approval (grant) for your Tailscale login directly between your browser and that remote host (renewed automatically when the app is open within 10 days of expiry), verifies the live feed at the home gateway, and adds the host to this device's selection.
+3. Confirm the row status moves from `Connecting…` to `Covered` (when every selected host is `Covered`, the section summary reads `All selected hosts covered`; otherwise it reads `N of M selected hosts covered`).
+
+To stop alerts from a remote host on this device, turn its switch off under **Settings → Hosts** (the row returns to `Off`). When no device of yours still selects that host, the home gateway discards the grant and the app revokes it at the remote host; a device with no remote hosts selected returns to local-only alerts. To stop all alerts on this device, tap **Disable background alerts**.
+
+| Row status | Meaning and next step |
+|---|---|
+| `Covered` | Selected and connected; the home gateway is receiving live alert metadata from this host. |
+| `Connecting…` | Selected and waiting for the initial feed snapshot from this host. |
+| `Unreachable · showing last known` | Selected, but the home gateway cannot currently reach this host; last-known waiting requests stay counted until it recovers. |
+| `Needs approval on this host` | Selected, but this host has no active grant for your login or rejected the grant; tap **Reconnect** on that **Settings → Hosts** row while signed in to Tailscale to re-approve directly from your browser. |
+| `Host gateway does not support alerts` | Selected, but the remote gateway does not offer fleet notification routes; upgrade or configure that host ([Fleet notification source setup in `OPERATIONS.md`](OPERATIONS.md#fleet-notification-source-setup)). |
+| `Off` | Not selected on this device. |
+
+**Alert detail, taps, and coverage:**
+
+- **Detail levels**: fleet alerts use the same titles (`OMP session needs attention` and `OMP session activity stopped`). **Private** sends the fixed title with no body. At **Session** and **Preview**, a remote host's alert body shows only that host's configured label and a six-character session suffix (for example `Workstation · bb2222`) — never a session title, working directory, or prompt preview, which the remote feed does not include. When at least one remote host is turned on for this device, alerts from the home gateway itself prefix the home gateway's host label (`fleet.label`) before their **Session** detail, and **Preview** falls back to **Session** for every fleet alert.
+- **Tapping a remote alert**: tapping an alert checks that the remote host is still configured at the same HTTPS address (origin), selected, and `Covered`, then fetches a fresh snapshot from that host to revalidate the exact waiting request (opening **Control**) or continuing generation (opening read-only **View** for a stop alert). If the host was removed, its origin changed, its grant was revoked, or the request or session already changed or ended, the app opens nothing and shows `That notification changed or expired. Choose a current session.` (or `That alert changed or expired.` in the triage bar when a session is already open).
+- **Badge and `All clear` coverage**: the app icon badge counts known pending Control-capable requests across your selected hosts, including an unreachable host's last-known requests. When the count is zero but any selected host is not `Covered`, the badge shows the platform's plain marker (an unnumbered badge) instead of clearing. In the directory, **All clear** (`Nothing needs you.`) appears only when every selected host is `Covered` and none has a waiting request; otherwise the summary shows `Host coverage incomplete` (`Known work only. Alerts unavailable for <hosts>.`).
+
+For the full coordinator, grant, ordering, and wire contract, see [Fleet notifications in `ATTENTION_SPEC.md`](ATTENTION_SPEC.md#fleet-notifications).
 
 ## Install as an app
 
