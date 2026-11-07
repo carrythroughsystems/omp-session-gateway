@@ -1899,7 +1899,8 @@ test("lease self-clear accepts only settled candidate-bound cleanup with matchin
   }
 });
 
-describe("failed-campaign lease recovery settles only from owner proof", () => {
+// The release-host lease and private outcome files are the POSIX Studio channel, as above.
+describe.skipIf(process.platform === "win32")("failed-campaign lease recovery settles only from owner proof", () => {
   const epoch = "11111111-2222-4333-8444-555555555555";
   const baseline = { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true };
   /** The installed driver reads the real retained lease row; only worker liveness and GitHub stay simulated. */
