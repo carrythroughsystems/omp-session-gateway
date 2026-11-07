@@ -842,6 +842,54 @@ test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
+test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch", "phase"] as const)(
+  "fleet metadata reuse is bound to the exact phase record (%s)", async scenario => {
+    let session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
+      startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
+      ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
+    const record = { key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
+      title: "OMP session needs attention", body: "", text: "" };
+    let records: typeof record[] = [], workerReads = 0, matches = scenario !== "mismatch";
+    const driver = {
+      browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
+        { type: "page", targetId: "page", url: identity.origin + "/" },
+        { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
+      ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
+      sessionSend: async () => { workerReads++; return { result: { value: matches } }; },
+      attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
+      evaluate: async (expression: string) => expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
+    };
+    const spies = [
+      spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [session] }), { preconnect: globalThis.fetch.preconnect })),
+      spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+      spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+      spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+      spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+      spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => records),
+      spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+    ];
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.beforeEffect = async () => {}; runtime.dndOff = async () => true;
+      await runtime.fleet.select(true);
+      await runtime.beginNotificationPhase("synthetic", "fleet_restart_verified");
+      records = [record];
+      expect((await runtime.observe(session, "attention", "private")).count).toBe(matches ? 1 : 0);
+      expect(workerReads).toBe(1);
+      if (scenario === "phase") {
+        records = []; await runtime.beginNotificationPhase("synthetic", "fleet_revocation_verified"); records = [record];
+      }
+      if (scenario === "repost") records = [{ ...record, postedAt: 2 }];
+      if (scenario === "new-key") records = [{ ...record, key: "synthetic-replacement" }];
+      if (scenario === "request") { session = { ...session, ask: { ...session.ask!, requestId: "synthetic-new-request" } }; matches = false; }
+      if (scenario === "generation") { session = { ...session, generation: 2 }; matches = false; }
+      if (scenario === "mismatch") matches = true;
+      if (["repost", "new-key"].includes(scenario)) await expect(runtime.observe(session, "attention", "private")).rejects.toBeInstanceOf(QualificationFailure);
+      else expect((await runtime.observe(session, "attention", "private")).count).toBe(matches ? 1 : 0);
+      expect(workerReads).toBe(scenario === "unchanged" ? 1 : 2);
+    } finally { for (const spy of spies) spy.mockRestore(); }
+  });
+
 test.each(["idle", "blocked", "unavailable"] as const)("resumed fleet deselection accepts hidden Hosts with alerts %s", async state => {
   let toggleActions = 0, controlReads = 0;
   const driver = {
@@ -1843,7 +1891,17 @@ test.each(["quiet", "replaced", "changed", "foreign", "missing", "ambiguous", "i
   let listener: (method: string, parameters: Record<string, unknown>) => void = () => {};
   let removed = 0, evaluations = 0;
   const failure = new AndroidDevtoolsConnectionError("protocol_timeout", "CDP timeout: Runtime.evaluate");
+  const adb = spyOn(deviceOperations, "runAdb").mockResolvedValue(`
+  *APP* synthetic com.android.chrome:sandboxed_process
+    cached=true isFrozen=true secret=synthetic-private-process-data
+  *APP* synthetic org.chromium.webapk.synthetic
+    cached=true isFrozen=true
+  *APP* synthetic com.android.chrome
+    cached=false isFrozen=false
+  *APP* synthetic foreign.package
+    cached=true isFrozen=true`);
   const connect = (async (run: (driver: unknown) => Promise<unknown>) => run({
+    serial: "synthetic", packageName: "com.android.chrome",
     onEvent: (callback: typeof listener) => { listener = callback; return () => { removed++; }; },
     browserSend: async (method: string) => {
       methods.push(method);
@@ -1887,12 +1945,13 @@ test.each(["quiet", "replaced", "changed", "foreign", "missing", "ambiguous", "i
         { detached: 1, destroyed: 1, changed: 1, identityChanged: scenario === "changed" ? 1 : 0, sameScriptCreated: 1 } : zero,
       inventory: ["replaced", "missing", "ambiguous"].includes(scenario) ? scenario : scenario === "inventory-failed" ? "failed" : "same",
       context: scenario === "replaced" ? "failed" : "responsive",
+      processes: { total: 3, cached: 2, frozen: 2 },
     });
     expect(diagnostic.message).not.toContain("synthetic");
     expect(diagnostic.message).not.toContain(identity.origin);
     expect(evaluations).toBe(2);
     expect(removed).toBe(0);
-  } finally { await observer.close(); }
+  } finally { await observer.close(); adb.mockRestore(); }
   expect(removed).toBe(1);
   expect(methods).toEqual(["Target.getTargets", "Target.attachToTarget", "Target.setDiscoverTargets", "Target.getTargets", "Target.detachFromTarget"]);
 });

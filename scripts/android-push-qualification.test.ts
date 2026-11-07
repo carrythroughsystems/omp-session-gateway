@@ -1768,6 +1768,45 @@ test.each(["race", "restart"] as const)("fleet %s refuses to conceal a missing o
   expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
 });
 
+test.each(["zero", "send", "send-mismatch", "unavailable", "absent"] as const)(
+  "fleet restart retains the quiet badge only with complete zero-send telemetry (%s)", async scenario => {
+    const host = fake(), events = eventBackedTelemetry(host);
+    const begin = host.runtime.beginNotificationPhase, pause = host.runtime.pause, fixture = host.runtime.fixture;
+    const badge = host.runtime.fleet.observeBadge, telemetry = host.runtime.deliveryTelemetry!;
+    let phase = "", quiet = false, quietReads = 0, windows = 0;
+    host.runtime.beginNotificationPhase = async (...args) => { phase = args[1] ?? ""; await begin(...args); };
+    host.runtime.pause = async milliseconds => {
+      await pause(milliseconds);
+      if (phase === "fleet_restart_verified" && milliseconds === 21_000) {
+        quiet = true;
+        if (scenario.startsWith("send")) events.push({ index: events.length + 1, timestamp: "2026-01-01T00:00:00.000Z",
+          level: "info", event: "push.send_started", sequence: 999, request_alias: 0, clear: true, subscriptions: 1 });
+      }
+    };
+    host.runtime.fixture = async (...args) => { if (quiet && args[0] === "ask") quiet = false; await fixture(...args); };
+    host.runtime.fleet.observeBadge = async () => {
+      if (quiet) {
+        quietReads++;
+        if (scenario === "send-mismatch") return { count: 9, complete: true };
+      }
+      return badge();
+    };
+    host.runtime.deliveryTelemetry = async window => {
+      if (quiet) { windows++; if (scenario === "unavailable") throw new Error("synthetic log unavailable"); }
+      return telemetry(window);
+    };
+    if (scenario === "absent") { delete host.runtime.beginDeliveryTelemetry; delete host.runtime.deliveryTelemetry; }
+    const result = await runAndroidPush(host.input).catch(error => error);
+    if (scenario === "send-mismatch") {
+      expect(result).toBeInstanceOf(QualificationFailure);
+      expect(result.evidence.step).toBe("fleet_restart_verified");
+      expect(privateQualificationFailureDiagnostic(result).map(entry => entry.message).join("\n")).toContain("restart-no-repeat");
+    } else expect(result.passed).toBe(true);
+    expect(quietReads === 0).toBe(scenario === "zero");
+    if (scenario !== "absent") expect(windows).toBeGreaterThan(0);
+    expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  });
+
 test("fleet outage rejects a stale source whose directory drops the waiting row", async () => {
   const host = fake({ fleetFailure: "stale-row" });
   const error = await runAndroidPush(host.input).catch(error => error);

@@ -218,8 +218,15 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await r.fixture("answer", p.epoch, "remote"); await snapshot(s => !s.inputRequired, "remote");
     await f.host("coordinator-up", p.epoch);
     await wait("restart remote exact clear", async () => await r.notificationCleared(old) ? true : undefined);
-    await delivered(local); await badge("restart-exact-clear", 1, true);
-    await r.pause(21_000); await delivered(local); await badge("restart-no-repeat", 1, true);
+    await delivered(local);
+    const quietWindow = await r.beginDeliveryTelemetry?.("fleet_restart_verified").catch(() => undefined);
+    await badge("restart-exact-clear", 1, true);
+    await r.pause(21_000); await delivered(local);
+    const quiet = quietWindow === undefined ? undefined : await r.deliveryTelemetry?.(quietWindow).catch(() => undefined);
+    // A complete, healthy coordinator log window with zero sends globally is stronger
+    // than zero sends to this subscription. With the page still closed, retain the badge
+    // verified inside this window; any push activity or unavailable log reads it fresh.
+    if (quiet?.sends !== 0 || quiet.acknowledgements !== 0 || quiet.failures !== 0) await badge("restart-no-repeat", 1, true);
     const fresh = await ask("remote");
     if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet restart did not replace its request");
     await delivered(local); await badge("new-ask", 2, true);
