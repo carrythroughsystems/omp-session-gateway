@@ -1053,7 +1053,9 @@ test.each([false, true])("fleet badge observer forwards platform calls and resto
   const calls: string[] = [], platformCalls: unknown[][] = [];
   const set = (...args: unknown[]) => { platformCalls.push(args); return Promise.resolve(); };
   const clear = () => { platformCalls.push(["clear"]); return Promise.resolve(); };
-  const context = { navigator: { setAppBadge: set, clearAppBadge: clear }, self: {} as Record<string, unknown> };
+  const navigator = (fail ? Object.create({ setAppBadge: set, clearAppBadge: clear }) :
+    { setAppBadge: set, clearAppBadge: clear }) as { setAppBadge: typeof set; clearAppBadge: typeof clear };
+  const context = { navigator, self: {} as Record<string, unknown> };
   const driver = {
     browserSend: async (method: string) => method === "Target.getTargets" ?
       { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
@@ -1083,6 +1085,8 @@ test.each([false, true])("fleet badge observer forwards platform calls and resto
     expect(calls).toEqual(["coordinator-up", "remote-stop", "restore"]);
     expect(context.navigator.setAppBadge).toBe(set);
     expect(context.navigator.clearAppBadge).toBe(clear);
+    expect(Object.hasOwn(context.navigator, "setAppBadge")).toBe(!fail);
+    expect(Object.hasOwn(context.navigator, "clearAppBadge")).toBe(!fail);
     expect(context.self.__ompQualificationBadge).toBeUndefined();
     expect(progress.fleetPrepared).toBe(fail);
   } finally { chrome.mockRestore(); }
