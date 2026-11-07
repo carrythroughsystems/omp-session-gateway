@@ -1,5 +1,5 @@
 import { isProtectedLabel, targetEligibility } from "./acceptance-target.ts";
-import { withAndroidChrome, type AndroidExecution } from "./android-device.ts";
+import { ensureRelayReachable, reconnectTailscaleVpn, RELAY_REACHABLE_EXPRESSION, runAdb, withAndroidChrome, type AndroidExecution } from "./android-device.ts";
 import { ANDROID_COLLAB_STAGES, announceAndroidStage } from "./android-stages.ts";
 import { APP_ASSET_PATTERN, runCollaborationJourney } from "./browser-journey.ts";
 
@@ -13,6 +13,8 @@ export interface AndroidCollabSmokeOptions {
   readonly execution?: AndroidExecution;
   /** Force-stop the browser before launching it, for a Pixel consumer that follows radio changes. */
   readonly freshBrowser?: boolean;
+  /** Prove the relay host is reachable (one VPN reconnect allowed) before the journey opens View. */
+  readonly relayReachability?: boolean;
 }
 
 export interface AndroidCollabSmokeResult {
@@ -104,6 +106,15 @@ export async function runAndroidCollabSmoke(options: AndroidCollabSmokeOptions):
   announceAndroidStage(ANDROID_COLLAB_STAGES, "Android Chrome");
   return withAndroidChrome(async driver => {
     await driver.openTab();
+    if (options.relayReachability === true) {
+      // The blank tab has no page CSP; this proves only that the relay host answers.
+      const relay = await ensureRelayReachable(
+        () => driver.evaluate<boolean>(RELAY_REACHABLE_EXPRESSION),
+        () => reconnectTailscaleVpn((...args) => runAdb(driver.serial, args, { timeoutMs: 10_000 }), milliseconds => Bun.sleep(milliseconds)),
+        milliseconds => Bun.sleep(milliseconds),
+      );
+      console.error(`android-relay: ${JSON.stringify({ reachable: true, vpnReconnected: relay.vpnReconnected })}`);
+    }
     const journeyResult = await runCollaborationJourney(driver, {
       origin: options.origin,
       label: options.label,

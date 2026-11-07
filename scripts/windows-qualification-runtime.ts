@@ -1147,13 +1147,20 @@ if ($exists) {
         const owner = context.execution ?? execution;
         assertWindowsPixelDispatch(context);
         // This consumer can follow the Push lane's radio sequence on the shared Pixel; start Chrome
-        // fresh so a wedged network stack cannot masquerade as a Windows relay failure.
+        // fresh and prove the relay host answers (one VPN reconnect) so a wedged phone network
+        // cannot masquerade as a Windows relay failure.
         const smoke = await runAndroidCollabSmoke({ origin: String(access.origin), label: sessionLabel, allowDisposableTarget: true,
-          freshBrowser: true, ...(owner === undefined ? {} : { execution: owner }) });
+          freshBrowser: true, relayReachability: true, ...(owner === undefined ? {} : { execution: owner }) });
         // Serve must supply the user identity for this exact-login, production-mode gateway.
         result = { pixelIdentityAccepted: true, viewReadOnly: smoke.viewReadOnly, controlWritable: smoke.controlWritable, promptAccepted: smoke.promptAccepted, returnedToDirectory: smoke.returnedToDirectory };
       } catch (error) {
         primary = windowsPhysicalClientFailure(error, context.execution ?? execution);
+        // Private diagnostic only: the Windows host's clock offset from the Studio, a number.
+        try {
+          const clock = await winrm(context, "@{ utc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress", undefined, 30_000, undefined, false);
+          const offset = typeof clock.utc === "string" ? Date.parse(clock.utc) - Date.now() : Number.NaN;
+          if (Number.isFinite(offset)) console.error(`windows-clock-offset-ms: ${Math.round(offset)}`);
+        } catch { /* the failure above stays the verdict */ }
       }
       try { await restorePixel(windowsPixelRestorationContext(context, execution)); }
       catch (error) {

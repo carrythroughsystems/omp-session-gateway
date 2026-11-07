@@ -819,6 +819,47 @@ export async function wakeAndroidChrome(
   }
 }
 
+/** The collaboration relay's public HTTPS host (the gateway CSP's `connect-src wss://my.omp.sh`). */
+export const COLLAB_RELAY_PROBE_URL = "https://my.omp.sh/";
+/** Run on a blank tab (no page CSP): an opaque response proves reachability; nothing is read. */
+export const RELAY_REACHABLE_EXPRESSION = `(async () => {
+  try {
+    await fetch(${JSON.stringify(COLLAB_RELAY_PROBE_URL)}, { mode: "no-cors", cache: "no-store", credentials: "omit", signal: AbortSignal.timeout(8000) });
+    return true;
+  } catch { return false; }
+})()`;
+
+/**
+ * Establishes that the phone's browser reaches the collaboration relay before a physical-client
+ * journey. The only repair is one Tailscale VPN reconnect (the #567 remedy); a relay that stays
+ * unreachable fails here, before any capability opens, instead of as a View timeout.
+ */
+export async function ensureRelayReachable(
+  probe: () => Promise<boolean>,
+  reconnectVpn: () => Promise<void>,
+  pause: (milliseconds: number) => Promise<void>,
+  attempts: { readonly before: number; readonly after: number } = { before: 6, after: 12 },
+): Promise<{ readonly vpnReconnected: boolean }> {
+  const poll = async (count: number): Promise<boolean> => {
+    for (let attempt = 0; attempt < count; attempt += 1) {
+      if (await probe().catch(() => false)) return true;
+      if (attempt + 1 < count) await pause(2_000);
+    }
+    return false;
+  };
+  if (await poll(attempts.before)) return { vpnReconnected: false };
+  await reconnectVpn();
+  if (await poll(attempts.after)) return { vpnReconnected: true };
+  throw new Error("Pixel browser could not reach the collaboration relay, even after one VPN reconnect");
+}
+
+/** Disconnects and reconnects the phone's Tailscale VPN through its documented broadcast receiver. */
+export async function reconnectTailscaleVpn(command: AndroidAdbCommand, pause: (milliseconds: number) => Promise<void>): Promise<void> {
+  await command("shell", "am", "broadcast", "-a", "com.tailscale.ipn.DISCONNECT_VPN", "-n", "com.tailscale.ipn/.IPNReceiver");
+  await pause(3_000);
+  await command("shell", "am", "broadcast", "-a", "com.tailscale.ipn.CONNECT_VPN", "-n", "com.tailscale.ipn/.IPNReceiver");
+}
+
 /**
  * Waits for the forwarded DevTools endpoint to answer, not for the browser process to exist.
  * `adb forward` binds the local port whether or not the device-side socket answers: a cold browser

@@ -67,8 +67,9 @@ async function walk(dir: string): Promise<string[]> {
 const nonProviderFetches: Readonly<Record<string, readonly string[]>> = {
   "android-acceptance.ts": ['"/api/v1/sessions/" + id + "/launch"', '"/api/v1/sessions"', 'new URL("/api/v1/sessions"'],
   "android-collab-smoke.ts": ['`${options.origin}/api/v1/sessions`'],
-  // The caller's owned adb-forwarded Chrome endpoint, never a provider request.
-  "android-device.ts": ['"http://127.0.0.1:" + port + "/json/version"'],
+  // The caller's owned adb-forwarded Chrome endpoint, never a provider request; and the phone's
+  // single no-cors reachability probe of the public collaboration relay host (opaque, never read).
+  "android-device.ts": ['"http://127.0.0.1:" + port + "/json/version"', "${JSON.stringify(COLLAB_RELAY_PROBE_URL)}"],
   "android-leak-sweep.ts": ['origin + "/api/v1/sessions"'],
   // Authenticated reads of the owned retained gateway, never subscription endpoints or a provider.
   "android-push-runtime.ts": ['`${identity.origin}/api/v1/sessions`', '`${identity.origin}/api/v1/push/config`', "'/api/v1/sessions'", "'/api/v1/sessions/'+${JSON.stringify(fixture.instanceId)}+'/launch'"],
