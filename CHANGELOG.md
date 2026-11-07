@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.10.0] — 2026-11-07
 
-This release uses stock OMP v18.18.0 as its engineering baseline. The 14 changelog entries below record the changes since v0.9.1. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.18.0 as its engineering baseline. The 15 changelog entries below record the changes since v0.9.1. Historical receipts do not qualify these bytes.
 
 ### Added
 
@@ -66,6 +66,9 @@ This release uses stock OMP v18.18.0 as its engineering baseline. The 14 changel
 - Qualification journeys now name the closed connection state (chip state, relay or gateway
   unavailable, online) when a View or Control collaboration shell does not connect, instead of an
   unclassified timeout.
+- The Windows lane's physical Pixel check now starts Chrome fresh, so a browser process that lived
+  through the Push lane's Wi-Fi/cellular/Airplane sequence can no longer fail its View as
+  "Relay unavailable" while tailnet traffic still works.
 
 ## [v0.9.1] — 2026-11-06
 
