@@ -1,13 +1,13 @@
 {
   "$schema": "./schemas/stable-release.schema.json",
   "schemaVersion": 1,
-  "version": "0.9.1",
-  "releaseTag": "v0.9.1",
-  "previousTag": "v0.9.0",
+  "version": "0.10.0",
+  "releaseTag": "v0.10.0",
+  "previousTag": "v0.9.1",
   "status": "qualified",
-  "candidateTag": "v0.9.1-prealpha.5",
-  "candidateSourceCommit": "f5167aebbeb28f9d8e484c25c28a69312b5a4167",
-  "candidateArchiveSha256": "9216835ab4683ff799e89320b80fa589530de6ca7472ddc6ea3cef96eceb2cbb",
+  "candidateTag": "v0.10.0-prealpha.5",
+  "candidateSourceCommit": "32c48fc4c36a1f97dfb297bfeb5fe41823e966af",
+  "candidateArchiveSha256": "7552d9b6c57320ff94e79c5d0a854ac01b65a80898d7143a9c631207b4b27636",
   "runtimeByteComparison": "passed",
   "evidence": {
     "debian": "passed",
@@ -20,5 +20,5 @@
     "provenance": "passed",
     "secretSinks": "passed"
   },
-  "approvedAt": "2026-11-07T02:23:27.091Z"
+  "approvedAt": "2026-11-07T22:56:14.143Z"
 }
