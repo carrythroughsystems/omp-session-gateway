@@ -45,10 +45,14 @@ concurrency:
 # failure report needs each host's version and failed stage.
 jobs:
   inspect-client-drift:
+    # Drift is observed by this workflow's own runs only. A reusable call from a release request
+    # skips it, so a drift or source-read failure can never block or alter a release request.
+    if: ${{ github.workflow == 'Upstream OMP canary' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
+      issues: read
     outputs:
       issue_action: ${{ steps.inspect.outputs.issue_action }}
     steps:

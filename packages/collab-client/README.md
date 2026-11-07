@@ -15,11 +15,12 @@ deployment scope.
 ## Source drift report and refresh
 
 The daily **Upstream OMP canary** inspects browser-client sources independently of the host
-canary and host pin, including when `UPSTREAM.lock.json` already equals npm `latest`.
+canary and host pin, including when `UPSTREAM.lock.json` already equals npm `latest`; a release
+request's reusable canary call skips the inspection, so drift never blocks a release request.
 `@oh-my-pi/collab-web`'s unchanged package version is not evidence of unchanged source.
 For a local read-only observation, run `bun scripts/client-drift.ts`; an optional `GH_TOKEN`
-authenticates only upstream GitHub API reads. Nothing is installed or executed from upstream.
-Public issue reads are anonymous so inspection needs only `contents: read`.
+authenticates its GitHub API reads (in CI, the job's `contents: read` / `issues: read` token).
+Nothing is installed or executed from upstream.
 
 Download the run's `client-drift-report` artifact (`client-drift-report.json`):
 

@@ -331,8 +331,9 @@ test("workflow preserves daily schedule, canary outputs and failure reporter whi
   expect(workflow.jobs["report-failure"]!.if).toContain("github.event_name == 'schedule'");
   const inspection = workflow.jobs["inspect-client-drift"]!;
   const writer = workflow.jobs["report-client-drift"]!;
-  expect(inspection.permissions).toEqual({ contents: "read" });
-  expect(inspection.if).toBeUndefined();
+  expect(inspection.permissions).toEqual({ contents: "read", issues: "read" });
+  // A release request's reusable call must never run, and so never fail on, drift inspection.
+  expect(inspection.if).toBe("${{ github.workflow == 'Upstream OMP canary' }}");
   expect(inspection.steps!.find(step => step.id === "inspect")!.run).toContain("bun scripts/client-drift.ts");
   expect(inspection.steps!.some(step => step.uses?.startsWith("actions/upload-artifact@"))).toBe(true);
   expect(writer.permissions).toEqual({ issues: "write" });

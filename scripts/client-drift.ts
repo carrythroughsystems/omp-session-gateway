@@ -1,6 +1,5 @@
 import { appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { readProvider } from "./provider-read.ts";
 import { readPublicSource, resolveUpstreamCommit, type PinReader } from "./upstream-pins.ts";
 
 const UPSTREAM = "https://api.github.com/repos/can1357/oh-my-pi";
@@ -9,9 +8,8 @@ const LATEST = "https://registry.npmjs.org/@oh-my-pi%2Fpi-coding-agent/latest";
 const SHA = /^[0-9a-f]{40}$/u;
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 export const CLIENT_DRIFT_LABEL = "client-drift";
-// This repository's issues are public. Anonymous issue reads need no issues permission in inspection.
-const readDriftSource: PinReader = url => url.startsWith(`${UPSTREAM}/`)
-  ? readPublicSource(url) : readProvider(signal => fetch(url, { signal }));
+// Every GitHub API read, including this repository's issue list, uses the job's read-only token, so
+// shared runner addresses never meet the anonymous rate limit; npm reads stay anonymous.
 
 interface Helper {
   readonly sourcePath: string;
@@ -237,7 +235,7 @@ export async function inspectClientDrift(
   embeddedInput: unknown,
   hostInput: unknown,
   repository = "carrythroughsystems/omp-session-gateway",
-  read: PinReader = readDriftSource,
+  read: PinReader = readPublicSource,
 ): Promise<ClientDriftReport> {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) throw new Error("invalid issue repository");
   const embedded = provenance(embeddedInput);
