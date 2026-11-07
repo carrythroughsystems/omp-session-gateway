@@ -3858,6 +3858,29 @@ Recorded 2026-10-03. Published-byte smoke passed against the stable source and d
 
 This smoke does not expand the candidate matrix or qualify bare-metal Mac, Windows, cloud browsers or background Push beyond their candidate lanes.
 
+## Fleet notifications (ADR-048) — Tested, not qualified
+
+Fleet notifications (one installed app receiving background alerts from selected remote hosts
+through its home gateway) are **Tested**, not qualified, on every platform. The Tested lanes are
+`implementation-checks` (two real gateways in `apps/gateway/test/fleet-two-gateway.test.ts`:
+grant, feed, coordination, delivery, coordinator restart, and revocation), `browser-notifications`
+(Chromium at Pixel sizes), and `browser-core` (desktop Chromium and WebKit with iPhone-class
+emulation).
+
+On 2026-11-07, development runs of the Android Push lane's proposed fleet phases (PR #585, not
+merged) on the Studio Pixel 8 Pro passed 8 of 12 planned fleet steps against the fleet-enabled
+app. Those steps were enrollment through Settings → Hosts; Private, Session, and Preview identity;
+the clear/new-request race, with exact clears seen on the device; exact-source taps; stale and
+expired taps without a launch; and source outage with last-known retention, the plain badge
+marker, and recovery. Coordinator restart, revocation, the fleet sink sweep, and fleet restoration
+have not passed on a device. Every run stopped in test instrumentation, never in a product
+assertion, and every run restored the Pixel and the retained Mac guest exactly. These are
+development runs, not signed-candidate qualification.
+
+Release qualification adds fleet phases only after #585 lands. Until then, the release's
+`androidPush` lane qualifies single-host background alerts on the Pixel, and fleet notifications
+stay **Tested**.
+
 ## Embedded client v18.12.6 — source integration only
 
 On 2026-10-24, the independent browser client and npm wire pin advance from v18.4.2 to v18.12.6
