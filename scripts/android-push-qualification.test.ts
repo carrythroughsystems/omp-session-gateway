@@ -1610,6 +1610,21 @@ test("fleet restoration failure cannot set restored or release the cleanup oblig
   expect(() => parseAndroidPushProgress({ ...host.checkpoints.at(-1), phase: "restored", cleanupRequired: false })).toThrow("fleet restoration state");
 });
 
+test("fleet exported receipts reject synthetic secrets, raw topics and enrollment metadata", async () => {
+  const host = fake();
+  await runAndroidPush(host.input);
+  const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+  const canary = `https://synthetic.example.test/#synthetic-fleet.${"X".repeat(43)}`;
+  for (const field of ["secret", "endpoint", "grantId", "sourceId", "requestId", "identity"]) {
+    expect(() => parseAndroidPushProgress({ ...progress, results: {
+      ...progress.results, fleet_sinks_verified: { clean: true, [field]: canary },
+    } })).toThrow("unsafe Android Push evidence");
+  }
+  expect(() => parseAndroidPushProgress({ ...progress, remoteNotificationTopicDigest: "omp-attention-synthetic-binding-instance" }))
+    .toThrow("notification ownership");
+  expect(JSON.stringify(progress)).not.toContain(canary);
+});
+
 test.each([
   ["a directory that does not queue asks in arrival order", { wrongOrder: true }, "arrival order"],
   ["a Hold that reaches the gateway", { triageMutation: "hold" }, "on this device alone"],
@@ -1798,6 +1813,23 @@ test("one foreign post re-arms its phase visibly; a second overlap fails rather 
   await expect(runAndroidPush(twice.input)).rejects.toThrow("unowned notification overlapped");
   expect(parseAndroidPushProgress(twice.checkpoints.at(-1)).results.private_verified).toMatchObject({ rearmCount: 1, rearmReason: "unowned_notification_overlap", deliveryRearmCount: 0 });
   expect(twice.state()).toMatchObject({ started: false, device: baseline, browser: browserBaseline });
+});
+
+test("fleet overlap restores without replaying an enrollment or remote-clear transaction", async () => {
+  const host = fake(), observe = host.runtime.observe;
+  let phase: string | undefined, attempts = 0;
+  host.runtime.beginNotificationPhase = async (_epoch, value) => {
+    phase = value;
+    if (value === "fleet_private_verified") attempts++;
+  };
+  host.runtime.observe = async (...args) => {
+    if (phase === "fleet_private_verified") throw new NotificationOverlapError();
+    return observe(...args);
+  };
+  await expect(runAndroidPush(host.input)).rejects.toThrow("unowned notification overlapped");
+  expect(attempts).toBe(1);
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1))).toMatchObject({ phase: "restored", cleanupRequired: false, fleetPrepared: false });
+  expect(host.state()).toMatchObject({ started: false, device: baseline, browser: browserBaseline });
 });
 
 test("missing cellular path is a named blocked sub-phase, not a passed network matrix", async () => {

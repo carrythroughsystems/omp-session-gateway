@@ -853,7 +853,10 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
             await save();
           } catch (persistenceError) { throw new AggregateError([error, persistenceError], "Android Push phase and checkpoint failed"); }
           if (!everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
-          if (index !== 0) throw error;
+          // Enrollment/outage/revocation transactions cannot be replayed by the home-only clear
+          // recovery below. In particular, a remote request has no home registry alias proving its
+          // exact outbound clear. Preserve the overlap and restore, rather than retry ambiguously.
+          if (index !== 0 || FLEET_PUSH_PHASES.some(fleetPhase => fleetPhase === phase)) throw error;
           lateDelivery = undefined;
           progress.results[phase] = { ...progress.results[phase], rearmCount: 1, rearmReason: "unowned_notification_overlap" };
           await save();
