@@ -825,6 +825,9 @@ export class AndroidDevtoolsConnectionError extends Error {
     message: string, options?: ErrorOptions) { super(message, options); }
 }
 
+/** Only a protocol rejection proves that the expression never started, not a page exception. */
+class MissingDefaultExecutionContextError extends Error {}
+
 export async function waitForDevtoolsEndpoint(
   url: string,
   request: (url: string, options: { signal: AbortSignal }) => Promise<Response> = fetch,
@@ -966,7 +969,11 @@ export async function withAndroidChrome<T>(
     const entry = pending.get(message.id);
     if (entry === undefined) return;
     pending.delete(message.id);
-    if (message.error) entry.reject(new Error(`CDP ${entry.method}: ${message.error.message}`));
+    if (message.error) {
+      const ErrorType = entry.method === "Runtime.evaluate" && message.error.message === "Cannot find default execution context"
+        ? MissingDefaultExecutionContextError : Error;
+      entry.reject(new ErrorType(`CDP ${entry.method}: ${message.error.message}`));
+    }
     else entry.resolve(message.result ?? {});
   };
   socket.onclose = event => {
@@ -976,22 +983,24 @@ export async function withAndroidChrome<T>(
     pending.clear();
   };
 
-  const send = (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) =>
+  const sendOnce = (method: string, parameters: Record<string, unknown>, destination: string | undefined, cleanup: boolean, until: number) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
       if (!cleanup) check();
       if (socket.readyState !== WebSocket.OPEN) {
         reject(new AndroidDevtoolsConnectionError("websocket_closed", "DevTools WebSocket is not open")); return;
       }
+      if (performance.now() >= until) {
+        reject(new AndroidDevtoolsConnectionError("protocol_timeout", `CDP timeout: ${method}`)); return;
+      }
       const id = (nextId += 1);
       const timeout = () => {
         if (pending.delete(id)) reject(new AndroidDevtoolsConnectionError("protocol_timeout", `CDP timeout: ${method}`));
       };
-      let timer = setTimeout(timeout, cleanup ? 10_000 : CALL_TIMEOUT_MS), cancelled = false;
+      let timer = setTimeout(timeout, Math.max(1, until - performance.now())), cancelled = false;
       pending.set(id, { method, cleanup,
         cancel() { if (!cancelled) { cancelled = true; clearTimeout(timer); timer = setTimeout(timeout, 10_000); } },
         resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
       const frame: Record<string, unknown> = { id, method, params: parameters };
-      const destination = explicitSession ?? (useSession ? sessionId : undefined);
       if (destination !== undefined) frame.sessionId = destination;
       // A lost create acknowledgement is an unresolved mutation, even after its bounded
       // response route expires. Never pretend that deleting the route removed the target.
@@ -999,6 +1008,36 @@ export async function withAndroidChrome<T>(
       try { socket.send(JSON.stringify(frame)); }
       catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
     });
+
+  const send = async (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) => {
+    // Pin the attachment for the whole call, even if another target is admitted while waiting.
+    const destination = explicitSession ?? (useSession ? sessionId : undefined);
+    const until = Math.min(performance.now() + (cleanup ? 10_000 : CALL_TIMEOUT_MS), cleanup ? Infinity : execution?.deadline ?? Infinity);
+    let contextUntil: number | undefined;
+    for (;;) {
+      try { return await sendOnce(method, parameters, destination, cleanup, until); }
+      catch (error) {
+        if (!(error instanceof MissingDefaultExecutionContextError) || parameters.contextId !== undefined ||
+          parameters.uniqueContextId !== undefined) throw error;
+        contextUntil ??= Math.min(until, performance.now() + 15_000);
+        // Attachment readiness is not document readiness: a later navigation can replace the
+        // default context. Probe only, without waking/navigating/re-attaching the page or worker.
+        // Do not resend the original expression until a default context answers. Destruction,
+        // disconnect, timeout and page exceptions can follow execution and must never retry it.
+        for (;;) {
+          if (!cleanup) check();
+          if (performance.now() >= contextUntil) throw error;
+          await Bun.sleep(Math.min(250, contextUntil - performance.now()));
+          try {
+            evaluationValue(await sendOnce("Runtime.evaluate", { expression: "void 0", returnByValue: true }, destination, cleanup, contextUntil));
+            break;
+          } catch (probeError) {
+            if (!(probeError instanceof MissingDefaultExecutionContextError)) throw probeError;
+          }
+        }
+      }
+    }
+  };
 
   const closeTarget = async (cleanup = cleaning) => {
     if (targetId === undefined) return;
