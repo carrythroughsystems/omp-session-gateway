@@ -50,7 +50,7 @@ export interface WindowsPins {
 /** Reads one public URL. Tests replace it; the default authenticates only GitHub API reads. */
 export type PinReader = (url: string) => Promise<Response>;
 
-const readPublicSource: PinReader = url => {
+export const readPublicSource: PinReader = url => {
   const token = url.startsWith("https://api.github.com/") ? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN : undefined;
   return readProvider(() => fetch(url, { headers: token === undefined ? {} : { authorization: `Bearer ${token}` } }));
 };
@@ -85,6 +85,29 @@ async function nativePin(read: PinReader, platform: string, version: string, fil
   };
 }
 
+/** Resolves a release tag or exact source commit without downloading or executing upstream code. */
+export async function resolveUpstreamCommit(
+  reference: string,
+  read: PinReader = readPublicSource,
+): Promise<{ readonly commit: string; readonly tree: string }> {
+  if (!/^v\d+\.\d+\.\d+$/u.test(reference) && !/^[0-9a-f]{40}$/u.test(reference)) {
+    throw new Error("an exact upstream release tag or commit is required");
+  }
+  const tagged = await readJson(read, `https://api.github.com/repos/${REPOSITORY}/commits/${reference}`) as {
+    readonly sha?: unknown;
+    readonly commit?: { readonly tree?: { readonly sha?: unknown } };
+  };
+  const commit = tagged.sha;
+  const tree = tagged.commit?.tree?.sha;
+  if (typeof commit !== "string" || !/^[0-9a-f]{40}$/u.test(commit) || typeof tree !== "string" || !/^[0-9a-f]{40}$/u.test(tree)) {
+    throw new Error(`${reference} does not resolve to a commit and tree`);
+  }
+  if (/^[0-9a-f]{40}$/u.test(reference) && reference !== commit) {
+    throw new Error(`${reference} resolves to a different commit`);
+  }
+  return { commit, tree };
+}
+
 export async function deriveUpstreamPins(
   version: string,
   lock: UpstreamLock,
@@ -95,15 +118,7 @@ export async function deriveUpstreamPins(
     throw new Error("a published mainline OMP version >=18.1.20 is required");
   }
   const tag = `v${version}`;
-  const tagged = await readJson(read, `https://api.github.com/repos/${REPOSITORY}/commits/${tag}`) as {
-    readonly sha?: unknown;
-    readonly commit?: { readonly tree?: { readonly sha?: unknown } };
-  };
-  const commit = tagged.sha;
-  const tree = tagged.commit?.tree?.sha;
-  if (typeof commit !== "string" || !/^[0-9a-f]{40}$/u.test(commit) || typeof tree !== "string" || !/^[0-9a-f]{40}$/u.test(tree)) {
-    throw new Error(`${tag} does not resolve to a commit and tree`);
-  }
+  const { commit, tree } = await resolveUpstreamCommit(tag, read);
   for (const name of ["pi-coding-agent", "pi-wire"]) {
     const published = await readJson(read, `https://registry.npmjs.org/@oh-my-pi%2F${name}/${version}`);
     if (published.version !== version) throw new Error(`@oh-my-pi/${name}@${version} is not published`);

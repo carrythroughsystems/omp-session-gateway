@@ -12,6 +12,54 @@ custom OMP build, or gateway-specific OMP plugin, while this package pins the em
 client at `v18.18.0`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
 deployment scope.
 
+## Source drift report and refresh
+
+The daily **Upstream OMP canary** inspects browser-client sources independently of the host
+canary and host pin, including when `UPSTREAM.lock.json` already equals npm `latest`.
+`@oh-my-pi/collab-web`'s unchanged package version is not evidence of unchanged source.
+For a local read-only observation, run `bun scripts/client-drift.ts`; an optional `GH_TOKEN`
+authenticates only upstream GitHub API reads. Nothing is installed or executed from upstream.
+Public issue reads are anonymous so inspection needs only `contents: read`.
+
+Download the run's `client-drift-report` artifact (`client-drift-report.json`):
+
+- `release` identifies the exact tag, commit and tree for the observed stable npm `latest`;
+  `embedded` identifies this package's independently verified tag/commit.
+- `hostPin` is the engineering host baseline for context, not a skip condition or client pin.
+- `changes` lists every relevant changed upstream path and `oldBlob`/`newBlob` Git hashes;
+  `null` means a file was added or removed. Complete package trees include non-`src` files, but
+  omit exactly the documented `excludedEntrypoints` (including retained-but-unbundled entries).
+- `changedHelpers` compares each helper from its own provenance commit/blob, names its
+  `vendoredPath`, and records its old/new blobs. Helpers do not inherit the collab-web source pin.
+- `patchOverlaps` names active patch ids and their overlapping `files`, including changed
+  helper vendored paths. Patch files retain their `src/` prefix relative to `upstream/`.
+- `refreshScope` is the sorted smallest set of changed relevant upstream files.
+  `issueAction` is the tested create/update/none decision consumed as inert data by a separate,
+  checkout-free issue writer. API/shape/truncation/provenance errors fail inspection, not
+  a successful empty report.
+
+Direct scheduled/manual runs on `main` file or update only
+`Embedded client drift: <embedded tag> → <release tag>` with the `client-drift` label.
+An existing release request does not suppress or absorb this issue. Repeated observations
+update the open issue for that release commit (or exact title and label), not a new copy.
+No relevant change leaves existing issues unchanged; nothing auto-closes. The writer serializes
+effects and refuses a stale plan if an issue arrived or changed after inspection; rerun the
+read-only inspection to reconcile it. PR and reusable release-request runs only inspect.
+No drift report or issue requests, prepares, qualifies or ships a release, or changes a frozen
+candidate.
+
+For a refresh, review `refreshScope` at the exact reported commits, including additions and
+deletions; do not copy the whole package or restore excluded entrypoints. Reconcile each
+overlapping active patch against its purpose, removal condition and regression proof. Copy
+changed helpers from their recorded upstream paths without installing pi-utils/pi-natives.
+Update source/helper provenance, blob hashes, active/retired patch records and affected proofs
+together; adjust the independent wire dependency only if the reviewed refresh needs it. Keep
+the host baseline and release state unchanged unless separately authorized. Run the focused
+client/provenance/bundle tests and repository checks, then have the refresh reviewed as an
+implementation PR. The report is an intake aid, not proof of compatibility or qualification.
+
+## Embedded integration
+
 The local patch passes the capability directly into the root `App` component. The installed PWA
 mounts that component in its current document so Android standalone navigation does not depend on
 `window.opener`. Embedded gateway mode suppresses the client's competing header, rail, connect
