@@ -9,6 +9,7 @@ import { checkProviderReads } from "./check-repository.ts";
 import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qualification.ts";
 import { QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, parseLaneFailures, qualificationRetryEligible } from "./qualification-failure.ts";
 import { notificationTopicDigest } from "./android-notification.ts";
+import { PUSH_FIXTURE_ASK_BODY } from "./fixtures/push-qualification-extension.ts";
 const identity = { origin: "https://synthetic.example.test", omp: { version: "18.3.0", bunVersion: "1.4.0", sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40), nativeTarballSha256: "c".repeat(64), nativeBinarySha256: "d".repeat(64) } };
 const WIFI_CONNECTIVITY = "Current Networks:\n  NetworkAgentInfo{ ni{WIFI CONNECTED} lastValidated }";
 const VPN_CONNECTIVITY = `${WIFI_CONNECTIVITY}\n  NetworkAgentInfo{ ni{VPN CONNECTED} SYNTHETIC-PRIVATE-TRANSPORT-NETWORK }`;
@@ -623,6 +624,42 @@ test("509 round2 runtime privacy conversion preserves ordinary notification erro
     const error = await runtime.observe(session, "attention", "private").catch(error => error);
     expect(normalizeQualificationFailures(error)).toMatchObject([{ reason: "privacy_failed" }]);
     expect(privateQualificationFailureDiagnostic(error).map(entry => entry.message)).toContain(raw.message);
+  } finally { for (const spy of spies) spy.mockRestore(); }
+});
+
+test("fleet replacement observation never hides forbidden content in a mismatched request", async () => {
+  const session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
+    startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
+    ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
+  let reads = 0;
+  const driver = {
+    browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
+      { type: "page", targetId: "page", url: identity.origin + "/" },
+      { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
+    ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
+    sessionSend: async () => ({ result: { value: false } }),
+    attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
+    evaluate: async (expression: string) => expression === "document.readyState" ? "complete" :
+      expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
+  };
+  const spies = [
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [session] }), { preconnect: globalThis.fetch.preconnect })),
+    spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+    spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+    spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++reads === 1 ? [] : [{
+      key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
+      title: "OMP session needs attention", body: PUSH_FIXTURE_ASK_BODY, text: PUSH_FIXTURE_ASK_BODY,
+    }]),
+    spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+  ];
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.beforeEffect = async () => {}; runtime.dndOff = async () => true;
+    await runtime.fleet.select(true);
+    await runtime.beginNotificationPhase("synthetic", "fleet_private_verified");
+    expect(await runtime.observe(session, "attention", "private")).toMatchObject({ count: 0, forbiddenFound: true });
   } finally { for (const spy of spies) spy.mockRestore(); }
 });
 

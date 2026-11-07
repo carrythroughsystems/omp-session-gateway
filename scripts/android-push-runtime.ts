@@ -896,6 +896,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const expected = expectation(session, kind, level);
       const records = (await phaseRecords()).filter(record => record.tag.endsWith(expected.tag));
       const owned = records[0];
+      const forbiddenFound = records.some(record => expected.forbidden.some(value => record.text.includes(value)));
       if (fleetEnabled && kind === "attention" && records.length === 1) {
         const matches = await worker<boolean>(`(async () => {
           const notices = await self.registration.getNotifications({tag:${JSON.stringify(expected.tag)}});
@@ -906,7 +907,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         })()`);
         // A replaced request's previous OS row may still be settling. Do not record its post time
         // as the new request's deduplication baseline, or mistake the old row for delivery.
-        if (!matches) return { count: 0, titleMatches: false, bodyMatches: false, forbiddenFound: false };
+        if (!matches) return { count: 0, titleMatches: false, bodyMatches: false, forbiddenFound };
       }
       if (records.length === 1 && owned !== undefined) {
         if (owned.postedAt <= (baselineRecords.get(owned.key) ?? 0)) throw new Error("owned notification did not advance from its record baseline");
@@ -914,7 +915,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       }
       return { count: records.length, titleMatches: records.length === 1 && owned?.title === expected.title,
         bodyMatches: records.length === 1 && owned?.body === expected.body,
-        forbiddenFound: records.some(record => expected.forbidden.some(value => record.text.includes(value))) };
+        forbiddenFound };
     },
     async presentation(session, level) {
       await mutate("shell", "input", "keyevent", "224");
