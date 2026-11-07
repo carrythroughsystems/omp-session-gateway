@@ -279,6 +279,8 @@ Remote notification ownership includes the origin-bound fleet binding; local tag
 Private alerts intentionally look identical: concurrent ownership, privacy and deduplication use
 the OS records and worker metadata, then each source's lock-screen row is observed alone after
 authoritatively resolving its peer. The lane never guesses between indistinguishable Private rows.
+The source supervisor detaches from the remote SSH session using the existing fixture's Python
+session-leader pattern; its owned PID and script remain the authority for outage and cleanup.
 
 Fleet progress adds only an ownership boolean and a remote notification-topic SHA-256 digest.
 Closed boolean/count results remain additive to receipt schema 3; no source, session, request,
