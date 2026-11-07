@@ -1561,10 +1561,35 @@ test("queue order, Hold, Hide and delayed taps pass on the device and leave no l
 
 test("fleet phases share androidPush receipts and restore their isolated source before the legacy radio phases", async () => {
   const host = fake();
+  let warm = false, attached = false, admissions = 0, coldReads = 0, phase = "";
+  const { detail, closePwa, observe, cleanup, beginNotificationPhase, forceStop, doze } = host.runtime;
+  const badge = host.runtime.fleet.observeBadge;
+  host.runtime.detail = async level => { await detail(level); warm = true; };
+  host.runtime.closePwa = async () => { await closePwa(); warm = false; };
+  host.runtime.fleet.armBadgeObserver = async () => {
+    expect(warm).toBe(true);
+    if (!attached) { admissions++; attached = true; }
+  };
+  host.runtime.beginNotificationPhase = async (epoch, current) => { phase = current ?? phase; await beginNotificationPhase(epoch, current); };
+  host.runtime.fleet.observeBadge = async () => {
+    expect(attached).toBe(true); if (!warm) coldReads++;
+    return badge();
+  };
+  host.runtime.observe = async (...args) => {
+    if (phase.startsWith("fleet_") && phase !== "fleet_enrolled") expect(attached).toBe(true);
+    return observe(...args);
+  };
+  host.runtime.cleanup = async (step, progress) => {
+    try { await cleanup(step, progress); } finally { if (step === "fleet") attached = false; }
+  };
+  host.runtime.forceStop = async () => { expect(attached).toBe(false); await forceStop(); };
+  host.runtime.doze = async active => { if (active) expect(attached).toBe(false); await doze(active); };
   expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(admissions).toBe(1); expect(coldReads).toBeGreaterThan(0); expect(attached).toBe(false);
   const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
   for (const phase of FLEET_PUSH_PHASES) {
-    expect(progress.results[phase]).toMatchObject({ dndOff: true, phaseElapsedMs: expect.any(Number) });
+    expect(progress.results[phase]).toMatchObject({ dndOff: true, phaseElapsedMs: expect.any(Number),
+      devtoolsObserver: !["fleet_enrolled", "fleet_restored"].includes(phase) });
   }
   expect(progress.results.fleet_race_verified).toMatchObject({ concurrent: true, exactClear: true, replacement: true, badgeReconciled: true });
   expect(progress.results.fleet_preview_verified?.previewFallback).toBe(true);

@@ -3,7 +3,7 @@ import * as deviceOperations from "./android-device.ts";
 import * as webApkOperations from "./android-webapk.ts";
 import * as notificationOperations from "./android-notification.ts";
 import { AndroidBrowserCleanupError, AndroidDevtoolsConnectionError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
-import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure } from "./android-push-runtime.ts";
+import { createAndroidPushRuntime, holdAndroidNotificationDenial, holdPushWorkerObserver, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { checkProviderReads } from "./check-repository.ts";
 import type { AndroidPushProgress, PushDeviceBaseline } from "./android-push-qualification.ts";
@@ -1108,7 +1108,7 @@ test("fleet cleanup before persisted ownership never touches enrollment or a wor
   expect(progress.fleetPrepared).toBe(false);
 });
 
-test.each(["recovered", "exhausted", "product", "cleanup", "mutation"] as const)("fleet observer connection %s remains bounded and cold", async scenario => {
+test.each(["recovered", "exhausted", "product", "cleanup"] as const)("unheld worker connection %s remains bounded and cold", async scenario => {
   let calls = 0;
   const retained: unknown[] = [];
   const transport = new AndroidDevtoolsConnectionError("endpoint_timeout", "synthetic endpoint timeout",
@@ -1118,7 +1118,7 @@ test.each(["recovered", "exhausted", "product", "cleanup", "mutation"] as const)
     browserSend: async (method: string) => method === "Target.getTargets" ?
       { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
       method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {},
-    sessionSend: async () => { if (scenario === "mutation") throw transport; return { result: { value: { count: 2, complete: true } } }; },
+    sessionSend: async () => ({ result: { value: { count: 2, complete: true } } }),
   };
   const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
     (async (run: (driver: unknown) => Promise<unknown>, options: { launchBrowser?: boolean }) => {
@@ -1133,17 +1133,17 @@ test.each(["recovered", "exhausted", "product", "cleanup", "mutation"] as const)
     runtime.beforeEffect = async () => {};
     if (scenario === "recovered") expect(await runtime.fleet.observeBadge()).toEqual({ count: 2, complete: true });
     else {
-      const failure = await (scenario === "mutation" ? runtime.fleet.armBadgeObserver() : runtime.fleet.observeBadge()).catch(error => error);
+      const failure = await runtime.fleet.observeBadge().catch(error => error);
       if (scenario === "product") expect(failure).toBe(product);
-      else if (scenario === "exhausted" || scenario === "mutation") {
+      else if (scenario === "exhausted") {
         expect(failure).toBeInstanceOf(QualificationFailure);
         expect(failure.evidence).toMatchObject({ lane: "androidPush", reason: "invalid_evidence",
-          observations: { transportFailure: true, attempts: scenario === "mutation" ? 1 : 2 } });
+          observations: { transportFailure: true, attempts: 2 } });
         expect(failure.cause.errors[0]).toBe(transport);
       } else expect(failure.pixelUnrestored).toBe(true);
     }
     expect(calls).toBe(["recovered", "exhausted"].includes(scenario) ? 2 : 1);
-    expect(retained.length).toBe(["recovered", "exhausted", "mutation"].includes(scenario) ? 1 : 0);
+    expect(retained.length).toBe(["recovered", "exhausted"].includes(scenario) ? 1 : 0);
   } finally { chrome.mockRestore(); }
 });
 
@@ -1162,7 +1162,8 @@ test("fleet host restore retains the helper exception privately and types contai
   expect(JSON.stringify(failure)).not.toContain(message);
 });
 
-test.each([false, true])("fleet badge observer forwards platform calls and restores after enrollment failure=%s", async fail => {
+test.each(["none", "enrollment", "owner", "host", "connection", "mutation"] as const)("fleet badge observer releases on %s failure", async failure => {
+  const fail = failure !== "none";
   const { runInNewContext } = await import("node:vm");
   const calls: string[] = [], platformCalls: unknown[][] = [];
   const set = (...args: unknown[]) => { platformCalls.push(args); return Promise.resolve(); };
@@ -1170,20 +1171,30 @@ test.each([false, true])("fleet badge observer forwards platform calls and resto
   const navigator = (fail ? Object.create({ setAppBadge: set, clearAppBadge: clear }) :
     { setAppBadge: set, clearAppBadge: clear }) as { setAppBadge: typeof set; clearAppBadge: typeof clear };
   const context = { navigator, self: {} as Record<string, unknown> };
+  let admissions = 0, detached = 0, closed = 0, broken = false;
+  const transport = new AndroidDevtoolsConnectionError("websocket_closed", "synthetic observer disconnected");
   const driver = {
-    browserSend: async (method: string) => method === "Target.getTargets" ?
+    browserSend: async (method: string) => { if (method === "Target.detachFromTarget") detached++; return method === "Target.getTargets" ?
       { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
-      method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {},
-    sessionSend: async (_session: string, _method: string, parameters: { expression: string }) =>
-      ({ result: { value: await runInNewContext(parameters.expression, context) } }),
+      method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {}; },
+    sessionSend: async (_session: string, _method: string, parameters: { expression: string }) => {
+      if (broken) throw transport;
+      return { result: { value: await runInNewContext(parameters.expression, context) } };
+    },
   };
   const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
-    (async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome);
+    (async (run: (driver: unknown) => Promise<unknown>, options: { port: number; launchBrowser: boolean }) => {
+      admissions++; expect(options.port).toBe(9237); expect(options.launchBrowser).toBe(false);
+      try { return await run(driver); } finally { closed++; }
+    }) as typeof withAndroidChrome);
   try {
-    const runtime = createAndroidPushRuntime(identity, { execute: async () => ({ exitCode: 0, stdout: "" }) });
+    const runtime = createAndroidPushRuntime(identity, { execute: async () => {
+      if (failure === "owner") throw new Error("synthetic owner read failure");
+      return { exitCode: 0, stdout: "" };
+    } });
     runtime.beforeEffect = async () => {};
-    runtime.fleet.host = async operation => { calls.push(operation); };
-    runtime.fleet.select = async () => { if (fail) throw new Error("synthetic enrollment restoration failure"); };
+    runtime.fleet.host = async operation => { calls.push(operation); if (failure === "host" && operation === "restore") throw new Error("synthetic host restore failure"); };
+    runtime.fleet.select = async () => { if (failure === "enrollment") throw new Error("synthetic enrollment restoration failure"); };
     runtime.fixture = async operation => { calls.push(`remote-${operation}`); };
     await runtime.fleet.armBadgeObserver();
     await context.navigator.setAppBadge(2);
@@ -1193,17 +1204,47 @@ test.each([false, true])("fleet badge observer forwards platform calls and resto
     await context.navigator.clearAppBadge();
     expect(await runtime.fleet.observeBadge()).toEqual({ count: 0, complete: true });
     expect(platformCalls).toEqual([[2], [], ["clear"]]);
+    await runtime.fleet.armBadgeObserver();
+    expect(admissions).toBe(1); expect(detached).toBe(0); expect(closed).toBe(0);
+    if (failure === "connection" || failure === "mutation") {
+      broken = true;
+      const lost = await (failure === "mutation" ? runtime.fleet.armBadgeObserver() : runtime.fleet.observeBadge()).catch(error => error);
+      expect(lost.evidence).toMatchObject({ lane: "androidPush", reason: "invalid_evidence", observations: { transportFailure: true, attempts: 1 } });
+      expect(admissions).toBe(1);
+    }
     const progress = { epoch: "a3a77f8e-956b-45d0-a684-a33e6b336dc0", fleetPrepared: true } as AndroidPushProgress;
     if (fail) await expect(runtime.cleanup("fleet", progress)).rejects.toThrow();
     else await runtime.cleanup("fleet", progress);
-    expect(calls).toEqual(["coordinator-up", "remote-stop", "restore"]);
-    expect(context.navigator.setAppBadge).toBe(set);
-    expect(context.navigator.clearAppBadge).toBe(clear);
-    expect(Object.hasOwn(context.navigator, "setAppBadge")).toBe(!fail);
-    expect(Object.hasOwn(context.navigator, "clearAppBadge")).toBe(!fail);
-    expect(context.self.__ompQualificationBadge).toBeUndefined();
+    expect(calls).toEqual(failure === "owner" ? [] : ["coordinator-up", "remote-stop", "restore"]);
+    if (!["owner", "connection", "mutation"].includes(failure)) {
+      expect(context.navigator.setAppBadge).toBe(set);
+      expect(context.navigator.clearAppBadge).toBe(clear);
+      expect(Object.hasOwn(context.navigator, "setAppBadge")).toBe(!fail);
+      expect(Object.hasOwn(context.navigator, "clearAppBadge")).toBe(!fail);
+      expect(context.self.__ompQualificationBadge).toBeUndefined();
+    }
+    expect(detached).toBe(1); expect(closed).toBe(1); expect(admissions).toBe(1);
     expect(progress.fleetPrepared).toBe(fail);
   } finally { chrome.mockRestore(); }
+});
+
+test("held worker admission cancellation releases the connection without creating a page", async () => {
+  const controller = new AbortController(), cancelled = new Error("synthetic observer cancellation"), methods: string[] = [];
+  let closes = 0;
+  const connect = (async (run: (driver: unknown) => Promise<unknown>) => {
+    try { return await run({
+      browserSend: async (method: string) => {
+        methods.push(method);
+        return method === "Target.getTargets" ? { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: identity.origin + "/service-worker.js" }] } :
+          method === "Target.attachToTarget" ? { sessionId: "synthetic" } : {};
+      },
+    }); } finally { closes++; }
+  }) as typeof withAndroidChrome;
+  const observer = await holdPushWorkerObserver(identity.origin, { signal: controller.signal, deadline: performance.now() + 60_000 }, connect);
+  controller.abort(cancelled);
+  await expect(observer.close()).rejects.toBe(cancelled);
+  expect(methods).toEqual(["Target.getTargets", "Target.attachToTarget", "Target.detachFromTarget"]);
+  expect(closes).toBe(1);
 });
 
 test("R2 fresh request attestation accepts the delivering secondary snapshot and rejects wrong generations", async () => {

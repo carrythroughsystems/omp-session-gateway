@@ -288,6 +288,16 @@ remain failures. Exhaustion records `androidPush / invalid_evidence` with the tr
 private diagnostics retain the underlying error and stack. Host-helper restoration failures
 record `androidPushCleanup / fleet / containment_unproven`, preserving the helper exception
 privately without exporting its text in the receipt.
+The fleet observer is admitted while warm and keeps one browser/worker attachment (no page
+target) for at most 30 minutes, bounded further by the lane deadline. Fleet result rows mark
+`devtoolsObserver`: these cold-PWA phases prove real delivery, rendering, identity, ordering
+and taps with instrumentation attached, **not process-cold wake semantics**. Loss of the held
+connection fails typed; it is never silently reconnected. Fleet cleanup restores the wrappers
+and releases that connection on success or failure. The unchanged legacy force-stop and Doze
+phases run after release, without this observer, and retain the process-cold observations.
+After signalling a verified source supervisor once, cleanup tolerates transient loss of its
+command line only while awaiting proven absence/zombie within the existing 30-second bound;
+it never signals an unverified PID or treats a changed command as proof of exit.
 
 Fleet progress adds only an ownership boolean and a remote notification-topic SHA-256 digest.
 Closed boolean/count results remain additive to receipt schema 3; no source, session, request,

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -186,4 +186,33 @@ test.each(["config", "ledger", "process"])("fleet restoration refuses changed %s
     await expect(fleetPushFixture("restore", f.root, epoch, origin, commit, execute, f.home)).rejects.toThrow();
     expect(JSON.parse(await readFile(join(f.root, "owner.json"), "utf8")).epoch).toBe(epoch);
   } finally { await f.dispose(); }
+});
+
+test.each([false, true])("fleet stop waits for proven exit after transient command loss (persistent=%s)", async persistent => {
+  const f = await fixture();
+  let signalled = false, observations = 0, now = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const sleep = spyOn(Bun, "sleep").mockImplementation((async () => { now += 15_000; }) as typeof Bun.sleep);
+  const execute: FixtureExecutor = async argv => {
+    if (argv[0] === "kill") signalled = true;
+    if (signalled && argv[0] === "ps" && argv.includes("-p") && (++observations === 1 || persistent)) {
+      return { exitCode: 0, stdout: "?E (sh)" };
+    }
+    return f.execute(argv);
+  };
+  try {
+    await f.run("prepare");
+    const result = fleetPushFixture("restore", f.root, epoch, origin, commit, execute, f.home);
+    if (persistent) {
+      const error = await result.catch(error => error);
+      expect(error.message).toBe("fleet source did not stop");
+      expect(error.cause.message).toBe("fleet source process ownership changed");
+      expect(JSON.parse(await readFile(join(f.root, "owner.json"), "utf8")).epoch).toBe(epoch);
+    } else {
+      await result;
+      expect(observations).toBe(2);
+      expect(await readFile(f.config, "utf8")).toBe(f.original);
+    }
+    expect(f.effects.filter(command => command.startsWith("kill "))).toHaveLength(1);
+  } finally { clock.mockRestore(); sleep.mockRestore(); await f.dispose(); }
 });
