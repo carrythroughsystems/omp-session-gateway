@@ -281,6 +281,13 @@ the OS records and worker metadata, then each source's lock-screen row is observ
 authoritatively resolving its peer. The lane never guesses between indistinguishable Private rows.
 The source supervisor detaches from the remote SSH session using the existing fixture's Python
 session-leader pattern; its owned PID and script remain the authority for outage and cleanup.
+DevTools admission bounds both pending HTTP reads and retries. A worker-only observation may
+reconnect once after contained transport loss, but never wakes/navigates the cold PWA, re-arms
+lost observer state, or replays an evaluated mutation. Missing workers and product assertions
+remain failures. Exhaustion records `androidPush / invalid_evidence` with the transport flag;
+private diagnostics retain the underlying error and stack. Host-helper restoration failures
+record `androidPushCleanup / fleet / containment_unproven`, preserving the helper exception
+privately without exporting its text in the receipt.
 
 Fleet progress adds only an ownership boolean and a remote notification-topic SHA-256 digest.
 Closed boolean/count results remain additive to receipt schema 3; no source, session, request,

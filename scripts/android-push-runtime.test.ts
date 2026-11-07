@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import * as deviceOperations from "./android-device.ts";
 import * as webApkOperations from "./android-webapk.ts";
 import * as notificationOperations from "./android-notification.ts";
-import { AndroidBrowserCleanupError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
+import { AndroidBrowserCleanupError, AndroidDevtoolsConnectionError, runAdb, unlockAndroidKeyguard, withAndroidChrome, type AndroidAdbSpawner } from "./android-device.ts";
 import { createAndroidPushRuntime, holdAndroidNotificationDenial, observePushDeliveryRequest, qualificationPushAliasFor, pushBrowserCleanupFailure } from "./android-push-runtime.ts";
 import type { SessionMetadata } from "../packages/protocol/src/types.ts";
 import { checkProviderReads } from "./check-repository.ts";
@@ -1083,6 +1083,60 @@ test("fleet cleanup before persisted ownership never touches enrollment or a wor
   await runtime.cleanup("fleet", progress);
   expect(calls).toEqual(["restore"]);
   expect(progress.fleetPrepared).toBe(false);
+});
+
+test.each(["recovered", "exhausted", "product", "cleanup", "mutation"] as const)("fleet observer connection %s remains bounded and cold", async scenario => {
+  let calls = 0;
+  const retained: unknown[] = [];
+  const transport = new AndroidDevtoolsConnectionError("endpoint_timeout", "synthetic endpoint timeout",
+    { cause: new Error("exact lower transport error") });
+  const product = new Error("fleet worker observation failed");
+  const driver = {
+    browserSend: async (method: string) => method === "Target.getTargets" ?
+      { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
+      method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {},
+    sessionSend: async () => { if (scenario === "mutation") throw transport; return { result: { value: { count: 2, complete: true } } }; },
+  };
+  const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
+    (async (run: (driver: unknown) => Promise<unknown>, options: { launchBrowser?: boolean }) => {
+      calls++; expect(options.launchBrowser).toBe(false);
+      if (scenario === "cleanup") throw new AndroidBrowserCleanupError([transport], 1);
+      if (scenario === "product") throw product;
+      if (scenario === "exhausted" || scenario === "recovered" && calls === 1) throw transport;
+      return run(driver);
+    }) as typeof withAndroidChrome);
+  try {
+    const runtime = createAndroidPushRuntime(identity, { browserFailure: async (_step, error) => { retained.push(error); } });
+    runtime.beforeEffect = async () => {};
+    if (scenario === "recovered") expect(await runtime.fleet.observeBadge()).toEqual({ count: 2, complete: true });
+    else {
+      const failure = await (scenario === "mutation" ? runtime.fleet.armBadgeObserver() : runtime.fleet.observeBadge()).catch(error => error);
+      if (scenario === "product") expect(failure).toBe(product);
+      else if (scenario === "exhausted" || scenario === "mutation") {
+        expect(failure).toBeInstanceOf(QualificationFailure);
+        expect(failure.evidence).toMatchObject({ lane: "androidPush", reason: "invalid_evidence",
+          observations: { transportFailure: true, attempts: scenario === "mutation" ? 1 : 2 } });
+        expect(failure.cause.errors[0]).toBe(transport);
+      } else expect(failure.pixelUnrestored).toBe(true);
+    }
+    expect(calls).toBe(["recovered", "exhausted"].includes(scenario) ? 2 : 1);
+    expect(retained.length).toBe(["recovered", "exhausted", "mutation"].includes(scenario) ? 1 : 0);
+  } finally { chrome.mockRestore(); }
+});
+
+test("fleet host restore retains the helper exception privately and types containment", async () => {
+  const message = "fleet grants or recipients remain enrolled", stack = `Error: ${message}\n    at fleetPushFixture (synthetic.ts:200:17)`;
+  const runtime = createAndroidPushRuntime({ ...identity, candidate: { tag: "v0.9.1", sourceCommit: "c".repeat(40),
+    archiveSha256: "d".repeat(64), archivePath: "/synthetic/candidate.tar" } }, {
+    execute: async () => ({ exitCode: 1, stdout: JSON.stringify({ completed: false, diagnostic: [{ message, stack }] }) }),
+  });
+  runtime.beforeEffect = async () => {};
+  const failure = await runtime.fleet.host("restore", "synthetic").catch(error => error);
+  expect(failure.evidence).toMatchObject({ lane: "androidPushCleanup", step: "fleet", reason: "containment_unproven",
+    operation: "unknown", observations: { exitCode: 1, cleanupVerified: false } });
+  expect(failure.cause.errors[0].message).toBe(message);
+  expect(failure.cause.errors[0].stack).toBe(stack);
+  expect(JSON.stringify(failure)).not.toContain(message);
 });
 
 test.each([false, true])("fleet badge observer forwards platform calls and restores after enrollment failure=%s", async fail => {
