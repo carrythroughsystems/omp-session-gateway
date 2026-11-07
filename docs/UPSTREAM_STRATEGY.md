@@ -37,6 +37,20 @@ stores capabilities. The private readiness token belongs only to gateway/CLI rea
   exceeds it or any trusted open tracking request exists, and re-check for an open request before
   filing. Manual dispatch, including fixes-only requests, is unchanged; see
   [Request, authority and gates](RELEASE.md#request-authority-and-gates).
+- The daily upstream canary (08:23 UTC) independently inspects embedded browser-client source,
+  even when the engineering host pin equals npm `latest`. It resolves that published stable
+  version's exact upstream release commit, validates the embedded tag/commit and helper blob
+  provenance, and compares complete GitHub trees by blob hash for `packages/collab-web/**` minus
+  documented excluded entrypoints and every vendored helper at its own pinned commit. It never
+  executes upstream source or trusts a truncated tree/compare result. Source-read or integrity
+  errors fail visibly. The `client-drift-report` artifact records changed paths/blobs, helpers,
+  active patch overlap, independent host pin and smallest refresh scope. On direct daily/manual
+  runs on `main`, a separate data-only issue writer creates or updates
+  `Embedded client drift: <embedded tag> → <release tag>` with only the `client-drift` label,
+  deduplicated by release commit or exact title plus label. No relevant change leaves all issues
+  alone; issues are never auto-closed. This is implementation intake, never a release request,
+  candidate update, qualification or publication. See the
+  [client refresh guidance](../packages/collab-client/README.md#source-drift-report-and-refresh).
 - Validate discovery, both query operations, every error code, and generation/access races.
 - Preserve the liveness distinction: only `ENOENT`/`ECONNREFUSED` proves a queried host dead.
 - Exercise start, stop, switch, branch, resume, and gateway restart against the real mainline host.

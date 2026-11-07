@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseQualificationPins } from "./stable-qualification.ts";
-import { applyUpstreamPins, deriveUpstreamPins, type PinReader, type UpstreamLock, type WindowsPins } from "./upstream-pins.ts";
+import { applyUpstreamPins, deriveUpstreamPins, resolveUpstreamCommit, type PinReader, type UpstreamLock, type WindowsPins } from "./upstream-pins.ts";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
@@ -66,6 +66,20 @@ function publicSource(changes: Record<string, unknown> = {}, served = tarballs):
     return body instanceof Uint8Array ? new Response(body.slice()) : Response.json(body);
   };
 }
+
+test("resolves exact source tags and commits without reading or executing package code", async () => {
+  expect(await resolveUpstreamCommit(`v${VERSION}`, publicSource())).toEqual({ commit: COMMIT, tree: TREE });
+  const url = `https://api.github.com/repos/can1357/oh-my-pi/commits/${COMMIT}`;
+  expect(await resolveUpstreamCommit(COMMIT, publicSource({ [url]: { sha: COMMIT, commit: { tree: { sha: TREE } } } })))
+    .toEqual({ commit: COMMIT, tree: TREE });
+  await expect(resolveUpstreamCommit(COMMIT, publicSource({ [url]: { sha: "e".repeat(40), commit: { tree: { sha: TREE } } } })))
+    .rejects.toThrow("resolves to a different commit");
+  await expect(resolveUpstreamCommit("latest", publicSource())).rejects.toThrow("exact upstream release tag or commit");
+  await expect(resolveUpstreamCommit("v18.999.0", publicSource())).rejects.toThrow("answered 404");
+  await expect(resolveUpstreamCommit(`v${VERSION}`, publicSource({
+    [`https://api.github.com/repos/can1357/oh-my-pi/commits/v${VERSION}`]: { sha: COMMIT },
+  }))).rejects.toThrow("does not resolve to a commit and tree");
+});
 
 test("hashes each native addon only from the tarball the registry vouches for", async () => {
   expect(await deriveUpstreamPins(VERSION, lock, windows.omp.nativeFile, publicSource())).toEqual({

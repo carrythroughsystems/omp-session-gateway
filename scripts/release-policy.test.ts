@@ -76,6 +76,13 @@ describe("standing routine release authority", () => {
       expect(routinePathClassification(path)?.authority).toBe(false);
     }
   });
+  test("embedded client drift inspection and its tests grant no release authority", () => {
+    for (const path of ["scripts/client-drift.ts", "scripts/client-drift.test.ts", ".github/workflows/upstream-canary.yml"]) {
+      expect(routinePathClassification(path)?.authority).toBe(false);
+    }
+    expect(routineProtectedPath("scripts/unclassified-client-drift.ts")).toBe(true);
+    expect(routineProtectedPath(".github/workflows/unclassified-client-drift.yml")).toBe(true);
+  });
   test.each(["scripts/qualification-failure.ts", "scripts/qualification-outcome.ts"])("protects qualification recovery contract %s", path => {
     expect(routinePathClassification(path)?.authority).toBe(true);
   });

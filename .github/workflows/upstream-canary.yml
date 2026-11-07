@@ -24,6 +24,12 @@ on:
     paths:
       - scripts/upstream-canary.ts
       - scripts/upstream-canary.test.ts
+      - scripts/client-drift.ts
+      - scripts/client-drift.test.ts
+      - scripts/upstream-pins.ts
+      - scripts/upstream-pins.test.ts
+      - packages/collab-client/upstream/UPSTREAM.json
+      - UPSTREAM.lock.json
       - .github/workflows/upstream-canary.yml
       - scripts/omp-fixture.*
       - apps/gateway/src/omp-registry.ts
@@ -38,6 +44,105 @@ concurrency:
 # Two jobs rather than an OS matrix: a matrix job exposes only its last leg's outputs, and the
 # failure report needs each host's version and failed stage.
 jobs:
+  inspect-client-drift:
+    # Drift is observed by this workflow's own runs only. A reusable call from a release request
+    # skips it, so a drift or source-read failure can never block or alter a release request.
+    if: ${{ github.workflow == 'Upstream OMP canary' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      issue_action: ${{ steps.inspect.outputs.issue_action }}
+    steps:
+      - name: Check out gateway
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Inspect embedded source against npm latest
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(bun --version)" = 1.4.4
+          bun scripts/client-drift.ts >"$RUNNER_TEMP/client-drift-report.json"
+      - name: Retain complete source drift report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: client-drift-report
+          path: ${{ runner.temp }}/client-drift-report.json
+          if-no-files-found: error
+          retention-days: 14
+
+  report-client-drift:
+    # Only daily/manual observations on main may write. Reusable release requests stay observation-only.
+    if: ${{ needs.inspect-client-drift.result == 'success' && github.workflow == 'Upstream OMP canary' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: inspect-client-drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    concurrency:
+      group: embedded-client-drift-writer
+      cancel-in-progress: false
+    steps:
+      # No checkout, dependency installation, repository imports, or upstream execution.
+      - name: Apply the inspected issue action
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_ACTION: ${{ needs.inspect-client-drift.outputs.issue_action }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const { execFileSync } = require("node:child_process");
+          const action = JSON.parse(process.env.ISSUE_ACTION);
+          if (action.kind === "none") {
+            console.log("No relevant embedded client source drift; existing issues left unchanged.");
+          } else {
+            // Revalidate inert data across the read/write boundary. Never evaluate report strings.
+            const title = /^Embedded client drift: v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) → v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+            if (!["create", "update"].includes(action.kind) || !title.test(action.title)
+              || action.label !== "client-drift" || !/^[0-9a-f]{40}$/.test(action.releaseCommit)
+              || action.marker !== `<!-- embedded-client-drift:${action.releaseCommit} -->`
+              || typeof action.body !== "string" || !action.body.startsWith(action.marker + "\n")
+              || Buffer.byteLength(action.body) > 60000
+              || (action.kind === "create" ? action.issueNumber !== null
+                : !Number.isSafeInteger(action.issueNumber) || action.issueNumber <= 0)) {
+              throw new Error("Invalid inspected client drift issue action");
+            }
+            const repo = process.env.GITHUB_REPOSITORY;
+            if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("Invalid issue repository");
+            const gh = args => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+            // A serialized writer refuses stale plans, rather than duplicating a concurrent observation
+            // or reopening/reclassifying an issue edited since inspection. The next run observes it.
+            const pages = JSON.parse(gh(["api", "--method", "GET", "--paginate", "--slurp",
+              `repos/${repo}/issues`, "-f", "state=open", "-f", "per_page=100"]));
+            if (!Array.isArray(pages) || pages.some(page => !Array.isArray(page))) throw new Error("Invalid issue pages");
+            const matching = pages.flat().filter(issue => issue.state === "open" && !issue.pull_request
+              && /^Embedded client drift: v[0-9]+\.[0-9]+\.[0-9]+ → v[0-9]+\.[0-9]+\.[0-9]+$/.test(issue.title)
+              && Array.isArray(issue.labels) && issue.labels.some(label => label.name === action.label)
+              && !issue.labels.some(label => ["release-request", "release-minor"].includes(label.name))
+              && (issue.title === action.title || typeof issue.body === "string" && issue.body.includes(action.marker)));
+            if (action.kind === "create" ? matching.length !== 0
+              : !matching.some(issue => issue.number === action.issueNumber)) {
+              throw new Error("Client drift issue plan became stale; rerun read-only inspection");
+            }
+            gh(["label", "create", action.label, "--repo", repo, "--color", "5319e7", "--force"]);
+            if (action.kind === "create") {
+              gh(["issue", "create", "--repo", repo, "--label", action.label, "--title", action.title, "--body", action.body]);
+            } else {
+              gh(["issue", "edit", String(action.issueNumber), "--repo", repo, "--title", action.title, "--body", action.body]);
+            }
+            console.log(`Applied embedded client drift issue action: ${action.kind}`);
+          }
+          NODE
+
   canary:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
