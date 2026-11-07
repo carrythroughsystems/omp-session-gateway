@@ -6,6 +6,64 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.10.0] — 2026-11-07
+
+This release uses stock OMP v18.18.0 as its engineering baseline. The 13 changelog entries below record the changes since v0.9.1. Historical receipts do not qualify these bytes.
+
+### Added
+
+- Detect embedded collaboration-client source and helper drift in the daily upstream canary,
+  reporting exact blob changes and local-patch overlap in distinct implementation issues without
+  requesting a release or changing pinned sources, candidates, or release state.
+- Add opt-in home-gateway fleet notifications with owner/device-bound source grants, bounded SSE
+  pullers, private restart reconciliation, coverage-aware Push v3 badges, and unchanged legacy
+  Push v2.
+- Enable selected hosts' background alerts from the home PWA, with per-host coverage, direct grants,
+  safe remote taps, and durable worker ordering. Cross-host asks follow first observation on this
+  page; configured host order breaks ties, and that in-memory order resets after a cold load.
+  Badge reconciliation keeps fresh hosts usable while a notification's launch is in flight.
+  Unsupported or unselected fleets do not poll in the directory; Hold and Requeue stay device-local.
+  Enrollment owns worker mode until it finishes, then follows actual device selection even on
+  failure; unacknowledged mode changes retry on the next foreground trigger. Legacy resets replace
+  the fleet badge with local asks. Unknown worker support and coverage never claim All clear;
+  recovered or superseded observations reconcile again. Badge counts exclude withdrawn hosts;
+  Reconnect replaces rejected grants. Alert taps wait for focus and its refresh, keep their source
+  stable through launch, and preserve the selected directory scope.
+- Add opt-in fleet notification source grants and identifier-only machine feeds with private
+  verifier storage, discovery-warm snapshots, strict coordinator trust, and rollback projection.
+- Allow an administrator-configured Tern window slot for opt-in session creation and all
+  inspections, failing closed without fallback while preserving the unconfigured CLI behavior.
+
+### Changed
+
+- Refresh the embedded OMP client and exact wire dependency to v18.18.0, adopting shared wire
+  helpers, job-intent labels and exact-width Markdown code spans while retaining older-host wait
+  results and gateway phone controls. Record active/retired patches and exclude offline viewers.
+- Settle a failed campaign's unknown or confirmed outside effects only from its owner's residue
+  proof: zero Windows qualification tailnet nodes, zero active device-cloud vendor sessions, a
+  verified Pixel baseline, or restored readiness. The release driver then clears that campaign's
+  lease itself; unproven residue keeps the maintainer stop.
+- Move the OMP host engineering baseline to published v18.18.0 with independently verified
+  source, package, and native pins. Registry v1, discovery/query, relay framing, the minimum
+  host, and Bun 1.4.4 are unchanged. Exact-version canary run 42337262675 passed all eleven
+  Linux and eight supported Windows stages as Tested evidence, not release qualification.
+  The embedded client stays at v18.12.6; bash shell-trace byte arrays retain its text fallback.
+
+### Fixed
+
+- Record outstanding fleet asks only after push acceptance for exact restart reconciliation; release
+  cancelled sends immediately, retry transport failures after each delivery's own 30-second cooldown
+  without changing clear sequences, and exclude grant-less sources from badges and stale retention.
+- Return deselected fleet devices to unchanged local Push v2 delivery while remote clears drain.
+- Keep fleet grant credentials available during renewal writes and concurrent authentication or feed
+  opening, then reconnect with the durably renewed expiry.
+- Clear outstanding remote alerts when a notification source answers 404 instead of retaining them
+  as stale alerts.
+- Record device-cloud journey and record-audit failures and Windows physical-client navigation
+  failures as typed outcomes at their lane phase, and other errors at the phase their lane last
+  checkpointed, instead of `unknown` at the lane's first step. WinRM helper diagnostics keep the
+  exception class when redaction alters a frame name.
+
 ## [v0.9.1] — 2026-11-06
 
 This release uses stock OMP v18.17.0 as its engineering baseline. The 26 changelog entries below record the changes since v0.9.0. Historical receipts do not qualify these bytes.
