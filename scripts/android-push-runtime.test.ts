@@ -1814,7 +1814,8 @@ test("held worker admission cancellation releases the connection without creatin
   expect(closes).toBe(1);
 });
 
-test.each(["quiet", "replaced", "changed", "foreign"] as const)("held worker timeout retains closed lifecycle diagnostics (%s)", async scenario => {
+test.each(["quiet", "replaced", "changed", "foreign", "missing", "ambiguous", "inventory-failed"] as const)(
+  "held worker timeout retains closed lifecycle diagnostics (%s)", async scenario => {
   const methods: string[] = [];
   let listener: (method: string, parameters: Record<string, unknown>) => void = () => {};
   let removed = 0, evaluations = 0;
@@ -1823,13 +1824,25 @@ test.each(["quiet", "replaced", "changed", "foreign"] as const)("held worker tim
     onEvent: (callback: typeof listener) => { listener = callback; return () => { removed++; }; },
     browserSend: async (method: string) => {
       methods.push(method);
+      if (method === "Target.getTargets" && evaluations > 0) {
+        if (scenario === "inventory-failed") throw new Error("synthetic inventory unavailable");
+        if (scenario === "missing") return { targetInfos: [] };
+        if (scenario === "replaced" || scenario === "ambiguous") return { targetInfos:
+          Array.from({ length: scenario === "replaced" ? 1 : 2 }, (_, index) =>
+            ({ type: "service_worker", targetId: `synthetic-new-${index}`, url: identity.origin + "/service-worker.js" })) };
+      }
       return method === "Target.getTargets" ? { targetInfos: [
         { type: "service_worker", targetId: "synthetic-held-target", url: identity.origin + "/service-worker.js" },
       ] } : method === "Target.attachToTarget" ? { sessionId: "synthetic-held-session" } : {};
     },
-    sessionSend: async (session: string) => {
+    sessionSend: async (session: string, _method: string, parameters: { expression: string; awaitPromise?: boolean }) => {
       expect(session).toBe("synthetic-held-session"); evaluations++;
-      if (scenario !== "quiet") {
+      if (parameters.awaitPromise !== true) {
+        expect(parameters).toEqual({ expression: "1", returnByValue: true });
+        if (scenario === "replaced") throw new Error("synthetic missing worker");
+        return { result: { value: 1 } };
+      }
+      if (["replaced", "changed", "foreign"].includes(scenario)) {
         const owned = scenario !== "foreign";
         listener("Target.detachedFromTarget", { sessionId: owned ? session : "synthetic-foreign-session" });
         listener("Target.targetDestroyed", { targetId: owned ? "synthetic-held-target" : "synthetic-foreign-target" });
@@ -1849,14 +1862,16 @@ test.each(["quiet", "replaced", "changed", "foreign"] as const)("held worker tim
     expect(JSON.parse(diagnostic.message.slice("Fleet worker lifecycle: ".length))).toEqual({
       before: zero, after: ["replaced", "changed"].includes(scenario) ?
         { detached: 1, destroyed: 1, changed: 1, identityChanged: scenario === "changed" ? 1 : 0, sameScriptCreated: 1 } : zero,
+      inventory: ["replaced", "missing", "ambiguous"].includes(scenario) ? scenario : scenario === "inventory-failed" ? "failed" : "same",
+      context: scenario === "replaced" ? "failed" : "responsive",
     });
     expect(diagnostic.message).not.toContain("synthetic");
     expect(diagnostic.message).not.toContain(identity.origin);
-    expect(evaluations).toBe(1);
+    expect(evaluations).toBe(2);
     expect(removed).toBe(0);
   } finally { await observer.close(); }
   expect(removed).toBe(1);
-  expect(methods).toEqual(["Target.getTargets", "Target.attachToTarget", "Target.setDiscoverTargets", "Target.detachFromTarget"]);
+  expect(methods).toEqual(["Target.getTargets", "Target.attachToTarget", "Target.setDiscoverTargets", "Target.getTargets", "Target.detachFromTarget"]);
 });
 
 test("held worker discovery failure detaches and removes diagnostic subscriptions", async () => {
