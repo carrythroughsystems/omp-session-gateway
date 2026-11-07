@@ -26,7 +26,8 @@ Highest-value assets:
 - session metadata such as project names, models, activity timing, and whether human input is required;
 - per-host OMP query tokens and the gateway-only readiness token;
 - tailnet and WebAuthn identity material;
-- private VAPID key material and browser push subscription endpoints/keys;
+- private VAPID key material, browser push subscription endpoints/keys, and fleet grant secrets
+  and verifiers;
 - release-signing and update infrastructure.
 
 ## 3. Threat model
@@ -319,9 +320,48 @@ request ID and cannot be used as an ask/Control intent. Stop detail obeys the sa
 privacy choice, with no preview content. No activity state is persisted.
 Never put a collaboration capability in a payload, notification data, route, history,
 service-worker message, persisted push state, badge, or request identifier.
-Web Push subscriptions, VAPID keys, notification tags, app badges, and service-worker tap routes remain strictly home-scoped to the originating gateway ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)). Remote fleet targets never share push state or routes, and foreground remote counts never feed the home app badge.
+Web Push subscriptions, VAPID keys, notification tags, app badges, and service-worker tap routes belong to the gateway that served the PWA. Remote fleet targets never receive or share push state, and a remote host reaches that worker only through the coordinator's fleet notifications below.
 
 JavaScript strings cannot be reliably zeroized. Minimize lifetime, copies, closures, global state, and persistence instead of claiming memory erasure.
+
+### Fleet notifications
+
+[ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator) adds
+one machine trust relationship and keeps every browser trust relationship browser-direct:
+
+- **Both administrators opt in.** A coordinator pulls only sources listed in
+  `notifications.sources`; a source serves only coordinators listed in
+  `notifications.coordinators` whose origins are also trusted dashboard origins. A trusted
+  dashboard origin alone still grants no machine access.
+- **The owner authorizes each source directly.** Grant creation, renewal, and revocation at a
+  source authenticate the caller from that source's own Serve identity and accept only the exact
+  coordinator origin. No daemon forwards, synthesizes, or relies on `Tailscale-User-Login` for
+  another host.
+- **The credential is narrow.** The coordinator holds a 256-bit secret per grant; the source holds
+  only its SHA-256 verifier. The bearer credential reaches only `GET /api/v1/notification-feed`,
+  which refuses browser requests (`Origin` or `Sec-Fetch-*` present), keeps the Serve-only loopback
+  and second-hop checks, compares in constant time, and rechecks coordinator configuration,
+  trusted origin, owner allowlist, and expiry on every connection and event. It cannot list
+  sessions through the browser API, fetch View or Control links, create sessions, change
+  subscriptions, or choose a URL; the coordinator connects only to the configured origin and refuses
+  redirects.
+- **The feed is metadata only and projected explicitly.** It carries instance identifiers,
+  generations, actionable request identifiers, live stop edges, an owner digest, and the grant
+  expiry. Titles, working directories, models, previews, option counts, timestamps, and
+  capabilities are never projected, so neither the coordinator nor the phone receives them from a
+  remote source.
+- **Fan-out is owner- and device-bound.** A remote event reaches only push subscriptions owned by
+  the grant's owner (verified against the feed's owner digest), still allowlisted at the
+  coordinator, and selecting that source. Two owners' grants or devices never mix.
+- **State stays private and small.** Grant secrets live only in the coordinator's private
+  `fleet-notifications.json`; verifiers live in the source's private `notification-grants.json`.
+  Neither file holds session metadata or capabilities; both fail closed when corrupt. Diagnostics
+  stay numeric or boolean.
+
+Residual risks: a source that names a coordinator discloses enrolled owners' session identifiers
+and ask timing to that coordinator; a stolen coordinator secret reads the same metadata until
+revocation or expiry (at most 30 days without renewal); pushes already accepted by a push service
+cannot be recalled after revocation; and fleet alerts stop while the coordinator is down.
 
 ### Opt-in creation and first-task drafts
 
@@ -885,6 +925,8 @@ Before release, prove:
 - stopped, expired, and replaced generations cannot launch;
 - view-only mutation attempts are rejected by the OMP host;
 - unconfigured cross-origin requests and launches fail with `403` before identity checks and without CORS headers; configured `http.trustedDashboardOrigins` admit only exact-origin `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, and their authenticated `OPTIONS` preflights (without consuming launch rate-limit tokens) under full Tailscale identity authorization; any future WebAuthn endpoints must enforce the same exact-origin boundary;
+- a fleet grant credential is refused by every route except `GET /api/v1/notification-feed`, the feed refuses browser requests, foreign or revoked or expired grants, and grants whose coordinator, origin trust, or owner was removed, and a remote event never reaches another owner's or an unselecting device's subscription;
+- fleet feeds, fleet pushes, and fleet notification data carry no title, working directory, model, preview, timestamp, endpoint, secret, or capability, and synthetic canaries in those fields are rejected before persistence, logging, routing, or rendering;
 - malformed and oversized IPC/API input stays bounded;
 - gateway restart starts empty and discovery polling repopulates only live hosts;
 - every test record either vendor kept from the stable campaign's cloud devices contains neither

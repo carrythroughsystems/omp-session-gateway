@@ -5,6 +5,7 @@ import {
   LOCAL_FLEET_SOURCE_ID,
   MAX_FLEET_LABEL_CODEPOINTS,
   MAX_FLEET_TARGETS,
+  MAX_FLEET_SOURCES,
   MAX_FRAME_BYTES,
   INSTANCE_ID_PATTERN,
   MAX_LABEL_CODEPOINTS,
@@ -50,6 +51,33 @@ import {
   type SessionCreationReceipt,
   type SessionCreationStatus,
   type SessionCreationState,
+  FLEET_BINDING_PATTERN,
+  FLEET_DIGEST_PATTERN,
+  FLEET_NOTIFICATIONS_VERSION,
+  FLEET_PUSH_VERSION,
+  MAX_FLEET_FEED_EVENT_BYTES,
+  MAX_FLEET_NOTIFICATION_SOURCES,
+  MAX_FLEET_PUSH_BYTES,
+  MAX_FLEET_REQUEST_BYTES,
+  MAX_FLEET_STATUS_BYTES,
+  MAX_FLEET_SYNC_ENTRIES,
+  type FleetBadge,
+  type FleetFeedEvent,
+  type FleetFeedSession,
+  type FleetGrantActionRequest,
+  type FleetGrantCreateRequest,
+  type FleetGrantCreateResponse,
+  type FleetPendingAsk,
+  type FleetPushMessage,
+  type FleetRecipientRemoveRequest,
+  type FleetRecipientRequest,
+  type FleetRecipientResponse,
+  type FleetSequence,
+  type FleetSourceState,
+  type FleetSourceStatus,
+  type FleetStatusResponse,
+  type SourceGrantRequest,
+  type SourceGrantResponse,
 } from "./types.ts";
 
 const SESSION_ID_PATTERN = /^[^\0\r\n]{1,256}$/u;
@@ -566,18 +594,24 @@ export function parseAttentionPushMessage(value: unknown): AttentionPushMessage 
 }
 
 
-/** Notification data is deliberately smaller than a push payload and admits no extra fields. */
+/**
+ * Notification data is deliberately smaller than a push payload and admits no extra fields. Push v2
+ * data names only the serving gateway's sessions; fleet v3 data may add a remote source binding.
+ */
 export function parseNotificationData(value: unknown): NotificationLaunchIntent | undefined {
   try {
     const record = requireRecord(value);
-    if (record.version !== PUSH_API_VERSION) return undefined;
+    const fleet = record.version === FLEET_PUSH_VERSION;
+    if (record.version !== PUSH_API_VERSION && !fleet) return undefined;
+    const optional = fleet ? ["source"] : [];
+    const source = fleet && record.source !== undefined ? { source: requireBinding(record.source) } : {};
     if (record.type === "attention") {
-      requireExactKeys(record, ["version", "type", "instanceId", "requestId"]);
-      return { kind: "attention", instanceId: requireInstanceId(record.instanceId), requestId: requireRequestId(record.requestId) };
+      requireExactKeys(record, ["version", "type", "instanceId", "requestId"], optional);
+      return { kind: "attention", ...source, instanceId: requireInstanceId(record.instanceId), requestId: requireRequestId(record.requestId) };
     }
     if (record.type === "activity_stop") {
-      requireExactKeys(record, ["version", "type", "instanceId", "generation"]);
-      return { kind: "activity_stop", instanceId: requireInstanceId(record.instanceId), generation: requireInteger(record.generation, 1) };
+      requireExactKeys(record, ["version", "type", "instanceId", "generation"], optional);
+      return { kind: "activity_stop", ...source, instanceId: requireInstanceId(record.instanceId), generation: requireInteger(record.generation, 1) };
     }
   } catch {
     return undefined;
@@ -591,14 +625,19 @@ export function parseNotificationRoute(url: URL): NotificationLaunchIntent | und
   if (match?.[1] === undefined || url.hash !== "") return undefined;
   try {
     const instanceId = requireInstanceId(decodeURIComponent(match[1]));
-    const entries = [...url.searchParams];
-    if (entries.length === 1 && entries[0]?.[0] === "request") {
-      return { kind: "attention", instanceId, requestId: requireRequestId(entries[0][1]) };
+    const keys = [...url.searchParams.keys()];
+    if (new Set(keys).size !== keys.length) return undefined;
+    const sourceValue = url.searchParams.get("source");
+    const source = sourceValue === null ? {} : { source: requireBinding(sourceValue) };
+    const expected = (names: readonly string[]): boolean =>
+      keys.length === names.length + (sourceValue === null ? 0 : 1) && names.every(name => keys.includes(name));
+    if (expected(["request"])) {
+      return { kind: "attention", ...source, instanceId, requestId: requireRequestId(url.searchParams.get("request")) };
     }
-    if (entries.length !== 2 || url.searchParams.getAll("activity").length !== 1 || url.searchParams.getAll("generation").length !== 1) return undefined;
+    if (!expected(["activity", "generation"])) return undefined;
     const generation = url.searchParams.get("generation");
     if (url.searchParams.get("activity") !== "stopped" || generation === null || !/^[1-9][0-9]*$/u.test(generation)) return undefined;
-    return { kind: "activity_stop", instanceId, generation: requireInteger(Number(generation), 1) };
+    return { kind: "activity_stop", ...source, instanceId, generation: requireInteger(Number(generation), 1) };
   } catch {
     return undefined;
   }
@@ -606,9 +645,10 @@ export function parseNotificationRoute(url: URL): NotificationLaunchIntent | und
 
 export function notificationRoutePath(intent: NotificationLaunchIntent): string {
   const path = "/collab/" + requireInstanceId(intent.instanceId);
-  return intent.kind === "attention"
+  const route = intent.kind === "attention"
     ? path + "?request=" + requireRequestId(intent.requestId)
     : path + "?activity=stopped&generation=" + requireInteger(intent.generation, 1);
+  return intent.source === undefined ? route : route + "&source=" + requireBinding(intent.source);
 }
 
 function parseSessionMetadata(value: unknown): SessionMetadata {
@@ -753,7 +793,8 @@ export function parseSessionCreationUuid(value: unknown): string {
   return value;
 }
 
-function creationRecord(value: unknown, bound: number): JsonRecord {
+/** An object whose JSON encoding fits `bound` bytes; shared by every size-capped contract. */
+function boundedRecord(value: unknown, bound: number): JsonRecord {
   const record = requireRecord(value);
   try {
     if (new TextEncoder().encode(JSON.stringify(record)).byteLength > bound) throw new ProtocolValidationError();
@@ -783,7 +824,7 @@ function creationChoice(value: unknown): SessionCreationChoice {
 }
 
 export function parseSessionCreationOptions(value: unknown): SessionCreationOptions {
-  const record = creationRecord(value, MAX_SESSION_CREATION_OPTIONS_BYTES);
+  const record = boundedRecord(value, MAX_SESSION_CREATION_OPTIONS_BYTES);
   requireExactKeys(record, ["version", "revision", "available", "projects", "profiles"],
     record.available === false ? ["reason"] : []);
   if (record.version !== SESSION_CREATION_VERSION) throw new ProtocolValidationError();
@@ -807,7 +848,7 @@ export function parseSessionCreationOptions(value: unknown): SessionCreationOpti
 }
 
 export function parseSessionCreationRequest(value: unknown): SessionCreationRequest {
-  const record = creationRecord(value, MAX_SESSION_CREATION_REQUEST_BYTES);
+  const record = boundedRecord(value, MAX_SESSION_CREATION_REQUEST_BYTES);
   requireExactKeys(record, ["clientOperationId", "revision", "projectId", "workingCopyId", "profileId"]);
   return { clientOperationId: parseSessionCreationUuid(record.clientOperationId), revision: parseSessionCreationUuid(record.revision),
     projectId: parseFleetSourceId(record.projectId), workingCopyId: parseFleetSourceId(record.workingCopyId),
@@ -820,13 +861,13 @@ function creationState(value: unknown): SessionCreationState {
 }
 
 export function parseSessionCreationReceipt(value: unknown): SessionCreationReceipt {
-  const record = creationRecord(value, MAX_SESSION_CREATION_STATUS_BYTES);
+  const record = boundedRecord(value, MAX_SESSION_CREATION_STATUS_BYTES);
   requireExactKeys(record, ["operationId", "state"]);
   return { operationId: parseSessionCreationUuid(record.operationId), state: creationState(record.state) };
 }
 
 export function parseSessionCreationStatus(value: unknown): SessionCreationStatus {
-  const record = creationRecord(value, MAX_SESSION_CREATION_STATUS_BYTES);
+  const record = boundedRecord(value, MAX_SESSION_CREATION_STATUS_BYTES);
   const state = creationState(record.state);
   const terminal = Object.hasOwn(SESSION_CREATION_ERRORS, state);
   requireExactKeys(record, ["operationId", "state", "updatedAt",
@@ -922,4 +963,231 @@ export function sessionMetadataFromObserved(
     },
     immutableIdentity: `${input.pid}\0${input.sessionId}\0${input.startedAt}`,
   };
+}
+
+// Fleet notifications (ADR-048). Every parser is exact: unknown keys, other versions, and
+// out-of-bound values are rejected before any state, routing, delivery, or rendering uses them.
+
+function requireBinding(value: unknown): string {
+  if (typeof value !== "string" || !FLEET_BINDING_PATTERN.test(value)) throw new ProtocolValidationError();
+  return value;
+}
+
+function requireDigest(value: unknown): string {
+  if (typeof value !== "string" || !FLEET_DIGEST_PATTERN.test(value)) throw new ProtocolValidationError();
+  return value;
+}
+
+function requireFleetVersion(record: JsonRecord): typeof FLEET_NOTIFICATIONS_VERSION {
+  if (record.version !== FLEET_NOTIFICATIONS_VERSION) throw new ProtocolValidationError();
+  return FLEET_NOTIFICATIONS_VERSION;
+}
+
+function requireCanonicalDateTime(value: unknown): string {
+  const text = requireDateTime(value);
+  if (new Date(Date.parse(text)).toISOString() !== text) throw new ProtocolValidationError();
+  return text;
+}
+
+function parseFleetSequence(value: unknown): FleetSequence {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["epoch", "n"]);
+  return { epoch: requireInteger(record.epoch, 1), n: requireInteger(record.n, 1) };
+}
+
+function parseFleetBadge(value: unknown): FleetBadge {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["count", "complete"]);
+  if (typeof record.complete !== "boolean") throw new ProtocolValidationError();
+  return { count: requireInteger(record.count, 0, MAX_PUSH_PENDING_COUNT), complete: record.complete };
+}
+
+function optionalSource(record: JsonRecord): { readonly source?: string } {
+  return record.source === undefined ? {} : { source: requireBinding(record.source) };
+}
+
+function parseFleetPendingAsk(value: unknown): FleetPendingAsk {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["instanceId", "generation", "requestId"], ["source"]);
+  return {
+    ...optionalSource(record),
+    instanceId: requireInstanceId(record.instanceId),
+    generation: requireInteger(record.generation, 1),
+    requestId: requireRequestId(record.requestId),
+  };
+}
+
+/** A fleet push for one recipient: content-free, capability-free, and at most 3 KiB of JSON. */
+export function parseFleetPushMessage(value: unknown): FleetPushMessage {
+  const record = boundedRecord(value, MAX_FLEET_PUSH_BYTES);
+  if (record.version !== FLEET_PUSH_VERSION) throw new ProtocolValidationError();
+  if (record.type === "sync") {
+    requireExactKeys(record, ["version", "type", "seq", "badge", "fresh", "pending"]);
+    if (!Array.isArray(record.fresh) || record.fresh.length > MAX_FLEET_SOURCES) throw new ProtocolValidationError();
+    const fresh = record.fresh.map(entry => entry === LOCAL_FLEET_SOURCE_ID ? entry : requireBinding(entry));
+    if (new Set(fresh).size !== fresh.length) throw new ProtocolValidationError();
+    if (!Array.isArray(record.pending) || record.pending.length > MAX_FLEET_SYNC_ENTRIES) throw new ProtocolValidationError();
+    const pending = record.pending.map(parseFleetPendingAsk);
+    const asks = new Set<string>();
+    for (const ask of pending) {
+      if (!fresh.includes(ask.source ?? LOCAL_FLEET_SOURCE_ID)) throw new ProtocolValidationError();
+      const key = `${ask.source ?? ""}\0${ask.instanceId}\0${ask.requestId}`;
+      if (asks.has(key)) throw new ProtocolValidationError();
+      asks.add(key);
+    }
+    return { version: FLEET_PUSH_VERSION, type: "sync", seq: parseFleetSequence(record.seq), badge: parseFleetBadge(record.badge), fresh, pending };
+  }
+  const common = ["version", "type", "instanceId", "generation", "seq", "badge"];
+  const session = {
+    version: FLEET_PUSH_VERSION,
+    ...optionalSource(record),
+    instanceId: requireInstanceId(record.instanceId),
+    generation: requireInteger(record.generation, 1),
+    seq: parseFleetSequence(record.seq),
+    badge: parseFleetBadge(record.badge),
+  } as const;
+  if (record.type === "attention") {
+    requireExactKeys(record, [...common, "requestId", "title"], ["source", "body"]);
+    if (record.title !== "OMP session needs attention") throw new ProtocolValidationError();
+    const body = optionalLabel(record.body);
+    return { ...session, type: "attention", requestId: requireRequestId(record.requestId), title: record.title, ...(body === undefined ? {} : { body }) };
+  }
+  if (record.type === "activity_stop") {
+    requireExactKeys(record, [...common, "title"], ["source", "body"]);
+    if (record.title !== "OMP session activity stopped") throw new ProtocolValidationError();
+    const body = optionalLabel(record.body);
+    return { ...session, type: "activity_stop", title: record.title, ...(body === undefined ? {} : { body }) };
+  }
+  if (record.type === "clear") {
+    requireExactKeys(record, [...common, "requestId"], ["source"]);
+    return { ...session, type: "clear", requestId: requireRequestId(record.requestId) };
+  }
+  throw new ProtocolValidationError();
+}
+
+const FLEET_SOURCE_STATES: Readonly<Record<FleetSourceState, true>> = {
+  not_enrolled: true,
+  pending: true,
+  current: true,
+  stale: true,
+  unauthorized: true,
+  unsupported: true,
+};
+
+function parseFleetSourceStatus(value: unknown): FleetSourceStatus {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["sourceId", "state"], ["expiresAt"]);
+  if (typeof record.state !== "string" || !Object.hasOwn(FLEET_SOURCE_STATES, record.state)) throw new ProtocolValidationError();
+  return {
+    sourceId: parseFleetSourceId(record.sourceId),
+    state: record.state as FleetSourceState,
+    ...(record.expiresAt === undefined ? {} : { expiresAt: requireCanonicalDateTime(record.expiresAt) }),
+  };
+}
+
+export function parseFleetStatusResponse(value: unknown): FleetStatusResponse {
+  const record = boundedRecord(value, MAX_FLEET_STATUS_BYTES);
+  requireExactKeys(record, ["version", "sources"]);
+  if (!Array.isArray(record.sources) || record.sources.length > MAX_FLEET_NOTIFICATION_SOURCES) throw new ProtocolValidationError();
+  const sources = record.sources.map(parseFleetSourceStatus);
+  if (new Set(sources.map(source => source.sourceId)).size !== sources.length) throw new ProtocolValidationError();
+  return { version: requireFleetVersion(record), sources };
+}
+
+export function parseFleetGrantCreateRequest(value: unknown): FleetGrantCreateRequest {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES);
+  requireExactKeys(record, ["version", "sourceId"]);
+  return { version: requireFleetVersion(record), sourceId: parseFleetSourceId(record.sourceId) };
+}
+
+export function parseFleetGrantCreateResponse(value: unknown): FleetGrantCreateResponse {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES);
+  requireExactKeys(record, ["version", "grantId", "verifier"]);
+  return { version: requireFleetVersion(record), grantId: parseSessionCreationUuid(record.grantId), verifier: requireDigest(record.verifier) };
+}
+
+export function parseFleetGrantActionRequest(value: unknown): FleetGrantActionRequest {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES);
+  requireExactKeys(record, ["version"]);
+  return { version: requireFleetVersion(record) };
+}
+
+function parseFleetSelection(value: unknown, minimum = 1): readonly string[] {
+  if (!Array.isArray(value) || value.length < minimum || value.length > MAX_FLEET_NOTIFICATION_SOURCES) throw new ProtocolValidationError();
+  const sources = value.map(parseFleetSourceId);
+  if (sources.includes(LOCAL_FLEET_SOURCE_ID) || new Set(sources).size !== sources.length) throw new ProtocolValidationError();
+  return sources;
+}
+
+export function parseFleetRecipientRequest(value: unknown): FleetRecipientRequest {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES + MAX_PUSH_ENDPOINT_BYTES);
+  requireExactKeys(record, ["version", "endpoint", "sources"]);
+  return { version: requireFleetVersion(record), endpoint: requirePushEndpoint(record.endpoint), sources: parseFleetSelection(record.sources) };
+}
+
+export function parseFleetRecipientResponse(value: unknown): FleetRecipientResponse {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES);
+  requireExactKeys(record, ["version", "sources", "released"]);
+  return {
+    version: requireFleetVersion(record),
+    sources: parseFleetSelection(record.sources, 0),
+    released: parseFleetSelection(record.released, 0),
+  };
+}
+
+export function parseFleetRecipientRemoveRequest(value: unknown): FleetRecipientRemoveRequest {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES + MAX_PUSH_ENDPOINT_BYTES);
+  requireExactKeys(record, ["version", "endpoint"]);
+  return { version: requireFleetVersion(record), endpoint: requirePushEndpoint(record.endpoint) };
+}
+
+export function parseSourceGrantRequest(value: unknown): SourceGrantRequest {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES);
+  requireExactKeys(record, ["version", "grantId", "verifier"]);
+  return { version: requireFleetVersion(record), grantId: parseSessionCreationUuid(record.grantId), verifier: requireDigest(record.verifier) };
+}
+
+export function parseSourceGrantResponse(value: unknown): SourceGrantResponse {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES);
+  requireExactKeys(record, ["version", "grantId", "expiresAt"]);
+  return { version: requireFleetVersion(record), grantId: parseSessionCreationUuid(record.grantId), expiresAt: requireCanonicalDateTime(record.expiresAt) };
+}
+
+function parseFleetFeedSession(value: unknown): FleetFeedSession {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["instanceId", "generation"], ["requestId"]);
+  return {
+    instanceId: requireInstanceId(record.instanceId),
+    generation: requireInteger(record.generation, 1),
+    ...(record.requestId === undefined ? {} : { requestId: requireRequestId(record.requestId) }),
+  };
+}
+
+/** One Server-Sent Events `data` payload of the source feed; the event name repeats `type`. */
+export function parseFleetFeedEvent(value: unknown): FleetFeedEvent {
+  const record = boundedRecord(value, MAX_FLEET_FEED_EVENT_BYTES);
+  const version = requireFleetVersion(record);
+  if (record.type === "snapshot") {
+    requireExactKeys(record, ["version", "type", "owner", "expiresAt", "sessions"]);
+    if (!Array.isArray(record.sessions) || record.sessions.length > MAX_SESSIONS) throw new ProtocolValidationError();
+    const sessions = record.sessions.map(parseFleetFeedSession);
+    if (new Set(sessions.map(session => session.instanceId)).size !== sessions.length) throw new ProtocolValidationError();
+    return { version, type: "snapshot", owner: requireDigest(record.owner), expiresAt: requireCanonicalDateTime(record.expiresAt), sessions };
+  }
+  if (record.type === "upsert") {
+    requireExactKeys(record, ["version", "type", "session"]);
+    return { version, type: "upsert", session: parseFleetFeedSession(record.session) };
+  }
+  if (record.type === "remove" || record.type === "stop") {
+    requireExactKeys(record, ["version", "type", "instanceId", "generation"]);
+    return { version, type: record.type, instanceId: requireInstanceId(record.instanceId), generation: requireInteger(record.generation, 1) };
+  }
+  throw new ProtocolValidationError();
+}
+
+/** `Authorization: Bearer <grantId>.<secret>` on the feed; anything else is not a fleet credential. */
+export function parseFleetBearer(header: string | null): { readonly grantId: string; readonly secret: string } | undefined {
+  const match = /^Bearer ([0-9a-f-]{36})\.([A-Za-z0-9_-]{43})$/u.exec(header ?? "");
+  if (match?.[1] === undefined || match[2] === undefined || !SESSION_CREATION_UUID_PATTERN.test(match[1])) return undefined;
+  return { grantId: match[1], secret: match[2] };
 }

@@ -260,7 +260,7 @@ transition still require native-device qualification.
 
 ## ADR-017 — Deliver actionable attention through metadata-only Web Push
 
-**Status:** Accepted; amended 2026-09-25 (no coalescing topic) and 2026-09-30 (taps routed into an open page)
+**Status:** Accepted; amended 2026-09-25 (no coalescing topic) and 2026-09-30 (taps routed into an open page); the 2026-10-22 home-only scoping is narrowed by [ADR-048](#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator) (fleet notifications through the home gateway)
 
 **Context:** Foreground SSE notifications cannot reach an installed PWA after its page closes. The
 phone user needs an actionable alert that reaches the exact live session with one tap, without
@@ -1825,7 +1825,7 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 
 ## ADR-036 — Federated dashboard origins through browser-direct CORS
 
-**Status:** Accepted; exact creation routes and dashboard creation trust added by ADR-043
+**Status:** Accepted; exact creation routes and dashboard creation trust added by ADR-043; fleet notification grant routes and the coordinator's fleet pushes added by [ADR-048](#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator)
 
 **Date:** 2026-10-22
 
@@ -2266,3 +2266,173 @@ Current CI checks historical generator fixtures and live claim coherence, not li
 equality against main's generator. New marker/schema or coherence requirements may still reject an
 older installed renderer. Preserve the gates and reconcile manually under the pinned policy, rather
 than executing main's code or upgrading the driver during a pending release.
+
+---
+
+## ADR-048 — Fleet notifications through the home gateway as coordinator
+
+**Status:** Accepted; narrowly supersedes the home-only Web Push scoping in the 2026-10-22
+amendment of [ADR-017](#adr-017--deliver-actionable-attention-through-metadata-only-web-push) and
+in [ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors), and extends
+ADR-036's exact CORS surface with three grant routes. Browser-direct View, Control, and creation,
+the capability rules, and Push v2 are unchanged.
+
+**Date:** 2026-11-07
+
+**Context:** One installed **OMP Sessions** PWA lists and opens sessions on up to 8 sources
+browser-direct (ADR-036), but background alerts reach it only for the gateway that served it.
+Operators want one opt-in that alerts for selected hosts, including on a locked phone where the
+platform permits. Each gateway authenticates the browser from its own Tailscale Serve identity; a
+trusted dashboard origin grants no machine permission, and no daemon may present the user's identity
+to another. A Web Push subscription is bound to one VAPID application-server key, so one
+subscription cannot receive pushes signed by several hosts' keys. Capabilities and session content
+never enter push. Operators commonly pair an always-on desktop with laptops that sleep.
+
+**Decision:**
+
+- **Transport.** The gateway serving the installed PWA (the *home*) is that installation's sole
+  notification coordinator. It keeps its one VAPID key, `push-state.json`, and existing
+  subscriptions, and it sends every push. For each remote source an owner enables, the coordinator
+  pulls bounded attention metadata from that source over one authenticated machine stream. The
+  coordinator never proxies View, Control, launch, or creation; those stay browser-direct.
+- **Opt-in on both sides.** On the coordinator, `notifications.sources` lists the `fleet.targets`
+  ids eligible for fleet alerts. On a source, `notifications.coordinators` lists `{ id, origin }`
+  peers; each origin must also be in `http.trustedDashboardOrigins`. Neither side alone grants
+  anything, and a trusted dashboard origin alone still grants no machine access.
+- **Grants.** One grant per owner and source, created browser-direct in three steps:
+  1. The page asks its home (same-origin, owner-authenticated) to create a pending grant. The home
+     generates a UUIDv4 `grantId` and a 256-bit secret, stores both privately, and returns `grantId`
+     and `verifier = base64url(SHA-256("omp-fleet-grant-v1" ‖ 0x00 ‖ grantId ‖ 0x00 ‖ secret))`.
+  2. The page posts `{ grantId, verifier }` to the source cross-origin. The source authenticates the
+     owner from its own Serve identity, requires the exact request `Origin` to be a configured
+     coordinator, and stores `{ grantId, coordinator, owner, verifier, expiresAt }` with a 30-day
+     expiry. The secret never leaves the coordinator; the source holds only the verifier.
+  3. The page activates the grant at home. The coordinator verifies it by opening the feed and
+     waiting up to 5 seconds for the first snapshot: a rejected credential answers
+     `409 grant_rejected` and an unreachable source `503 source_unreachable`, and only a verified
+     grant is kept. A grant needs at least one stored push subscription of the same owner. A
+     grant is bound to the source origin it was created for; changing that target's configured
+     origin invalidates it.
+
+  While a device has the source selected, the page renews the grant at the source (cross-origin,
+  owner-authenticated) whenever the coordinator reports expiry within 10 days; renewal is also the
+  direct authorization check when another device of the same owner enables the source. An expired
+  grant stops the feed until renewed. Revocation by the owner (both sides), the source
+  administrator (removing the coordinator, its trusted origin, or the login), the coordinator
+  administrator (removing the source), or expiry closes live feeds at once; deleting the record is
+  the persisted revocation. A source answers revocation with `204` whether or not the grant exists,
+  so the route reveals nothing.
+- **Feed.** `GET /api/v1/notification-feed` on the source is the only route a grant credential
+  reaches. It never receives CORS headers and refuses any request carrying `Origin` or a
+  `Sec-Fetch-*` header. It requires the loopback-peer, Serve-only topology with no second-hop
+  evidence, ignores Tailscale identity headers, and authenticates only
+  `Authorization: Bearer <grantId>.<secret>` against the stored verifier in constant time. Each
+  connection, and each event, rechecks that the coordinator is still configured and trusted, the
+  owner is still allowlisted, and the grant is unexpired. The response is Server-Sent Events: a
+  `snapshot` first (owner digest, grant expiry, sessions), then `upsert`, `remove`, and `stop`
+  events, with heartbeats and a bounded queue whose overflow closes the stream; a reconnect starts
+  from a fresh snapshot. A source sends its snapshot only after its own discovery has completed a
+  round, so a restarting source never presents an empty directory as authoritative; until then the
+  stream carries heartbeats only. The owner digest is
+  `base64url(SHA-256("omp-fleet-owner-v1" ‖ 0x00 ‖ coordinatorOrigin ‖ 0x00 ‖ login))`, so it cannot
+  correlate an owner across coordinators. The projection is explicit: `instanceId`, `generation`,
+  and a `requestId` only for a Control-capable waiting session. Titles, working directories,
+  models, timestamps, previews, option counts, and capabilities are never projected. Stops are
+  live-only and never appear in a snapshot, so a reconnect cannot invent one.
+- **Fan-out.** A *fleet recipient* is an existing push subscription that opted into fleet delivery
+  with a selection of remote sources. A remote event reaches a recipient only when the recipient's
+  owner equals the grant owner (checked against the feed's owner digest), that owner is still
+  allowlisted at the coordinator, the recipient selected the source, and the grant is active.
+  Local sessions keep reaching every subscribed recipient.
+- **Envelope.** Fleet recipients receive Push v3 for every message, local and remote; legacy
+  recipients keep strict Push v2 byte-for-byte. v3 has `attention`, `activity_stop`, `clear` (now
+  carrying `generation`), and `sync`. Every v3 message carries `seq: { epoch, n }` and
+  `badge: { count, complete }`. `epoch` is persisted by the coordinator and advances at every start
+  to `max(previous + 1, current Unix time in seconds)`, so even a recreated state file yields a newer
+  epoch; `n` counts messages per recipient within the epoch. A remote message names its source by
+  *binding*, the first 22 characters of
+  `base64url(SHA-256("omp-fleet-binding-v1" ‖ 0x00 ‖ id ‖ 0x00 ‖ origin))`; a local
+  message omits it. A binding is an identifier, not an authenticator, and changing a source's origin
+  changes it. `sync` lists the authoritative pending asks of the sources it names as fresh (at most
+  16 entries) and never shows a notification.
+- **Ordering.** The coordinator's receipt order defines `n`; no cross-host wall clock orders
+  anything. The worker keeps bounded, durable IndexedDB state: request tombstones retained for 30
+  minutes (longer than the 5-minute push TTL), per-session watermarks within an epoch, the highest
+  epoch seen, and the badge's `seq`. It drops a message from an older epoch; a `clear` records a
+  tombstone and closes only its exact source, instance, generation, and request; an `attention` is
+  dropped when its request is tombstoned or its session has a newer applied message; a stop is
+  dropped when its session has a newer applied message or a displayed attention; a badge applies
+  only with a newer `seq`. An attention that replaces a stop, or an older request whose clear has
+  not arrived, alerts again; a duplicate does not. After a coordinator restart it replays attention
+  for current asks, which the worker deduplicates against requests it already showed, then sends one
+  `sync` per recipient. After a source reconnect, the coordinator diffs the new snapshot into clears
+  and attentions. Neither path emits a stop. These rules live in one pure reducer in
+  `packages/protocol` with shared test vectors, used by the worker and the qualification harness.
+- **Coverage and badges.** Each selected source is `current`, `stale`, `unauthorized`,
+  `unsupported`, or `pending`; unselected sources are excluded. *Notifications enabled* (permission
+  and subscription) is reported separately from *All selected hosts covered* (every selected
+  source current). The badge counts known pending Control-capable asks, including a stale source's
+  last-known asks; a zero count with incomplete coverage shows the platform's badge flag instead of
+  clearing. Fleet "All clear" needs every selected source current and an empty reconciled set. A
+  stale source keeps its last-known alerts. When a grant becomes unauthorized or its source leaves
+  the configuration, the coordinator clears that source's alerts for the owner's devices and reports
+  the source as unauthorized, never as empty.
+- **Detail.** The coordinator applies detail before transport. In v3, Private shows fixed titles and
+  no body. Session and Preview show, for a remote session, the target's configured label and a
+  six-character opaque session suffix, never a title, working-directory label, preview, or path,
+  which the feed cannot carry anyway. A local session keeps the existing Push v2 Session detail
+  prefixed with `fleet.label`, because the coordinator observes it directly; Preview falls back to
+  Session for every fleet alert.
+- **Taps.** Notification data carries version, type, the optional binding, `instanceId`,
+  `generation`, and, for attention, `requestId`. A remote route adds `&source=<binding>`. The page
+  recomputes bindings from its client configuration; an unmatched binding shows the expired notice
+  and issues no capability. Otherwise the page fetches a fresh snapshot from that exact source,
+  checks generation, request, `inputRequired`, and access, and uses that source's ordinary launch
+  broker. A stop tap opens View only.
+- **Bounds.** At most 7 remote sources, 8 subscriptions, one feed per active grant, 32 grants at a
+  coordinator, 16 grants at a source, 256 queued feed events, 512 worker records, 8 concurrent push
+  sends, and 256 queued deliveries, where overflow drops attention and stops but never a clear. Feed
+  reconnects back off from 1 second to 5 minutes with ±20 % jitter; an authorization or unsupported
+  answer backs off for 5 minutes. Coordinator pulls ignore proxy environment variables, so the
+  credential only travels to the configured origin, and support archives exclude both state files.
+- **Persistence.** The coordinator's `<stateDir>/fleet-notifications.json` holds the epoch,
+  grants with their secrets, and recipient selections keyed by the SHA-256 of each endpoint; the
+  source's `<stateDir>/notification-grants.json` holds verifiers. Both are private, atomic,
+  versioned, and fail closed when corrupt. `push-state.json`, its VAPID key, the memory-only session
+  registry, and capability handling are unchanged.
+- **Versioning, migration, and rollback.** An existing subscription stays Push v2 home-only until
+  the page confirms that the active worker supports v3 and the user enables remote sources. Fleet
+  APIs are new routes, so an older gateway answers 404 and the page shows the source as
+  unsupported. A v3 worker in fleet mode still renders Push v2 messages as local alerts (tombstone
+  checked, badge count ignored), so a rollback keeps local alerts; the page returns the worker to
+  legacy mode once the coordinator stops offering fleet. Rolling back to a runtime older than
+  0.10.0 removes `notifications` from the active configuration through the existing private
+  pre-rollback backup and keeps both state files for a later re-upgrade.
+
+**Rejected alternatives:**
+
+- *Direct per-host subscriptions* (one service-worker registration per source at the PWA origin,
+  each subscribed with its host's own key, each host pushing directly). It removes the grant
+  credential and the coordinator dependency, but an installed iPhone Home Screen app with several
+  push-subscribed registrations is unproven on the available rigs; proving it needs a new billed
+  device-cloud journey on a custom candidate build. Every release would also requalify several
+  worker lifecycles in the Pixel and iPhone lanes, and the shared badge would need cross-worker
+  locking among several writers. Bounded result (2026-11-07): the packet's Android spike was not
+  run, with the founder's approval, because an Android-only result could not select this
+  alternative while the iPhone half stays unprovable within a bounded spike.
+- *Source-initiated forwarding.* It still needs snapshot reconciliation and adds source-side
+  retry, queue, and restart state. One pulled stream provides both the snapshot and live events.
+- A mesh, leader election, automatic coordinator failover, and VAPID key sharing are out of scope.
+
+**Consequences:**
+
+- Fleet alerts depend on the coordinator. While the home is asleep or down, no fleet alert is sent,
+  and a sleeping phone cannot learn that; the next foreground reconciliation shows stale coverage.
+  Install the PWA from an always-on gateway and list laptops as its sources. To move the home,
+  install from the new origin, enable alerts there, and disable alerts in the old installation,
+  which would otherwise keep sending its own local alerts.
+- A source that names a coordinator trusts it with the session identifiers and ask states of
+  enrolled owners. The credential reaches no other route. Revocation stops new sends at once;
+  pushes already accepted by a push service cannot be recalled.
+- WebKit may count clears and syncs, which display nothing, against its silent-push allowance, as
+  it already could for Push v2 clears. Delivery stays best effort.
