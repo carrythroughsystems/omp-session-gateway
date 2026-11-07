@@ -74,6 +74,25 @@ function shellStateExpression(expectedAppAsset: string | undefined): string {
 })()`;
 }
 const SHELL_STATE = /^(?:no-registration|sw-installing|sw-waiting|sw-no-active|sw-activating|sw-active-other|uncontrolled|controller-not-active|no-app-asset|asset-mismatch|asset-not-cached|ready|evaluation-error|shell-caches:(?:0|[1-9][0-9]{0,9}))$/u;
+/**
+ * Closed-category state of a collaboration shell that did not connect: no copy, URL, or identifier.
+ * The chip's fixed unavailability copy separates a lost relay from a lost gateway.
+ */
+export const COLLAB_SHELL_STATE = `(() => {
+  try {
+    const chip = document.querySelector(".conn-chip");
+    const state = chip instanceof HTMLElement ? chip.dataset.state : undefined;
+    const text = chip?.textContent ?? "";
+    return [
+      "client=" + (location.pathname === "/client/"),
+      "chip=" + (chip === null ? "absent" : ["connecting", "connected", "reconnecting", "forbidden", "offline"].includes(state) ? state : "other"),
+      "unavailable=" + (text.includes("Relay unavailable") ? "relay" : text.includes("Gateway unavailable") ? "gateway" : "none"),
+      "composer=" + (document.querySelector(".sh-composer-input") instanceof HTMLTextAreaElement),
+      "online=" + (navigator.onLine === true),
+    ].join(",");
+  } catch { return "evaluation-error"; }
+})()`;
+const COLLAB_STATE = /^(?:evaluation-error|client=(?:true|false),chip=(?:absent|connecting|connected|reconnecting|forbidden|offline|other),unavailable=(?:relay|gateway|none),composer=(?:true|false),online=(?:true|false))$/u;
 
 async function pause(milliseconds: number): Promise<void> {
   const paused = Promise.withResolvers<void>();
@@ -88,12 +107,14 @@ export async function runCollaborationJourney(
 ): Promise<CollaborationJourneyResult> {
     await page.navigate(`${options.origin}/`);
 
-    const waitFor = async (name: string, expression: string, attempts = 60): Promise<void> => {
+    const waitFor = async (name: string, expression: string, attempts = 60, diagnostic?: string): Promise<void> => {
       for (let attempt = 0; attempt < attempts; attempt += 1) {
         if (await page.evaluate<boolean>(expression).catch(() => false)) return;
         await pause(500);
       }
-      throw new Error(`${name} did not become ready`);
+      if (diagnostic === undefined) throw new Error(`${name} did not become ready`);
+      const state = await page.evaluate<unknown>(diagnostic).catch(() => undefined);
+      throw new Error(`${name} did not become ready (${typeof state === "string" && COLLAB_STATE.test(state) ? state : "state-unreadable"})`);
     };
 
     options.announce?.("installed shell");
@@ -144,6 +165,7 @@ export async function runCollaborationJourney(
       "View collaboration shell",
       `location.pathname === "/client/" && document.querySelector(".conn-chip")?.dataset.state === "connected" && document.querySelector(".sh-composer-input") instanceof HTMLTextAreaElement`,
       120,
+      COLLAB_SHELL_STATE,
     );
     const view = await page.evaluate<{ readOnly: boolean; controlVisible: boolean; rootMounted: boolean }>(JOURNEY_VIEW_STATE);
     if (!view.readOnly || !view.controlVisible || !view.rootMounted) throw new Error("View did not remain read-only");
@@ -161,6 +183,7 @@ export async function runCollaborationJourney(
       "Control collaboration shell",
       `document.querySelector(".conn-chip")?.dataset.state === "connected" && document.querySelector(".shell-control")?.hidden === true && document.querySelector(".sh-composer-input") instanceof HTMLTextAreaElement && !document.querySelector(".sh-composer-input").disabled`,
       120,
+      COLLAB_SHELL_STATE,
     );
     const control = await page.evaluate<{ writable: boolean; sendInitiallyDisabled: boolean }>(`(() => {
       const editor = document.querySelector(".sh-composer-input");
