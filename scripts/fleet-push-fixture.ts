@@ -144,7 +144,8 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
   }
   if (state === undefined) {
     if (operation !== "restore") throw new Error("fleet fixture owner unavailable");
-    // A pre-owner interruption owns only an empty directory.
+    // Before publication, only this exact pending owner file can belong to prepare.
+    await rm(`${statePath}.tmp`, { force: true });
     await rmdir(root).catch(error => { if (!absent(error)) throw error; });
     return;
   }
@@ -216,9 +217,8 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
       "stop() {", "  trap '' TERM INT", "  trap - EXIT", '  child=${child:-$!}',
       '  if [ -n "$child" ]; then',
       `    printf %s "$child" > ${quote(`${childPidPath}.tmp`)} && mv ${quote(`${childPidPath}.tmp`)} ${quote(childPidPath)}`,
-      `    case "$(ps -ww -p "$child" -o command=)" in`,
-      `      ${quote(sourceCommand)}) kill -TERM "$child" 2>/dev/null ;;`,
-      "    esac", '    wait "$child" 2>/dev/null', "  fi", "  exit", "}",
+      // The parent's own unreaped child cannot be PID-reused, including before env execs Bun.
+      '    kill -TERM "$child" 2>/dev/null', '    wait "$child" 2>/dev/null', "  fi", "  exit", "}",
       "trap stop TERM INT EXIT",
       `printf %s $$ > ${quote(`${sourcePidPath}.tmp`)} && mv ${quote(`${sourcePidPath}.tmp`)} ${quote(sourcePidPath)} || exit 1`,
       `env -u XDG_RUNTIME_DIR HOME=${quote(home)} XDG_CONFIG_HOME=${quote(join(home, ".config"))} XDG_STATE_HOME=${quote(join(home, ".local/state"))} ${quote(state.bun)} ${quote(state.cli)} serve &`,

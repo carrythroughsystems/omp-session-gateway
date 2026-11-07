@@ -281,6 +281,8 @@ ask while the coordinator is down, then proves its old alert closed while the lo
 unchanged, before arming a new remote ask. The expired-host replay must close before re-baselining.
 The remote sink sweep runs while the remote session launched by the PWA's real Control tap is
 still alive, using that same generation's Control capability and the detectable positive control;
+two identical-generation Control launches must return equal capability bytes in page memory
+before scanning. An unstable capability is typed invalid evidence; no value leaves the page.
 `fleet_sinks_verified` records those closed observations after the other fleet checks.
 Remote notification ownership includes the origin-bound fleet binding; local tags stay unchanged.
 Private alerts intentionally look identical: concurrent ownership, privacy and deduplication use
@@ -291,6 +293,9 @@ session-leader pattern. Its TERM/EXIT trap precedes spawning the daemon, and ato
 identify both processes. Stop proves the supervisor, child and backend listener gone within the
 30-second bound before removing their PID files. The restoration owner is fsynced and atomically
 published (including its parent directory) before any coordinator config/service/Serve mutation.
+The supervisor signals its own unreaped child even before exec; external cleanup still verifies
+PID/command ownership before signalling. Pre-owner recovery removes only `owner.json.tmp`, then
+requires the epoch directory to be empty.
 DevTools admission bounds both pending HTTP reads and retries. A worker-only observation may
 reconnect once after contained transport loss, but never wakes/navigates the cold PWA, re-arms
 lost observer state, or replays an evaluated mutation. Missing workers and product assertions
