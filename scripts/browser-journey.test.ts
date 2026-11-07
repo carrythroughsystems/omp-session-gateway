@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { JOURNEY_VIEW_STATE, LEAK_SINKS, runCollaborationJourney, vendorLeakControlExpression, type JourneyPage } from "./browser-journey.ts";
+import { COLLAB_SHELL_STATE, JOURNEY_VIEW_STATE, LEAK_SINKS, runCollaborationJourney, vendorLeakControlExpression, type JourneyPage } from "./browser-journey.ts";
 
 describe("vendor-safe application asset attestation", () => {
   test.each([undefined, "/assets/app.abc123.js"])("compares the expected asset in-page without returning a pathname to the vendor (expected=%s)", async expected => {
@@ -140,6 +140,46 @@ describe("vendor-safe application asset attestation", () => {
         : "installed application shell did not become ready (evaluation-error; 0 of 120 reads failed)");
       expect(String(error)).not.toContain(marker);
       expect((error as Error).cause).toBeUndefined();
+    } finally { timer.mockRestore(); }
+  });
+  const VIEW_READY = `location.pathname === "/client/" && document.querySelector(".conn-chip")`;
+  const connectingPage = (diagnose: (expression: string) => unknown): JourneyPage => ({
+    navigate: async () => {},
+    evaluate: async <T>(expression: string): Promise<T> => {
+      if (expression === COLLAB_SHELL_STATE) return diagnose(expression) as T;
+      if (expression.includes("serviceWorker")) return "ready" as T;
+      return (!expression.startsWith(VIEW_READY)) as T;
+    },
+  });
+  test.each([
+    ["Relay unavailable", "reconnecting", true, "client=true,chip=reconnecting,unavailable=relay,composer=true,online=true"],
+    ["Gateway unavailable", "reconnecting", false, "client=true,chip=reconnecting,unavailable=gateway,composer=true,online=false"],
+    ["Connecting…", "connecting", true, "client=true,chip=connecting,unavailable=none,composer=true,online=true"],
+    ["SYNTHETIC_CHIP_COPY", "SYNTHETIC_CHIP_STATE", true, "client=true,chip=other,unavailable=none,composer=true,online=true"],
+  ] as const)("a View shell that never connects reports only its closed state (%s)", async (copy, state, online, expected) => {
+    class FakeElement { constructor(readonly dataset: Record<string, string>, readonly textContent: string) {} }
+    class FakeTextArea {}
+    const document = { querySelector: (selector: string) => selector === ".conn-chip" ? new FakeElement({ state }, copy)
+      : selector === ".sh-composer-input" ? new FakeTextArea() : null };
+    const timer = immediateTimers();
+    try {
+      const error = await runCollaborationJourney(connectingPage(expression => new Function(
+        "document", "location", "navigator", "HTMLElement", "HTMLTextAreaElement", `return ${expression};`,
+      )(document, { pathname: "/client/" }, { onLine: online }, FakeElement, FakeTextArea)), {
+        origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-COLLAB-TIMEOUT",
+      }).catch((error: unknown) => error);
+      expect((error as Error).message).toBe(`View collaboration shell did not become ready (${expected})`);
+      expect(String(error)).not.toContain("SYNTHETIC_CHIP");
+    } finally { timer.mockRestore(); }
+  });
+  test.each(["SYNTHETIC_PAGE_TEXT", undefined])("a page-controlled collaboration state is discarded (%s)", async value => {
+    const timer = immediateTimers();
+    try {
+      const error = await runCollaborationJourney(connectingPage(() => { if (value === undefined) throw new Error("SYNTHETIC_TRANSPORT"); return value; }), {
+        origin: "https://fixture.invalid", label: "fixture", promptMarker: "SYNTHETIC-COLLAB-TIMEOUT",
+      }).catch((error: unknown) => error);
+      expect((error as Error).message).toBe("View collaboration shell did not become ready (state-unreadable)");
+      expect(String(error)).not.toContain("SYNTHETIC_");
     } finally { timer.mockRestore(); }
   });
 });
