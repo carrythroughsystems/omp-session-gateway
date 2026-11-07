@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { executeFixture, type FixtureExecutor } from "./push-qualification-fixture.ts";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 import { findIdentifierLeaks } from "./identifier-leak-rules.ts";
@@ -57,7 +57,7 @@ export function fleetFixtureDiagnostic(error: unknown): { message: string; stack
 export async function fleetPushFixture(operation: FleetFixtureOperation, root: string, epoch: string, origin: string,
   commit: string, execute: FixtureExecutor = executeFixture, homeDirectory = homedir()): Promise<void> {
   if (root !== resolve(root) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(epoch) ||
-    !/^[0-9a-f]{40}$/u.test(commit) || !root.endsWith(`/fleet-${epoch}`)) throw new Error("invalid fleet fixture identity");
+    !/^[0-9a-f]{40}$/u.test(commit) || basename(root) !== `fleet-${epoch}`) throw new Error("invalid fleet fixture identity");
   const source = fleetPushSource(origin);
   const statePath = join(root, "owner.json"), home = join(root, "home");
   const configPath = join(homeDirectory, ".config/omp-session-gateway/config.json");
@@ -76,7 +76,9 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
       value.Web?.[serveKey]?.Handlers?.["/"]?.Proxy === `http://127.0.0.1:${FLEET_PUSH_BACKEND_PORT}`;
   };
   const service = async (start: boolean, state: FixtureState) => {
-    const domain = `gui/${process.getuid!()}`;
+    const uid = (await run(["id", "-u"])).trim();
+    if (!/^(?:0|[1-9]\d*)$/u.test(uid)) throw new Error("fleet service account identity unavailable");
+    const domain = `gui/${uid}`;
     const status = await execute(["launchctl", "print", `${domain}/omp-session-gateway`]);
     if (start && status.exitCode !== 0) await run(["launchctl", "bootstrap", domain, state.plist]);
     if (!start && status.exitCode === 0) await run(["launchctl", "bootout", domain, state.plist]);
@@ -99,7 +101,7 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     const args = JSON.parse(await run(["plutil", "-extract", "ProgramArguments", "json", "-o", "-", plist])) as unknown;
     if (!Array.isArray(args) || typeof args[0] !== "string" || typeof args[1] !== "string" || args[2] !== "serve") throw new Error("fleet candidate service identity unavailable");
     const cli = args[1], bun = args[0];
-    if (!cli.endsWith("/apps/gateway/src/cli.js")) throw new Error("fleet requires an installed candidate runtime");
+    if (!cli.endsWith(`${sep}${join("apps", "gateway", "src", "cli.js")}`)) throw new Error("fleet requires an installed candidate runtime");
     const manifest = JSON.parse(await readFile(join(cli, "../../../..", "release-info.json"), "utf8"));
     if (manifest.sourceCommit !== commit) throw new Error("fleet gateway is not the lane candidate");
     // Never copy or overwrite a pre-existing credential ledger, even an unused one.
@@ -122,8 +124,12 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
       await owner.sync();
     } finally { await owner.close(); }
     await rename(pendingOwner, statePath);
-    const directory = await open(root, "r");
-    try { await directory.sync(); } finally { await directory.close(); }
+    // Same NTFS boundary as config.ts writePrivateTextFile: directory handles cannot be
+    // fsynced on Windows. The physical macOS host always requires this directory sync.
+    if (process.platform !== "win32") {
+      const directory = await open(root, "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
     await mkdir(join(home, ".config/omp-session-gateway"), { recursive: true, mode: 0o700 });
     await mkdir(join(home, ".omp/run/collab-hosts"), { recursive: true, mode: 0o700 });
     await atomic(sourceConfigPath, JSON.stringify({ http: { hostname: "127.0.0.1", port: FLEET_PUSH_BACKEND_PORT,

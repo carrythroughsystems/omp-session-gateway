@@ -30,6 +30,7 @@ async function fixture(options: { orphanChild?: boolean; listenerRemains?: boole
   const execute: FixtureExecutor = async argv => {
     const command = argv.join(" "); effects.push(command);
     if (command.includes(fail) && fail !== "") throw new Error("synthetic interruption");
+    if (argv[0] === "id") return { exitCode: 0, stdout: "501\n" };
     if (argv[0] === "plutil") return { exitCode: 0, stdout: JSON.stringify([process.execPath, cli, "serve"]) };
     if (argv[0] === "lsof") return child || spawned && options.listenerRemains ?
       { exitCode: 0, stdout: "synthetic owned backend" } : { exitCode: 1, stdout: "" };
@@ -94,6 +95,7 @@ test("fleet fixture uses the candidate bytes and restores exact config and Serve
     expect(f.effects.some(command => command.includes("nohup python3") && command.includes("os.setsid()") &&
       command.includes('os.execv("/bin/sh"'))).toBe(true);
     expect(f.state()).toMatchObject({ running: true, source: true });
+    expect(f.effects.some(command => command.includes("launchctl bootstrap gui/501 "))).toBe(true);
     await f.run("source-down"); expect(f.state().source).toBe(false);
     await expect(readFile(join(f.root, "source.pid"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(join(f.root, "source-child.pid"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -157,6 +159,28 @@ test("fleet preparation never adopts an existing unowned directory", async () =>
     await expect(f.run("restore")).rejects.toMatchObject({ code: "ENOTEMPTY" });
     expect(await readFile(f.config, "utf8")).toBe(f.original);
     expect(f.state()).toEqual({ mapping: {}, running: true, source: false });
+  } finally { await f.dispose(); }
+});
+
+test("fleet fixture requires a canonical native path with the exact epoch basename", async () => {
+  const f = await fixture();
+  try {
+    for (const root of [join(f.home, `other-fleet-${epoch}`), join(f.root, "child"), `${f.root}/../fleet-${epoch}`]) {
+      await expect(fleetPushFixture("prepare", root, epoch, origin, commit, f.execute, f.home)).rejects.toThrow("invalid fleet fixture identity");
+    }
+    expect(f.effects).toEqual([]);
+    await f.run("prepare"); await f.run("restore");
+  } finally { await f.dispose(); }
+});
+
+test("fleet service mutations require the executor's verified numeric account identity", async () => {
+  const f = await fixture();
+  const execute: FixtureExecutor = argv => argv[0] === "id" ? Promise.resolve({ exitCode: 0, stdout: "unverified-account" }) : f.execute(argv);
+  try {
+    await expect(fleetPushFixture("prepare", f.root, epoch, origin, commit, execute, f.home)).rejects.toThrow("fleet service account identity unavailable");
+    expect(f.effects.some(command => command.includes("launchctl bootout") || command.includes("tailscale serve --bg"))).toBe(false);
+    expect(await readFile(f.config, "utf8")).toBe(f.original);
+    expect(JSON.parse(await readFile(join(f.root, "owner.json"), "utf8")).epoch).toBe(epoch);
   } finally { await f.dispose(); }
 });
 
@@ -265,7 +289,7 @@ test.each(["foreign-child", "backend"] as const)("fleet restoration retains owne
   } finally { clock.mockRestore(); sleep.mockRestore(); await f.dispose(); }
 });
 
-test.each(["durable", "file-sync-fails", "directory-sync-fails"] as const)(
+test.each(["durable", "file-sync-fails"] as const)(
   "fleet ownership is fsynced and renamed before coordinator mutations (%s)", async scenario => {
     const f = await fixture(), events: string[] = [], actualOpen = fs.open, actualRename = fs.rename;
     const opened = spyOn(fs, "open").mockImplementation(async (path, flags, mode) => {
@@ -286,7 +310,7 @@ test.each(["durable", "file-sync-fails", "directory-sync-fails"] as const)(
     });
     const execute: FixtureExecutor = async argv => {
       if (argv[0] === "launchctl" && argv[1] === "bootout" || argv[0] === "tailscale" && argv[2] !== "status") {
-        expect(events).toEqual(["file-sync", "owner-rename", "directory-sync"]);
+        expect(events).toEqual(process.platform === "win32" ? ["file-sync", "owner-rename"] : ["file-sync", "owner-rename", "directory-sync"]);
         expect(JSON.parse(await readFile(join(f.root, "owner.json"), "utf8")).config).toBe(f.original);
       }
       return f.execute(argv);
@@ -303,3 +327,18 @@ test.each(["durable", "file-sync-fails", "directory-sync-fails"] as const)(
       }
     } finally { renamed.mockRestore(); opened.mockRestore(); await f.dispose(); }
   });
+
+test.skipIf(process.platform === "win32")("fleet physical POSIX host refuses mutation after directory fsync failure", async () => {
+  const f = await fixture(), actualOpen = fs.open;
+  const opened = spyOn(fs, "open").mockImplementation(async (path, flags, mode) => {
+    const handle = await actualOpen(path, flags, mode);
+    if (path === f.root) handle.sync = async () => { throw new Error("synthetic directory fsync failure"); };
+    return handle;
+  });
+  try {
+    await expect(f.run("prepare")).rejects.toThrow("synthetic directory fsync failure");
+    expect(f.effects.some(command => command.includes("launchctl bootout") || command.includes("tailscale serve --bg"))).toBe(false);
+    expect(await readFile(f.config, "utf8")).toBe(f.original);
+    expect(JSON.parse(await readFile(join(f.root, "owner.json"), "utf8")).epoch).toBe(epoch);
+  } finally { opened.mockRestore(); await f.dispose(); }
+});
