@@ -2376,7 +2376,12 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   same way. Neither path emits a stop or repeats an alert. Opening the app reconciles from fresh
   snapshots of each source, but the page first captures the worker's push count: only alerts whose
   session received no push since then may be closed, and the page's badge applies only if no push
-  arrived at all. These rules live in one pure reducer in `packages/protocol` with shared test
+  arrived at all. The page sends retained asks separately for non-fresh sources; the worker counts
+  only those not known cleared or replaced, together with fresh pending asks, and keeps the page's
+  completeness flag. Replaced known requests receive the same bounded tombstones as clears;
+  a bounded request map also remembers fresh page observations that never produced an alert,
+  without suppressing their first push. It uses the same 30-minute retention as shown requests.
+  These rules live in one pure reducer in `packages/protocol` with shared test
   vectors, used by the worker and the qualification harness.
 - **Coverage and badges.** Each selected source is `current`, `stale`, `unauthorized`,
   `unsupported`, or `pending`; unselected sources are excluded. *Notifications enabled* (permission

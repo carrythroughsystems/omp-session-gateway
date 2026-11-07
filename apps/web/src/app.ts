@@ -842,9 +842,11 @@ async function reconcileFleetNotificationSnapshot(probe: boolean): Promise<void>
       }
     }),
   ]);
-  const count = [...selectedKeys].reduce((sum, key) => sum + (knownNotificationAsks.get(key)?.length ?? 0), 0);
+  const retained = [...selectedKeys].flatMap(key => fresh.includes(bindings.get(key) ?? "local")
+    ? [] : knownNotificationAsks.get(key) ?? []);
+  const count = pending.length + retained.length;
   notificationRegistration?.active?.postMessage(parseFleetReconcileMessage({
-    type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received }, fresh, pending,
+    type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received }, fresh, pending, retained,
     badge: { count, complete: notificationCoverageComplete() && fresh.length === selected.length + 1 },
   }));
 }

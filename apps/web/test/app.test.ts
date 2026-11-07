@@ -5266,8 +5266,8 @@ describe("fleet background notifications", () => {
         permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
         initialSessions: [], remoteSessions: [current], fleetResponse: api.respond, suffix: `fleet-badge-exclusion-${state}`,
       });
-      const reconciles = (): { badge: { count: number; complete: boolean } }[] => harness.workerMessages.filter(message =>
-        (message as { type: string }).type === "omp-notification-reconcile") as { badge: { count: number; complete: boolean } }[];
+      const reconciles = (): { fresh: string[]; retained: unknown[]; badge: { count: number; complete: boolean } }[] => harness.workerMessages.filter(message =>
+        (message as { type: string }).type === "omp-notification-reconcile") as ReturnType<typeof reconciles>;
       try {
         await settleUntil(() => reconciles().at(-1)?.badge.count === 1, 1_000);
         const before = reconciles().length;
@@ -5276,6 +5276,11 @@ describe("fleet background notifications", () => {
         harness.elements.settingsButton.dispatchEvent(new Event("click"));
         await settleUntil(() => reconciles().length > before, 1_000);
         expect(reconciles().at(-1)?.badge).toEqual({ count: state === "stale" ? 1 : 0, complete: state === "deselected" });
+        expect(reconciles().at(-1)?.retained).toEqual(state === "stale" ? [{
+          source: await fleetSourceBinding("remote", "https://remote.example"),
+          instanceId: current.instanceId, generation: current.generation, requestId: current.ask!.requestId,
+        }] : []);
+        expect(reconciles().at(-1)?.fresh).toEqual(["local"]);
       } finally { harness.setVisibility("hidden"); }
     });
   }
@@ -5647,7 +5652,7 @@ describe("fleet background notifications", () => {
       pending: [
         { instanceId: current.instanceId, generation: 1, requestId: current.ask!.requestId },
         { source: await fleetSourceBinding("remote", "https://remote.example"), instanceId: current.instanceId, generation: 1, requestId: current.ask!.requestId },
-      ], badge: { count: 2, complete: true },
+      ], retained: [], badge: { count: 2, complete: true },
     });
     harness.setVisibility("hidden");
   });

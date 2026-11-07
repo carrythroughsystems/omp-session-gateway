@@ -1076,7 +1076,7 @@ export function parseFleetPushMessage(value: unknown, remoteLabels?: ReadonlyMap
 /** The page's authoritative snapshot handed to the worker; `asOf` is the worker sequence it captured first. */
 export function parseFleetReconcileMessage(value: unknown): FleetReconcileMessage {
   const record = requireRecord(value);
-  requireExactKeys(record, ["type", "version", "asOf", "fresh", "pending", "badge"]);
+  requireExactKeys(record, ["type", "version", "asOf", "fresh", "pending", "retained", "badge"]);
   if (record.type !== "omp-notification-reconcile" || record.version !== FLEET_PUSH_VERSION) throw new ProtocolValidationError();
   const asOf = requireRecord(record.asOf);
   requireExactKeys(asOf, ["received"]);
@@ -1086,12 +1086,17 @@ export function parseFleetReconcileMessage(value: unknown): FleetReconcileMessag
   if (!Array.isArray(record.pending) || record.pending.length > MAX_FLEET_BADGE_COUNT) throw new ProtocolValidationError();
   const pending = record.pending.map(parseFleetPendingAsk);
   if (pending.some(ask => !fresh.includes(ask.source ?? LOCAL_FLEET_SOURCE_ID))) throw new ProtocolValidationError();
+  if (!Array.isArray(record.retained) || pending.length + record.retained.length > MAX_FLEET_BADGE_COUNT) throw new ProtocolValidationError();
+  const retained = record.retained.map(parseFleetPendingAsk);
+  if (retained.some(ask => fresh.includes(ask.source ?? LOCAL_FLEET_SOURCE_ID))) throw new ProtocolValidationError();
+  if (new Set([...fresh, ...retained.map(ask => ask.source ?? LOCAL_FLEET_SOURCE_ID)]).size > MAX_FLEET_SOURCES) throw new ProtocolValidationError();
   return {
     type: "omp-notification-reconcile",
     version: FLEET_PUSH_VERSION,
     asOf: { received: requireInteger(asOf.received, 0) },
     fresh,
     pending,
+    retained,
     badge: parseFleetBadge(record.badge),
   };
 }

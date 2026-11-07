@@ -85,6 +85,7 @@ function run(scenario: (typeof vectors.scenarios)[number]) {
         asOf: { received: captured },
         fresh: (reconcile.fresh as string[]).map(token => token === "local" ? token : binding(token)!),
         pending: reconcile.pending,
+        retained: reconcile.retained ?? [],
         badge: { count, complete },
       });
       apply(reduceFleetReconcile(state, message, surface, now));
@@ -109,6 +110,72 @@ describe("fleet ordering vectors", () => {
 });
 
 describe("fleet ordering bounds", () => {
+  test("dismissed replacements still exclude stale asks, but retain the current request", () => {
+    const ask = { source: aliases.studio!, instanceId: "aaaa1111bbbb2222", generation: 1, requestId: "req_retained_000b" };
+    const original = reduceFleetPush(EMPTY_FLEET_WORKER_STATE, fleetMessage({
+      type: "attention", ...ask, requestId: "req_retained_000a", seq: [1, 1], badge: [1, true],
+    }), [], 0);
+    const pushed = reduceFleetPush(original.state, fleetMessage({
+      type: "attention", ...ask, seq: [1, 2], badge: [1, true],
+    }), [], 1);
+    const state = JSON.parse(JSON.stringify(pushed.state)) as FleetWorkerState;
+    for (const [requestId, count] of [["req_retained_000a", 0], [ask.requestId, 1]] as const) {
+      const result = reduceFleetReconcile(state, {
+        asOf: { received: state.received }, fresh: ["local"], pending: [], retained: [{ ...ask, requestId }],
+        badge: { count: 1, complete: false },
+      }, [], 1);
+      expect(result.effects).toEqual([{ kind: "badge", count, complete: false }]);
+    }
+  });
+
+  test("a different older pushed ask does not exclude a genuinely pending last-known request", () => {
+    const ask = { source: aliases.studio!, instanceId: "aaaa1111bbbb2222", generation: 1, requestId: "req_retained_000a" };
+    const pushed = reduceFleetPush(EMPTY_FLEET_WORKER_STATE, fleetMessage({
+      type: "attention", ...ask, seq: [1, 1], badge: [1, true],
+    }), [], 0);
+    const result = reduceFleetReconcile(pushed.state, {
+      asOf: { received: 1 }, fresh: ["local"], pending: [],
+      retained: [{ ...ask, requestId: "req_retained_000b" }], badge: { count: 1, complete: false },
+    }, [], 1);
+    expect(result.effects).toEqual([{ kind: "badge", count: 1, complete: false }]);
+  });
+
+  test("replacement tombstones include requests known only from an earlier fresh page snapshot", () => {
+    const ask = { source: aliases.studio!, instanceId: "aaaa1111bbbb2222", generation: 1, requestId: "req_retained_000a" };
+    const snapshot = reduceFleetReconcile(EMPTY_FLEET_WORKER_STATE, {
+      asOf: { received: 0 }, fresh: [ask.source], pending: [ask], retained: [], badge: { count: 1, complete: true },
+    }, [], 0);
+    const replacement = reduceFleetPush(snapshot.state, fleetMessage({
+      type: "attention", ...ask, requestId: "req_retained_000b", seq: [1, 1], badge: [1, true],
+    }), [], 1);
+    const state = JSON.parse(JSON.stringify(replacement.state)) as FleetWorkerState;
+    const result = reduceFleetReconcile(state, {
+      asOf: { received: 1 }, fresh: ["local"], pending: [], retained: [ask], badge: { count: 1, complete: false },
+    }, [], 2);
+    expect(result.effects).toEqual([{ kind: "badge", count: 0, complete: false }]);
+  });
+
+  test("fresh snapshot request knowledge stays bounded", () => {
+    const pending = Array.from({ length: MAX_FLEET_WORKER_RECORDS + 64 }, (_, n) => ({
+      instanceId: `inst${String(n).padStart(8, "0")}`, generation: 1, requestId: `req_observed_${String(n).padStart(8, "0")}`,
+    }));
+    const result = reduceFleetReconcile(EMPTY_FLEET_WORKER_STATE, {
+      asOf: { received: 0 }, fresh: ["local"], pending, retained: [], badge: { count: pending.length, complete: true },
+    }, [], 0);
+    expect(Object.keys(result.state.observed)).toHaveLength(MAX_FLEET_WORKER_RECORDS);
+  });
+
+  test("observing a fresh pending ask never suppresses its first pushed alert", () => {
+    const ask = { source: aliases.studio!, instanceId: "aaaa1111bbbb2222", generation: 1, requestId: "req_observed_000a" };
+    const snapshot = reduceFleetReconcile(EMPTY_FLEET_WORKER_STATE, {
+      asOf: { received: 0 }, fresh: [ask.source], pending: [ask], retained: [], badge: { count: 1, complete: true },
+    }, [], 0);
+    const result = reduceFleetPush(snapshot.state, fleetMessage({
+      type: "attention", ...ask, seq: [1, 1], badge: [1, true],
+    }), [], 1);
+    expect(result.effects).toContainEqual({ kind: "show", tag: fleetNotificationTag(ask.source, ask.instanceId), renotify: false });
+  });
+
   test("tags keep the Push v2 form for local sessions and qualify remote ones", () => {
     expect(fleetNotificationTag(undefined, "aaaa1111bbbb2222")).toBe("omp-attention-aaaa1111bbbb2222");
     expect(fleetNotificationTag(aliases.studio, "aaaa1111bbbb2222")).toBe(`omp-attention-${aliases.studio}-aaaa1111bbbb2222`);
@@ -138,7 +205,7 @@ describe("fleet ordering bounds", () => {
 
   test("a reconciliation claiming more receipts than the worker has seen changes nothing", () => {
     const message = parseFleetReconcileMessage({
-      type: "omp-notification-reconcile", version: 3, asOf: { received: 5 }, fresh: ["local"], pending: [], badge: { count: 0, complete: true },
+      type: "omp-notification-reconcile", version: 3, asOf: { received: 5 }, fresh: ["local"], pending: [], retained: [], badge: { count: 0, complete: true },
     });
     const result = reduceFleetReconcile(EMPTY_FLEET_WORKER_STATE, message, [], 0);
     expect(result.state).toBe(EMPTY_FLEET_WORKER_STATE);

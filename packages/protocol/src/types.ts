@@ -378,7 +378,7 @@ interface FleetSessionPush {
   readonly badge: FleetBadge;
 }
 
-/** One pending ask in a page's authoritative snapshot; `source` absent means the coordinator's own. */
+/** One known pending ask; `source` absent means the coordinator's own. */
 export interface FleetPendingAsk {
   readonly source?: string;
   readonly instanceId: string;
@@ -413,6 +413,8 @@ export interface FleetReconcileMessage {
   /** `local` or remote bindings whose pending sets below are complete and authoritative. */
   readonly fresh: readonly string[];
   readonly pending: readonly FleetPendingAsk[];
+  /** Last-known asks of selected non-fresh sources; never authoritative for closing alerts. */
+  readonly retained: readonly FleetPendingAsk[];
   readonly badge: FleetBadge;
 }
 

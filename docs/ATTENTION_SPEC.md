@@ -258,7 +258,10 @@ reconciles from fresh snapshots of each source, but never closes an alert, or ch
 on the strength of a snapshot older than a push the phone received while the app was loading.
 
 **Badge and All clear.** The badge counts known pending Control-capable asks across selected hosts,
-including an unreachable host's last-known asks. When the count is zero but a selected host is not
+including an unreachable host's last-known asks, except requests the worker already knows were
+cleared or replaced. Foreground reconciliation sends those retained asks separately from fresh
+snapshots, so a host becoming unreachable cannot resurrect an answered ask's badge.
+When the count is zero but a selected host is not
 `Covered`, the badge shows the platform's plain marker instead of clearing. The directory's fleet
 `All clear` appears only when every selected host is `Covered` and none has a pending ask;
 otherwise it shows known work with the unavailable hosts named.

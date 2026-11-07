@@ -234,7 +234,7 @@ describe("fleet vectors through the actual worker listeners and durable store", 
           const delivery = workerMessage({
             type: "omp-notification-reconcile", version: 3, asOf: { received: captured },
             fresh: (snapshot.fresh as string[]).map(token => token === "local" ? token : vectorBinding(token)),
-            pending: snapshot.pending, badge: { count, complete },
+            pending: snapshot.pending, retained: snapshot.retained ?? [], badge: { count, complete },
           });
           for (let turn = 0; turn < 60; turn++) await Promise.resolve();
           jest.runAllTimers();
@@ -258,6 +258,22 @@ describe("fleet vectors through the actual worker listeners and durable store", 
       for (const field of ["title", "body", "endpoint", "capability", "verifier", "secret"]) expect(stored).not.toContain(`\"${field}\"`);
     });
   }
+
+  test("upgrading persisted ordering state preserves clears without a fresh-snapshot request map", async () => {
+    const ask = { source: vectorBindings.studio, instanceId: "aaaa1111bbbb2222", generation: 1, requestId: "req_upgrade_0000a" };
+    await settledPush({ ...ask, version: 3, type: "clear", seq: { epoch: 1, n: 1 }, badge: { count: 0, complete: true } });
+    const { observed: _observed, ...oldState } = database.values.get("worker") as Record<string, unknown>;
+    database.values.set("worker", oldState);
+    await restartWorker();
+    expect(await workerMessage({ type: "omp-notification-support-request", version: 3 }))
+      .toEqual({ type: "omp-notification-support-response", version: 3, received: 1 });
+    await workerMessage({
+      type: "omp-notification-reconcile", version: 3, asOf: { received: 1 },
+      fresh: ["local"], pending: [], retained: [ask], badge: { count: 1, complete: false },
+    });
+    expect(badgeState.current).toEqual([0, false]);
+    expect(database.values.get("worker")).toMatchObject({ ...oldState, observed: {} });
+  });
 
   test("v3 support captures the serialized receipt count and rejects malformed handshakes", async () => {
     await settledPush({

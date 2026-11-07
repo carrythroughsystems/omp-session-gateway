@@ -120,7 +120,7 @@
         { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_reconcile_00a", "seq": [2, 1], "badge": [1, true] } },
         { "push": { "type": "attention", "source": "laptop", "instanceId": "cccc3333dddd4444", "requestId": "req_reconcile_00b", "seq": [2, 3], "badge": [2, true] } },
         { "capture": true },
-        { "reconcile": { "fresh": ["local", "studio"], "pending": [], "badge": [1, false] } },
+        { "reconcile": { "fresh": ["local", "studio"], "pending": [], "retained": [{ "source": "Zm7JF6omGejLZ9M1ygWBi2", "instanceId": "cccc3333dddd4444", "generation": 1, "requestId": "req_reconcile_00b" }], "badge": [1, false] } },
         { "push": { "type": "attention", "source": "studio", "instanceId": "eeee5555ffff6666", "requestId": "req_reconcile_00c", "seq": [2, 2], "badge": [5, true] } }
       ],
       "expect": {
@@ -149,6 +149,51 @@
         { "reconcile": { "fresh": ["local"], "pending": [], "badge": [0, true] } }
       ],
       "expect": { "displayed": ["omp-attention-cccc3333dddd4444|attention|req_mixed_snap_0b"], "badge": [2, true], "alerts": 2 }
+    },
+    {
+      "name": "a clear before receipt capture cannot be undone by a stale retained ask after restart",
+      "steps": [
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_retained_000a", "seq": [1, 1], "badge": [1, true] } },
+        { "push": { "type": "clear", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_retained_000a", "seq": [1, 2], "badge": [0, true] } },
+        { "restart": true },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "retained": [{ "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_retained_000a" }], "badge": [1, false] } }
+      ],
+      "expect": { "displayed": [], "badge": [0, false], "alerts": 1 }
+    },
+    {
+      "name": "retained cleared asks are excluded without losing fresh or genuinely last-known pending asks",
+      "steps": [
+        { "push": { "type": "clear", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_retained_000a", "seq": [1, 1], "badge": [0, true] } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [{ "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_retained_000a" }], "retained": [
+          { "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_retained_000a" },
+          { "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "cccc3333dddd4444", "generation": 1, "requestId": "req_retained_000b" },
+          { "source": "Zm7JF6omGejLZ9M1ygWBi2", "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_retained_000a" }
+        ], "badge": [4, false] } }
+      ],
+      "expect": { "displayed": [], "badge": [3, false], "alerts": 0 }
+    },
+    {
+      "name": "a replaced retained request stays excluded after its replacement is cleared and the worker restarts",
+      "steps": [
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_retained_000a", "seq": [1, 1], "badge": [1, true] } },
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_retained_000b", "seq": [1, 2], "badge": [1, true] } },
+        { "push": { "type": "clear", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_retained_000b", "seq": [1, 3], "badge": [0, true] } },
+        { "restart": true },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "retained": [{ "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_retained_000a" }], "badge": [1, false] } }
+      ],
+      "expect": { "displayed": [], "badge": [0, false], "alerts": 2 }
+    },
+    {
+      "name": "a clear during reconciliation still owns the badge despite retained page asks",
+      "steps": [
+        { "capture": true },
+        { "push": { "type": "clear", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_retained_000a", "seq": [1, 1], "badge": [0, true] } },
+        { "reconcile": { "fresh": ["local"], "pending": [], "retained": [{ "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_retained_000a" }], "badge": [1, false] } }
+      ],
+      "expect": { "displayed": [], "badge": [0, true], "alerts": 0 }
     },
     {
       "name": "tombstones age out only after the retention window",

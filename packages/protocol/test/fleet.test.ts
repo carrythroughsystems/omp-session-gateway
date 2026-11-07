@@ -148,7 +148,7 @@ describe("fleet push messages", () => {
   });
 
   test("a reconciliation names only fresh sources' pending asks and the receipt count it captured", () => {
-    const reconcile = { type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received: 4 }, badge: { count: 1, complete: true } };
+    const reconcile = { type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received: 4 }, retained: [], badge: { count: 1, complete: true } };
     const ask = { instanceId, generation: 1, requestId };
     expect(parseFleetReconcileMessage({ ...reconcile, fresh: ["local"], pending: [ask] }).asOf).toEqual({ received: 4 });
     reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: [binding], pending: [ask] }));
@@ -156,6 +156,19 @@ describe("fleet push messages", () => {
     reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: ["laptop"], pending: [] }));
     reject(() => parseFleetReconcileMessage({ ...reconcile, asOf: { epoch: 1, n: 1 }, fresh: ["local"], pending: [] }));
     reject(() => parseFleetReconcileMessage({ ...reconcile, type: "omp-notification-sync", fresh: ["local"], pending: [] }));
+  });
+
+  test("retained asks are bounded metadata from non-fresh sources only", () => {
+    const ask = { source: binding, instanceId, generation: 1, requestId };
+    const reconcile = { type: "omp-notification-reconcile", version: 3, asOf: { received: 1 },
+      fresh: ["local"], pending: [], retained: [ask], badge: { count: 1, complete: false } };
+    expect(parseFleetReconcileMessage(reconcile).retained).toEqual([ask]);
+    reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: [binding] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, retained: undefined }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, retained: [{ ...ask, capability: "forbidden" }] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, retained: Array(MAX_FLEET_BADGE_COUNT + 1).fill(ask) }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, pending: [{ instanceId, generation: 1, requestId }],
+      retained: Array(MAX_FLEET_BADGE_COUNT).fill(ask) }));
   });
 });
 

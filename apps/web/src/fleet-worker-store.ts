@@ -50,7 +50,8 @@ export class FleetWorkerStore {
         transaction.oncomplete = () => resolve(request.result as FleetWorkerState | undefined);
         transaction.onerror = transaction.onabort = () => reject(new Error("worker state unavailable"));
         const saved = await promise;
-        if (saved !== undefined) this.memory = saved;
+        // Existing installations predate the bounded fresh-snapshot request map.
+        if (saved !== undefined) this.memory = { ...saved, observed: saved.observed ?? {} };
       } catch { this.database = Promise.resolve(undefined); database.close(); }
     }
     this.loaded = true;

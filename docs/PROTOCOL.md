@@ -442,9 +442,13 @@ TTL, and absent `Topic` as Push v2.
 
 The page reconciles in the foreground by first asking the worker for its push receipt count, then
 fetching fresh snapshots, then posting
-`{ type: "omp-notification-reconcile", version: 3, asOf: { received }, fresh, pending, badge }`,
-where `fresh` lists `local` or bindings whose `pending` asks are complete. The worker closes only
-alerts whose session received no push since `asOf`, and applies the badge only if no push arrived.
+`{ type: "omp-notification-reconcile", version: 3, asOf: { received }, fresh, pending, retained, badge }`,
+where `fresh` lists `local` or bindings whose `pending` asks are complete. `retained` contains
+last-known asks of selected non-fresh sources, with the same metadata-only shape as `pending`;
+the two arrays together are bounded to 8,000 asks across at most 8 sources. The worker closes only
+alerts of fresh sources whose session received no push since `asOf`, and applies the badge only
+if no push arrived. Its count is fresh pending plus retained asks minus known clears or
+replacements, using the page's `badge.complete`. The page's count cannot override worker knowledge.
 
 Fleet notification data is `{ version: 3, type, source?, instanceId, requestId }` for attention
 and `{ version: 3, type, source?, instanceId, generation }` for a stop. Routes append
