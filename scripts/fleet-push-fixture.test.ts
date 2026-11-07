@@ -75,7 +75,8 @@ test("fleet source has a distinct HTTPS origin and origin-bound notification ide
   for (const value of ["http://synthetic.example.test", `${origin}/`, `${origin}:8443`]) expect(() => fleetPushSource(value)).toThrow();
 });
 
-test("fleet fixture uses the candidate bytes and restores exact config and Serve ownership", async () => {
+// The real parser checks POSIX 0600 publications here; the Mac-only fixture does not author NTFS ACLs.
+test.skipIf(process.platform === "win32")("fleet fixture uses the candidate bytes and restores exact config and Serve ownership", async () => {
   const f = await fixture();
   try {
     await f.run("prepare");
