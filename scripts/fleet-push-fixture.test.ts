@@ -129,6 +129,25 @@ test("fleet preparation never adopts an existing unowned directory", async () =>
   } finally { await f.dispose(); }
 });
 
+test.each(["ledger", "target", "candidate", "serve", "listener", "probe-error"])("fleet preparation refuses existing or unverifiable %s ownership before mutation", async scenario => {
+  const f = await fixture();
+  try {
+    if (scenario === "ledger") {
+      const path = join(f.home, ".local/state/omp-session-gateway/fleet-notifications.json");
+      await mkdir(dirname(path), { recursive: true }); await writeFile(path, "{}");
+    }
+    if (scenario === "target") await writeFile(f.config, JSON.stringify({ ...JSON.parse(f.original), fleet: { targets: [{}] } }));
+    if (scenario === "candidate") await writeFile(join(f.home, "candidate/release-info.json"), JSON.stringify({ sourceCommit: "a".repeat(40) }));
+    if (scenario === "serve") await f.execute(["tailscale", "serve", "--bg", "--https=10443"]);
+    const execute: FixtureExecutor = argv => argv[0] === "lsof" && ["listener", "probe-error"].includes(scenario) ?
+      Promise.resolve({ exitCode: scenario === "listener" ? 0 : 127, stdout: "" }) : f.execute(argv);
+    await expect(fleetPushFixture("prepare", f.root, epoch, origin, commit, execute, f.home)).rejects.toThrow();
+    expect(f.effects.some(command => command.includes("launchctl bootout"))).toBe(false);
+    expect(f.state()).toMatchObject({ running: true, source: false });
+    await expect(readFile(join(f.root, "owner.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  } finally { await f.dispose(); }
+});
+
 test.each(["launchctl bootout", "tailscale serve --bg", "nohup sh"])("fleet fixture restores an interrupted %s mutation from persisted ownership", async failure => {
   const f = await fixture();
   try {
