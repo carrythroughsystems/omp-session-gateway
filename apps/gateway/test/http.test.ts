@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { SecretCapability, fleetOwnerDigest, type ObservedSessionInput } from "@omp-session-gateway/protocol";
+import { SecretCapability, fleetOwnerDigest, MAX_PUSH_ENDPOINT_BYTES, parsePushSubscriptionRequest, type ObservedSessionInput } from "@omp-session-gateway/protocol";
 import type { GatewayConfig } from "../src/config.ts";
 import { requestHasTrustedDashboardContext, requestHasValidMutationContext } from "../src/auth.ts";
 import { createHttpHandler, startHttpServer } from "../src/http.ts";
@@ -1055,8 +1055,10 @@ describe("HTTP boundary", () => {
     };
     const registry = populatedRegistry();
     const push = await PushService.open({ config: gatewayConfig, registry, transport: { async send() {} } });
-    const endpoint = "https://push.example.test/send/synthetic-fleet-http";
-    await push.subscribe("allowed@example.com", { version: 2, subscription: { endpoint, expirationTime: null, keys: { p256dh: "P".repeat(88), auth: "A".repeat(22) } } });
+    // A valid endpoint at the push contract's byte limit makes status/selection bodies exceed 4 KiB.
+    const prefix = "https://push.example.test/send/synthetic-fleet-http-";
+    const endpoint = prefix + "x".repeat(MAX_PUSH_ENDPOINT_BYTES - prefix.length);
+    await push.subscribe("allowed@example.com", parsePushSubscriptionRequest({ version: 2, subscription: { endpoint, expirationTime: null, keys: { p256dh: "P".repeat(88), auth: "A".repeat(22) } } }));
     const digest = await fleetOwnerDigest(origin, "allowed@example.com");
     const coordinator = await FleetCoordinator.open({
       config: { publicOrigin: origin, ownLabel: "Home", sources: [source] }, push, registry, stateDir: gatewayConfig.paths.stateDir,

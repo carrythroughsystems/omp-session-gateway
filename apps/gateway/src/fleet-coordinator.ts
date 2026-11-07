@@ -238,7 +238,7 @@ export class FleetCoordinator {
     return { healthy: this.#healthy, grants: this.#state.grants.length, recipients: this.#state.recipients.length, queued: this.#queue.length, sending: this.#inflight.size };
   }
   includes(owner: string, endpoint: string): boolean {
-    return !this.#healthy || this.#state.recipients.some(recipient => recipient.owner === owner && recipient.key === endpointKey(endpoint));
+    return this.#healthy && this.#state.recipients.some(recipient => recipient.owner === owner && recipient.key === endpointKey(endpoint));
   }
   subscriptionsChanged(): void { this.#scheduleReconcile(); }
   #subscription(recipient: Recipient): FleetPushRecipient | undefined {

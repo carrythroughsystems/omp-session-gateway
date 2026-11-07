@@ -216,7 +216,8 @@ The private `<stateDir>/fleet-notifications.json` contains grant secrets, source
 outstanding ask identities, not titles, paths, previews or endpoints. Do not copy it between homes,
 print it, or attach it to support reports. `doctor` exposes only `fleetNotificationsHealthy`;
 support bundles exclude both fleet state files. Corruption or a failed atomic write disables fleet
-routes with 503 and preserves the file for private recovery. Fix permissions or restore a trusted
+routes with 503 and preserves the file for private recovery; local alerts fall back to unchanged
+Push v2, which fleet-capable workers still render as local notifications. Fix permissions or restore a trusted
 private backup and restart; do not delete the file to hide corruption. Restart advances the epoch
 and reconciles exact outstanding requests after source snapshots or 30 seconds, preserving stale
 alerts and never replaying stops. Removing/re-pointing a source clears its old binding's alerts.

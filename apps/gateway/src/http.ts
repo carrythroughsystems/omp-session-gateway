@@ -5,6 +5,7 @@ import {
   LOCAL_FLEET_SOURCE_ID,
   MAX_FRAME_BYTES,
   MAX_PUSH_SUBSCRIPTION_BYTES,
+  MAX_PUSH_ENDPOINT_BYTES,
   PUSH_API_VERSION,
   ProtocolValidationError,
   type ClientConfigResponse,
@@ -527,7 +528,8 @@ export function createHttpHandler(options: {
       if (request.headers.get("Content-Type")?.toLowerCase() !== "application/json") return problem(415, "unsupported_media_type", "Expected application/json");
       if (!limiter.allow(`${authorization.identityKey}\0push`, now())) return problem(429, "rate_limited", "Too many requests");
       try {
-        const body = parseJsonFrame(await readBoundedBody(request, MAX_FLEET_REQUEST_BYTES));
+        const endpointBody = url.pathname === "/api/v1/push/fleet/status" || url.pathname === "/api/v1/push/fleet/recipient";
+        const body = parseJsonFrame(await readBoundedBody(request, MAX_FLEET_REQUEST_BYTES + (endpointBody ? MAX_PUSH_ENDPOINT_BYTES : 0)));
         const owner = authorization.identityKey;
         if (url.pathname === "/api/v1/push/fleet/status") {
           const parsed = parseFleetStatusRequest(body);

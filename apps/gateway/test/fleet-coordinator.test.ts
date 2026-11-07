@@ -430,6 +430,20 @@ describe("fleet coordinator", () => {
     for (const line of f.logs) { const entry = JSON.parse(line); for (const [key, value] of Object.entries(entry)) if (!["timestamp", "level", "event"].includes(key)) expect(typeof value === "boolean" || typeof value === "number").toBe(true); }
   });
 
+  test("corrupt coordinator state falls back to byte-identical v2 local alerts for enrolled devices", async () => {
+    const f = await fixture(); const device = await f.device();
+    await f.grant(alice, sourceA.id); await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    await f.coordinator.stop();
+    const path = join(f.config.paths.stateDir, "fleet-notifications.json");
+    await writeFile(path, "{SYNTHETIC_CORRUPTION}", { mode: 0o600 }); await f.restart();
+    expect(f.coordinator.healthy).toBe(false);
+    f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await f.push.flush();
+    const session = f.registry.snapshot().sessions[0]!;
+    expect(f.transport.legacy).toEqual([JSON.stringify({ version: 2, type: "attention", instanceId, generation: 1, requestId: session.ask!.requestId, pendingAskCount: 1, title: "OMP session needs attention", body: "SYNTHETIC_LOCAL_TITLE · SYNTHETIC_LOCAL_PROJECT" })]);
+    expect(f.transport.calls).toHaveLength(0);
+    expect(await readFile(path, "utf8")).toBe("{SYNTHETIC_CORRUPTION}");
+  });
+
   test("real fetch bypasses dead HTTP/HTTPS proxies for the configured host", async () => {
     const previous = { HTTPS_PROXY: process.env.HTTPS_PROXY, HTTP_PROXY: process.env.HTTP_PROXY, NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
     const digest = await fleetOwnerDigest("http://127.0.0.1:4317", alice);

@@ -123,7 +123,8 @@ to one device. Queue admission persists outstanding identifiers before transport
 delivery queue drops new alerts/stops while deferred clears remain represented in the bounded
 outstanding set until queue space opens. Transport rechecks owner, selection, grant and expiry
 after acquiring its send slot. Corrupt/unwritable state fails fleet routes closed without deleting
-evidence; the ordinary directory and capability broker remain independent.
+evidence; local alerts fall back to unchanged Push v2. The ordinary directory and capability
+broker remain independent.
 
 ### 1.4 OMP Sessions PWA
 
