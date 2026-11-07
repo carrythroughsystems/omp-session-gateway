@@ -1843,6 +1843,39 @@ describe("dashboard attention and notifications", () => {
     expect(harness.elements.directoryCount.hidden).toBeTrue();
   });
 
+  test("unknown alerts keep normal empty guidance without allowing All clear until checking settles", async () => {
+    const support = Promise.withResolvers<unknown>();
+    const quiet = session("checking-empty-quiet");
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, initialSessions: [], suffix: "checking-empty-guidance",
+      workerReply: () => support.promise,
+      beforeNotificationReady: async () => {
+        try {
+          await settleUntil(() => FakeEventSource.instances.length === 1, 100);
+          const page = document as unknown as FakeDocument;
+          const empty = page.querySelector("#empty-state")!;
+          const list = page.querySelector("#session-list")!;
+          expect(page.querySelector("#notify")!.textContent).toBe("Checking background alerts…");
+          expect(empty.hidden).toBeFalse();
+          expect(empty.dataset.state).toBe("empty");
+          expect(empty.querySelector(".empty-state-detail")).toBeNull();
+          FakeEventSource.instances[0]!.emit("session_upsert", { type: "session_upsert", revision: 2, session: quiet });
+          expect(list.querySelector(".all-clear-title")?.textContent).not.toBe("All clear");
+          FakeEventSource.instances[0]!.emit("session_remove", {
+            type: "session_remove", revision: 3, instanceId: quiet.instanceId, generation: quiet.generation,
+          });
+          expect(empty.dataset.state).toBe("empty");
+        } finally { support.resolve({ type: "omp-notification-support-response", version: 2 }); }
+      },
+    });
+    try {
+      expect(harness.elements.emptyState.dataset.state).toBe("empty");
+      expect(harness.elements.emptyState.querySelector(".empty-state-detail")).toBeNull();
+      harness.emit("session_upsert", { type: "session_upsert", revision: 4, session: quiet });
+      expect(harness.elements.sessionList.querySelector(".all-clear-title")?.textContent).toBe("All clear");
+    } finally { harness.setVisibility("hidden"); }
+  });
+
   test("activity samples distinguish working, idle, and unknown across metadata updates", async () => {
     const base = session("activity-samples-0001", { busy: true });
     const harness = await bootApp({
@@ -5622,6 +5655,38 @@ describe("fleet background notifications", () => {
       .toEqual([`https://remote.example/api/v1/notification-grants/${fleetGrantId}/renew`]);
     expect(harness.localStorage.values.has(fleetGrantId)).toBeFalse();
     harness.setVisibility("hidden");
+  });
+
+  test("an empty directory distinguishes unknown alert coverage from a known incomplete host", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "stale", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const support = Promise.withResolvers<unknown>();
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], remoteSessions: [], fleetResponse: api.respond, suffix: "empty-alert-coverage-transition",
+      workerReply: message => {
+        const request = message as { type: string; version: number };
+        return request.version === 2 ? support.promise : request.type === "omp-notification-mode"
+          ? { type: "omp-notification-mode-set", version: 3 }
+          : { type: "omp-notification-support-response", version: 3, received: 0 };
+      },
+      beforeNotificationReady: async () => {
+        try {
+          const page = document as unknown as FakeDocument;
+          await settleUntil(() => page.querySelector("#empty-state")!.dataset.state === "empty", 1_000);
+          expect(page.querySelector("#notify")!.textContent).toBe("Checking background alerts…");
+          expect(page.querySelector("#empty-state")!.textContent).not.toContain("Host coverage incomplete");
+        } finally { support.resolve({ type: "omp-notification-support-response", version: 2 }); }
+      },
+    });
+    try {
+      await settleUntil(() => harness.elements.emptyState.textContent?.includes("Host coverage incomplete") === true, 1_000);
+      expect(harness.elements.emptyState.dataset.state).toBe("limited");
+      expect(harness.elements.emptyState.textContent).toContain("Alerts unavailable for Studio");
+      api.rows = api.rows.map(row => ({ ...row, state: "current" }));
+      harness.elements.settingsButton.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.elements.emptyState.dataset.state === "empty", 1_000);
+      expect(harness.elements.emptyState.querySelector(".empty-state-detail")).toBeNull();
+    } finally { harness.setVisibility("hidden"); }
   });
 
   test("foreground reconcile captures the worker receipt before starting the snapshots it posts", async () => {
