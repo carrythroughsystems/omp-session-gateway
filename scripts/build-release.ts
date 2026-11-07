@@ -7,7 +7,7 @@ import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 import nerdSymbols from "../apps/web/src/fonts/nerd-symbols/manifest.json";
 import packageManifest from "../package.json";
 
-export const PRODUCT_VERSION = "0.9.1";
+export const PRODUCT_VERSION = "0.10.0";
 const PINNED_BUN_VERSION = packageManifest.packageManager.replace(/^bun@/u, "");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultReleaseRoot = join(root, "dist", "release");
