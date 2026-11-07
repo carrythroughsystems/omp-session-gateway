@@ -18,6 +18,7 @@ import { PushService, type PushTransport } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { StaticAssetStore } from "../src/static.ts";
 import { diagnosticsBundleBytes } from "../src/diagnostics.ts";
+import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 const instanceId = "synthetic-shared-instance";
 const requestId = "req_0123456789abcdef";
@@ -164,7 +165,10 @@ async function fixture(sources = [sourceA, sourceB]) {
   };
 }
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
-  for (let attempt = 0; attempt < 300; attempt++) {
+  // Polls a condition over real state-file I/O, which fake timers cannot drive. Bounded by wall
+  // time rather than attempts because Windows timers sleep in coarse ticks.
+  const deadline = performance.now() + HANG_DEADLINE_MS;
+  while (performance.now() < deadline) {
     if (await predicate()) return;
     await Bun.sleep(1);
   }

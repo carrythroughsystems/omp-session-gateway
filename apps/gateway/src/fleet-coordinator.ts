@@ -198,6 +198,7 @@ export class FleetCoordinator {
   #restartTimer: Timer | undefined;
   #retryTimer: Timer | undefined;
   #retryTimerAt: number | undefined;
+  #persistScheduled = false;
 
   private constructor(options: FleetCoordinatorOptions) {
     this.#config = options.config; this.#push = options.push; this.#registry = options.registry;
@@ -289,6 +290,15 @@ export class FleetCoordinator {
       if (Buffer.byteLength(text) > MAX_STATE_BYTES) throw new Error("fleet state capacity");
       await writePrivateTextFile(this.#path, text);
     } catch { this.#failClosed(); throw new FleetCoordinatorProblem(503, "fleet_unavailable"); }
+  }
+  /**
+   * Coalesces confirmed-delivery bookkeeping into one durable write per burst. A crash before the
+   * write only repeats an accepted attention or clear, which the worker deduplicates.
+   */
+  #schedulePersist(): void {
+    if (this.#persistScheduled) return;
+    this.#persistScheduled = true;
+    void this.#serial(async () => { this.#persistScheduled = false; await this.#persist(); }, true).catch(() => undefined);
   }
   #serial(work: () => Promise<void>, allowStopped = false): Promise<void> {
     const operation = this.#tail.then(async () => {
@@ -700,7 +710,7 @@ export class FleetCoordinator {
                 instanceId: message.instanceId, generation: message.generation, requestId: message.requestId };
               if (message.type === "attention") recipient.outstanding.push(ask);
               else recipient.outstanding = recipient.outstanding.filter(previous => askKey(previous) !== askKey(ask));
-              await this.#persist();
+              this.#schedulePersist();
             }, true);
           } else if (outcome === "skipped") reconcile = true;
           else if (outcome === "failed" && message.type !== "activity_stop" && !this.#stopped && this.#healthy) {
