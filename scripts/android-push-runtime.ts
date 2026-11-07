@@ -502,7 +502,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           if (!self.__ompQualificationBadge) {
             if (typeof navigator.setAppBadge !== "function" || typeof navigator.clearAppBadge !== "function") return false;
             const set = navigator.setAppBadge, clear = navigator.clearAppBadge;
-            const state = self.__ompQualificationBadge = { set, clear, observation: null };
+            const state = self.__ompQualificationBadge = { set, clear, observation: null,
+              setDescriptor: Object.getOwnPropertyDescriptor(navigator, "setAppBadge"),
+              clearDescriptor: Object.getOwnPropertyDescriptor(navigator, "clearAppBadge") };
             navigator.setAppBadge = function(count) {
               state.observation = { count: count ?? 0, complete: count !== undefined };
               return Reflect.apply(set, this, arguments);
@@ -1324,7 +1326,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
               () => runtime.fixture("stop", progress.epoch, "remote"),
               () => worker(`(() => {
                 const state = self.__ompQualificationBadge;
-                if (state) { navigator.setAppBadge = state.set; navigator.clearAppBadge = state.clear; delete self.__ompQualificationBadge; }
+                if (state) {
+                  if (state.setDescriptor) Object.defineProperty(navigator, "setAppBadge", state.setDescriptor); else delete navigator.setAppBadge;
+                  if (state.clearDescriptor) Object.defineProperty(navigator, "clearAppBadge", state.clearDescriptor); else delete navigator.clearAppBadge;
+                  delete self.__ompQualificationBadge;
+                }
                 return true;
               })()`),
               () => runtime.fleet.host("restore", progress.epoch),
