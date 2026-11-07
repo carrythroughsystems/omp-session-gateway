@@ -87,7 +87,7 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     await mkdir(root, { mode: 0o700 });
     const changedConfig = JSON.stringify({ ...document,
       fleet: { label: FLEET_PUSH_LOCAL_LABEL, targets: [{ id: source.id, label: source.label, origin: source.origin }] },
-      notifications: { sources: [source.id], coordinators: [] } });
+      notifications: { sources: [source.id] } });
     state = { epoch, origin, commit, config, changedConfig, plist, bun, cli, serve: beforeServe, fleetStateAbsent: true };
     // Persist restoration authority before touching the service, config, or Serve mapping.
     await writeFile(statePath, JSON.stringify(state), { mode: 0o600, flag: "wx" });
@@ -95,7 +95,7 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     await mkdir(join(home, ".omp/run/collab-hosts"), { recursive: true, mode: 0o700 });
     await atomic(sourceConfigPath, JSON.stringify({ http: { hostname: "127.0.0.1", port: FLEET_PUSH_BACKEND_PORT,
       publicOrigin: source.origin, trustedDashboardOrigins: [origin] }, auth: document.auth,
-      fleet: { label: source.label, targets: [] }, notifications: { sources: [], coordinators: [{ id: "qualification-home", origin }] },
+      fleet: { label: source.label, targets: [] }, notifications: { coordinators: [{ id: "qualification-home", origin }] },
       omp: { discoveryDir: join(home, ".omp/run/collab-hosts") } }));
     await service(false, state);
     await atomic(configPath, changedConfig);

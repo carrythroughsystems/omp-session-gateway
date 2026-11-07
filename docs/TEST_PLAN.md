@@ -287,6 +287,8 @@ restoration retains `cleanupRequired`; it cannot produce `restored`. Development
 **Tested**, never **Qualified**, and must name any PR5 scratch candidate and incomplete phases.
 The development target must be disposable and home-only; never run these host mutations against
 the founder's gateway. A foreign live notification overlap is partial evidence, not a fleet pass.
+The existing home-only retry still requires its exact outbound-clear proof; fleet transactions
+fail closed on the first overlap because they cannot safely reuse that home-registry alias proof.
 
 Configured-Mac regressions require an explicit SSH destination and expected hardware model, reject
 unsafe password-file ownership/mode/type, and prove that an omitted password file reaches

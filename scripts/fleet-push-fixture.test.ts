@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fleetPushFixture, fleetPushSource, FLEET_PUSH_BACKEND_PORT, FLEET_PUSH_HTTPS_PORT } from "./fleet-push-fixture.ts";
 import type { FixtureExecutor } from "./push-qualification-fixture.ts";
 import { fleetSourceBinding } from "../packages/protocol/src/fleet.ts";
+import { loadGatewayConfig } from "../apps/gateway/src/config.ts";
 
 const epoch = "a3a77f8e-956b-45d0-a684-a33e6b336dc0", commit = "c".repeat(40), origin = "https://synthetic.example.test";
 async function fixture() {
@@ -58,6 +59,9 @@ test("fleet fixture uses the candidate bytes and restores exact config and Serve
     const source = JSON.parse(await readFile(join(f.root, "home/.config/omp-session-gateway/config.json"), "utf8"));
     expect(home.notifications.sources).toEqual(["push-qualification"]);
     expect(source.notifications.coordinators).toEqual([{ id: "qualification-home", origin }]);
+    expect((await loadGatewayConfig({ configPath: f.config })).notifications?.sources).toEqual(["push-qualification"]);
+    expect((await loadGatewayConfig({ configPath: join(f.root, "home/.config/omp-session-gateway/config.json") })).notifications?.coordinators)
+      .toEqual([{ id: "qualification-home", origin }]);
     expect(source.http.trustedDashboardOrigins).toEqual([origin]);
     expect(source.omp.discoveryDir).toBe(join(f.root, "home/.omp/run/collab-hosts"));
     expect(await readFile(join(f.root, "source.sh"), "utf8")).toContain("printf %s $$");
