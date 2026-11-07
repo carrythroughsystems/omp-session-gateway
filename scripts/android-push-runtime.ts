@@ -140,7 +140,7 @@ export async function holdPushWorkerObserver(origin: string, execution?: Android
       if (method === "Target.detachedFromTarget" && parameters.sessionId === sessionId) lifecycle.detached++;
       if (method === "Target.targetDestroyed" && parameters.targetId === workers[0].targetId) lifecycle.destroyed++;
       const info = parameters.targetInfo as Record<string, unknown> | undefined;
-      if (method === "Target.targetInfoChanged" && info?.targetId === workers[0].targetId) {
+      if (method === "Target.targetInfoChanged" && info !== undefined && info.targetId === workers[0].targetId) {
         lifecycle.changed++;
         if (info.type !== "service_worker" || info.url !== `${origin}/service-worker.js`) lifecycle.identityChanged++;
       }
