@@ -12,9 +12,9 @@ source locations, and required attributions are included at the stated archive p
 
 ## Bundled runtime dependencies
 
-### @oh-my-pi/pi-wire@18.12.6
+### @oh-my-pi/pi-wire@18.18.0
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/v18.12.6/packages/wire>
+- Source: <https://github.com/can1357/oh-my-pi/tree/v18.18.0/packages/wire>
 - License: MIT
 - Copyright: Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
 - License text: `licenses/runtime/@oh-my-pi__pi-wire/LICENSE`
@@ -187,8 +187,8 @@ source locations, and required attributions are included at the stated archive p
 
 ### @oh-my-pi/collab-web@16.3.6
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/45c35e40c46166dc726ccc52f5d27f40f2449f99/packages/collab-web>
-- Pinned source: tag `v18.12.6`, commit `45c35e40c46166dc726ccc52f5d27f40f2449f99`
+- Source: <https://github.com/can1357/oh-my-pi/tree/b5a6b2f7e5b6606b6562e678ead83f21738f34a0/packages/collab-web>
+- Pinned source: tag `v18.18.0`, commit `b5a6b2f7e5b6606b6562e678ead83f21738f34a0`
 - License: MIT
 - Copyright: Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
 - License text: `licenses/collab-web/LICENSE`
@@ -202,11 +202,11 @@ source locations, and required attributions are included at the stated archive p
   redacted capability errors; retained hub-family renderers; speech input; artwork exclusion; and
   the gateway's self-hosted PUA symbol fallback. All dispositions are in `upstream/UPSTREAM.json`.
 
-### @oh-my-pi/pi-utils@18.12.6 — vendored Markdown sources only
+### @oh-my-pi/pi-utils@18.18.0 — vendored pure helpers only
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/45c35e40c46166dc726ccc52f5d27f40f2449f99/packages/utils/src>
+- Source: <https://github.com/can1357/oh-my-pi/tree/b5a6b2f7e5b6606b6562e678ead83f21738f34a0/packages/utils/src>
 - Exact source files: `marked.ts`, `marked/core.ts`, `marked/inline-closers.ts`,
-  `marked/inline-text.ts`, `marked-list.ts`, and `math-delimiters.ts`, copied without modifications
+  `marked/inline-text.ts`, `marked-list.ts`, `math-delimiters.ts`, and `bytes.ts`, copied without modifications
   into `packages/collab-client/upstream/src/vendor/pi-utils/`.
 - License: MIT; original Marked MIT and Markdown BSD-3-Clause notices are preserved.
 - Copyright: Copyright (c) 2018+ MarkedJS; Copyright (c) 2011-2018 Christopher Jeffrey;
@@ -216,7 +216,9 @@ source locations, and required attributions are included at the stated archive p
 - Distributed code: the same first-party `collab-client.<content-hash>.js` bundle.
 - Only these pure TypeScript sources are vendored. Neither the pi-utils npm package nor pi-natives
   is installed or bundled. This fork replaces npm `marked`, supplying linear-time lexing,
-  source-context math hooks, and streaming-tail rendering without a native runtime closure.
+  source-context math hooks, and streaming-tail rendering; `bytes.ts` supplies strict WebCrypto
+  buffers without a native runtime closure. Offline export/trace entrypoints and `omp-stats` are
+  excluded from the live bundle; see `upstream/UPSTREAM.json.excludedEntrypoints`.
 
 OMP itself is a separately installed mainline prerequisite, not a bundled or locally modified
 runtime component of this archive. The upstream OMP license text is retained at

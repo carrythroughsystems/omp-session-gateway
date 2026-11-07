@@ -511,9 +511,9 @@ export function createSpdxSbom(
   const parser = parserSources[0];
   if (parser === undefined || parserSources.some(source =>
     source.commit !== client.commit || source.packageVersion !== parser.packageVersion
-  )) throw new Error("vendored Markdown sources must share the client source pin");
+  )) throw new Error("vendored pure helper sources must share the client source pin");
   const markedForkPackage = {
-    name: "@oh-my-pi/pi-utils (vendored Markdown sources)",
+    name: "@oh-my-pi/pi-utils (vendored pure helpers)",
     SPDXID: "SPDXRef-Vendored-Pi-Utils-Markdown",
     versionInfo: parser.packageVersion,
     downloadLocation: `https://github.com/can1357/oh-my-pi/tree/${parser.commit}/packages/utils/src`,

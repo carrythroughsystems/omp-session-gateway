@@ -56,6 +56,7 @@ function parseInbox(value: unknown): IrcMsg[] {
 	return out;
 }
 
+/** Upstream renders message lists; pre-18.17 hosts send one message instead. */
 function parseWaited(value: unknown): IrcMsg[] {
 	if (Array.isArray(value)) return parseInbox(value);
 	const msg = parseMsg(value);
@@ -142,6 +143,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 		return (
 			<>
 				{opBadge} <span className="tv-pattern">← {from ?? "anyone"}</span>
+				{Array.isArray(d?.waited) && d.waited.length === 0 && <span className="tv-muted"> empty</span>}
 				{d?.waited === null && (
 					<>
 						{" "}
@@ -192,9 +194,10 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	const receipts = parseReceipts(d?.receipts);
 	const waited = parseWaited(d?.waited);
 	const timedOut = d ? d.waited === null : false;
+	const empty = Array.isArray(d?.waited) && d.waited.length === 0;
 	const inbox = parseInbox(d?.inbox);
 	const peers = parsePeers(d?.peers);
-	const structured = receipts.length > 0 || waited.length > 0 || timedOut || inbox.length > 0 || peers.length > 0;
+	const structured = receipts.length > 0 || waited.length > 0 || timedOut || empty || inbox.length > 0 || peers.length > 0;
 	return (
 		<>
 			<Badges
@@ -235,6 +238,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 				</div>
 			)}
 			{timedOut && <Note tone="warn">No reply yet — they may answer later; check inbox or wait again.</Note>}
+			{empty && <Note>No messages received.</Note>}
 			{inbox.length > 0 && (
 				<div className="tv-list">
 					{inbox.map((msg, i) => (

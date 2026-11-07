@@ -13,7 +13,7 @@ requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact login allowlist, and th
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
 | Engineering host baseline | `v18.18.0` (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`) | Exact OMP source and tree (`cc847a53faf634167bde0ae8c12cb1d6ef38a412`) in `UPSTREAM.lock.json` |
-| Embedded browser client | `v18.12.6` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.12.6`) | Independent provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); includes upstream render coalescing and streaming-tail Markdown ([#14728](https://github.com/can1357/oh-my-pi/pull/14728)), linear-time Markdown/math lexing ([#13961](https://github.com/can1357/oh-my-pi/pull/13961), [#14667](https://github.com/can1357/oh-my-pi/pull/14667)), idle agent-drawer polling shutdown, and eval-output rendering. Only pure TypeScript parser sources are vendored, without pi-utils/pi-natives packages. |
+| Embedded browser client | `v18.18.0` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.18.0`) | Independent provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); shared wire envelopes, wait-list/legacy-result rendering, job-intent labels and exact-width Markdown code spans. Seven exact pure TypeScript helpers are vendored, without pi-utils/pi-natives or export-only omp-stats. |
 | Gateway runtime | Bun `1.4.4` | Required runtime for the CLI, daemon, and release archives |
 
 For the current published release and its qualified hardware matrix, see

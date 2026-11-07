@@ -120,6 +120,15 @@ describe("transcript Markdown", () => {
     expect(html).toContain("<code>code</code>");
   });
 
+  test("closes code spans only at exact-width runs and treats inner backslashes literally", () => {
+    expect(renderMarkdown("before `a``b` after")).toContain("<code>a``b</code>");
+    expect(renderMarkdown("before ``a`b`` after")).toContain("<code>a`b</code>");
+    expect(renderMarkdown("before ``unclosed` after")).not.toContain("<code>");
+    expect(renderMarkdown("before `a\\` after")).toContain("<code>a\\</code>");
+    expect(renderMarkdown("before \\``code` after")).toContain("`<code>code</code>");
+    expect(renderMarkdown("**bold `a``b`** and *tail*")).toContain("<strong>bold <code>a``b</code></strong>");
+  });
+
   test("matches the TUI by not typesetting a span behind a rejected dollar opener", () => {
     expect(renderMarkdown("it costs $5, and the growth is $x^2$ per year")).toBe(
       '<div class="tr-md"><p>it costs $5, and the growth is $x^2$ per year</p>\n</div>',
@@ -199,6 +208,7 @@ const STREAM_DOCS: Record<string, string> = {
   "whitespace lines": "a\n\n\u00a0\n\nb\n\n \n\nc\n\n\u00a0x\n\nd",
   "carriage returns": "a\r\n\r\nb\r\n\r\nc",
   "gateway rejected currency and half delimiters": "it costs $5, and growth is $x^2$\n\n$$x$\n\nstreaming \\(x and \\[y",
+  "exact-width code spans and resumed delimiters": "before `a``b` and ``a`b``\n\nbefore \\``code` after\n\n**bold `a\\`** and *tail*\n\n``unclosed`",
 };
 
 describe("streaming Markdown", () => {

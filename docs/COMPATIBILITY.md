@@ -95,7 +95,7 @@ Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi
 ([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
 plain `omp`. The current engineering baseline is `v18.18.0` (`UPSTREAM.lock.json`) and the
 qualified host baseline is recorded in the release-generated matrix below, while the independent
-embedded browser client pin is `v18.12.6`.
+embedded browser client pin is `v18.18.0` (wire `18.18.0`).
 Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
 fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
 gateway update.
@@ -113,9 +113,17 @@ codec preserves these arrays; its bash renderer does not consume `details.trace`
 to show the command, text, images, and status badges, without shell visualization. This is a
 presentation-only limitation, not an observed discovery, launch, or decoding incompatibility.
 Additive bash `details.cwd` / `cdSeparator` and write `details.touchesNoFiles` are also ignored.
-The upstream codec's shared `asStrictBytes` helper has the same whole-`ArrayBuffer`/copy behavior
-as the embedded codec's local `asStrict`; adopting that helper belongs to the independent client
-refresh, not this host-pin update. Bun remains `1.4.4` (upstream requires `>=1.4.4`).
+The embedded codec now vendors the upstream pure `asStrictBytes` helper, preserving the
+whole-`ArrayBuffer` fast path and copy fallback. Bun remains `1.4.4` (upstream requires `>=1.4.4`).
+
+The embedded v18.18.0 client (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`) adopts shared wire
+envelopes, strict byte buffers, wait lists, job-intent labels and exact-width Markdown code spans.
+Its seven pure pi-utils helpers have exact blob provenance; no native helper package or offline
+export/trace viewer is installed. Shell-trace byte arrays remain safely ignored by the existing
+live command/output renderer. Gateway in-memory bootstrap, View guards, Ask/photo/speech drafts,
+bounded recovery and transcript anchoring remain local patches with named regression proofs in
+`packages/collab-client/upstream/UPSTREAM.json`. The host minimum and published qualification
+matrix are unchanged; source/browser regression tests are not physical-device qualification.
 
 v18.17.0 (`75e7801e247d4e3263439d4cc08ccad60dc64bdd`) keeps registry v1, the discovery file
 format and query contract, the relay protocol, and `collab.autoStart` behavior unchanged from
@@ -142,7 +150,8 @@ host `wait` tool result's `details.waited` (`CoordinationDetails.waited`) from o
 to a list of messages (`null` still means timed out) and updates `collab-web`
 `tool-render/tools/irc.tsx`, so the embedded client carries a local compatibility patch in its
 `irc`/`wait` renderer (`packages/collab-client/upstream/UPSTREAM.json`) to accept both the list
-and the older single message while keeping its v18.12.6 provenance and `pi-wire` `18.12.6` pin.
+and the older single message. The v18.18.0 source refresh adopts that list renderer directly,
+retaining only the singleton/null/empty adapter and the regression cases.
 v18.16.0 (`650f3a108229ee11bf68ba3377f4e8c3391cd424`) in turn kept these contracts unchanged from
 v18.12.5: collaboration settings, slash commands, and `collab-web` `app.tsx` and `lib/client.ts`
 are byte-identical, and `docs/collab.md` changes only table formatting.
