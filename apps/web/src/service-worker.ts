@@ -1,10 +1,22 @@
 import {
   PUSH_API_VERSION,
+  FLEET_PUSH_VERSION,
+  MAX_FLEET_WORKER_RECORDS,
   parseAttentionPushMessage,
+  parseFleetPushMessage,
+  parseFleetReconcileMessage,
   parseNotificationData,
   notificationRoutePath,
+  fleetNotificationTag,
+  reduceFleetPush,
+  reduceLegacyPush,
+  reduceFleetReconcile,
   type AttentionPushMessage,
+  type FleetPushMessage,
+  type FleetEffect,
+  type FleetDisplayedNotification,
 } from "@omp-session-gateway/protocol";
+import { FleetWorkerStore } from "./fleet-worker-store";
 
 declare const __SHELL_ASSETS__: readonly string[];
 declare const __LAZY_ASSETS__: readonly string[];
@@ -13,8 +25,9 @@ declare const __CACHE_NAME__: string;
 const cacheableAssets = new Set([...__SHELL_ASSETS__, ...__LAZY_ASSETS__]);
 const worker = globalThis as unknown as ServiceWorkerGlobalScope;
 const SHELL_CACHE_PREFIX = "omp-sessions-shell-";
+const store = new FleetWorkerStore(worker.indexedDB);
 
-function isNotificationSupportRequest(value: unknown): boolean {
+function isNotificationSupportRequest(value: unknown): value is { version: 2 | 3 } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
@@ -23,110 +36,151 @@ function isNotificationSupportRequest(value: unknown): boolean {
     keys.includes("type") &&
     keys.includes("version") &&
     record.type === "omp-notification-support-request" &&
-    record.version === PUSH_API_VERSION
+    (record.version === PUSH_API_VERSION || record.version === FLEET_PUSH_VERSION)
   );
 }
 
 worker.addEventListener("message", event => {
-  if (!isNotificationSupportRequest(event.data)) return;
-  event.ports[0]?.postMessage({
-    type: "omp-notification-support-response",
-    version: PUSH_API_VERSION,
-  });
+  if (isNotificationSupportRequest(event.data)) {
+    const version = event.data.version;
+    if (version === PUSH_API_VERSION) {
+      event.ports[0]?.postMessage({ type: "omp-notification-support-response", version });
+    } else {
+      event.waitUntil(serialize(async () => {
+        const state = await store.read();
+        event.ports[0]?.postMessage({ type: "omp-notification-support-response", version, received: state.received });
+      }));
+    }
+    return;
+  }
+  const message: unknown = event.data;
+  if (typeof message !== "object" || message === null || Array.isArray(message)) return;
+  const record = message as Record<string, unknown>;
+  if (record.type === "omp-notification-mode" && record.version === FLEET_PUSH_VERSION &&
+    Object.keys(record).length === 3 && typeof record.fleet === "boolean") {
+    const fleet = record.fleet;
+    event.waitUntil(serialize(async () => {
+      const committed = await store.write({ ...await store.read(), fleet }, true);
+      event.ports[0]?.postMessage({
+        type: committed ? "omp-notification-mode-set" : "omp-notification-mode-failed", version: FLEET_PUSH_VERSION,
+      });
+    }));
+    return;
+  }
+  try {
+    const snapshot = parseFleetReconcileMessage(message);
+    event.waitUntil(serialize(async () => {
+      const displayed = await worker.registration.getNotifications();
+      const reduction = reduceFleetReconcile(await store.read(), snapshot, describeNotifications(displayed), Date.now());
+      await store.write(reduction.state);
+      await executeEffects(reduction.effects);
+    }));
+  } catch { /* Unsupported or malformed page messages have no effects. */ }
 });
 
-
-async function updateAppBadge(pendingAskCount: number): Promise<void> {
+async function updateAppBadge(count: number, complete: boolean): Promise<void> {
   const badgeNavigator = worker.navigator as Navigator & {
     clearAppBadge?: () => Promise<void>;
     setAppBadge?: (contents?: number) => Promise<void>;
   };
-  if (pendingAskCount === 0) {
+  if (count === 0 && complete) {
     await badgeNavigator.clearAppBadge?.();
   } else {
-    await badgeNavigator.setAppBadge?.(pendingAskCount);
+    await badgeNavigator.setAppBadge?.(count === 0 ? undefined : count);
   }
 }
 
 // Serialize notification read/replace and badge updates across overlapping push events.
 let pushTail: Promise<void> = Promise.resolve();
+function serialize(action: () => Promise<void>): Promise<void> {
+  const delivery = pushTail.then(action);
+  pushTail = delivery.catch(() => {});
+  return delivery;
+}
 // Chrome 153 posted warm replacements 48–78 ms after cancellation. Allow ~25× that observed lag.
 const CLOSE_SETTLE_MS = 2_000;
 const shownAtByTag = new Map<string, number>();
 
-function matchesRequest(notification: Notification, instanceId: string, requestId: string): boolean {
+function matchesRequest(notification: Notification, requestId: string): boolean {
   const intent = parseNotificationData(notification.data);
-  return intent?.kind === "attention" && intent.instanceId === instanceId && intent.requestId === requestId;
+  return intent?.kind === "attention" && intent.requestId === requestId;
 }
 
-worker.addEventListener("push", event => {
-  let message: AttentionPushMessage;
-  try {
-    if (event.data === null) return;
-    message = parseAttentionPushMessage(event.data.json());
-  } catch {
-    return;
-  }
-  const tag = `omp-attention-${message.instanceId}`;
-  const delivery = pushTail.then(async () => {
-    if (message.type === "clear") {
+function describeNotifications(notifications: readonly Notification[]): FleetDisplayedNotification[] {
+  return notifications.flatMap(notification => {
+    const intent = parseNotificationData(notification.data);
+    return intent === undefined ? [] : [{ tag: notification.tag, intent }];
+  });
+}
+
+async function executeEffects(effects: readonly FleetEffect[], message?: AttentionPushMessage | FleetPushMessage): Promise<void> {
+  for (const effect of effects) {
+    if (effect.kind === "badge") {
+      await updateAppBadge(effect.count, effect.complete);
+      continue;
+    }
+    const { tag } = effect;
+    if (effect.kind === "close") {
       let notifications = await worker.registration.getNotifications({ tag });
       const shownAt = shownAtByTag.get(tag);
-      if (shownAt !== undefined && notifications.some(notification => matchesRequest(notification, message.instanceId, message.requestId))) {
+      if (shownAt !== undefined && notifications.some(notification => matchesRequest(notification, effect.requestId))) {
         const remaining = CLOSE_SETTLE_MS - (performance.now() - shownAt);
         if (remaining > 0) {
-          await new Promise<void>(resolve => setTimeout(resolve, remaining));
+          const { promise, resolve } = Promise.withResolvers<void>();
+          setTimeout(resolve, remaining);
+          await promise;
           notifications = await worker.registration.getNotifications({ tag });
         }
       }
       for (const notification of notifications) {
-        if (matchesRequest(notification, message.instanceId, message.requestId)) {
+        if (matchesRequest(notification, effect.requestId)) {
           notification.close();
           shownAtByTag.delete(tag);
         }
       }
-    } else {
-      const notifications = await worker.registration.getNotifications({ tag });
-      if (message.type === "attention" && notifications.some(notification =>
-        matchesRequest(notification, message.instanceId, message.requestId) &&
-        notification.title === message.title && notification.body === (message.body ?? ""),
-      )) {
-        await updateAppBadge(message.pendingAskCount);
-        return;
-      }
-      if (message.type === "activity_stop") {
-        if (notifications.some(notification => {
-          const intent = parseNotificationData(notification.data);
-          return intent?.kind === "attention" && intent.instanceId === message.instanceId;
-        })) {
-          await updateAppBadge(message.pendingAskCount);
-          return;
-        }
-      }
-      const options = {
-        tag,
-        icon: "/icon-192.png",
-        badge: "/icon-192.png",
-        renotify: message.type === "attention" && notifications.some(notification => {
-          const intent = parseNotificationData(notification.data);
-          return intent?.kind === "activity_stop" && intent.instanceId === message.instanceId;
-        }),
-        ...(message.body === undefined ? {} : { body: message.body }),
-        data: {
-          version: message.version,
-          type: message.type,
-          instanceId: message.instanceId,
-          ...(message.type === "attention" ? { requestId: message.requestId } : { generation: message.generation }),
-        },
-      } satisfies NotificationOptions & { readonly renotify: boolean };
-      await worker.registration.showNotification(message.title, options);
-      shownAtByTag.set(tag, performance.now());
+      continue;
     }
-    await updateAppBadge(message.pendingAskCount);
-  });
-  // Preserve this event's failure without poisoning later deliveries.
-  pushTail = delivery.catch(() => {});
-  event.waitUntil(delivery);
+    if (message === undefined || message.type === "clear") continue;
+    const options = {
+      tag,
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+      renotify: effect.renotify,
+      ...(message.body === undefined ? {} : { body: message.body }),
+      data: {
+        version: message.version,
+        type: message.type,
+        ...(message.version === FLEET_PUSH_VERSION && message.source !== undefined ? { source: message.source } : {}),
+        instanceId: message.instanceId,
+        ...(message.type === "attention" ? { requestId: message.requestId } : { generation: message.generation }),
+      },
+    } satisfies NotificationOptions & { readonly renotify: boolean };
+    await worker.registration.showNotification(message.title, options);
+    shownAtByTag.delete(tag);
+    shownAtByTag.set(tag, performance.now());
+    if (shownAtByTag.size > MAX_FLEET_WORKER_RECORDS) shownAtByTag.delete(shownAtByTag.keys().next().value!);
+  }
+}
+
+worker.addEventListener("push", event => {
+  let message: AttentionPushMessage | FleetPushMessage;
+  try {
+    if (event.data === null) return;
+    const value: unknown = event.data.json();
+    message = typeof value === "object" && value !== null && "version" in value && value.version === FLEET_PUSH_VERSION
+      ? parseFleetPushMessage(value) : parseAttentionPushMessage(value);
+  } catch { return; }
+  event.waitUntil(serialize(async () => {
+    const tag = fleetNotificationTag(message.version === FLEET_PUSH_VERSION ? message.source : undefined, message.instanceId);
+    const displayed = describeNotifications(await worker.registration.getNotifications({ tag }));
+    const state = await store.read();
+    const reduction = message.version === FLEET_PUSH_VERSION
+      ? reduceFleetPush(state, message, displayed, Date.now())
+      : reduceLegacyPush(state, message, displayed, Date.now());
+    // Persist tombstones before closing: a killed worker cannot resurrect an overtaken attention.
+    await store.write(reduction.state);
+    await executeEffects(reduction.effects, message);
+  }));
 });
 
 /** A page that accepts within this bound handles the tapped route itself. */
@@ -141,7 +195,7 @@ function isNotificationRouteAccepted(value: unknown): boolean {
     keys.includes("type") &&
     keys.includes("version") &&
     record.type === "omp-notification-route-accepted" &&
-    record.version === PUSH_API_VERSION
+    (record.version === PUSH_API_VERSION || record.version === FLEET_PUSH_VERSION)
   );
 }
 
@@ -159,7 +213,8 @@ async function routeInPage(client: WindowClient, data: unknown): Promise<boolean
   const timeout = setTimeout(() => resolve(false), NOTIFICATION_ROUTE_ACCEPT_MS);
   channel.port1.onmessage = event => resolve(isNotificationRouteAccepted(event.data));
   try {
-    client.postMessage({ type: "omp-notification-route", version: PUSH_API_VERSION, data }, [channel.port2]);
+    const intent = parseNotificationData(data);
+    client.postMessage({ type: "omp-notification-route", version: intent?.source === undefined ? PUSH_API_VERSION : FLEET_PUSH_VERSION, data }, [channel.port2]);
   } catch {
     resolve(false);
   }

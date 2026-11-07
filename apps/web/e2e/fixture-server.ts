@@ -90,6 +90,7 @@ export interface DashboardFixture {
   readonly creationRequests: readonly SessionCreationRequest[];
   configureCreation(config: CreationFixtureConfig): void;
   configureFleet(label: string, targets: readonly FleetSource[], trustedOrigins: readonly string[]): void;
+  configureNotifications(handler: NotificationFixtureHandler): void;
   setListFailure(failure: "forbidden" | "timeout" | "malformed" | undefined): void;
   assertNoCapabilityMaterial(text: string): void;
   disconnectEvents(): number;
@@ -99,6 +100,10 @@ export interface DashboardFixture {
   upsert(session: SessionMetadata): void;
   upgradeServiceWorker(): void;
 }
+
+type NotificationFixtureHandler = (
+  path: string, method: string, body: unknown, credentialsPresent: boolean,
+) => Response | Promise<Response>;
 
 export interface CreationFixtureConfig {
   readonly options?: SessionCreationOptions | 404;
@@ -136,6 +141,7 @@ export async function startDashboardFixture(
   const requestLog: FixtureRequestLog[] = [];
   const creationRequests: SessionCreationRequest[] = [];
   let creationConfig: CreationFixtureConfig = { options: 404 };
+  let notificationHandler: NotificationFixtureHandler | undefined;
   let lostCreationAcknowledgement = false;
   let mismatchedCreationRevision = false;
   const creations = new Map<string, { request: SessionCreationRequest; operationId: string; cursor: number }>();
@@ -210,8 +216,16 @@ export async function startDashboardFixture(
       const creationPostPath = url.pathname === "/api/v1/session-creations";
       const creationStatusId = url.pathname.startsWith("/api/v1/session-creations/") ? url.pathname.slice("/api/v1/session-creations/".length) : "";
       const creationStatusPath = SESSION_CREATION_UUID_PATTERN.test(creationStatusId);
+      const sourceGrantAction = /^\/api\/v1\/notification-grants\/([^/]+)\/(?:renew|revoke)$/u.exec(url.pathname);
+      const sourceGrantPath = url.pathname === "/api/v1/notification-grants" ||
+        (sourceGrantAction !== null && SESSION_CREATION_UUID_PATTERN.test(sourceGrantAction[1]!));
+      const coordinatorGrantAction = /^\/api\/v1\/push\/fleet\/grants\/([^/]+)\/(?:activate|revoke)$/u.exec(url.pathname);
+      const notificationMethod = sourceGrantPath || url.pathname === "/api/v1/push/fleet/status" ||
+        url.pathname === "/api/v1/push/fleet/grants" ||
+        (coordinatorGrantAction !== null && SESSION_CREATION_UUID_PATTERN.test(coordinatorGrantAction[1]!)) ? "POST"
+        : url.pathname === "/api/v1/push/fleet/recipient" && (method === "PUT" || method === "DELETE") ? method : undefined;
       const routeMethod = url.pathname === "/api/v1/sessions" || creationOptionsPath || creationStatusPath ? "GET"
-        : launchPath || creationPostPath ? "POST" : undefined;
+        : launchPath || creationPostPath || (sourceGrantPath && notificationHandler !== undefined) ? "POST" : undefined;
       const admitted = requestOrigin !== undefined && trustedOrigins.includes(requestOrigin) &&
         routeMethod !== undefined && (method === routeMethod || method === "OPTIONS");
       if (url.pathname.startsWith("/api/")) {
@@ -239,6 +253,25 @@ export async function startDashboardFixture(
       if (admitted) {
         response.setHeader("Access-Control-Allow-Origin", requestOrigin!);
         response.setHeader("Vary", "Origin");
+      }
+      if (notificationHandler !== undefined && method === notificationMethod) {
+        if (url.search !== "") { response.writeHead(400).end(); return; }
+        const fetchSite = request.headers["sec-fetch-site"];
+        const contextValid = request.headers["content-type"] === "application/json" && (
+          admitted ? fetchSite === undefined || fetchSite === "same-site" || fetchSite === "cross-site"
+            : requestOrigin === origin && (fetchSite === undefined || fetchSite === "same-origin")
+        );
+        if (!contextValid) { response.writeHead(403).end('{"code":"forbidden"}'); return; }
+        let bytes = Buffer.alloc(0);
+        for await (const chunk of request) {
+          bytes = Buffer.concat([bytes, Buffer.from(chunk)]);
+          if (bytes.byteLength > 4_096) { response.writeHead(413).end(); return; }
+        }
+        const result = await notificationHandler(url.pathname, method, parseJsonFrame(bytes),
+          request.headers.cookie !== undefined || request.headers.authorization !== undefined);
+        response.writeHead(result.status, Object.fromEntries(result.headers));
+        response.end(Buffer.from(await result.arrayBuffer()));
+        return;
       }
       if ((creationOptionsPath || creationPostPath || creationStatusPath) && method === routeMethod) {
         if (url.search !== "") { response.writeHead(400).end(); return; }
@@ -527,6 +560,7 @@ export async function startDashboardFixture(
       targets = nextTargets;
       trustedOrigins = nextTrusted;
     },
+    configureNotifications(handler): void { notificationHandler = handler; },
     setListFailure(failure): void { listFailure = failure; },
     assertNoCapabilityMaterial(text): void {
       // Decode ordinary mixed escaping before checking, without retaining or echoing input.

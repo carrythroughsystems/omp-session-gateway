@@ -3,6 +3,11 @@ import {
   MAX_FRAME_BYTES,
   MAX_SESSIONS,
   PUSH_API_VERSION,
+  FLEET_PUSH_VERSION,
+  FLEET_GRANT_RENEW_WITHIN_MS,
+  fleetSourceBinding,
+  fleetNotificationTag,
+  parseFleetReconcileMessage,
   parseLaunchResponse,
   parseNotificationData,
   parseNotificationRoute,
@@ -17,6 +22,8 @@ import {
   type SessionMetadata as Metadata,
   type FleetSource,
   type PushDetailLevel,
+  type FleetSourceStatus,
+  type FleetPendingAsk,
 } from "@omp-session-gateway/protocol";
 import type {
   CollabEmbedOptions,
@@ -25,6 +32,7 @@ import type {
 import {
   FleetTransport, loadClientConfig, sourceKey, sessionKey, recordKey, recordRef,
   readSourceRecords, boundedJson, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
+  FleetNotificationTransport, FleetNotificationError,
   type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
 } from "./fleet";
 import { sourceAvailability as describeSource, scopeCoverage as coverageForSources } from "./availability";
@@ -74,6 +82,11 @@ const hostPickerLabel = requiredElement<HTMLElement>("#host-picker-label");
 const fleetStatus = requiredElement<HTMLElement>("#fleet-status");
 const alertScope = requiredElement<HTMLElement>("#alert-scope");
 const alertsPanel = requiredElement<HTMLElement>("#alerts-panel");
+const notificationHosts = document.createElement("section");
+notificationHosts.className = "notification-hosts";
+notificationHosts.hidden = true;
+notificationHosts.setAttribute("aria-label", "Hosts");
+alertsPanel.append(notificationHosts);
 const detailPanel = requiredElement<HTMLElement>("#detail-panel");
 const alertDetailButton = requiredElement<HTMLButtonElement>("#alert-detail");
 const settingsButton = requiredElement<HTMLButtonElement>("#settings");
@@ -232,6 +245,23 @@ let collabShellDisposedOnPageHide = false;
  */
 let disposedShellResume: DisposedShellResume | undefined;
 let currentNotificationDetail: PushDetailLevel = "session";
+let notificationWorkerV3: boolean | undefined;
+let fleetNotificationsOffered: boolean | undefined;
+let fleetWorkerModePending: boolean | undefined;
+let notificationConfigSignature: string | undefined;
+let fleetNotificationRows: readonly FleetSourceStatus[] = [];
+const fleetNotificationErrors = new Map<string, string>();
+const fleetNotificationBusy = new Set<string>();
+const bindings = new Map<SourceKey, string>();
+const knownNotificationAsks = new Map<SourceKey, readonly FleetPendingAsk[]>();
+const renewedFleetGrants = new Map<string, number>();
+const rejectedFleetGrants = new Set<string>();
+const fleetNotifications = new FleetNotificationTransport();
+let fleetStatusTimer: number | undefined;
+let fleetStatusRequest: Promise<void> | undefined;
+let fleetReconciliation: Promise<void> | undefined;
+let fleetReconciliationDirty = false;
+let fleetReconciliationProbe = false;
 
 let initialPromptDraft: { ref: SessionRef; text: string } | undefined;
 const sameBinding = (left: SessionRef, right: SessionRef): boolean =>
@@ -298,6 +328,11 @@ function setNotificationControl(state: NotificationControlState): void {
         ? "Background push is not available in this browser profile. On iPhone and iPad it needs OMP Sessions added to the Home Screen."
         : "Alerts work with the app closed for input requests or activity stops. After revalidation, requests open Control; activity stops open View.";
   notificationDisclosure.hidden = state === "enabled";
+  if (state !== "enabled" && fleetStatusTimer !== undefined) {
+    window.clearTimeout(fleetStatusTimer);
+    fleetStatusTimer = undefined;
+  }
+  renderNotificationHosts();
   // The all-clear surface repeats the alert promise, so it re-renders with the control state.
   if (changed) render();
   if (tray.id === "alerts" || tray.id === "first-run-alerts") tray.refresh();
@@ -306,7 +341,9 @@ function setNotificationControl(state: NotificationControlState): void {
 function openAlerts(): void {
   if (creation.isActive) cancelLaunch();
   creation.cancel("competing");
-  tray.open({ id: "alerts", title: "Background alerts", tone: "neutral", body: alertsPanel });
+  tray.open({ id: "alerts", title: "Background alerts", tone: "neutral", body: alertsPanel },
+    { onClose: scheduleFleetStatusRefresh });
+  if (notificationState === "enabled") void reconcileFleetNotifications(true);
 }
 
 /** A missing record is fresh; malformed or inaccessible storage never forces an introduction. */
@@ -382,7 +419,11 @@ function firstRunPanel(step: Exclude<FirstRunStep, "done">): TrayPanel {
     title: step === "connected" ? "Connected" : step === "alerts" ? "Background alerts" : "View or Control",
     tone: "neutral", body, actions: [next],
     ...(step === "connected" ? { leadingLabel: "Skip introduction" } : {}),
-    onShow: () => writeFirstRunStep(step),
+    onShow: () => {
+      writeFirstRunStep(step);
+      if (step === "alerts" && notificationState === "enabled") void reconcileFleetNotifications(true);
+      else scheduleFleetStatusRefresh();
+    },
   };
 }
 
@@ -395,7 +436,10 @@ function maybeStartFirstRun(): void {
   firstRunStarted = true;
   const parents = step === "connected" ? [] : [firstRunPanel("connected")];
   if (step === "modes") parents.push(firstRunPanel("alerts"));
-  tray.open(firstRunPanel(step), { parents, onClose: () => writeFirstRunStep("done") });
+  tray.open(firstRunPanel(step), { parents, onClose: () => {
+    writeFirstRunStep("done");
+    scheduleFleetStatusRefresh();
+  } });
 }
 
 function isNotificationSupportResponse(value: unknown): boolean {
@@ -438,6 +482,371 @@ async function checkNotificationWorker(registration: ServiceWorkerRegistration):
     finish(false);
   }
   return promise;
+}
+
+async function askNotificationWorker(message: unknown, timeoutMs = 2_000): Promise<unknown> {
+  const active = notificationRegistration?.active;
+  if (active === null || active === undefined) return undefined;
+  const channel = new MessageChannel();
+  const { promise, resolve } = Promise.withResolvers<unknown>();
+  const timeout = window.setTimeout(() => resolve(undefined), timeoutMs);
+  channel.port1.onmessage = event => resolve(event.data);
+  channel.port1.start();
+  try { active.postMessage(message, [channel.port2]); }
+  catch { resolve(undefined); }
+  const result = await promise;
+  window.clearTimeout(timeout);
+  channel.port1.close();
+  try { channel.port2.close(); } catch { /* Transferred port. */ }
+  return result;
+}
+
+async function notificationReceiptCount(): Promise<number | undefined> {
+  // The worker's IndexedDB open alone may take two seconds. Silence never proves legacy support.
+  const value = await askNotificationWorker({ type: "omp-notification-support-request", version: FLEET_PUSH_VERSION }, 5_000);
+  notificationWorkerV3 = undefined;
+  if (isNotificationSupportResponse(value)) { notificationWorkerV3 = false; return undefined; }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const response = value as Record<string, unknown>;
+  if (Object.keys(response).length === 3 && response.type === "omp-notification-support-response" &&
+    response.version === FLEET_PUSH_VERSION && Number.isSafeInteger(response.received) && (response.received as number) >= 0
+  ) {
+    notificationWorkerV3 = true;
+    return response.received as number;
+  }
+  return undefined;
+}
+
+async function setFleetWorkerMode(fleet: boolean): Promise<boolean> {
+  if (!notificationWorkerV3) return false;
+  const response = await askNotificationWorker({ type: "omp-notification-mode", version: FLEET_PUSH_VERSION, fleet });
+  return typeof response === "object" && response !== null && "type" in response &&
+    response.type === "omp-notification-mode-set" && "version" in response && response.version === FLEET_PUSH_VERSION;
+}
+
+function configuredNotificationSource(id: string): FleetSource | undefined {
+  return [...sources.values()].find(source => source.id !== "local" && source.id === id);
+}
+
+async function applyFleetWorkerMode(fleet: boolean): Promise<void> {
+  fleetWorkerModePending = fleet;
+  if (!await setFleetWorkerMode(fleet)) return;
+  fleetWorkerModePending = undefined;
+  if (fleet) return;
+  // Legacy pushes no longer own a fleet badge. Replace it from this page's local directory.
+  const count = [...sessions.values()].filter(session =>
+    session.sourceKey === localKey && session.inputRequired && session.canControl).length;
+  const badgeNavigator = navigator as Navigator & {
+    clearAppBadge?: () => Promise<void>;
+    setAppBadge?: (count: number) => Promise<void>;
+  };
+  try {
+    await (count === 0 ? badgeNavigator.clearAppBadge?.() : badgeNavigator.setAppBadge?.(count));
+  } catch { /* Badging is optional and cannot undo an acknowledged mode change. */ }
+}
+
+function notificationCoverageComplete(): boolean {
+  if (fleetWorkerModePending !== undefined || notificationState === "checking") return false;
+  if (notificationState !== "enabled" || notificationWorkerV3 === false) return true;
+  if (notificationWorkerV3 === undefined || fleetNotificationsOffered === undefined) return false;
+  return !fleetNotificationsOffered || fleetNotificationRows.every(row => !row.selected || row.state === "current");
+}
+
+function renderNotificationHosts(): void {
+  alertScope.textContent = fleetNotificationsOffered && notificationWorkerV3
+    ? "This home gateway sends all enabled hosts' alerts. Fleet alerts need it awake and reachable."
+    : `Alerts cover this host (${localSource.label}) only.`;
+  notificationHosts.hidden = notificationState !== "enabled" || !fleetNotificationsOffered || !notificationWorkerV3 ||
+    fleetWorkerModePending !== undefined;
+  notificationHosts.replaceChildren();
+  if (notificationHosts.hidden) return;
+  const selected = fleetNotificationRows.filter(row => row.selected);
+  const covered = selected.filter(row => row.state === "current").length;
+  notificationHosts.append(createTextElement("h3", "notification-hosts-title", "Hosts"),
+    createTextElement("p", "notification-hosts-summary", covered === selected.length
+      ? "All selected hosts covered" : `${covered} of ${selected.length} selected hosts covered`));
+  for (const row of fleetNotificationRows) {
+    const source = configuredNotificationSource(row.sourceId);
+    if (source === undefined) continue;
+    const element = document.createElement("div");
+    element.className = "notification-host";
+    element.dataset.sourceId = source.id;
+    element.dataset.state = row.state;
+    const label = document.createElement("label");
+    label.className = "notification-host-label";
+    const copy = document.createElement("span");
+    const status = !row.selected ? "Off" : row.state === "current" ? "Covered"
+      : row.state === "pending" ? "Connecting…"
+        : row.state === "stale" ? "Unreachable · showing last known"
+          : row.state === "unsupported" ? "Host gateway does not support alerts" : "Needs approval on this host";
+    copy.append(createTextElement("strong", "", source.label), createTextElement("span", "notification-host-status", status));
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-label", `${source.label} alerts`);
+    toggle.checked = row.selected;
+    toggle.disabled = fleetNotificationBusy.size > 0;
+    toggle.addEventListener("change", () => void changeNotificationHost(source, toggle.checked));
+    label.append(copy, toggle);
+    element.append(label);
+    if (row.selected && (row.state === "unauthorized" || row.state === "not_enrolled")) {
+      const reconnect = createTextElement("button", "status-action", "Reconnect") as HTMLButtonElement;
+      reconnect.disabled = fleetNotificationBusy.size > 0;
+      reconnect.addEventListener("click", () => void changeNotificationHost(source, true));
+      element.append(reconnect);
+    }
+    const problem = fleetNotificationErrors.get(source.id);
+    if (problem !== undefined) {
+      const notice = createTextElement("p", "notification-host-error", problem);
+      notice.setAttribute("role", "status");
+      element.append(notice);
+    }
+    notificationHosts.append(element);
+  }
+  if (tray.id === "alerts" || tray.id === "first-run-alerts") tray.refresh();
+}
+
+async function releaseFleetGrants(released: readonly { sourceId: string; grantId: string }[]): Promise<void> {
+  await Promise.all(released.map(async grant => {
+    const source = configuredNotificationSource(grant.sourceId);
+    if (source !== undefined) await fleetNotifications.revoke(grant.grantId, source).catch(() => undefined);
+  }));
+}
+
+function notificationSettingsOpen(): boolean {
+  return trayHost.open && !trayHost.matches(".tray-closing") &&
+    (tray.id === "alerts" || tray.id === "detail" || tray.id === "first-run-alerts");
+}
+
+function shouldRefreshFleetStatus(probe = false): boolean {
+  return fleetWorkerModePending !== undefined || probe || fleetNotificationsOffered === undefined ||
+    (fleetNotificationsOffered && (fleetNotificationRows.some(row => row.selected) || notificationSettingsOpen()));
+}
+
+function scheduleFleetStatusRefresh(): void {
+  if (fleetStatusTimer !== undefined) window.clearTimeout(fleetStatusTimer);
+  fleetStatusTimer = undefined;
+  if (notificationState !== "enabled" || document.visibilityState !== "visible" || !notificationWorkerV3 ||
+    fleetWorkerModePending !== undefined || fleetNotificationsOffered === false || !shouldRefreshFleetStatus()) return;
+  fleetStatusTimer = window.setTimeout(() => {
+    fleetStatusTimer = undefined;
+    if (notificationState === "enabled" && document.visibilityState === "visible" &&
+      fleetWorkerModePending === undefined && fleetNotificationsOffered !== false && shouldRefreshFleetStatus()) void reconcileFleetNotifications();
+  }, 10_000);
+}
+
+/** An unsupported coordinator is probed again only after configuration changes or Settings opens. */
+function observeNotificationConfig(config: Awaited<ReturnType<typeof loadClientConfig>>): boolean {
+  const signature = JSON.stringify(config ?? null);
+  if (notificationConfigSignature === signature) return false;
+  notificationConfigSignature = signature;
+  if (fleetNotificationsOffered === false) fleetNotificationsOffered = undefined;
+  return true;
+}
+
+async function refreshFleetNotifications(renew = true, probe = false): Promise<void> {
+  if (!probe && fleetNotificationsOffered === false && fleetWorkerModePending === undefined) return;
+  if (fleetStatusRequest !== undefined) return await fleetStatusRequest;
+  fleetStatusRequest = (async () => {
+    const subscription = await notificationRegistration?.pushManager.getSubscription();
+    try {
+      if (fleetNotificationsOffered === false && fleetWorkerModePending !== undefined) {
+        if (fleetNotificationBusy.size === 0) await applyFleetWorkerMode(false);
+        return;
+      }
+      const status = await fleetNotifications.status(subscription?.endpoint);
+      fleetNotificationRows = status?.sources.filter(row => configuredNotificationSource(row.sourceId) !== undefined) ?? [];
+      if (status === undefined) {
+        fleetNotificationsOffered = false;
+        if (fleetNotificationBusy.size === 0) await applyFleetWorkerMode(false);
+        return;
+      }
+      fleetNotificationsOffered = true;
+      if (renew) {
+        await Promise.all(fleetNotificationRows.map(async row => {
+          const source = configuredNotificationSource(row.sourceId);
+          if (!row.selected || source === undefined || row.grantId === undefined || row.expiresAt === undefined ||
+            Math.max(Date.parse(row.expiresAt), renewedFleetGrants.get(row.grantId) ?? 0) - Date.now() > FLEET_GRANT_RENEW_WITHIN_MS) return;
+          try {
+            const renewed = await fleetNotifications.renew(source, row.grantId);
+            if (renewed.grantId !== row.grantId) throw new FleetNotificationError("grant_rejected");
+            renewedFleetGrants.set(row.grantId, Date.parse(renewed.expiresAt));
+            rejectedFleetGrants.delete(row.grantId);
+            fleetNotificationErrors.delete(row.sourceId);
+          } catch (error) {
+            const code = error instanceof FleetNotificationError ? error.code : "source_unreachable";
+            if (code === "unauthorized" || code === "grant_rejected") rejectedFleetGrants.add(row.grantId);
+            fleetNotificationErrors.set(row.sourceId, code);
+            fleetNotificationRows = fleetNotificationRows.map(current => current.sourceId !== row.sourceId ? current : {
+              ...current, state: code === "unsupported" ? "unsupported" : code === "unauthorized" || code === "grant_rejected" ? "unauthorized" : "stale",
+            });
+          }
+        }));
+      }
+      fleetNotificationRows = fleetNotificationRows.map(row =>
+        row.grantId !== undefined && rejectedFleetGrants.has(row.grantId) ? { ...row, state: "unauthorized" } : row);
+      if (notificationWorkerV3 && fleetNotificationBusy.size === 0) {
+        await applyFleetWorkerMode(fleetNotificationRows.some(row => row.selected));
+      }
+    } catch {
+      // A coordinator outage cannot turn last-known selection or alerts into an all-clear.
+      fleetNotificationRows = fleetNotificationRows.map(row => row.selected ? { ...row, state: "stale" } : row);
+      if (fleetWorkerModePending !== undefined && fleetNotificationBusy.size === 0) {
+        await applyFleetWorkerMode(fleetWorkerModePending);
+      }
+    } finally {
+      const retained = new Set<SourceKey>([localKey]);
+      for (const row of fleetNotificationRows) {
+        const source = configuredNotificationSource(row.sourceId);
+        if (source !== undefined && row.selected && (row.state === "current" || row.state === "stale")) retained.add(sourceKey(source));
+      }
+      for (const key of knownNotificationAsks.keys()) if (!retained.has(key)) knownNotificationAsks.delete(key);
+      renderNotificationHosts();
+      render();
+      scheduleFleetStatusRefresh();
+      fleetStatusRequest = undefined;
+    }
+  })();
+  await fleetStatusRequest;
+}
+
+async function changeNotificationHost(source: FleetSource, enabled: boolean): Promise<void> {
+  if (fleetNotificationBusy.size > 0 || !notificationWorkerV3) return;
+  const subscription = await notificationRegistration?.pushManager.getSubscription();
+  if (subscription === null || subscription === undefined) return;
+  fleetNotificationBusy.add(source.id);
+  fleetNotificationErrors.delete(source.id);
+  renderNotificationHosts();
+  let previous: FleetSourceStatus | undefined;
+  let createdGrant: string | undefined;
+  let enrolling = false;
+  try {
+    await refreshFleetNotifications(false);
+    const row = fleetNotificationRows.find(row => row.sourceId === source.id);
+    if (row === undefined) throw new FleetNotificationError("unsupported");
+    previous = row;
+    if (enabled) {
+      enrolling = row.grantId === undefined || rejectedFleetGrants.has(row.grantId) ||
+        row.state === "unauthorized" || row.state === "not_enrolled";
+      // No grant mutation may begin before the worker's durable fleet-mode acknowledgment.
+      if (!await setFleetWorkerMode(true)) throw new FleetNotificationError("unsupported");
+      if (!enrolling && row.grantId !== undefined) {
+        try {
+          const renewed = await fleetNotifications.renew(source, row.grantId);
+          if (renewed.grantId !== row.grantId) throw new FleetNotificationError("grant_rejected");
+          renewedFleetGrants.set(row.grantId, Date.parse(renewed.expiresAt));
+          rejectedFleetGrants.delete(row.grantId);
+          fleetNotificationErrors.delete(source.id);
+        } catch (error) {
+          if (error instanceof FleetNotificationError && (error.code === "unauthorized" || error.code === "grant_rejected")) {
+            rejectedFleetGrants.add(row.grantId);
+            fleetNotificationRows = fleetNotificationRows.map(current => current.sourceId === source.id ? { ...current, state: "unauthorized" } : current);
+          }
+          throw error;
+        }
+      } else {
+        const grant = await fleetNotifications.create(source.id);
+        createdGrant = grant.grantId;
+        const authorized = await fleetNotifications.authorize(source, grant);
+        if (authorized.grantId !== grant.grantId) throw new FleetNotificationError("grant_rejected");
+        await fleetNotifications.activate(grant.grantId);
+      }
+    }
+    const selected = fleetNotificationRows.filter(row => row.selected && row.sourceId !== source.id).map(row => row.sourceId);
+    if (enabled) selected.push(source.id);
+    const result = await fleetNotifications.recipient(subscription.endpoint, selected);
+    if (createdGrant !== undefined) {
+      rejectedFleetGrants.delete(createdGrant);
+      fleetNotificationErrors.delete(source.id);
+      createdGrant = undefined;
+    }
+    await releaseFleetGrants(result.released);
+  } catch (error) {
+    if (createdGrant !== undefined) {
+      await Promise.allSettled([fleetNotifications.revoke(createdGrant), fleetNotifications.revoke(createdGrant, source)]);
+    }
+    if (enrolling && previous !== undefined) {
+      fleetNotificationRows = fleetNotificationRows.map(row => row.sourceId === source.id ? previous! : row);
+    }
+    fleetNotificationErrors.set(source.id, error instanceof FleetNotificationError ? error.code : "source_unreachable");
+  } finally {
+    // Success and failure both follow the coordinator's actual device selection, never grant state.
+    await fleetStatusRequest;
+    await refreshFleetNotifications(false);
+    await applyFleetWorkerMode(fleetNotificationRows.some(row => row.selected));
+    fleetNotificationBusy.delete(source.id);
+    renderNotificationHosts();
+    render();
+    scheduleFleetStatusRefresh();
+    if (fleetWorkerModePending === undefined) await reconcileFleetNotifications();
+  }
+}
+
+async function reconcileFleetNotifications(probe = false): Promise<void> {
+  if (notificationWorkerV3 === false || notificationState !== "enabled") return;
+  if (fleetReconciliation !== undefined) {
+    fleetReconciliationDirty = true;
+    fleetReconciliationProbe ||= probe;
+    return await fleetReconciliation;
+  }
+  if (!shouldRefreshFleetStatus(probe)) return;
+  fleetReconciliation = (async () => {
+    try {
+      do {
+        fleetReconciliationDirty = false;
+        await reconcileFleetNotificationSnapshot(probe);
+        probe = fleetReconciliationProbe;
+        fleetReconciliationProbe = false;
+      } while (fleetReconciliationDirty);
+    } finally { fleetReconciliation = undefined; }
+  })();
+  await fleetReconciliation;
+}
+
+async function reconcileFleetNotificationSnapshot(probe: boolean): Promise<void> {
+  // Capture first. Never reuse a snapshot request started before this worker reply.
+  const received = await notificationReceiptCount();
+  if (received === undefined) { renderNotificationHosts(); render(); return; }
+  await refreshFleetNotifications(true, probe);
+  const selected = fleetNotificationRows.filter(row => row.selected);
+  if (!fleetNotificationsOffered || fleetWorkerModePending !== undefined) return;
+  const fresh: string[] = [];
+  const pending: FleetPendingAsk[] = [];
+  const selectedKeys = new Set<SourceKey>([localKey]);
+  const observe = (key: SourceKey, metadata: readonly Metadata[]): void => {
+    const source = bindings.get(key);
+    const asks = metadata.flatMap(session => session.inputRequired && session.canControl && session.ask !== undefined
+      ? [{ ...(source === undefined ? {} : { source }), instanceId: session.instanceId,
+        generation: session.generation, requestId: session.ask.requestId }] : []);
+    knownNotificationAsks.set(key, asks);
+    fresh.push(source ?? "local");
+    pending.push(...asks);
+  };
+  await Promise.all([
+    (async () => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
+      try {
+        const response = await fetch("/api/v1/sessions", { cache: "no-store", credentials: "same-origin", redirect: "error", signal: controller.signal });
+        if (response.ok) observe(localKey, parseSessionListResponse(await boundedJson(response, SNAPSHOT_BYTES)).sessions);
+      } catch { /* No fresh observation: retain known asks, never close this source. */ }
+      finally { window.clearTimeout(timeout); }
+    })(),
+    ...selected.map(async row => {
+      const source = configuredNotificationSource(row.sourceId);
+      if (source === undefined) return;
+      const key = sourceKey(source);
+      if (row.state === "current" || row.state === "stale") selectedKeys.add(key);
+      if (row.state === "current" && await remotes.get(key)?.refreshAfterCurrent() === "healthy") {
+        observe(key, remotes.get(key)!.snapshot!.sessions);
+      }
+    }),
+  ]);
+  const count = [...selectedKeys].reduce((sum, key) => sum + (knownNotificationAsks.get(key)?.length ?? 0), 0);
+  notificationRegistration?.active?.postMessage(parseFleetReconcileMessage({
+    type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received }, fresh, pending,
+    badge: { count, complete: notificationCoverageComplete() && fresh.length === selected.length + 1 },
+  }));
 }
 
 async function savePushSubscription(
@@ -499,7 +908,7 @@ function isNotificationRouteRequest(value: unknown): value is { readonly data: u
     keys.includes("version") &&
     keys.includes("data") &&
     record.type === "omp-notification-route" &&
-    record.version === PUSH_API_VERSION
+    (record.version === PUSH_API_VERSION || record.version === FLEET_PUSH_VERSION)
   );
 }
 
@@ -512,17 +921,16 @@ function acceptNotificationRoute(event: MessageEvent): void {
   if (!isNotificationRouteRequest(event.data)) return;
   const intent = parseNotificationData(event.data.data);
   if (intent === undefined) return;
-  event.ports[0]?.postMessage({ type: "omp-notification-route-accepted", version: PUSH_API_VERSION });
+  event.ports[0]?.postMessage({ type: "omp-notification-route-accepted", version: intent.source === undefined ? PUSH_API_VERSION : FLEET_PUSH_VERSION });
   notificationRouteSequence += 1;
   notificationRouteNoticeRevision = undefined;
-  selectionEpoch += 1;
-  creation.cancel("competing");
-  clearCreationDraft();
-  cancelLaunch();
   pendingNotificationLaunch = intent;
   pendingNotificationRoute = true;
   notificationRouteStatusLocked = true;
-  void refreshAndConnect();
+  notificationRouteHeldForVisibility = document.visibilityState !== "visible";
+  if (notificationRouteHeldForVisibility) return;
+  if (intent.source === undefined) void refreshAndConnect();
+  else void resolvePendingNotificationRoute();
 }
 
 async function initializeApplicationWorker(): Promise<ServiceWorkerRegistration | undefined> {
@@ -552,6 +960,7 @@ async function initializeApplicationWorker(): Promise<ServiceWorkerRegistration 
 
 async function initializeNotifications(
   workerRegistration: Promise<ServiceWorkerRegistration | undefined>,
+  fleetReady: Promise<void>,
 ): Promise<void> {
   setNotificationControl("checking");
   if (
@@ -582,6 +991,7 @@ async function initializeNotifications(
     }
     const config = parsePushConfigResponse(await configResponse.json());
     notificationRegistration = registration;
+    await notificationReceiptCount();
     applicationServerKey = config.applicationServerKey;
     if (Notification.permission === "denied") {
       setNotificationControl("blocked");
@@ -594,6 +1004,8 @@ async function initializeNotifications(
     }
     selectNotificationDetail(await savePushSubscription(existing));
     setNotificationControl("enabled");
+    await fleetReady;
+    if (notificationWorkerV3 === true) await reconcileFleetNotifications();
   } catch {
     setNotificationControl("unavailable");
   }
@@ -610,6 +1022,14 @@ async function disableBackgroundNotifications(): Promise<void> {
   setNotificationControl("disabling");
   const endpoint = existing.endpoint;
   try {
+    if (notificationWorkerV3 && fleetNotificationsOffered) {
+      try {
+        const result = await fleetNotifications.recipient(endpoint, []);
+        await releaseFleetGrants(result.released);
+      } catch { /* Browser unsubscribe still stops this device if the coordinator is down or rolled back. */ }
+      await setFleetWorkerMode(false);
+      fleetNotificationRows = [];
+    }
     await existing.unsubscribe();
     await fetch("/api/v1/push/subscription", {
       method: "DELETE",
@@ -653,6 +1073,7 @@ async function toggleBackgroundNotifications(): Promise<void> {
       throw error;
     }
     setNotificationControl("enabled");
+    await reconcileFleetNotifications();
   } catch {
     setNotificationControl(Notification.permission === "denied" ? "blocked" : "unavailable");
   }
@@ -671,6 +1092,13 @@ let notificationRouteSequence = pendingNotificationRoute ? 1 : 0;
 let notificationRouteStatusLocked = pendingNotificationRoute;
 let notificationRouteNoticeRevision: number | undefined;
 let pendingNotificationLaunch = readPendingNotificationLaunch();
+let notificationRouteHeldForVisibility = false;
+interface NotificationRouteResolution {
+  readonly sequence: number;
+  sourceKey: SourceKey | undefined;
+  visibilityDeferred: boolean;
+}
+let notificationRouteResolution: NotificationRouteResolution | undefined;
 
 if (location.pathname === "/update/" || location.pathname === "/client/") {
   history.replaceState(null, "", "/");
@@ -1108,7 +1536,7 @@ function scopeCoverage(scope = selectedScope) {
 }
 
 function scopeComplete(scope = selectedScope): boolean {
-  return scopeCoverage(scope).complete;
+  return scopeCoverage(scope).complete && notificationCoverageComplete();
 }
 
 function hostLabel(ref: Pick<SessionRef, "sourceKey">): string {
@@ -1238,8 +1666,11 @@ function renderFleetStatus(): void {
 }
 
 async function initializeFleet(): Promise<void> {
+  const recovering = fleetBootstrapFailed;
+  let notificationConfigChanged = false;
   try {
     const config = await loadClientConfig(location.origin);
+    notificationConfigChanged = observeNotificationConfig(config);
     if (config !== undefined) {
       // Identity is already origin-bound. Keep in-flight creation intents on this same source.
       localSource.label = config.local.label;
@@ -1248,6 +1679,7 @@ async function initializeFleet(): Promise<void> {
         const key = sourceKey(target);
         sources.set(key, target);
         remotes.set(key, new FleetTransport(target, remoteChanged));
+        bindings.set(key, await fleetSourceBinding(target.id, target.origin));
       }
     }
     fleetBootstrapFailed = false;
@@ -1266,9 +1698,10 @@ async function initializeFleet(): Promise<void> {
   }
   hostPicker.value = selectedScope;
   hostPickerLabel.hidden = sources.size === 1;
-  alertScope.textContent = `Alerts cover this host (${localSource.label}) only. Remote hosts need their own installed PWA for alerts.`;
-  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  renderNotificationHosts();
+  updateRemoteVisibility();
   renderFleetStatus();
+  if (recovering && notificationConfigChanged && notificationWorkerV3 === true) void reconcileFleetNotifications();
 }
 
 function elapsedLabel(startedAt: number): string {
@@ -1301,9 +1734,12 @@ function modelSlug(model: string): string {
 
 function compareWaiting(left: SessionMetadata, right: SessionMetadata, scope = selectedScope): number {
   if (scope === "all" && sources.size > 1) {
+    // Page receipt order, never host clocks. A cold document intentionally loses this in-memory order.
     const first = observedAsks.get(localRecordKey(left, left.ask?.requestId ?? "")) ?? 0;
     const second = observedAsks.get(localRecordKey(right, right.ask?.requestId ?? "")) ?? 0;
-    return first - second || left.sourceKey.localeCompare(right.sourceKey) || left.instanceId.localeCompare(right.instanceId);
+    const configuredOrder = [...sources.keys()];
+    return first - second || configuredOrder.indexOf(left.sourceKey) - configuredOrder.indexOf(right.sourceKey) ||
+      left.instanceId.localeCompare(right.instanceId) || (left.ask?.requestId ?? "").localeCompare(right.ask?.requestId ?? "");
   }
   const leftSince = left.ask?.since ?? left.lastSeenAt;
   const rightSince = right.ask?.since ?? right.lastSeenAt;
@@ -1426,16 +1862,19 @@ function createExpandIcon(): SVGSVGElement {
 }
 
 async function closeHeldAskNotification(held: HeldAsk): Promise<void> {
-  if (recordRef(held).sourceKey !== localKey) return;
   if (!("serviceWorker" in navigator)) return;
+  const key = recordRef(held).sourceKey;
+  const binding = key === localKey ? undefined : bindings.get(key);
+  if (key !== localKey && binding === undefined) return;
   try {
     const registration = notificationRegistration ?? (await navigator.serviceWorker.ready);
     const notifications = await registration.getNotifications({
-      tag: `omp-attention-${held.instanceId}`,
+      tag: fleetNotificationTag(binding, held.instanceId),
     });
     for (const notification of notifications) {
-      const data = notification.data as { requestId?: unknown } | undefined;
-      if (data?.requestId === held.requestId) notification.close();
+      const intent = parseNotificationData(notification.data);
+      if (intent?.kind === "attention" && intent.source === binding && intent.instanceId === held.instanceId &&
+        intent.requestId === held.requestId) notification.close();
     }
   } catch {
     // Holding remains valid when the browser cannot enumerate notifications.
@@ -1664,26 +2103,30 @@ function renderAllClear(
   arrived: boolean,
 ): void {
   const coverage = scopeCoverage();
+  const complete = coverage.complete && notificationCoverageComplete();
   const summary = document.createElement("div");
   summary.className = "all-clear-summary";
-  summary.dataset.complete = String(coverage.complete);
+  summary.dataset.complete = String(complete);
   if (arrived) summary.dataset.arrived = "true";
-  const alertsLive = notificationState === "enabled" && (sources.size === 1 || selectedScope === localKey);
+  const alertsLive = notificationState === "enabled" &&
+    (sources.size === 1 || selectedScope === localKey || fleetNotificationRows.some(row => row.selected));
+  const uncovered = fleetNotificationRows.filter(row => row.selected && row.state !== "current")
+    .map(row => configuredNotificationSource(row.sourceId)?.label).filter(label => label !== undefined);
   const message = document.createElement("div");
   message.className = "all-clear-message";
   message.append(
-    createTextElement("h2", "all-clear-title", coverage.complete ? "All clear" : coverage.title),
+    createTextElement("h2", "all-clear-title", complete ? "All clear" : coverage.complete ? "Host coverage incomplete" : coverage.title),
     createTextElement(
       "p",
       "all-clear-copy",
-      coverage.complete
+      complete
         ? `Nothing needs you.${alertsLive ? " Alerts are on for input requests and activity stops." : ""}`
-        : coverage.copy,
+        : uncovered.length > 0 ? `Known work only. Alerts unavailable for ${uncovered.join(", ")}.` : coverage.copy,
     ),
   );
   summary.append(createTextElement("span", "all-clear-dot", ""), message);
   // Keep the ping promise honest: without an active subscription, surface the path to one.
-  if (coverage.complete && (sources.size === 1 || selectedScope === localKey) && (notificationState === "idle" || notificationState === "blocked")) {
+  if (complete && (sources.size === 1 || selectedScope === localKey) && (notificationState === "idle" || notificationState === "blocked")) {
     const hint = document.createElement("button");
     hint.type = "button";
     hint.className = "alerts-hint";
@@ -1693,7 +2136,7 @@ function renderAllClear(
   }
   sessionList.append(summary);
   if (working.length > 0) {
-    sessionList.append(createQueueKicker(coverage.complete ? "Live sessions" : "Sessions"));
+    sessionList.append(createQueueKicker(complete ? "Live sessions" : "Sessions"));
     for (const session of working) sessionList.append(createWorkingRow(session));
   }
   appendDismissedControl(dismissed);
@@ -1944,6 +2387,9 @@ function renderDirectory(arrived = false): void {
 function renderEmptyState(): void {
   emptyState.querySelector(".empty-state-detail")?.remove();
   const coverage = scopeCoverage();
+  const notificationComplete = notificationCoverageComplete();
+  const uncovered = fleetNotificationRows.filter(row => row.selected && row.state !== "current")
+    .map(row => configuredNotificationSource(row.sourceId)?.label).filter(label => label !== undefined);
   const filtered = selectedScope !== "all";
   const observations = [...sources.keys()].filter(key => !filtered || key === selectedScope).map(sourceAvailability);
   const observation = observations.length === 1 ? observations[0] : undefined;
@@ -1954,12 +2400,13 @@ function renderEmptyState(): void {
     (source.status === "fresh" || source.status === "refreshing" || source.status === "stale"));
   const sharedTime = observations[0]?.time;
   const sharedInstant = observations[0]?.observedAt;
-  emptyState.dataset.state = coverage.complete && !filtered ? "empty" : "limited";
+  emptyState.dataset.state = coverage.complete && notificationComplete && !filtered ? "empty" : "limited";
   if (emptyState.dataset.state === "empty") return;
   const body = document.createElement("div");
   body.className = "empty-state-detail";
   const title = denied ? "Sessions are hidden"
     : withdrawn ? "Session list withdrawn"
+    : !notificationComplete ? "Host coverage incomplete"
     : coverage.complete ? "No sessions on this host"
       : expired ? observation === undefined ? "Session lists expired" : "Session list expired"
         : retainedEmpty ? observations.every(source => source.observedAt === sharedInstant)
@@ -1968,6 +2415,7 @@ function renderEmptyState(): void {
             : observation !== undefined ? "This host has not been checked" : "No sessions to show yet";
   const detail = denied ? "Ask the gateway operator to restore access."
     : withdrawn ? "A fresh authorized list is needed before showing sessions."
+    : !notificationComplete ? `Known work only. Alerts unavailable for ${uncovered.join(", ")}.`
     : coverage.complete ? "Choose another host or start a session here."
     : !coverage.failed ? retainedEmpty ? "Checking for updates before confirming this list is still empty."
       : "Waiting for the remaining hosts before confirming this list is empty."
@@ -3144,7 +3592,8 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
-  if (!directoryLoaded && transportFailureKind === undefined && !authorizationDenied && !localObservationWithdrawn) {
+  if (!directoryLoaded && transportFailureKind === undefined && !authorizationDenied && !localObservationWithdrawn &&
+    notificationRouteNoticeRevision === undefined) {
     setStatus("loading", "Loading sessions…");
   }
   try {
@@ -3163,6 +3612,9 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     const payload = parseSessionListResponse(await response.json());
     if (epoch !== directoryEpoch || payload.revision < directoryRevision) return false;
     directoryRevision = payload.revision;
+    // A remote routed load can expire before the first local list arrives. Pin that notice to
+    // this first revision so neither bootstrap nor its identical opening SSE snapshot erases it.
+    if (notificationRouteNoticeRevision === -1) notificationRouteNoticeRevision = payload.revision;
     authorizationDenied = false;
     localObservationWithdrawn = false;
     directoryLoaded = true;
@@ -3172,7 +3624,7 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     replaceSessionSnapshot(payload.sessions);
     releaseLaunchFailure(localKey);
     render();
-    setStatus("ready", "");
+    if (!notificationRouteStatusLocked) setStatus("ready", "");
     return true;
   } catch {
     if (epoch !== directoryEpoch || (controller.signal.aborted && !timedOut)) return false;
@@ -3246,26 +3698,86 @@ function connectEvents(epoch: number): void {
   };
 }
 
+/** A tap owns its source's visibility epoch through the launch response, not just its snapshot. */
+function updateRemoteVisibility(refresh = false): void {
+  const visible = document.visibilityState === "visible";
+  const resolution = notificationRouteResolution;
+  for (const remote of remotes.values()) {
+    if (resolution !== undefined && remote.key === resolution.sourceKey) {
+      resolution.visibilityDeferred = true;
+      continue;
+    }
+    remote.setVisible(visible);
+    if (visible && refresh) void remote.refresh(true);
+  }
+}
+
+function releaseNotificationVisibility(resolution: NotificationRouteResolution): void {
+  const remote = resolution.sourceKey === undefined ? undefined : remotes.get(resolution.sourceKey);
+  if (!resolution.visibilityDeferred || remote === undefined) return;
+  remote.setVisible(document.visibilityState === "visible");
+  if (document.visibilityState === "visible") void remote.refresh(true);
+}
+
 async function resolvePendingNotificationRoute(): Promise<void> {
-  if (!pendingNotificationRoute) return;
+  if (!pendingNotificationRoute || notificationRouteResolution?.sequence === notificationRouteSequence) return;
+  if (document.visibilityState !== "visible") { notificationRouteHeldForVisibility = true; return; }
   const sequence = notificationRouteSequence;
+  const previous = notificationRouteResolution;
+  const resolution: NotificationRouteResolution = { sequence, sourceKey: undefined, visibilityDeferred: false };
+  notificationRouteResolution = resolution;
+  if (previous !== undefined) releaseNotificationVisibility(previous);
+  const epoch = selectionEpoch;
+  const heldForVisibility = notificationRouteHeldForVisibility;
+  notificationRouteHeldForVisibility = false;
   pendingNotificationRoute = false;
   const pending = pendingNotificationLaunch;
   pendingNotificationLaunch = undefined;
   try {
-    const session = pending === undefined ? undefined : sessions.get(sessionKey({ sourceKey: localKey, instanceId: pending.instanceId }));
+    let key: SourceKey | undefined = pending?.source === undefined ? localKey
+      : [...bindings].find(([, binding]) => binding === pending.source)?.[0];
+    if (pending?.source !== undefined && key !== undefined) {
+      resolution.sourceKey = key;
+      const source = sources.get(key)!;
+      try {
+        // Focus first starts the ordinary source refresh. Let it settle before tap revalidation.
+        if (heldForVisibility) await remotes.get(key)?.refresh(true);
+        // A warm page's bootstrap configuration may predate a target removal or origin change.
+        const config = await loadClientConfig(location.origin);
+        if (observeNotificationConfig(config)) void reconcileFleetNotifications();
+        const target = config?.targets.find(target => target.id === source.id);
+        // This binding was derived with fleetSourceBinding; require those exact inputs still.
+        if (target === undefined || target.origin !== source.origin || fleetNotificationsOffered === false) key = undefined;
+        else {
+          const registration = notificationRegistration ?? await applicationWorkerRegistration;
+          const subscription = await registration?.pushManager.getSubscription();
+          // Stale, deselected, revoked and rebound hosts never reach a launch broker.
+          const status = await fleetNotifications.status(subscription?.endpoint);
+          const row = status?.sources.find(row => row.sourceId === source.id);
+          if (row?.selected !== true || row.state !== "current" ||
+            await remotes.get(key)?.refreshForNotification() !== "healthy") key = undefined;
+          else {
+            const current = await fleetNotifications.status(subscription?.endpoint);
+            const checked = current?.sources.find(row => row.sourceId === source.id);
+            if (checked?.selected !== true || checked.state !== "current" || checked.grantId !== row.grantId) key = undefined;
+          }
+        }
+      } catch { key = undefined; }
+    }
+    if (sequence !== notificationRouteSequence || epoch !== selectionEpoch) return;
+    const session = pending === undefined || key === undefined ? undefined
+      : sessions.get(sessionKey({ sourceKey: key, instanceId: pending.instanceId }));
     // A tap for the collaboration this page already shows keeps it: an activity stop never
     // downgrades Control to View, and an attention tap relaunches only to gain Control.
     const shell = activeCollabShell;
     const shown =
       shell !== undefined &&
       session !== undefined &&
-      shell.sourceKey === localKey &&
+      shell.sourceKey === key &&
       shell.instanceId === session.instanceId &&
       shell.generation === session.generation;
     if (pending?.kind === "activity_stop" && session?.generation === pending.generation && session.canView) {
       if (shown) return;
-      selectedScope = localKey;
       if (shell !== undefined) showTriageBar(shell, "sending", "Opening view…");
       await launch(session, "view");
     } else if (
@@ -3275,7 +3787,6 @@ async function resolvePendingNotificationRoute(): Promise<void> {
       session.canControl
     ) {
       if (shown && shell.mode === "control") return;
-      selectedScope = localKey;
       if (shell !== undefined) showTriageBar(shell, "sending", "Opening control…");
       await launch(session, "control", undefined, pending.requestId);
     } else if (shell !== undefined) {
@@ -3290,15 +3801,20 @@ async function resolvePendingNotificationRoute(): Promise<void> {
       applyActivatedWorkerUpdate();
     }
   } finally {
+    if (notificationRouteResolution === resolution) {
+      notificationRouteResolution = undefined;
+      releaseNotificationVisibility(resolution);
+    }
     if (sequence === notificationRouteSequence && notificationRouteNoticeRevision === undefined) {
       notificationRouteStatusLocked = false;
     }
+    if (pendingNotificationRoute) void resolvePendingNotificationRoute();
   }
 }
 
 let fleetRecovery: Promise<void> | undefined;
 async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
-  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  updateRemoteVisibility();
   if (resetBackoff) reconnectAttempt = 0;
   clearReconnectTimeout();
   const epoch = directoryEpoch + 1;
@@ -3375,7 +3891,8 @@ for (const input of notificationDetailInputs) {
 }
 window.addEventListener("pageshow", event => {
   if (!event.persisted) return;
-  for (const remote of remotes.values()) remote.setVisible(document.visibilityState === "visible");
+  void reconcileFleetNotifications();
+  updateRemoteVisibility();
   if (collabShellDisposedOnPageHide) {
     void resumeDisposedCollabShell();
     return;
@@ -3383,13 +3900,13 @@ window.addEventListener("pageshow", event => {
   void refreshAndConnect();
 });
 window.addEventListener("online", () => {
-  for (const remote of remotes.values()) {
-    remote.setVisible(document.visibilityState === "visible");
-    void remote.refresh(true);
-  }
+  void reconcileFleetNotifications();
+  updateRemoteVisibility(true);
   void refreshAndConnect();
 });
 window.addEventListener("pagehide", () => {
+  if (fleetStatusTimer !== undefined) window.clearTimeout(fleetStatusTimer);
+  fleetStatusTimer = undefined;
   creation.cancel("pagehide");
   clearCreationDraft();
   const attempt = pendingLaunch;
@@ -3465,15 +3982,21 @@ document.addEventListener("freeze", () => {
  * a timer that was frozen with it.
  */
 document.addEventListener("visibilitychange", () => {
-  for (const remote of remotes.values()) {
-    remote.setVisible(document.visibilityState === "visible");
-    if (document.visibilityState === "visible") void remote.refresh(true);
+  if (document.visibilityState === "visible") void reconcileFleetNotifications();
+  else {
+    if (fleetStatusTimer !== undefined) window.clearTimeout(fleetStatusTimer);
+    fleetStatusTimer = undefined;
   }
+  updateRemoteVisibility(true);
   if (document.visibilityState !== "visible") {
     if (creation.isActive) cancelLaunch();
     creation.cancel("background");
     resetTransportGuidance();
     return;
+  }
+  if (pendingNotificationRoute) {
+    if (pendingNotificationLaunch?.source === undefined) { void refreshAndConnect(); return; }
+    void resolvePendingNotificationRoute();
   }
   maybeStartFirstRun();
   if (authorizationDenied || directoryStreamIsLive()) return;
@@ -3484,6 +4007,8 @@ document.addEventListener("visibilitychange", () => {
 });
 
 const applicationWorkerRegistration = initializeApplicationWorker();
-void initializeNotifications(applicationWorkerRegistration);
-await initializeFleet();
+const fleetReady = initializeFleet();
+void initializeNotifications(applicationWorkerRegistration, fleetReady);
+await fleetReady;
+if (pendingNotificationLaunch?.source !== undefined) void resolvePendingNotificationRoute();
 await refreshAndConnect();

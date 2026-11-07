@@ -6,6 +6,12 @@ import {
   MAX_SESSION_CREATION_OPTIONS_BYTES, MAX_SESSION_CREATION_STATUS_BYTES,
   type SessionCreationOptions, type SessionCreationRequest, type SessionCreationReceipt, type SessionCreationStatus,
   type ClientConfigResponse, type FleetSource, type SessionListResponse,
+  MAX_FLEET_STATUS_BYTES, MAX_FLEET_REQUEST_BYTES,
+  parseFleetStatusRequest, parseFleetStatusResponse,
+  parseFleetGrantCreateRequest, parseFleetGrantCreateResponse, parseFleetGrantActionRequest,
+  parseSourceGrantRequest, parseSourceGrantResponse,
+  parseFleetRecipientRequest, parseFleetRecipientRemoveRequest, parseFleetRecipientResponse,
+  type FleetStatusResponse, type FleetGrantCreateResponse, type FleetRecipientResponse, type SourceGrantResponse,
 } from "@omp-session-gateway/protocol";
 import type { SourceStatus } from "./availability";
 
@@ -80,7 +86,7 @@ export async function loadClientConfig(origin: string, time: FleetClock = clock)
   } finally { time.clearTimeout(timer); }
 }
 
-/** One source owns one request, one revision domain and one visibility epoch. */
+/** One source owns a polling request and visibility epoch; explicit taps have their own request. */
 export class FleetTransport {
   readonly key: SourceKey;
   status: SourceStatus = "loading";
@@ -93,6 +99,7 @@ export class FleetTransport {
   private visible = false;
   private failures = 0;
   private request: { controller: AbortController; promise: Promise<SnapshotResult> } | undefined;
+  private notificationRequest: AbortController | undefined;
   private timer: number | undefined;
   private graceTimer: number | undefined;
 
@@ -160,6 +167,8 @@ export class FleetTransport {
     this.epoch += 1;
     this.request?.controller.abort();
     this.request = undefined;
+    this.notificationRequest?.abort();
+    this.notificationRequest = undefined;
     this.clearTimer();
     if (this.graceTimer !== undefined) this.time.clearTimeout(this.graceTimer);
     this.graceTimer = undefined;
@@ -186,6 +195,25 @@ export class FleetTransport {
     return promise;
   }
 
+  /** Worker reconciliation needs a request started after its receipt-count capture. */
+  async refreshAfterCurrent(explicit = false): Promise<SnapshotResult> {
+    await this.request?.promise;
+    // Routine observations must not withdraw still-fresh metadata from an in-flight launch.
+    return await this.refresh(explicit);
+  }
+
+  /** A notification tap may arrive before focus; polling visibility never owns this request. */
+  refreshForNotification(): Promise<SnapshotResult> {
+    this.notificationRequest?.abort();
+    const controller = new AbortController();
+    this.notificationRequest = controller;
+    this.request?.controller.abort();
+    this.request = undefined;
+    this.clearTimer();
+    this.sequence += 1;
+    return this.fetchSnapshot(controller, this.epoch, this.sequence, true);
+  }
+
   async probe(signal: AbortSignal): Promise<SnapshotResult> {
     if (signal.aborted) return "unavailable";
     // Cancelling a consumer must not cancel the directory's coalesced request.
@@ -199,10 +227,11 @@ export class FleetTransport {
     return await promise;
   }
 
-  private async fetchSnapshot(controller: AbortController, epoch: number, sequence: number): Promise<SnapshotResult> {
+  private async fetchSnapshot(controller: AbortController, epoch: number, sequence: number, notification = false): Promise<SnapshotResult> {
     let timedOut = false;
     const timeout = this.time.setTimeout(() => { timedOut = true; controller.abort(); }, 5_000);
-    const current = (): boolean => this.epoch === epoch && this.sequence === sequence && this.visible;
+    const current = (): boolean => notification ? this.notificationRequest === controller
+      : this.epoch === epoch && this.sequence === sequence && this.visible;
     try {
       // Native browser fetch must not receive this transport as its Window receiver.
       const fetchSnapshot = this.fetcher;
@@ -232,14 +261,104 @@ export class FleetTransport {
     } finally {
       this.time.clearTimeout(timeout);
       if (current()) {
-        this.request = undefined;
-        if (this.status !== "forbidden") {
+        if (notification) this.notificationRequest = undefined;
+        else this.request = undefined;
+        if (this.visible && this.request === undefined && this.status !== "forbidden") {
           const cap = Math.min(30_000, 1_000 * 2 ** Math.min(5, Math.max(0, this.failures - 1)));
           const delay = this.failures === 0 ? 10_000 : Math.floor(cap / 2 + this.time.random() * cap / 2);
           this.timer = this.time.setTimeout(() => { this.timer = undefined; void this.refresh(); }, delay);
         }
       }
     }
+  }
+}
+
+type FleetNotificationProblem = "grant_rejected" | "source_unreachable" | "unsupported" | "unauthorized" | "unavailable";
+export class FleetNotificationError extends Error {
+  constructor(readonly code: FleetNotificationProblem) { super(code); }
+}
+
+/** Browser-direct grants only: a verifier passes through memory; no feed credential reaches a page. */
+export class FleetNotificationTransport {
+  constructor(
+    private readonly fetcher: typeof fetch = fetch,
+    private readonly time: FleetClock = clock,
+  ) {}
+
+  async status(endpoint?: string): Promise<FleetStatusResponse | undefined> {
+    try {
+      return await this.request("/api/v1/push/fleet/status", "POST",
+        parseFleetStatusRequest({ version: 1, ...(endpoint === undefined ? {} : { endpoint }) }), parseFleetStatusResponse);
+    } catch (error) {
+      if (error instanceof FleetNotificationError && error.code === "unsupported") return undefined;
+      throw error;
+    }
+  }
+
+  create(sourceId: string): Promise<FleetGrantCreateResponse> {
+    return this.request("/api/v1/push/fleet/grants", "POST",
+      parseFleetGrantCreateRequest({ version: 1, sourceId }), parseFleetGrantCreateResponse);
+  }
+
+  authorize(source: FleetSource, grant: FleetGrantCreateResponse): Promise<SourceGrantResponse> {
+    return this.request("/api/v1/notification-grants", "POST", parseSourceGrantRequest(grant), parseSourceGrantResponse, source);
+  }
+
+  renew(source: FleetSource, grantId: string): Promise<SourceGrantResponse> {
+    return this.request(`/api/v1/notification-grants/${parseSessionCreationUuid(grantId)}/renew`, "POST",
+      parseFleetGrantActionRequest({ version: 1 }), parseSourceGrantResponse, source);
+  }
+
+  activate(grantId: string): Promise<void> {
+    return this.request(`/api/v1/push/fleet/grants/${parseSessionCreationUuid(grantId)}/activate`, "POST",
+      parseFleetGrantActionRequest({ version: 1 }), () => undefined);
+  }
+
+  revoke(grantId: string, source?: FleetSource): Promise<void> {
+    const prefix = source === undefined ? "/api/v1/push/fleet/grants" : "/api/v1/notification-grants";
+    return this.request(`${prefix}/${parseSessionCreationUuid(grantId)}/revoke`, "POST",
+      parseFleetGrantActionRequest({ version: 1 }), () => undefined, source);
+  }
+
+  recipient(endpoint: string, sources: readonly string[]): Promise<FleetRecipientResponse> {
+    return this.request("/api/v1/push/fleet/recipient", sources.length === 0 ? "DELETE" : "PUT",
+      sources.length === 0 ? parseFleetRecipientRemoveRequest({ version: 1, endpoint })
+        : parseFleetRecipientRequest({ version: 1, endpoint, sources }), parseFleetRecipientResponse);
+  }
+
+  private async request<T>(
+    path: string, method: string, payload: unknown, parse: (value: unknown) => T, source?: FleetSource,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timeout = this.time.setTimeout(() => controller.abort(), path.endsWith("/activate") ? 10_000 : 5_000);
+    try {
+      const fetchRequest = this.fetcher;
+      const response = await fetchRequest(`${source?.origin ?? ""}${path}`, {
+        method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        cache: "no-store", credentials: source === undefined ? "same-origin" : "omit",
+        redirect: "error", ...(source === undefined ? {} : { mode: "cors" as const }), signal: controller.signal,
+      });
+      if (controller.signal.aborted) throw new FleetNotificationError("source_unreachable");
+      if (!response.ok) {
+        let code: FleetNotificationProblem = response.status === 404 ? "unsupported"
+          : response.status === 401 || response.status === 403 ? "unauthorized" : "unavailable";
+        if (response.status === 409 || response.status === 503) {
+          try {
+            const problem = await boundedJson(response, MAX_FLEET_REQUEST_BYTES, true);
+            if (typeof problem === "object" && problem !== null && "code" in problem &&
+              ((response.status === 409 && problem.code === "grant_rejected") ||
+                (response.status === 503 && problem.code === "source_unreachable"))) code = problem.code;
+          } catch { /* Never retain arbitrary problem content. */ }
+        }
+        throw new FleetNotificationError(code);
+      }
+      const value = parse(response.status === 204 ? undefined : await boundedJson(response, MAX_FLEET_STATUS_BYTES, true));
+      if (controller.signal.aborted) throw new FleetNotificationError("source_unreachable");
+      return value;
+    } catch (error) {
+      if (error instanceof FleetNotificationError) throw error;
+      throw new FleetNotificationError("source_unreachable");
+    } finally { this.time.clearTimeout(timeout); }
   }
 }
 
