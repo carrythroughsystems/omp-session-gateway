@@ -1645,7 +1645,7 @@ test("development selection refuses unknown steps before admission and parses ex
   }
 });
 
-test.skipIf(process.platform === "win32").each(["campaign", "pixel", "restored-failure", "unrestored-failure"] as const)(
+test.skipIf(process.platform === "win32").each(["campaign", "pixel", "restored-failure", "unrestored-failure", "unrestored-success"] as const)(
   "development lease refuses contention and retains only unresolved effects (%s)", async scenario => {
     const root = await mkdtemp(join(tmpdir(), "push-step-lease-"));
     const hostDirectory = join(root, "host"), pixelDirectory = join(root, "pixel");
@@ -1659,13 +1659,15 @@ test.skipIf(process.platform === "win32").each(["campaign", "pixel", "restored-f
     if (scenario === "pixel") await mkdir(pixelDirectory, { mode: 0o700 });
     let called = false;
     try {
-      await expect(withAndroidPushDevelopmentLease(async () => { called = true; throw new Error("synthetic step failure"); },
-        () => !["pixel", "unrestored-failure"].includes(scenario), { hostDirectory, pixelDirectory })).rejects.toThrow();
-      expect(called).toBe(scenario.endsWith("failure"));
+      await expect(withAndroidPushDevelopmentLease(async () => {
+        called = true;
+        if (scenario !== "unrestored-success") throw new Error("synthetic step failure");
+      }, () => !["pixel", "unrestored-failure", "unrestored-success"].includes(scenario), { hostDirectory, pixelDirectory })).rejects.toThrow();
+      expect(called).toBe(!["campaign", "pixel"].includes(scenario));
       const read = new Database(path, { readonly: true });
-      try { expect(read.query("SELECT owner FROM campaign").get() !== null).toBe(["campaign", "unrestored-failure"].includes(scenario)); }
+      try { expect(read.query("SELECT owner FROM campaign").get() !== null).toBe(["campaign", "unrestored-failure", "unrestored-success"].includes(scenario)); }
       finally { read.close(); }
-      expect(await stat(pixelDirectory).then(() => true, () => false)).toBe(["pixel", "unrestored-failure"].includes(scenario));
+      expect(await stat(pixelDirectory).then(() => true, () => false)).toBe(["pixel", "unrestored-failure", "unrestored-success"].includes(scenario));
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -1679,6 +1681,11 @@ test.skipIf(process.platform === "win32")("installed cleanup cannot retire a ret
       () => true, { cleanup: true, hostDirectory, pixelDirectory })).rejects.toThrow("campaign lease exists");
     await expect(withAndroidPushDevelopmentLease(async () => { throw new Error("must not enter"); },
       () => true, { scope: "retained-guest", hostDirectory, pixelDirectory })).rejects.toThrow("campaign lease exists");
+    // Cleanup refused by a still-live Pixel owner must not retire the existing host obligation.
+    await expect(withAndroidPushDevelopmentLease(async () => { throw new Error("must not enter"); },
+      () => false, { cleanup: true, scope: "retained-guest", hostDirectory, pixelDirectory })).rejects.toThrow("still running");
+    const db = new Database(join(hostDirectory, "lease.sqlite"), { readonly: true });
+    try { expect(db.query("SELECT owner FROM campaign").get()).not.toBeNull(); } finally { db.close(); }
     expect(await stat(pixelDirectory).then(() => true)).toBe(true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

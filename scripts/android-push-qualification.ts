@@ -1267,6 +1267,7 @@ export async function withAndroidPushDevelopmentLease<T>(action: () => Promise<T
   const hostDirectory = options.hostDirectory ?? join(homedir(), ".local/state/omp-session-gateway/release-host");
   const prefix = `PushLane androidPush ${options.scope ?? "installed"} development:`;
   let owner = `${prefix}${randomUUID()}`;
+  let resuming = false;
   if (await Bun.file(join(hostDirectory, "lease.sqlite")).exists()) {
     const database = new Database(join(hostDirectory, "lease.sqlite"), { readonly: true });
     try {
@@ -1274,6 +1275,7 @@ export async function withAndroidPushDevelopmentLease<T>(action: () => Promise<T
       if (previous !== null) {
         if (!options.cleanup || !previous.owner.startsWith(prefix)) throw new Error("release-host campaign lease exists; refusing development run");
         owner = previous.owner;
+        resuming = true;
       }
     } finally { database.close(); }
   }
@@ -1281,11 +1283,13 @@ export async function withAndroidPushDevelopmentLease<T>(action: () => Promise<T
   const result = await withReleaseHostLease(owner, async () => {
     let entered = false;
     try {
-      return await withDevelopmentPixelLease(owner, () => { entered = true; return action(); }, restored,
+      const result = await withDevelopmentPixelLease(owner, () => { entered = true; return action(); }, restored,
         options.pixelDirectory ?? "/tmp/omp-gw-pixel.lock", options.cleanup === true);
+      if (!restored()) throw new Error("Android Push development restoration incomplete; ownership retained");
+      return result;
     } catch (error) {
       // A restored failed step releases ownership; unproven restoration retains both leases.
-      if (entered && !restored()) throw error;
+      if ((entered || resuming) && !restored()) throw error;
       primary = error;
       return undefined;
     }
