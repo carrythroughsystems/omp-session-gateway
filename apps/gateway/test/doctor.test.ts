@@ -83,6 +83,24 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     expect(report.checks.ternAvailable).toBe(false);
     expect(JSON.stringify(report)).not.toContain("TERN_DOCTOR_PRIVATE_CANARY");
   }, 2 * HANG_DEADLINE_MS);
+  test("reports source grant corruption as a boolean without changing or exposing evidence", async () => {
+    const root = await isolatedRoot();
+    const path = join(root, "config/omp-session-gateway/config.json");
+    const document = JSON.parse(await readFile(path, "utf8"));
+    const coordinator = "https://home.example.ts.net";
+    await writeFile(path, JSON.stringify({ ...document,
+      http: { ...document.http, trustedDashboardOrigins: [coordinator] },
+      notifications: { coordinators: [{ id: "home", origin: coordinator }] },
+    }));
+    const statePath = join(root, "state/omp-session-gateway/notification-grants.json");
+    const evidence = '{"SYNTHETIC_FLEET_DOCTOR_SECRET_CANARY":true}';
+    await writeFile(statePath, evidence, { mode: 0o600 });
+    const report = await runDoctorChecks({ ompVersion: async () => "18.1.20" });
+    expect(report.checks.notificationGrantsHealthy).toBe(false);
+    expect(Object.values(report.checks).every(value => typeof value === "boolean")).toBe(true);
+    expect(JSON.stringify(report)).not.toContain("SYNTHETIC_FLEET_DOCTOR_SECRET_CANARY");
+    expect(await readFile(statePath, "utf8")).toBe(evidence);
+  }, 2 * HANG_DEADLINE_MS);
   test.skipIf(process.platform === "win32")("scopes the real ternAvailable inspect to the configured window without spawning OMP", async () => {
     const root = await realpath(await isolatedRoot());
     const executable = join(root, "tern"), path = join(root, "config/omp-session-gateway/config.json");

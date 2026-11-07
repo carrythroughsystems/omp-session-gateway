@@ -6,6 +6,8 @@ import {
   LOCAL_FLEET_SOURCE_ID,
   MAX_FLEET_SOURCES,
   MAX_FLEET_TARGETS,
+  MAX_FLEET_COORDINATORS,
+  MAX_FLEET_NOTIFICATION_SOURCES,
   ProtocolValidationError,
   parseFleetLabel,
   parseFleetOrigin,
@@ -16,6 +18,7 @@ import { resolveOmpDiscoveryDirectory } from "./omp-registry.ts";
 
 export type AuthMode = "tailscale-serve" | "dev-localhost";
 export const FLEET_CONFIG_SINCE_VERSION = "0.8.0";
+export const NOTIFICATIONS_CONFIG_SINCE_VERSION = "0.10.0";
 
 export interface TernProfile {
   readonly id: string;
@@ -37,6 +40,10 @@ export interface TernConfig {
 
 export interface GatewayConfig {
   readonly tern?: TernConfig;
+  readonly notifications?: {
+    readonly sources?: readonly string[];
+    readonly coordinators?: readonly { readonly id: string; readonly origin: string }[];
+  };
   readonly http: {
     readonly hostname: "127.0.0.1" | "::1";
     readonly port: number;
@@ -606,6 +613,55 @@ function fleetTargets(value: unknown, mode: AuthMode, publicOrigin: string): rea
   });
 }
 
+function notificationsConfig(
+  value: unknown,
+  mode: AuthMode,
+  publicOrigin: string,
+  trustedOrigins: readonly string[],
+  targets: readonly FleetSource[],
+): NonNullable<GatewayConfig["notifications"]> {
+  const invalid = (): never => { throw new Error("invalid notifications configuration"); };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return invalid();
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some(key => !["sources", "coordinators"].includes(key))) return invalid();
+  let sources: readonly string[] | undefined;
+  if (Object.hasOwn(record, "sources")) {
+    if (!Array.isArray(record.sources) || record.sources.length < 1 ||
+        record.sources.length > MAX_FLEET_NOTIFICATION_SOURCES) return invalid();
+    sources = record.sources.map(value => fleetValue(value, parseFleetSourceId, "invalid notifications source id"));
+    if (new Set(sources).size !== sources.length ||
+        sources.some(id => !targets.some(target => target.id === id))) return invalid();
+  }
+  let coordinators: readonly { readonly id: string; readonly origin: string }[] | undefined;
+  if (Object.hasOwn(record, "coordinators")) {
+    if (!Array.isArray(record.coordinators) || record.coordinators.length < 1 ||
+        record.coordinators.length > MAX_FLEET_COORDINATORS) return invalid();
+    coordinators = record.coordinators.map((entry: unknown) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return invalid();
+      const coordinator = entry as Record<string, unknown>;
+      if (Object.keys(coordinator).length !== 2 || !Object.hasOwn(coordinator, "id") ||
+          !Object.hasOwn(coordinator, "origin")) return invalid();
+      const id = fleetValue(coordinator.id, parseFleetSourceId, "invalid notifications coordinator id");
+      const origin = fleetOrigin(coordinator.origin, mode, "notifications.coordinators.origin");
+      if (origin === publicOrigin || !trustedOrigins.includes(origin)) return invalid();
+      return { id, origin };
+    });
+    if (new Set(coordinators.map(peer => peer.id)).size !== coordinators.length ||
+        new Set(coordinators.map(peer => peer.origin)).size !== coordinators.length) return invalid();
+  }
+  return { ...(sources === undefined ? {} : { sources }), ...(coordinators === undefined ? {} : { coordinators }) };
+}
+
+export function projectPreNotificationsConfig(document: unknown): {
+  readonly document: Record<string, unknown>; readonly removedKeys: readonly string[];
+} {
+  if (typeof document !== "object" || document === null || Array.isArray(document)) throw new Error("config must be an object");
+  const projected = { ...document } as Record<string, unknown>;
+  const removedKeys = Object.hasOwn(projected, "notifications") ? ["notifications"] : [];
+  delete projected.notifications;
+  return { document: projected, removedKeys };
+}
+
 /** Remove only the authored keys older runtimes cannot parse; never mutate the parsed document. */
 export function projectPreFleetConfig(document: unknown): {
   readonly document: Record<string, unknown>;
@@ -707,7 +763,7 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("config must be an object");
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (!["http", "auth", "registry", "omp", "fleet", "speech", "tern"].includes(key)) throw new Error(`unknown config key: ${key}`);
+    if (!["http", "auth", "registry", "omp", "fleet", "speech", "tern", "notifications"].includes(key)) throw new Error(`unknown config key: ${key}`);
   }
   const http = configSection(record, "http");
   const auth = configSection(record, "auth");
@@ -786,19 +842,24 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
   if (ttlSeconds <= heartbeatSeconds * 2) throw new Error("registry.ttlSeconds must exceed two heartbeat intervals");
   const browserRecognition = speech.browserRecognition ?? false;
   if (typeof browserRecognition !== "boolean") throw new Error("speech.browserRecognition must be a boolean");
+  const trustedOrigins = trustedDashboardOrigins(http.trustedDashboardOrigins ?? [], mode, publicOrigin.origin);
+  const targets = fleetTargets(fleet.targets ?? [], mode, publicOrigin.origin);
   return {
     http: {
       hostname,
       port,
       publicOrigin: publicOrigin.origin,
-      trustedDashboardOrigins: trustedDashboardOrigins(http.trustedDashboardOrigins ?? [], mode, publicOrigin.origin),
+      trustedDashboardOrigins: trustedOrigins,
     },
     fleet: {
       label: fleetValue(fleet.label ?? defaultFleetLabel(publicOrigin.origin), parseFleetLabel, "fleet.label must contain 1 to 64 display characters"),
-      targets: fleetTargets(fleet.targets ?? [], mode, publicOrigin.origin),
+      targets,
     },
     speech: { browserRecognition },
     ...(Object.hasOwn(record, "tern") ? { tern: parseTernConfig(record.tern) } : {}),
+    ...(Object.hasOwn(record, "notifications") ? {
+      notifications: notificationsConfig(record.notifications, mode, publicOrigin.origin, trustedOrigins, targets),
+    } : {}),
     // Written only when asserted, so an ordinary config keeps the shape it had before this field
     // existed and the safe reading is the absent one.
     auth: { mode, allowedLogins, ...(declaredTrust ? { trustIdentityWithoutTailnetDevice: true } : {}) },
@@ -873,6 +934,8 @@ export async function loadGatewayConfig(overrides: ConfigOverrides = {}): Promis
     throw new Error("tailscale-serve mode requires at least one allowed login");
   }
   const authoredFleet = configSection(loaded as Record<string, unknown>, "fleet");
+  const trustedOrigins = trustedDashboardOrigins(config.http.trustedDashboardOrigins, mode, publicOrigin.origin);
+  const targets = fleetTargets(config.fleet.targets, mode, publicOrigin.origin);
   return {
     ...config,
     auth: { ...config.auth, mode },
@@ -880,14 +943,17 @@ export async function loadGatewayConfig(overrides: ConfigOverrides = {}): Promis
       ...config.http,
       port,
       publicOrigin: publicOrigin.origin,
-      trustedDashboardOrigins: trustedDashboardOrigins(config.http.trustedDashboardOrigins, mode, publicOrigin.origin),
+      trustedDashboardOrigins: trustedOrigins,
     },
     fleet: {
       label: authoredFleet.label === undefined
         ? fleetValue(defaultFleetLabel(publicOrigin.origin), parseFleetLabel, "fleet.label must contain 1 to 64 display characters")
         : config.fleet.label,
-      targets: fleetTargets(config.fleet.targets, mode, publicOrigin.origin),
+      targets,
     },
+    ...(config.notifications === undefined ? {} : {
+      notifications: notificationsConfig(config.notifications, mode, publicOrigin.origin, trustedOrigins, targets),
+    }),
     paths: { ...paths, configPath },
   };
 }
@@ -1006,6 +1072,7 @@ export async function writeGatewayConfigFile(options: {
         readonly fleet?: { readonly label?: string; readonly targets?: readonly FleetSource[] };
         readonly speech?: Partial<GatewayConfig["speech"]>;
         readonly tern?: TernConfig;
+        readonly notifications?: GatewayConfig["notifications"];
       };
   const mode = options.mode ?? "tailscale-serve";
   const origin = new URL(options.publicOrigin);
@@ -1024,6 +1091,7 @@ export async function writeGatewayConfigFile(options: {
     ...(priorDocument?.fleet === undefined ? {} : { fleet: priorDocument.fleet }),
     ...(priorDocument?.speech === undefined ? {} : { speech: priorDocument.speech }),
     ...(priorDocument?.tern === undefined ? {} : { tern: priorDocument.tern }),
+    ...(priorDocument?.notifications === undefined ? {} : { notifications: priorDocument.notifications }),
     http: {
       hostname: priorConfig?.http.hostname ?? "127.0.0.1",
       port: validatePort(options.port ?? priorConfig?.http.port ?? 4317),

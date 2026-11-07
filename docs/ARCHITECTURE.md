@@ -62,13 +62,13 @@ Responsibilities:
 - embed or serve a pinned build/integration of OMP's existing `collab-web` client;
 - persist private VAPID/subscription material separately from the memory-only session registry and send metadata-only Web Push attention/resolution envelopes;
 - provide `install`, `status`, `doctor`, token rotation, and `uninstall` through `omp-gateway`.
-- serve `GET /api/v1/client-config` (same-origin only, `no-store`) and, when `http.trustedDashboardOrigins` is configured, admit browser-direct CORS requests from those exact origins only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), and their `OPTIONS` preflights (`apps/gateway/src/http-policy.ts`, [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)) without server-side proxying or fleet push.
+- serve `GET /api/v1/client-config` (same-origin only, `no-store`) and, when `http.trustedDashboardOrigins` is configured, admit browser-direct CORS requests from those exact origins only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), the three notification-grant POST routes (also requiring a configured coordinator), and their `OPTIONS` preflights (`apps/gateway/src/http-policy.ts`, [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors), ADR-048), without server-side launch proxying.
 - when explicitly configured, create a new interactive OMP process through the bounded Tern CLI
   boundary and adopt it through OMP-native discovery, never through a terminal discovery adapter.
 
 The registry is intentionally empty after daemon restart. The next host poll repopulates it; no capability store exists.
 
-`apps/gateway/src/cli.ts:runServe()` owns `SessionCreationService`, the poller, HTTP server, and
+`apps/gateway/src/cli.ts:runServe()` owns `SessionCreationService`, `FleetSourceService`, the poller, HTTP server, and
 shutdown, just as it owns `PushService`; `service.ts` remains OS-service installation code.
 `tern-creation.ts` owns serialized admission, a private capability-free
 `<stateDir>/session-creations.json` ledger, state transitions, and adoption. `tern-cli.ts` owns
@@ -76,6 +76,28 @@ only bounded subprocesses, lossless numeric-ID decoding, metadata projection, an
 Intent and every checkpoint are durable before exposure or dependent effects. Restart classifies
 in-flight operations conservatively without resuming or re-spawning; shutdown never closes Tern
 tabs, kills OMP, or modifies OMP discovery. See [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption).
+
+#### Fleet notification source
+
+`fleet-source.ts` owns the source half of ADR-048: a private atomic version-1
+`notification-grants.json`, serialized grant mutations, verifier-only storage, 30-day expiry,
+expired-entry pruning, and at most 16 grants. The browser grants access only from an origin in
+both `notifications.coordinators` and `http.trustedDashboardOrigins`; the source authenticates
+the owner independently. The separate machine-authorization arm in `auth.ts` never reads an
+identity header and reaches only `GET /api/v1/notification-feed`. Measured Serve topology is
+required even when a loopback browser harness declares identity trust.
+
+Each grant owns at most one live SSE connection. It has a 256-event queue, identifier-only
+projection, 15-second heartbeat comments, and authorization checks before each write.
+`HostPoller.discoveryWarm` becomes true only after healthy discovery reconciliation; a cold
+source sends heartbeats, not an authoritative empty snapshot. Atomic registry subscription
+then establishes the snapshot before upserts/removes, while stops are live-only and revalidated
+against the current activity-stop edge before writing. Revocation/replacement closes the old
+connection before yielding to persistence; failed writes disable source authorization.
+Corruption preserves evidence and disables fleet routes with 503 without disabling ordinary
+directory/launch access. Doctor emits a boolean health finding; support archives never read
+either fleet state file. The coordinator puller and PWA enrollment are separate roles and are
+not implemented by this source service.
 
 ### 1.4 OMP Sessions PWA
 

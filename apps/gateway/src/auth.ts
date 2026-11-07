@@ -111,6 +111,28 @@ export function authorizeHttpRequest(
   }
 }
 
+/** Feed-only topology admission. Machine credentials never consult a Serve identity header. */
+export function authorizeFleetFeedContext(
+  request: Request,
+  peer: RequestPeer | undefined,
+  config: GatewayConfig,
+  serveOwnsIdentityHeaders: boolean,
+): "allowed" | "unauthorized" | "browser" {
+  if (request.headers.has("Origin") || [...request.headers.keys()].some(name => name.startsWith("sec-fetch-"))) {
+    return "browser";
+  }
+  if (peer === undefined || !isLoopbackAddress(peer.address)) return "unauthorized";
+  switch (config.auth.mode) {
+    case "tailscale-serve":
+      return serveOwnsIdentityHeaders && secondHopEvidence(request, config.http.publicOrigin) === undefined
+        ? "allowed" : "unauthorized";
+    case "dev-localhost":
+      return authorizeDevLocalhost(request, config).allowed ? "allowed" : "unauthorized";
+    default:
+      return "unauthorized";
+  }
+}
+
 function authorizeDevLocalhost(request: Request, config: GatewayConfig): AuthorizationResult {
   try {
     const origin = new URL(request.url).origin;

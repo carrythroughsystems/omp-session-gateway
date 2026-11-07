@@ -568,6 +568,8 @@ export type AdoptionRefresh = { readonly status: "ok"; readonly observation: Ado
 export interface HostPoller {
   /** False while OMP's discovery directory itself is unusable. */
   readonly discoveryHealthy: boolean;
+  /** True after the first healthy discovery round has reconciled the memory-only registry. */
+  readonly discoveryWarm: boolean;
   poll(): Promise<void>;
   subscribeObservations(listener: (observation: AdoptionObservation) => void): () => void;
   refreshForAdoption(options: { readonly signal: AbortSignal; readonly timeoutMs: number }): Promise<AdoptionRefresh>;
@@ -587,6 +589,7 @@ export function startHostPoller(options: {
   readonly onEvent?: (event: string, detail: Readonly<Record<string, number | boolean>>) => void;
 }): HostPoller {
   let healthy = true;
+  let warm = false;
   let inFlight: Promise<void> | undefined;
   let stopped = false;
   let roundNumber = 0;
@@ -603,6 +606,7 @@ export function startHostPoller(options: {
         observed: observation.hosts.map(host => host.session),
         retained: observation.retained,
       });
+      if (healthy) warm = true;
       if (result.inserted > 0 || result.removed > 0) {
         options.onEvent?.("omp.directory_changed", {
           inserted: result.inserted,
@@ -648,6 +652,9 @@ export function startHostPoller(options: {
   return {
     get discoveryHealthy(): boolean {
       return healthy;
+    },
+    get discoveryWarm(): boolean {
+      return warm;
     },
     poll,
     subscribeObservations(listener) {
