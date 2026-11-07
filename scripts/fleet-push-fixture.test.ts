@@ -65,6 +65,8 @@ test("fleet fixture uses the candidate bytes and restores exact config and Serve
     expect(source.http.trustedDashboardOrigins).toEqual([origin]);
     expect(source.omp.discoveryDir).toBe(join(f.root, "home/.omp/run/collab-hosts"));
     expect(await readFile(join(f.root, "source.sh"), "utf8")).toContain("printf %s $$");
+    expect(f.effects.some(command => command.includes("nohup python3") && command.includes("os.setsid()") &&
+      command.includes('os.execv("/bin/sh"'))).toBe(true);
     expect(f.state()).toMatchObject({ running: true, source: true });
     await f.run("source-down"); expect(f.state().source).toBe(false);
     await f.run("source-up"); expect(f.state().source).toBe(true);
@@ -148,7 +150,7 @@ test.each(["ledger", "target", "candidate", "serve", "listener", "probe-error"])
   } finally { await f.dispose(); }
 });
 
-test.each(["launchctl bootout", "tailscale serve --bg", "nohup sh"])("fleet fixture restores an interrupted %s mutation from persisted ownership", async failure => {
+test.each(["launchctl bootout", "tailscale serve --bg", "nohup python3"])("fleet fixture restores an interrupted %s mutation from persisted ownership", async failure => {
   const f = await fixture();
   try {
     f.setFail(failure); await expect(f.run("prepare")).rejects.toThrow("synthetic interruption");

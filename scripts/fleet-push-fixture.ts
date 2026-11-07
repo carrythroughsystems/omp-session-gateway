@@ -146,7 +146,10 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     await atomic(script, ["#!/bin/sh", `printf %s $$ > ${quote(sourcePidPath)}`,
       `env -u XDG_RUNTIME_DIR HOME=${quote(home)} XDG_CONFIG_HOME=${quote(join(home, ".config"))} XDG_STATE_HOME=${quote(join(home, ".local/state"))} ${quote(state.bun)} ${quote(state.cli)} serve &`,
       'child=$!', 'trap \'kill -TERM "$child" 2>/dev/null; wait "$child"; exit\' TERM INT', 'wait "$child"', ""].join("\n"));
-    await run(["sh", "-c", `nohup sh ${quote(script)} </dev/null >/dev/null 2>&1 &`]);
+    // Like the existing OMP fixture holder, leave the SSH session before exec. nohup alone
+    // does not keep this supervisor alive when the remote command's session is torn down.
+    const detach = 'import os,sys; os.setsid(); os.execv("/bin/sh", ["sh", sys.argv[1]])';
+    await run(["sh", "-c", `nohup python3 -c ${quote(detach)} ${quote(script)} </dev/null >/dev/null 2>&1 &`]);
     const deadline = Date.now() + 30_000;
     while (true) {
       const result = await execute(["curl", "--silent", "--fail", "--max-time", "2", `http://127.0.0.1:${FLEET_PUSH_BACKEND_PORT}/api/v1/health`]);
