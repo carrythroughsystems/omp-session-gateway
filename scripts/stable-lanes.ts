@@ -252,7 +252,7 @@ export const defaultLaneModules: StableQualificationLaneModules = {
   windows,
   androidPush,
   deviceCloud,
-  createPixelLease: nextFailureId => createPixelLease(undefined, nextFailureId),
+  createPixelLease: (nextFailureId, stepOf) => createPixelLease(undefined, nextFailureId, stepOf),
   readiness: {
     windows: async (identity, nextFailureId) => {
       const admission = await withQualificationDeadline("rigReadiness", 30 * 60_000, nextFailureId,

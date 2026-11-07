@@ -19,7 +19,7 @@ import { parseDeviceCloudHoldSet, recognizedDeviceCloudOutcome, writeDeviceCloud
 import { withReleaseHostLease } from "./release-host-lease.ts";
 import { abortablePause } from "./provider-read.ts";
 import { createOmpStdinDriver, OmpLifecycleFailure, runOmpLifecycle, type OmpLifecycleEvidence, type OmpLifecycleHost, type OmpSessionWait } from "./omp-lifecycle-qualification.ts";
-import { FAILURE_LIMITS, FAILURE_STEPS, FAILURE_REASONS, QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, qualificationRetryEligible, qualificationContainmentUnproven, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, type QualificationFailureLane, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
+import { FAILURE_LIMITS, FAILURE_STEPS, FAILURE_REASONS, QualificationFailure, privateQualificationFailureDiagnostic, normalizeQualificationFailures, qualificationRetryEligible, qualificationContainmentUnproven, parseLaneFailure, parseLaneFailures, parseLaneTimings, parseQualificationFailureSummary, qualificationPreflightFailuresEffectFree, unclassifiedLaneFailure, type QualificationFailureLane, type LaneFailure, type LaneTimings, type QualificationFailureSummary } from "./qualification-failure.ts";
 import { parseQualificationExecution, qualificationExecutionsMatch, parseRigReadinessReceipt, writeQualificationOutcomeFile, readQualificationOutcomeFile, qualificationOutcomeExitCode, type QualificationExecution, type RigReadinessReceipt } from "./qualification-outcome.ts";
 
 /** Candidate-source rollout marker: contract modules alone do not enable new worker arguments. */
@@ -99,11 +99,22 @@ function nextReceiptFailureId(receipt: StableQualificationReceipt): number {
   return next;
 }
 
-function laneFailure(error: unknown, lane: QualificationFailureLane, nextFailureId: () => number): unknown {
+/** The last phase an external lane persisted while it still owned effects: where an untyped failure happened. */
+const checkpointedPhases = new WeakMap<LaneReceipt, string>();
+function noteCheckpointedPhase(lane: LaneReceipt, progress: unknown): void {
+  // A terminal checkpoint, with nothing left to release, is not where a failure happened.
+  if (isRecord(progress) && progress.cleanupRequired !== false && typeof progress.phase === "string") checkpointedPhases.set(lane, progress.phase);
+}
+function checkpointedStep(lane: LaneReceipt, name: QualificationFailureLane): string {
+  const phase = checkpointedPhases.get(lane);
+  return phase !== undefined && (FAILURE_STEPS[name] as readonly string[]).includes(phase) ? phase : FAILURE_STEPS[name][0];
+}
+
+function laneFailure(error: unknown, lane: QualificationFailureLane, nextFailureId: () => number, step: string = FAILURE_STEPS[lane][0]): unknown {
   if (error instanceof QualificationFailure) return pixelUnrestored(error) ? Object.assign(new QualificationFailure(parseLaneFailure({
     ...error.evidence, observations: { ...error.evidence.observations, cleanupVerified: false },
   }), { cause: error }), { pixelUnrestored: true }) : error;
-  if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(child => laneFailure(child, lane, nextFailureId)), "qualification failures", { cause: error }),
+  if (error instanceof AggregateError) return Object.assign(new AggregateError(error.errors.map(child => laneFailure(child, lane, nextFailureId, step)), "qualification failures", { cause: error }),
     pixelUnrestored(error) ? { pixelUnrestored: true } : {});
   const holds = deviceCloudHolds(error);
   if (holds !== undefined) {
@@ -113,10 +124,7 @@ function laneFailure(error: unknown, lane: QualificationFailureLane, nextFailure
     }), { cause: error }));
     return failures.length === 1 ? failures[0] : new AggregateError(failures, "qualification availability holds");
   }
-  return Object.assign(new QualificationFailure({
-    id: nextFailureId(), lane, step: FAILURE_STEPS[lane][0], reason: "unclassified_failure", class: "harness",
-    elapsedMs: 0, operation: "unknown", observations: pixelUnrestored(error) ? { cleanupVerified: false } : {},
-  } as LaneFailure, { cause: error }), pixelUnrestored(error) ? { pixelUnrestored: true } : {});
+  return unclassifiedLaneFailure(error, lane, step, nextFailureId);
 }
 
 function preflightFailures(error: unknown): readonly LaneFailure[] {
@@ -431,7 +439,7 @@ export interface StableQualificationLaneModules {
   readonly windows: ExternalLaneModule;
   readonly androidPush: ExternalLaneModule<RetainedMacLaneContext>;
   readonly deviceCloud: ExternalLaneModule<RetainedMacLaneContext>;
-  readonly createPixelLease: (nextFailureId?: () => number) => PixelLease;
+  readonly createPixelLease: (nextFailureId?: () => number, stepOf?: (lane: QualificationFailureLane) => string | undefined) => PixelLease;
   readonly readiness?: {
     readonly windows: (identity: ExternalLaneIdentity, nextFailureId: () => number) => Promise<RigReadinessReceipt["observations"]>;
     readonly push: (context: ExternalLaneContext & RetainedMacLaneContext) => Promise<Record<string, unknown>>;
@@ -830,6 +838,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
   delete lane.error;
   delete lane.failure;
   delete lane.notStartedReason;
+  checkpointedPhases.delete(lane);
   const cleanup = name === "cleanup" || Object.values(CLEANUP_LANES).includes(name as typeof CLEANUP_LANES[keyof typeof CLEANUP_LANES]);
   let persistenceFailed = false;
   const persistenceErrors: unknown[] = [];
@@ -879,7 +888,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
       if (outcome !== undefined) lane.evidence = { ...lane.evidence, availabilityHold: outcome.availabilityHolds };
       else if (lane.evidence !== undefined) delete lane.evidence.availabilityHold;
     }
-    let failure = receipt.execution === undefined ? error : laneFailure(error, name, () => nextReceiptFailureId(receipt));
+    let failure = receipt.execution === undefined ? error : laneFailure(error, name, () => nextReceiptFailureId(receipt), checkpointedStep(lane, name));
     if (receipt.execution !== undefined) {
       // A queued owner can settle before its root owner's catch persists. Defer collateral
       // records until finalization can atomically persist the complete, closed failure graph.
@@ -916,6 +925,7 @@ export async function executeReceiptLane<T extends Record<string, unknown>>(
 export function createPixelLease(
   log: (line: string) => void = line => console.error(line),
   allocate?: () => number,
+  stepOf?: (lane: QualificationFailureLane) => string | undefined,
 ): PixelLease {
   let tail: Promise<unknown> = Promise.resolve();
   let holder: string | undefined;
@@ -943,7 +953,7 @@ export function createPixelLease(
       } catch (error) {
         if (pixelUnrestored(error)) {
           unrestoredBy = owner;
-          const source = laneFailure(error, lane, nextId);
+          const source = laneFailure(error, lane, nextId, stepOf?.(lane));
           origins = normalizeQualificationFailures(source).filter(item => item.class !== "collateral").map(item => item.id);
           throw Object.assign(source as Error, { pixelUnrestored: true });
         }
@@ -1075,6 +1085,38 @@ export function assertCampaignCleanupComplete(
     throw new Error("campaign retry Mac binding changed");
   }
   assertCampaignResourceCleanup(receipt, modules);
+  // The installed driver re-derives settlement; a worker's containment claim is never proof by itself.
+  if (campaignSettlementUnproven(receipt, receipt.failureSummary.failures)) throw new Error("campaign containment claims settlement without owner proof");
+}
+
+const PIXEL_BASELINE = ["airplaneOff", "mobileDataOn", "wifiUp", "vpnUp", "gcmConnectedOnWifi"] as const;
+/** Lanes owning outside resources: their confirmed effects, like any unknown one, settle only from residue proof. */
+const SETTLED_LANES: readonly QualificationFailureLane[] = ["windows", "deviceCloud", "androidPush", "rigReadiness"];
+
+/** Counts and booleans the failed lane's own cleanup recorded for the same attempt; absence proves nothing. */
+function laneSettlementProven(receipt: StableQualificationReceipt, lane: QualificationFailureLane): boolean {
+  const verifiedBaseline = (value: unknown) => isRecord(value) && PIXEL_BASELINE.every(key => value[key] === true);
+  if (lane === "rigReadiness") {
+    const readiness = receipt.rigReadiness;
+    return readiness?.epoch !== undefined && readiness.campaignAttempt === receipt.execution?.campaignAttempt &&
+      readiness.cleanupDisposition === "restored" && readiness.observations.baselineRestored === true;
+  }
+  if ((lane !== "windows" && lane !== "deviceCloud" && lane !== "androidPush") || !externalCleanupCurrent(receipt, lane)) return false;
+  const proof = receipt.lanes[CLEANUP_LANES[lane]].evidence ?? {};
+  if (lane === "deviceCloud") return proof.activeVendorSessions === 0;
+  if (lane === "androidPush") return verifiedBaseline(proof.pixelBaseline);
+  const progress = laneProgress(receipt.lanes.windows);
+  const phase = (FAILURE_STEPS.windows as readonly unknown[]).indexOf(isRecord(progress) ? progress.phase : undefined);
+  // From pixel_verified on the physical client held the Pixel, so its reference state is part of the proof.
+  const heldPixel = phase === -1 || phase >= FAILURE_STEPS.windows.indexOf("pixel_verified");
+  return proof.instancesRemaining === 0 && proof.firewallsRemaining === 0 && proof.tailnetNodesRemaining === 0 &&
+    (!heldPixel || verifiedBaseline(proof.pixelBaseline));
+}
+
+function campaignSettlementUnproven(receipt: StableQualificationReceipt, failures: readonly LaneFailure[]): boolean {
+  return failures.some(failure => (failure.operation === "unknown" ||
+    (failure.operation === "confirmed" && failure.class !== "collateral" && SETTLED_LANES.includes(failure.lane))) &&
+    !laneSettlementProven(receipt, failure.lane));
 }
 
 function unsettledCampaignMac(receipt: StableQualificationReceipt): boolean {
@@ -1303,7 +1345,7 @@ export async function finalizeCampaignFailure(
     try { assertCampaignResourceCleanup(receipt, modules, failures); } catch { cleanupComplete = false; }
     const summary = parseQualificationFailureSummary({
       failures, timings,
-      containment: { proven: cleanupComplete, cleanupComplete, unresolvedMutation: !cleanupComplete || failures.some(item => item.operation === "unknown") },
+      containment: { proven: cleanupComplete, cleanupComplete, unresolvedMutation: !cleanupComplete || campaignSettlementUnproven(receipt, failures) },
     });
     receipt.failureSummary = summary;
   }
@@ -1325,7 +1367,7 @@ type ExternalLaneRunContext<Extra extends object> = {
 const cleanupQueues = new WeakMap<StableQualificationReceipt, Map<ExternalLaneName, Promise<void>>>();
 
 /** Replaces the whole progress object, so no phase can pair with a previous attempt's resources. */
-function externalCheckpoint(primary: LaneReceipt, persist: () => Promise<void>) {
+function externalCheckpoint(primary: LaneReceipt, persist: () => Promise<void>, failureStep = false) {
   return async (progress: Record<string, unknown>): Promise<void> => {
     primary.evidence = { ...primary.evidence, progress };
     try { await persist(); }
@@ -1333,6 +1375,7 @@ function externalCheckpoint(primary: LaneReceipt, persist: () => Promise<void>) 
       primary.evidence = { ...primary.evidence, persistenceFailed: true };
       throw error;
     }
+    if (failureStep) noteCheckpointedPhase(primary, progress);
   };
 }
 
@@ -1399,8 +1442,9 @@ export async function runExternalLane<Extra extends object>(
   let failure: unknown;
   try {
     await executeReceiptLane(receipt, name, persist, async () => {
+      noteCheckpointedPhase(primary, resumable);
       const result = await withQualificationDeadline(name, QUALIFICATION_CEILINGS_MS[name], () => nextReceiptFailureId(receipt),
-        execution => module.run({ ...context, execution, progress: resumable, checkpoint: externalCheckpoint(primary, persist) }));
+        execution => module.run({ ...context, execution, progress: resumable, checkpoint: externalCheckpoint(primary, persist, true) }));
       if (progressEpoch(laneProgress(primary)) === undefined) {
         throw new Error(`${name} returned without checkpointing an attempt epoch`);
       }
@@ -3316,7 +3360,8 @@ async function runReceiptStableQualification(
   const protectedFiles = await captureProtectedFiles();
   let admitted = false;
   let externalEffects = false;
-  const pixel = lanes.createPixelLease(() => nextReceiptFailureId(receipt));
+  const pixel = lanes.createPixelLease(() => nextReceiptFailureId(receipt),
+    lane => Object.hasOwn(receipt.lanes, lane) ? checkpointedStep(receipt.lanes[lane as StableQualificationLane], lane) : undefined);
   let windowsBranch: Promise<void> | undefined;
   // Lanes this invocation drove through runExternalLane, which always runs their cleanup itself.
   const driven: Record<"androidPush" | "deviceCloud", boolean> = { androidPush: false, deviceCloud: false };

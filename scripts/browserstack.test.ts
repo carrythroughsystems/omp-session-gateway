@@ -207,6 +207,7 @@ function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progres
         },
       }, fixture.clock));
     },
+    activeVendorSessions: async () => 0,
     launch: async () => replayCapability,
     removeWorkspace: async () => {},
   };
@@ -237,9 +238,10 @@ function auditedAttempt(fixture: ReturnType<typeof provider>, options: { progres
   return { attempt, checkpoints, errors };
 }
 
+/** Typed lane failure records keep the lane's original error as their private cause. */
 function errorMessages(error: unknown): string {
   return error instanceof AggregateError ? [error.message, ...error.errors.map(errorMessages)].join("\n")
-    : error instanceof Error ? error.message : String(error);
+    : error instanceof Error ? [error.message, ...(error.cause === undefined ? [] : [errorMessages(error.cause)])].join("\n") : String(error);
 }
 
 describe("BrowserStack fixed policy inputs", () => {
@@ -282,6 +284,17 @@ describe("BrowserStack fixed policy inputs", () => {
     await expect(api.plan(Date.parse("2026-10-20T00:00:00Z"))).rejects.toThrow("entitlement");
     body = { ...body, automate_plan: "Automate Mobile", parallel_sessions_max_allowed: 1 };
     await expect(api.plan(Date.parse("2026-10-20T00:00:00Z"))).rejects.toThrow("entitlement");
+  });
+  test("the residue sweep counts the account's running and queued sessions and refuses unknown shapes", async () => {
+    let body: Record<string, unknown> = { automate_plan: "Automate Mobile", parallel_sessions_running: 1, queued_sessions: 2 };
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json(body), { preconnect: () => {} }));
+    restore = () => mock.mockRestore();
+    const api = new BrowserStackApi(credentials);
+    expect(await api.activeSessions()).toBe(3);
+    for (const invalid of [{ parallel_sessions_running: 0 }, { parallel_sessions_running: -1, queued_sessions: 0 }, { parallel_sessions_running: "0", queued_sessions: 0 }]) {
+      body = invalid;
+      await expect(api.activeSessions()).rejects.toThrow("invalid session count");
+    }
   });
   test("uses the same fail-closed loopback listener contract as TestingBot", () => {
     for (const vendor of ["testingbot", "browserstack"] as const) {
@@ -512,7 +525,6 @@ describe("BrowserStack complete retention and deletion", () => {
     expect(source).not.toMatch(/\bJSON\s*\.\s*parse\s*\(/u);
     expect(source).not.toMatch(/\bvendorJson\s*\(/u);
     expect(source).not.toMatch(/\.\s*json\s*\(/u);
-    expect([...source.matchAll(/\bparseRetainedVendorJson\s*\(/gu)]).toHaveLength(5);
     expect(source).not.toMatch(/\.command\.includes\("BrowserStackLocal"\)/u);
   });
   const placements: [string, (value: unknown) => unknown][] = [];

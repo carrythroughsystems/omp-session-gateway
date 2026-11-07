@@ -24,6 +24,7 @@ import { pixelUnrestored } from "./restoration.ts";
 import { TestingBotApi } from "./testingbot.ts";
 import { BrowserStackApi, BrowserStackAuditFailure, prepareBrowserStackLocal } from "./browserstack.ts";
 import { RetainedVendorJsonError } from "./device-cloud-record-json.ts";
+import { normalizeQualificationFailures } from "./qualification-failure.ts";
 
 // Distinctive synthetic links: never a real capability shape, so the repository leak scans stay green.
 const LINKS: Record<string, Record<"view" | "control", string>> = {
@@ -150,6 +151,7 @@ function harness(options: {
       };
     },
     removeRecord: async ({ sessionId }, removal) => { effect(`remove ${sessionId}`); await removal.markDeleted(); },
+    activeVendorSessions: async (_epoch, vendors) => { effect(`sweep ${vendors.join("+")}`); return 0; },
     launch: async (launched, mode) => LINKS[launched.instanceId]![mode],
     removeWorkspace: async () => {
       effect("workspace remove");
@@ -212,14 +214,15 @@ async function failure(promise: Promise<unknown>): Promise<string> {
   try {
     await promise;
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessages(error);
   }
   throw new Error("expected a rejection");
 }
 
+/** Typed lane failure records keep the lane's original error as their private cause. */
 function errorMessages(error: unknown): string {
   return error instanceof AggregateError ? [error.message, ...error.errors.map(errorMessages)].join("\n") :
-    error instanceof Error ? error.message : String(error);
+    error instanceof Error ? [error.message, ...(error.cause === undefined ? [] : [errorMessages(error.cause)])].join("\n") : String(error);
 }
 
 describe("device-cloud lane", () => {
@@ -242,10 +245,10 @@ describe("device-cloud lane", () => {
       "tunnel stop", "fixture stop", "workspace remove",
     ]);
 
-    // The cleanup lane then finds nothing left to release.
+    // The cleanup lane then finds nothing left to release; it only sweeps the vendor, unleased.
     const effects = lane.effects.length;
-    expect(await cleanupDeviceCloud(input(lane, progress))).toEqual({ epoch: progress.epoch, restored: true });
-    expect(lane.effects).toHaveLength(effects);
+    expect(await cleanupDeviceCloud(input(lane, progress))).toEqual({ epoch: progress.epoch, restored: true, activeVendorSessions: 0 });
+    expect(lane.effects.slice(effects)).toEqual(["sweep testingbot (unleased)"]);
   });
 
   test("ends each target before allocating another under the vendor's two-session limit", async () => {
@@ -346,7 +349,7 @@ describe("device-cloud lane", () => {
 
   test("device text outside the evidence grammar fails the attempt before it is saved", async () => {
     const lane = harness({ evidence: { ipad: { device: "iPad (9th generation)", os: "SYNTHETICKEYREFLECTION7c4b1e9a" } } });
-    expect(await failure(runDeviceCloud(input(lane)))).toBe("unsafe device-cloud evidence from the ipad");
+    expect(await failure(runDeviceCloud(input(lane)))).toContain("unsafe device-cloud evidence from the ipad");
     expect(JSON.stringify(lane.checkpoints)).not.toContain("SYNTHETICKEYREFLECTION");
     expect(deviceCloudNeedsCleanup(lane.checkpoints.at(-1))).toBe(false);
   });
@@ -433,9 +436,26 @@ describe("device-cloud lane", () => {
     expect(second.effects).toEqual([]);
     await cleanupDeviceCloud(input(second, interrupted));
     expect(second.effects).toEqual([
-      "tunnel stop", "fixture stop", "workspace remove",
+      "tunnel stop", "fixture stop", "workspace remove", "sweep testingbot (unleased)",
     ]);
   });
+
+  test.each([[0, 0], [1, 1], ["unreadable", undefined]] as const)(
+    "the vendor sweep records %p active sessions as proof without changing the cleanup verdict", async (active, recorded) => {
+      const lane = harness({ vendors: { ipad: "browserstack" } });
+      await runDeviceCloud(input(lane));
+      const progress = lane.checkpoints.at(-1);
+      const swept: string[][] = [];
+      const result = await cleanupDeviceCloud({ ...input(lane, progress), runtime: { ...lane.runtime, activeVendorSessions: async (_epoch, vendors) => {
+        swept.push([...vendors]);
+        if (active === "unreadable") throw new Error("synthetic vendor outage");
+        return active;
+      } } });
+      expect(swept).toEqual([["testingbot", "browserstack"]]);
+      expect(result).toMatchObject({ epoch: parseDeviceCloudProgress(progress).epoch, restored: true });
+      if (recorded === undefined) expect(Object.hasOwn(result, "activeVendorSessions")).toBe(false);
+      else expect(result.activeVendorSessions).toBe(recorded);
+    });
 
   test("a release that cannot finish stays dirty and retries the unfinished cleanup", async () => {
     const run = harness({ failing: "tunnel stop" });
@@ -493,6 +513,49 @@ describe("bounded device journey retry", () => {
         { attempt: 1, outcome: "journey-failed" }, { attempt: 2, outcome: "journey-failed" },
       ] },
     });
+  });
+
+  test.each([["android", "collaboration"], ["iphone", "home-screen"]] as const)(
+    "two %s %s journey failures are typed confirmed outcomes at the target's phase, never preflight", async (target, stage) => {
+      let id = 40;
+      const lane = harness({ journeyFailures: { [target]: 2 }, failureStage: stage });
+      const error = await runDeviceCloud({ ...input(lane), execution: { signal: new AbortController().signal,
+        deadline: performance.now() + 60_000, nextFailureId: () => ++id } }).catch((error: unknown) => error);
+      expect(normalizeQualificationFailures(error)).toEqual([1, 2].map((attempts, index) => ({ id: 41 + index, lane: "deviceCloud",
+        step: `${target}_verified`, reason: "journey_failed", class: "product", elapsedMs: 0, operation: "confirmed", observations: { attempts } })));
+      expect(errorMessages(error)).toContain("synthetic journey failure");
+    });
+
+  test.each([["testingbot", "read_only"], ["browserstack", "confirmed"]] as const)(
+    "a %s retained-record audit verdict is a typed %s outcome at records_audited", async (vendor, operation) => {
+      const lane = harness({ media: true, ...(vendor === "browserstack" ?
+        { vendors: { ipad: "browserstack", android: "browserstack" }, sessionIds: { ipad: "a".repeat(40), android: "b".repeat(40) } } as const : {}) });
+      const failures = normalizeQualificationFailures(await runDeviceCloud(input(lane)).catch((error: unknown) => error));
+      expect(failures).toContainEqual(expect.objectContaining({ step: "records_audited", reason: "audit_failed", class: "product", operation }));
+      // A BrowserStack incident also fails release; that untyped cleanup error is not an audit verdict.
+      expect(failures.filter(failure => failure.reason === "audit_failed").every(failure => failure.operation !== "unknown")).toBe(true);
+    });
+
+  test("a retry refused by the first session's record audit keeps that first journey failure", async () => {
+    const lane = harness({ journeyFailures: { android: 1 }, media: true });
+    const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
+    const failures = normalizeQualificationFailures(error);
+    expect(failures).toContainEqual(expect.objectContaining({ step: "android_verified", reason: "journey_failed", operation: "confirmed",
+      observations: { attempts: 1 } }));
+    expect(failures).toContainEqual(expect.objectContaining({ step: "records_audited", reason: "audit_failed" }));
+    expect(lane.effects.filter(effect => effect === "verify android")).toHaveLength(1);
+    expect(errorMessages(error)).toContain("synthetic journey failure");
+  });
+
+  test("an untyped failure stays unknown at the phase checkpointed when it happened", async () => {
+    const lane = harness();
+    const runtime: DeviceCloudRuntime = { ...lane.runtime, verify: async (target, attempt) => {
+      if (target === "ipad") throw new Error("synthetic untyped allocation refusal");
+      return lane.runtime.verify(target, attempt);
+    } };
+    const failures = normalizeQualificationFailures(await runDeviceCloud({ ...input(lane), runtime }).catch((error: unknown) => error));
+    expect(failures).toEqual([expect.objectContaining({ step: "iphone_verified", reason: "unclassified_failure", operation: "unknown" })]);
+    expect(parseDeviceCloudProgress(lane.checkpoints.at(-1)).phase).toBe("restored");
   });
 
   test("availability is never retried and retains its typed hold", async () => {
@@ -683,7 +746,7 @@ describe("mixed-vendor ownership and partial failure", () => {
   test("one vendor's missing record does not skip the other vendor's record audit", async () => {
     const lane = harness({ vendors, sessionIds });
     const audited: string[] = [];
-    await expect(runDeviceCloud({
+    const error = await runDeviceCloud({
       ...input(lane), runtime: {
         ...lane.runtime,
         record: async (reference, remember) => {
@@ -692,7 +755,8 @@ describe("mixed-vendor ownership and partial failure", () => {
           return lane.runtime.record(reference, remember);
         },
       },
-    })).rejects.toThrow("could not be audited");
+    }).catch((error: unknown) => error);
+    expect(errorMessages(error)).toContain("could not be audited");
     expect(audited).toEqual(["testingbot", "browserstack", "browserstack"]);
   });
   test.each(["reference", "duplicate-json", "vendor-error"])("audit diagnostics attach only fixed developer causes: %s", async kind => {
@@ -720,7 +784,8 @@ describe("mixed-vendor ownership and partial failure", () => {
           const found = findAudit(child);
           if (found !== undefined) return found;
         }
-        return undefined;
+        // Typed failure records keep the audit's own error as their private cause.
+        return error instanceof Error && !(error instanceof AggregateError) ? findAudit(error.cause) : undefined;
       };
       const audit = findAudit(error);
       expect(audit).toBeDefined();
@@ -920,7 +985,7 @@ describe("mixed-vendor ownership and partial failure", () => {
       }, () => attempt.startingTunnel("browserstack"), async () => { throw new Error("Local download failed"); });
       return lane.runtime.verify(target, attempt);
     } };
-    await expect(runDeviceCloud({ ...input(lane), runtime })).rejects.toThrow("Local download failed");
+    expect(await failure(runDeviceCloud({ ...input(lane), runtime }))).toContain("Local download failed");
     const progress = parseDeviceCloudProgress(lane.checkpoints.at(-1));
     expect(progress.cleanupRequired).toBe(false);
     expect(progress.tunnels).toEqual(["testingbot"]);

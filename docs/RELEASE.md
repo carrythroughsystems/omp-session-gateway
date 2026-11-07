@@ -938,6 +938,10 @@ derives total/per-vendor audit counts from every ended, clean-audited allocation
 it does not assume three records or attribute a failed attempt to its successor's vendor.
 Successful evidence includes this journey history. A crash does
 not resume an interrupted journey or reset its retry budget: existing dirty-attempt cleanup applies.
+A failed journey on a recorded session is a typed `journey_failed` (`product`, `confirmed`) at the
+target's `<target>_verified` step, with its attempt ordinal; a retained-record audit verdict is
+`audit_failed` at `records_audited` (`confirmed` once a BrowserStack removal started, otherwise
+`read_only`). Neither is ever recorded with `operation: unknown`, and neither is retry-eligible.
 
 Availability holds are never automatically retried by this mechanism. An initial hold keeps the
 operator-authorized semantics below; availability encountered after an ordinary failed first
@@ -1291,13 +1295,41 @@ All four cleanup lanes (`cleanup`, `windowsCleanup`, `androidPushCleanup`, `devi
 must have passed; external cleanup epochs must match their lane's last attempt and the lane
 implementations must report no remaining effects. Debian must also have passed, since a failed
 workflow is not proof that its cloud teardown succeeded. Pending/unstarted cleanup is not a pass.
+
+Containment settles a failure's effects only from its owner's proof, counts and booleans its own
+cleanup recorded for the same epoch. An untyped error stays `unclassified_failure` with
+`operation: unknown` at the phase its lane last checkpointed; a known outcome is never `unknown`.
+Any `unknown` failure, and any `confirmed` Windows, device-cloud, background-Push or readiness
+failure, leaves `unresolvedMutation` true unless that owner proves no residue:
+
+- **Windows:** `windowsCleanup` reports zero `omp-winqual-` instances, firewall groups and
+  tailnet nodes (`tailnetNodesRemaining`, a prefix-wide device listing), plus a verified Pixel
+  baseline once the physical client reached `pixel_verified`.
+- **Device cloud:** every recorded session ended and passed its audit, and `deviceCloudCleanup`
+  counts zero active vendor sessions (`activeVendorSessions`: TestingBot sessions of the attempt's
+  build, BrowserStack running and queued sessions).
+- **Background Push:** `androidPushCleanup` carries a verified Pixel baseline: Airplane mode off
+  (an explicit `0` setting), mobile data on, validated Wi‑Fi, VPN up and GCM connected over Wi‑Fi.
+- **Readiness:** the owner-bound readiness record (epoch present, same `campaignAttempt`) is
+  `restored` with `baselineRestored`.
+
+A Pixel baseline is read only after a complete restoration, inside the same Pixel lease turn, by
+whichever release did it (the lane's own or its cleanup lane's); it is checkpointed with that
+progress, so a cleanup with nothing left to restore reports it without waiting for the Pixel.
+
+An absent, failed or inconclusive sweep proves nothing and never fails its cleanup lane. The
+installed driver re-derives this proof from the receipt before clearing; a worker's containment
+claim alone is refused. Receipts written before these sweeps existed, such as v0.9.1-prealpha.3
+and .4, keep their maintainer stop.
+
 Inside an EXCLUSIVE SQLite transaction the driver rechecks the exact owner, revalidates cleanup,
 and fsyncs `jobs/<failed-job>/lease-recovery.json` with the old receipt digest before deleting
 only that owner row. The receipt records `clear-authorized` before the transaction commits and
 `cleared` after it; a crash between them leaves the durable authorization evidence. A live OS lock
 refuses even the same owner. No device or provider cleanup is guessed or performed by this clear.
-The old receipt and database inode remain intact. Missing, failed or stale cleanup, a foreign
-owner, or an active worker retains the maintainer recovery stop below.
+The old receipt and database inode remain intact. Missing, failed or stale cleanup, unproven
+residue, a foreign owner, or an active worker retains the maintainer recovery stop below; reconcile
+only the effects whose proof is missing before the exclusive owner-verified clear.
 
 Never delete, rename, or replace the lease database to unlock a campaign: that can create two
 live lock inodes. If the original command cannot recover, a maintainer must stop every launcher

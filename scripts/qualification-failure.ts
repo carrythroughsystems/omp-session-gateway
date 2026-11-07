@@ -27,6 +27,7 @@
 import { DeviceCloudAvailabilityHold, parseDeviceCloudHold } from "./device-cloud-availability.ts";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
 import { findIdentifierLeaks } from "./identifier-leak-rules.ts";
+import { pixelUnrestored } from "./restoration.ts";
 
 export type LaneFailureClass = "product" | "infra_transient" | "harness" | "collateral";
 export type OperationDisposition = "not_started" | "read_only" | "confirmed" | "unknown";
@@ -63,12 +64,15 @@ export const FAILURE_REASONS = {
     delivery_timeout: "harness", delivery_metadata_timeout: "harness", browser_baseline_failed: "harness",
     push_service_failure: "infra_transient", device_outage: "infra_transient", tailnet_outage: "infra_transient" },
   windows: { ...commonReasons, ...transportReasons, probe_deadline: "infra_transient", allocation_rejected: "infra_transient",
-    assertion_failed: "product", authentication_failed: "harness", helper_failed: "harness", mutation_unconfirmed: "harness", ownership_changed: "harness" },
+    assertion_failed: "product", authentication_failed: "harness", helper_failed: "harness", mutation_unconfirmed: "harness", ownership_changed: "harness",
+    navigation_failed: "harness" },
   deviceCloud: { ...commonReasons, pinned_pool_busy: "infra_transient", journey_failed: "product", audit_failed: "product",
     identity_mismatch: "harness", allocation_unknown: "harness", containment_unproven: "harness" },
   androidPushCleanup: cleanupReasons, windowsCleanup: cleanupReasons, deviceCloudCleanup: cleanupReasons,
   cleanup: { ...cleanupReasons, remote_unsettled: "collateral" },
 } as const;
+/** Outcomes a lane observed and recorded; their effects are known, so they never carry "unknown". */
+export const KNOWN_OUTCOME_REASONS: readonly string[] = ["journey_failed", "audit_failed", "navigation_failed"];
 export type QualificationFailureLane = keyof typeof FAILURE_REASONS;
 export const PUSH_BROWSER_STEPS = ["browser_capture", "browser_wake", "browser_webapk", "browser_forward",
   "browser_target", "browser_attach", "browser_context", "browser_navigation", "browser_notification_state"] as const;
@@ -170,6 +174,7 @@ export function parseLaneFailure(value: unknown): LaneFailure {
   }
   if (lane === "campaign" && item.class !== "harness" &&
     (item.step !== "admission" || !["not_started", "read_only"].includes(item.operation))) invalid();
+  if (KNOWN_OUTCOME_REASONS.includes(item.reason as string) && item.operation === "unknown") invalid();
   if (item.class === "infra_transient") {
     switch (item.reason) {
       case "connection_timeout": case "connection_reset": case "read_timeout":
@@ -252,6 +257,13 @@ export class QualificationFailure extends Error {
     this.evidence = safe;
   }
   toJSON(): LaneFailure { return parseLaneFailure(this.evidence); }
+}
+
+/** Untyped errors stay unknown (fail closed); only the step the lane had checkpointed is evidence. */
+export function unclassifiedLaneFailure(error: unknown, lane: QualificationFailureLane, step: string, nextFailureId: () => number): QualificationFailure {
+  const unrestored = pixelUnrestored(error);
+  return Object.assign(new QualificationFailure(parseLaneFailure({ id: nextFailureId(), lane, step, reason: "unclassified_failure", class: "harness",
+    elapsedMs: 0, operation: "unknown", observations: unrestored ? { cleanupVerified: false } : {} }), { cause: error }), unrestored ? { pixelUnrestored: true } : {});
 }
 
 export const PRIVATE_QUALIFICATION_DIAGNOSTIC_BYTES = 262_144;

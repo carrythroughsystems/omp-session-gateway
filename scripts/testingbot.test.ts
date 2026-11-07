@@ -166,6 +166,38 @@ describe("TestingBot retained audit surfaces", () => {
   });
 });
 
+describe("TestingBot build residue sweep", () => {
+  const build = "qualify:stable 1a2b3c4d";
+  const entry = (state: string, completed: string | null) => ({ build, state, completed_at: completed, session_id: "synthetic-session" });
+  async function sweep(answer: () => Response, identity = build): Promise<{ result: number | Error; urls: string[] }> {
+    const urls: string[] = [];
+    const mock = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: RequestInfo | URL) => { urls.push(String(url)); return answer(); }, { preconnect: () => {} }));
+    try { return { result: await new TestingBotApi({ key: KEY, secret: SECRET }).activeBuildSessions(identity).catch((error: Error) => error), urls }; }
+    finally { mock.mockRestore(); }
+  }
+  test("a build TestingBot never saw has no sessions, and only that build is queried", async () => {
+    const { result, urls } = await sweep(() => new Response("missing", { status: 404 }));
+    expect(result).toBe(0);
+    expect(new URL(urls[0]!).searchParams.get("build")).toBe(build);
+  });
+  test("counts running or uncompleted sessions and settles completed ones", async () => {
+    const data = [entry("COMPLETE", "2026-11-06T00:00:00Z"), entry("RUNNING", "2026-11-06T00:00:00Z"), entry("COMPLETE", null)];
+    expect((await sweep(() => Response.json({ data, meta: { offset: 0, count: 100, total: 3 } }))).result).toBe(2);
+  });
+  test.each([
+    ["a truncated page", { data: [entry("COMPLETE", "2026-11-06T00:00:00Z")], meta: { total: 2 } }],
+    ["another build", { data: [{ ...entry("COMPLETE", "2026-11-06T00:00:00Z"), build: "qualify:stable ffffffff" }], meta: { total: 1 } }],
+    ["a missing state", { data: [{ build, completed_at: null }], meta: { total: 1 } }],
+  ])("%s is inconclusive, never zero", async (_name, body) => {
+    expect((await sweep(() => Response.json(body))).result).toBeInstanceOf(Error);
+  });
+  test("refuses identities outside the attempt build grammar before any read", async () => {
+    const { result, urls } = await sweep(() => Response.json({}), "qualify:stable *");
+    expect(result).toBeInstanceOf(Error);
+    expect(urls).toEqual([]);
+  });
+});
+
 describe("TestingBot credentials through the 1Password service account", () => {
   let root: string;
   let tokenFile: string;

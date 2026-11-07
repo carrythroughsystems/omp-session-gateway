@@ -72,12 +72,12 @@ test("routine controls normalize generated versions but retain policy and depend
 import { assertFailedCampaignCleanup, botEnvironment, campaignAvailabilityObservation, campaignWorkerArguments, CommandOutputTail, credentialExpiry, driverConfig, StudioDriver } from "./release-driver-runtime.ts";
 import { applyDecisionPatch, campaignAttempt, campaignExecution, campaignRetryLaunchState, parseCampaignRetryPlan, compareVersions, isOrder, nextCandidate, nextStep, ORDER_SCOPE, outsideOrderScope, parseCampaignInfrastructureHold, REPOSITORY, requestVersion, selectRequest, StaleIntentError, tick } from "./release-driver.ts";
 import type { CampaignFailureObservation, CampaignInfrastructureHold, Decision, DriverPort, DriverState, JobObservation, Operation, PullRequest, RepositorySnapshot, TrackingIssue } from "./release-driver.ts";
-import { assertCampaignCleanupComplete, assertCampaignRetryEligible, createStableQualificationReceipt, withConsumedCampaignRetry } from "./stable-qualification.ts";
+import { assertCampaignCleanupComplete, assertCampaignRetryEligible, createStableQualificationReceipt, finalizeCampaignFailure, withConsumedCampaignRetry } from "./stable-qualification.ts";
 import type { ExternalLaneModule, StableQualificationLaneModules, StableQualificationReceipt } from "./stable-qualification.ts";
 import { readDeviceCloudOutcomeFile, writeDeviceCloudOutcomeFile } from "./device-cloud-outcome.ts";
-import { writeQualificationOutcomeFile } from "./qualification-outcome.ts";
+import { qualificationOutcomeExitCode, writeQualificationOutcomeFile } from "./qualification-outcome.ts";
 import { withReleaseHostLease } from "./release-host-lease.ts";
-import type { QualificationFailureSummary } from "./qualification-failure.ts";
+import { QualificationFailure, type LaneFailure, type QualificationFailureSummary } from "./qualification-failure.ts";
 
 import { REQUIRED_CHECKS, ROUTINE_EVIDENCE_STEPS, RoutineHoldError, routineSourceHold } from "./release-policy.ts";
 import { generateRelease, RELEASE_TEXT } from "./release-generate.ts";
@@ -1897,6 +1897,139 @@ test("lease self-clear accepts only settled candidate-bound cleanup with matchin
     { ...receipt, orchestratorCommit: "b".repeat(40) }]) {
     expect(() => assertFailedCampaignCleanup(selected, changed, retryReceiptModules)).toThrow();
   }
+});
+
+// The release-host lease and private outcome files are the POSIX Studio channel, as above.
+describe.skipIf(process.platform === "win32")("failed-campaign lease recovery settles only from owner proof", () => {
+  const epoch = "11111111-2222-4333-8444-555555555555";
+  const baseline = { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true };
+  /** The installed driver reads the real retained lease row; only worker liveness and GitHub stay simulated. */
+  class LeaseRecoveryRuntime extends AutomaticRuntime {
+    override async releaseHostOwner() { return StudioDriver.prototype.releaseHostOwner.call(this); }
+  }
+  type Kind = "journey" | "navigation" | "unclassified" | "legacy";
+  interface JobChange {
+    /** Changes what the cleanup lanes recorded before the worker settles its containment. */
+    readonly proof?: (receipt: StableQualificationReceipt) => void;
+    /** Changes the finalized receipt the worker writes, after it claimed settlement. */
+    readonly claim?: (receipt: StableQualificationReceipt) => void;
+    readonly owner?: string;
+  }
+  const failure = (id: number, lane: LaneFailure["lane"], step: string, reason: string, kind: LaneFailure["class"],
+    operation: LaneFailure["operation"], observations: LaneFailure["observations"] = {}) =>
+    ({ id, lane, step, reason, class: kind, elapsedMs: 0, operation, observations }) as LaneFailure;
+
+  /** What a finished worker leaves: a finalized receipt, its outcome and job files, and the lease row it still owns. */
+  async function failedCampaignJob(root: string, kind: Kind, change: JobChange = {}) {
+    root = await realpath(root);
+    const runtime = new LeaseRecoveryRuntime(driverConfig({ ...process.env, OMP_RELEASE_STATE_DIR: root }), false);
+    runtime.receiptPath = join(root, "stable-qualification.json");
+    const selected = runtime.current;
+    const { receipt } = receiptScopedCampaign(selected);
+    receipt.status = "running";
+    receipt.execution = selected.qualificationExecution!;
+    delete receipt.lanes.deviceCloud.evidence!.availabilityHold;
+    receipt.lanes.deviceCloud.status = "passed";
+    let failures: LaneFailure[];
+    if (kind === "journey" || kind === "legacy") {
+      // prealpha.4: both Android collaboration journeys failed on recorded sessions; release ended and audited all four.
+      const resources = (["iphone", "ipad", "android", "android"] as const).map((target, index) => ({ vendor: "testingbot", target,
+        sessionId: `session-${target}-000${index + 1}`, ended: true, audited: true, recordRemoved: false }));
+      receipt.lanes.deviceCloud = { status: "failed", attempts: 1, evidence: { progress: { ...cleanCloudProgress(epoch),
+        sessions: resources.map(resource => resource.sessionId), resources,
+        results: { audit: { records: 4, recordsExposingLinks: 0, recordsWithMedia: 0, lingeringSignedArtifacts: 0 } } } } };
+      receipt.lanes.deviceCloudCleanup.evidence = kind === "legacy" ? { epoch, restored: true } : { epoch, restored: true, activeVendorSessions: 0 };
+      failures = kind === "legacy" ? [1, 2].map(id => failure(id, "deviceCloud", "preflight", "unclassified_failure", "harness", "unknown")) :
+        [1, 2].map(attempts => failure(attempts, "deviceCloud", "android_verified", "journey_failed", "product", "confirmed", { attempts }));
+    } else {
+      // prealpha.3: Push timed out read-only; the Windows physical client failed while it held the Pixel.
+      receipt.lanes.windows = { status: "failed", attempts: 1, evidence: { progress: { epoch, phase: "pixel_verified", settled: false, cleanupRequired: false } } };
+      receipt.lanes.windowsCleanup.evidence = { epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,
+        guestCleanupFailures: 0, guestCommandsSkipped: true, tailnetNodesRemaining: 0, pixelBaseline: baseline };
+      receipt.lanes.androidPush = { status: "failed", attempts: 1, evidence: { progress: { epoch, phase: "network_verified", cleanupRequired: false } } };
+      receipt.lanes.androidPushCleanup.evidence = { epoch, restored: true, pixelBaseline: baseline };
+      failures = [failure(1, "androidPush", "network_verified", "delivery_timeout", "harness", "read_only"),
+        kind === "navigation" ? failure(2, "windows", "pixel_verified", "navigation_failed", "harness", "confirmed") :
+          failure(2, "windows", "pixel_verified", "unclassified_failure", "harness", "unknown")];
+    }
+    for (const item of failures) receipt.lanes[item.lane as "windows"].failure = failures.filter(own => own.lane === item.lane);
+    change.proof?.(receipt);
+    await finalizeCampaignFailure(receipt, new AggregateError(failures.map(item => new QualificationFailure(item)), "qualification failed"),
+      async () => {}, retryReceiptModules);
+    change.claim?.(receipt);
+    const bytes = JSON.stringify(receipt) + "\n", containment = receipt.failureSummary!.containment;
+    const outcome = { formatVersion: 1, outcome: "qualification-failed", scope: "campaign", execution: receipt.execution,
+      failureSummary: receipt.failureSummary!, receipt: { sha256: createHash("sha256").update(bytes).digest("hex"),
+        cleanupDisposition: containment.proven && containment.cleanupComplete && !containment.unresolvedMutation ? "restored" : "unresolved" } } as const;
+    await writeFile(runtime.receiptPath, bytes, { mode: 0o600 });
+    const owner = `qualification:${selected.candidate}:${runtime.receiptPath}`;
+    await expect(withReleaseHostLease(change.owner ?? owner, async () => { throw new Error("retained fixture owner"); },
+      join(root, "lease"))).rejects.toThrow("retained fixture owner");
+    const directory = runtime.jobDirectory("campaign", selected);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(join(directory, "spec.json"), JSON.stringify({ kind: "campaign", state: selected, root: join(import.meta.dir, "..") }) + "\n", { mode: 0o600 });
+    await writeFile(join(directory, "result.json"), '{"status":"failed"}\n', { mode: 0o600 });
+    await writeFile(join(directory, "exit"), `${qualificationOutcomeExitCode(outcome, receipt.execution)}\n`, { mode: 0o600 });
+    for (const name of ["out.log", "err.log", "qualification-out.log", "qualification-err.log"]) {
+      await writeFile(join(directory, name), "fixed fixture log\n", { mode: 0o600 });
+    }
+    await writeQualificationOutcomeFile(join(directory, "failure-outcome.json"), outcome);
+    await writeFile(join(directory, "failed-qualification.json"), bytes, { mode: 0o600 });
+    return { runtime, directory, receipt, owner, state: { ...selected, phase: "diagnostic-required" as const } };
+  }
+
+  test.each(["journey", "navigation", "unclassified"] as const)("a %s failure with its owner's residue proof self-clears the retained lease", async kind => {
+    const root = await mkdtemp(join(tmpdir(), "lease-recovery-proof-"));
+    try {
+      const { runtime, directory, receipt, owner, state } = await failedCampaignJob(root, kind);
+      expect(receipt.failureSummary!.containment).toEqual({ proven: true, cleanupComplete: true, unresolvedMutation: false });
+      expect((await runtime.snapshot(state)).hostRecoveryRequired).toBe(false);
+      await runtime.recoverFailedCampaign(state);
+      expect(await runtime.releaseHostOwner()).toBeUndefined();
+      expect(JSON.parse(await readFile(join(directory, "lease-recovery.json"), "utf8"))).toMatchObject({ owner, status: "cleared",
+        receiptSha256: createHash("sha256").update(await readFile(runtime.receiptPath)).digest("hex") });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  const unrestored = "not restored before retirement";
+  test.each([
+    ["Windows tailnet residue", "unclassified", unrestored, { proof: receipt => { receipt.lanes.windowsCleanup.evidence!.tailnetNodesRemaining = 1; } }],
+    ["an absent Windows tailnet sweep", "navigation", unrestored, { proof: receipt => { delete receipt.lanes.windowsCleanup.evidence!.tailnetNodesRemaining; } }],
+    ["an inconclusive Pixel baseline", "navigation", unrestored, { proof: receipt => {
+      receipt.lanes.windowsCleanup.evidence!.pixelBaseline = { ...baseline, gcmConnectedOnWifi: false };
+    } }],
+    ["an active vendor session", "journey", unrestored, { proof: receipt => { receipt.lanes.deviceCloudCleanup.evidence!.activeVendorSessions = 1; } }],
+    ["an absent vendor sweep", "journey", unrestored, { proof: receipt => { delete receipt.lanes.deviceCloudCleanup.evidence!.activeVendorSessions; } }],
+    ["cleanup proof from another epoch", "journey", unrestored, { proof: receipt => {
+      receipt.lanes.deviceCloudCleanup.evidence!.epoch = "99999999-2222-4333-8444-555555555555";
+    } }],
+    ["a pre-proof receipt with untyped failures", "legacy", unrestored, {}],
+    ["a worker settlement claim without proof", "journey", "claims settlement without owner proof", { claim: receipt => {
+      delete receipt.lanes.deviceCloudCleanup.evidence!.activeVendorSessions;
+    } }],
+    ["a foreign lease owner", "journey", "belongs to another campaign", { owner: "qualification:v0.0.0-prealpha.1:/synthetic/other-receipt.json" }],
+  ] as [string, Kind, string, JobChange][])("%s keeps the lease for a maintainer", async (_name, kind, reason, change) => {
+    const root = await mkdtemp(join(tmpdir(), "lease-recovery-refusal-"));
+    try {
+      const { runtime, directory, owner, state } = await failedCampaignJob(root, kind, change);
+      expect((await runtime.snapshot(state)).hostRecoveryRequired).toBe(true);
+      await expect(runtime.recoverFailedCampaign(state)).rejects.toThrow(reason);
+      expect(await runtime.releaseHostOwner()).toBe(change.owner ?? owner);
+      expect(await Bun.file(join(directory, "lease-recovery.json")).exists()).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  test("a live candidate worker keeps the lease despite complete proof", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lease-recovery-live-"));
+    try {
+      const { runtime, directory, owner, state } = await failedCampaignJob(root, "journey");
+      runtime.active = true;
+      expect((await runtime.snapshot(state)).hostRecoveryRequired).toBe(true);
+      await expect(runtime.recoverFailedCampaign(state)).rejects.toThrow("still active");
+      expect(await runtime.releaseHostOwner()).toBe(owner);
+      expect(await Bun.file(join(directory, "lease-recovery.json")).exists()).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 });
 
 test("prealpha.3 exited-job receipt permits cleanup despite unfinished publication bookkeeping", () => {

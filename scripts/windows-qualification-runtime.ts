@@ -9,7 +9,7 @@ import { QualificationFailure } from "./qualification-failure.ts";
 import { parseCandidateTagArgs, parseQualificationPins, releaseArchivePath, verifyRelease, waitForPublishedSession, waitForRevocation } from "./stable-qualification.ts";
 import { windowsHostScript } from "./upstream-canary.ts";
 import { OMP_FIXTURE_ARGS, OMP_FIXTURE_ENV } from "./omp-fixture.ts";
-import { runAdb as androidAdb, parseKeyguardShowing, requireSingleDevice as androidDevice, withAndroidChrome } from "./android-device.ts";
+import { AndroidNavigationFailure, readPixelBaseline, runAdb as androidAdb, parseKeyguardShowing, requireSingleDevice as androidDevice, withAndroidChrome } from "./android-device.ts";
 import { runAndroidCollabSmoke } from "./android-collab-smoke.ts";
 import { releaseVersion } from "./release-policy.ts";
 import { firewallEligibility, instanceEligibility, QUAL_LABEL_PREFIX } from "./vultr-target.ts";
@@ -487,18 +487,27 @@ const interruptedUploadTransports = new WeakSet<QualificationFailure>();
 function withWinrmDiagnostic(error: QualificationFailure, value: Record<string, unknown>): QualificationFailure {
   if (typeof value.diagnostic !== "string" || value.diagnostic.length > 512) return error;
   const exception = value.exception;
-  if (exception !== undefined) {
-    if (!object(exception) || Object.keys(exception).sort().join(",") !== "frames,message,type,uploadStep" ||
-      typeof exception.type !== "string" || !/^[A-Za-z0-9_]{1,120}$/u.test(exception.type) ||
-      typeof exception.message !== "string" || exception.message.length > 2048 ||
-      !(exception.uploadStep === null || ["existence/hash", "remove", "stream"].includes(String(exception.uploadStep))) ||
-      !Array.isArray(exception.frames) || exception.frames.length > 16 || exception.frames.some(frame =>
-        !object(frame) || Object.keys(frame).sort().join(",") !== "file,function,line" ||
-        typeof frame.file !== "string" || !/^[A-Za-z0-9_.<>-]{1,120}$/u.test(frame.file) ||
-        typeof frame.function !== "string" || !/^[A-Za-z0-9_.<>-]{1,120}$/u.test(frame.function) ||
-        !Number.isSafeInteger(frame.line) || Number(frame.line) < 1)) return error;
+  let detail: Parameters<typeof windowsWinrmDiagnostic>[0]["exception"];
+  if (object(exception) && typeof exception.type === "string" && /^[A-Za-z0-9_]{1,120}$/u.test(exception.type)) {
+    const complete = Object.keys(exception).sort().join(",") === "frames,message,type,uploadStep" &&
+      typeof exception.message === "string" && exception.message.length <= 2048 &&
+      (exception.uploadStep === null || ["existence/hash", "remove", "stream"].includes(String(exception.uploadStep))) &&
+      Array.isArray(exception.frames) && exception.frames.length <= 16 && exception.frames.every(frame =>
+        object(frame) && Object.keys(frame).sort().join(",") === "file,function,line" &&
+        typeof frame.file === "string" && /^[A-Za-z0-9_.<>-]{1,120}$/u.test(frame.file) &&
+        typeof frame.function === "string" && /^[A-Za-z0-9_.<>-]{1,120}$/u.test(frame.function) &&
+        Number.isSafeInteger(frame.line) && Number(frame.line) >= 1);
+    // A malformed optional field must not erase the exception class: #565's probe lost both.
+    detail = complete ? exception as NonNullable<typeof detail> : { type: exception.type };
   }
-  return new QualificationFailure(error.evidence, { cause: new Error(windowsWinrmDiagnostic(value as Parameters<typeof windowsWinrmDiagnostic>[0]), { cause: error }) });
+  return new QualificationFailure(error.evidence, { cause: new Error(windowsWinrmDiagnostic({
+    diagnostic: value.diagnostic, ...(detail === undefined ? {} : { exception: detail }) }), { cause: error }) });
+}
+/** Navigation and page-load failures are observed client outcomes; anything else stays unclassified. */
+export function windowsPhysicalClientFailure(error: unknown, execution?: WindowsExecutionContext): unknown {
+  if (error instanceof AndroidNavigationFailure) return windowsFailure("navigation_failed", "pixel_verified", "confirmed", {}, execution, 0, { cause: error });
+  return error instanceof QualificationFailure || error instanceof AggregateError || pixelUnrestored(error) ? error :
+    new Error("Windows physical client failed", { cause: error });
 }
 /** Only closed helper evidence is classification; diagnostics stay outside the failure record. */
 export function windowsWinrmResult(value: unknown, readOnly: boolean, execution?: WindowsExecutionContext, upload = false): Record<string, unknown> {
@@ -642,7 +651,7 @@ export function windowsWinrmDiagnostic(result: {
   exception?: {
     type: string; message: string; uploadStep: WindowsUploadStep | null;
     frames: { file: string; line: number; function: string }[];
-  };
+  } | { type: string };
 }): string {
   return result.diagnostic + (result.exception === undefined ? "" : `; ${JSON.stringify(result.exception)}`);
 }
@@ -1142,8 +1151,7 @@ if ($exists) {
         // Serve must supply the user identity for this exact-login, production-mode gateway.
         result = { pixelIdentityAccepted: true, viewReadOnly: smoke.viewReadOnly, controlWritable: smoke.controlWritable, promptAccepted: smoke.promptAccepted, returnedToDirectory: smoke.returnedToDirectory };
       } catch (error) {
-        primary = error instanceof QualificationFailure || error instanceof AggregateError || pixelUnrestored(error) ? error :
-          new Error("Windows physical client failed", { cause: error });
+        primary = windowsPhysicalClientFailure(error, context.execution ?? execution);
       }
       try { await restorePixel(windowsPixelRestorationContext(context, execution)); }
       catch (error) {
@@ -1155,6 +1163,11 @@ if ($exists) {
       return result;
     },
     restorePixel,
+    async pixelBaseline(context) {
+      const { runAdb, requireSingleDevice } = windowsAndroidCommands(() => context.execution ?? execution);
+      const serial = await requireSingleDevice();
+      return readPixelBaseline((...args) => runAdb(serial, args, { timeoutMs: 10_000 }), { now: Date.now, pause: Bun.sleep });
+    },
     async deleteTailnet(context) {
       const owner = context.execution ?? execution;
       const listing = await request<{ devices: Array<{ id: string; hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, owner);
@@ -1168,6 +1181,14 @@ if ($exists) {
       }
       const after = await request<{ devices: Array<{ hostname: string }> }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, owner);
       if (!after || after.devices.some(item => item.hostname === windowsCampaignLabel(context.epoch))) throw new Error("tailnet node remains");
+    },
+    async tailnetResidue() {
+      const listing = await request<{ devices?: unknown }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, execution);
+      // A node without a readable name cannot be excluded from the prefix, so the sweep is inconclusive.
+      if (!listing || !Array.isArray(listing.devices) || listing.devices.some(item => !object(item) ||
+        typeof item.hostname !== "string" || typeof item.name !== "string")) throw new Error("tailnet listing failed");
+      return (listing.devices as { hostname: string; name: string }[]).filter(item =>
+        item.hostname.startsWith(QUAL_LABEL_PREFIX) || item.name.startsWith(QUAL_LABEL_PREFIX)).length;
     },
   };
 }

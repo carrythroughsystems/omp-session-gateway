@@ -67,6 +67,11 @@ The stable campaign (or explicit development `run`) is provisioning authority; t
 second environment-variable gate. The creation cap, positive ownership label and protected
 inventory snapshot remain mandatory. Tailscale inventory and cleanup use `tailnet/-`, binding
 every query to the API credential's own tailnet rather than a hard-coded account identifier.
+After its own teardown, cleanup also counts every tailnet device whose hostname or name starts
+with `omp-winqual-` (`tailnetNodesRemaining`). Once the physical client reached `pixel_verified`,
+a successful Pixel restore also reads the Pixel's baseline in the same lease turn and checkpoints
+it. Both are settlement proof for a failed campaign, never a cleanup verdict; an unreadable
+listing or device records nothing.
 
 The development commands are:
 
@@ -192,6 +197,11 @@ the surrounding unsettled phase. Clean the retained epoch instead of manufacturi
 Development repair may resume read-only phases without repeating completed mutations.
 Private helper diagnostics retain only the existing redacted, source-free exception context;
 typed failures contain closed codes and numeric/boolean observations, not that diagnostic text.
+A frame name that redaction would alter becomes `<redacted>`, which still parses, and the
+controller keeps the exception class even when another field is malformed. The physical
+client's navigation and page-load failures are typed `navigation_failed` (`harness`,
+`confirmed`) at `pixel_verified`; other Pixel failures remain `unclassified_failure` with
+unknown disposition.
 
 Read-only admission also reports remaining per-tag creation allowance. Provider quota metadata is
 explicitly marked unobservable; admission neither assumes unlimited capacity nor allocates a probe VM.

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { parsePushConfigResponse, parseSessionListResponse } from "../packages/protocol/src/validation.ts";
 import { PUSH_API_VERSION, type PushDetailLevel, type SessionMetadata } from "../packages/protocol/src/types.ts";
-import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget, parseAndroidVpnNetwork,
+import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget, parseAndroidVpnNetwork, parseGcmTransport, readPixelBaseline,
   runAdb, wakeAndroidDisplay, unlockAndroidKeyguard, showAndroidPinBouncer, type AndroidAdbCommand, type AndroidChromeDriver, type AndroidExecution } from "./android-device.ts";
 import { closeWebApk, openWebApk, requireWebApk, webApkTasks } from "./android-webapk.ts";
 import { readAndroidUi, findAndroidNotification, tapAndroidNotification, readAndroidNotificationRecords, notificationMatchesDigest, trackUnchangedNotificationPost, NotificationOverlapError, type AndroidUiNode, type NotificationExpectation } from "./android-notification.ts";
@@ -56,19 +56,6 @@ export function qualificationPushAliasFor(session: SessionMetadata, candidates: 
 export function rethrowPushSafetyFailure(error: unknown): void {
   if (pixelUnrestored(error) || !everyError(error, nested =>
     !(nested instanceof QualificationFailure) && !(nested instanceof NotificationOverlapError))) throw error;
-}
-
-/** Closed values only: never retain GCM identifiers, network descriptions or the raw dump. */
-function parseGcmTransport(dump: string): { connected: boolean | undefined; wifi: boolean } {
-  // Candidate detection is broader than the accepted spelling: duplicates and variants fail closed.
-  const flags = [...dump.matchAll(/^[^\S\r\n]*Is[^\S\r\n]*client[^\S\r\n]*connected[^\r\n]*\r?$/gimu)];
-  const connected = flags.length === 1 ?
-    /^[ \t]*Is client connected: (true|false)[ \t]*\r?$/u.exec(flags[0]![0])?.[1] : undefined;
-  const networks = [...dump.matchAll(/^[^\S\r\n]*In-use[^\S\r\n]*by[^\S\r\n]*client[^\r\n]*\r?$/gimu)];
-  const network = networks.length === 1 ?
-    /^[ \t]*In-use by client: GcmNetwork\{\d+ ([^{}\r\n]+)\}[ \t]*\r?$/u.exec(networks[0]![0])?.[1] : undefined;
-  // A socket directly on Wi-Fi or on the VPN over Wi-Fi is the restored path; cellular is not.
-  return { connected: connected === undefined ? undefined : connected === "true", wifi: network?.includes("WiFi(") ?? false };
 }
 
 /** An independent cleanup failure is a harness root; only its containment consequence is collateral. */
@@ -624,6 +611,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         throw error;
       }
     },
+    // Each read keeps pushTransport's own 10-second adb bound.
+    pixelBaseline: () => readPixelBaseline(async (...args) => boundedAdb(await selectDevice(), args, 10_000), runtime),
     dndOff: async () => (await command("shell", "settings", "get", "global", "zen_mode")).trim() === "0",
     async device() {
       packageName ??= await requireWebApk(command, identity.origin);

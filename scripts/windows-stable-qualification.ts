@@ -7,6 +7,7 @@ import { firewallEligibility, instanceEligibility, QUAL_LABEL_PREFIX } from "./v
 import { FAILURE_LIMITS, FAILURE_REASONS, parseLaneFailure, QualificationFailure } from "./qualification-failure.ts";
 import type { FailureObservations, LaneStep, OperationDisposition } from "./qualification-failure.ts";
 import { pixelUnrestored } from "./restoration.ts";
+import { parsePixelBaseline, type PixelBaseline } from "./android-device.ts";
 
 /** Structurally shared with the orchestrator; cleanup receives its own fresh execution. */
 export interface WindowsExecutionContext { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
@@ -146,6 +147,10 @@ export interface WindowsRuntime {
   pixel(context: WindowsContext): Promise<Record<string, unknown>>;
   restorePixel(context: WindowsContext): Promise<void>;
   deleteTailnet(context: WindowsContext): Promise<void>;
+  /** Read-only: tailnet nodes of every qualification epoch (prefix-wide), for cleanup proof only. */
+  tailnetResidue(): Promise<number>;
+  /** Read-only Pixel reference state, for cleanup proof only; never a remedy. */
+  pixelBaseline?(context: WindowsContext): Promise<PixelBaseline>;
 }
 const PHASES = ["intent_checkpointed", "firewall_created", "instance_created", "transport_ready", "toolchain_staged",
   "predecessor_installed", "candidate_upgraded", "reboot_requested", "prelogin_verified", "postlogin_ready",
@@ -186,6 +191,8 @@ interface Progress extends Record<string, unknown> {
   allocationDeadline?: number;
   retirementPending?: boolean;
   cleanupFailed?: boolean;
+  /** Read after a successful Pixel restore in the same lease turn: settlement proof only. */
+  pixelBaseline?: PixelBaseline;
 }
 export interface WindowsLaneInput {
   readonly identity: WindowsIdentity;
@@ -241,7 +248,7 @@ function binding(identity: WindowsIdentity): string {
 function parseProgress(value: unknown, expected?: string): Progress {
   requireFact(record(value), "invalid Windows progress");
   const keys = ["binding", "cleanupRequired", "epoch", "facts", "lane", "phase", "schemaVersion", "settled", "startedAt", "timings"];
-  for (const key of ["transportProbes", "mutationClaims", "allocationDeadline", "retirementPending", "cleanupFailed"]) if (Object.hasOwn(value, key)) keys.push(key);
+  for (const key of ["transportProbes", "mutationClaims", "allocationDeadline", "retirementPending", "cleanupFailed", "pixelBaseline"]) if (Object.hasOwn(value, key)) keys.push(key);
   requireFact(JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys.sort()), "unknown Windows progress fields");
   requireFact(value.schemaVersion === 1 && value.lane === "windows" && typeof value.epoch === "string" && UUID.test(value.epoch) &&
     typeof value.binding === "string" && SHA.test(value.binding) && (expected === undefined || value.binding === expected) &&
@@ -257,6 +264,7 @@ function parseProgress(value: unknown, expected?: string): Progress {
   if (value.allocationDeadline !== undefined) requireFact(Number.isSafeInteger(value.allocationDeadline) && Number(value.allocationDeadline) > Number(value.startedAt), "invalid Windows allocation deadline");
   if (value.retirementPending !== undefined) requireFact(typeof value.retirementPending === "boolean" && value.cleanupRequired === false, "invalid Windows retirement state");
   if (value.cleanupFailed !== undefined) requireFact(typeof value.cleanupFailed === "boolean", "invalid Windows cleanup failure state");
+  if (value.pixelBaseline !== undefined) parsePixelBaseline(value.pixelBaseline);
   if (value.mutationClaims !== undefined) {
     requireFact(record(value.mutationClaims), "invalid Windows mutation claims");
     for (const [key, state] of Object.entries(value.mutationClaims)) {
@@ -752,7 +760,15 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
     });
     // Device recovery can wait for another lane's lease; paid infrastructure must not.
     if (PHASES.indexOf(progress.phase) >= PHASES.indexOf("pixel_verified")) {
-      await attempt("pixelRestore", () => input.pixel("windows-cleanup", () => { assertWindowsExecution(input.execution); return runtime.restorePixel(context); }, input.execution));
+      delete progress.pixelBaseline;
+      await attempt("pixelRestore", () => input.pixel("windows-cleanup", async () => {
+        assertWindowsExecution(input.execution);
+        await runtime.restorePixel(context);
+        // Settlement proof only, in the restoring lease turn: never a second turn, never after a failed restore.
+        if (runtime.pixelBaseline !== undefined) {
+          try { progress.pixelBaseline = await runtime.pixelBaseline(context); } catch { delete progress.pixelBaseline; }
+        }
+      }, input.execution));
     }
   } else {
     progress.retirementPending = true; await save();
@@ -763,6 +779,10 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   await runtime.sleep(5_000);
   await attempt("instanceResidue", async () => { requireFact(!(await runtime.provider.instances()).some(item => item.label?.startsWith(QUAL_LABEL_PREFIX)), "instance residue"); });
   await attempt("firewallResidue", async () => { requireFact(!(await runtime.provider.firewalls()).some(item => item.description?.startsWith(QUAL_LABEL_PREFIX)), "firewall residue"); });
+  // Proof for settlement only, never a cleanup verdict: an unreadable listing records no count.
+  let tailnetNodesRemaining: number | undefined;
+  try { assertWindowsExecution(input.execution); tailnetNodesRemaining = await runtime.tailnetResidue(); }
+  catch { tailnetNodesRemaining = undefined; }
   if (guestErrors.length > 0 && !instanceAbsent) failed("guestContainment",
     new Error("Windows guest containment failed", { cause: new AggregateError(guestErrors) }));
   if (!containmentCommitted) progress.cleanupRequired = failures.length > 0;
@@ -784,6 +804,7 @@ export async function cleanupWindows(input: WindowsLaneInput): Promise<Record<st
   if (failures.length) throw new AggregateError(causes, `Windows retirement failed: ${failures.join(", ")}`,
     { cause: new AggregateError(checkpointErrors, "Windows retirement diagnostics") });
   return { epoch: progress.epoch, instancesRemaining: 0, firewallsRemaining: 0, tailnetDeleted: true, vaultRemoved: true,
+    ...(tailnetNodesRemaining === undefined ? {} : { tailnetNodesRemaining }), ...(progress.pixelBaseline === undefined ? {} : { pixelBaseline: progress.pixelBaseline }),
     guestCleanupFailures: guestErrors.length, guestCommandsSkipped, ...(progress.cleanupFailed ? { cleanupFailed: true } : {}) };
 }
 

@@ -15,6 +15,7 @@ import { executeFixture } from "./push-qualification-fixture.ts";
 import { everyError, pixelUnrestored } from "./restoration.ts";
 import { FAILURE_LIMITS, PUSH_BROWSER_STEPS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
 import type { QualificationLogWindow, PushDeliveryTelemetry } from "./qualification-logs.ts";
+import { parsePixelBaseline, type PixelBaseline } from "./android-device.ts";
 
 export interface PushExecution { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
 export interface PushDeliveryMetrics {
@@ -262,6 +263,8 @@ export interface AndroidPushRuntime {
   network(value: PushNetwork): Promise<boolean>;
   /** Best-effort Wi-Fi push socket recovery; delivery remains the verdict. */
   pushTransport?(target: { wifi: boolean; mobile: boolean }): Promise<boolean>;
+  /** Read-only proof for failed-campaign settlement; it changes neither radios nor the VPN. */
+  pixelBaseline?(): Promise<PixelBaseline>;
   sinks(epoch: string): Promise<Record<string, boolean | number>>;
   cleanup(step: PushCleanupStep, progress: AndroidPushProgress): Promise<void>;
 }
@@ -287,6 +290,8 @@ export interface AndroidPushProgress extends Record<string, unknown> {
   /** The secondary host's topic, for cleanup of an interrupted triage or expiry check. */
   secondaryNotificationTopicDigest: string | null;
   results: Record<string, Record<string, boolean | number | string | number[]>>;
+  /** Read after a complete restoration in the same Pixel lease turn: settlement proof only. */
+  pixelBaseline?: PixelBaseline;
 }
 interface LaneInput {
   readonly identity: AndroidPushIdentity; readonly progress: unknown;
@@ -334,10 +339,17 @@ export function parseAndroidPushProgress(value: unknown): AndroidPushProgress {
   const p = value as Record<string, unknown>;
   const keys = Object.keys(p).sort().join(",");
   // Progress written before the secondary host existed has no secondary topic, and cleans up the same way.
-  if (![PROGRESS_KEYS, PROGRESS_KEYS.replace(",secondaryNotificationTopicDigest", "")].includes(keys) || p.lane !== "androidPush" ||
+  const required = PROGRESS_KEYS.split(",").filter(key => key !== "secondaryNotificationTopicDigest");
+  const expected = [...required, ...["secondaryNotificationTopicDigest", "pixelBaseline"].filter(key => Object.hasOwn(p, key))].sort().join(",");
+  if (keys !== expected || p.lane !== "androidPush" ||
     typeof p.epoch !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(p.epoch) ||
     typeof p.binding !== "string" || !/^[a-f0-9]{64}$/u.test(p.binding) || typeof p.cleanupRequired !== "boolean" ||
     !ANDROID_PUSH_PHASES.includes(p.phase as AndroidPushPhase)) throw new Error("invalid Android Push progress");
+  if (p.pixelBaseline !== undefined) {
+    parsePixelBaseline(p.pixelBaseline);
+    // Only a completed restoration records a baseline.
+    if (p.cleanupRequired) throw new Error("invalid Android Push progress");
+  }
   for (const digest of [p.notificationTopicDigest, p.secondaryNotificationTopicDigest ?? null]) {
     if (digest !== null && (typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest))) throw new Error("invalid Android Push notification ownership");
   }
@@ -410,11 +422,17 @@ async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: 
   if (failures.length === 0 && persistenceErrors.length === 0) {
     progress.cleanupRequired = false;
     progress.phase = "restored";
+    // Settlement proof only, read in the restoring lease turn: an unreadable Pixel records nothing.
+    delete progress.pixelBaseline;
+    if (runtime.pixelBaseline !== undefined) {
+      try { progress.pixelBaseline = await runtime.pixelBaseline(); } catch { delete progress.pixelBaseline; }
+    }
   }
   await runtime.beforeEffect();
   if (persistenceErrors.length > 0) {
     progress.cleanupRequired = true;
     progress.phase = priorPhase;
+    delete progress.pixelBaseline;
   }
   if (persistenceErrors.length > 0) errors.push(new QualificationFailure({
     id: nextFailureId(), lane: "androidPushCleanup", step: "containment",
@@ -429,11 +447,13 @@ export async function cleanupAndroidPush(input: LaneInput): Promise<Record<strin
   const nextFailureId = () => input.execution?.nextFailureId() ?? ++localId;
   const progress = parseAndroidPushProgress(input.progress);
   if (progress.binding !== binding(input.identity)) throw new Error("Android Push progress belongs to a different candidate or origin");
-  if (!progress.cleanupRequired) return { epoch: progress.epoch, restored: true };
+  // With nothing to restore, cleanup takes no Pixel lease: the owner's restoration recorded its baseline.
+  const settled = (evidence: Record<string, unknown>) => progress.pixelBaseline === undefined ? evidence : { ...evidence, pixelBaseline: progress.pixelBaseline };
+  if (!progress.cleanupRequired) return settled({ epoch: progress.epoch, restored: true });
   const runtime = input.runtime ?? createAndroidPushRuntime(input.identity, {
     nextFailureId, ...(input.execution === undefined ? {} : { execution: input.execution }) });
   runtime.beginCleanup?.(input.execution);
-  return input.pixel("androidPush-cleanup", () => restore(input, runtime, progress, nextFailureId));
+  return input.pixel("androidPush-cleanup", async () => settled(await restore(input, runtime, progress, nextFailureId)));
 }
 
 /** Effectful readiness only. The internal result includes private GCM context, not receipt data. */

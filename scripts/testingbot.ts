@@ -32,6 +32,7 @@ const API = "https://api.testingbot.com/v1";
 const MAX_RECORD_BYTES = 2_000_000;
 const ELEMENT = "element-6066-11e4-a52e-4f735466cecf";
 const TUNNEL_IDENTIFIER = /^omp-dc-[0-9a-f]{8}$/u;
+const BUILD_IDENTIFIER = /^qualify:stable [0-9a-f]{8}$/u;
 
 export interface TestingBotCredentials {
   readonly key: string;
@@ -100,6 +101,21 @@ export class TestingBotApi {
         !/^[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}$/u.test(entry.version)) throw new Error("TestingBot returned an invalid device catalog");
       return { name: entry.name, platform: entry.platform_name as string, version: entry.version };
     });
+  }
+
+  /**
+   * Read-only residue sweep for one attempt's build: sessions TestingBot has not settled. The
+   * build exists only once a session used it, so its absence (404) means no session at all.
+   */
+  async activeBuildSessions(build: string): Promise<number> {
+    if (!BUILD_IDENTIFIER.test(build)) throw new Error("invalid TestingBot build identity");
+    const response = await this.#get(`/tests?offset=0&count=100&skip_fields=logs,thumbs,steps&build=${encodeURIComponent(build)}`, "build session");
+    if (response === undefined) return 0;
+    const listing = parseRetainedVendorJson(await boundedVendorText(response, "TestingBot"));
+    if (!isRecord(listing) || !Array.isArray(listing.data) || !isRecord(listing.meta) || listing.meta.total !== listing.data.length ||
+      listing.data.some(entry => !isRecord(entry) || entry.build !== build || typeof entry.state !== "string" ||
+        (entry.completed_at !== null && typeof entry.completed_at !== "string"))) throw new Error("TestingBot returned an invalid build session listing");
+    return (listing.data as Record<string, unknown>[]).filter(entry => entry.completed_at === null || entry.state === "RUNNING").length;
   }
 
   /** The retained record of one WebDriver session, which TestingBot keys by session id. */

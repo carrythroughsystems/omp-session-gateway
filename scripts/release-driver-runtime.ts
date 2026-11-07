@@ -760,7 +760,7 @@ export class StudioDriver implements DriverPort {
     const result = await clearReleaseHostLease(expected, async () => {
       const receiptSha256 = await this.failedCampaignCleanup(state);
       await atomicJson(path, { owner: expected, candidate: state.candidate, at: new Date().toISOString(), receiptSha256, status: "clear-authorized" });
-    });
+    }, dirname(this.releaseHostLeasePath()));
     const proof = await jsonFile<Record<string, unknown>>(path);
     if (proof !== undefined) await atomicJson(path, { ...proof, status: result });
   }

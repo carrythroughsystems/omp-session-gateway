@@ -22,6 +22,9 @@ import {
   parseValidatedWifi,
   readAndroidQualificationPin,
   readAndroidRadioBaseline,
+  readPixelBaseline,
+  parsePixelBaseline,
+  type AndroidAdbCommand,
   requireSingleDevice,
   requireAndroidDevicePreconditions,
   unlockAndroidKeyguard,
@@ -344,6 +347,50 @@ describe("Android radio restoration", () => {
     expect(mobileRestoredAfterValidation).toBe(true);
     expect(device.state).toEqual({ airplane: false, wifi: true, mobile: true });
   });
+});
+
+describe("Pixel baseline settlement proof", () => {
+  const WIFI = "  NetworkAgentInfo{network{436} ni{WIFI CONNECTED extra: } lastValidated}\n";
+  const VPN = "  NetworkAgentInfo{network{437} ni{VPN CONNECTED extra: } }\n";
+  function pixel(options: { vpn: boolean; gcmConnectedAfter: number; airplane?: boolean | string }) {
+    const commands: string[] = [];
+    let gcmReads = 0, time = 0;
+    const command: AndroidAdbCommand = async (...args) => {
+      const call = args.join(" ");
+      commands.push(call);
+      if (call === "shell settings get global airplane_mode_on") return typeof options.airplane === "string" ? options.airplane : options.airplane ? "1\n" : "0\n";
+      if (call === "shell settings get global wifi_on" || call === "shell settings get global mobile_data") return "1\n";
+      if (call === "shell settings get global multi_sim_data_call") return "null\n";
+      if (call === "shell dumpsys connectivity") return `Current Networks:\n${WIFI}${options.vpn ? VPN : ""}Network Requests:\n`;
+      if (call === "shell dumpsys activity service GcmService") {
+        gcmReads += 1;
+        return `Is client connected: ${gcmReads > options.gcmConnectedAfter}\nIn-use by client: GcmNetwork{409 VPN(17) [WiFi(1)]}\n`;
+      }
+      throw new Error(`unexpected synthetic Pixel command: ${call}`);
+    };
+    return { commands, command, clock: { now: () => time, pause: async (milliseconds: number) => { time += milliseconds; } } };
+  }
+  test("observes a settling push socket until the whole baseline holds, using reads only", async () => {
+    const device = pixel({ vpn: true, gcmConnectedAfter: 2 });
+    expect(await readPixelBaseline(device.command, device.clock)).toEqual(
+      { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true });
+    expect(device.commands.every(call => call.startsWith("shell settings get ") || call.startsWith("shell dumpsys "))).toBe(true);
+  });
+  test.each([["a missing VPN", { vpn: false, gcmConnectedAfter: 0 }, "vpnUp"], ["Airplane mode", { vpn: true, gcmConnectedAfter: 0, airplane: true }, "airplaneOff"],
+    ["an unreadable Airplane setting", { vpn: true, gcmConnectedAfter: 0, airplane: "null\n" }, "airplaneOff"],
+    ["an empty Airplane setting", { vpn: true, gcmConnectedAfter: 0, airplane: "\n" }, "airplaneOff"],
+    ["a stalled push socket", { vpn: true, gcmConnectedAfter: 1_000 }, "gcmConnectedOnWifi"]] as const)(
+    "reports %s as unproven once the settle window ends, never remedying it", async (_name, options, unproven) => {
+      const device = pixel(options);
+      const baseline = await readPixelBaseline(device.command, device.clock, 10_000);
+      expect(baseline[unproven]).toBe(false);
+      expect(device.commands.every(call => call.startsWith("shell settings get ") || call.startsWith("shell dumpsys "))).toBe(true);
+    });
+  test.each([{}, { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true }, { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true,
+    gcmConnectedOnWifi: "true" }, { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true, serial: false }])(
+    "a checkpointed baseline other than exactly five booleans is not evidence: %j", value => {
+      expect(() => parsePixelBaseline(value)).toThrow("invalid Pixel baseline");
+    });
 });
 
 describe("authorized Android selection", () => {

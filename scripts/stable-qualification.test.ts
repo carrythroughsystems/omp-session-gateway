@@ -55,6 +55,7 @@ import {
   type ExternalLaneIdentity,
   type ExternalLaneModule,
   type ProtectedFileSnapshot,
+  type RetainedMacLaneContext,
   type StablePreflightRuntime,
   type StableQualificationLaneModules,
 } from "./stable-qualification.ts";
@@ -1864,6 +1865,37 @@ test.each(["cleanupVerified", "mutationReconciled", "persistenceFailed", "pixel"
     expect(() => assertCampaignCleanupComplete(receipt, receipt.execution!, resumeModules)).toThrow();
   });
 
+test.each([
+  ["androidPush", "network_verified", "a verified Pixel baseline", false],
+  ["androidPush", "network_verified", "a Pixel baseline with Wi-Fi down", true],
+  ["androidPush", "network_verified", "no Pixel baseline", true],
+  ["windows", "omp_published", "residue sweeps from before it held the Pixel", false],
+  ["windows", "pixel_verified", "residue sweeps but no Pixel baseline after holding it", true],
+  ["rigReadiness", "pixel_push", "owner-bound restored readiness", false],
+  ["rigReadiness", "pixel_push", "restored readiness without an owner epoch", true],
+] as const)("an unknown %s failure at %s with %s settles only from that owner proof", async (lane, step, proof, unresolved) => {
+  const receipt = availabilityReceipt();
+  receipt.execution = receiptExecution();
+  receipt.lanes.deviceCloud.status = "passed";
+  receipt.lanes.deviceCloud.evidence = { progress: { epoch: "11111111-2222-4333-8444-555555555555", cleanupRequired: false, resources: [] } };
+  const baseline = { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true };
+  if (lane === "androidPush") {
+    receipt.lanes.androidPush.status = "failed";
+    if (proof !== "no Pixel baseline") receipt.lanes.androidPushCleanup.evidence!.pixelBaseline = { ...baseline, wifiUp: proof === "a verified Pixel baseline" };
+  } else if (lane === "windows") {
+    receipt.lanes.windows.status = "failed";
+    Object.assign(receipt.lanes.windows.evidence!.progress as object, { phase: step });
+    Object.assign(receipt.lanes.windowsCleanup.evidence!, { instancesRemaining: 0, firewallsRemaining: 0, tailnetNodesRemaining: 0 });
+  } else {
+    receipt.rigReadiness = { status: "failed", campaignAttempt: 0, observations: { baselineRestored: true }, timings: {}, cleanupDisposition: "restored",
+      ...(proof === "owner-bound restored readiness" ? { epoch: "22222222-3333-4444-8555-666666666666", phase: "pixel_push" } as const : {}) };
+  }
+  const error = new QualificationFailure({ id: 7, lane, step, reason: "unclassified_failure", class: "harness",
+    elapsedMs: 0, operation: "unknown", observations: {} } as LaneFailure);
+  await finalizeCampaignFailure(receipt, error, async () => {}, resumeModules);
+  expect(receipt.failureSummary?.containment).toEqual({ proven: true, cleanupComplete: true, unresolvedMutation: unresolved });
+});
+
 test("council498r1 readiness cannot restore a remote owner lost before Mac effects were marked", async () => {
   const receipt = summarizedReceipt();
   const target = { sshDestination: "early-owner-loss.invalid", sudoPassword: "" };
@@ -3129,6 +3161,28 @@ describe("resource-owning lanes", () => {
     const finalized = validateStableQualificationReceipt(receipt, TAG, COMMIT, PREVIOUS_TAG);
     expect(finalized.failureSummary?.failures.some(item => item.lane === "windows")).toBe(true);
     expect(finalized.failureSummary?.containment.proven).toBe(false);
+  });
+
+  test.each([
+    ["windows", [["transport_ready", true], ["pixel_verified", true]], "pixel_verified"],
+    ["deviceCloud", [["tunnel_ready", true], ["restored", false]], "tunnel_ready"],
+  ] as const)("an untyped %s failure records the last phase checkpointed while the lane owned effects", async (name, phases, step) => {
+    const receipt = summarizedReceipt();
+    receipt.status = "running";
+    delete receipt.failureSummary;
+    for (const lane of Object.values(receipt.lanes)) delete lane.failure;
+    receipt.lanes[name] = { status: "pending", attempts: 0 };
+    const module: ExternalLaneModule<RetainedMacLaneContext> = {
+      preflight: async () => {}, needsCleanup: () => false, cleanup: async () => ({ restored: true }),
+      run: async ({ checkpoint }) => {
+        for (const [phase, cleanupRequired] of phases) await checkpoint({ epoch: "11111111-2222-4333-8444-555555555555", phase, cleanupRequired });
+        throw new Error("synthetic untyped lane failure");
+      },
+    };
+    const context = { ...await laneContext(), origin: "https://fixture.invalid", sessionLabel: "synthetic",
+      mac: async () => { throw new Error("unexpected remote effect"); } };
+    await runExternalLane(receipt, name, async () => {}, module, context).catch(error => error);
+    expect(receipt.lanes[name].failure).toEqual([expect.objectContaining({ step, reason: "unclassified_failure", operation: "unknown" })]);
   });
 
   test("council498r1 Push browser cleanup roots survive later cleanup and queued Pixel collateral", async () => {
