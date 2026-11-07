@@ -60,7 +60,10 @@ import {
   MAX_FLEET_PUSH_BYTES,
   MAX_FLEET_REQUEST_BYTES,
   MAX_FLEET_STATUS_BYTES,
-  MAX_FLEET_SYNC_ENTRIES,
+  MAX_FLEET_BADGE_COUNT,
+  FLEET_SESSION_SUFFIX_LENGTH,
+  type FleetReconcileMessage,
+  type FleetStatusRequest,
   type FleetBadge,
   type FleetFeedEvent,
   type FleetFeedSession,
@@ -999,7 +1002,7 @@ function parseFleetBadge(value: unknown): FleetBadge {
   const record = requireRecord(value);
   requireExactKeys(record, ["count", "complete"]);
   if (typeof record.complete !== "boolean") throw new ProtocolValidationError();
-  return { count: requireInteger(record.count, 0, MAX_PUSH_PENDING_COUNT), complete: record.complete };
+  return { count: requireInteger(record.count, 0, MAX_FLEET_BADGE_COUNT), complete: record.complete };
 }
 
 function optionalSource(record: JsonRecord): { readonly source?: string } {
@@ -1017,31 +1020,29 @@ function parseFleetPendingAsk(value: unknown): FleetPendingAsk {
   };
 }
 
+/**
+ * A remote alert's visible body may only be the coordinator's configured label for that source and
+ * the session's opaque suffix, so no title, path, or preview can reach the worker from a peer.
+ */
+function fleetBody(record: JsonRecord, instanceId: string): { readonly body?: string } {
+  const body = optionalLabel(record.body);
+  if (body === undefined || record.source === undefined) return body === undefined ? {} : { body };
+  const suffix = ` · ${instanceId.slice(-FLEET_SESSION_SUFFIX_LENGTH)}`;
+  const label = body.endsWith(suffix) ? body.slice(0, -suffix.length) : "";
+  if (label.length === 0 || parseFleetLabel(label) !== label) throw new ProtocolValidationError();
+  return { body };
+}
+
 /** A fleet push for one recipient: content-free, capability-free, and at most 3 KiB of JSON. */
 export function parseFleetPushMessage(value: unknown): FleetPushMessage {
   const record = boundedRecord(value, MAX_FLEET_PUSH_BYTES);
   if (record.version !== FLEET_PUSH_VERSION) throw new ProtocolValidationError();
-  if (record.type === "sync") {
-    requireExactKeys(record, ["version", "type", "seq", "badge", "fresh", "pending"]);
-    if (!Array.isArray(record.fresh) || record.fresh.length > MAX_FLEET_SOURCES) throw new ProtocolValidationError();
-    const fresh = record.fresh.map(entry => entry === LOCAL_FLEET_SOURCE_ID ? entry : requireBinding(entry));
-    if (new Set(fresh).size !== fresh.length) throw new ProtocolValidationError();
-    if (!Array.isArray(record.pending) || record.pending.length > MAX_FLEET_SYNC_ENTRIES) throw new ProtocolValidationError();
-    const pending = record.pending.map(parseFleetPendingAsk);
-    const asks = new Set<string>();
-    for (const ask of pending) {
-      if (!fresh.includes(ask.source ?? LOCAL_FLEET_SOURCE_ID)) throw new ProtocolValidationError();
-      const key = `${ask.source ?? ""}\0${ask.instanceId}\0${ask.requestId}`;
-      if (asks.has(key)) throw new ProtocolValidationError();
-      asks.add(key);
-    }
-    return { version: FLEET_PUSH_VERSION, type: "sync", seq: parseFleetSequence(record.seq), badge: parseFleetBadge(record.badge), fresh, pending };
-  }
   const common = ["version", "type", "instanceId", "generation", "seq", "badge"];
+  const instanceId = requireInstanceId(record.instanceId);
   const session = {
     version: FLEET_PUSH_VERSION,
     ...optionalSource(record),
-    instanceId: requireInstanceId(record.instanceId),
+    instanceId,
     generation: requireInteger(record.generation, 1),
     seq: parseFleetSequence(record.seq),
     badge: parseFleetBadge(record.badge),
@@ -1049,20 +1050,41 @@ export function parseFleetPushMessage(value: unknown): FleetPushMessage {
   if (record.type === "attention") {
     requireExactKeys(record, [...common, "requestId", "title"], ["source", "body"]);
     if (record.title !== "OMP session needs attention") throw new ProtocolValidationError();
-    const body = optionalLabel(record.body);
-    return { ...session, type: "attention", requestId: requireRequestId(record.requestId), title: record.title, ...(body === undefined ? {} : { body }) };
+    return { ...session, type: "attention", requestId: requireRequestId(record.requestId), title: record.title, ...fleetBody(record, instanceId) };
   }
   if (record.type === "activity_stop") {
     requireExactKeys(record, [...common, "title"], ["source", "body"]);
     if (record.title !== "OMP session activity stopped") throw new ProtocolValidationError();
-    const body = optionalLabel(record.body);
-    return { ...session, type: "activity_stop", title: record.title, ...(body === undefined ? {} : { body }) };
+    return { ...session, type: "activity_stop", title: record.title, ...fleetBody(record, instanceId) };
   }
   if (record.type === "clear") {
     requireExactKeys(record, [...common, "requestId"], ["source"]);
     return { ...session, type: "clear", requestId: requireRequestId(record.requestId) };
   }
   throw new ProtocolValidationError();
+}
+
+/** The page's authoritative snapshot handed to the worker; `asOf` is the worker sequence it captured first. */
+export function parseFleetReconcileMessage(value: unknown): FleetReconcileMessage {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["type", "version", "asOf", "fresh", "pending", "badge"]);
+  if (record.type !== "omp-notification-reconcile" || record.version !== FLEET_PUSH_VERSION) throw new ProtocolValidationError();
+  const asOf = requireRecord(record.asOf);
+  requireExactKeys(asOf, ["received"]);
+  if (!Array.isArray(record.fresh) || record.fresh.length > MAX_FLEET_SOURCES) throw new ProtocolValidationError();
+  const fresh = record.fresh.map(entry => entry === LOCAL_FLEET_SOURCE_ID ? entry : requireBinding(entry));
+  if (new Set(fresh).size !== fresh.length) throw new ProtocolValidationError();
+  if (!Array.isArray(record.pending) || record.pending.length > MAX_FLEET_BADGE_COUNT) throw new ProtocolValidationError();
+  const pending = record.pending.map(parseFleetPendingAsk);
+  if (pending.some(ask => !fresh.includes(ask.source ?? LOCAL_FLEET_SOURCE_ID))) throw new ProtocolValidationError();
+  return {
+    type: "omp-notification-reconcile",
+    version: FLEET_PUSH_VERSION,
+    asOf: { received: requireInteger(asOf.received, 0) },
+    fresh,
+    pending,
+    badge: parseFleetBadge(record.badge),
+  };
 }
 
 const FLEET_SOURCE_STATES: Readonly<Record<FleetSourceState, true>> = {
@@ -1076,12 +1098,24 @@ const FLEET_SOURCE_STATES: Readonly<Record<FleetSourceState, true>> = {
 
 function parseFleetSourceStatus(value: unknown): FleetSourceStatus {
   const record = requireRecord(value);
-  requireExactKeys(record, ["sourceId", "state"], ["expiresAt"]);
+  requireExactKeys(record, ["sourceId", "state", "selected"], ["grantId", "expiresAt"]);
   if (typeof record.state !== "string" || !Object.hasOwn(FLEET_SOURCE_STATES, record.state)) throw new ProtocolValidationError();
+  if (typeof record.selected !== "boolean") throw new ProtocolValidationError();
   return {
     sourceId: parseFleetSourceId(record.sourceId),
     state: record.state as FleetSourceState,
+    selected: record.selected,
+    ...(record.grantId === undefined ? {} : { grantId: parseSessionCreationUuid(record.grantId) }),
     ...(record.expiresAt === undefined ? {} : { expiresAt: requireCanonicalDateTime(record.expiresAt) }),
+  };
+}
+
+export function parseFleetStatusRequest(value: unknown): FleetStatusRequest {
+  const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES + MAX_PUSH_ENDPOINT_BYTES);
+  requireExactKeys(record, ["version"], ["endpoint"]);
+  return {
+    version: requireFleetVersion(record),
+    ...(record.endpoint === undefined ? {} : { endpoint: requirePushEndpoint(record.endpoint) }),
   };
 }
 
@@ -1128,11 +1162,15 @@ export function parseFleetRecipientRequest(value: unknown): FleetRecipientReques
 export function parseFleetRecipientResponse(value: unknown): FleetRecipientResponse {
   const record = boundedRecord(value, MAX_FLEET_REQUEST_BYTES);
   requireExactKeys(record, ["version", "sources", "released"]);
-  return {
-    version: requireFleetVersion(record),
-    sources: parseFleetSelection(record.sources, 0),
-    released: parseFleetSelection(record.released, 0),
-  };
+  if (!Array.isArray(record.released) || record.released.length > MAX_FLEET_NOTIFICATION_SOURCES) throw new ProtocolValidationError();
+  const released = record.released.map(entry => {
+    const grant = requireRecord(entry);
+    requireExactKeys(grant, ["sourceId", "grantId"]);
+    return { sourceId: parseFleetSourceId(grant.sourceId), grantId: parseSessionCreationUuid(grant.grantId) };
+  });
+  if (new Set(released.map(grant => grant.sourceId)).size !== released.length ||
+    released.some(grant => grant.sourceId === LOCAL_FLEET_SOURCE_ID)) throw new ProtocolValidationError();
+  return { version: requireFleetVersion(record), sources: parseFleetSelection(record.sources, 0), released };
 }
 
 export function parseFleetRecipientRemoveRequest(value: unknown): FleetRecipientRemoveRequest {

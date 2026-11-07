@@ -2316,7 +2316,9 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
 
   While a device has the source selected, the page renews the grant at the source (cross-origin,
   owner-authenticated) whenever the coordinator reports expiry within 10 days; renewal is also the
-  direct authorization check when another device of the same owner enables the source. An expired
+  direct authorization check when another device of the same owner enables the source. The
+  coordinator's status lists each source's state, this device's selection, the owner's `grantId`,
+  and the reported expiry, so any device of the owner can renew or revoke after a reload. An expired
   grant stops the feed until renewed. Revocation by the owner (both sides), the source
   administrator (removing the coordinator, its trusted origin, or the login), the coordinator
   administrator (removing the source), or expiry closes live feeds at once; deleting the record is
@@ -2345,29 +2347,36 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   allowlisted at the coordinator, the recipient selected the source, and the grant is active.
   Local sessions keep reaching every subscribed recipient.
 - **Envelope.** Fleet recipients receive Push v3 for every message, local and remote; legacy
-  recipients keep strict Push v2 byte-for-byte. v3 has `attention`, `activity_stop`, `clear` (now
-  carrying `generation`), and `sync`. Every v3 message carries `seq: { epoch, n }` and
+  recipients keep strict Push v2 byte-for-byte. v3 has `attention`, `activity_stop`, and `clear`
+  (now carrying `generation`). Every v3 message carries `seq: { epoch, n }` and
   `badge: { count, complete }`. `epoch` is persisted by the coordinator and advances at every start
   to `max(previous + 1, current Unix time in seconds)`, so even a recreated state file yields a newer
-  epoch; `n` counts messages per recipient within the epoch. A remote message names its source by
+  epoch; `n` is one coordinator-wide counter within the epoch, so a recipient that is re-created or
+  re-enrolled never restarts below what its device already saw. A remote message names its source by
   *binding*, the first 22 characters of
   `base64url(SHA-256("omp-fleet-binding-v1" ‖ 0x00 ‖ id ‖ 0x00 ‖ origin))`; a local
   message omits it. A binding is an identifier, not an authenticator, and changing a source's origin
-  changes it. `sync` lists the authoritative pending asks of the sources it names as fresh (at most
-  16 entries) and never shows a notification.
+  changes it. A remote alert's body must be exactly a configured label, ` · `, and the session suffix;
+  the worker's parser rejects anything else.
 - **Ordering.** The coordinator's receipt order defines `n`; no cross-host wall clock orders
   anything. The worker keeps bounded, durable IndexedDB state: request tombstones retained for 30
   minutes (longer than the 5-minute push TTL), per-session watermarks within an epoch, the highest
-  epoch seen, and the badge's `seq`. It drops a message from an older epoch; a `clear` records a
-  tombstone and closes only its exact source, instance, generation, and request; an `attention` is
-  dropped when its request is tombstoned or its session has a newer applied message; a stop is
-  dropped when its session has a newer applied message or a displayed attention; a badge applies
-  only with a newer `seq`. An attention that replaces a stop, or an older request whose clear has
-  not arrived, alerts again; a duplicate does not. After a coordinator restart it replays attention
-  for current asks, which the worker deduplicates against requests it already showed, then sends one
-  `sync` per recipient. After a source reconnect, the coordinator diffs the new snapshot into clears
-  and attentions. Neither path emits a stop. These rules live in one pure reducer in
-  `packages/protocol` with shared test vectors, used by the worker and the qualification harness.
+  epoch seen, the badge's `seq`, and a count of pushes received. It drops a message from an older
+  epoch; a `clear` records a tombstone and closes only its exact source, instance, and request; an
+  `attention` is dropped when its request is tombstoned or its session has a newer applied message;
+  a stop is dropped when its session has a newer applied message or a displayed attention; a badge
+  applies only with a newer `seq`. An attention that replaces a stop, or an older request whose
+  clear has not arrived, alerts again; a duplicate does not. The coordinator persists, per recipient,
+  the identifiers of asks it has alerted and not yet cleared (binding, instance, generation, request;
+  at most 256). After a coordinator restart, once each selected source has reported or 30 seconds
+  pass, it sends exact clears for outstanding asks that are resolved, belong to a source that is now
+  unauthorized, removed, re-pointed, or deselected, and attentions for asks it has not alerted;
+  a stale source keeps its outstanding asks. After a source reconnect it diffs the new snapshot the
+  same way. Neither path emits a stop or repeats an alert. Opening the app reconciles from fresh
+  snapshots of each source, but the page first captures the worker's push count: only alerts whose
+  session received no push since then may be closed, and the page's badge applies only if no push
+  arrived at all. These rules live in one pure reducer in `packages/protocol` with shared test
+  vectors, used by the worker and the qualification harness.
 - **Coverage and badges.** Each selected source is `current`, `stale`, `unauthorized`,
   `unsupported`, or `pending`; unselected sources are excluded. *Notifications enabled* (permission
   and subscription) is reported separately from *All selected hosts covered* (every selected
@@ -2383,23 +2392,28 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   which the feed cannot carry anyway. A local session keeps the existing Push v2 Session detail
   prefixed with `fleet.label`, because the coordinator observes it directly; Preview falls back to
   Session for every fleet alert.
-- **Taps.** Notification data carries version, type, the optional binding, `instanceId`,
-  `generation`, and, for attention, `requestId`. A remote route adds `&source=<binding>`. The page
+- **Taps.** Attention notification data carries version, type, the optional binding, `instanceId`,
+  and `requestId`; stop data carries `generation` in place of the request. A remote route adds
+  `&source=<binding>`. The page
   recomputes bindings from its client configuration; an unmatched binding shows the expired notice
   and issues no capability. Otherwise the page fetches a fresh snapshot from that exact source,
   checks generation, request, `inputRequired`, and access, and uses that source's ordinary launch
   broker. A stop tap opens View only.
 - **Bounds.** At most 7 remote sources, 8 subscriptions, one feed per active grant, 32 grants at a
-  coordinator, 16 grants at a source, 256 queued feed events, 512 worker records, 8 concurrent push
-  sends, and 256 queued deliveries, where overflow drops attention and stops but never a clear. Feed
+  coordinator, 16 grants at a source, 256 queued feed events, 256 outstanding asks per recipient,
+  2,048 records per worker map (a flood of more distinct cleared requests within 30 minutes evicts
+  the oldest tombstones), a badge count up to 8,000, 8 concurrent push sends, and 256 queued
+  deliveries, where overflow drops attention and stops but never a clear. Feed
   reconnects back off from 1 second to 5 minutes with ±20 % jitter; an authorization or unsupported
   answer backs off for 5 minutes. Coordinator pulls ignore proxy environment variables, so the
   credential only travels to the configured origin, and support archives exclude both state files.
 - **Persistence.** The coordinator's `<stateDir>/fleet-notifications.json` holds the epoch,
-  grants with their secrets, and recipient selections keyed by the SHA-256 of each endpoint; the
-  source's `<stateDir>/notification-grants.json` holds verifiers. Both are private, atomic,
-  versioned, and fail closed when corrupt. `push-state.json`, its VAPID key, the memory-only session
-  registry, and capability handling are unchanged.
+  grants with their secrets, and per recipient (keyed by the SHA-256 of its endpoint) the selected
+  sources and the outstanding ask identifiers above; the source's
+  `<stateDir>/notification-grants.json` holds verifiers. Both are private, atomic, versioned, and
+  fail closed when corrupt. Neither holds titles, paths, previews, or capabilities.
+  `push-state.json`, its VAPID key, the memory-only session registry, and capability handling are
+  unchanged.
 - **Versioning, migration, and rollback.** An existing subscription stays Push v2 home-only until
   the page confirms that the active worker supports v3 and the user enables remote sources. Fleet
   APIs are new routes, so an older gateway answers 404 and the page shows the source as
@@ -2434,5 +2448,6 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
 - A source that names a coordinator trusts it with the session identifiers and ask states of
   enrolled owners. The credential reaches no other route. Revocation stops new sends at once;
   pushes already accepted by a push service cannot be recalled.
-- WebKit may count clears and syncs, which display nothing, against its silent-push allowance, as
-  it already could for Push v2 clears. Delivery stays best effort.
+- WebKit may count clears, which display nothing, against its silent-push allowance, as it already
+  could for Push v2 clears. Delivery stays best effort; a lost clear leaves its alert until the
+  next reconciliation or a newer request replaces it.

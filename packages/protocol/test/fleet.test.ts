@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   FLEET_PUSH_VERSION,
-  MAX_FLEET_SYNC_ENTRIES,
+  MAX_FLEET_BADGE_COUNT,
   ProtocolValidationError,
   fleetGrantVerifier,
   fleetOwnerDigest,
@@ -18,6 +18,8 @@ import {
   parseFleetRecipientRemoveRequest,
   parseFleetRecipientRequest,
   parseFleetRecipientResponse,
+  parseFleetReconcileMessage,
+  parseFleetStatusRequest,
   parseFleetStatusResponse,
   parseNotificationData,
   parseNotificationRoute,
@@ -74,20 +76,12 @@ describe("fleet derivations", () => {
 });
 
 describe("fleet push messages", () => {
-  test("accept the documented attention, stop, clear, and sync examples", () => {
+  test("accept the documented attention, stop, and clear examples", () => {
     expect(parseFleetPushMessage(attention)).toEqual(attention as never);
     const { requestId: _request, title: _title, body: _body, type: _type, source: _source, ...session } = attention;
     expect(parseFleetPushMessage({ ...session, type: "activity_stop", title: "OMP session activity stopped" }).type).toBe("activity_stop");
     expect(parseFleetPushMessage({ ...session, type: "clear", requestId })).toEqual({ ...session, type: "clear", requestId } as never);
-    const sync = {
-      version: 3,
-      type: "sync",
-      seq: { epoch: 7, n: 43 },
-      badge: { count: 1, complete: false },
-      fresh: ["local", binding],
-      pending: [{ source: binding, instanceId, generation: 3, requestId }],
-    };
-    expect(parseFleetPushMessage(sync)).toEqual(sync as never);
+    reject(() => parseFleetPushMessage({ version: 3, type: "sync", seq: { epoch: 7, n: 43 }, badge: { count: 1, complete: false }, fresh: ["local"], pending: [] }));
   });
 
   test("local messages omit the source; Push v2 and other versions never parse as fleet", () => {
@@ -107,27 +101,38 @@ describe("fleet push messages", () => {
     reject(() => parseFleetPushMessage({ ...attention, body: "x".repeat(3 * 1024) }));
   });
 
+  test("a remote body is only a configured label and the opaque session suffix; local bodies keep legacy detail", () => {
+    for (const body of ["Fix payment retry · checkout-service", "Studio · aaaa11", "Studio", "/Users/you/repo · bb2222x", " · bb2222"]) {
+      reject(() => parseFleetPushMessage({ ...attention, body }));
+    }
+    expect(parseFleetPushMessage({ ...attention, body: "Mac Studio · bb2222" }).type).toBe("attention");
+    // Control and bidi characters are stripped exactly as for every label, then the format is checked.
+    expect(parseFleetPushMessage({ ...attention, body: "Studio\u202e · bb2222" })).toHaveProperty("body", "Studio · bb2222");
+    const { source: _source, ...local } = attention;
+    expect(parseFleetPushMessage({ ...local, body: "MacBook · Fix payment retry · checkout-service" }).type).toBe("attention");
+  });
+
   test("reject malformed ordering, badge, and binding fields", () => {
     reject(() => parseFleetPushMessage({ ...attention, seq: { epoch: 0, n: 1 } }));
     reject(() => parseFleetPushMessage({ ...attention, seq: { epoch: 1, n: 0 } }));
     reject(() => parseFleetPushMessage({ ...attention, seq: { epoch: 1, n: 1, at: 1 } }));
-    reject(() => parseFleetPushMessage({ ...attention, badge: { count: 1001, complete: true } }));
+    expect(parseFleetPushMessage({ ...attention, badge: { count: MAX_FLEET_BADGE_COUNT, complete: true } }).badge.count).toBe(MAX_FLEET_BADGE_COUNT);
+    reject(() => parseFleetPushMessage({ ...attention, badge: { count: MAX_FLEET_BADGE_COUNT + 1, complete: true } }));
     reject(() => parseFleetPushMessage({ ...attention, badge: { count: 1, complete: "yes" } }));
     reject(() => parseFleetPushMessage({ ...attention, source: "local" }));
     reject(() => parseFleetPushMessage({ ...attention, source: `${binding}=` }));
     reject(() => parseFleetPushMessage({ ...attention, generation: 0 }));
   });
 
-  test("a sync may only name pending asks of fresh sources, without duplicates, within bounds", () => {
-    const sync = { version: FLEET_PUSH_VERSION, type: "sync", seq: { epoch: 1, n: 1 }, badge: { count: 0, complete: true } };
+  test("a reconciliation names only fresh sources' pending asks and the receipt count it captured", () => {
+    const reconcile = { type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received: 4 }, badge: { count: 1, complete: true } };
     const ask = { instanceId, generation: 1, requestId };
-    expect(parseFleetPushMessage({ ...sync, fresh: ["local"], pending: [ask] }).type).toBe("sync");
-    reject(() => parseFleetPushMessage({ ...sync, fresh: [binding], pending: [ask] }));
-    reject(() => parseFleetPushMessage({ ...sync, fresh: ["local"], pending: [ask, ask] }));
-    reject(() => parseFleetPushMessage({ ...sync, fresh: ["local", "local"], pending: [] }));
-    reject(() => parseFleetPushMessage({ ...sync, fresh: ["laptop"], pending: [] }));
-    const many = Array.from({ length: MAX_FLEET_SYNC_ENTRIES + 1 }, (_, index) => ({ ...ask, requestId: `${requestId}${index}` }));
-    reject(() => parseFleetPushMessage({ ...sync, fresh: ["local"], pending: many }));
+    expect(parseFleetReconcileMessage({ ...reconcile, fresh: ["local"], pending: [ask] }).asOf).toEqual({ received: 4 });
+    reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: [binding], pending: [ask] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: ["local", "local"], pending: [] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: ["laptop"], pending: [] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, asOf: { epoch: 1, n: 1 }, fresh: ["local"], pending: [] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, type: "omp-notification-sync", fresh: ["local"], pending: [] }));
   });
 });
 
@@ -162,10 +167,19 @@ describe("fleet notification data and routes", () => {
 
 describe("fleet HTTP and feed contracts", () => {
   test("coordinator bodies are exact", () => {
-    expect(parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", expiresAt: "2026-12-07T00:00:00.000Z" }, { sourceId: "laptop", state: "not_enrolled" }] }).sources).toHaveLength(2);
-    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "online" }] }));
-    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current" }, { sourceId: "studio", state: "stale" }] }));
-    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", expiresAt: "2026-12-07" }] }));
+    const status = parseFleetStatusResponse({ version: 1, sources: [
+      { sourceId: "studio", state: "current", selected: true, grantId, expiresAt: "2026-12-07T00:00:00.000Z" },
+      { sourceId: "laptop", state: "not_enrolled", selected: false },
+    ] });
+    expect(status.sources.map(source => [source.sourceId, source.selected, source.grantId ?? null])).toEqual([["studio", true, grantId], ["laptop", false, null]]);
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "online", selected: true }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current" }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", selected: true }, { sourceId: "studio", state: "stale", selected: false }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", selected: true, expiresAt: "2026-12-07" }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", selected: true, secret: digest }] }));
+    expect(parseFleetStatusRequest({ version: 1, endpoint })).toEqual({ version: 1, endpoint });
+    expect(parseFleetStatusRequest({ version: 1 })).toEqual({ version: 1 });
+    reject(() => parseFleetStatusRequest({ version: 1, endpoint: "http://insecure.example/push" }));
     expect(parseFleetGrantCreateRequest({ version: 1, sourceId: "studio" })).toEqual({ version: 1, sourceId: "studio" });
     reject(() => parseFleetGrantCreateRequest({ version: 1, sourceId: "studio", origin: "https://evil.example" }));
     expect(parseFleetGrantCreateResponse({ version: 1, grantId, verifier: digest }).grantId).toBe(grantId);
@@ -182,10 +196,12 @@ describe("fleet HTTP and feed contracts", () => {
     reject(() => parseFleetRecipientRequest({ version: 1, endpoint: "http://insecure.example/push", sources: ["studio"] }));
     reject(() => parseFleetRecipientRequest({ version: 1, endpoint, sources: Array.from({ length: 8 }, (_, index) => `s${index}`) }));
     expect(parseFleetRecipientRemoveRequest({ version: 1, endpoint }).endpoint).toBe(endpoint);
-    expect(parseFleetRecipientResponse({ version: 1, sources: [], released: ["studio"] }))
-      .toEqual({ version: 1, sources: [], released: ["studio"] });
+    expect(parseFleetRecipientResponse({ version: 1, sources: [], released: [{ sourceId: "studio", grantId }] }))
+      .toEqual({ version: 1, sources: [], released: [{ sourceId: "studio", grantId }] });
     reject(() => parseFleetRecipientResponse({ version: 1, sources: ["studio"] }));
-    reject(() => parseFleetRecipientResponse({ version: 1, sources: [], released: ["local"] }));
+    reject(() => parseFleetRecipientResponse({ version: 1, sources: [], released: ["studio"] }));
+    reject(() => parseFleetRecipientResponse({ version: 1, sources: [], released: [{ sourceId: "local", grantId }] }));
+    reject(() => parseFleetRecipientResponse({ version: 1, sources: [], released: [{ sourceId: "studio", grantId, secret: digest }] }));
   });
 
   test("source grant bodies carry a verifier, never a secret, and canonical expiry", () => {

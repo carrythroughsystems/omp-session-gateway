@@ -338,10 +338,14 @@ export const MAX_SOURCE_FLEET_GRANTS = 16;
 export const FLEET_GRANT_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
 /** The page renews a selected source's grant once its expiry is this close. */
 export const FLEET_GRANT_RENEW_WITHIN_MS = 10 * 24 * 60 * 60 * 1_000;
-export const MAX_FLEET_SYNC_ENTRIES = 16;
 /** The worker keeps a cleared request's tombstone longer than any admitted push TTL (5 minutes). */
 export const FLEET_TOMBSTONE_RETENTION_MS = 30 * 60 * 1_000;
-export const MAX_FLEET_WORKER_RECORDS = 512;
+/** Per worker map; a flood of more distinct cleared requests within the retention evicts the oldest. */
+export const MAX_FLEET_WORKER_RECORDS = 2_048;
+/** Known pending asks across every fleet source a recipient may select. */
+export const MAX_FLEET_BADGE_COUNT = MAX_FLEET_SOURCES * MAX_SESSIONS;
+/** Outstanding asks the coordinator remembers per recipient for restart reconciliation. */
+export const MAX_FLEET_OUTSTANDING_ASKS = 256;
 /** First 22 base64url characters of the binding digest: 132 bits. */
 export const FLEET_BINDING_PATTERN = /^[A-Za-z0-9_-]{22}$/u;
 /** Unpadded base64url of 32 bytes: a grant secret, a verifier, or an owner digest. */
@@ -350,7 +354,7 @@ export const FLEET_SESSION_SUFFIX_LENGTH = 6;
 
 export type FleetPushTitle = "OMP session needs attention" | "OMP session activity stopped";
 
-/** Coordinator receipt order for one recipient: a persisted start counter and a message counter. */
+/** Coordinator receipt order: a persisted start counter and one message counter across recipients. */
 export interface FleetSequence {
   readonly epoch: number;
   readonly n: number;
@@ -372,6 +376,7 @@ interface FleetSessionPush {
   readonly badge: FleetBadge;
 }
 
+/** One pending ask in a page's authoritative snapshot; `source` absent means the coordinator's own. */
 export interface FleetPendingAsk {
   readonly source?: string;
   readonly instanceId: string;
@@ -392,16 +397,22 @@ export type FleetPushMessage =
       readonly title: "OMP session activity stopped";
       readonly body?: string;
     })
-  | (FleetSessionPush & { readonly type: "clear"; readonly requestId: string })
-  | {
-      readonly version: typeof FLEET_PUSH_VERSION;
-      readonly type: "sync";
-      readonly seq: FleetSequence;
-      readonly badge: FleetBadge;
-      /** Sources whose pending sets below are authoritative: `local` or remote bindings. */
-      readonly fresh: readonly string[];
-      readonly pending: readonly FleetPendingAsk[];
-    };
+  | (FleetSessionPush & { readonly type: "clear"; readonly requestId: string });
+
+/**
+ * Page → worker foreground reconciliation from fresh, authenticated source snapshots. `asOf` is the
+ * worker's push receipt count captured before the page fetched them, so a snapshot can never
+ * overrule a push the worker received after the page began.
+ */
+export interface FleetReconcileMessage {
+  readonly type: "omp-notification-reconcile";
+  readonly version: typeof FLEET_PUSH_VERSION;
+  readonly asOf: { readonly received: number };
+  /** `local` or remote bindings whose pending sets below are complete and authoritative. */
+  readonly fresh: readonly string[];
+  readonly pending: readonly FleetPendingAsk[];
+  readonly badge: FleetBadge;
+}
 
 /** Coordinator view of one configured notification source for the calling owner. */
 export type FleetSourceState = "not_enrolled" | "pending" | "current" | "stale" | "unauthorized" | "unsupported";
@@ -409,8 +420,18 @@ export type FleetSourceState = "not_enrolled" | "pending" | "current" | "stale" 
 export interface FleetSourceStatus {
   readonly sourceId: string;
   readonly state: FleetSourceState;
+  /** Whether the device named by the request's endpoint selects this source. */
+  readonly selected: boolean;
+  /** The calling owner's grant at this source, needed for renewal and revocation there. */
+  readonly grantId?: string;
   /** The source's grant expiry as last reported by its feed. */
   readonly expiresAt?: string;
+}
+
+export interface FleetStatusRequest {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  /** This device's push endpoint, so the response can report its selection; absent before enrollment. */
+  readonly endpoint?: string;
 }
 
 export interface FleetStatusResponse {
@@ -446,8 +467,8 @@ export interface FleetRecipientResponse {
   readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
   /** This device's remote selection after the change; empty means it is back on Push v2. */
   readonly sources: readonly string[];
-  /** Sources no device of the owner selects any more: the coordinator discarded their grants. */
-  readonly released: readonly string[];
+  /** Grants no device of the owner needs any more: discarded here, to be revoked at each source. */
+  readonly released: readonly { readonly sourceId: string; readonly grantId: string }[];
 }
 
 export interface FleetRecipientRemoveRequest {

@@ -250,9 +250,11 @@ the same local ask replace rather than duplicate each other.
 suppressed for 30 minutes even if its attention arrives later or the worker restarts; an older
 message for a session never replaces a newer one; a stop never replaces a displayed attention; an
 older badge never overwrites a newer one. Asks on different hosts are ordered by first observation
-at the coordinator, never by host clocks. After the coordinator restarts it re-sends current asks,
-which the worker shows only if it has not shown them, and one `sync` that closes alerts for asks no
-longer pending. Opening the app reconciles the same way from fresh snapshots of each source.
+at the coordinator, never by host clocks. The coordinator remembers which asks it alerted each device
+about; after it restarts it sends exact clears for the ones resolved meanwhile, or whose host was
+revoked, removed, or deselected, and alerts only asks the device has not seen. Opening the app
+reconciles from fresh snapshots of each source, but never closes an alert, or changes the badge,
+on the strength of a snapshot older than a push the phone received while the app was loading.
 
 **Badge and All clear.** The badge counts known pending Control-capable asks across selected hosts,
 including an unreachable host's last-known asks. When the count is zero but a selected host is not

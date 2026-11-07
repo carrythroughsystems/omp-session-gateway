@@ -6,6 +6,7 @@ import {
   fleetNotificationTag,
   parseAttentionPushMessage,
   parseFleetPushMessage,
+  parseFleetReconcileMessage,
   reduceFleetPush,
   reduceFleetReconcile,
   reduceLegacyPush,
@@ -24,14 +25,10 @@ function fleetMessage(step: Json) {
   const [epoch, n] = step.seq as [number, number];
   const [count, complete] = step.badge as [number, boolean];
   const source = binding(step.source);
-  const common = { version: 3, ...(source === undefined ? {} : { source }), seq: { epoch, n }, badge: { count, complete } };
-  if (step.type === "sync") {
-    const pending = (step.pending as Json[]).map(ask => ({ ...ask, source: binding(ask.source) })).map(ask =>
-      ask.source === undefined ? (({ source: _source, ...rest }) => rest)(ask) : ask);
-    const fresh = (step.fresh as string[]).map(token => token === "local" ? token : binding(token)!);
-    return parseFleetPushMessage({ version: 3, type: "sync", seq: common.seq, badge: common.badge, fresh, pending });
-  }
-  const session = { ...common, type: step.type, instanceId: step.instanceId, generation: 1 };
+  const session = {
+    version: 3, ...(source === undefined ? {} : { source }), seq: { epoch, n }, badge: { count, complete },
+    type: step.type, instanceId: step.instanceId, generation: 1,
+  };
   if (step.type === "attention") return parseFleetPushMessage({ ...session, requestId: step.requestId, title: "OMP session needs attention" });
   if (step.type === "activity_stop") return parseFleetPushMessage({ ...session, title: "OMP session activity stopped" });
   return parseFleetPushMessage({ ...session, requestId: step.requestId });
@@ -51,6 +48,7 @@ function run(scenario: (typeof vectors.scenarios)[number]) {
   let badge: [number, boolean] | undefined;
   let alerts = 0;
   let now = 0;
+  let captured = 0;
   const apply = (reduction: FleetReduction, shown?: NotificationLaunchIntent): void => {
     state = reduction.state;
     for (const effect of reduction.effects as FleetEffect[]) {
@@ -68,9 +66,10 @@ function run(scenario: (typeof vectors.scenarios)[number]) {
     const surface = [...displayed.values()];
     if ("advance" in step) now += step.advance as number;
     else if ("restart" in step) state = JSON.parse(JSON.stringify(state)) as FleetWorkerState;
+    else if ("capture" in step) captured = state.received;
     else if ("push" in step) {
       const message = fleetMessage(step.push as Json);
-      apply(reduceFleetPush(state, message, surface, now), message.type === "sync" ? undefined : intentOf(message));
+      apply(reduceFleetPush(state, message, surface, now), intentOf(message));
     } else if ("legacy" in step) {
       const legacy = step.legacy as Json;
       const message = parseAttentionPushMessage({
@@ -80,8 +79,15 @@ function run(scenario: (typeof vectors.scenarios)[number]) {
     } else {
       const reconcile = step.reconcile as Json;
       const [count, complete] = reconcile.badge as [number, boolean];
-      const fresh = (reconcile.fresh as string[]).map(token => token === "local" ? token : binding(token)!);
-      apply(reduceFleetReconcile(state, { fresh, pending: [], badge: { count, complete } }, surface, now));
+      const message = parseFleetReconcileMessage({
+        type: "omp-notification-reconcile",
+        version: 3,
+        asOf: { received: captured },
+        fresh: (reconcile.fresh as string[]).map(token => token === "local" ? token : binding(token)!),
+        pending: reconcile.pending,
+        badge: { count, complete },
+      });
+      apply(reduceFleetReconcile(state, message, surface, now));
     }
   }
   const describe = (notification: FleetDisplayedNotification): string => {
@@ -108,21 +114,19 @@ describe("fleet ordering bounds", () => {
     expect(fleetNotificationTag(aliases.studio, "aaaa1111bbbb2222")).toBe(`omp-attention-${aliases.studio}-aaaa1111bbbb2222`);
   });
 
-  test("tombstones, shown requests, and marks stay bounded under a flood", () => {
+  test("tombstones, shown requests, marks, and touched sessions stay bounded under a flood", () => {
     let state = EMPTY_FLEET_WORKER_STATE;
-    for (let n = 1; n <= MAX_FLEET_WORKER_RECORDS + 64; n++) {
-      const instanceId = `inst${String(n).padStart(8, "0")}`;
-      const attention = fleetMessage({ type: "attention", instanceId, requestId: `req_flood_${String(n).padStart(8, "0")}`, seq: [1, 2 * n - 1], badge: [1, true] });
-      state = reduceFleetPush(state, attention, [], n).state;
-      const clear = fleetMessage({ type: "clear", instanceId, requestId: `req_flood_${String(n).padStart(8, "0")}`, seq: [1, 2 * n], badge: [0, true] });
-      state = reduceFleetPush(state, clear, [], n).state;
+    const total = MAX_FLEET_WORKER_RECORDS + 64;
+    for (let n = 1; n <= total; n++) {
+      const id = String(n).padStart(8, "0");
+      state = reduceFleetPush(state, fleetMessage({ type: "attention", instanceId: `inst${id}`, requestId: `req_flood_${id}`, seq: [1, 2 * n - 1], badge: [1, true] }), [], n).state;
+      state = reduceFleetPush(state, fleetMessage({ type: "clear", instanceId: `inst${id}`, requestId: `req_flood_${id}`, seq: [1, 2 * n], badge: [0, true] }), [], n).state;
     }
-    expect(Object.keys(state.tombstones)).toHaveLength(MAX_FLEET_WORKER_RECORDS);
-    expect(Object.keys(state.marks)).toHaveLength(MAX_FLEET_WORKER_RECORDS);
+    for (const record of [state.tombstones, state.marks, state.touched]) expect(Object.keys(record)).toHaveLength(MAX_FLEET_WORKER_RECORDS);
     expect(Object.keys(state.shown).length).toBeLessThanOrEqual(MAX_FLEET_WORKER_RECORDS);
-    // The newest records survive; the oldest are the ones dropped.
-    expect(Object.keys(state.tombstones).some(key => key.includes(`req_flood_${String(MAX_FLEET_WORKER_RECORDS + 64).padStart(8, "0")}`))).toBe(true);
-    expect(Object.keys(state.tombstones).some(key => key.includes("req_flood_00000001"))).toBe(false);
+    // The newest records survive; only the oldest are dropped.
+    expect(Object.keys(state.tombstones).some(key => key.endsWith(`req_flood_${String(total).padStart(8, "0")}`))).toBe(true);
+    expect(Object.keys(state.tombstones).some(key => key.endsWith("req_flood_00000001"))).toBe(false);
   });
 
   test("an older epoch changes nothing at all", () => {
@@ -130,5 +134,14 @@ describe("fleet ordering bounds", () => {
     const older = reduceFleetPush(newer.state, fleetMessage({ type: "clear", instanceId: "aaaa1111bbbb2222", requestId: "req_epoch_check_0a", seq: [8, 9], badge: [0, true] }), [], 0);
     expect(older.state).toBe(newer.state);
     expect(older.effects).toEqual([]);
+  });
+
+  test("a reconciliation claiming more receipts than the worker has seen changes nothing", () => {
+    const message = parseFleetReconcileMessage({
+      type: "omp-notification-reconcile", version: 3, asOf: { received: 5 }, fresh: ["local"], pending: [], badge: { count: 0, complete: true },
+    });
+    const result = reduceFleetReconcile(EMPTY_FLEET_WORKER_STATE, message, [], 0);
+    expect(result.state).toBe(EMPTY_FLEET_WORKER_STATE);
+    expect(result.effects).toEqual([]);
   });
 });
