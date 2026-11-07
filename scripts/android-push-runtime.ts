@@ -295,7 +295,7 @@ export function requireAndroidPushDevice(model: string, androidRelease: string):
 }
 
 export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "origin" | "omp"> & Partial<Pick<AndroidPushIdentity, "candidate">>, options: AndroidPushRuntimeOptions = {}): AndroidPushRuntime {
-  const base = options.fixtureBase ?? join(homedir(), ".local/share/omp-session-gateway/qualification/dev/androidPush/fixtures");
+  const base = options.fixtureBase ?? posix.join(homedir(), ".local/share/omp-session-gateway/qualification/dev/androidPush/fixtures");
   let serial: string | undefined;
   let packageName: string | undefined;
   let currentEpoch: string | undefined;
@@ -304,7 +304,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   const remoteIds = new Set<string>();
   let fleetPrepared = false, fleetEnabled = false, fleetRevoked = false;
   let fleetObserver: PushWorkerObserver | undefined;
-  const fleetRoot = (epoch: string) => join(base, `fleet-${epoch}`);
+  const fleetRoot = (epoch: string) => posix.join(base, `fleet-${epoch}`);
   let observationArmed = false;
   let observedTopics: string[] = [];
   let releasePermission: (() => Promise<void>) | undefined;
@@ -354,7 +354,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   };
   // Neither root's label is a prefix of the other's: notification bodies carry the label.
   const location = (epoch: string, role: PushFixtureRole = "primary"): PushFixtureLocation => ({
-    root: role === "remote" ? join(fleetRoot(epoch), "omp-push-remote") : join(base, role === "primary" ? `omp-push-${epoch}` : `omp-push-b-${epoch}`), epoch,
+    root: role === "remote" ? posix.join(fleetRoot(epoch), "omp-push-remote") : posix.join(base, role === "primary" ? `omp-push-${epoch}` : `omp-push-b-${epoch}`), epoch,
     bun: options.fixtureBun ?? process.execPath,
     binary: options.fixtureBinary ?? process.env.OMP_PUSH_FIXTURE_BINARY ?? "",
     scripts: options.fixtureScripts ?? resolve(import.meta.dir) });
@@ -540,7 +540,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         await runtime.beforeEffect();
         if (operation === "prepare") fleetPrepared = true;
         const result = await execute([options.fixtureBun ?? process.execPath,
-          join(options.fixtureScripts ?? import.meta.dir, "fleet-push-fixture.ts"), operation, fleetRoot(epoch), epoch, identity.origin, identity.candidate.sourceCommit]);
+          posix.join(options.fixtureScripts ?? import.meta.dir, "fleet-push-fixture.ts"), operation, fleetRoot(epoch), epoch, identity.origin, identity.candidate.sourceCommit]);
         if (result.exitCode !== 0) {
           let cause: Error;
           try {
@@ -913,7 +913,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if ((await execute(["python3", "-c", "import os; os.forkpty"])).exitCode !== 0) throw new Error("Push fixture host requires Python 3 with forkpty");
         const extension = "fixtures/push-qualification-extension.ts";
         const expected = createHash("sha256").update(await readFile(join(import.meta.dir, extension))).digest("hex");
-        const staged = await execute(["shasum", "-a", "256", join(host.scripts, extension)]);
+        const staged = await execute(["shasum", "-a", "256", posix.join(host.scripts, extension)]);
         if (staged.exitCode !== 0 || staged.stdout.trim().split(/\s+/u)[0] !== expected) throw new Error("staged Push extension differs from lane source");
         const version = await execute([...( /\.[cm]?[jt]s$/u.test(host.binary) ? [host.bun, host.binary] : [host.binary]), "--version"]);
         if (version.exitCode !== 0 || version.stdout.trim() !== `omp/${identity.omp.version}`) throw new Error("Push fixture OMP does not match the exact pin");
@@ -929,8 +929,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             class: "harness", reason: "invalid_evidence", operation: "read_only", elapsedMs: 0, observations: {} });
         }
       }
-      const hostExecute: FixtureExecutor = role !== "remote" ? execute : argv => execute(["env", `HOME=${join(fleetRoot(epoch), "home")}`,
-        `XDG_CONFIG_HOME=${join(fleetRoot(epoch), "home/.config")}`, `XDG_STATE_HOME=${join(fleetRoot(epoch), "home/.local/state")}`, ...argv]);
+      const hostExecute: FixtureExecutor = role !== "remote" ? execute : argv => execute(["env", `HOME=${posix.join(fleetRoot(epoch), "home")}`,
+        `XDG_CONFIG_HOME=${posix.join(fleetRoot(epoch), "home/.config")}`, `XDG_STATE_HOME=${posix.join(fleetRoot(epoch), "home/.local/state")}`, ...argv]);
       await commandPushFixture(location(epoch, role), operation, hostExecute, expectedOwner !== undefined);
     },
     snapshot,
@@ -1428,7 +1428,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           if (progress.fleetPrepared !== true) break;
           fleetPrepared = true;
           await runWithRestoration("fleet observer lifecycle", async () => {
-            const owner = await execute(["test", "-f", join(fleetRoot(progress.epoch), "owner.json")]);
+            const owner = await execute(["test", "-f", posix.join(fleetRoot(progress.epoch), "owner.json")]);
             if (owner.exitCode !== 0) await runtime.fleet.host("restore", progress.epoch);
             else await runWithRestoration("fleet enrollment and hosts", async () => {
               await runtime.fleet.host("coordinator-up", progress.epoch);
@@ -1456,7 +1456,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         }
         case "fixtureAsk":
           if (progress.fleetPrepared === true &&
-            (await execute(["test", "-f", join(fleetRoot(progress.epoch), "owner.json")])).exitCode === 0) {
+            (await execute(["test", "-f", posix.join(fleetRoot(progress.epoch), "owner.json")])).exitCode === 0) {
             await runtime.fleet.host("coordinator-up", progress.epoch);
           }
           // A not-yet-started fixture has nothing to settle. Stop verifies ownership before notification cleanup.
