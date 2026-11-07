@@ -53,6 +53,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
   const { runtime: r, progress: p, fixture, snapshot, delivered, clear, wait, assertion, attempt } = c;
   const f = r.fleet;
   let observerAttached = false;
+  let sinkAudit: Record<string, boolean | number> | undefined;
   const finish: FleetPhaseContext["finish"] = (phase, result) => c.finish(phase, { ...result, devtoolsObserver: observerAttached });
   const badge = async (count: number, complete: boolean) => wait("fleet badge reconciliation", async () => {
     const observed = await f.observeBadge();
@@ -120,8 +121,8 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await cold();
     const local = await ask("primary"), old = await ask("remote");
     await badge(2, true);
-    // Do not wait for the old notification to clear before arming the new request.
-    await fixture("answer", "remote"); await snapshot(s => !s.inputRequired, "remote");
+    // Replacement on a shared tag cannot prove the old request's clear.
+    await clear(60_000, "remote"); await delivered(local); await badge(1, true);
     const fresh = await ask("remote");
     if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet race did not replace its request");
     await r.pause(21_000);
@@ -139,6 +140,9 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
         throw assertion("Fleet tap did not launch the exact source and request");
       }
       await r.answer(); await snapshot(s => !s.inputRequired, role); await clear(60_000, role);
+      // Scan the same live Control capability the installed PWA just handled, before the
+      // delayed-tap phase replaces/stops this remote fixture and invalidates that material.
+      if (role === "remote") sinkAudit = await f.audit(p.epoch);
     }
     await finish("fleet_taps_verified", { local: true, remote: true, exactRequest: true, scrubbed: true });
   });
@@ -152,8 +156,9 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await cold(); const gone = await ask("remote");
     await fixture("stop", "remote");
     await wait("remote unpublication", async () => await r.snapshot(p.epoch, "remote") === undefined ? true : undefined, 90_000);
-    await wait("remote removal clear", async () => (await r.observe(gone, "attention", "session")).count === 0 ? true : undefined);
+    await wait("remote removal clear", async () => await r.notificationCleared(gone) ? true : undefined);
     await expiredTap(gone);
+    await wait("stopped remote replay close", async () => await r.notificationCleared(gone) ? true : undefined);
     await fixture("start", "remote");
     const fresh = await snapshot(s => s.canControl && !s.inputRequired, "remote");
     // Keep both notification ownership digests until the old tag's cleanup was observed above.
@@ -168,6 +173,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await wait("visible fleet ask before outage", async () => (await r.triage()).waiting.includes(remote.instanceId) ? true : undefined);
     await f.host("source-down", p.epoch);
     await wait("stale fleet source", async () => (await f.coverage()).state === "stale" ? true : undefined);
+    if (!(await r.triage()).waiting.includes(remote.instanceId)) throw assertion("Fleet stale directory dropped its last-known waiting row");
     await delivered(remote); await badge(1, false);
     await f.host("source-up", p.epoch);
     await wait("fleet source recovery", async () => (await f.coverage()).state === "current" ? true : undefined, 90_000);
@@ -183,13 +189,16 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
   await attempt("fleet_restart_verified", async () => {
     await cold(); const local = await ask("primary"), old = await ask("remote");
     await f.host("coordinator-down", p.epoch);
-    // The source stays live; its answer/new ask happen while no coordinator can send.
+    // Answer without a replacement while no coordinator can send. Only a restart-time
+    // clear can now remove the old remote alert; the local alert must remain unchanged.
     await r.fixture("answer", p.epoch, "remote"); await snapshot(s => !s.inputRequired, "remote");
-    await r.fixture("ask", p.epoch, "remote"); const fresh = await snapshot(s => s.inputRequired, "remote");
-    if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet restart did not replace its request");
     await f.host("coordinator-up", p.epoch);
-    await delivered(fresh); await delivered(local); await badge(2, true);
-    await r.pause(21_000); await delivered(local); await delivered(fresh);
+    await wait("restart remote exact clear", async () => await r.notificationCleared(old) ? true : undefined);
+    await delivered(local); await badge(1, true);
+    await r.pause(21_000); await delivered(local); await badge(1, true);
+    const fresh = await ask("remote");
+    if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet restart did not replace its request");
+    await delivered(local); await badge(2, true);
     await clear(); await delivered(fresh); await badge(1, true);
     await clear(60_000, "remote"); await badge(0, true);
     await finish("fleet_restart_verified", { exactClear: true, noRepeats: true, newAsk: true, badgeReconciled: true });
@@ -198,13 +207,14 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await cold(); const remote = await ask("remote");
     await f.revoke();
     await wait("fleet authorization revocation", async () => (await f.coverage()).state === "unauthorized" ? true : undefined);
-    await wait("revoked fleet clear", async () => (await r.observe(remote, "attention", "session")).count === 0 ? true : undefined);
+    await wait("revoked fleet clear", async () => await r.notificationCleared(remote) ? true : undefined);
     await expiredTap(remote);
     await fixture("answer", "remote"); await snapshot(s => !s.inputRequired, "remote");
     await finish("fleet_revocation_verified", { unauthorized: true, cleared: true, launches: 0 });
   });
   await attempt("fleet_sinks_verified", async () => {
-    const audit = await f.audit(p.epoch);
+    const audit = sinkAudit;
+    if (audit === undefined) throw assertion("Fleet sink sweep did not observe the PWA's live remote Control launch");
     if (audit.clean !== true || audit.detectable !== true || audit.findings !== 0) throw assertion("Fleet forbidden sink sweep failed");
     await finish("fleet_sinks_verified", audit);
   });

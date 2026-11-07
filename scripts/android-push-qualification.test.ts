@@ -33,7 +33,8 @@ interface FakeOptions { failAfter?: number; forceDelivery?: boolean; dozeDeliver
   /** Holds delivery after the denied-to-granted permission transition. */ permissionRecoveryMs?: number;
   /** The directory shows the waiting asks newest first. */ wrongOrder?: boolean; /** That triage control reaches the gateway. */ triageMutation?: TriageAction["kind"]; /** A delayed stale tap still launches. */ staleLaunch?: boolean;
   /** A foreign post arrives while an owned activity-stop notice is showing. */ foreignDuringStop?: boolean;
-  fleetFailure?: "enrollment" | "badge" | "revocation" | "sinks" | "remote-tap" | "remote-stale-tap" | "retained" }
+  fleetFailure?: "enrollment" | "badge" | "revocation" | "sinks" | "remote-tap" | "remote-stale-tap" | "retained" |
+    "clear" | "race-clear" | "restart-clear" | "stale-row" | "stopped-replay" }
 const SECONDARY = "synthetic-secondary";
 const REMOTE = "synthetic-remote";
 function fake(options: FakeOptions = {}) {
@@ -41,12 +42,12 @@ function fake(options: FakeOptions = {}) {
   let time = 0; let effects = 0; let started = false; let generation = 1; let request = 0; let askedAt = 0;
   let asking = false; let busy = false; let stopped = false; let forced = false; let asleep = false; let offline = false; let dozed = false; let deferredClear = false;
   let socketStaleUntil = -Infinity; let heldAsk = false; let heldClear = false;
-  let shown: "attention" | "activity_stop" | undefined;
+  let shown: "attention" | "activity_stop" | undefined, phase = "";
   // The subscription detail each notice was sent at: a Private notice has no body.
   let shownDetail = browserBaseline.detail;
   // `clearing`: the gateway's clear for a removed host's ask is still in flight to the device.
   const second = { started: false, asking: false, request: 0, askedAt: 0, shown: false, clearing: false, detail: browserBaseline.detail };
-  const remote = { ...second, generation: 1, prepared: false, selected: false, online: true, coordinator: true, revoked: false };
+  const remote = { ...second, shownRequest: "", generation: 1, prepared: false, selected: false, online: true, coordinator: true, revoked: false };
   let tappedRole: "primary" | "remote" = "primary";
   // The installed app's device-local Hold and Hide records, keyed as the app keys them.
   const held = new Set<string>(); const hidden: string[] = []; let toastUntil = -Infinity;
@@ -78,7 +79,8 @@ function fake(options: FakeOptions = {}) {
     reconcile();
     const bySince = (left: SessionMetadata, right: SessionMetadata) => (left.ask?.since ?? "").localeCompare(right.ask?.since ?? "");
     const isHeld = (session: SessionMetadata) => session.inputRequired && held.has(heldKey(session));
-    const waiting = sessions().filter(session => session.inputRequired && !isHeld(session)).sort(bySince).map(session => session.instanceId);
+    const waiting = sessions().filter(session => session.inputRequired && !isHeld(session) &&
+      !(session.instanceId === REMOTE && !remote.online && options.fleetFailure === "stale-row")).sort(bySince).map(session => session.instanceId);
     const heldIds = sessions().filter(isHeld).sort(bySince).map(session => session.instanceId);
     const working = sessions().filter(session => !session.inputRequired && !hidden.includes(hiddenKey(session))).map(session => session.instanceId);
     const attention = waiting.length + heldIds.length;
@@ -98,7 +100,12 @@ function fake(options: FakeOptions = {}) {
         if (operation === "source-down") remote.online = false;
         if (operation === "source-up") remote.online = true;
         if (operation === "coordinator-down") remote.coordinator = false;
-        if (operation === "coordinator-up") { remote.coordinator = true; remote.shown = remote.asking; }
+        if (operation === "coordinator-up") {
+          remote.coordinator = true;
+          if (options.fleetFailure !== "restart-clear" || phase !== "fleet_restart_verified") {
+            remote.shown = remote.asking; remote.shownRequest = `synthetic-remote-request-${remote.request}`;
+          }
+        }
         if (operation === "restore") remote.prepared = false;
       }); },
       select: async enabled => { await effect(() => { remote.selected = enabled; remote.revoked = false; }); },
@@ -126,13 +133,20 @@ function fake(options: FakeOptions = {}) {
     },
     preflight: async () => ({ android: "17", browser: "153.0.8010.52", webApk: true, dndOff: true }),
     dndOff: async () => options.dndFlipAfter === undefined || effects < options.dndFlipAfter,
-    beginNotificationPhase: async () => {}, assertNotificationOwnership: async () => { if (overlaps > 0) { overlaps--; throw new NotificationOverlapError(); } },
+    beginNotificationPhase: async (_epoch, current) => { phase = current ?? phase; }, assertNotificationOwnership: async () => { if (overlaps > 0) { overlaps--; throw new NotificationOverlapError(); } },
     device: async () => ({ ...device }), browser: async () => ({ ...browser }),
     async fixture(operation, _epoch, role = "primary") { await effect(() => {
       if (role === "remote") {
         if (operation === "start") remote.started = true;
-        else if (operation === "ask") { remote.asking = true; remote.request++; remote.askedAt = time; remote.shown = remote.coordinator && !remote.revoked; remote.detail = browser.detail; }
-        else if (operation === "answer") { remote.asking = false; if (remote.coordinator) remote.shown = false; }
+        else if (operation === "ask") {
+          remote.asking = true; remote.request++; remote.askedAt = time; remote.shown = remote.coordinator && !remote.revoked;
+          remote.shownRequest = `synthetic-remote-request-${remote.request}`; remote.detail = browser.detail;
+        }
+        else if (operation === "answer") {
+          remote.asking = false;
+          if (remote.coordinator && options.fleetFailure !== "clear" &&
+            !(options.fleetFailure === "race-clear" && phase === "fleet_race_verified")) remote.shown = false;
+        }
         else if (operation === "replace") remote.generation++;
         else if (operation === "stop") { remote.clearing = remote.shown; remote.started = false; remote.asking = false; }
         return;
@@ -161,7 +175,8 @@ function fake(options: FakeOptions = {}) {
     observe: async (session, kind, detail) => {
       if (session.instanceId === REMOTE) {
         if (remote.clearing) { remote.clearing = false; remote.shown = false; }
-        return { count: remote.shown && !(options.fleetFailure === "retained" && !remote.online) ? 1 : 0,
+        return { count: remote.shown && session.ask?.requestId === remote.shownRequest &&
+          !(options.fleetFailure === "retained" && !remote.online) ? 1 : 0,
           titleMatches: true, bodyMatches: (remote.detail === "private") === (detail === "private"), forbiddenFound: false };
       }
       // Waiting lets an in-flight removal clear land.
@@ -172,11 +187,19 @@ function fake(options: FakeOptions = {}) {
       if (notice === "activity_stop" && foreignDuringStop) { foreignDuringStop = false; throw new NotificationOverlapError(); }
       return { count: notice === undefined ? 0 : options.duplicate ? 2 : 1, titleMatches: notice === kind, bodyMatches: notice === kind && sentPrivate === (detail === "private"), forbiddenFound: false };
     },
+    notificationCleared: async session => {
+      if (session.instanceId === REMOTE) {
+        if (remote.clearing) { remote.clearing = false; remote.shown = false; }
+        return !remote.shown;
+      }
+      return (await runtime.observe(session, "attention", "private")).count === 0;
+    },
     dismissOwned: async () => { await effect(() => { shown = undefined; second.shown = false; second.clearing = false; }); },
     presentation: async session => device.locked && (session.instanceId === REMOTE ? remote.shown : shown === "attention"),
     async tap(session, kind, stale) { await effect(() => { if (session.instanceId === SECONDARY) second.shown = false; else shown = undefined; device.webApkTask = true; });
       if (session.instanceId === REMOTE) {
-        tappedRole = "remote"; remote.shown = false;
+        tappedRole = "remote";
+        if (remote.started || options.fleetFailure !== "stopped-replay") remote.shown = false;
         const live = remoteSnapshot();
         const current = !remote.revoked && live?.generation === session.generation && live?.ask?.requestId === session.ask?.requestId;
         const launches = current || options.fleetFailure === "remote-stale-tap" ? 1 : 0;
@@ -212,7 +235,9 @@ function fake(options: FakeOptions = {}) {
       return directory(mutations);
     },
     replay: async session => {
-      if (session.instanceId === REMOTE) { await effect(() => { remote.shown = true; remote.detail = browser.detail; device.webApkTask = false; }); return; }
+      if (session.instanceId === REMOTE) {
+        await effect(() => { remote.shown = true; remote.shownRequest = session.ask!.requestId; remote.detail = browser.detail; device.webApkTask = false; }); return;
+      }
       // As on the device: launching the app re-saves its subscription, and the gateway re-sends each
       // current ask, replacing a replay on the same tag. The runtime refuses that state.
       const live = sessions().find(item => item.instanceId === session.instanceId);
@@ -1655,6 +1680,98 @@ test("fleet outage establishes a visible remote ask before interrupting its sour
   };
   expect((await runAndroidPush(host.input)).passed).toBe(true);
   expect(interruptions).toBe(2);
+});
+
+test.each([false, true])("fleet clear checks the tag after the answered snapshot loses its request (missing=%s)", async missing => {
+  const host = fake(missing ? { fleetFailure: "clear" } : {}), observe = host.runtime.observe;
+  let settledDeliveryRead = false;
+  const cleared = host.runtime.notificationCleared;
+  host.runtime.notificationCleared = async session => {
+    if (session.instanceId === REMOTE && !session.inputRequired) {
+      expect(session.ask).toBeUndefined();
+      expect((await observe(session, "attention", "private")).count).toBe(0);
+      settledDeliveryRead = true;
+    }
+    return cleared(session);
+  };
+  const result = await runAndroidPush(host.input).catch(error => error);
+  if (missing) {
+    expect(result).toBeInstanceOf(QualificationFailure);
+    expect(result.evidence.step).toBe("fleet_private_verified");
+    expect(result.cause.message).toContain("authoritative clear");
+  } else expect(result.passed).toBe(true);
+  expect(settledDeliveryRead).toBe(true);
+});
+
+test.each(["race", "restart"] as const)("fleet %s refuses to conceal a missing old clear with a same-session re-arm", async scenario => {
+  const host = fake({ fleetFailure: scenario === "race" ? "race-clear" : "restart-clear" });
+  const phase = `fleet_${scenario}_verified`;
+  const begin = host.runtime.beginNotificationPhase, fixture = host.runtime.fixture, control = host.runtime.fleet.host;
+  const events: string[] = [];
+  let current = "", stopped = false;
+  host.runtime.beginNotificationPhase = async (...args) => { current = args[1] ?? ""; await begin(...args); };
+  host.runtime.fixture = async (...args) => {
+    if (current === phase && args[2] === "remote") {
+      events.push(args[0]);
+      if (args[0] === "answer" && scenario === "restart") expect(stopped).toBe(true);
+    }
+    await fixture(...args);
+  };
+  host.runtime.fleet.host = async (...args) => {
+    if (args[0] === "coordinator-down") stopped = true;
+    if (args[0] === "coordinator-up") stopped = false;
+    await control(...args);
+  };
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(error.evidence.step).toBe(phase);
+  expect(error.cause.message).toContain(scenario === "restart" ? "restart remote exact clear" : "authoritative clear");
+  expect(events.filter(event => event === "ask")).toHaveLength(1);
+  expect(events.slice(0, 2)).toEqual(["ask", "answer"]);
+  expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+});
+
+test("fleet outage rejects a stale source whose directory drops the waiting row", async () => {
+  const host = fake({ fleetFailure: "stale-row" });
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(error.evidence.step).toBe("fleet_outage_verified");
+  expect(error.message).toContain("stale directory dropped");
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results.fleet_outage_verified).toBeUndefined();
+});
+
+test("fleet sinks scan while the PWA's tapped remote Control session is still alive", async () => {
+  const host = fake(), tap = host.runtime.tap, audit = host.runtime.fleet.audit;
+  let launched: SessionMetadata | undefined, swept = false;
+  host.runtime.tap = async (...args) => {
+    const result = await tap(...args);
+    if (args[0].instanceId === REMOTE && !args[2]) launched = args[0];
+    return result;
+  };
+  host.runtime.fleet.audit = async epoch => {
+    expect(launched).toBeDefined();
+    const current = await host.runtime.snapshot(epoch, "remote");
+    expect(current?.instanceId).toBe(launched!.instanceId);
+    expect(current?.generation).toBe(launched!.generation);
+    swept = true;
+    return audit(epoch);
+  };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(swept).toBe(true);
+});
+
+test("fleet stopped-session replay must close before the notification owner is re-baselined", async () => {
+  const host = fake({ fleetFailure: "stopped-replay" }), begin = host.runtime.beginNotificationPhase;
+  let baselines = 0;
+  host.runtime.beginNotificationPhase = async (...args) => {
+    if (args[1] === "fleet_stale_taps_verified") baselines++;
+    await begin(...args);
+  };
+  const error = await runAndroidPush(host.input).catch(error => error);
+  expect(error).toBeInstanceOf(QualificationFailure);
+  expect(error.evidence.step).toBe("fleet_stale_taps_verified");
+  expect(error.cause.message).toContain("stopped remote replay close");
+  expect(baselines).toBe(1);
 });
 
 test.each([

@@ -690,6 +690,118 @@ test("fleet replacement observation never hides forbidden content in a mismatche
   } finally { for (const spy of spies) spy.mockRestore(); }
 });
 
+test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
+  "fleet tag clear requires zero OS and worker notifications (os=%s worker=%s)", async (osCount, workerCount, cleared) => {
+    const session = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: false,
+      startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic" };
+    let reads = 0, workerReads = 0;
+    const driver = {
+      browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
+        { type: "page", targetId: "page", url: identity.origin + "/" },
+        { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
+      ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
+      sessionSend: async (_session: string, _method: string, params: { expression: string }) => {
+        expect(params.expression).toContain('getNotifications({tag:"omp-attention-synthetic"})');
+        expect(params.expression).not.toContain("requestId");
+        workerReads++;
+        return { result: { value: workerCount === 0 } };
+      },
+      attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
+      evaluate: async (expression: string) => expression === "document.readyState" ? "complete" :
+        expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
+    };
+    const spies = [
+      spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [session] }), { preconnect: globalThis.fetch.preconnect })),
+      spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+      spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+      spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+      spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+      spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++reads === 1 || osCount === 0 ? [] : [{
+        key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
+        title: "OMP session needs attention", body: "", text: "",
+      }]),
+      spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+    ];
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.beforeEffect = async () => {};
+      await runtime.fleet.select(true);
+      await runtime.beginNotificationPhase("synthetic", "fleet_private_verified");
+      expect(await runtime.notificationCleared(session)).toBe(cleared);
+      expect(workerReads).toBe(osCount === 0 ? 1 : 0);
+    } finally { for (const spy of spies) spy.mockRestore(); }
+  });
+
+test.each(["idle", "blocked", "unavailable"] as const)("resumed fleet deselection accepts hidden Hosts with alerts %s", async state => {
+  let toggleActions = 0, controlReads = 0;
+  const driver = {
+    browserSend: async () => ({ targetInfos: [{ type: "page", targetId: "page", url: identity.origin + "/" }] }),
+    attachTab: async () => {}, navigate: async () => {},
+    send: async () => { toggleActions++; return {}; },
+    evaluate: async (expression: string) => {
+      if (expression === "document.readyState") return "complete";
+      if (expression.includes("href: location.href")) return { href: identity.origin + "/", secure: true };
+      if (expression.includes(".notification-hosts")) {
+        return Function("document", `return ${expression}`)({
+          querySelector: (selector: string) => selector === ".notification-hosts" ? { hidden: true } : { dataset: { state } },
+        });
+      }
+      if (expression.includes("input[role")) { controlReads++; throw new Error("hidden fleet controls were awaited"); }
+      return true;
+    },
+  };
+  const spies = [
+    spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+    spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+    spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+  ];
+  try {
+    const runtime = createAndroidPushRuntime(identity); runtime.beforeEffect = async () => {};
+    await runtime.fleet.select(false);
+    expect(toggleActions).toBe(0); expect(controlReads).toBe(0);
+  } finally { for (const spy of spies) spy.mockRestore(); }
+});
+
+test("fleet audit fetches the live remote Control material, never an unlaunched View capability", async () => {
+  const remote = { instanceId: "synthetic-remote", generation: 2, canView: true, canControl: true, inputRequired: false,
+    startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-remote" };
+  let scanned = false;
+  const driver = {
+    browserSend: async () => ({ targetInfos: [{ type: "page", targetId: "page", url: identity.origin + "/client/" }] }),
+    attachTab: async () => {}, navigate: async () => {},
+    evaluate: async (expression: string) => {
+      if (expression === "document.readyState") return "complete";
+      if (expression.includes("href: location.href")) return { href: identity.origin + "/client/", secure: true };
+      if (expression.includes("fleet sink launch refused")) {
+        expect(expression).toContain('mode:"control"');
+        expect(expression).not.toContain('mode:"view"');
+        expect(expression).toContain('"/api/v1/sessions/" + "synthetic-remote"');
+        expect(expression).toContain("generation:2");
+        scanned = true;
+        return { clean: true, findings: 0 };
+      }
+      return true;
+    },
+  };
+  const spies = [
+    spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ revision: 1, sessions: [remote] })),
+    spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+    spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+    spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+  ];
+  try {
+    const runtime = createAndroidPushRuntime(identity); runtime.beforeEffect = async () => {};
+    runtime.sinks = async () => ({ clean: true, detectable: true, sinks: 10, findings: 0 });
+    runtime.fleet.host = async operation => { expect(operation).toBe("audit"); };
+    expect(await runtime.fleet.audit("synthetic")).toMatchObject({ clean: true, detectable: true, findings: 0 });
+    expect(scanned).toBe(true);
+  } finally { for (const spy of spies) spy.mockRestore(); }
+});
+
 test.each(["before", "during"] as const)("509 council browser deadline elapsed %s capture retains deadline and original cause", async when => {
   let id = 0;
   const execution = { signal: new AbortController().signal, deadline: when === "before" ? 0 : performance.now() + 60_000, nextFailureId: () => ++id };
@@ -1149,6 +1261,45 @@ test("fleet cleanup before persisted ownership never touches enrollment or a wor
   expect(calls).toEqual(["restore"]);
   expect(commands).toEqual([["test", "-f", `/synthetic/fixtures/fleet-${progress.epoch}/owner.json`]]);
   expect(progress.fleetPrepared).toBe(false);
+});
+
+test("fleet unpatch failure and retry retain host ownership until worker restoration is proven", async () => {
+  const events: string[] = [], progress = { epoch: "a3a77f8e-956b-45d0-a684-a33e6b336dc0", fleetPrepared: true } as AndroidPushProgress;
+  let owner = true, restored = false;
+  const driver = {
+    browserSend: async (method: string) => {
+      if (method === "Target.detachFromTarget") events.push("observer-close");
+      return method === "Target.getTargets" ? { targetInfos: [{ type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" }] } :
+        method === "Target.attachToTarget" ? { sessionId: "worker" } : {};
+    },
+    sessionSend: async (_session: string, _method: string, params: { expression: string }) => {
+      if (params.expression.includes("delete self.__ompQualificationBadge")) {
+        events.push("unpatch");
+        return { result: { value: restored } };
+      }
+      return { result: { value: true } };
+    },
+  };
+  const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
+    (async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome);
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execute: async () => ({ exitCode: owner ? 0 : 1, stdout: "" }) });
+    runtime.beforeEffect = async () => {};
+    runtime.fixture = async () => {};
+    runtime.fleet.select = async () => {};
+    runtime.fleet.host = async operation => { if (operation === "restore") { events.push("host-restore"); owner = false; } };
+    await runtime.fleet.armBadgeObserver();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(runtime.cleanup("fleet", progress)).rejects.toThrow("restoration failed");
+      expect(owner).toBe(true); expect(progress.fleetPrepared).toBe(true);
+      expect(events).not.toContain("host-restore");
+    }
+    expect(events.slice(0, 2)).toEqual(["unpatch", "observer-close"]);
+    restored = true;
+    await runtime.cleanup("fleet", progress);
+    expect(owner).toBe(false); expect(progress.fleetPrepared).toBe(false);
+    expect(events.indexOf("host-restore")).toBeGreaterThan(events.lastIndexOf("unpatch"));
+  } finally { chrome.mockRestore(); }
 });
 
 test.each(["recovered", "exhausted", "product", "cleanup"] as const)("unheld worker connection %s remains bounded and cold", async scenario => {

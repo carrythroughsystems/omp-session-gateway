@@ -559,7 +559,6 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             operation: "unknown", elapsedMs: 0, observations: { exitCode: result.exitCode },
           }, { cause });
         }
-        if (operation === "restore") fleetPrepared = false;
         if (operation === "prepare" || operation === "coordinator-up" || operation === "restore") {
           await wait(async () => {
             try { return (await fetch(`${identity.origin}/api/v1/health`, { signal: AbortSignal.timeout(4_000), cache: "no-store" })).ok; }
@@ -571,6 +570,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         await page(async driver => {
           await browserState(driver);
           await driver.evaluate('document.querySelector("#settings").click()');
+          // Browser restoration can already have disabled alerts on a resumed cleanup.
+          // Host restore still requires the coordinator's grant ledger to be empty.
+          if (!enabled && await driver.evaluate<boolean>('document.querySelector(".notification-hosts")?.hidden === true && ["idle", "blocked", "unavailable"].includes(document.querySelector("#notify")?.dataset.state)')) return;
           const selector = `.notification-host[data-source-id="${remote.id}"] input[role="switch"]`;
           await wait(() => driver.evaluate<boolean>(`!!document.querySelector(${JSON.stringify(selector)})`), "fleet Hosts control");
           await runtime.beforeEffect();
@@ -651,7 +653,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         const result = await page(driver => driver.evaluate<Record<string, boolean | number>>(`(async () => {
           ${PAGE_PRELUDE}
           const response = await fetch(${JSON.stringify(remote.origin)} + "/api/v1/sessions/" + ${JSON.stringify(remoteSession.instanceId)} + "/launch",
-            {method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({generation:${remoteSession.generation},mode:"view"})});
+            {method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({generation:${remoteSession.generation},mode:"control",requestId:${JSON.stringify(remoteSession.ask?.requestId)}})});
           if (!response.ok) throw Error("fleet sink launch refused");
           const payload=await response.json(), raw=payload.capability;
           if(typeof raw!=="string")throw Error("fleet sink material unavailable");
@@ -1022,6 +1024,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       return { count: records.length, titleMatches: records.length === 1 && owned?.title === expected.title,
         bodyMatches: records.length === 1 && owned?.body === expected.body,
         forbiddenFound };
+    },
+    async notificationCleared(session) {
+      const tag = notificationTag(session);
+      if ((await phaseRecords()).some(record => record.tag.endsWith(tag))) return false;
+      return worker<boolean>(`(async () => (await self.registration.getNotifications({tag:${JSON.stringify(tag)}})).length === 0)()`, true);
     },
     async presentation(session, level) {
       await mutate("shell", "input", "keyevent", "224");
@@ -1430,22 +1437,31 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           await runWithRestoration("fleet observer lifecycle", async () => {
             const owner = await execute(["test", "-f", posix.join(fleetRoot(progress.epoch), "owner.json")]);
             if (owner.exitCode !== 0) await runtime.fleet.host("restore", progress.epoch);
-            else await runWithRestoration("fleet enrollment and hosts", async () => {
-              await runtime.fleet.host("coordinator-up", progress.epoch);
-              await runtime.fleet.select(false);
-            }, [
-              () => runtime.fixture("stop", progress.epoch, "remote"),
-              () => worker(`(() => {
-                const state = self.__ompQualificationBadge;
-                if (state) {
-                  if (state.setDescriptor) Object.defineProperty(navigator, "setAppBadge", state.setDescriptor); else delete navigator.setAppBadge;
-                  if (state.clearDescriptor) Object.defineProperty(navigator, "clearAppBadge", state.clearDescriptor); else delete navigator.clearAppBadge;
-                  delete self.__ompQualificationBadge;
-                }
-                return true;
-              })()`),
-              () => runtime.fleet.host("restore", progress.epoch),
-            ]);
+            else {
+              let workerRestored = false;
+              await runWithRestoration("fleet enrollment and hosts", async () => {
+                await runtime.fleet.host("coordinator-up", progress.epoch);
+                await runtime.fleet.select(false);
+              }, [
+                () => runtime.fixture("stop", progress.epoch, "remote"),
+                async () => {
+                  workerRestored = await worker<boolean>(`(() => {
+                    const state = self.__ompQualificationBadge;
+                    if (!state) return true; // This worker restarted, or was already unpatched.
+                    if (state.setDescriptor) Object.defineProperty(navigator, "setAppBadge", state.setDescriptor); else delete navigator.setAppBadge;
+                    if (state.clearDescriptor) Object.defineProperty(navigator, "clearAppBadge", state.clearDescriptor); else delete navigator.clearAppBadge;
+                    if (navigator.setAppBadge !== state.set || navigator.clearAppBadge !== state.clear) return false;
+                    delete self.__ompQualificationBadge;
+                    return true;
+                  })()`);
+                  if (!workerRestored) throw new Error("fleet worker badge restoration unproven");
+                },
+                async () => {
+                  if (!workerRestored) throw new Error("fleet ownership retained for worker badge restoration");
+                  await runtime.fleet.host("restore", progress.epoch);
+                },
+              ]);
+            }
           }, [async () => {
             const observer = fleetObserver;
             try { await observer?.close(); } finally { fleetObserver = undefined; }
