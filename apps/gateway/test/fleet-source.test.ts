@@ -412,6 +412,32 @@ describe("fleet source feed projection and lifecycle", () => {
     expect(f.source.healthy).toBe(false);
   });
 
+  test("renewal preserves bearer authorization until durable publication then reconnects with the new expiry", async () => {
+    const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+    let writes = 0;
+    const f = await fixture({ write: async (...args) => {
+      if (++writes > 1) { entered.resolve(); await gate.promise; }
+      await writePrivateTextFile(...args);
+    } });
+    cleanups.push(async () => { gate.resolve(); });
+    await f.create();
+    const stream = reader(await f.feed());
+    expect(await event(stream)).toMatchObject({ type: "snapshot", expiresAt: "2026-12-06T12:00:00.000Z" });
+    f.advance(60_000);
+    const renewal = f.mutate(`/api/v1/notification-grants/${grantId}/renew`, { version: 1 });
+    await entered.promise;
+    try {
+      expect(await f.source.authenticate(`Bearer ${grantId}.${secret}`)).toBe(grantId);
+      f.registry.reconcile({ observed: [session()], retained: new Set() });
+      expect((await event(stream)).type).toBe("upsert");
+    } finally { gate.resolve(); }
+    expect((await renewal).status).toBe(200);
+    expect((await stream.read()).done).toBe(true);
+    const reconnected = reader(await f.feed());
+    expect(await event(reconnected)).toMatchObject({ type: "snapshot", expiresAt: "2026-12-06T12:01:00.000Z" });
+    await reconnected.cancel();
+  });
+
   test("a new verified grant replaces the same owner/coordinator grant and closes its old stream", async () => {
     const f = await fixture(); await f.create();
     const stream = reader(await f.feed()); await event(stream);

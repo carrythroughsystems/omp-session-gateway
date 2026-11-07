@@ -223,6 +223,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
       registry,
       logger,
       discoveryWarm: () => poller.discoveryWarm,
+      subscribeObservations: poller.subscribeObservations,
     }) : undefined;
   let stopping = false;
   let resolveStop: () => void = () => undefined;

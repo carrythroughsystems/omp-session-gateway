@@ -2387,6 +2387,7 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   stale source keeps its last-known alerts. When a grant becomes unauthorized or its source leaves
   the configuration, the coordinator clears that source's alerts for the owner's devices and reports
   the source as unauthorized, never as empty.
+  A source answering 404 (`unsupported`) has its alerts cleared like a removed source.
 - **Detail.** The coordinator applies detail before transport. In v3, Private shows fixed titles and
   no body. Session and Preview show, for a remote session, the target's configured label and a
   six-character opaque session suffix, never a title, working-directory label, preview, or path,

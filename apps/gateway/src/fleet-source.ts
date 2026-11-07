@@ -221,9 +221,8 @@ export class FleetSourceService {
       const grant = { ...prior, expiresAt: new Date(this.#now() + FLEET_GRANT_LIFETIME_MS).toISOString() };
       const grants = this.#pruned();
       grants.set(grantId, grant);
-      this.#grants.delete(grantId);
-      this.#connections.get(grantId)?.close();
       await this.#persist(grants);
+      this.#connections.get(grantId)?.close();
       return parseSourceGrantResponse({ version: FLEET_NOTIFICATIONS_VERSION, grantId, expiresAt: grant.expiresAt });
     });
   }

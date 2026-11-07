@@ -328,7 +328,9 @@ export const FLEET_NOTIFICATIONS_VERSION = 1 as const;
 export const MAX_FLEET_PUSH_BYTES = 3 * 1024;
 export const MAX_FLEET_REQUEST_BYTES = 4 * 1024;
 export const MAX_FLEET_STATUS_BYTES = 8 * 1024;
-export const MAX_FLEET_FEED_EVENT_BYTES = 64 * 1024;
+/** Worst-case projected session identifiers, safe-integer generation, and JSON delimiters. */
+export const MAX_FLEET_FEED_SESSION_BYTES = 256;
+export const MAX_FLEET_FEED_EVENT_BYTES = MAX_SESSIONS * MAX_FLEET_FEED_SESSION_BYTES + 4 * 1024;
 /** Remote sources a coordinator may pull: at most every configured remote target. */
 export const MAX_FLEET_NOTIFICATION_SOURCES = MAX_FLEET_TARGETS;
 /** Coordinators one source may name. */

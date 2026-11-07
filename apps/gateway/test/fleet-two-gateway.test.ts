@@ -236,7 +236,7 @@ async function fixture(identities = false) {
     const coordinator = role === "home" ? await FleetCoordinator.open({ stateDir: config.paths.stateDir,
       config: { publicOrigin: config.http.publicOrigin, ownLabel: config.fleet.label, sources: [target] },
       registry, push, clock, random: () => 0.5, logger, fetch: feeds.fetch,
-      discoveryWarm: () => poller.discoveryWarm }) : undefined;
+      discoveryWarm: () => poller.discoveryWarm, subscribeObservations: poller.subscribeObservations }) : undefined;
     bound.setHandler(createHttpHandler({ config, registry, staticAssets: assets, pushService: push,
       ...(source === undefined ? {} : { fleetSourceService: source }),
       ...(coordinator === undefined ? {} : { fleetCoordinator: coordinator }),
