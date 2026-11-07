@@ -614,11 +614,12 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
               setDescriptor: Object.getOwnPropertyDescriptor(navigator, "setAppBadge"),
               clearDescriptor: Object.getOwnPropertyDescriptor(navigator, "clearAppBadge") };
             navigator.setAppBadge = function(count) {
-              state.observation = { count: count ?? 0, complete: count !== undefined };
+              state.observation = { count: count ?? 0, complete: count !== undefined,
+                call: { method: "setAppBadge", arguments: arguments.length, argument: count === undefined ? "undefined" : count } };
               return Reflect.apply(set, this, arguments);
             };
             navigator.clearAppBadge = function() {
-              state.observation = { count: 0, complete: true };
+              state.observation = { count: 0, complete: true, call: { method: "clearAppBadge", arguments: arguments.length } };
               return Reflect.apply(clear, this, arguments);
             };
           }
@@ -628,7 +629,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if (!armed) throw new Error("fleet platform badge API unavailable");
       },
       async observeBadge() {
-        return (await worker<{ count: number; complete: boolean } | null>("self.__ompQualificationBadge?.observation ?? null", true)) ?? undefined;
+        return (await worker<Awaited<ReturnType<AndroidPushRuntime["fleet"]["observeBadge"]>> | null>("self.__ompQualificationBadge?.observation ?? null", true)) ?? undefined;
       },
       async revoke() {
         await page(async driver => {

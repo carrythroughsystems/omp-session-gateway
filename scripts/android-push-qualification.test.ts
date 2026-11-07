@@ -113,7 +113,8 @@ function fake(options: FakeOptions = {}) {
         remote.revoked ? "unauthorized" : remote.online ? "current" : "stale", covered: remote.online && !remote.revoked }),
       armBadgeObserver: async () => {},
       observeBadge: async () => ({ count: options.fleetFailure === "badge" ? 9 : Number(asking) + Number(remote.asking && !remote.revoked),
-        complete: remote.online && !remote.revoked }),
+        complete: remote.online && !remote.revoked,
+        ...(options.fleetFailure === "badge" ? { call: { method: "setAppBadge" as const, arguments: 1, argument: 9 } } : {}) }),
       revoke: async () => { await effect(() => {
         if (options.fleetFailure !== "revocation") { remote.revoked = true; remote.shown = false; }
       }); },
@@ -1737,7 +1738,7 @@ test("fleet outage rejects a stale source whose directory drops the waiting row"
   expect(error).toBeInstanceOf(QualificationFailure);
   expect(error.evidence.step).toBe("fleet_outage_verified");
   expect(error.message).toContain("stale directory dropped");
-  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results.fleet_outage_verified).toBeUndefined();
+  expect(parseAndroidPushProgress(host.checkpoints.at(-1)).results.fleet_outage_verified?.lastKnownKept).toBeUndefined();
 });
 
 test("fleet sinks scan while the PWA's tapped remote Control session is still alive", async () => {
@@ -1783,7 +1784,11 @@ test.each([
   const error = await runAndroidPush(host.input).catch(error => error);
   expect(error).toBeInstanceOf(QualificationFailure);
   expect(error.evidence.step).toBe(phase);
-  if (fleetFailure === "badge") expect(error.cause.message).toBe("Android Push wait expired: fleet badge reconciliation");
+  if (fleetFailure === "badge") {
+    const diagnostics = privateQualificationFailureDiagnostic(error).map(entry => entry.message).join("\n");
+    expect(diagnostics).toContain("fleet_private_verified/concurrent");
+    expect(diagnostics).toContain('last observation {"count":9,"complete":true,"call":{"method":"setAppBadge","arguments":1,"argument":9}}');
+  }
   expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
   expect(host.state()).toMatchObject({ remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
 });

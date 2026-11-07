@@ -317,7 +317,9 @@ wrong-source/malformed launch attempts cannot be hidden by the cross-origin admi
 The outage phase observes its pending remote row in the open PWA before taking the source down,
 and asserts that the row is still present once the source is stale.
 Coverage polls preserve that page instead of reloading away its last-known directory. Wait
-timeouts retain the named observation in private diagnostics, never in receipt fields.
+timeouts retain the phase/step and last badge count/completeness plus the forwarded platform
+badge call in private diagnostics, never in receipt fields. Both omitted and explicit `undefined`
+`setAppBadge` arguments mean an incomplete zero-count marker, not a complete empty badge.
 Paths sent to the retained macOS fixture executor use POSIX separators on every runner OS;
 runner-local file reads keep native paths.
 
