@@ -194,7 +194,14 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await delivered(remote); await badge("stale-waiting", 1, false);
     await f.host("source-up", p.epoch);
     await wait("fleet source recovery", async () => (await f.coverage()).state === "current" ? true : undefined, 90_000);
-    await clear(60_000, "remote"); await badge("recovered-settled", 0, true);
+    await clear(60_000, "remote");
+    // A push clear can zero the worker badge before this page receives the settled snapshot.
+    // Establish the page's empty last-known state before making the source unreachable again.
+    await wait("settled fleet directory before outage", async () => {
+      const view = await r.triage();
+      return !view.waiting.includes(remote.instanceId) && view.working.includes(remote.instanceId) ? true : undefined;
+    });
+    await badge("recovered-settled", 0, true);
     await f.host("source-down", p.epoch);
     await wait("stale empty fleet source", async () => (await f.coverage()).state === "stale" ? true : undefined);
     await badge("stale-empty", 0, false);

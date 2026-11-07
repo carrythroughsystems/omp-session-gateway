@@ -1658,9 +1658,9 @@ test("fleet Private proves concurrent records but never guesses between identica
   expect(concurrent).toBe(true); expect(privateRows).toBe(2);
 });
 
-test("fleet outage establishes a visible remote ask before interrupting its source", async () => {
+test("fleet outage establishes the visible remote state before each source interruption", async () => {
   const host = fake();
-  let phase = "", observed = false, interruptions = 0;
+  let phase = "", observed = false, settled = false, interruptions = 0;
   const begin = host.runtime.beginNotificationPhase, triage = host.runtime.triage, control = host.runtime.fleet!.host;
   host.runtime.beginNotificationPhase = async (...args) => { phase = args[1] ?? ""; await begin(...args); };
   host.runtime.triage = async (...args) => {
@@ -1669,12 +1669,13 @@ test("fleet outage establishes a visible remote ask before interrupting its sour
       expect(host.state().device.webApkTask).toBe(true);
       const remote = await host.runtime.snapshot("", "remote");
       observed = remote?.ask !== undefined && view.waiting.includes(remote.instanceId);
+      settled = remote !== undefined && remote.ask === undefined && view.working.includes(remote.instanceId);
     }
     return view;
   };
   host.runtime.fleet!.host = async (...args) => {
     if (phase === "fleet_outage_verified" && args[0] === "source-down") {
-      expect(observed).toBe(true);
+      expect(interruptions === 0 ? observed : settled).toBe(true);
       interruptions++;
     }
     await control(...args);
@@ -1682,6 +1683,41 @@ test("fleet outage establishes a visible remote ask before interrupting its sour
   expect((await runAndroidPush(host.input)).passed).toBe(true);
   expect(interruptions).toBe(2);
 });
+
+test.each(["delayed", "waiting", "missing"] as const)(
+  "fleet empty outage waits for the page snapshot, not only a cleared worker badge (%s)", async scenario => {
+    const host = fake();
+    let phase = "", interruptions = 0, settledReads = 0, settledObserved = false;
+    const begin = host.runtime.beginNotificationPhase, triage = host.runtime.triage, control = host.runtime.fleet!.host;
+    host.runtime.beginNotificationPhase = async (...args) => { phase = args[1] ?? ""; await begin(...args); };
+    host.runtime.triage = async (...args) => {
+      const view = await triage(...args), remote = await host.runtime.snapshot("", "remote");
+      if (phase !== "fleet_outage_verified" || remote?.ask !== undefined || interruptions !== 1) return view;
+      settledReads++;
+      // The worker already reports zero from the push clear; the page is still behind.
+      expect(await host.runtime.fleet!.observeBadge()).toMatchObject({ count: 0, complete: true });
+      if (scenario === "missing" || scenario === "waiting" || settledReads < 3) return {
+        ...view, waiting: scenario === "missing" ? [] : [REMOTE], working: view.working.filter(id => id !== REMOTE),
+      };
+      settledObserved = true;
+      return view;
+    };
+    host.runtime.fleet!.host = async (...args) => {
+      if (phase === "fleet_outage_verified" && args[0] === "source-down") {
+        if (interruptions === 1) expect(settledObserved).toBe(true);
+        interruptions++;
+      }
+      await control(...args);
+    };
+    if (scenario === "delayed") {
+      expect((await runAndroidPush(host.input)).passed).toBe(true);
+      expect(settledReads).toBe(3); expect(interruptions).toBe(2);
+    } else {
+      const error = await runAndroidPush(host.input).catch(error => error);
+      expect(error.evidence).toMatchObject({ step: "fleet_outage_verified", reason: "delivery_timeout" });
+      expect(interruptions).toBe(1); expect(settledObserved).toBe(false);
+    }
+  });
 
 test.each([false, true])("fleet clear checks the tag after the answered snapshot loses its request (missing=%s)", async missing => {
   const host = fake(missing ? { fleetFailure: "clear" } : {}), observe = host.runtime.observe;
