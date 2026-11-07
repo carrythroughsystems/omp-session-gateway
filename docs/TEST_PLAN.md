@@ -276,6 +276,9 @@ Control taps, resolved/replaced/expired remote taps without a launch, clear/new-
 source stale/last-known recovery, coordinator restart without repeats, grant revocation,
 replacement/deduplication, foreground reconciliation, and privacy sink scans on both identities.
 Remote notification ownership includes the origin-bound fleet binding; local tags stay unchanged.
+Private alerts intentionally look identical: concurrent ownership, privacy and deduplication use
+the OS records and worker metadata, then each source's lock-screen row is observed alone after
+authoritatively resolving its peer. The lane never guesses between indistinguishable Private rows.
 
 Fleet progress adds only an ownership boolean and a remote notification-topic SHA-256 digest.
 Closed boolean/count results remain additive to receipt schema 3; no source, session, request,
