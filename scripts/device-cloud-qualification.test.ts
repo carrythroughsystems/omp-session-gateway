@@ -536,6 +536,17 @@ describe("bounded device journey retry", () => {
       expect(failures.filter(failure => failure.reason === "audit_failed").every(failure => failure.operation !== "unknown")).toBe(true);
     });
 
+  test("a retry refused by the first session's record audit keeps that first journey failure", async () => {
+    const lane = harness({ journeyFailures: { android: 1 }, media: true });
+    const error = await runDeviceCloud(input(lane)).catch((error: unknown) => error);
+    const failures = normalizeQualificationFailures(error);
+    expect(failures).toContainEqual(expect.objectContaining({ step: "android_verified", reason: "journey_failed", operation: "confirmed",
+      observations: { attempts: 1 } }));
+    expect(failures).toContainEqual(expect.objectContaining({ step: "records_audited", reason: "audit_failed" }));
+    expect(lane.effects.filter(effect => effect === "verify android")).toHaveLength(1);
+    expect(errorMessages(error)).toContain("synthetic journey failure");
+  });
+
   test("an untyped failure stays unknown at the phase checkpointed when it happened", async () => {
     const lane = harness();
     const runtime: DeviceCloudRuntime = { ...lane.runtime, verify: async (target, attempt) => {

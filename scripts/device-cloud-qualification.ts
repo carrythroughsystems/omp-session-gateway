@@ -750,8 +750,13 @@ async function drive(input: DeviceCloudLaneInput, progress: DeviceCloudProgress,
           throw new AggregateError(targetFailures, "device-cloud target and session release failed");
         }
         if (failure instanceof DeviceCloudJourneyFailure && ordinal === 1) {
-          await inspect(resources);
-          if (resources.length !== 1 || !resources.every(journeyReleased)) throw new Error("device-cloud retry lacks prior containment proof");
+          // A retry needs the first session's release proof; refused, the first journey stays recorded.
+          try {
+            await inspect(resources);
+            if (resources.length !== 1 || !resources.every(journeyReleased)) throw new Error("device-cloud retry lacks prior containment proof");
+          } catch (error) {
+            throw new AggregateError([journeyFailure(failure, target, 1), error], "device-cloud journey failed and its retry was refused");
+          }
           firstFailure = failure;
           continue;
         }

@@ -382,20 +382,35 @@ describe("Windows qualification ownership and failure paths", () => {
     expect(normalizeQualificationFailures(await f.run().catch(error => error))).toMatchObject([{ step: "pixel_verified",
       reason: "unclassified_failure", operation: "unknown" }]);
   });
-  test.each([["toolchain_staged", false], ["pixel_verified", true], ["evidence_complete", true]] as const)(
-    "cleanup after %s reads the Pixel baseline under the cleanup lease only once the client held it", async (reached, read) => {
+  test.each([["toolchain_staged", false, []], ["pixel_verified", true, []], ["evidence_complete", true, ["windows-cleanup"]]] as const)(
+    "cleanup after %s reports the baseline read right after the Pixel restore only once the client held it", async (reached, read, turns) => {
       const f = fixture(reached === "toolchain_staged" ? { fail: "stage" } : {});
       if (reached === "pixel_verified") f.runtime.pixel = async () => { throw new Error("synthetic physical-client failure"); };
+      const baseline = { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true };
+      f.runtime.pixelBaseline = async () => baseline;
       await f.run().catch(() => undefined);
       expect((f.progress as { phase: string }).phase).toBe(reached);
-      const owners: string[] = [], baseline = { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true };
-      f.runtime.pixelBaseline = async () => baseline;
+      const owners: string[] = [];
       const evidence = await cleanupWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, runtime: f.runtime,
         pixel: async (owner, action) => { owners.push(owner); return action(); } });
       expect(Object.hasOwn(evidence, "pixelBaseline")).toBe(read);
       if (read) expect(evidence.pixelBaseline).toEqual(baseline);
-      expect(owners.every(owner => owner === "windows-cleanup")).toBe(true);
+      // A failed lane's own release already restored and read the Pixel; only an unreleased lane takes a turn.
+      expect(owners).toEqual([...turns]);
     });
+  test("a failed Pixel restore reads no baseline and takes no second Pixel turn", async () => {
+    const f = fixture();
+    await f.run();
+    let reads = 0;
+    f.runtime.pixelBaseline = async () => { reads++; return { airplaneOff: true, mobileDataOn: true, wifiUp: true, vpnUp: true, gcmConnectedOnWifi: true }; };
+    f.runtime.restorePixel = async () => { throw Object.assign(new Error("synthetic restore failure"), { pixelUnrestored: true }); };
+    const owners: string[] = [];
+    await expect(cleanupWindows({ identity, progress: f.progress, checkpoint: f.checkpoint, runtime: f.runtime,
+      pixel: async (owner, action) => { owners.push(owner); return action(); } })).rejects.toThrow();
+    expect(owners).toEqual(["windows-cleanup"]);
+    expect(reads).toBe(0);
+    expect(Object.hasOwn(f.progress as object, "pixelBaseline")).toBe(false);
+  });
   test("an unreadable Pixel baseline records no proof and keeps the cleanup verdict", async () => {
     const f = fixture();
     await f.run();

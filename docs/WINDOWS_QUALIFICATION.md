@@ -68,9 +68,10 @@ second environment-variable gate. The creation cap, positive ownership label and
 inventory snapshot remain mandatory. Tailscale inventory and cleanup use `tailnet/-`, binding
 every query to the API credential's own tailnet rather than a hard-coded account identifier.
 After its own teardown, cleanup also counts every tailnet device whose hostname or name starts
-with `omp-winqual-` (`tailnetNodesRemaining`) and, once the physical client reached
-`pixel_verified`, reads the Pixel's baseline under its lease. Both are settlement proof for a
-failed campaign, never a cleanup verdict; an unreadable listing or device records nothing.
+with `omp-winqual-` (`tailnetNodesRemaining`). Once the physical client reached `pixel_verified`,
+a successful Pixel restore also reads the Pixel's baseline in the same lease turn and checkpoints
+it. Both are settlement proof for a failed campaign, never a cleanup verdict; an unreadable
+listing or device records nothing.
 
 The development commands are:
 

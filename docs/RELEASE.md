@@ -1308,10 +1308,14 @@ failure, leaves `unresolvedMutation` true unless that owner proves no residue:
 - **Device cloud:** every recorded session ended and passed its audit, and `deviceCloudCleanup`
   counts zero active vendor sessions (`activeVendorSessions`: TestingBot sessions of the attempt's
   build, BrowserStack running and queued sessions).
-- **Background Push:** `androidPushCleanup` records a verified Pixel baseline: Airplane mode off,
-  mobile data on, validated Wi‑Fi, VPN up and GCM connected over Wi‑Fi.
+- **Background Push:** `androidPushCleanup` carries a verified Pixel baseline: Airplane mode off
+  (an explicit `0` setting), mobile data on, validated Wi‑Fi, VPN up and GCM connected over Wi‑Fi.
 - **Readiness:** the owner-bound readiness record (epoch present, same `campaignAttempt`) is
   `restored` with `baselineRestored`.
+
+A Pixel baseline is read only after a complete restoration, inside the same Pixel lease turn, by
+whichever release did it (the lane's own or its cleanup lane's); it is checkpointed with that
+progress, so a cleanup with nothing left to restore reports it without waiting for the Pixel.
 
 An absent, failed or inconclusive sweep proves nothing and never fails its cleanup lane. The
 installed driver re-derives this proof from the receipt before clearing; a worker's containment

@@ -618,6 +618,14 @@ export interface PixelBaseline {
   readonly airplaneOff: boolean; readonly mobileDataOn: boolean; readonly wifiUp: boolean;
   readonly vpnUp: boolean; readonly gcmConnectedOnWifi: boolean;
 }
+const PIXEL_BASELINE_KEYS = ["airplaneOff", "gcmConnectedOnWifi", "mobileDataOn", "vpnUp", "wifiUp"] as const;
+
+/** A checkpointed baseline is exactly five booleans; anything else is not evidence. */
+export function parsePixelBaseline(value: unknown): PixelBaseline {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).sort().join(",") !== PIXEL_BASELINE_KEYS.join(",") ||
+    Object.values(value).some(item => typeof item !== "boolean")) throw new Error("invalid Pixel baseline");
+  return value as PixelBaseline;
+}
 
 /**
  * Read-only: a push socket may still be settling after restoration, so this observes for
@@ -628,9 +636,11 @@ export async function readPixelBaseline(command: AndroidAdbCommand,
   const deadline = clock.now() + settleMs;
   for (;;) {
     const radios = await readAndroidRadioBaseline(command);
+    // Proof is strict: only an explicit "0" shows Airplane mode off; an unreadable setting shows nothing.
+    const airplane = (await command("shell", "settings", "get", "global", "airplane_mode_on")).trim();
     const connectivity = await command("shell", "dumpsys", "connectivity");
     const gcm = parseGcmTransport(await command("shell", "dumpsys", "activity", "service", "GcmService"));
-    const baseline = { airplaneOff: !radios.airplane, mobileDataOn: radios.mobile, wifiUp: parseValidatedWifi(connectivity),
+    const baseline = { airplaneOff: airplane === "0" && !radios.airplane, mobileDataOn: radios.mobile, wifiUp: parseValidatedWifi(connectivity),
       vpnUp: parseAndroidVpnNetwork(connectivity), gcmConnectedOnWifi: gcm.connected === true && gcm.wifi };
     if (Object.values(baseline).every(Boolean) || clock.now() >= deadline) return baseline;
     await clock.pause(Math.min(2_000, deadline - clock.now()));
