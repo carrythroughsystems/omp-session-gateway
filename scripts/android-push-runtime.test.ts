@@ -627,6 +627,32 @@ test("509 round2 runtime privacy conversion preserves ordinary notification erro
   } finally { for (const spy of spies) spy.mockRestore(); }
 });
 
+test("fleet coverage polls retain the open page's last-known directory without navigation", async () => {
+  let navigations = 0;
+  const coverage = { selected: true, state: "stale", covered: false };
+  const driver = {
+    browserSend: async () => ({ targetInfos: [{ type: "page", targetId: "page", url: identity.origin + "/" }] }),
+    attachTab: async () => {}, navigate: async () => { navigations++; }, send: async () => ({}),
+    evaluate: async (expression: string) => expression === "document.readyState" ? "complete" :
+      expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } :
+      expression.includes("notification-hosts-summary") ? coverage : true,
+  };
+  const spies = [
+    spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+    spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+    spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+  ];
+  try {
+    const runtime = createAndroidPushRuntime(identity);
+    runtime.beforeEffect = async () => {}; runtime.dndOff = async () => true;
+    expect(await runtime.fleet.coverage()).toEqual(coverage);
+    expect(await runtime.fleet.coverage()).toEqual(coverage);
+    expect(navigations).toBe(0);
+  } finally { for (const spy of spies) spy.mockRestore(); }
+});
+
 test("fleet replacement observation never hides forbidden content in a mismatched request", async () => {
   const session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
     startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",

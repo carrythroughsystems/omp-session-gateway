@@ -597,7 +597,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
               state: row?.dataset.state ?? "missing",
               covered: document.querySelector(".notification-hosts-summary")?.textContent === "All selected hosts covered" };
           })()`);
-        }, true);
+        });
       },
       async armBadgeObserver() {
         await runtime.beforeEffect();
