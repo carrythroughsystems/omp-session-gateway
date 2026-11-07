@@ -60,8 +60,10 @@ worker.addEventListener("message", event => {
     Object.keys(record).length === 3 && typeof record.fleet === "boolean") {
     const fleet = record.fleet;
     event.waitUntil(serialize(async () => {
-      await store.write({ ...await store.read(), fleet });
-      event.ports[0]?.postMessage({ type: "omp-notification-mode-set", version: FLEET_PUSH_VERSION });
+      const committed = await store.write({ ...await store.read(), fleet }, true);
+      event.ports[0]?.postMessage({
+        type: committed ? "omp-notification-mode-set" : "omp-notification-mode-failed", version: FLEET_PUSH_VERSION,
+      });
     }));
     return;
   }

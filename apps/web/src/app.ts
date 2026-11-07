@@ -247,6 +247,7 @@ let disposedShellResume: DisposedShellResume | undefined;
 let currentNotificationDetail: PushDetailLevel = "session";
 let notificationWorkerV3 = false;
 let fleetNotificationsOffered: boolean | undefined;
+let fleetLegacyResetPending = false;
 let notificationConfigSignature: string | undefined;
 let fleetNotificationRows: readonly FleetSourceStatus[] = [];
 const fleetNotificationErrors = new Map<string, string>();
@@ -254,6 +255,7 @@ const fleetNotificationBusy = new Set<string>();
 const bindings = new Map<SourceKey, string>();
 const knownNotificationAsks = new Map<SourceKey, readonly FleetPendingAsk[]>();
 const renewedFleetGrants = new Map<string, number>();
+const rejectedFleetGrants = new Set<string>();
 const fleetNotifications = new FleetNotificationTransport();
 let fleetStatusTimer: number | undefined;
 let fleetStatusRequest: Promise<void> | undefined;
@@ -518,6 +520,8 @@ function configuredNotificationSource(id: string): FleetSource | undefined {
 }
 
 function notificationCoverageComplete(): boolean {
+  if (fleetLegacyResetPending) return false;
+  if (fleetNotificationsOffered === undefined) return !notificationWorkerV3 || notificationState !== "enabled";
   return !fleetNotificationsOffered || fleetNotificationRows.every(row => !row.selected || row.state === "current");
 }
 
@@ -525,7 +529,7 @@ function renderNotificationHosts(): void {
   alertScope.textContent = fleetNotificationsOffered && notificationWorkerV3
     ? "This home gateway sends all enabled hosts' alerts. Fleet alerts need it awake and reachable."
     : `Alerts cover this host (${localSource.label}) only.`;
-  notificationHosts.hidden = notificationState !== "enabled" || !fleetNotificationsOffered || !notificationWorkerV3;
+  notificationHosts.hidden = notificationState !== "enabled" || !fleetNotificationsOffered || !notificationWorkerV3 || fleetLegacyResetPending;
   notificationHosts.replaceChildren();
   if (notificationHosts.hidden) return;
   const selected = fleetNotificationRows.filter(row => row.selected);
@@ -587,7 +591,7 @@ function notificationSettingsOpen(): boolean {
 }
 
 function shouldRefreshFleetStatus(probe = false): boolean {
-  return probe || fleetNotificationsOffered === undefined ||
+  return fleetLegacyResetPending || probe || fleetNotificationsOffered === undefined ||
     (fleetNotificationsOffered && (fleetNotificationRows.some(row => row.selected) || notificationSettingsOpen()));
 }
 
@@ -595,11 +599,11 @@ function scheduleFleetStatusRefresh(): void {
   if (fleetStatusTimer !== undefined) window.clearTimeout(fleetStatusTimer);
   fleetStatusTimer = undefined;
   if (notificationState !== "enabled" || document.visibilityState !== "visible" || !notificationWorkerV3 ||
-    fleetNotificationsOffered !== true || !shouldRefreshFleetStatus()) return;
+    fleetLegacyResetPending || fleetNotificationsOffered === false || !shouldRefreshFleetStatus()) return;
   fleetStatusTimer = window.setTimeout(() => {
     fleetStatusTimer = undefined;
     if (notificationState === "enabled" && document.visibilityState === "visible" &&
-      fleetNotificationsOffered === true && shouldRefreshFleetStatus()) void refreshFleetNotifications();
+      !fleetLegacyResetPending && fleetNotificationsOffered !== false && shouldRefreshFleetStatus()) void refreshFleetNotifications();
   }, 10_000);
 }
 
@@ -613,14 +617,29 @@ function observeNotificationConfig(config: Awaited<ReturnType<typeof loadClientC
 }
 
 async function refreshFleetNotifications(renew = true, probe = false): Promise<void> {
-  if (!probe && fleetNotificationsOffered === false) return;
+  if (!probe && fleetNotificationsOffered === false && !fleetLegacyResetPending) return;
   if (fleetStatusRequest !== undefined) return await fleetStatusRequest;
   fleetStatusRequest = (async () => {
     const subscription = await notificationRegistration?.pushManager.getSubscription();
     try {
+      if (fleetLegacyResetPending) {
+        if (await setFleetWorkerMode(false)) {
+          fleetLegacyResetPending = false;
+          fleetNotificationsOffered = false;
+        }
+        return;
+      }
       const status = await fleetNotifications.status(subscription?.endpoint);
-      fleetNotificationsOffered = status !== undefined;
       fleetNotificationRows = status?.sources.filter(row => configuredNotificationSource(row.sourceId) !== undefined) ?? [];
+      if (status === undefined) {
+        fleetLegacyResetPending = true;
+        if (await setFleetWorkerMode(false)) {
+          fleetLegacyResetPending = false;
+          fleetNotificationsOffered = false;
+        }
+        return;
+      }
+      fleetNotificationsOffered = true;
       if (renew) {
         await Promise.all(fleetNotificationRows.map(async row => {
           const source = configuredNotificationSource(row.sourceId);
@@ -630,8 +649,11 @@ async function refreshFleetNotifications(renew = true, probe = false): Promise<v
             const renewed = await fleetNotifications.renew(source, row.grantId);
             if (renewed.grantId !== row.grantId) throw new FleetNotificationError("grant_rejected");
             renewedFleetGrants.set(row.grantId, Date.parse(renewed.expiresAt));
+            rejectedFleetGrants.delete(row.grantId);
+            fleetNotificationErrors.delete(row.sourceId);
           } catch (error) {
             const code = error instanceof FleetNotificationError ? error.code : "source_unreachable";
+            if (code === "unauthorized" || code === "grant_rejected") rejectedFleetGrants.add(row.grantId);
             fleetNotificationErrors.set(row.sourceId, code);
             fleetNotificationRows = fleetNotificationRows.map(current => current.sourceId !== row.sourceId ? current : {
               ...current, state: code === "unsupported" ? "unsupported" : code === "unauthorized" || code === "grant_rejected" ? "unauthorized" : "stale",
@@ -639,11 +661,19 @@ async function refreshFleetNotifications(renew = true, probe = false): Promise<v
           }
         }));
       }
+      fleetNotificationRows = fleetNotificationRows.map(row =>
+        row.grantId !== undefined && rejectedFleetGrants.has(row.grantId) ? { ...row, state: "unauthorized" } : row);
       if (notificationWorkerV3) await setFleetWorkerMode(fleetNotificationRows.some(row => row.selected));
     } catch {
       // A coordinator outage cannot turn last-known selection or alerts into an all-clear.
       fleetNotificationRows = fleetNotificationRows.map(row => row.selected ? { ...row, state: "stale" } : row);
     } finally {
+      const retained = new Set<SourceKey>([localKey]);
+      for (const row of fleetNotificationRows) {
+        const source = configuredNotificationSource(row.sourceId);
+        if (source !== undefined && row.selected && (row.state === "current" || row.state === "stale")) retained.add(sourceKey(source));
+      }
+      for (const key of knownNotificationAsks.keys()) if (!retained.has(key)) knownNotificationAsks.delete(key);
       renderNotificationHosts();
       render();
       scheduleFleetStatusRefresh();
@@ -659,37 +689,64 @@ async function changeNotificationHost(source: FleetSource, enabled: boolean): Pr
   fleetNotificationBusy.add(source.id);
   fleetNotificationErrors.delete(source.id);
   renderNotificationHosts();
+  let previous: FleetSourceStatus | undefined;
+  let createdGrant: string | undefined;
+  let enrolling = false;
+  let fleetModeConfirmed = false;
+  let otherSelected = false;
   try {
     await refreshFleetNotifications(false);
     const row = fleetNotificationRows.find(row => row.sourceId === source.id);
     if (row === undefined) throw new FleetNotificationError("unsupported");
+    previous = row;
+    otherSelected = fleetNotificationRows.some(row => row.selected && row.sourceId !== source.id);
     if (enabled) {
-      if (row.grantId !== undefined && row.state !== "unauthorized" && row.state !== "not_enrolled") {
-        const renewed = await fleetNotifications.renew(source, row.grantId);
-        if (renewed.grantId !== row.grantId) throw new FleetNotificationError("grant_rejected");
-        renewedFleetGrants.set(row.grantId, Date.parse(renewed.expiresAt));
-      } else {
-        const grant = await fleetNotifications.create(source.id);
+      enrolling = row.grantId === undefined || rejectedFleetGrants.has(row.grantId) ||
+        row.state === "unauthorized" || row.state === "not_enrolled";
+      // No grant mutation may begin before the worker's durable fleet-mode acknowledgment.
+      if (!await setFleetWorkerMode(true)) throw new FleetNotificationError("unsupported");
+      fleetModeConfirmed = true;
+      if (!enrolling && row.grantId !== undefined) {
         try {
-          const authorized = await fleetNotifications.authorize(source, grant);
-          if (authorized.grantId !== grant.grantId) throw new FleetNotificationError("grant_rejected");
-          await fleetNotifications.activate(grant.grantId);
+          const renewed = await fleetNotifications.renew(source, row.grantId);
+          if (renewed.grantId !== row.grantId) throw new FleetNotificationError("grant_rejected");
+          renewedFleetGrants.set(row.grantId, Date.parse(renewed.expiresAt));
+          rejectedFleetGrants.delete(row.grantId);
+          fleetNotificationErrors.delete(source.id);
         } catch (error) {
-          await Promise.allSettled([fleetNotifications.revoke(grant.grantId), fleetNotifications.revoke(grant.grantId, source)]);
+          if (error instanceof FleetNotificationError && (error.code === "unauthorized" || error.code === "grant_rejected")) {
+            rejectedFleetGrants.add(row.grantId);
+            fleetNotificationRows = fleetNotificationRows.map(current => current.sourceId === source.id ? { ...current, state: "unauthorized" } : current);
+          }
           throw error;
         }
+      } else {
+        const grant = await fleetNotifications.create(source.id);
+        createdGrant = grant.grantId;
+        const authorized = await fleetNotifications.authorize(source, grant);
+        if (authorized.grantId !== grant.grantId) throw new FleetNotificationError("grant_rejected");
+        await fleetNotifications.activate(grant.grantId);
       }
-      // Confirm persisted worker support before the coordinator may send any v3 to this endpoint.
-      if (!await setFleetWorkerMode(true)) throw new FleetNotificationError("unsupported");
     }
     const selected = fleetNotificationRows.filter(row => row.selected && row.sourceId !== source.id).map(row => row.sourceId);
     if (enabled) selected.push(source.id);
     const result = await fleetNotifications.recipient(subscription.endpoint, selected);
+    if (createdGrant !== undefined) {
+      rejectedFleetGrants.delete(createdGrant);
+      fleetNotificationErrors.delete(source.id);
+      createdGrant = undefined;
+    }
     await releaseFleetGrants(result.released);
     await refreshFleetNotifications(false);
     await reconcileFleetNotifications();
   } catch (error) {
-    await refreshFleetNotifications(false);
+    if (createdGrant !== undefined) {
+      await Promise.allSettled([fleetNotifications.revoke(createdGrant), fleetNotifications.revoke(createdGrant, source)]);
+    }
+    if (enrolling && fleetModeConfirmed && !otherSelected) await setFleetWorkerMode(false);
+    if (enrolling && previous !== undefined) {
+      fleetNotificationRows = fleetNotificationRows.map(row => row.sourceId === source.id ? previous! : row);
+    }
     fleetNotificationErrors.set(source.id, error instanceof FleetNotificationError ? error.code : "source_unreachable");
   } finally {
     fleetNotificationBusy.delete(source.id);
@@ -706,7 +763,7 @@ async function reconcileFleetNotifications(probe = false): Promise<void> {
     if (received === undefined) return;
     await refreshFleetNotifications(true, probe);
     const selected = fleetNotificationRows.filter(row => row.selected);
-    if (!fleetNotificationsOffered || selected.length === 0) return;
+    if (!fleetNotificationsOffered || fleetLegacyResetPending) return;
     const fresh: string[] = [];
     const pending: FleetPendingAsk[] = [];
     const selectedKeys = new Set<SourceKey>([localKey]);
@@ -733,7 +790,7 @@ async function reconcileFleetNotifications(probe = false): Promise<void> {
         const source = configuredNotificationSource(row.sourceId);
         if (source === undefined) return;
         const key = sourceKey(source);
-        selectedKeys.add(key);
+        if (row.state === "current" || row.state === "stale") selectedKeys.add(key);
         if (row.state === "current" && await remotes.get(key)?.refreshAfterCurrent() === "healthy") {
           observe(key, remotes.get(key)!.snapshot!.sessions);
         }
@@ -742,7 +799,7 @@ async function reconcileFleetNotifications(probe = false): Promise<void> {
     const count = [...selectedKeys].reduce((sum, key) => sum + (knownNotificationAsks.get(key)?.length ?? 0), 0);
     notificationRegistration?.active?.postMessage(parseFleetReconcileMessage({
       type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received }, fresh, pending,
-      badge: { count, complete: notificationCoverageComplete() && fresh.length === selectedKeys.size },
+      badge: { count, complete: notificationCoverageComplete() && fresh.length === selected.length + 1 },
     }));
   })();
   try { await fleetReconciliation; } finally { fleetReconciliation = undefined; }
@@ -3613,7 +3670,7 @@ async function resolvePendingNotificationRoute(): Promise<void> {
           const status = await fleetNotifications.status(subscription?.endpoint);
           const row = status?.sources.find(row => row.sourceId === source.id);
           if (row?.selected !== true || row.state !== "current" ||
-            await remotes.get(key)?.refreshAfterCurrent(true) !== "healthy") key = undefined;
+            await remotes.get(key)?.refreshForNotification() !== "healthy") key = undefined;
           else {
             const current = await fleetNotifications.status(subscription?.endpoint);
             const checked = current?.sources.find(row => row.sourceId === source.id);
@@ -3636,7 +3693,6 @@ async function resolvePendingNotificationRoute(): Promise<void> {
       shell.generation === session.generation;
     if (pending?.kind === "activity_stop" && session?.generation === pending.generation && session.canView) {
       if (shown) return;
-      selectedScope = key!;
       if (shell !== undefined) showTriageBar(shell, "sending", "Opening view…");
       await launch(session, "view");
     } else if (
@@ -3646,7 +3702,6 @@ async function resolvePendingNotificationRoute(): Promise<void> {
       session.canControl
     ) {
       if (shown && shell.mode === "control") return;
-      selectedScope = key!;
       if (shell !== undefined) showTriageBar(shell, "sending", "Opening control…");
       await launch(session, "control", undefined, pending.requestId);
     } else if (shell !== undefined) {

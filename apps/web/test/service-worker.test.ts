@@ -278,6 +278,50 @@ describe("fleet vectors through the actual worker listeners and durable store", 
     expect(shownNotifications).toHaveLength(0);
   });
 
+  for (const failure of ["open", "commit"] as const) {
+    test(`focused remediation: an IndexedDB ${failure} failure refuses durable fleet mode and retains local Push v2 badges`, async () => {
+      if (failure === "open") {
+        Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: {
+          open(): never { throw new Error("synthetic storage denied"); },
+        } });
+        await restartWorker();
+      } else database.failCommit = true;
+      expect(await workerMessage({ type: "omp-notification-mode", version: 3, fleet: true }))
+        .toEqual({ type: "omp-notification-mode-failed", version: 3 });
+      expect(database.values.get("worker")).toBeUndefined();
+      await settledPush({ version: 2, type: "clear", instanceId: "mode-failure-local", requestId: "mode_failure_request_0001", pendingAskCount: 4 });
+      expect(badgeState.current).toEqual([4, true]);
+    });
+  }
+
+  test("focused remediation: fleet-mode acknowledgment waits for the IndexedDB transaction commit", async () => {
+    const gate = Promise.withResolvers<void>();
+    database.commitGate = gate.promise;
+    let response: unknown;
+    const setting = workerMessage({ type: "omp-notification-mode", version: 3, fleet: true }).then(value => { response = value; });
+    for (let turn = 0; turn < 60; turn++) await Promise.resolve();
+    expect(response).toBeUndefined();
+    expect(database.values.get("worker")).toBeUndefined();
+    gate.resolve();
+    await setting;
+    expect(response).toEqual({ type: "omp-notification-mode-set", version: 3 });
+    expect(database.values.get("worker")).toMatchObject({ fleet: true });
+  });
+
+  test("focused remediation: an acknowledged legacy reset restores local Push v2 badge counts", async () => {
+    expect(await workerMessage({ type: "omp-notification-mode", version: 3, fleet: true }))
+      .toEqual({ type: "omp-notification-mode-set", version: 3 });
+    await settledPush({ version: 2, type: "clear", instanceId: "reset-local-badge", requestId: "reset_local_request_0001", pendingAskCount: 2 });
+    badgeState.set.length = 0;
+    expect(await workerMessage({ type: "omp-notification-mode", version: 3, fleet: false }))
+      .toEqual({ type: "omp-notification-mode-set", version: 3 });
+    await settledPush({ version: 2, type: "clear", instanceId: "reset-local-badge", requestId: "reset_local_request_0001", pendingAskCount: 3 });
+    expect(badgeState.set).toEqual([3]);
+    await restartWorker();
+    await settledPush({ version: 2, type: "clear", instanceId: "reset-local-badge", requestId: "reset_local_request_0001", pendingAskCount: 5 });
+    expect(badgeState.set).toEqual([3, 5]);
+  });
+
   test("zero incomplete coverage shows the platform flag; only zero complete clears it", async () => {
     badgeState.set.length = 0;
     badgeState.clears = 0;
@@ -293,8 +337,9 @@ describe("fleet vectors through the actual worker listeners and durable store", 
 });
 
 // Transactions commit structured clones, so a new worker instance cannot reuse the previous heap.
-function workerDatabase(): { readonly factory: IDBFactory; readonly values: Map<string, unknown> } {
+function workerDatabase(): { readonly factory: IDBFactory; readonly values: Map<string, unknown>; failCommit: boolean; commitGate: Promise<void> | undefined } {
   const values = new Map<string, unknown>();
+  const controls = { failCommit: false, commitGate: undefined as Promise<void> | undefined };
   let created = false;
   const database = {
     close(): void {},
@@ -302,6 +347,7 @@ function workerDatabase(): { readonly factory: IDBFactory; readonly values: Map<
     transaction(): unknown {
       const transaction = {
         oncomplete: undefined as (() => void) | undefined,
+        onabort: undefined as (() => void) | undefined,
         objectStore: () => ({
           get(key: string): unknown {
             const request = { result: structuredClone(values.get(key)) };
@@ -309,8 +355,11 @@ function workerDatabase(): { readonly factory: IDBFactory; readonly values: Map<
             return request;
           },
           put(value: unknown, key: string): void {
-            values.set(key, structuredClone(value));
-            queueMicrotask(() => transaction.oncomplete?.());
+            void Promise.resolve(controls.commitGate).then(() => {
+              if (controls.failCommit) { transaction.onabort?.(); return; }
+              values.set(key, structuredClone(value));
+              transaction.oncomplete?.();
+            });
           },
         }),
       };
@@ -327,7 +376,8 @@ function workerDatabase(): { readonly factory: IDBFactory; readonly values: Map<
       return request;
     },
   } as unknown as IDBFactory;
-  return { factory, values };
+  return { factory, values, get failCommit() { return controls.failCommit; }, set failCommit(value) { controls.failCommit = value; },
+    get commitGate() { return controls.commitGate; }, set commitGate(value) { controls.commitGate = value; } };
 }
 
 let workerInstance = 0;

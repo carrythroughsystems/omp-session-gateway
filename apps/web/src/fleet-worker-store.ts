@@ -57,18 +57,25 @@ export class FleetWorkerStore {
     return this.memory;
   }
 
-  async write(state: FleetWorkerState): Promise<void> {
-    this.memory = state;
-    this.loaded = true;
+  async write(state: FleetWorkerState, requireDurable = false): Promise<boolean> {
     const database = await this.open();
-    if (database === undefined) return;
-    try {
-      const { promise, resolve, reject } = Promise.withResolvers<void>();
-      const transaction = database.transaction("state", "readwrite");
-      transaction.objectStore("state").put(state, "worker");
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = transaction.onabort = () => reject(new Error("worker state unavailable"));
-      await promise;
-    } catch { this.database = Promise.resolve(undefined); database.close(); }
+    let committed = false;
+    if (database !== undefined) {
+      try {
+        const { promise, resolve, reject } = Promise.withResolvers<void>();
+        const transaction = database.transaction("state", "readwrite");
+        transaction.objectStore("state").put(state, "worker");
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = transaction.onabort = () => reject(new Error("worker state unavailable"));
+        await promise;
+        committed = true;
+      } catch { this.database = Promise.resolve(undefined); database.close(); }
+    }
+    // Pushes retain their in-worker fallback; an uncommitted mode change must not take effect.
+    if (committed || !requireDurable) {
+      this.memory = state;
+      this.loaded = true;
+    }
+    return committed;
   }
 }

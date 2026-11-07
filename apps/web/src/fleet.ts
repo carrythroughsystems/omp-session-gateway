@@ -86,7 +86,7 @@ export async function loadClientConfig(origin: string, time: FleetClock = clock)
   } finally { time.clearTimeout(timer); }
 }
 
-/** One source owns one request, one revision domain and one visibility epoch. */
+/** One source owns a polling request and visibility epoch; explicit taps have their own request. */
 export class FleetTransport {
   readonly key: SourceKey;
   status: SourceStatus = "loading";
@@ -99,6 +99,7 @@ export class FleetTransport {
   private visible = false;
   private failures = 0;
   private request: { controller: AbortController; promise: Promise<SnapshotResult> } | undefined;
+  private notificationRequest: AbortController | undefined;
   private timer: number | undefined;
   private graceTimer: number | undefined;
 
@@ -166,6 +167,8 @@ export class FleetTransport {
     this.epoch += 1;
     this.request?.controller.abort();
     this.request = undefined;
+    this.notificationRequest?.abort();
+    this.notificationRequest = undefined;
     this.clearTimer();
     if (this.graceTimer !== undefined) this.time.clearTimeout(this.graceTimer);
     this.graceTimer = undefined;
@@ -192,11 +195,23 @@ export class FleetTransport {
     return promise;
   }
 
-  /** A tap or worker reconciliation needs a request started after its authorization/count capture. */
+  /** Worker reconciliation needs a request started after its receipt-count capture. */
   async refreshAfterCurrent(explicit = false): Promise<SnapshotResult> {
     await this.request?.promise;
     // Routine observations must not withdraw still-fresh metadata from an in-flight launch.
     return await this.refresh(explicit);
+  }
+
+  /** A notification tap may arrive before focus; polling visibility never owns this request. */
+  refreshForNotification(): Promise<SnapshotResult> {
+    this.notificationRequest?.abort();
+    const controller = new AbortController();
+    this.notificationRequest = controller;
+    this.request?.controller.abort();
+    this.request = undefined;
+    this.clearTimer();
+    this.sequence += 1;
+    return this.fetchSnapshot(controller, this.epoch, this.sequence, true);
   }
 
   async probe(signal: AbortSignal): Promise<SnapshotResult> {
@@ -212,10 +227,11 @@ export class FleetTransport {
     return await promise;
   }
 
-  private async fetchSnapshot(controller: AbortController, epoch: number, sequence: number): Promise<SnapshotResult> {
+  private async fetchSnapshot(controller: AbortController, epoch: number, sequence: number, notification = false): Promise<SnapshotResult> {
     let timedOut = false;
     const timeout = this.time.setTimeout(() => { timedOut = true; controller.abort(); }, 5_000);
-    const current = (): boolean => this.epoch === epoch && this.sequence === sequence && this.visible;
+    const current = (): boolean => notification ? this.notificationRequest === controller
+      : this.epoch === epoch && this.sequence === sequence && this.visible;
     try {
       // Native browser fetch must not receive this transport as its Window receiver.
       const fetchSnapshot = this.fetcher;
@@ -245,8 +261,9 @@ export class FleetTransport {
     } finally {
       this.time.clearTimeout(timeout);
       if (current()) {
-        this.request = undefined;
-        if (this.status !== "forbidden") {
+        if (notification) this.notificationRequest = undefined;
+        else this.request = undefined;
+        if (this.visible && this.request === undefined && this.status !== "forbidden") {
           const cap = Math.min(30_000, 1_000 * 2 ** Math.min(5, Math.max(0, this.failures - 1)));
           const delay = this.failures === 0 ? 10_000 : Math.floor(cap / 2 + this.time.random() * cap / 2);
           this.timer = this.time.setTimeout(() => { this.timer = undefined; void this.refresh(); }, delay);
@@ -324,7 +341,7 @@ export class FleetNotificationTransport {
       if (controller.signal.aborted) throw new FleetNotificationError("source_unreachable");
       if (!response.ok) {
         let code: FleetNotificationProblem = response.status === 404 ? "unsupported"
-          : response.status === 403 ? "unauthorized" : "unavailable";
+          : response.status === 401 || response.status === 403 ? "unauthorized" : "unavailable";
         if (response.status === 409 || response.status === 503) {
           try {
             const problem = await boundedJson(response, MAX_FLEET_REQUEST_BYTES, true);
