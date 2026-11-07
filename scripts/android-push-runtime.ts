@@ -1089,27 +1089,65 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         };
         let tabsSeen = 0, pagesSeen = 0, pausedTabs = 0, pausedPages = 0;
         const requests = new Set<string>();
-        const attachedTargets = new Set<string>();
+        type PageCategory = "owned" | "blank" | "other";
+        type PageTarget = { category: PageCategory; sessionId?: string; observing?: Promise<void> };
+        const pageTargets = new Map<string, PageTarget>();
+        const pageCategories = { owned: 0, blank: 0, other: 0, toOwned: 0 };
+        const attachmentAdmissions = { attached: 0, created: 0, changed: 0, inventory: 0 };
+        let duplicatePausedPages = 0;
         const tabWatches: Promise<void>[] = [];
         let stage = "observer admission";
-        const attach = (targetId: string, attachedSession?: string, paused = false) => {
-          if (attachedTargets.has(targetId)) return;
-          attachedTargets.add(targetId);
+        const notePage = (targetId: string, url: unknown): PageTarget => {
+          const category: PageCategory = typeof url === "string" && url.startsWith(`${identity.origin}/`) ? "owned" :
+            url === undefined || url === "" || url === "about:blank" ? "blank" : "other";
+          let target = pageTargets.get(targetId);
+          if (target === undefined) {
+            target = { category };
+            pageTargets.set(targetId, target);
+            pageCategories[category]++;
+          } else if (target.category !== category) {
+            if (category === "owned") pageCategories.toOwned++;
+            pageCategories[category]++;
+            target.category = category;
+          }
+          return target;
+        };
+        const attach = (targetId: string, target: PageTarget, admission: keyof typeof attachmentAdmissions, pausedSession?: string) => {
+          if (target.observing !== undefined) {
+            // Discovery may attach first, before auto-attach reports its paused session.
+            // Resume that session only once our observer is ready; never strand the page.
+            if (pausedSession !== undefined) {
+              duplicatePausedPages++;
+              attached = (attached ?? target.observing).then(async () => {
+                if (!attachedError) await driver.sessionSend(pausedSession, "Runtime.runIfWaitingForDebugger");
+              }).catch(recordFailure);
+            }
+            return;
+          }
+          attachmentAdmissions[admission]++;
           const previous = attached ?? Promise.resolve();
           attached = previous.then(async () => {
+            const attachedSession = target.sessionId;
             if (attachedSession === undefined) {
               await driver.attachTab(targetId);
               await driver.send("Network.enable");
             } else {
               await Promise.all([driver.sessionSend(attachedSession, "Network.enable"), driver.attachTab(targetId, attachedSession)]);
             }
-            if (paused) await driver.send("Runtime.runIfWaitingForDebugger");
+            if (pausedSession !== undefined) await driver.sessionSend(pausedSession, "Runtime.runIfWaitingForDebugger");
           }).catch(recordFailure);
+          target.observing = attached;
         };
         const stopListening = driver.onEvent((method, params) => {
           if (method === "Target.targetInfoChanged" || method === "Target.targetCreated") {
-            const target = params.targetInfo as { type?: string; url?: string } | undefined;
-            if (target?.type === "page") observeRoute(target.url);
+            const target = params.targetInfo as { type?: string; targetId?: string; url?: string } | undefined;
+            if (target?.type === "page" && typeof target.targetId === "string") {
+              const page = notePage(target.targetId, target.url);
+              observeRoute(target.url);
+              // Existing tab shells can change from a native/unrelated page into our
+              // notification page without another attachedToTarget event.
+              if (page.category === "owned") attach(target.targetId, page, method === "Target.targetCreated" ? "created" : "changed");
+            }
           }
           if (method === "Page.frameStartedNavigating" || method === "Page.navigatedWithinDocument") observeRoute(params.url);
           if (method === "Target.attachedToTarget") {
@@ -1134,13 +1172,15 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
               return;
             }
             if (target.type !== "page") return;
-            if ("url" in target && typeof target.url === "string" && target.url !== "" && target.url !== "about:blank" && !target.url.startsWith(`${identity.origin}/`)) {
+            const page = notePage(targetId, "url" in target ? target.url : undefined);
+            page.sessionId = attachedSession;
+            if (page.category === "other") {
               // Do not initialize Chrome's undriveable native new-tab page or unrelated web pages.
               if (params.waitingForDebugger === true) void driver.sessionSend(attachedSession, "Runtime.runIfWaitingForDebugger").catch(recordFailure);
               return;
             }
             if ("url" in target) observeRoute(target.url);
-            attach(targetId, attachedSession, params.waitingForDebugger === true);
+            attach(targetId, page, "attached", params.waitingForDebugger === true ? attachedSession : undefined);
           }
           if (method === "Page.frameNavigated") {
             const frame = params.frame;
@@ -1175,7 +1215,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           await Promise.all(tabWatches);
           if (attachedError) throw new Error("notification child observers unavailable");
           const existing = await targetForOrigin(driver);
-          if (existing !== undefined) { attach(existing); await attached; }
+          if (existing !== undefined) { attach(existing, notePage(existing, `${identity.origin}/`), "inventory"); await attached; }
           stage = "notification input";
           await mutate("shell", "input", "keyevent", "224");
           await Bun.sleep(1_200);
@@ -1233,7 +1273,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           if (everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
           // Already-observed closed values only: secondary device reads must not mask the cause.
           const diagnostics = { observerFailure, tabsSeen, pagesSeen, pausedTabs, pausedPages, launches, preflights, successful,
-            currentGeneration, currentRequest, modeMatches, routeObserved, routeScrubbed, metadataObserved };
+            currentGeneration, currentRequest, modeMatches, routeObserved, routeScrubbed, metadataObserved,
+            pageCategories, attachmentAdmissions, duplicatePausedPages };
           throw new Error(`Android Push tap failed during ${stage}: ${JSON.stringify(diagnostics)}`, { cause: error });
         } finally {
           stopListening();
