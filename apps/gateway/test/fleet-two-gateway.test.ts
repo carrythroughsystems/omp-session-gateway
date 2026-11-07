@@ -303,7 +303,8 @@ async function fixture(identities = false) {
       for (const name of await readdir(config.paths.stateDir)) {
         texts.push({ path: join(config.paths.stateDir, name), text: await readFile(join(config.paths.stateDir, name), "utf8") });
       }
-      const path = join(config.paths.runtimeDir, "diagnostics.tar");
+      // The test root exists on every platform; Windows never creates the POSIX runtime directory.
+      const path = join(root, `${config === homeConfig ? "home" : "studio"}-diagnostics.tar`);
       await rm(path, { force: true });
       await createDiagnosticsBundle({ service: "omp-session-gateway", checks: {
         discoveryHealthy: (config === homeConfig ? home : studio).poller.discoveryHealthy,
