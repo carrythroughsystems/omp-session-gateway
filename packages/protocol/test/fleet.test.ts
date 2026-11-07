@@ -101,7 +101,7 @@ describe("fleet push messages", () => {
     reject(() => parseFleetPushMessage({ ...attention, body: "x".repeat(3 * 1024) }));
   });
 
-  test("a remote body is only a configured label and the opaque session suffix; local bodies keep legacy detail", () => {
+  test("a remote body is shaped as a label and the opaque session suffix; local bodies keep legacy detail", () => {
     for (const body of ["Fix payment retry · checkout-service", "Studio · aaaa11", "Studio", "/Users/you/repo · bb2222x", " · bb2222"]) {
       reject(() => parseFleetPushMessage({ ...attention, body }));
     }
@@ -110,6 +110,18 @@ describe("fleet push messages", () => {
     expect(parseFleetPushMessage({ ...attention, body: "Studio\u202e · bb2222" })).toHaveProperty("body", "Studio · bb2222");
     const { source: _source, ...local } = attention;
     expect(parseFleetPushMessage({ ...local, body: "MacBook · Fix payment retry · checkout-service" }).type).toBe("attention");
+  });
+
+  test("a sender with its configuration requires the exact configured label and a configured binding", () => {
+    const labels = new Map([[binding, "Mac Studio"]]);
+    expect(parseFleetPushMessage({ ...attention, body: "Mac Studio · bb2222" }, labels).type).toBe("attention");
+    reject(() => parseFleetPushMessage({ ...attention, body: "Fix payment retry · bb2222" }, labels));
+    reject(() => parseFleetPushMessage({ ...attention, body: "Studio · bb2222" }, labels));
+    const { body: _body, ...privateAttention } = attention;
+    expect(parseFleetPushMessage(privateAttention, labels).type).toBe("attention");
+    reject(() => parseFleetPushMessage({ ...privateAttention, source: otherBinding }, labels));
+    const { source: _source, ...local } = attention;
+    expect(parseFleetPushMessage({ ...local, body: "MacBook · Fix payment retry · checkout-service" }, labels).type).toBe("attention");
   });
 
   test("reject malformed ordering, badge, and binding fields", () => {
@@ -167,16 +179,36 @@ describe("fleet notification data and routes", () => {
 
 describe("fleet HTTP and feed contracts", () => {
   test("coordinator bodies are exact", () => {
-    const status = parseFleetStatusResponse({ version: 1, sources: [
-      { sourceId: "studio", state: "current", selected: true, grantId, expiresAt: "2026-12-07T00:00:00.000Z" },
-      { sourceId: "laptop", state: "not_enrolled", selected: false },
-    ] });
+    const expiresAt = "2026-12-07T00:00:00.000Z";
+    const current = { sourceId: "studio", state: "current", selected: true, grantId, expiresAt };
+    const status = parseFleetStatusResponse({ version: 1, sources: [current, { sourceId: "laptop", state: "not_enrolled", selected: false }] });
     expect(status.sources.map(source => [source.sourceId, source.selected, source.grantId ?? null])).toEqual([["studio", true, grantId], ["laptop", false, null]]);
-    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "online", selected: true }] }));
-    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current" }] }));
-    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", selected: true }, { sourceId: "studio", state: "stale", selected: false }] }));
-    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", selected: true, expiresAt: "2026-12-07" }] }));
-    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", selected: true, secret: digest }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ ...current, state: "online" }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", state: "current", grantId, expiresAt }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [current, { ...current, state: "stale", selected: false }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ ...current, expiresAt: "2026-12-07" }] }));
+    reject(() => parseFleetStatusResponse({ version: 1, sources: [{ ...current, secret: digest }] }));
+  });
+
+  test("status rows name the grant whenever one can exist, so any device can renew or revoke it", () => {
+    const row = (fields: Record<string, unknown>) => parseFleetStatusResponse({ version: 1, sources: [{ sourceId: "studio", selected: true, ...fields }] }).sources[0];
+    const expiresAt = "2026-12-07T00:00:00.000Z";
+    for (const state of ["current", "stale"]) {
+      expect(row({ state, grantId, expiresAt })).toHaveProperty("grantId", grantId);
+      reject(() => row({ state, expiresAt }));
+      reject(() => row({ state, grantId }));
+    }
+    for (const state of ["pending", "unauthorized"]) {
+      expect(row({ state, grantId })).toHaveProperty("grantId", grantId);
+      reject(() => row({ state }));
+    }
+    expect(row({ state: "unsupported" })).not.toHaveProperty("grantId");
+    expect(row({ state: "unsupported", grantId })).toHaveProperty("grantId", grantId);
+    reject(() => row({ state: "not_enrolled", grantId }));
+    reject(() => row({ state: "not_enrolled", expiresAt }));
+  });
+
+  test("status requests carry at most this device's endpoint", () => {
     expect(parseFleetStatusRequest({ version: 1, endpoint })).toEqual({ version: 1, endpoint });
     expect(parseFleetStatusRequest({ version: 1 })).toEqual({ version: 1 });
     reject(() => parseFleetStatusRequest({ version: 1, endpoint: "http://insecure.example/push" }));

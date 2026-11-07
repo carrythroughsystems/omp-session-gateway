@@ -249,7 +249,8 @@ the same local ask replace rather than duplicate each other.
 **Ordering.** The worker stores bounded metadata-only state durably: a cleared request stays
 suppressed for 30 minutes even if its attention arrives later or the worker restarts; an older
 message for a session never replaces a newer one; a stop never replaces a displayed attention; an
-older badge never overwrites a newer one. Asks on different hosts are ordered by first observation
+older pushed badge never overwrites a newer one (a badge set when the app opens lasts until the
+next push). Asks on different hosts are ordered by first observation
 at the coordinator, never by host clocks. The coordinator remembers which asks it alerted each device
 about; after it restarts it sends exact clears for the ones resolved meanwhile, or whose host was
 revoked, removed, or deselected, and alerts only asks the device has not seen. Opening the app

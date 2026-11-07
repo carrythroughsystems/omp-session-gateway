@@ -370,7 +370,10 @@ in `http.trustedDashboardOrigins`. Both default to empty, which keeps every rout
 | `DELETE /api/v1/push/fleet/recipient` | `{ version: 1, endpoint }` | `{ version: 1, sources: [], released }`; the subscription returns to Push v2 |
 
 `state` is `not_enrolled`, `pending`, `current`, `stale`, `unauthorized`, or `unsupported` for the
-calling owner. `grantId` is a lowercase UUIDv4 and `verifier` the 43-character unpadded base64url
+calling owner. A row names the owner's `grantId` in every state except `not_enrolled` (where it is
+absent) and `unsupported` (where it is optional), and `current` and `stale` rows also carry the
+`expiresAt` the coordinator persisted from the feed, so any of the owner's devices can renew or
+revoke. `grantId` is a lowercase UUIDv4 and `verifier` the 43-character unpadded base64url
 SHA-256 of `"omp-fleet-grant-v1" ‖ 0x00 ‖ grantId ‖ 0x00 ‖ secret`; the 256-bit secret is generated,
 stored, and used only by the coordinator. A recipient `endpoint` must be an existing subscription of
 the caller, and `sources` names 1–7 distinct remote notification sources, never `local`; the
@@ -429,8 +432,10 @@ coordinator's own sessions. `seq.epoch` is persisted by the coordinator and adva
 so a recipient sees gaps but never a reset. `badge.count` (0–8,000) is the known pending
 Control-capable asks across the recipient's sources; `badge.complete` is false while any selected
 source is not current. `body` is absent at Private; otherwise a remote alert's body is exactly the
-target's configured label, ` · `, and the last six characters of `instanceId` (the parser rejects
-anything else), and a local alert shows `fleet.label` before the existing Push v2 Session detail.
+target's configured label, ` · `, and the last six characters of `instanceId` (the coordinator
+checks it against its configuration with `parseFleetPushMessage(payload, remoteLabels)` before
+sending; the worker checks its shape), and a local alert shows `fleet.label` before the existing
+Push v2 Session detail.
 There is no snapshot message: after a restart the coordinator sends exact clears and attentions from
 the outstanding asks it persisted per recipient. Payloads stay under 3 KiB and use the same urgency,
 TTL, and absent `Topic` as Push v2.

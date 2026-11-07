@@ -2356,8 +2356,9 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   *binding*, the first 22 characters of
   `base64url(SHA-256("omp-fleet-binding-v1" ‖ 0x00 ‖ id ‖ 0x00 ‖ origin))`; a local
   message omits it. A binding is an identifier, not an authenticator, and changing a source's origin
-  changes it. A remote alert's body must be exactly a configured label, ` · `, and the session suffix;
-  the worker's parser rejects anything else.
+  changes it. A remote alert's body is exactly the source's configured label, ` · `, and the session
+  suffix: the coordinator checks every payload against its configuration before sending, and the
+  worker's parser, which has no configuration, rejects any body not shaped as a label and that suffix.
 - **Ordering.** The coordinator's receipt order defines `n`; no cross-host wall clock orders
   anything. The worker keeps bounded, durable IndexedDB state: request tombstones retained for 30
   minutes (longer than the 5-minute push TTL), per-session watermarks within an epoch, the highest
@@ -2400,7 +2401,9 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   checks generation, request, `inputRequired`, and access, and uses that source's ordinary launch
   broker. A stop tap opens View only.
 - **Bounds.** At most 7 remote sources, 8 subscriptions, one feed per active grant, 32 grants at a
-  coordinator, 16 grants at a source, 256 queued feed events, 256 outstanding asks per recipient,
+  coordinator, 16 grants at a source, 256 queued feed events, 256 outstanding asks per recipient (at
+  capacity a further attention is not sent, so every sent alert stays clearable; the badge still
+  counts it),
   2,048 records per worker map (a flood of more distinct cleared requests within 30 minutes evicts
   the oldest tombstones), a badge count up to 8,000, 8 concurrent push sends, and 256 queued
   deliveries, where overflow drops attention and stops but never a clear. Feed
@@ -2451,3 +2454,6 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
 - WebKit may count clears, which display nothing, against its silent-push allowance, as it already
   could for Push v2 clears. Delivery stays best effort; a lost clear leaves its alert until the
   next reconciliation or a newer request replaces it.
+- A foreground reconciliation's badge holds only until the next push. A push generated before the
+  page's snapshots but delivered after them, or an older reconciliation from a second window, can
+  show its older count until the next push or reconciliation; alerts themselves are unaffected.

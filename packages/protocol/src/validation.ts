@@ -1021,20 +1021,26 @@ function parseFleetPendingAsk(value: unknown): FleetPendingAsk {
 }
 
 /**
- * A remote alert's visible body may only be the coordinator's configured label for that source and
- * the session's opaque suffix, so no title, path, or preview can reach the worker from a peer.
+ * A remote alert's visible body may only be a label and the session's opaque suffix, so no title,
+ * path, or preview can reach the worker from a peer. A sender that knows its configuration passes
+ * `remoteLabels` (binding → configured label) to require the exact configured label.
  */
-function fleetBody(record: JsonRecord, instanceId: string): { readonly body?: string } {
+function fleetBody(record: JsonRecord, instanceId: string, remoteLabels?: ReadonlyMap<string, string>): { readonly body?: string } {
   const body = optionalLabel(record.body);
   if (body === undefined || record.source === undefined) return body === undefined ? {} : { body };
   const suffix = ` · ${instanceId.slice(-FLEET_SESSION_SUFFIX_LENGTH)}`;
   const label = body.endsWith(suffix) ? body.slice(0, -suffix.length) : "";
   if (label.length === 0 || parseFleetLabel(label) !== label) throw new ProtocolValidationError();
+  if (remoteLabels !== undefined && label !== parseFleetLabel(remoteLabels.get(record.source as string))) throw new ProtocolValidationError();
   return { body };
 }
 
-/** A fleet push for one recipient: content-free, capability-free, and at most 3 KiB of JSON. */
-export function parseFleetPushMessage(value: unknown): FleetPushMessage {
+/**
+ * A fleet push for one recipient: content-free, capability-free, and at most 3 KiB of JSON. The
+ * coordinator passes `remoteLabels` before sending, so a remote message must name a configured
+ * binding and carry exactly that source's label; the worker, which has no configuration, checks shape.
+ */
+export function parseFleetPushMessage(value: unknown, remoteLabels?: ReadonlyMap<string, string>): FleetPushMessage {
   const record = boundedRecord(value, MAX_FLEET_PUSH_BYTES);
   if (record.version !== FLEET_PUSH_VERSION) throw new ProtocolValidationError();
   const common = ["version", "type", "instanceId", "generation", "seq", "badge"];
@@ -1047,15 +1053,16 @@ export function parseFleetPushMessage(value: unknown): FleetPushMessage {
     seq: parseFleetSequence(record.seq),
     badge: parseFleetBadge(record.badge),
   } as const;
+  if (remoteLabels !== undefined && session.source !== undefined && !remoteLabels.has(session.source)) throw new ProtocolValidationError();
   if (record.type === "attention") {
     requireExactKeys(record, [...common, "requestId", "title"], ["source", "body"]);
     if (record.title !== "OMP session needs attention") throw new ProtocolValidationError();
-    return { ...session, type: "attention", requestId: requireRequestId(record.requestId), title: record.title, ...fleetBody(record, instanceId) };
+    return { ...session, type: "attention", requestId: requireRequestId(record.requestId), title: record.title, ...fleetBody(record, instanceId, remoteLabels) };
   }
   if (record.type === "activity_stop") {
     requireExactKeys(record, [...common, "title"], ["source", "body"]);
     if (record.title !== "OMP session activity stopped") throw new ProtocolValidationError();
-    return { ...session, type: "activity_stop", title: record.title, ...fleetBody(record, instanceId) };
+    return { ...session, type: "activity_stop", title: record.title, ...fleetBody(record, instanceId, remoteLabels) };
   }
   if (record.type === "clear") {
     requireExactKeys(record, [...common, "requestId"], ["source"]);
@@ -1096,14 +1103,23 @@ const FLEET_SOURCE_STATES: Readonly<Record<FleetSourceState, true>> = {
   unsupported: true,
 };
 
+/**
+ * Every state but `not_enrolled` names the owner's grant so any device can renew or revoke it
+ * (`unsupported` may have none); `current` and `stale` also carry the expiry learned from the feed.
+ */
 function parseFleetSourceStatus(value: unknown): FleetSourceStatus {
   const record = requireRecord(value);
   requireExactKeys(record, ["sourceId", "state", "selected"], ["grantId", "expiresAt"]);
   if (typeof record.state !== "string" || !Object.hasOwn(FLEET_SOURCE_STATES, record.state)) throw new ProtocolValidationError();
   if (typeof record.selected !== "boolean") throw new ProtocolValidationError();
+  const state = record.state as FleetSourceState;
+  const grantRequired = state !== "not_enrolled" && state !== "unsupported";
+  const expiryRequired = state === "current" || state === "stale";
+  if (state === "not_enrolled" && (record.grantId !== undefined || record.expiresAt !== undefined)) throw new ProtocolValidationError();
+  if ((grantRequired && record.grantId === undefined) || (expiryRequired && record.expiresAt === undefined)) throw new ProtocolValidationError();
   return {
     sourceId: parseFleetSourceId(record.sourceId),
-    state: record.state as FleetSourceState,
+    state,
     selected: record.selected,
     ...(record.grantId === undefined ? {} : { grantId: parseSessionCreationUuid(record.grantId) }),
     ...(record.expiresAt === undefined ? {} : { expiresAt: requireCanonicalDateTime(record.expiresAt) }),
