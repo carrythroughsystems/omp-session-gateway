@@ -32,6 +32,7 @@ import {
   resolveAndroidBrowserTarget,
   restoreAndroidRadios,
   wakeAndroidChrome,
+  ensureRelayReachable,
   waitForDevtoolsEndpoint,
 } from "./android-device.ts";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
@@ -730,6 +731,31 @@ describe("Android display bootstrap", () => {
       expect(stop).toBeGreaterThan(calls.findIndex(call => call === "shell dumpsys power"));
       expect(stop).toBeLessThan(start);
     } else expect(stop).toBe(-1);
+  });
+  test.each([
+    { name: "reachable at once", outcomes: [true], reconnects: 0, result: "clean" },
+    { name: "recovers without repair", outcomes: [false, false, true], reconnects: 0, result: "clean" },
+    { name: "recovers after one VPN reconnect", outcomes: [false, false, false, false, false, false, false, true], reconnects: 1, result: "repaired" },
+    { name: "stays unreachable", outcomes: Array.from({ length: 18 }, () => false), reconnects: 1, result: "failed" },
+  ])("the relay precondition repairs at most once and fails before the journey ($name)", async ({ outcomes, reconnects, result }) => {
+    let probes = 0, repaired = 0, pauses = 0;
+    const outcome = await ensureRelayReachable(
+      async () => {
+        const value = outcomes[probes] ?? false;
+        probes += 1;
+        // A failing probe transport counts as unreachable, never as a pass.
+        if (!value && probes === 2) throw new Error("SYNTHETIC_PROBE_TRANSPORT");
+        return value;
+      },
+      async () => { repaired += 1; },
+      async () => { pauses += 1; },
+    ).then(value => value.vpnReconnected ? "repaired" : "clean", (error: unknown) => (error as Error).message);
+    expect(repaired).toBe(reconnects);
+    if (result === "failed") {
+      expect(outcome).toBe("Pixel browser could not reach the collaboration relay, even after one VPN reconnect");
+      expect(probes).toBe(18);
+    } else expect(outcome).toBe(result);
+    expect(pauses).toBeLessThan(probes);
   });
 
   test("parses keyguard state and rejects missing state", () => {
