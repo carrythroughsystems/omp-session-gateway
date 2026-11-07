@@ -113,6 +113,86 @@ describe("tool renderers across supported OMP releases", () => {
     expect(html).toContain("1 done");
   });
 
+  test("renders legacy timeouts and empty message lists without losing the wait state", () => {
+    for (const name of ["wait", "irc"]) {
+      for (const waited of [null, []]) {
+        const html = render({
+          name, args: { op: "wait" },
+          result: { content: [], details: { op: "wait", waited } },
+        });
+        expect(html).toContain("← anyone");
+        expect(html).toContain(waited === null ? "timed out" : "No messages received.");
+        expect(html).not.toContain("all running jobs");
+        expect(html).not.toContain("tv-out-title");
+      }
+    }
+  });
+
+  test("keeps IRC sender order and duplicate-sender bodies for both host shapes", () => {
+    const first = { from: "Worker", body: "first body", replyTo: "prior" };
+    for (const waited of [first, [first, { from: "Reviewer", body: "second body" }, { from: "Worker", body: "third body" }]]) {
+      const html = render({ name: "irc", args: { op: "wait" }, result: { content: [], details: { waited } } });
+      expect(html).toContain("first body");
+      expect(html).toContain('<span class="tv-badge">reply</span>');
+      if (Array.isArray(waited)) {
+        expect(html).toContain("← Worker, Reviewer");
+        expect(html).toContain("3 messages");
+        expect(html.indexOf("first body")).toBeLessThan(html.indexOf("second body"));
+        expect(html.indexOf("second body")).toBeLessThan(html.indexOf("third body"));
+      }
+    }
+  });
+
+  test("falls back to plain wait errors and tolerates malformed or unfinished message results", () => {
+    for (const waited of [undefined, [{ from: 1, body: null }], "invalid"]) {
+      const html = render({
+        name: "wait", args: {}, result: {
+          isError: true, content: [{ type: "text", text: "fixed failure text" }], details: { waited },
+        },
+      });
+      expect(html).toContain("fixed failure text");
+    }
+    expect(render({ name: "wait", args: {}, running: true })).toContain("all running jobs");
+  });
+
+  test("prefers job intent and falls back to legacy command labels", () => {
+    for (const name of ["job", "wait", "await", "poll", "cancel_job"]) {
+      for (const intent of ["  Compile\nclient  ", "", "   ", undefined]) {
+        const html = render({
+          name, args: {}, result: { content: [], details: { jobs: [{
+            id: "build", type: "bash", status: "completed", label: "bun run build", intent,
+            durationMs: 25, resultText: "Built", errorText: "",
+          }] } },
+        });
+        expect(html).toContain(intent?.trim() ? "Compile client" : "bun run build");
+        if (intent?.trim()) expect(html).not.toContain("bun run build");
+        expect(html).toContain("Built");
+      }
+    }
+  });
+
+  test("keeps shell-trace strings and byte arrays on the safe text fallback", () => {
+    // The live bash view deliberately does not interpret details.trace or load omp-stats.
+    for (const value of ["<img src=x onerror=alert(1)>", [255, 0, 60, 62]]) {
+      const html = render({
+        name: "bash", args: { command: "printf output" },
+        result: { content: [{ type: "text", text: "safe output <script>bad()</script>" }], details: {
+          exitCode: 0, wallTimeMs: 25,
+          trace: { v: 1, seq: 1, t_ns: 1, script: "printf output", units: [{
+            line: 1, bytes: 1, source: value,
+            nodes: [{ k: "simple", lo: 0, hi: 1, state: "ok", argv: [value],
+              env: [[value, value]], redirs: [{ fd: 1, op: ">", target: value }] }],
+          }], diags: [{ code: "test", message: value }] },
+        } },
+      });
+      expect(html).toContain("printf output");
+      expect(html).toContain("safe output &lt;script&gt;bad()&lt;/script&gt;");
+      expect(html).not.toContain("<script>");
+      expect(html).not.toContain("onerror");
+      expect(html).not.toContain("255");
+    }
+  });
+
   // OMP 18.3.0 replaced these tools with `wait` and upstream unregistered them, but hosts on
   // the older releases the gateway supports still emit them.
   test("keeps rendering the hub-family tools that older supported hosts emit", () => {

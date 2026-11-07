@@ -23,7 +23,7 @@ setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const expectedRuntimeDependencies = [
-  "@oh-my-pi/pi-wire@18.12.6",
+  "@oh-my-pi/pi-wire@18.18.0",
   "agent-base@7.1.4",
   "asn1.js@5.4.1",
   "bn.js@4.12.5",
@@ -138,13 +138,13 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
   expect(document.packages.map(pkg => `${pkg.name}@${pkg.versionInfo}`)).toEqual([
     `omp-session-gateway@${PRODUCT_VERSION}`,
     "@oh-my-pi/collab-web@16.3.6",
-    "@oh-my-pi/pi-utils (vendored Markdown sources)@18.12.6",
+    "@oh-my-pi/pi-utils (vendored pure helpers)@18.18.0",
     "Symbols Nerd Font Mono@v3.5.1",
     ...expectedRuntimeDependencies,
   ]);
   expect(document.packages[0]?.sourceInfo).toContain(lockSha256);
   expect(document.packages.find(pkg => pkg.name === "@oh-my-pi/collab-web")?.sourceInfo).toContain(client.commit);
-  const parser = document.packages.find(pkg => pkg.name === "@oh-my-pi/pi-utils (vendored Markdown sources)");
+  const parser = document.packages.find(pkg => pkg.name === "@oh-my-pi/pi-utils (vendored pure helpers)");
   expect(parser?.sourceInfo).toContain(client.commit);
   expect(client.additionalSources.map(source => source.sourcePath)).toEqual([
     "packages/utils/src/marked.ts",
@@ -153,6 +153,7 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
     "packages/utils/src/marked/inline-text.ts",
     "packages/utils/src/marked-list.ts",
     "packages/utils/src/math-delimiters.ts",
+    "packages/utils/src/bytes.ts",
   ]);
   for (const source of client.additionalSources) expect(parser?.sourceInfo).toContain(source.sourcePath);
   expect(document.packages.find(pkg => pkg.name === "lucide-react")?.licenseDeclared).toBe("ISC");

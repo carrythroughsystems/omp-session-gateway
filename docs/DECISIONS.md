@@ -962,7 +962,7 @@ Upstream
 [`packages/wire/src/shell-trace.ts`](https://github.com/can1357/oh-my-pi/blob/b5a6b2f7e5b6606b6562e678ead83f21738f34a0/packages/wire/src/shell-trace.ts)
 now accepts `ShellTraceBytes = string | number[]` for non-UTF-8 run bytes in bash
 `details.trace`: argv, assignments, redirection targets, unit source, and diagnostics/history.
-The current embedded v18.12.6 client neither imports the shell-trace validator nor renders the
+The embedded client neither consumes the shell-trace validator nor renders the
 trace; it preserves arrays through the unchanged JSON/AES codec and retains its bash command,
 text, images, and status badges. The residual gap is shell visualization, a presentation-only
 limitation rather than an observed transport failure. Bash results additionally stamp
@@ -971,8 +971,14 @@ write results can add `details.touchesNoFiles`. The current client ignores these
 details and still displays the original bash command, including any leading `cd`.
 The upstream codec now uses the pure `asStrictBytes` helper instead of its local `asStrict`;
 their whole-buffer fast path and copy fallback are equivalent. No codec runtime incompatibility
-was found. Keep the embedded source and npm wire pin at v18.12.6 in this host-only change;
-the independent client refresh owns source/helper adoption.
+was found. The host-only update retained v18.12.6 client provenance; the independent client
+refresh now advances the embedded source and exact npm wire pin to v18.18.0. It adopts shared
+wire envelopes, seven exact pure helpers (including `bytes.ts`), job-intent labels, upstream wait
+lists with older-singleton/null/empty adaptation, and exact-width Markdown code spans. Gateway
+embedding, View guards, Ask/photo/speech drafts, bounded recovery and transcript anchoring remain
+local adaptations. Active and retired patches have named regression proofs in `UPSTREAM.json`;
+offline export/trace entrypoints and `omp-stats` remain outside the live bundle. This changes
+source provenance, not the host minimum or published qualification claims.
 
 Exact-version canary run
 [42337262675](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42337262675)

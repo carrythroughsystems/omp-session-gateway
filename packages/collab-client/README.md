@@ -1,15 +1,15 @@
 # `packages/collab-client`
 
-Pinned integration of OMP's existing `packages/collab-web` source at tag `v18.12.6`, commit
-`45c35e40c46166dc726ccc52f5d27f40f2449f99`. The upstream collab package remains version
-`16.3.6`; `@oh-my-pi/pi-wire` is pinned exactly to `18.12.6`. The collaboration protocol and
+Pinned integration of OMP's existing `packages/collab-web` source at tag `v18.18.0`, commit
+`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`. The upstream collab package remains version
+`16.3.6`; `@oh-my-pi/pi-wire` is pinned exactly to `18.18.0`. The collaboration protocol and
 relay framing are unchanged; the wire barrel's unrelated TSP runtime is not bundled.
 
 These are browser-client provenance pins, independent of both the minimum supported OMP host
-version (`>= 18.1.20`) and the root `UPSTREAM.lock.json` engineering host baseline (`v18.12.5`).
+version (`>= 18.1.20`) and the root `UPSTREAM.lock.json` engineering host baseline.
 The gateway consumes the native registry and controller in stock OMP `>= 18.1.20` without a fork,
 custom OMP build, or gateway-specific OMP plugin, while this package pins the embedded browser
-client at `v18.12.6`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
+client at `v18.18.0`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
 deployment scope.
 
 The local patch passes the capability directly into the root `App` component. The installed PWA
@@ -43,7 +43,20 @@ updates only the ordinary composer text: never Ask input, never a prompt submiss
 an overwrite. Reconnects, Ask transitions, clearing the draft, and rerenders do not seed again.
 The shell binds and clears its holder on disposal; no draft enters storage or gateway requests.
 
-The 18.12.6 refresh brings upstream render coalescing and streaming-tail Markdown parsing
+The 18.18.0 refresh adopts pi-wire's shared envelope functions, the pure byte-buffer helper,
+upstream wait-list rendering with a small older-singleton/timeout/empty adapter, job-intent labels
+with command fallback, and exact-width Markdown code-span closers. The live bash view deliberately
+renders command/output text without interpreting shell-trace string or byte-array fields.
+App, Composer, Transcript, client and socket retain their gateway adaptations; their upstream
+sources did not change between these pins.
+
+This is a live-runtime selection, not a copy of the whole upstream package. `embed.ts` remains
+the only production client entry. `UPSTREAM.json.excludedEntrypoints` records standalone bootstrap,
+HTML export/trace entrypoints and artwork exclusions with reasons. The retained upstream
+`tool-render/standalone.tsx` is not bundled; export-only `omp-stats`, pi-utils and pi-natives are
+not installed. A production-bundle input test enforces this boundary.
+
+The preceding 18.12.6 refresh brought upstream render coalescing and streaming-tail Markdown parsing
 ([#14728](https://github.com/can1357/oh-my-pi/pull/14728)), linear-time Markdown/math lexing
 ([#13961](https://github.com/can1357/oh-my-pi/pull/13961),
 [#14667](https://github.com/can1357/oh-my-pi/pull/14667)), idle agent-drawer polling shutdown,
@@ -67,8 +80,8 @@ transcript remains independent. The `wait` renderer and the retained hub-family 
 (`hub`, `irc`, `job`, `await`, `poll`, `cancel_job`) support older host releases.
 
 LaTeX delimiters render through KaTeX `0.18.5` as native MathML with `trust: false`; no KaTeX
-stylesheet, font URL, or remote asset is emitted. The browser bundle vendors the six pure
-TypeScript marked-fork, list-continuation, and math-grammar sources from pi-utils `18.12.6`,
+stylesheet, font URL, or remote asset is emitted. The browser bundle vendors the seven pure
+TypeScript marked-fork, list-continuation, math-grammar and byte-buffer sources from pi-utils `18.18.0`,
 including its source-context and `startFrom` hooks. This replaces npm `marked` without installing
 pi-utils or pi-natives. Original Marked/Markdown and fork licences are retained in
 `licenses/pi-utils-marked/LICENSE`. Rejected currency openers and half-streamed delimiters keep
@@ -103,6 +116,13 @@ Generation, Ask identity, destination, liveness, pending-response, and page life
 the recording. No audio is persisted or sent to the gateway; browser support is feature-detected,
 not a claim of physical-device qualification or on-device recognition.
 
-`upstream/UPSTREAM.json` records the exact source paths, package versions, Bun `1.4.0`, and local patch list.
+`upstream/UPSTREAM.json` schema version 1 records exact source paths, versions, commits and helper
+Git blob hashes with Bun `1.4.4`. `localPatches.active` and `localPatches.retired` contain records
+with stable `id`, `purpose`, `files`, `proof`, `upstreamStatus` and `removeWhen` fields. Patch
+`files` and additional-source `vendoredPath` are relative to `upstream/`; each proof names a
+repository-relative test `file` and its literal `case` title (or parameterized title template).
+`excludedEntrypoints` paths are relative to the upstream `sourcePath`, with `vendored` distinguishing
+retained-but-unbundled files from omitted files. `test/vendor-provenance.test.ts` checks helper
+bytes, proof references and the live bundle graph without fetching upstream or installing helpers.
 `upstream/LICENSE` preserves the upstream license. The build remains a narrow integration; it does not fork the
 collaboration protocol or transcript UI.

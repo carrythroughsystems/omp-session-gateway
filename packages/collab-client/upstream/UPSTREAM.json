@@ -1,88 +1,632 @@
 {
   "repository": "https://github.com/can1357/oh-my-pi",
-  "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
-  "tag": "v18.12.6",
+  "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+  "tag": "v18.18.0",
   "package": "@oh-my-pi/collab-web",
   "packageVersion": "16.3.6",
   "sourcePath": "packages/collab-web",
+  "observedAt": "2026-11-06",
+  "bunVersion": "1.4.4",
+  "schemaVersion": 1,
   "additionalSources": [
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.12.6",
-      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "packageVersion": "18.18.0",
+      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
       "sourcePath": "packages/utils/src/marked.ts",
-      "vendoredPath": "src/vendor/pi-utils/marked.ts"
+      "vendoredPath": "src/vendor/pi-utils/marked.ts",
+      "blob": "75369d2cdb83f360ade03cafa325858ef631bce6"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.12.6",
-      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "packageVersion": "18.18.0",
+      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
       "sourcePath": "packages/utils/src/marked/core.ts",
-      "vendoredPath": "src/vendor/pi-utils/marked/core.ts"
+      "vendoredPath": "src/vendor/pi-utils/marked/core.ts",
+      "blob": "074f73c1bce275c2c8ec7ec6af35640dc0c18da5"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.12.6",
-      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "packageVersion": "18.18.0",
+      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
       "sourcePath": "packages/utils/src/marked/inline-closers.ts",
-      "vendoredPath": "src/vendor/pi-utils/marked/inline-closers.ts"
+      "vendoredPath": "src/vendor/pi-utils/marked/inline-closers.ts",
+      "blob": "020cb64caebfa52630e33082653c607b3ecdea45"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.12.6",
-      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "packageVersion": "18.18.0",
+      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
       "sourcePath": "packages/utils/src/marked/inline-text.ts",
-      "vendoredPath": "src/vendor/pi-utils/marked/inline-text.ts"
+      "vendoredPath": "src/vendor/pi-utils/marked/inline-text.ts",
+      "blob": "f2072e9036048ef86d479cf2336336e7f893329b"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.12.6",
-      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "packageVersion": "18.18.0",
+      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
       "sourcePath": "packages/utils/src/marked-list.ts",
-      "vendoredPath": "src/vendor/pi-utils/marked-list.ts"
+      "vendoredPath": "src/vendor/pi-utils/marked-list.ts",
+      "blob": "f7fd8fb4ab5147576345f9427f9b8c05c4bf7fd0"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.12.6",
-      "commit": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+      "packageVersion": "18.18.0",
+      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
       "sourcePath": "packages/utils/src/math-delimiters.ts",
-      "vendoredPath": "src/vendor/pi-utils/math-delimiters.ts"
+      "vendoredPath": "src/vendor/pi-utils/math-delimiters.ts",
+      "blob": "dd0dcbb7fe62d1159f51150bc2d3fdad2ed8bc4f"
+    },
+    {
+      "package": "@oh-my-pi/pi-utils",
+      "sourcePath": "packages/utils/src/bytes.ts",
+      "vendoredPath": "src/vendor/pi-utils/bytes.ts",
+      "packageVersion": "18.18.0",
+      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+      "blob": "2e003975f10be65ceed83e73b5999ce6ba0160b0"
     }
   ],
-  "observedAt": "2026-10-24",
-  "bunVersion": "1.4.0",
-  "localPatches": [
-    "Validate Markdown link schemes through the browser URL parser; decode href entities and normalize scheme whitespace expanded from source tabs by the fork, preserving one-shot and streaming rejection of obfuscated unsafe schemes",
-    "Direct in-memory App capability prop; no capability URL/hash writes",
-    "Installed-PWA same-document mount through a reusable in-memory bootstrap",
-    "Return to the gateway directory on leave or reload",
-    "Force a fresh relay transport after mobile foreground and online transitions",
-    "Recover established guests across bounded relay room replacement instead of adopting upstream's unbounded guest room-recovery retry; retain hello-gated generation-bound send queues and per-attempt connection deadlines",
-    "Keep the hub renderer and re-register upstream irc/job plus await, poll, and cancel_job aliases, because older supported OMP releases still emit those tools",
-    "Use a metadata-free same-origin gateway health probe to replace relay transport once after an observed outage recovers; retain relay health ping/pong frames, codec object sealing, pending-response acknowledgements, and welcome timer extraction",
-    "Preserve strict exact-optional typing for view links without a write token and optional agent-command text or tool intent",
-    "Redact invalid capability input from collaboration-link errors",
-    "Correlate active Ask requests with explicit tool-call recommendation metadata",
-    "Embed under gateway chrome without a competing client header, rail, or lifecycle overlay, retaining the gateway primary-action palette",
-    "Present an embedded active Ask in the client's sole composer without a duplicate transcript card, keeping the transcript and composer at one tree position so an Ask starting or ending never remounts them (drafts, photos, and the Show earlier window survive)",
-    "Capture, metadata-strip, bound, preview, and send phone photos through the existing encrypted image-prompt frame",
-    "Offer separate rear-camera capture and existing-photo inputs behind one accessible Photo source panel",
-    "Reject oversized decoded image dimensions before browser decode and use CSP-compatible data previews",
-    "Retain photo drafts until the host transcript acknowledges delivery and expose bounded retry",
-    "Enforce view-link read-only state inside every mutating guest-client method",
-    "Capture active composer pointers so status-row layout changes cannot cancel mobile actions",
-    "Superseded npm marked adapter: vendor the pure-JavaScript pi-utils marked fork from v18.12.6 for source-context and startFrom hooks; do not install pi-utils or pi-natives; remove the replaced npm marked dependency",
-    "Vendor exact v18.12.6 pure math delimiter, marked-list, and marked fork sources without adding pi-utils or its native dependency closure",
-    "Retired source adapter: upstream-provided since v18.3.0, LaTeX renders as CSP-safe native MathML with trust:false and no KaTeX stylesheet or font assets; retain regression tests",
-    "Retired npm-parser adapter: rejected-currency and half-streamed delimiter semantics are upstream-provided by the v18.12.6 marked fork and math grammar; retain explicit one-shot and chunked-stream regression tests",
-    "Force the transcript to its tail once per initial or recovered live transition without discarding windowing; publish a monotonic liveEpoch so coalesced React renders cannot lose a transition",
-    "Retain explicit Show earlier expansion, oldest-entry ID anchoring, and full-history tool-result pairing because gateway tests encode phone reading behavior across live appends and reconnects; combine upstream row-based prepend anchoring",
-    "Exclude OMP's pi artwork: omit OmpMark.tsx and its HeaderBar/ConnectScreen imports and rendering",
-    "Provide keyboard-dictation guidance and opt-in bounded browser speech for live Control drafts, with destination-bound cancellation and explicit review, Use text, and Send separation",
-    "Probe the launching gateway through an injected selected-source callback and treat a readable authorization loss as terminal for automatic recovery, allowing a fresh probe only on foreground, pageshow, or online transitions",
-    "Publish snapshot loading counters only through the embed contract so the gateway's sole connection chip can distinguish joining from reconnecting without exposing transcript content or adding a second client banner",
-    "Drain an optional memory-only first-task draft into the ordinary composer once, only in live writable Control with healthy relay, no active Ask and no existing text or photo draft/pending send; never submit or reseed on reconnect",
-    "Draw Nerd Font Private Use Area glyphs in transcript text through the gateway's self-hosted symbol face; the client itself loads no fonts",
-    "Render OMP 18.17.0 wait results whose waited is a message list (upstream adcb8800b6) while still accepting the single message older supported hosts send"
-  ]
+  "excludedEntrypoints": [
+    {
+      "sourcePath": "src/main.tsx",
+      "vendored": false,
+      "reason": "Standalone URL/hash bootstrap is replaced by the gateway memory-only embed.ts entrypoint."
+    },
+    {
+      "sourcePath": "src/export-standalone.ts",
+      "vendored": false,
+      "reason": "Offline HTML export viewer; not a live collaboration entrypoint."
+    },
+    {
+      "sourcePath": "src/export-markdown-bridge.ts",
+      "vendored": false,
+      "reason": "Offline viewer depends on a preloaded global parser; live client uses its vendored parser."
+    },
+    {
+      "sourcePath": "src/trace-render/standalone.tsx",
+      "vendored": false,
+      "reason": "Offline trace custom element imports omp-stats; the live bash renderer keeps its text fallback."
+    },
+    {
+      "sourcePath": "src/tool-render/standalone.tsx",
+      "vendored": true,
+      "reason": "Retained upstream source only; custom-element export registration is not imported by embed.ts."
+    },
+    {
+      "sourcePath": "scripts/build-export-viewer.ts",
+      "vendored": false,
+      "reason": "Builds hosted offline exports and pulls coding-agent assets; gateway build uses embed.ts only."
+    },
+    {
+      "sourcePath": "src/components/shell/OmpMark.tsx",
+      "vendored": false,
+      "reason": "OMP artwork is excluded by gateway policy."
+    }
+  ],
+  "localPatches": {
+    "active": [
+      {
+        "id": "safe-markdown-links",
+        "purpose": "Reject unsafe schemes after href entity decoding, source-tab normalization and browser URL parsing in settled and streaming Markdown.",
+        "files": [
+          "src/components/transcript/Markdown.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "sanitizes obfuscated javascript links in both frozen blocks and streaming tails"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream applies the same URL allowlist to both settled and streaming links."
+      },
+      {
+        "id": "memory-only-embed",
+        "purpose": "Bootstrap the same PWA document in memory, never write capability URLs/storage, and return to the directory on leave or reload.",
+        "files": [
+          "src/app.tsx",
+          "src/embed.ts",
+          "src/embed-contract.ts"
+        ],
+        "proof": [
+          {
+            "file": "apps/web/e2e/launch.e2e.ts",
+            "case": "installed-PWA View and Control mount in the current window without losing the handoff"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream supports the same in-memory embed and leave contract."
+      },
+      {
+        "id": "foreground-recovery",
+        "purpose": "Measure gateway and relay health after foreground, pageshow, online and network changes; recover stale transports without reusing stale sends.",
+        "files": [
+          "src/lib/browser-recovery.ts",
+          "src/lib/client.ts",
+          "src/lib/socket.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/browser-recovery.test.ts",
+            "case": "uses a connection change only to trigger gateway and relay measurements"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "emits a fresh hello before queued frames and drops stale queued sends"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream provides bounded lifecycle recovery with generation-bound, hello-gated queues."
+      },
+      {
+        "id": "bounded-room-recovery",
+        "purpose": "Bound established relay-room replacement recovery to six retries and retain per-attempt handshake deadlines.",
+        "files": [
+          "src/lib/client.ts",
+          "src/lib/socket.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "ends room recovery after six exponential retries"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "times out a blackholed replacement handshake and continues jittered retry"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream bounds recovery and preserves terminal initial-room failures."
+      },
+      {
+        "id": "legacy-tool-registry",
+        "purpose": "Retain hub, irc, job, await, poll and cancel_job renderers emitted by older supported hosts.",
+        "files": [
+          "src/tool-render/registry.ts",
+          "src/tool-render/tools/hub.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "keeps rendering the hub-family tools that older supported hosts emit"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Minimum supported host no longer emits these names."
+      },
+      {
+        "id": "health-and-response-ack",
+        "purpose": "Retain metadata-free gateway probes, encrypted health frames, object sealing, pending UI-response acknowledgements and welcome timer extraction.",
+        "files": [
+          "src/lib/browser-recovery.ts",
+          "src/lib/client.ts",
+          "src/lib/socket.ts",
+          "src/lib/codec.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "detects two silent end-to-end relay probe failures"
+          },
+          {
+            "file": "packages/collab-client/test/codec.test.ts",
+            "case": "round-trips offset encrypted health and acknowledgement frames"
+          },
+          {
+            "file": "apps/web/e2e/launch.e2e.ts",
+            "case": "embedded active ask matches the original 3d shell interaction"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream supplies the same health and acknowledged-response contract."
+      },
+      {
+        "id": "exact-optional-fields",
+        "purpose": "Omit absent View write tokens and optional agent-command text/tool intent under exactOptionalPropertyTypes.",
+        "files": [
+          "src/lib/link.ts",
+          "src/lib/client.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/codec.test.ts",
+            "case": "omits writeToken for View and preserves it for Control"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "drops every mutating frame after a read-only welcome"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream typechecks under the gateway exact-optional configuration."
+      },
+      {
+        "id": "redacted-link-errors",
+        "purpose": "Never reflect malformed capability input in parser errors.",
+        "files": [
+          "src/lib/link.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "never reflects a malformed capability in parser errors"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream errors no longer include capability input."
+      },
+      {
+        "id": "ask-recommendations",
+        "purpose": "Correlate explicit tool-call recommendation metadata with the active Ask.",
+        "files": [
+          "src/components/shell/ask-recommendation.ts",
+          "src/app.tsx",
+          "src/components/shell/Composer.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/composer.test.ts",
+            "case": "finds an explicit recommendation on the matching active option"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream exposes equivalent recommendation metadata in the active composer."
+      },
+      {
+        "id": "single-composer-embed",
+        "purpose": "Keep gateway chrome and primary actions, one Ask-aware composer and a stable transcript/composer tree across Ask transitions.",
+        "files": [
+          "src/app.tsx",
+          "src/components/shell/Composer.tsx",
+          "src/components/shell/shell.css"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/transcript.test.ts",
+            "case": "keeps the published transcript mounted across loading and reconnect without competing chrome"
+          },
+          {
+            "file": "apps/web/e2e/client-refresh.e2e.ts",
+            "case": "client refresh ${mode} at ${viewport.width}x${viewport.height}"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream embedding preserves ordinary drafts, photos, scroll and Show earlier across Ask transitions."
+      },
+      {
+        "id": "bounded-phone-photos",
+        "purpose": "Capture/choose, metadata-strip, bound and preview encrypted image prompts; reject oversized dimensions before decode and retain drafts until transcript acknowledgement with bounded retry.",
+        "files": [
+          "src/components/shell/Composer.tsx",
+          "src/components/shell/shell.css",
+          "src/lib/photo-attachment.ts",
+          "src/lib/client.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/photo-attachment.test.ts",
+            "case": "rejects every accepted format above the source edge bound"
+          },
+          {
+            "file": "packages/collab-client/test/composer.test.ts",
+            "case": "requires an exact matching entry after the baseline"
+          },
+          {
+            "file": "packages/collab-client/test/transcript.test.ts",
+            "case": "routes explicit camera and library choices to separate inputs"
+          },
+          {
+            "file": "apps/web/e2e/launch.e2e.ts",
+            "case": "embedded active ask matches the original 3d shell interaction"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream provides the same bounded phone-photo flow and acknowledgement/retry semantics."
+      },
+      {
+        "id": "read-only-mutations",
+        "purpose": "Enforce View guards inside every mutating guest method, including image, Ask and agent commands.",
+        "files": [
+          "src/lib/client.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "drops every mutating frame after a read-only welcome"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream enforces read-only state at every mutation entrypoint."
+      },
+      {
+        "id": "mobile-pointer-capture",
+        "purpose": "Capture active composer pointers so a changing status row cannot cancel a mobile action.",
+        "files": [
+          "src/components/shell/Composer.tsx"
+        ],
+        "proof": [
+          {
+            "file": "apps/web/e2e/launch.e2e.ts",
+            "case": "embedded active ask matches the original 3d shell interaction"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream handles layout changes during active mobile pointers."
+      },
+      {
+        "id": "pure-helper-imports",
+        "purpose": "Use seven exact pure pi-utils helper files instead of installing pi-utils or pi-natives.",
+        "files": [
+          "src/lib/codec.ts",
+          "src/components/transcript/Markdown.tsx",
+          "src/components/transcript/math.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/vendor-provenance.test.ts",
+            "case": "matches every pure helper to its recorded upstream blob"
+          },
+          {
+            "file": "packages/collab-client/test/vendor-provenance.test.ts",
+            "case": "keeps export, trace, native and artwork entrypoints outside the live bundle"
+          }
+        ],
+        "upstreamStatus": "upstream source copied exactly; only consumer import paths are local",
+        "removeWhen": "Upstream publishes a browser-only helper package without the native closure."
+      },
+      {
+        "id": "live-tail-epoch",
+        "purpose": "Return the main transcript to its tail once per initial/recovered live transition without losing expanded history; use monotonic epochs across coalesced renders.",
+        "files": [
+          "src/app.tsx",
+          "src/lib/client.ts",
+          "src/components/transcript/Transcript.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/transcript.test.ts",
+            "case": "returns to tail once when reconnect and live are batched before the first coalesced observer"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream preserves this edge across coalesced renders and explicit history expansion."
+      },
+      {
+        "id": "anchored-earlier-history",
+        "purpose": "Keep explicit 150/300 Show earlier expansion, oldest-entry anchors and full-history tool pairing across live appends and reconnects.",
+        "files": [
+          "src/components/transcript/Transcript.tsx",
+          "src/components/transcript/transcript.css"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/transcript.test.ts",
+            "case": "holds the reader's anchor when a tap mounts older rows above them"
+          },
+          {
+            "file": "packages/collab-client/test/transcript.test.ts",
+            "case": "pairs a windowed assistant row with a tool result held outside the window"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream offers the same explicit phone reading-window behavior."
+      },
+      {
+        "id": "no-omp-artwork",
+        "purpose": "Exclude OmpMark and remove HeaderBar/ConnectScreen artwork imports and rendering.",
+        "files": [
+          "src/components/shell/HeaderBar.tsx",
+          "src/components/shell/ConnectScreen.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/vendor-provenance.test.ts",
+            "case": "keeps export, trace, native and artwork entrypoints outside the live bundle"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream supports an artwork-free embed without source adaptations."
+      },
+      {
+        "id": "reviewed-browser-speech",
+        "purpose": "Keep keyboard guidance and opt-in bounded Control speech, destination-bound cancellation and separate review, Use text and Send.",
+        "files": [
+          "src/components/shell/Composer.tsx",
+          "src/components/shell/SpeechInput.tsx",
+          "src/components/shell/shell.css",
+          "src/lib/speech-recognition.ts",
+          "src/app.tsx",
+          "src/embed-contract.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/speech-input.test.ts",
+            "case": "Use text inserts at current selection without sending and requires a separate Send"
+          },
+          {
+            "file": "packages/collab-client/test/speech-recognition.test.ts",
+            "case": "absolute two-minute capture limit stops; five-second finalization aborts and retains text"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream provides equivalent opt-in bounds and explicit review/send semantics."
+      },
+      {
+        "id": "selected-source-authorization",
+        "purpose": "Probe the launching source through the injected callback; readable authorization loss stops automatic recovery until an explicit lifecycle transition.",
+        "files": [
+          "src/lib/browser-recovery.ts",
+          "src/app.tsx",
+          "src/embed-contract.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/browser-recovery.test.ts",
+            "case": "stops forbidden recovery until a visible, pageshow, or online transition probes once"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream supports selected-source probing and the same terminal authorization behavior."
+      },
+      {
+        "id": "metadata-only-embed-loading",
+        "purpose": "Publish only snapshot loading counters to the gateway connection chip, not transcript contents or duplicate banners.",
+        "files": [
+          "src/app.tsx",
+          "src/embed-contract.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/embed.test.ts",
+            "case": "publishes only snapshot counters across join, completion, reconnect and disposal"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream exposes the same metadata-only embed state."
+      },
+      {
+        "id": "first-task-draft",
+        "purpose": "Consume a memory-only initial draft once into healthy writable Control, only without an Ask or existing text/photo/pending send; never auto-send or reseed.",
+        "files": [
+          "src/components/shell/Composer.tsx",
+          "src/app.tsx",
+          "src/embed-contract.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/initial-prompt-draft.test.ts",
+            "case": "drains once without submitting, including strict effects, reconnects, Ask transitions and clearing"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream supplies the same one-shot, no-auto-send draft handoff."
+      },
+      {
+        "id": "self-hosted-symbol-fallback",
+        "purpose": "Use the gateway PUA-only Nerd Font face in both transcript text stacks without client font loading.",
+        "files": [
+          "src/styles/tokens.css"
+        ],
+        "proof": [
+          {
+            "file": "apps/web/e2e/client-refresh.e2e.ts",
+            "case": "client refresh ${mode} at ${viewport.width}x${viewport.height}"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream supports the gateway-provided symbol fallback."
+      },
+      {
+        "id": "legacy-wait-adapter",
+        "purpose": "Keep upstream list rendering with a small singleton adapter; distinguish null timeouts, empty lists and job results.",
+        "files": [
+          "src/tool-render/tools/irc.tsx",
+          "src/tool-render/tools/wait.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "renders a received wait message without falling back to JSON"
+          },
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "renders legacy timeouts and empty message lists without losing the wait state"
+          }
+        ],
+        "upstreamStatus": "list rendering upstream-provided since v18.17.0; older-host and empty-result adaptation remains local",
+        "removeWhen": "Minimum supported host no longer emits singleton/null results and upstream renders empty lists explicitly."
+      }
+    ],
+    "retired": [
+      {
+        "id": "npm-marked-adapter",
+        "purpose": "Retire npm marked and its source-context adapter; use the upstream pure parser fork.",
+        "files": [
+          "src/components/transcript/Markdown.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "freezes settled blocks so each update re-parses only the tail"
+          }
+        ],
+        "upstreamStatus": "replaced in the v18.12.6 client refresh",
+        "removeWhen": "Already removed; retain regression proof during future refreshes."
+      },
+      {
+        "id": "local-mathml-adapter",
+        "purpose": "Retire the locally invented MathML adapter while retaining CSP-safe native MathML and trust:false proofs.",
+        "files": [
+          "src/components/transcript/math.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "emits CSP-compatible MathML rather than font-dependent KaTeX HTML"
+          },
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "does not trust URL-producing TeX commands"
+          }
+        ],
+        "upstreamStatus": "upstream-provided since v18.3.0",
+        "removeWhen": "Already removed; retain regression proof during future refreshes."
+      },
+      {
+        "id": "npm-delimiter-adapter",
+        "purpose": "Retire npm-parser currency and half-streamed delimiter adaptation.",
+        "files": [
+          "src/components/transcript/Markdown.tsx",
+          "src/components/transcript/math.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "matches the TUI by not typesetting a span behind a rejected dollar opener"
+          },
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "keeps a half-streamed display opener whole instead of re-opening its second dollar"
+          }
+        ],
+        "upstreamStatus": "upstream-provided by the v18.12.6 marked fork",
+        "removeWhen": "Already removed; retain regression proof during future refreshes."
+      },
+      {
+        "id": "wait-list-backport",
+        "purpose": "Retire the v18.17 wait-list backport as local implementation; retain upstream list rendering and the separate legacy-wait-adapter.",
+        "files": [
+          "src/tool-render/tools/irc.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "renders every OMP 18.17.0 wait message with its senders and bodies"
+          }
+        ],
+        "upstreamStatus": "adcb8800b6 is included in the v18.18.0 source pin",
+        "removeWhen": "Already removed; retain regression proof during future refreshes."
+      },
+      {
+        "id": "duplicate-envelope-and-bytes",
+        "purpose": "Remove local envelope implementations and codec asStrict; use pi-wire exports and the exact vendored bytes helper.",
+        "files": [
+          "src/lib/link.ts",
+          "src/lib/codec.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/codec.test.ts",
+            "case": "reuses shared envelope functions and preserves offset payload views"
+          },
+          {
+            "file": "packages/collab-client/test/codec.test.ts",
+            "case": "copies sliced and shared buffers but reuses whole ArrayBuffers"
+          }
+        ],
+        "upstreamStatus": "shared pi-wire and pi-utils implementations included in v18.18.0",
+        "removeWhen": "Already removed; retain regression proof during future refreshes."
+      }
+    ]
+  }
 }
