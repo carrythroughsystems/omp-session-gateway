@@ -16,6 +16,7 @@ import { everyError, pixelUnrestored } from "./restoration.ts";
 import { FAILURE_LIMITS, PUSH_BROWSER_STEPS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
 import type { QualificationLogWindow, PushDeliveryTelemetry } from "./qualification-logs.ts";
 import { parsePixelBaseline, type PixelBaseline } from "./android-device.ts";
+import { runFleetPushPhases, FLEET_PUSH_PHASES, FLEET_PUSH_RESULT_FIELDS, type FleetPushRuntime } from "./android-push-fleet.ts";
 
 export interface PushExecution { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
 export interface PushDeliveryMetrics {
@@ -203,9 +204,9 @@ export interface PushTapObservation {
   readonly writable: boolean; readonly readOnly: boolean; readonly expired: boolean;
 }
 export type PushNetwork = "wifi" | "cellular" | "airplane";
-export type PushCleanupStep = "fixtureAsk" | "notifications" | "browser" | "doze" | "network" | "task" | "fixture";
+export type PushCleanupStep = "fixtureAsk" | "notifications" | "browser" | "doze" | "network" | "task" | "fixture" | "fleet";
 /** The lane owns two disposable hosts; the secondary exists only for the queue-order and expiry checks. */
-export type PushFixtureRole = "primary" | "secondary";
+export type PushFixtureRole = "primary" | "secondary" | "remote";
 /** One device-local triage control in the installed app. `settleMs` keeps observing before the read. */
 export type TriageAction =
   | { readonly kind: "hold" | "requeue" | "hide"; readonly instanceId: string; readonly settleMs?: number }
@@ -219,6 +220,7 @@ export interface TriageObservation {
   readonly mutations: number;
 }
 export interface AndroidPushRuntime {
+  readonly fleet: FleetPushRuntime;
   now(): number;
   pause(milliseconds: number): Promise<void>;
   beforeEffect: () => Promise<void>;
@@ -280,6 +282,7 @@ const PUSH_RECOVERY_MS = 160_000;
 
 export const ANDROID_PUSH_PHASES = ["baseline_captured", "subscription_ready", "private_verified", "session_verified", "preview_verified",
   "attention_tap_verified", "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified",
+  ...FLEET_PUSH_PHASES,
   "force_stop_verified", "permission_verified", "lock_resume_verified", "network_verified", "doze_verified", "forbidden_sinks_verified",
   "evidence_complete", "restored"] as const;
 export type AndroidPushPhase = (typeof ANDROID_PUSH_PHASES)[number];
@@ -289,6 +292,9 @@ export interface AndroidPushProgress extends Record<string, unknown> {
   notificationTopicDigest: string | null;
   /** The secondary host's topic, for cleanup of an interrupted triage or expiry check. */
   secondaryNotificationTopicDigest: string | null;
+  /** Persisted before the first fleet host mutation; false only after its restoration. */
+  fleetPrepared?: boolean;
+  remoteNotificationTopicDigest?: string | null;
   results: Record<string, Record<string, boolean | number | string | number[]>>;
   /** Read after a complete restoration in the same Pixel lease turn: settlement proof only. */
   pixelBaseline?: PixelBaseline;
@@ -301,9 +307,10 @@ interface LaneInput {
   readonly execution?: PushExecution;
 }
 const PROGRESS_KEYS = "binding,browser,cleanupRequired,device,epoch,lane,notificationTopicDigest,phase,results,secondaryNotificationTopicDigest";
-const CLEANUP_STEPS: readonly PushCleanupStep[] = ["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"];
+const CLEANUP_STEPS: readonly PushCleanupStep[] = ["fixtureAsk", "doze", "network", "fleet", "fixture", "notifications", "browser", "task"];
 const DELIVERY_FIELDS = Object.keys(emptyPushDeliveryMetrics()).filter(key => key !== "deliveryTimings");
 const RESULT_FIELDS: Partial<Record<AndroidPushPhase, readonly string[]>> = {
+  ...FLEET_PUSH_RESULT_FIELDS,
   subscription_ready: ["enabled"],
   private_verified: ["delivered", "locked", "singleNotification", "detailMatched", "elapsedMs"],
   session_verified: ["delivered", "locked", "singleNotification", "detailMatched", "elapsedMs"],
@@ -340,7 +347,7 @@ export function parseAndroidPushProgress(value: unknown): AndroidPushProgress {
   const keys = Object.keys(p).sort().join(",");
   // Progress written before the secondary host existed has no secondary topic, and cleans up the same way.
   const required = PROGRESS_KEYS.split(",").filter(key => key !== "secondaryNotificationTopicDigest");
-  const expected = [...required, ...["secondaryNotificationTopicDigest", "pixelBaseline"].filter(key => Object.hasOwn(p, key))].sort().join(",");
+  const expected = [...required, ...["secondaryNotificationTopicDigest", "pixelBaseline", "fleetPrepared", "remoteNotificationTopicDigest"].filter(key => Object.hasOwn(p, key))].sort().join(",");
   if (keys !== expected || p.lane !== "androidPush" ||
     typeof p.epoch !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(p.epoch) ||
     typeof p.binding !== "string" || !/^[a-f0-9]{64}$/u.test(p.binding) || typeof p.cleanupRequired !== "boolean" ||
@@ -350,7 +357,8 @@ export function parseAndroidPushProgress(value: unknown): AndroidPushProgress {
     // Only a completed restoration records a baseline.
     if (p.cleanupRequired) throw new Error("invalid Android Push progress");
   }
-  for (const digest of [p.notificationTopicDigest, p.secondaryNotificationTopicDigest ?? null]) {
+  if (p.fleetPrepared !== undefined && typeof p.fleetPrepared !== "boolean" || p.fleetPrepared === true && !p.cleanupRequired) throw new Error("invalid fleet restoration state");
+  for (const digest of [p.notificationTopicDigest, p.secondaryNotificationTopicDigest ?? null, p.remoteNotificationTopicDigest ?? null]) {
     if (digest !== null && (typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest))) throw new Error("invalid Android Push notification ownership");
   }
   const device = p.device;
@@ -416,6 +424,7 @@ async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: 
     catch (error) { persistenceErrors.push(error); }
   };
   for (const step of CLEANUP_STEPS) {
+    if (step === "fleet" && progress.fleetPrepared !== true) continue;
     try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch (error) { failures.push(step); errors.push(error); }
     if (["fixtureAsk", "doze", "network"].includes(step)) await sampleLate?.();
   }
@@ -1079,6 +1088,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         await staleTap(expiring, "expired-host");
         await finish("stale_taps_verified", { resolved: true, rearmed: true, replaced: true, expired: true, launches: 0, scrubbed: true, replayed: true });
       });
+      await runFleetPushPhases({ runtime, progress, save, attempt, finish, fixture, snapshot, delivered, clear, wait, assertion });
       await attempt("force_stop_verified", async () => {
         // Its privacy check reads Private notices; the triage and delayed-tap phases leave Session.
         await runtime.detail("private"); await runtime.forceStop(); await fixture("ask");

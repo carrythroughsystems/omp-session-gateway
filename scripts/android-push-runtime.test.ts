@@ -1045,6 +1045,72 @@ test("R2 raw log proof resolves the retained Mac home and uses its configured ex
   expect(reads.every(argv => argv.at(-1) === "/synthetic/retained-user/Library/LaunchAgents/omp-session-gateway.plist")).toBe(true);
 });
 
+test("fleet host commands use the retained executor and exact candidate identity", async () => {
+  const calls: string[][] = [], epoch = "a3a77f8e-956b-45d0-a684-a33e6b336dc0";
+  const runtime = createAndroidPushRuntime({ ...identity, candidate: { tag: "v0.9.1", sourceCommit: "c".repeat(40),
+    archiveSha256: "d".repeat(64), archivePath: "/synthetic/candidate.tar" } }, {
+    fixtureBase: "/synthetic/fixtures", fixtureScripts: "/synthetic/scripts", fixtureBun: "/synthetic/bun",
+    execute: async argv => { calls.push([...argv]); return { exitCode: 0, stdout: "" }; },
+  });
+  let checkpoints = 0;
+  runtime.beforeEffect = async () => { checkpoints++; };
+  await runtime.fleet.host("source-down", epoch);
+  expect(checkpoints).toBe(1);
+  expect(calls).toEqual([["/synthetic/bun", "/synthetic/scripts/fleet-push-fixture.ts", "source-down",
+    `/synthetic/fixtures/fleet-${epoch}`, epoch, identity.origin, "c".repeat(40)]]);
+});
+
+test("fleet cleanup before persisted ownership never touches enrollment or a worker", async () => {
+  const runtime = createAndroidPushRuntime(identity, { execute: async () => ({ exitCode: 1, stdout: "" }) });
+  const calls: string[] = [];
+  runtime.fleet.host = async operation => { calls.push(operation); };
+  runtime.fleet.select = async () => { throw new Error("unowned enrollment touched"); };
+  const progress = { epoch: "a3a77f8e-956b-45d0-a684-a33e6b336dc0", fleetPrepared: true } as AndroidPushProgress;
+  await runtime.cleanup("fleet", progress);
+  expect(calls).toEqual(["restore"]);
+  expect(progress.fleetPrepared).toBe(false);
+});
+
+test.each([false, true])("fleet badge observer forwards platform calls and restores after enrollment failure=%s", async fail => {
+  const { runInNewContext } = await import("node:vm");
+  const calls: string[] = [], platformCalls: unknown[][] = [];
+  const set = (...args: unknown[]) => { platformCalls.push(args); return Promise.resolve(); };
+  const clear = () => { platformCalls.push(["clear"]); return Promise.resolve(); };
+  const context = { navigator: { setAppBadge: set, clearAppBadge: clear }, self: {} as Record<string, unknown> };
+  const driver = {
+    browserSend: async (method: string) => method === "Target.getTargets" ?
+      { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
+      method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {},
+    sessionSend: async (_session: string, _method: string, parameters: { expression: string }) =>
+      ({ result: { value: await runInNewContext(parameters.expression, context) } }),
+  };
+  const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
+    (async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome);
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execute: async () => ({ exitCode: 0, stdout: "" }) });
+    runtime.beforeEffect = async () => {};
+    runtime.fleet.host = async operation => { calls.push(operation); };
+    runtime.fleet.select = async () => { if (fail) throw new Error("synthetic enrollment restoration failure"); };
+    runtime.fixture = async operation => { calls.push(`remote-${operation}`); };
+    await runtime.fleet.armBadgeObserver();
+    await context.navigator.setAppBadge(2);
+    expect(await runtime.fleet.observeBadge()).toEqual({ count: 2, complete: true });
+    await context.navigator.setAppBadge();
+    expect(await runtime.fleet.observeBadge()).toEqual({ count: 0, complete: false });
+    await context.navigator.clearAppBadge();
+    expect(await runtime.fleet.observeBadge()).toEqual({ count: 0, complete: true });
+    expect(platformCalls).toEqual([[2], [], ["clear"]]);
+    const progress = { epoch: "a3a77f8e-956b-45d0-a684-a33e6b336dc0", fleetPrepared: true } as AndroidPushProgress;
+    if (fail) await expect(runtime.cleanup("fleet", progress)).rejects.toThrow();
+    else await runtime.cleanup("fleet", progress);
+    expect(calls).toEqual(["coordinator-up", "remote-stop", "restore"]);
+    expect(context.navigator.setAppBadge).toBe(set);
+    expect(context.navigator.clearAppBadge).toBe(clear);
+    expect(context.self.__ompQualificationBadge).toBeUndefined();
+    expect(progress.fleetPrepared).toBe(fail);
+  } finally { chrome.mockRestore(); }
+});
+
 test("R2 fresh request attestation accepts the delivering secondary snapshot and rejects wrong generations", async () => {
   const { matchesPushDeliverySnapshot } = await import("./android-push-runtime.ts");
   const session = { instanceId: "secondary", generation: 2, ask: { requestId: "fresh" } } as SessionMetadata;
