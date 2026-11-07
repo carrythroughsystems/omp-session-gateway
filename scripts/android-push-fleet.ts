@@ -30,7 +30,8 @@ export interface FleetPushRuntime {
   /** Reads the Hosts row in the installed PWA, not a synthetic enrollment API client. */
   coverage(): Promise<{ selected: boolean; state: string; covered: boolean }>;
   /** Observes the real worker's calls; the wrapper forwards unchanged to the platform. */
-  observeBadge(): Promise<{ count: number; complete: boolean } | undefined>;
+  observeBadge(): Promise<{ count: number; complete: boolean;
+    call?: { method: "setAppBadge" | "clearAppBadge"; arguments: number; argument?: number | "undefined" } } | undefined>;
   armBadgeObserver(): Promise<void>;
   revoke(): Promise<void>;
   audit(epoch: string): Promise<Record<string, boolean | number>>;
@@ -50,16 +51,32 @@ interface FleetPhaseContext {
 
 /** Additional phases of androidPush, sharing its checkpoints, failure typing and restoration owner. */
 export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
-  const { runtime: r, progress: p, fixture, snapshot, delivered, clear, wait, assertion, attempt } = c;
+  const { runtime: r, progress: p, fixture, snapshot, delivered, clear, wait, assertion } = c;
   const f = r.fleet;
   let observerAttached = false;
   let sinkAudit: Record<string, boolean | number> | undefined;
+  let activePhase: AndroidPushPhase = "fleet_enrolled";
+  const attempt: FleetPhaseContext["attempt"] = (phase, action) => {
+    activePhase = phase;
+    return c.attempt(phase, action);
+  };
   const finish: FleetPhaseContext["finish"] = (phase, result) => c.finish(phase, { ...result, devtoolsObserver: observerAttached });
-  const badge = async (count: number, complete: boolean) => wait("fleet badge reconciliation", async () => {
-    const observed = await f.observeBadge();
-    // A numeric badge cannot express completeness; the Hosts row proves that separately.
-    return observed?.count === count && (count > 0 || observed.complete === complete) ? true : undefined;
-  });
+  const badge = async (step: string, count: number, complete: boolean) => {
+    let last: Awaited<ReturnType<FleetPushRuntime["observeBadge"]>>;
+    try {
+      await wait(`fleet badge reconciliation: ${activePhase}/${step}`, async () => {
+        last = await f.observeBadge();
+        // A numeric badge cannot express completeness; the Hosts row proves that separately.
+        return last?.count === count && (count > 0 || last.complete === complete) ? true : undefined;
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        const diagnostic = new Error(`Fleet badge ${activePhase}/${step} expected ${JSON.stringify({ count, complete })}; last observation ${JSON.stringify(last ?? null)}`);
+        error.cause = error.cause === undefined ? diagnostic : new AggregateError([error.cause, diagnostic], "Fleet badge private diagnostics");
+      }
+      throw error;
+    }
+  };
   const ask = async (role: "primary" | "remote", detail: PushDetailLevel = "session") => {
     await fixture("ask", role);
     const session = await snapshot(s => s.inputRequired, role);
@@ -96,7 +113,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
       await Promise.all([fixture("ask"), fixture("ask", "remote")]);
       const local = await snapshot(s => s.inputRequired), remote = await snapshot(s => s.inputRequired, "remote");
       await delivered(local, "attention", detail); await delivered(remote, "attention", detail);
-      await badge(2, true);
+      await badge("concurrent", 2, true);
       await r.pause(21_000);
       // observe() also compares OS post timestamps: replacing the same request fails deduplication.
       await delivered(local, "attention", detail); await delivered(remote, "attention", detail);
@@ -113,23 +130,23 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
         if (!await r.presentation(local, detail) || !await r.presentation(remote, detail)) throw assertion("Fleet host identity or privacy presentation differed");
         await clear(); await clear(60_000, "remote");
       }
-      await badge(0, true);
+      await badge("settled", 0, true);
       await finish(`fleet_${detail}_verified`, { local: true, remote: true, identity: true, previewFallback: detail === "preview", deduplicated: true });
     });
   }
   await attempt("fleet_race_verified", async () => {
     await cold();
     const local = await ask("primary"), old = await ask("remote");
-    await badge(2, true);
+    await badge("concurrent", 2, true);
     // Replacement on a shared tag cannot prove the old request's clear.
-    await clear(60_000, "remote"); await delivered(local); await badge(1, true);
+    await clear(60_000, "remote"); await delivered(local); await badge("old-remote-cleared", 1, true);
     const fresh = await ask("remote");
     if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet race did not replace its request");
     await r.pause(21_000);
-    await delivered(fresh); await delivered(local); await badge(2, true);
-    await clear(); await delivered(fresh); await badge(1, true);
-    await r.openPwa(); await delivered(fresh); await badge(1, true);
-    await clear(60_000, "remote"); await badge(0, true);
+    await delivered(fresh); await delivered(local); await badge("replacement", 2, true);
+    await clear(); await delivered(fresh); await badge("local-cleared", 1, true);
+    await r.openPwa(); await delivered(fresh); await badge("foreground", 1, true);
+    await clear(60_000, "remote"); await badge("settled", 0, true);
     await finish("fleet_race_verified", { concurrent: true, exactClear: true, replacement: true, badgeReconciled: true });
   });
   await attempt("fleet_taps_verified", async () => {
@@ -174,16 +191,16 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await f.host("source-down", p.epoch);
     await wait("stale fleet source", async () => (await f.coverage()).state === "stale" ? true : undefined);
     if (!(await r.triage()).waiting.includes(remote.instanceId)) throw assertion("Fleet stale directory dropped its last-known waiting row");
-    await delivered(remote); await badge(1, false);
+    await delivered(remote); await badge("stale-waiting", 1, false);
     await f.host("source-up", p.epoch);
     await wait("fleet source recovery", async () => (await f.coverage()).state === "current" ? true : undefined, 90_000);
-    await clear(60_000, "remote"); await badge(0, true);
+    await clear(60_000, "remote"); await badge("recovered-settled", 0, true);
     await f.host("source-down", p.epoch);
     await wait("stale empty fleet source", async () => (await f.coverage()).state === "stale" ? true : undefined);
-    await badge(0, false);
+    await badge("stale-empty", 0, false);
     await f.host("source-up", p.epoch);
     await wait("fleet source recovery", async () => (await f.coverage()).state === "current" ? true : undefined, 90_000);
-    await badge(0, true);
+    await badge("recovered-empty", 0, true);
     await finish("fleet_outage_verified", { stale: true, lastKnownKept: true, badgeFlag: true, recovered: true });
   });
   await attempt("fleet_restart_verified", async () => {
@@ -194,13 +211,13 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     await r.fixture("answer", p.epoch, "remote"); await snapshot(s => !s.inputRequired, "remote");
     await f.host("coordinator-up", p.epoch);
     await wait("restart remote exact clear", async () => await r.notificationCleared(old) ? true : undefined);
-    await delivered(local); await badge(1, true);
-    await r.pause(21_000); await delivered(local); await badge(1, true);
+    await delivered(local); await badge("restart-exact-clear", 1, true);
+    await r.pause(21_000); await delivered(local); await badge("restart-no-repeat", 1, true);
     const fresh = await ask("remote");
     if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet restart did not replace its request");
-    await delivered(local); await badge(2, true);
-    await clear(); await delivered(fresh); await badge(1, true);
-    await clear(60_000, "remote"); await badge(0, true);
+    await delivered(local); await badge("new-ask", 2, true);
+    await clear(); await delivered(fresh); await badge("local-cleared", 1, true);
+    await clear(60_000, "remote"); await badge("settled", 0, true);
     await finish("fleet_restart_verified", { exactClear: true, noRepeats: true, newAsk: true, badgeReconciled: true });
   });
   await attempt("fleet_revocation_verified", async () => {

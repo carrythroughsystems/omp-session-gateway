@@ -1392,12 +1392,18 @@ test.each(["none", "enrollment", "owner", "host", "connection", "mutation"] as c
     runtime.fixture = async operation => { calls.push(`remote-${operation}`); };
     await runtime.fleet.armBadgeObserver();
     await context.navigator.setAppBadge(2);
-    expect(await runtime.fleet.observeBadge()).toEqual({ count: 2, complete: true });
+    expect(await runtime.fleet.observeBadge()).toEqual({ count: 2, complete: true,
+      call: { method: "setAppBadge", arguments: 1, argument: 2 } });
     await context.navigator.setAppBadge();
-    expect(await runtime.fleet.observeBadge()).toEqual({ count: 0, complete: false });
+    expect(await runtime.fleet.observeBadge()).toEqual({ count: 0, complete: false,
+      call: { method: "setAppBadge", arguments: 0, argument: "undefined" } });
+    await context.navigator.setAppBadge(undefined);
+    expect(await runtime.fleet.observeBadge()).toEqual({ count: 0, complete: false,
+      call: { method: "setAppBadge", arguments: 1, argument: "undefined" } });
     await context.navigator.clearAppBadge();
-    expect(await runtime.fleet.observeBadge()).toEqual({ count: 0, complete: true });
-    expect(platformCalls).toEqual([[2], [], ["clear"]]);
+    expect(await runtime.fleet.observeBadge()).toEqual({ count: 0, complete: true,
+      call: { method: "clearAppBadge", arguments: 0 } });
+    expect(platformCalls).toEqual([[2], [], [undefined], ["clear"]]);
     await runtime.fleet.armBadgeObserver();
     expect(admissions).toBe(1); expect(detached).toBe(0); expect(closed).toBe(0);
     if (failure === "connection" || failure === "mutation") {
@@ -1409,7 +1415,8 @@ test.each(["none", "enrollment", "owner", "host", "connection", "mutation"] as c
     const progress = { epoch: "a3a77f8e-956b-45d0-a684-a33e6b336dc0", fleetPrepared: true } as AndroidPushProgress;
     if (fail) await expect(runtime.cleanup("fleet", progress)).rejects.toThrow();
     else await runtime.cleanup("fleet", progress);
-    expect(calls).toEqual(failure === "owner" ? [] : ["coordinator-up", "remote-stop", "restore"]);
+    expect(calls).toEqual(failure === "owner" ? [] : ["connection", "mutation"].includes(failure) ?
+      ["coordinator-up", "remote-stop"] : ["coordinator-up", "remote-stop", "restore"]);
     if (!["owner", "connection", "mutation"].includes(failure)) {
       expect(context.navigator.setAppBadge).toBe(set);
       expect(context.navigator.clearAppBadge).toBe(clear);
