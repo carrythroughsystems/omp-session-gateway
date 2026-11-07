@@ -34,10 +34,13 @@
   // omp-gateway install --origin <origin> --allow <login>. Working-copy paths must equal
   // their realpath; profile.env is the complete CLI child environment (not merged with
   // process.env) and requires absolute HOME and PATH. Configure OMP inside Tern with
-  // collab.autoStart=control first. The CLI opens the tab in Tern's first window.
+  // collab.autoStart=control first. Optional window targets a reassignable slot, not an identity:
+  // "" selects the first window, "2" through "999" select other slots. Omit it for unchanged
+  // CLI defaults. A missing slot fails closed; creation never falls back to another window.
   // See docs/OPERATIONS.md#opt-in-tern-session-creation.
   // "tern": {
   //   "executable": "/usr/local/bin/tern",
+  //   "window": "2",
   //   "projects": [
   //     {
   //       "id": "alpha-founder",

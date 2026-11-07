@@ -1,0 +1,241 @@
+{
+  "sessions": [
+    {
+      "id": 9007199254740993,
+      "name": "synthetic",
+      "shown": true,
+      "tabs": [
+        {
+          "id": 9007199254740995,
+          "number": 1,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254740997,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": null,
+              "cols": 80,
+              "rows": 24,
+              "exited": null,
+              "keep_open": false,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254740997
+          }
+        },
+        {
+          "id": 9007199254740999,
+          "number": 1,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741001,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": null,
+              "cols": 80,
+              "rows": 24,
+              "exited": null,
+              "keep_open": false,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741001
+          }
+        },
+        {
+          "id": 9007199254741003,
+          "number": 1,
+          "name": null,
+          "shown": true,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741005,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": null,
+              "cols": 80,
+              "rows": 24,
+              "exited": null,
+              "keep_open": false,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741005
+          }
+        }
+      ]
+    }
+  ],
+  "detached": [],
+  "panes": [
+    {
+      "pane": 9007199254741001,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": null,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": false,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": "/synthetic/omp/sessions/2026-11-06T00-00-00-000Z_synthetic-session-1.jsonl",
+      "quiet_ms": 100,
+      "working": true
+    },
+    {
+      "pane": 9007199254741005,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": null,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": false,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": "/synthetic/omp/sessions/2026-11-06T00-00-00-000Z_synthetic-session-2.jsonl",
+      "quiet_ms": 100,
+      "working": true
+    },
+    {
+      "pane": 9007199254740997,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": null,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": false,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": "/synthetic/omp/sessions/2026-11-06T00-00-00-000Z_synthetic-session-3.jsonl",
+      "quiet_ms": 100,
+      "working": true
+    }
+  ],
+  "clients": [
+    {
+      "conn": 9007199254741007,
+      "window": "",
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "kind": "synthetic",
+      "since": 1
+    },
+    {
+      "conn": 9007199254741009,
+      "window": "",
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "kind": "synthetic",
+      "since": 1
+    },
+    {
+      "conn": 9007199254741011,
+      "window": "",
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "kind": "synthetic",
+      "since": 1
+    }
+  ]
+}

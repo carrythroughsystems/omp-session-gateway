@@ -492,6 +492,19 @@ Unknown, expired, malformed-UUID, and other-identity operations all return `404 
 
 ### Session creation state machine
 
+An administrator may bind this adapter to `tern.window` (`""` or a decimal string `"2"`–`"999"`).
+This is not a protocol field: choices, requests, statuses, and enums remain version 1 and never
+expose the selector. When authored, every availability, baseline, adoption, and doctor inspect
+uses `[executable, "inspect", "--json", "--window", KEY]`, and creation uses
+`[executable, "new", "tab", "--window", KEY, "--json", "--keep-open", "--cwd", path, "--",
+...profile.argv]`. With the field absent, argv is unchanged, with no `--window`.
+Tern `0.9.12` rejects missing slots: availability reports `tern_unavailable`, or a failed
+baseline follows `failed/preflight_failed` before spawn. A nonzero spawn exit remains
+`outcome_unknown`; failed adoption inspections, including a closed window, lead to
+`started_unavailable/adoption_timeout` at the existing deadline. No selector-free retry,
+fallback, or respawn is allowed. Window slots may be reassigned; they are not session identity.
+The table below abbreviates CLI commands without the optional selector.
+
 Every state transition is durably committed to `<stateDir>/session-creations.json` (write → `fsync` → atomic rename → directory `fsync`) before becoming observable in HTTP responses or triggering its dependent external action:
 
 | From → To | Trigger and durable boundary |

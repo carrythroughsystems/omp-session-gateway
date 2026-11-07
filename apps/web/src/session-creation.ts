@@ -338,7 +338,8 @@ export class SessionCreationController {
       steps.append(step);
     }
     status.append(steps);
-    body.append(status, text("p", "Close stops watching here. It does not stop the command on the host."));
+    body.append(text("p", `Starting on ${this.intent!.source.label}.`), status,
+      text("p", "Close stops watching here. It does not stop the command on the host."));
     this.panel("progress", "Starting session", body);
     this.progressState = active;
   }

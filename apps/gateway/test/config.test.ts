@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test as bunTest, vi } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
   type ConfigOverrides,
   type GatewayConfig,
@@ -52,6 +53,18 @@ describe("opt-in Tern configuration", () => {
     await writePrivateTextFile(path, JSON.stringify({ auth: { mode: "dev-localhost" }, tern: {} }));
     expect((await loadGatewayConfig({ configPath: path })).tern).toEqual({});
     expect(parseTernConfig(tern).profiles?.[0]?.label).toBe("OMP");
+    expect(Object.hasOwn(parseTernConfig(tern), "window")).toBe(false);
+  });
+  test("accepts only literal first-window or decimal window slots 2 through 999", () => {
+    for (const window of ["", "2", "9", "10", "99", "100", "999"]) {
+      expect(parseTernConfig({ ...tern, window }).window).toBe(window);
+    }
+    for (const window of [undefined, null, false, 2, {}, [], "0", "1", "01", "02", "1000", "9999",
+      "+2", "-2", "2.0", "2e0", " 2", "2 ", "2\n", "２", "TERN_WINDOW_PRIVATE_CANARY"]) {
+      expect(() => parseTernConfig({ ...tern, window })).toThrow("invalid tern configuration");
+    }
+    expect(() => parseTernConfig({ window: "2" })).toThrow("invalid tern configuration");
+    expect(() => parseTernConfig({ ...tern, windowKey: "2" })).toThrow("invalid tern configuration");
   });
   test("rejects unknown/null execution fields, aliases, duplicate IDs, env and size overflows without echo", () => {
     const secret = "TERN_CONFIG_SECRET_CANARY";
@@ -83,6 +96,31 @@ describe("opt-in Tern configuration", () => {
     expect(current.document).toEqual({ fleet: {}, speech: {}, omp: document.omp, http: document.http });
     expect(projectPreFleetConfig(current.document).document).toEqual({ omp: document.omp, http: {} });
     expect(document.tern).toBe(tern);
+  });
+  test("projects window selection to a document accepted by the exact retained v0.9.1 parser", async () => {
+    const root = await privateRoot(), path = join(root, "config.json");
+    const document = { auth: { mode: "dev-localhost" }, tern: { ...tern, window: "2" } };
+    // Immutable v0.9.1 source; remap only its imports so this proof needs neither Git nor a network.
+    const fixture = await Bun.file(new URL("./fixtures/config-v0.9.1.json", import.meta.url)).json();
+    const source = new TextDecoder().decode(Bun.gunzipSync(Buffer.from(fixture.sourceGzipBase64, "base64")));
+    expect(fixture.sourceCommit).toBe("4c72bc20b4a6770a3b6477a5684c733d5a223cc9");
+    expect(createHash("sha256").update(source).digest("hex")).toBe("740623555893ff38064fe6ac4b1ecc83ff184dde3a1659e0ba33d478c37ace64");
+    const retainedPath = join(root, "config-v0.9.1.ts");
+    await writePrivateTextFile(retainedPath, source
+      .replace('"./omp-registry.ts"', JSON.stringify(new URL("../src/omp-registry.ts", import.meta.url).href))
+      .replace('"@omp-session-gateway/protocol"', JSON.stringify(import.meta.resolve("@omp-session-gateway/protocol"))));
+    const retained = await import(retainedPath) as Pick<typeof import("../src/config.ts"), "loadGatewayConfig" | "stopWindowsAclHelper">;
+    const projected = projectPreTernConfig(document);
+    expect(projected.removedKeys).toEqual(["tern"]);
+    expect(projected.document).toEqual({ auth: document.auth });
+    expect(Object.hasOwn(projected.document, "tern")).toBe(false);
+    try {
+      await writePrivateTextFile(path, JSON.stringify(document));
+      await expect(retained.loadGatewayConfig({ configPath: path })).rejects.toThrow("invalid tern configuration");
+      await writePrivateTextFile(path, JSON.stringify(projected.document));
+      expect((await retained.loadGatewayConfig({ configPath: path })).tern).toBeUndefined();
+    } finally { retained.stopWindowsAclHelper(); }
+    expect(document.tern.window).toBe("2");
   });
   test("directory-synced publication retains private file mode and refuses unsafe publication", async () => {
     const root = await privateRoot();
@@ -1492,7 +1530,7 @@ describe("production config authoring", () => {
         targets: [{ id: "remote", label: " Remote\u202e ", origin: "https://remote.example.ts.net" }],
       },
       speech: { browserRecognition: true },
-      tern: { executable: "/synthetic/tern", projects: [{ id: "project", label: " Project\u202e ",
+      tern: { executable: "/synthetic/tern", window: "2", projects: [{ id: "project", label: " Project\u202e ",
         workingCopies: [{ id: "main", label: " Main ", path: "/synthetic/work" }] }],
         profiles: [{ id: "omp", label: " OMP ", argv: ["/synthetic/omp"], env: { HOME: "/synthetic", PATH: "/bin" } }] },
     };
@@ -1510,6 +1548,7 @@ describe("production config authoring", () => {
     const loaded = await loadGatewayConfig();
     expect(loaded.fleet.label).toBe("Studio é");
     expect(loaded.fleet.targets[0]?.label).toBe("Remote");
+    expect(loaded.tern?.window).toBe("2");
     for (const authored of [{ fleet: {}, speech: {}, tern: {} }, { fleet: { targets: [] }, speech: { browserRecognition: false }, tern: document.tern }]) {
       await writePrivateTextFile(paths.configPath, JSON.stringify({ ...serveDocument(), ...authored }));
       await writeGatewayConfigFile({ ...options, port: 4412 });

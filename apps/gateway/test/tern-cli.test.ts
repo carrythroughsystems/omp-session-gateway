@@ -45,6 +45,25 @@ else process.stdout.write(${JSON.stringify(receipt)});\n`);
 }
 
 describe("lossless bounded Tern metadata", () => {
+  test("parses sanitized Tern 0.9.12 selected-window metadata, ignoring clients and private fields", async () => {
+    // Read-only `inspect --json --window ""` on 0.9.12 (e498b49); all values are synthetic.
+    const fixture = new Uint8Array(await Bun.file(new URL("./fixtures/tern-inspect-0.9.12-window-first.json", import.meta.url)).arrayBuffer());
+    const parsed = parseTernInspection(fixture);
+    expect(parsed.blocks).toHaveLength(3);
+    expect(parsed.panes).toHaveLength(3);
+    expect(parseTernJson(fixture)).toMatchObject({ clients: [
+      { window: "" }, { window: "" }, { window: "" },
+    ] });
+    for (const block of parsed.blocks) {
+      expect(BigInt(block)).toBeGreaterThan(9007199254740991n);
+      const file = matchingTernBasename(parsed, block)!;
+      expect(file).toMatch(/^2026-11-06T00-00-00-000Z_synthetic-session-[1-3]\.jsonl$/u);
+      expect(sessionBasenameMatches(file, file.slice(25, -6))).toBe(true);
+    }
+    expect(JSON.stringify(parsed)).not.toContain("/synthetic/");
+    expect(JSON.stringify(parsed)).not.toContain("identity");
+    expect(JSON.stringify(parsed)).not.toContain("clients");
+  });
   test("preserves unsafe-number neighbors and projects only basenames, with exact one-to-one equality", () => {
     const parsed = parseTernInspection(bytes(inspect("9007199254740993")));
     expect(parsed.blocks).toEqual(["9007199254740993"]);
@@ -138,9 +157,24 @@ describe.skipIf(process.platform === "win32")("bounded Tern subprocess", () => {
     expect(received.env.MODE).toBe("success");
     expect(received.env.USER).toBeUndefined();
     expect(await cli.inspect(fixture.profile, new AbortController().signal)).toEqual(parseTernInspection(bytes(inspect())));
+    expect(JSON.parse(await readFile(join(fixture.root, "received"), "utf8")).argv).toEqual(["inspect", "--json"]);
     expect(await validateTernRuntime({ executable: fixture.executable,
       projects: [{ id: "main", label: "Main", workingCopies: [fixture.copy] }], profiles: [fixture.profile] })).toBe(true);
   });
+  for (const window of ["", "2", "999"]) {
+    test(`binds literal window slot ${JSON.stringify(window)} to both create and inspect argv`, async () => {
+      const fixture = await fake();
+      const cli = new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS }, window);
+      expect(await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal))
+        .toEqual({ kind: "started", blockId: "515396075522", spawnedAt: spawnTime });
+      expect(JSON.parse(await readFile(join(fixture.root, "received"), "utf8")).argv).toEqual([
+        "new", "tab", "--window", window, "--json", "--keep-open", "--cwd", fixture.copy.path, "--",
+        await realpath(process.execPath), "$(SYNTHETIC_ARG_SECRET)", "literal;argument",
+      ]);
+      expect(await cli.inspect(fixture.profile, new AbortController().signal)).toEqual(parseTernInspection(bytes(inspect())));
+      expect(JSON.parse(await readFile(join(fixture.root, "received"), "utf8")).argv).toEqual(["inspect", "--json", "--window", window]);
+    });
+  }
   test("accepts the verbatim pretty-printed three-key Tern 0.9.5 receipt", async () => {
     const fixture = await fake();
     expect(await new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS }).createTab(fixture.copy, fixture.profile, new AbortController().signal))

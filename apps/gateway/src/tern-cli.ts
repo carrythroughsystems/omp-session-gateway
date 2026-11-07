@@ -161,7 +161,7 @@ export async function validateTernRuntime(config: TernConfig): Promise<boolean> 
 
 export class TernCli implements TernCliBoundary {
   #busy = false;
-  constructor(readonly executable: string, readonly timeouts = { inspect: 5000, create: 10_000 }) {}
+  constructor(readonly executable: string, readonly timeouts = { inspect: 5000, create: 10_000 }, readonly window?: string) {}
   async #run(args: readonly string[], profile: TernProfile, signal: AbortSignal, bound: number, timeout: number): Promise<
     { kind: "not_started" } | { kind: "unknown" } | { kind: "output"; bytes: Uint8Array; spawnedAt: TernSpawnTime }> {
     if (this.#busy || signal.aborted) return { kind: "not_started" };
@@ -206,15 +206,19 @@ export class TernCli implements TernCliBoundary {
     }
   }
   async inspect(profile: TernProfile, signal: AbortSignal): Promise<TernInspection | undefined> {
-    const result = await this.#run(["inspect", "--json"], profile, signal, 1024 * 1024, this.timeouts.inspect);
+    const args = ["inspect", "--json"];
+    if (this.window !== undefined) args.push("--window", this.window);
+    const result = await this.#run(args, profile, signal, 1024 * 1024, this.timeouts.inspect);
     if (result.kind !== "output") return undefined;
     try { return parseTernInspection(result.bytes); } catch { return undefined; }
   }
   async createTab(copy: TernWorkingCopy, profile: TernProfile, signal: AbortSignal): Promise<TernCreateResult> {
     let argv: string[];
     try { argv = [await realpath(profile.argv[0]!), ...profile.argv.slice(1)]; } catch { return { kind: "not_started" }; }
-    const result = await this.#run(["new", "tab", "--json", "--keep-open", "--cwd", copy.path, "--", ...argv],
-      profile, signal, 8192, this.timeouts.create);
+    const args = ["new", "tab"];
+    if (this.window !== undefined) args.push("--window", this.window);
+    args.push("--json", "--keep-open", "--cwd", copy.path, "--", ...argv);
+    const result = await this.#run(args, profile, signal, 8192, this.timeouts.create);
     if (result.kind !== "output") return result;
     try {
       const receipt = object(parseTernJson(result.bytes));

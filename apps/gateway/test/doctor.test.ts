@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, setDefaultTimeout } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runDoctorChecks } from "../src/doctor.ts";
@@ -82,6 +82,26 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     expect(probes).toBe(1);
     expect(report.checks.ternAvailable).toBe(false);
     expect(JSON.stringify(report)).not.toContain("TERN_DOCTOR_PRIVATE_CANARY");
+  }, 2 * HANG_DEADLINE_MS);
+  test.skipIf(process.platform === "win32")("scopes the real ternAvailable inspect to the configured window without spawning OMP", async () => {
+    const root = await realpath(await isolatedRoot());
+    const executable = join(root, "tern"), path = join(root, "config/omp-session-gateway/config.json");
+    await writeFile(executable, `#!${process.execPath}
+await Bun.write(process.env.HOME + "/received", JSON.stringify(process.argv.slice(2)));
+if (process.argv.slice(2).join("|") !== "inspect|--json|--window|2") process.exit(1);
+console.log('{"sessions":[],"panes":[]}');
+`);
+    await chmod(executable, 0o700);
+    const document = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...document, tern: { executable, window: "2",
+      projects: [{ id: "project", label: "Project", workingCopies: [{ id: "main", label: "Main", path: root }] }],
+      profiles: [{ id: "omp", label: "OMP", argv: [process.execPath], env: { HOME: root, PATH: "/bin" } }],
+    } }));
+    const report = await runDoctorChecks({ ompVersion: async () => "18.1.20" });
+    expect(report.checks.ternAvailable).toBe(true);
+    expect(JSON.parse(await readFile(join(root, "received"), "utf8"))).toEqual(["inspect", "--json", "--window", "2"]);
+    expect(Object.values(report.checks).every(value => typeof value === "boolean")).toBe(true);
+    expect(JSON.stringify(report)).not.toContain(root);
   }, 2 * HANG_DEADLINE_MS);
 
   test("reports sound trust and compatibility at the minimum mainline release", async () => {
