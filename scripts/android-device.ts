@@ -891,6 +891,9 @@ export async function waitForDevtoolsEndpoint(
   throw new Error(`DevTools endpoint never accepted a connection${code}`, { cause: lastError });
 }
 
+/** Only this protocol rejection proves that an expression never started, unlike a page exception. */
+class MissingDefaultExecutionContextError extends Error {}
+
 /** Resource ownership that could not be discharged, without device identities in its evidence. */
 export class AndroidBrowserCleanupError extends AggregateError {
   readonly pixelUnrestored = true;
@@ -985,23 +988,27 @@ export async function withAndroidChrome<T>(
     const entry = pending.get(message.id);
     if (entry === undefined) return;
     pending.delete(message.id);
-    if (message.error) entry.reject(new Error(`CDP ${entry.method}: ${message.error.message}`));
+    if (message.error) {
+      const ErrorType = entry.method === "Runtime.evaluate" && message.error.message === "Cannot find default execution context"
+        ? MissingDefaultExecutionContextError : Error;
+      entry.reject(new ErrorType(`CDP ${entry.method}: ${message.error.message}`));
+    }
     else entry.resolve(message.result ?? {});
   };
 
-  const send = (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) =>
+  const sendOnce = (method: string, parameters: Record<string, unknown>, destination: string | undefined, cleanup: boolean, until: number) =>
     new Promise<Record<string, unknown>>((resolve, reject) => {
       if (!cleanup) check();
+      if (performance.now() >= until) { reject(new Error(`CDP timeout: ${method}`)); return; }
       const id = (nextId += 1);
       const timeout = () => {
         if (pending.delete(id)) reject(new Error(`CDP timeout: ${method}`));
       };
-      let timer = setTimeout(timeout, cleanup ? 10_000 : CALL_TIMEOUT_MS), cancelled = false;
+      let timer = setTimeout(timeout, Math.max(1, until - performance.now())), cancelled = false;
       pending.set(id, { method, cleanup,
         cancel() { if (!cancelled) { cancelled = true; clearTimeout(timer); timer = setTimeout(timeout, 10_000); } },
         resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
       const frame: Record<string, unknown> = { id, method, params: parameters };
-      const destination = explicitSession ?? (useSession ? sessionId : undefined);
       if (destination !== undefined) frame.sessionId = destination;
       // A lost create acknowledgement is an unresolved mutation, even after its bounded
       // response route expires. Never pretend that deleting the route removed the target.
@@ -1009,6 +1016,37 @@ export async function withAndroidChrome<T>(
       try { socket.send(JSON.stringify(frame)); }
       catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
     });
+
+  const send = async (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) => {
+    // Pin the attachment for the whole call, even if another target is attached while waiting.
+    const destination = explicitSession ?? (useSession ? sessionId : undefined);
+    const until = performance.now() + (cleanup ? 10_000 : CALL_TIMEOUT_MS);
+    let contextUntil: number | undefined;
+    for (;;) {
+      try { return await sendOnce(method, parameters, destination, cleanup, until); }
+      catch (error) {
+        if (!(error instanceof MissingDefaultExecutionContextError) || parameters.contextId !== undefined ||
+          parameters.uniqueContextId !== undefined) throw error;
+        contextUntil ??= Math.min(until, performance.now() + 15_000);
+        // Attachment readiness is not document readiness: a navigation can replace the default
+        // context (v0.10.0-prealpha.4's Push browser baseline). Probe only, without waking,
+        // navigating or re-attaching, and resend the original expression only after a default
+        // context answers. Destruction, timeout and page exceptions can follow execution and
+        // never retry.
+        for (;;) {
+          if (!cleanup) check();
+          if (performance.now() >= contextUntil) throw error;
+          await Bun.sleep(Math.min(250, contextUntil - performance.now()));
+          try {
+            evaluationValue(await sendOnce("Runtime.evaluate", { expression: "void 0", returnByValue: true }, destination, cleanup, contextUntil));
+            break;
+          } catch (probeError) {
+            if (!(probeError instanceof MissingDefaultExecutionContextError)) throw probeError;
+          }
+        }
+      }
+    }
+  };
 
   const closeTarget = async (cleanup = cleaning) => {
     if (targetId === undefined) return;
