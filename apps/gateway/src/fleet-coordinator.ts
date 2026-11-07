@@ -182,7 +182,7 @@ export class FleetCoordinator {
   readonly #queue: Delivery[] = [];
   readonly #inflight = new Set<Promise<void>>();
   readonly #pendingDeliveries = new Map<Recipient, PendingDeliveries>();
-  readonly #retryDeliveries = new Set<Delivery>();
+  readonly #retryDeliveries = new Map<Delivery, number>();
   readonly #unsubscribers: Array<() => void> = [];
   #state: State = { version: 1, epoch: 0, grants: [], recipients: [] };
   #healthy = true;
@@ -197,6 +197,7 @@ export class FleetCoordinator {
   #restartDeadline = 0;
   #restartTimer: Timer | undefined;
   #retryTimer: Timer | undefined;
+  #retryTimerAt: number | undefined;
 
   private constructor(options: FleetCoordinatorOptions) {
     this.#config = options.config; this.#push = options.push; this.#registry = options.registry;
@@ -366,8 +367,11 @@ export class FleetCoordinator {
     this.#clock.clearTimeout(timer);
     if (result !== "ok") {
       await this.#serial(async () => {
-        if (!grant.active) this.#state.grants = this.#state.grants.filter(value => value !== grant);
-        this.#syncPullers(); await this.#persist();
+        if (!grant.active) {
+          this.#state.grants = this.#state.grants.filter(value => value !== grant);
+          if (this.#grant(owner, grant.sourceId) === undefined) this.#setKnowledgeState(this.#known(owner, grant.sourceId), "not_enrolled");
+        }
+        this.#syncPullers(); await this.#reconcile();
       });
       throw new FleetCoordinatorProblem(result === "grant_rejected" ? 409 : result === "unsupported" ? 404 : 503, result);
     }
@@ -566,7 +570,8 @@ export class FleetCoordinator {
       [{ instanceId: session.instanceId, generation: session.generation, requestId: session.ask.requestId }] : []);
     for (const id of recipient.sources) {
       const known = this.#known(recipient.owner, id), source = this.#bindings.get(id);
-      if (source === undefined || (known.state !== "current" && known.state !== "stale" && known.state !== "pending")) continue;
+      if (source === undefined || this.#grant(recipient.owner, id) === undefined ||
+          (known.state !== "current" && known.state !== "stale" && known.state !== "pending")) continue;
       for (const session of known.sessions.values()) if (session.requestId !== undefined) asks.push({ source, instanceId: session.instanceId, generation: session.generation, requestId: session.requestId });
       if (!known.snapshot) for (const ask of recipient.outstanding) if (ask.source === source) asks.push(ask);
     }
@@ -584,7 +589,7 @@ export class FleetCoordinator {
       for (const ask of [...recipient.outstanding]) {
         const id = ask.source === undefined ? undefined : [...this.#bindings].find(([, binding]) => binding === ask.source)?.[0];
         const selected = id !== undefined && recipient.sources.includes(id);
-        const state = id === undefined ? undefined : this.#known(recipient.owner, id).state;
+        const state = id === undefined ? undefined : this.#grant(recipient.owner, id) === undefined ? "not_enrolled" : this.#known(recipient.owner, id).state;
         const stale = selected && (state === "stale" || state === "pending");
         if (recipient.sources.length === 0 ? ask.source !== undefined : !keys.has(askKey(ask)) && !stale && (ask.source !== undefined || this.#warm())) {
           if (!this.#enqueue(recipient, "clear", ask, id)) this.#deferredClears = true;
@@ -632,7 +637,10 @@ export class FleetCoordinator {
     if (!this.#healthy || this.#stopped || delivery.valid?.() === false) return false;
     const { recipient, message } = delivery;
     if (this.#subscription(recipient) === undefined) return false;
-    if (message.type === "clear") return true;
+    if (message.type === "clear") {
+      const key = askKey(message);
+      return this.#state.recipients.includes(recipient) && recipient.outstanding.some(ask => askKey(ask) === key);
+    }
     if (!this.#state.recipients.includes(recipient) || recipient.sources.length === 0) return false;
     if (message.source === undefined) return true;
     const grant = this.#state.grants.find(grant => grant.grantId === delivery.grantId);
@@ -640,15 +648,51 @@ export class FleetCoordinator {
       this.#bindings.get(grant.sourceId) === message.source && this.#known(grant.owner, grant.sourceId).state === "current" &&
       grant.expiresAt !== undefined && Date.parse(grant.expiresAt) > this.#clock.now();
   }
+  #armDeliveryRetry(): void {
+    const now = this.#clock.now();
+    let earliest: number | undefined;
+    for (const deadline of this.#retryDeliveries.values()) {
+      // Due clears blocked by queue capacity are picked up as the drain opens space.
+      if (deadline > now && (earliest === undefined || deadline < earliest)) earliest = deadline;
+    }
+    if (earliest === this.#retryTimerAt) return;
+    if (this.#retryTimer !== undefined) this.#clock.clearTimeout(this.#retryTimer);
+    this.#retryTimer = undefined; this.#retryTimerAt = earliest;
+    if (earliest !== undefined) this.#retryTimer = this.#clock.setTimeout(() => {
+      this.#retryTimer = undefined; this.#retryTimerAt = undefined;
+      this.#drain();
+    }, earliest - now);
+  }
+  #retryReadyDeliveries(): void {
+    const now = this.#clock.now();
+    let reconcile = false;
+    for (const [delivery, deadline] of this.#retryDeliveries) {
+      if (deadline > now) continue;
+      if (delivery.message.type === "clear" && this.#authorized(delivery)) {
+        if (this.#queue.length >= MAX_QUEUE) continue;
+        // Preserve receipt order even if a newer request's attention overtook this failed clear.
+        this.#queue.push(delivery);
+      } else {
+        this.#releaseDelivery(delivery);
+        reconcile = true;
+      }
+      this.#retryDeliveries.delete(delivery);
+    }
+    this.#armDeliveryRetry();
+    if (reconcile) this.#scheduleReconcile();
+  }
   #drain(): void {
+    if (!this.#healthy || this.#stopped || this.#mutating) return;
+    this.#retryReadyDeliveries();
     while (this.#healthy && !this.#stopped && !this.#mutating && this.#inflight.size < 8 && this.#queue.length > 0) {
       const delivery = this.#queue.shift()!;
-      let delivered = false;
+      this.#retryReadyDeliveries();
+      let reconcile = false;
       const task = this.#push.sendFleet(delivery.recipient.owner, delivery.endpoint, delivery.message, () => this.#authorized(delivery))
         .then(async outcome => {
           const { recipient, message } = delivery;
           if (outcome === "delivered") {
-            delivered = true;
+            reconcile = true;
             // A graceful stop still records accepted in-flight sends before returning.
             if (message.type !== "activity_stop") await this.#serial(async () => {
               if (!this.#state.recipients.includes(recipient)) return;
@@ -658,22 +702,18 @@ export class FleetCoordinator {
               else recipient.outstanding = recipient.outstanding.filter(previous => askKey(previous) !== askKey(ask));
               await this.#persist();
             }, true);
-          } else if (outcome === "failed" && message.type !== "activity_stop" && !this.#stopped && this.#healthy) {
+          } else if (outcome === "skipped") reconcile = true;
+          else if (outcome === "failed" && message.type !== "activity_stop" && !this.#stopped && this.#healthy) {
             // Keep the reservation through the cooldown: unrelated reconciles cannot hot-loop failures.
-            this.#retryDeliveries.add(delivery);
-            if (this.#retryTimer === undefined) this.#retryTimer = this.#clock.setTimeout(() => {
-              this.#retryTimer = undefined;
-              for (const pending of this.#retryDeliveries) this.#releaseDelivery(pending);
-              this.#retryDeliveries.clear();
-              this.#scheduleReconcile();
-            }, DELIVERY_RETRY_MS);
+            this.#retryDeliveries.set(delivery, this.#clock.now() + DELIVERY_RETRY_MS);
+            this.#armDeliveryRetry();
           }
         })
         .catch(() => this.#logger.event("warn", "fleet.send_failed", { failed: true }))
         .finally(() => {
           if (!this.#retryDeliveries.has(delivery)) this.#releaseDelivery(delivery);
           this.#inflight.delete(task); this.#drain();
-          if (delivered || this.#deferredClears || this.#state.recipients.some(recipient => recipient.sources.length === 0)) this.#scheduleReconcile();
+          if (reconcile || this.#deferredClears || this.#state.recipients.some(recipient => recipient.sources.length === 0)) this.#scheduleReconcile();
         });
       this.#inflight.add(task);
     }

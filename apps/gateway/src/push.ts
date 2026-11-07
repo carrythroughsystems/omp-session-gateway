@@ -325,11 +325,11 @@ export class PushService {
   }
 
   /** Recheck both subscription ownership and the coordinator's authority after acquiring a send slot. */
-  async sendFleet(owner: string, endpoint: string, message: FleetPushMessage, authorized: () => boolean): Promise<"delivered" | "gone" | "failed"> {
+  async sendFleet(owner: string, endpoint: string, message: FleetPushMessage, authorized: () => boolean): Promise<"delivered" | "gone" | "failed" | "skipped"> {
     const payload = JSON.stringify(parseFleetPushMessage(message));
     return this.#withSendSlot(async () => {
       const subscription = this.#subscriptions.find(candidate => candidate.endpoint === endpoint && candidate.identityKey === owner);
-      if (subscription === undefined || !this.#identityAllowed(owner) || !authorized()) return "failed";
+      if (subscription === undefined || !this.#identityAllowed(owner) || !authorized()) return "skipped";
       try {
         await this.#transport.send(subscription, payload, {
           subject: VAPID_SUBJECT, publicKey: this.#vapid.publicKey, privateKey: this.#vapid.privateKey, ttlSeconds: PUSH_TTL_SECONDS,

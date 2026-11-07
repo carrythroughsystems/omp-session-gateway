@@ -87,6 +87,7 @@ class Transport implements PushTransport {
   block = false;
   blockType: FleetPushMessage["type"] | undefined;
   failure = 0;
+  failureType: FleetPushMessage["type"] | undefined;
   sending = 0;
   peak = 0;
   async send(subscription: BrowserPushSubscription, payload: string): Promise<void> {
@@ -98,7 +99,9 @@ class Transport implements PushTransport {
       if (this.block && (this.blockType === undefined || value.version === 3 && value.type === this.blockType)) {
         const gate = Promise.withResolvers<void>(); this.gates.push(gate.resolve); await gate.promise;
       }
-      if (this.failure !== 0) throw Object.assign(new Error("SYNTHETIC_PUSH_CANARY"), { statusCode: this.failure });
+      if (this.failure !== 0 && (this.failureType === undefined || value.version === 3 && value.type === this.failureType)) {
+        throw Object.assign(new Error("SYNTHETIC_PUSH_CANARY"), { statusCode: this.failure });
+      }
       if (value.version === 3) {
         const message = parseFleetPushMessage(value);
         const worker = this.workers.get(subscription.endpoint) ?? { state: EMPTY_FLEET_WORKER_STATE, displayed: [] };
@@ -254,6 +257,40 @@ describe("fleet coordinator", () => {
     }
   });
 
+  for (const cancellation of ["revoke", "disconnect"] as const) {
+    test(`${cancellation} releases 256 cancelled attention reservations without a retry cooldown`, async () => {
+      const f = await fixture(); const device = await f.device();
+      const sessions = Array.from({ length: 256 }, (_, index) => ({ instanceId: `synthetic-cancelled-${index}`, generation: 1, requestId }));
+      const grant = await f.grant(alice, sourceA.id, sessions);
+      f.transport.block = true;
+      await f.coordinator.select(alice, device, [sourceA.id]); await until(() => f.transport.gates.length === 8);
+      expect(f.coordinator.diagnostics().queued).toBe(248);
+      if (cancellation === "revoke") await f.coordinator.revoke(alice, grant);
+      else {
+        f.feeds.live(grant).close();
+        await until(async () => (await f.coordinator.status(alice, device)).sources[0]!.state === "stale");
+      }
+      f.transport.release(); await settled(f.coordinator);
+      expect(f.transport.calls.filter(call => call.message.type === "attention")).toHaveLength(8);
+      expect([...f.clock.timers.values()].some(timer => timer.at === f.clock.now() + 30_000)).toBe(false);
+      const time = f.clock.now();
+      f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+      expect(f.transport.calls.at(-1)?.message).toMatchObject({ type: "attention", instanceId });
+      expect(f.transport.calls.at(-1)?.message.source).toBeUndefined();
+      expect(f.clock.now()).toBe(time);
+      if (cancellation === "disconnect") {
+        const connections = f.feeds.connections.length;
+        f.clock.advance(1_000);
+        await until(() => f.feeds.connections.length > connections); await settled(f.coordinator);
+        expect((await f.coordinator.status(alice, device)).sources[0]!.state).toBe("current");
+        // The local ask keeps one slot; all remaining capacity is reused by current remote asks.
+        expect(f.transport.calls.filter(call => call.message.type === "attention" && call.message.source !== undefined)).toHaveLength(255);
+        expect(await outstanding(f)).toHaveLength(256);
+        expect(f.clock.now()).toBe(time + 1_000);
+      }
+    });
+  }
+
   test("restart retries all 20 unaccepted clears with eight in flight and twelve queued at stop", async () => {
     const f = await fixture(); const device = await f.device();
     const sessions = Array.from({ length: 20 }, (_, index) => ({ instanceId: `synthetic-clear-${index}`, generation: 1, requestId }));
@@ -275,6 +312,30 @@ describe("fleet coordinator", () => {
   });
 
   for (const type of ["clear", "attention"] as const) {
+    test(`staggered failed ${type} deliveries each wait their own 30-second cooldown`, async () => {
+      const f = await fixture(); const device = await f.device();
+      const first = { instanceId: "synthetic-retry-first", generation: 1, requestId };
+      const second = { instanceId: "synthetic-retry-second", generation: 1, requestId };
+      const grant = await f.grant(alice, sourceA.id, type === "clear" ? [first, second] : []);
+      await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+      await until(() => f.feeds.connections.filter(connection => connection.grantId === grant).length >= 2);
+      const offset = f.transport.calls.length;
+      const send = (session: FleetFeedSession): void => f.feeds.live(grant).send({ version: 1, type: "upsert", session });
+      f.transport.failure = 500;
+      send(type === "clear" ? { instanceId: first.instanceId, generation: 1 } : first); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.instanceId)).toEqual([first.instanceId]);
+      f.clock.advance(29_000);
+      send(type === "clear" ? { instanceId: second.instanceId, generation: 1 } : second); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.instanceId)).toEqual([first.instanceId, second.instanceId]);
+      f.transport.failure = 0; f.clock.advance(1_000); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.instanceId)).toEqual([first.instanceId, second.instanceId, first.instanceId]);
+      f.clock.advance(28_999); await settled(f.coordinator);
+      expect(f.transport.calls).toHaveLength(offset + 3);
+      f.clock.advance(1); await settled(f.coordinator);
+      expect(f.transport.calls.slice(offset).map(call => call.message.instanceId)).toEqual([first.instanceId, second.instanceId, first.instanceId, second.instanceId]);
+      expect(f.transport.calls.slice(offset).every(call => call.message.type === type)).toBe(true);
+    });
+
     test(`a failed ${type} retries once after 30 seconds and changes outstanding only on acceptance`, async () => {
       const f = await fixture(); const device = await f.device();
       const ask = { instanceId, generation: 1, requestId };
@@ -317,6 +378,61 @@ describe("fleet coordinator", () => {
       expect(await outstanding(f)).toEqual(type === "clear" ? [] : [expect.objectContaining(ask)]);
     });
   }
+
+  test("a retried clear keeps its original sequence so a replacement attention survives push reordering", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    await until(() => f.feeds.connections.filter(connection => connection.grantId === grant).length >= 2);
+    const originalAttention = f.transport.calls[0]!.message;
+    f.transport.failure = 500; f.transport.failureType = "clear";
+    f.feeds.live(grant).send({ version: 1, type: "upsert", session: { instanceId, generation: 1, requestId: nextRequest } });
+    await settled(f.coordinator);
+    const failedClear = f.transport.calls[1]!.message, replacement = f.transport.calls[2]!.message;
+    expect(failedClear.type).toBe("clear"); expect(replacement.type).toBe("attention");
+    expect(f.transport.workers.get(device)!.displayed[0]?.intent).toMatchObject({ kind: "attention", requestId: nextRequest });
+    f.transport.failure = 0; f.clock.advance(30_000); await settled(f.coordinator);
+    const retriedClear = f.transport.calls[3]!.message;
+    expect(retriedClear).toEqual(failedClear);
+    expect(f.transport.calls[3]!.payload).toBe(f.transport.calls[1]!.payload);
+    const source = await fleetSourceBinding(sourceA.id, sourceA.origin), tag = fleetNotificationTag(source, instanceId);
+    const displayedA: FleetDisplayedNotification = { tag, intent: { kind: "attention", source, instanceId, requestId } };
+    const displayedB: FleetDisplayedNotification = { tag, intent: { kind: "attention", source, instanceId, requestId: nextRequest } };
+    const original = reduceFleetPush(EMPTY_FLEET_WORKER_STATE, originalAttention, [], f.clock.now());
+    const clearedFirst = reduceFleetPush(original.state, retriedClear, [displayedA], f.clock.now());
+    expect(clearedFirst.effects).toContainEqual({ kind: "close", tag, requestId });
+    expect(clearedFirst.state.tombstones[`${source}\0${instanceId}\0${requestId}`]).toBe(f.clock.now());
+    const delayedReplacement = reduceFleetPush(clearedFirst.state, replacement, [], f.clock.now());
+    expect(delayedReplacement.effects).toContainEqual({ kind: "show", tag, renotify: false });
+    const replacedFirst = reduceFleetPush(original.state, replacement, [displayedA], f.clock.now());
+    expect(replacedFirst.effects).toContainEqual({ kind: "show", tag, renotify: true });
+    const clearedAfter = reduceFleetPush(replacedFirst.state, retriedClear, [displayedB], f.clock.now());
+    expect(clearedAfter.effects.filter(effect => effect.kind === "close")).toEqual([]);
+    expect(clearedAfter.state.shown[`${source}\0${instanceId}\0${nextRequest}`]).toBe(f.clock.now());
+    expect(f.transport.workers.get(device)!.displayed).toEqual([displayedB]);
+    expect(await outstanding(f)).toEqual([expect.objectContaining({ instanceId, requestId: nextRequest })]);
+  });
+
+  test("a failed attention is not regenerated after its ask resolves during the cooldown", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    f.transport.failure = 500; await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.feeds.live(grant).send({ version: 1, type: "upsert", session: { instanceId, generation: 1 } }); await settled(f.coordinator);
+    f.transport.failure = 0; f.clock.advance(30_000); await settled(f.coordinator);
+    expect(f.transport.calls.map(call => call.message.type)).toEqual(["attention"]);
+    expect(await outstanding(f)).toEqual([]);
+  });
+
+  test("a failed clear is not retried after its recipient is removed during the cooldown", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.transport.failure = 500; await f.coordinator.revoke(alice, grant); await settled(f.coordinator);
+    await f.push.unsubscribe(alice, { version: 2, endpoint: device }); await settled(f.coordinator);
+    f.transport.failure = 0; f.clock.advance(30_000); await settled(f.coordinator);
+    expect(f.transport.calls.map(call => call.message.type)).toEqual(["attention", "clear"]);
+    expect(f.coordinator.diagnostics().recipients).toBe(0);
+  });
 
   test("DELETE returns local attention to exact Push v2 while a remote clear is in flight", async () => {
     const f = await fixture(); const device = await f.device();
@@ -403,6 +519,31 @@ describe("fleet coordinator", () => {
       expect(f.transport.calls.filter(call => call.message.source !== undefined).map(call => call.message.type)).toEqual(["attention", "clear"]);
     });
   }
+
+  test("a failed replacement activation cannot keep grant-less outstanding asks in badges or suppress their clears", async () => {
+    const f = await fixture(); const device = await f.device();
+    const grant = await f.grant(alice, sourceA.id, [{ instanceId, generation: 1, requestId }]);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator);
+    f.transport.failure = 500; await f.coordinator.revoke(alice, grant); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.type).toBe("clear");
+    expect(await outstanding(f)).toHaveLength(1);
+    const replacement = await f.coordinator.createGrant(alice, sourceA.id);
+    f.feeds.statuses.set(replacement.grantId, -1);
+    await expect(f.coordinator.activate(alice, replacement.grantId)).rejects.toMatchObject({ code: "source_unreachable" });
+    expect((await f.coordinator.status(alice, device)).sources[0]!).toEqual({ sourceId: sourceA.id, state: "not_enrolled", selected: true });
+    f.transport.failure = 0;
+    f.registry.reconcile({ observed: [observed(true)], retained: new Set() }); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.badge).toEqual({ count: 1, complete: false });
+    f.clock.advance(30_000); await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message.type).toBe("clear");
+    expect(await outstanding(f)).toEqual([expect.objectContaining({ instanceId })]);
+    expect((await outstanding(f))[0]?.source).toBeUndefined();
+    f.registry.reconcile({ observed: [observed(true), { ...observed(true), instanceId: "synthetic-later-local" }], retained: new Set() });
+    await settled(f.coordinator);
+    expect(f.transport.calls.at(-1)?.message).toMatchObject({ type: "attention", instanceId: "synthetic-later-local", badge: { count: 2, complete: false } });
+    expect((await f.coordinator.status(alice, device)).sources[0]!.state).toBe("not_enrolled");
+    expect(f.transport.workers.get(device)!.displayed.every(value => value.intent.source === undefined)).toBe(true);
+  });
 
   test("a real source activates and delivers a 1000-session worst-case snapshot to the coordinator", async () => {
     const f = await fixture(); const device = await f.device();

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -437,6 +437,60 @@ describe("fleet source feed projection and lifecycle", () => {
     expect(await event(reconnected)).toMatchObject({ type: "snapshot", expiresAt: "2026-12-06T12:01:00.000Z" });
     await reconnected.cancel();
   });
+
+  for (const phase of ["authenticate", "feed"] as const) {
+    test(`renewal during the ${phase} digest keeps the bearer valid and publishes the renewed expiry`, async () => {
+      const f = await fixture(); await f.create();
+      const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+      const original = crypto.subtle.digest.bind(crypto.subtle);
+      const domain = phase === "authenticate" ? "omp-fleet-grant-v1" : "omp-fleet-owner-v1";
+      let gated = false;
+      const digest = spyOn(crypto.subtle, "digest").mockImplementation(async (algorithm, data) => {
+        if (!gated && new TextDecoder().decode(data).startsWith(`${domain}\0`)) {
+          gated = true; entered.resolve(); await gate.promise;
+        }
+        return original(algorithm, data);
+      });
+      try {
+        const opening = f.feed();
+        await entered.promise;
+        f.advance(60_000);
+        const renewed = await f.mutate(`/api/v1/notification-grants/${grantId}/renew`, { version: 1 });
+        expect(renewed.status).toBe(200);
+        expect(await renewed.json()).toMatchObject({ expiresAt: "2026-12-06T12:01:00.000Z" });
+        gate.resolve();
+        const stream = reader(await opening);
+        try { expect(await event(stream)).toMatchObject({ type: "snapshot", expiresAt: "2026-12-06T12:01:00.000Z" }); }
+        finally { await stream.cancel(); }
+      } finally { gate.resolve(); digest.mockRestore(); }
+    });
+
+    test(`replacement during the ${phase} digest still refuses the old verifier immediately`, async () => {
+      const f = await fixture(); await f.create();
+      const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+      const original = crypto.subtle.digest.bind(crypto.subtle);
+      const domain = phase === "authenticate" ? "omp-fleet-grant-v1" : "omp-fleet-owner-v1";
+      let gated = false;
+      const digest = spyOn(crypto.subtle, "digest").mockImplementation(async (algorithm, data) => {
+        if (!gated && new TextDecoder().decode(data).startsWith(`${domain}\0`)) {
+          gated = true; entered.resolve(); await gate.promise;
+        }
+        return original(algorithm, data);
+      });
+      try {
+        const opening = f.feed();
+        await entered.promise;
+        expect((await f.mutate("/api/v1/notification-grants", {
+          version: 1, grantId, verifier: await fleetGrantVerifier(grantId, wrongSecret),
+        })).status).toBe(201);
+        gate.resolve();
+        expect((await opening).status).toBe(401);
+        expect(await f.source.authenticate(`Bearer ${grantId}.${secret}`)).toBeUndefined();
+        const stream = reader(await f.feed({ Authorization: `Bearer ${grantId}.${wrongSecret}` }));
+        await event(stream); await stream.cancel();
+      } finally { gate.resolve(); digest.mockRestore(); }
+    });
+  }
 
   test("a new verified grant replaces the same owner/coordinator grant and closes its old stream", async () => {
     const f = await fixture(); await f.create();

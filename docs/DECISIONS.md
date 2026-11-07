@@ -2455,6 +2455,10 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
 - WebKit may count clears, which display nothing, against its silent-push allowance, as it already
   could for Push v2 clears. Delivery stays best effort; a lost clear leaves its alert until the
   next reconciliation or a newer request replaces it.
+- An unchanged request cleared after deauthorization or an unsupported source cannot re-alert within
+  its 30-minute worker tombstone, even after access recovers.
+- If an authorization clear fails and the coordinator restarts while its source is unreachable, the
+  alert may remain until the source becomes reachable, is deselected, or its grant expires.
 - A foreground reconciliation's badge holds only until the next push. A push generated before the
   page's snapshots but delivered after them, or an older reconciliation from a second window, can
   show its older count until the next push or reconciliation; alerts themselves are unaffected.
