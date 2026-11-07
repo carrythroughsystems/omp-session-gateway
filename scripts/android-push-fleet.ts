@@ -9,18 +9,18 @@ export const FLEET_PUSH_PHASES = ["fleet_enrolled", "fleet_private_verified", "f
   "fleet_race_verified", "fleet_taps_verified", "fleet_stale_taps_verified", "fleet_outage_verified", "fleet_restart_verified",
   "fleet_revocation_verified", "fleet_sinks_verified", "fleet_restored"] as const;
 export const FLEET_PUSH_RESULT_FIELDS = {
-  fleet_enrolled: ["selected", "covered", "distinctOrigins"],
-  fleet_private_verified: ["local", "remote", "identity", "previewFallback", "deduplicated"],
-  fleet_session_verified: ["local", "remote", "identity", "previewFallback", "deduplicated"],
-  fleet_preview_verified: ["local", "remote", "identity", "previewFallback", "deduplicated"],
-  fleet_race_verified: ["concurrent", "exactClear", "replacement", "badgeReconciled"],
-  fleet_taps_verified: ["local", "remote", "exactRequest", "scrubbed"],
-  fleet_stale_taps_verified: ["resolved", "replaced", "expired", "launches", "replayed"],
-  fleet_outage_verified: ["stale", "lastKnownKept", "badgeFlag", "recovered"],
-  fleet_restart_verified: ["exactClear", "noRepeats", "newAsk", "badgeReconciled"],
-  fleet_revocation_verified: ["unauthorized", "cleared", "launches"],
-  fleet_sinks_verified: ["clean", "detectable", "sinks", "findings"],
-  fleet_restored: ["restored", "grantsRemoved", "sourceStopped", "serveRestored"],
+  fleet_enrolled: ["selected", "covered", "distinctOrigins", "devtoolsObserver"],
+  fleet_private_verified: ["local", "remote", "identity", "previewFallback", "deduplicated", "devtoolsObserver"],
+  fleet_session_verified: ["local", "remote", "identity", "previewFallback", "deduplicated", "devtoolsObserver"],
+  fleet_preview_verified: ["local", "remote", "identity", "previewFallback", "deduplicated", "devtoolsObserver"],
+  fleet_race_verified: ["concurrent", "exactClear", "replacement", "badgeReconciled", "devtoolsObserver"],
+  fleet_taps_verified: ["local", "remote", "exactRequest", "scrubbed", "devtoolsObserver"],
+  fleet_stale_taps_verified: ["resolved", "replaced", "expired", "launches", "replayed", "devtoolsObserver"],
+  fleet_outage_verified: ["stale", "lastKnownKept", "badgeFlag", "recovered", "devtoolsObserver"],
+  fleet_restart_verified: ["exactClear", "noRepeats", "newAsk", "badgeReconciled", "devtoolsObserver"],
+  fleet_revocation_verified: ["unauthorized", "cleared", "launches", "devtoolsObserver"],
+  fleet_sinks_verified: ["clean", "detectable", "sinks", "findings", "devtoolsObserver"],
+  fleet_restored: ["restored", "grantsRemoved", "sourceStopped", "serveRestored", "devtoolsObserver"],
 } as const;
 
 export interface FleetPushRuntime {
@@ -50,8 +50,10 @@ interface FleetPhaseContext {
 
 /** Additional phases of androidPush, sharing its checkpoints, failure typing and restoration owner. */
 export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
-  const { runtime: r, progress: p, fixture, snapshot, delivered, clear, wait, assertion, attempt, finish } = c;
+  const { runtime: r, progress: p, fixture, snapshot, delivered, clear, wait, assertion, attempt } = c;
   const f = r.fleet;
+  let observerAttached = false;
+  const finish: FleetPhaseContext["finish"] = (phase, result) => c.finish(phase, { ...result, devtoolsObserver: observerAttached });
   const badge = async (count: number, complete: boolean) => wait("fleet badge reconciliation", async () => {
     const observed = await f.observeBadge();
     // A numeric badge cannot express completeness; the Hosts row proves that separately.
@@ -64,7 +66,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
     return session;
   };
   const cold = async (detail: PushDetailLevel = "session") => {
-    await r.detail(detail); await f.armBadgeObserver(); await r.closePwa(); await r.lock();
+    await r.detail(detail); await f.armBadgeObserver(); observerAttached = true; await r.closePwa(); await r.lock();
   };
   const expiredTap = async (session: SessionMetadata) => {
     await r.replay(session);
@@ -205,6 +207,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext): Promise<void> {
   });
   await attempt("fleet_restored", async () => {
     await r.cleanup("fleet", p);
+    observerAttached = false;
     await finish("fleet_restored", { restored: true, grantsRemoved: true, sourceStopped: true, serveRestored: true });
   });
 }

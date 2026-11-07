@@ -111,6 +111,53 @@ export function observePushLaunch(session: Pick<SessionMetadata, "generation" | 
 
 type PermissionConnection = (run: (driver: Pick<AndroidChromeDriver, "browserSend">) => Promise<void>, execution?: AndroidExecution) => Promise<void>;
 
+interface PushWorkerObserver {
+  evaluate<T>(expression: string): Promise<T>;
+  close(): Promise<void>;
+}
+
+/** Admit while warm; keep only the existing worker attached, never a page or a fabricated event. */
+export async function holdPushWorkerObserver(origin: string, execution?: AndroidExecution,
+  connect: typeof withAndroidChrome = withAndroidChrome): Promise<PushWorkerObserver> {
+  const ready = Promise.withResolvers<PushWorkerObserver>(), release = Promise.withResolvers<void>();
+  let ended: unknown, closed = false, closing: Promise<void> | undefined;
+  const session = connect(async driver => {
+    const inventory = await driver.browserSend("Target.getTargets");
+    const workers = Array.isArray(inventory.targetInfos) ? inventory.targetInfos.filter((target: Record<string, unknown>) =>
+      target.type === "service_worker" && target.url === `${origin}/service-worker.js`) : [];
+    if (workers.length !== 1) throw new Error("fleet worker observer unavailable");
+    const attached = await driver.browserSend("Target.attachToTarget", { targetId: workers[0].targetId, flatten: true });
+    if (typeof attached.sessionId !== "string") throw new Error("fleet worker attachment unavailable");
+    const sessionId = attached.sessionId;
+    const abort = () => release.reject(execution?.signal.reason ?? new Error("fleet worker observer cancelled"));
+    const timer = setTimeout(() => release.reject(new AndroidDevtoolsConnectionError("protocol_timeout", "Fleet worker observer lifetime exceeded")),
+      Math.max(1, Math.min(30 * 60_000, execution === undefined ? Infinity : execution.deadline - performance.now())));
+    execution?.signal.addEventListener("abort", abort, { once: true });
+    if (execution?.signal.aborted) abort();
+    try {
+      ready.resolve({
+        async evaluate<T>(expression: string): Promise<T> {
+          if (ended !== undefined) throw ended;
+          if (closed) throw new Error("fleet worker observer already closed");
+          const result = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+          if (result.exceptionDetails !== undefined || result.result === null || typeof result.result !== "object" || !("value" in result.result)) {
+            throw new Error("fleet worker observation failed");
+          }
+          return result.result.value as T;
+        },
+        close() {
+          closed = true;
+          return closing ??= (async () => { release.resolve(); await session; })();
+        },
+      });
+      await runWithRestoration("fleet observer attachment", () => release.promise,
+        [async () => { await driver.browserSend("Target.detachFromTarget", { sessionId }); }]);
+    } finally { clearTimeout(timer); execution?.signal.removeEventListener("abort", abort); }
+  }, { port: 9237, launchBrowser: false, ...(execution === undefined ? {} : { execution }) });
+  void session.catch(error => { ended = error; ready.reject(error); });
+  return ready.promise;
+}
+
 export function ownedPushForwards(list: string, serial: string, socket: string): string[] {
   const forwards: string[] = [];
   for (const line of list.split("\n")) {
@@ -250,6 +297,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   const remote = fleetPushSource(identity.origin);
   const remoteIds = new Set<string>();
   let fleetPrepared = false, fleetEnabled = false, fleetRevoked = false;
+  let fleetObserver: PushWorkerObserver | undefined;
   const fleetRoot = (epoch: string) => join(base, `fleet-${epoch}`);
   let observationArmed = false;
   let observedTopics: string[] = [];
@@ -421,7 +469,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     const errors: unknown[] = [], started = performance.now();
     for (let attempt = 0; ; attempt++) {
       let evaluated = false;
-      try { return await withAndroidChrome(async driver => {
+      try {
+        if (fleetObserver !== undefined) { evaluated = true; return await fleetObserver.evaluate<T>(expression); }
+        return await withAndroidChrome(async driver => {
         const inventory = await driver.browserSend("Target.getTargets");
         const workers = Array.isArray(inventory.targetInfos) ? inventory.targetInfos.filter((target: Record<string, unknown>) =>
           target.type === "service_worker" && target.url === `${identity.origin}/service-worker.js`) : [];
@@ -447,7 +497,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         }
         // Recreate only a contained transport. Never wake Chrome, navigate, replay a mutation,
         // re-arm lost badge state, or turn a missing worker/product assertion into a retry.
-        if (attempt === 0 && (!evaluated || readOnly)) { checkExecution(); continue; }
+        if (fleetObserver === undefined && attempt === 0 && (!evaluated || readOnly)) { checkExecution(); continue; }
         throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase,
           class: "harness", reason: "invalid_evidence", operation: evaluated && !readOnly ? "unknown" : "read_only",
           elapsedMs: Math.round(performance.now() - started), observations: { transportFailure: true, attempts: attempt + 1 } },
@@ -545,6 +595,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       },
       async armBadgeObserver() {
         await runtime.beforeEffect();
+        // Fleet cold evidence is instrumented, not process-cold wake evidence. The legacy
+        // force-stop/Doze phases run only after fleet cleanup releases this connection.
+        fleetObserver ??= await holdPushWorkerObserver(identity.origin, execution, chrome);
         const armed = await worker<boolean>(`(() => {
           if (!self.__ompQualificationBadge) {
             if (typeof navigator.setAppBadge !== "function" || typeof navigator.clearAppBadge !== "function") return false;
@@ -1365,9 +1418,10 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         case "fleet": {
           if (progress.fleetPrepared !== true) break;
           fleetPrepared = true;
-          const owner = await execute(["test", "-f", join(fleetRoot(progress.epoch), "owner.json")]);
-          if (owner.exitCode !== 0) await runtime.fleet.host("restore", progress.epoch);
-          else await runWithRestoration("fleet enrollment and hosts", async () => {
+          await runWithRestoration("fleet observer lifecycle", async () => {
+            const owner = await execute(["test", "-f", join(fleetRoot(progress.epoch), "owner.json")]);
+            if (owner.exitCode !== 0) await runtime.fleet.host("restore", progress.epoch);
+            else await runWithRestoration("fleet enrollment and hosts", async () => {
               await runtime.fleet.host("coordinator-up", progress.epoch);
               await runtime.fleet.select(false);
             }, [
@@ -1383,6 +1437,10 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
               })()`),
               () => runtime.fleet.host("restore", progress.epoch),
             ]);
+          }, [async () => {
+            const observer = fleetObserver;
+            try { await observer?.close(); } finally { fleetObserver = undefined; }
+          }]);
           fleetEnabled = false; fleetPrepared = false;
           progress.fleetPrepared = false;
           break;

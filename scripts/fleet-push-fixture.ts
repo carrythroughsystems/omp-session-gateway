@@ -28,6 +28,7 @@ interface FixtureState {
 }
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const absent = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
+class FleetSourceOwnershipError extends Error {}
 
 /** Private helper response, consumed in memory by the controller; never receipt evidence. */
 export function fleetFixtureDiagnostic(error: unknown): { message: string; stack: string }[] {
@@ -142,7 +143,7 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     const result = await execute(["ps", "-ww", "-p", text, "-o", "stat=,command="]);
     if (result.exitCode !== 0) return;
     if (result.stdout.trimStart().startsWith("Z")) return;
-    if (!result.stdout.includes(join(root, "source.sh"))) throw new Error("fleet source process ownership changed");
+    if (!result.stdout.includes(join(root, "source.sh"))) throw new FleetSourceOwnershipError("fleet source process ownership changed");
     return pid;
   };
   const stopSource = async () => {
@@ -154,8 +155,16 @@ export async function fleetPushFixture(operation: FleetFixtureOperation, root: s
     if (pid !== undefined) {
       await run(["kill", "-TERM", String(pid)]);
       const deadline = Date.now() + 30_000;
-      while (await sourceAlive() !== undefined) {
-        if (Date.now() >= deadline) throw new Error("fleet source did not stop");
+      for (;;) {
+        let unsettled: unknown;
+        try { if (await sourceAlive() === undefined) break; }
+        catch (error) {
+          // After TERM, ps can see the exiting process without its former command line.
+          // This is not proof of exit: keep waiting for absence/zombie, never signal it again.
+          if (!(error instanceof FleetSourceOwnershipError)) throw error;
+          unsettled = error;
+        }
+        if (Date.now() >= deadline) throw new Error("fleet source did not stop", { cause: unsettled });
         await Bun.sleep(100);
       }
     }
