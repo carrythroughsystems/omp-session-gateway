@@ -276,10 +276,13 @@ export type AttentionPushMessage =
     };
 
 
-/** Capability-free launch intent, revalidated against the current directory before launch. */
+/**
+ * Capability-free launch intent, revalidated against the current directory before launch. `source`
+ * is the fleet binding of a remote source (ADR-048); absent means the gateway serving the page.
+ */
 export type NotificationLaunchIntent =
-  | { readonly kind: "attention"; readonly instanceId: string; readonly requestId: string }
-  | { readonly kind: "activity_stop"; readonly instanceId: string; readonly generation: number };
+  | { readonly kind: "attention"; readonly source?: string; readonly instanceId: string; readonly requestId: string }
+  | { readonly kind: "activity_stop"; readonly source?: string; readonly instanceId: string; readonly generation: number };
 
 export interface LaunchRequest {
   readonly mode: LaunchMode;
@@ -316,3 +319,197 @@ export interface ClientConfigResponse {
     readonly browserRecognition: boolean;
   };
 }
+
+/** Push envelope for fleet recipients (ADR-048). Push v2 remains the legacy home-only envelope. */
+export const FLEET_PUSH_VERSION = 3 as const;
+/** Coordinator and source HTTP contract for fleet notifications, versioned apart from Push. */
+export const FLEET_NOTIFICATIONS_VERSION = 1 as const;
+/** A fleet push stays well inside the 4 KiB Web Push record after encryption overhead. */
+export const MAX_FLEET_PUSH_BYTES = 3 * 1024;
+export const MAX_FLEET_REQUEST_BYTES = 4 * 1024;
+export const MAX_FLEET_STATUS_BYTES = 8 * 1024;
+export const MAX_FLEET_FEED_EVENT_BYTES = 64 * 1024;
+/** Remote sources a coordinator may pull: at most every configured remote target. */
+export const MAX_FLEET_NOTIFICATION_SOURCES = MAX_FLEET_TARGETS;
+/** Coordinators one source may name. */
+export const MAX_FLEET_COORDINATORS = MAX_FLEET_TARGETS;
+export const MAX_COORDINATOR_FLEET_GRANTS = 32;
+export const MAX_SOURCE_FLEET_GRANTS = 16;
+export const FLEET_GRANT_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
+/** The page renews a selected source's grant once its expiry is this close. */
+export const FLEET_GRANT_RENEW_WITHIN_MS = 10 * 24 * 60 * 60 * 1_000;
+/** The worker keeps a cleared request's tombstone longer than any admitted push TTL (5 minutes). */
+export const FLEET_TOMBSTONE_RETENTION_MS = 30 * 60 * 1_000;
+/** Per worker map; a flood of more distinct cleared requests within the retention evicts the oldest. */
+export const MAX_FLEET_WORKER_RECORDS = 2_048;
+/** Known pending asks across every fleet source a recipient may select. */
+export const MAX_FLEET_BADGE_COUNT = MAX_FLEET_SOURCES * MAX_SESSIONS;
+/** Outstanding asks the coordinator remembers per recipient for restart reconciliation. */
+export const MAX_FLEET_OUTSTANDING_ASKS = 256;
+/** First 22 base64url characters of the binding digest: 132 bits. */
+export const FLEET_BINDING_PATTERN = /^[A-Za-z0-9_-]{22}$/u;
+/** Unpadded base64url of 32 bytes: a grant secret, a verifier, or an owner digest. */
+export const FLEET_DIGEST_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+export const FLEET_SESSION_SUFFIX_LENGTH = 6;
+
+export type FleetPushTitle = "OMP session needs attention" | "OMP session activity stopped";
+
+/** Coordinator receipt order: a persisted start counter and one message counter across recipients. */
+export interface FleetSequence {
+  readonly epoch: number;
+  readonly n: number;
+}
+
+/** Known pending Control-capable asks across the recipient's sources; incomplete when any is not current. */
+export interface FleetBadge {
+  readonly count: number;
+  readonly complete: boolean;
+}
+
+interface FleetSessionPush {
+  readonly version: typeof FLEET_PUSH_VERSION;
+  /** Binding of a remote source; absent for the coordinator's own sessions. */
+  readonly source?: string;
+  readonly instanceId: string;
+  readonly generation: number;
+  readonly seq: FleetSequence;
+  readonly badge: FleetBadge;
+}
+
+/** One pending ask in a page's authoritative snapshot; `source` absent means the coordinator's own. */
+export interface FleetPendingAsk {
+  readonly source?: string;
+  readonly instanceId: string;
+  readonly generation: number;
+  readonly requestId: string;
+}
+
+/** Capability-free and content-free message encrypted for one fleet recipient. */
+export type FleetPushMessage =
+  | (FleetSessionPush & {
+      readonly type: "attention";
+      readonly requestId: string;
+      readonly title: "OMP session needs attention";
+      readonly body?: string;
+    })
+  | (FleetSessionPush & {
+      readonly type: "activity_stop";
+      readonly title: "OMP session activity stopped";
+      readonly body?: string;
+    })
+  | (FleetSessionPush & { readonly type: "clear"; readonly requestId: string });
+
+/**
+ * Page → worker foreground reconciliation from fresh, authenticated source snapshots. `asOf` is the
+ * worker's push receipt count captured before the page fetched them, so a snapshot can never
+ * overrule a push the worker received after the page began.
+ */
+export interface FleetReconcileMessage {
+  readonly type: "omp-notification-reconcile";
+  readonly version: typeof FLEET_PUSH_VERSION;
+  readonly asOf: { readonly received: number };
+  /** `local` or remote bindings whose pending sets below are complete and authoritative. */
+  readonly fresh: readonly string[];
+  readonly pending: readonly FleetPendingAsk[];
+  readonly badge: FleetBadge;
+}
+
+/** Coordinator view of one configured notification source for the calling owner. */
+export type FleetSourceState = "not_enrolled" | "pending" | "current" | "stale" | "unauthorized" | "unsupported";
+
+export interface FleetSourceStatus {
+  readonly sourceId: string;
+  readonly state: FleetSourceState;
+  /** Whether the device named by the request's endpoint selects this source. */
+  readonly selected: boolean;
+  /** The calling owner's grant at this source, needed for renewal and revocation there. */
+  readonly grantId?: string;
+  /** The source's grant expiry as last reported by its feed. */
+  readonly expiresAt?: string;
+}
+
+export interface FleetStatusRequest {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  /** This device's push endpoint, so the response can report its selection; absent before enrollment. */
+  readonly endpoint?: string;
+}
+
+export interface FleetStatusResponse {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  /** Every configured notification source, in configuration order. */
+  readonly sources: readonly FleetSourceStatus[];
+}
+
+export interface FleetGrantCreateRequest {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  readonly sourceId: string;
+}
+
+export interface FleetGrantCreateResponse {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  readonly grantId: string;
+  readonly verifier: string;
+}
+
+/** Body of activate, renew, and revoke requests: the path names the grant. */
+export interface FleetGrantActionRequest {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+}
+
+export interface FleetRecipientRequest {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  readonly endpoint: string;
+  /** Remote notification source ids; the coordinator's own sessions are always included. */
+  readonly sources: readonly string[];
+}
+
+export interface FleetRecipientResponse {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  /** This device's remote selection after the change; empty means it is back on Push v2. */
+  readonly sources: readonly string[];
+  /** Grants no device of the owner needs any more: discarded here, to be revoked at each source. */
+  readonly released: readonly { readonly sourceId: string; readonly grantId: string }[];
+}
+
+export interface FleetRecipientRemoveRequest {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  readonly endpoint: string;
+}
+
+/** Posted by the page to a source; the coordinator is the exact request origin. */
+export interface SourceGrantRequest {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  readonly grantId: string;
+  readonly verifier: string;
+}
+
+export interface SourceGrantResponse {
+  readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+  readonly grantId: string;
+  readonly expiresAt: string;
+}
+
+/** The only session fields a source ever projects into its feed. */
+export interface FleetFeedSession {
+  readonly instanceId: string;
+  readonly generation: number;
+  /** Present exactly when the session is Control-capable and waiting for input. */
+  readonly requestId?: string;
+}
+
+export type FleetFeedEvent =
+  | {
+      readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+      readonly type: "snapshot";
+      /** Owner digest of the grant, so a coordinator never fans one owner's feed out to another. */
+      readonly owner: string;
+      readonly expiresAt: string;
+      readonly sessions: readonly FleetFeedSession[];
+    }
+  | { readonly version: typeof FLEET_NOTIFICATIONS_VERSION; readonly type: "upsert"; readonly session: FleetFeedSession }
+  | {
+      readonly version: typeof FLEET_NOTIFICATIONS_VERSION;
+      readonly type: "remove" | "stop";
+      readonly instanceId: string;
+      readonly generation: number;
+    };

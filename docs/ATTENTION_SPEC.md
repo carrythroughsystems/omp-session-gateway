@@ -207,6 +207,71 @@ in push, notification data, the scrubbed route, and capability-free history stat
 capabilities remain forbidden from push state/payloads, notifications, URLs, history, service
 worker messages, browser storage, caches, logs, and diagnostics.
 
+## Fleet notifications
+
+[ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator)
+lets one installed PWA alert for selected remote hosts. The gateway serving the PWA is the
+coordinator; it pulls metadata from each enrolled source and sends every push. Wire shapes are in
+[Protocol](PROTOCOL.md#fleet-notifications).
+
+**Opt-in.** The Settings sheet shows a **Hosts** group only when the coordinator offers fleet
+notifications and background alerts are enabled. Each configured notification source has one
+switch. Turning a host on enrolls the owner's grant when needed (coordinator, then source, then
+coordinator), renews it at the source, and adds the host to this device's selection. Turning it off
+removes it from this device's selection; once no device of the owner selects the host, the
+coordinator discards that grant and the page revokes it at the host. A device with no remote host
+selected stays on Push v2. Each switch row shows exactly one status:
+
+| State | Status text |
+|---|---|
+| selected, `current` | `Covered` |
+| selected, `pending` | `Connecting…` |
+| selected, `stale` | `Unreachable · showing last known` |
+| selected, `unauthorized` or `not_enrolled` | `Needs approval on this host` (with **Reconnect**) |
+| selected, `unsupported` | `Host gateway does not support alerts` |
+| not selected | `Off` |
+
+The group summary reads `All selected hosts covered` only when every selected host is `Covered`,
+and otherwise `N of M selected hosts covered`; it never replaces the existing
+`Disable background alerts` state, which still describes permission and subscription only. A
+partial enable leaves each row in its own state.
+
+**Notifications.** Fleet alerts use the Push v2 titles. Private has no body. At Session and Preview,
+a remote host's alert shows that host's configured label and a six-character opaque session suffix,
+never a session title, working directory, or ask preview; a local alert shows this gateway's
+`fleet.label` before its existing Session detail. Preview behaves as Session for every fleet alert.
+A new ask that replaces a stop, or an older ask whose clear has not arrived yet, alerts again; a
+duplicate never does.
+A remote host's notifications use their own tag (`omp-attention-<binding>-<instanceId>`); the
+coordinator's own sessions keep `omp-attention-<instanceId>`, so a Push v2 and a Push v3 alert for
+the same local ask replace rather than duplicate each other.
+
+**Ordering.** The worker stores bounded metadata-only state durably: a cleared request stays
+suppressed for 30 minutes even if its attention arrives later or the worker restarts; an older
+message for a session never replaces a newer one; a stop never replaces a displayed attention; an
+older pushed badge never overwrites a newer one (a badge set when the app opens lasts until the
+next push). Asks on different hosts are ordered by first observation
+at the coordinator, never by host clocks. The coordinator remembers which asks it alerted each device
+about; after it restarts it sends exact clears for the ones resolved meanwhile, or whose host was
+revoked, removed, or deselected, and alerts only asks the device has not seen. Opening the app
+reconciles from fresh snapshots of each source, but never closes an alert, or changes the badge,
+on the strength of a snapshot older than a push the phone received while the app was loading.
+
+**Badge and All clear.** The badge counts known pending Control-capable asks across selected hosts,
+including an unreachable host's last-known asks. When the count is zero but a selected host is not
+`Covered`, the badge shows the platform's plain marker instead of clearing. The directory's fleet
+`All clear` appears only when every selected host is `Covered` and none has a pending ask;
+otherwise it shows known work with the unavailable hosts named.
+
+**Taps.** A remote alert's route adds `&source=<binding>`. The app maps the binding to a currently
+configured source; an unknown binding, a changed origin, or a revoked host shows the expired notice
+and launches nothing. Otherwise it fetches that source's current snapshot and launches through that
+source exactly as a directory tap would.
+
+**Limits.** Fleet alerts need the coordinator: while it is asleep or down, no fleet alert is sent,
+and the phone learns that only when the app next opens. Install the PWA from an always-on gateway.
+Delivery remains best effort, as for Push v2.
+
 ## Acceptance checklist
 
 The first checklist records pre-cutover implementation acceptance, including **fork-era** layout

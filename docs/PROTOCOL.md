@@ -344,6 +344,113 @@ ordinary Control launch POST only when the exact request identity remains action
 controllable. A capability never enters the push payload, route, notification, service worker, or
 history state.
 
+### Fleet notifications
+
+[ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator) makes
+the gateway serving the installed PWA (the *coordinator*) send background alerts for selected
+remote sources. Fleet HTTP bodies carry `version: 1`, fleet pushes carry `version: 3`, and Push v2
+above is unchanged for every subscription that has not opted in. Every body is parsed with exact
+keys and bounded sizes by `packages/protocol`; unknown keys and other versions are rejected.
+
+**Configuration.** A coordinator lists eligible `fleet.targets` ids in `notifications.sources`. A
+source lists `{ "id", "origin" }` peers in `notifications.coordinators`, each origin also present
+in `http.trustedDashboardOrigins`. Both default to empty, which keeps every route below answering
+`404`.
+
+**Coordinator routes** (same origin, owner-authenticated; mutations require
+`requestHasValidMutationContext`, `application/json`, rate limits, and a 4 KiB body bound):
+
+| Route | Request | Response |
+|---|---|---|
+| `POST /api/v1/push/fleet/status` | `{ version: 1, endpoint? }` | `{ version: 1, sources: [{ sourceId, state, selected, grantId?, expiresAt? }] }`, one row per configured notification source; `selected` reports the given endpoint's selection |
+| `POST /api/v1/push/fleet/grants` | `{ version: 1, sourceId }` | `201 { version: 1, grantId, verifier }` |
+| `POST /api/v1/push/fleet/grants/:grantId/activate` | `{ version: 1 }` | `204` once the first feed snapshot verifies the grant; `409 grant_rejected`, `503 source_unreachable`, or `404 unsupported` otherwise |
+| `POST /api/v1/push/fleet/grants/:grantId/revoke` | `{ version: 1 }` | `204` |
+| `PUT /api/v1/push/fleet/recipient` | `{ version: 1, endpoint, sources: [id, …] }` | `{ version: 1, sources, released }` |
+| `DELETE /api/v1/push/fleet/recipient` | `{ version: 1, endpoint }` | `{ version: 1, sources: [], released }`; the subscription returns to Push v2 |
+
+`state` is `not_enrolled`, `pending`, `current`, `stale`, `unauthorized`, or `unsupported` for the
+calling owner. A row names the owner's `grantId` in every state except `not_enrolled` (where it is
+absent) and `unsupported` (where it is optional), and `current` and `stale` rows also carry the
+`expiresAt` the coordinator persisted from the feed, so any of the owner's devices can renew or
+revoke. `grantId` is a lowercase UUIDv4 and `verifier` the 43-character unpadded base64url
+SHA-256 of `"omp-fleet-grant-v1" ‖ 0x00 ‖ grantId ‖ 0x00 ‖ secret`; the 256-bit secret is generated,
+stored, and used only by the coordinator. A recipient `endpoint` must be an existing subscription of
+the caller, and `sources` names 1–7 distinct remote notification sources, never `local`; the
+coordinator's own sessions always reach a subscribed device. `released` lists `{ sourceId, grantId }`
+for grants that no device of the owner selects any more: the coordinator has discarded their secrets
+and closed their feeds, and the page revokes them at the sources when they are reachable (expiry
+covers the rest).
+
+**Source routes.** `POST /api/v1/notification-grants` (`{ version: 1, grantId, verifier }` →
+`201 { version: 1, grantId, expiresAt }`), `POST /api/v1/notification-grants/:grantId/renew`
+(`{ version: 1 }` → `200 { version: 1, grantId, expiresAt }`), and
+`POST /api/v1/notification-grants/:grantId/revoke` (`{ version: 1 }` → `204` whether or not the
+grant exists) are the only fleet routes a browser reaches on a source. They are cross-origin from a
+configured coordinator's exact origin (`requestHasTrustedDashboardContext` plus a match in
+`notifications.coordinators`), authenticate the owner from that source's own Serve identity, and act
+only on the caller's grants. A grant expires 30 days after its creation or latest renewal; at most
+16 grants exist per source (`503 grant_capacity` after expired grants are pruned).
+
+**Feed.** `GET /api/v1/notification-feed` answers only a machine request: it refuses any `Origin`
+or `Sec-Fetch-*` header with `403`, requires the Serve-only loopback topology without second-hop
+evidence, ignores Tailscale identity headers, and accepts only
+`Authorization: Bearer <grantId>.<secret>`. An unknown, expired, revoked, or no-longer-authorized
+grant answers `401` without detail. The response is `text/event-stream`; each `data` line is one
+JSON event whose `type` matches the SSE event name:
+
+```json
+{ "version": 1, "type": "snapshot", "owner": "<43-char owner digest>", "expiresAt": "2026-12-07T00:00:00.000Z",
+  "sessions": [{ "instanceId": "metadata-instance-id", "generation": 3, "requestId": "opaque-request-id" }] }
+{ "version": 1, "type": "upsert", "session": { "instanceId": "metadata-instance-id", "generation": 3 } }
+{ "version": 1, "type": "remove", "instanceId": "metadata-instance-id", "generation": 3 }
+{ "version": 1, "type": "stop", "instanceId": "metadata-instance-id", "generation": 3 }
+```
+
+`requestId` appears exactly when the session is Control-capable and waiting. `owner` is the
+base64url SHA-256 of `"omp-fleet-owner-v1" ‖ 0x00 ‖ coordinatorOrigin ‖ 0x00 ‖ login`. The snapshot
+is always first, is sent only after the source's discovery has completed a round (heartbeats only
+until then), and is authoritative for that source; `stop` is live-only. A stream that would exceed
+its 256-event queue is closed, and the coordinator reconnects with backoff.
+
+**Fleet push (`version: 3`).** Every message to a fleet recipient is one of:
+
+```json
+{ "version": 3, "type": "attention", "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222",
+  "generation": 3, "requestId": "req_0123456789abcdef", "seq": { "epoch": 7, "n": 42 },
+  "badge": { "count": 2, "complete": true }, "title": "OMP session needs attention", "body": "Studio · bb2222" }
+{ "version": 3, "type": "activity_stop", "instanceId": "aaaa1111bbbb2222", "generation": 3,
+  "seq": { "epoch": 7, "n": 43 }, "badge": { "count": 2, "complete": true }, "title": "OMP session activity stopped" }
+{ "version": 3, "type": "clear", "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222",
+  "generation": 3, "requestId": "req_0123456789abcdef", "seq": { "epoch": 7, "n": 44 }, "badge": { "count": 1, "complete": true } }
+```
+
+`source` is the 22-character binding of a remote source, the prefix of the unpadded base64url
+SHA-256 of `"omp-fleet-binding-v1" ‖ 0x00 ‖ sourceId ‖ 0x00 ‖ origin`, and is absent for the
+coordinator's own sessions. `seq.epoch` is persisted by the coordinator and advances at each start to
+`max(previous + 1, current Unix seconds)`; `seq.n` is one coordinator-wide counter within the epoch,
+so a recipient sees gaps but never a reset. `badge.count` (0–8,000) is the known pending
+Control-capable asks across the recipient's sources; `badge.complete` is false while any selected
+source is not current. `body` is absent at Private; otherwise a remote alert's body is exactly the
+target's configured label, ` · `, and the last six characters of `instanceId` (the coordinator
+checks it against its configuration with `parseFleetPushMessage(payload, remoteLabels)` before
+sending; the worker checks its shape), and a local alert shows `fleet.label` before the existing
+Push v2 Session detail.
+There is no snapshot message: after a restart the coordinator sends exact clears and attentions from
+the outstanding asks it persisted per recipient. Payloads stay under 3 KiB and use the same urgency,
+TTL, and absent `Topic` as Push v2.
+
+The page reconciles in the foreground by first asking the worker for its push receipt count, then
+fetching fresh snapshots, then posting
+`{ type: "omp-notification-reconcile", version: 3, asOf: { received }, fresh, pending, badge }`,
+where `fresh` lists `local` or bindings whose `pending` asks are complete. The worker closes only
+alerts whose session received no push since `asOf`, and applies the badge only if no push arrived.
+
+Fleet notification data is `{ version: 3, type, source?, instanceId, requestId }` for attention
+and `{ version: 3, type, source?, instanceId, generation }` for a stop. Routes append
+`&source=<binding>` for remote sources; route parsing still rejects repeated, extra, or malformed
+parameters.
+
 ### `POST /api/v1/sessions/:instanceId/launch`
 
 Request:
@@ -561,12 +668,12 @@ readiness token and keeps its existing shape; that token is never given to OMP.
 
 When `http.trustedDashboardOrigins` is non-empty (up to 8 canonical origins), the gateway admits browser-direct CORS requests from those exact origins on a strictly bounded surface ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):
 
-- **Allowed routes and methods:** only `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), and `OPTIONS` preflight on those exact paths. `/api/v1/events`, `/api/v1/push/config`, `/api/v1/push/subscription`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin.
+- **Allowed routes and methods:** only `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), the fleet grant routes `POST /api/v1/notification-grants`, `POST /api/v1/notification-grants/:grantId/renew`, and `POST /api/v1/notification-grants/:grantId/revoke` (exact lowercase UUIDv4; admitted only from an origin that is also a configured `notifications.coordinators` origin), and `OPTIONS` preflight on those exact paths. `/api/v1/events`, `/api/v1/push/*`, `/api/v1/notification-feed`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin.
 - **Origin admission:** the request `Origin` header must be a single canonical origin present in `http.trustedDashboardOrigins`. Missing, `null`, `*`, malformed, or multi-valued `Origin` headers are not admitted. Any foreign non-admitted `Origin` on any `/api/` route except loopback `GET /api/v1/health` is refused with `403` (`forbidden`) and no CORS headers before identity checks.
 - **Normal authorization applies:** admitted cross-origin requests still run the full target-gateway authorization path (loopback peer check, TUN-mode Tailscale Serve verification, second-hop proxy header refusal, `auth.allowedLogins` check, rate limiting, and body-size bounds).
-- **Cross-origin mutation context (`requestHasTrustedDashboardContext`):** cross-origin `POST /api/v1/sessions/:instanceId/launch` and `POST /api/v1/session-creations` require `Origin` in `http.trustedDashboardOrigins`, `Sec-Fetch-Site` absent or in `{same-site, cross-site}` (`none` and `same-origin` are rejected on the cross-origin path), and `Content-Type` exactly `application/json`. `requestHasValidMutationContext` remains required for local launches, creations, and push subscription mutations. An opted-in target trusts those dashboards to create approved processes as well as read metadata and open existing sessions.
+- **Cross-origin mutation context (`requestHasTrustedDashboardContext`):** cross-origin `POST /api/v1/sessions/:instanceId/launch`, `POST /api/v1/session-creations`, and the three fleet grant `POST` routes require `Origin` in `http.trustedDashboardOrigins` (for the grant routes, also an origin listed in `notifications.coordinators`), `Sec-Fetch-Site` absent or in `{same-site, cross-site}` (`none` and `same-origin` are rejected on the cross-origin path), and `Content-Type` exactly `application/json`. `requestHasValidMutationContext` remains required for local launches, creations, and push subscription and fleet coordinator mutations. An opted-in target trusts those dashboards to create approved processes as well as read metadata and open existing sessions.
 - **Response headers on admitted requests:** responses add `Access-Control-Allow-Origin: <exact matched origin>` and `Vary: Origin`, keep `Cache-Control: no-store, max-age=0`, and never emit `Access-Control-Allow-Credentials` or a wildcard. Problem responses (`400`, `403`, `404`, `409`, `413`, `415`, `429`, `500`, `503`) for an admitted origin on the allowed route/method pairs carry the same `Access-Control-Allow-Origin` and `Vary: Origin` headers so the dashboard can distinguish a readable `403` from a network or CORS failure.
-- **Preflight (`OPTIONS`):** handled only on the five allowed route patterns above, authenticated through the normal identity path, without querying OMP, starting Tern, or consuming mutation rate-limit tokens. A valid preflight requires `Origin` in `http.trustedDashboardOrigins` and `Access-Control-Request-Method` matching the route (`GET` for sessions, creation options, and exact creation status; `POST` for launch and the creations collection). `Access-Control-Request-Headers` may be absent, or exactly `content-type` (case-insensitive) for POST only; GET permits no requested headers. It returns `204 No Content` with:
+- **Preflight (`OPTIONS`):** handled only on the allowed route patterns above (the five session and creation patterns and the three fleet grant patterns), authenticated through the normal identity path, without querying OMP, starting Tern, or consuming mutation rate-limit tokens. A valid preflight requires `Origin` in `http.trustedDashboardOrigins` (and, for a fleet grant route, in `notifications.coordinators`) and `Access-Control-Request-Method` matching the route (`GET` for sessions, creation options, and exact creation status; `POST` for launch, the creations collection, and the fleet grant routes). `Access-Control-Request-Headers` may be absent, or exactly `content-type` (case-insensitive) for POST only; GET permits no requested headers. It returns `204 No Content` with:
   - `Access-Control-Allow-Origin: <exact matched origin>`
   - `Access-Control-Allow-Methods: GET` (or `POST`)
   - `Access-Control-Allow-Headers: Content-Type` (`POST` only)
