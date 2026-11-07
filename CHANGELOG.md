@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.10.0] — 2026-11-07
 
-This release uses stock OMP v18.18.0 as its engineering baseline. The 13 changelog entries below record the changes since v0.9.1. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.18.0 as its engineering baseline. The 14 changelog entries below record the changes since v0.9.1. Historical receipts do not qualify these bytes.
 
 ### Added
 
@@ -63,6 +63,9 @@ This release uses stock OMP v18.18.0 as its engineering baseline. The 13 changel
   failures as typed outcomes at their lane phase, and other errors at the phase their lane last
   checkpointed, instead of `unknown` at the lane's first step. WinRM helper diagnostics keep the
   exception class when redaction alters a frame name.
+- Qualification journeys now name the closed connection state (chip state, relay or gateway
+  unavailable, online) when a View or Control collaboration shell does not connect, instead of an
+  unclassified timeout.
 
 ## [v0.9.1] — 2026-11-06
 
