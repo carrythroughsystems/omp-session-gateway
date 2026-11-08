@@ -529,6 +529,57 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     if (records.some(record => record.tag.includes("omp-attention-") && !observedTopics.some(topic => record.tag.endsWith(topic)) && baselineRecords.get(record.key) !== record.postedAt)) throw new NotificationOverlapError();
     return records;
   };
+  type RestartLedger = { epoch: number; recipients: number; grants: number; outstanding: number; requestOutstanding: boolean };
+  let restartClear: { session?: SessionMetadata; before?: RestartLedger; upAt?: number } | undefined;
+  const restartLedger = async (session: SessionMetadata): Promise<RestartLedger | undefined> => {
+    try {
+      // Project on the host: the private ledger, endpoint keys and grant secrets never leave it.
+      const result = await execute([options.fixtureBun ?? process.execPath, "-e", `
+        const timer=setTimeout(()=>process.exit(1),3000);
+        const s=JSON.parse(await Bun.file((process.env.XDG_STATE_HOME??process.env.HOME+'/.local/state')+'/omp-session-gateway/fleet-notifications.json').text());
+        const q=JSON.parse(process.argv[1]);
+        console.log(JSON.stringify({epoch:s.epoch,recipients:s.recipients.length,grants:s.grants.length,
+          outstanding:s.recipients.reduce((n,r)=>n+r.outstanding.length,0),
+          requestOutstanding:s.recipients.some(r=>r.outstanding.some(a=>a.source===q.source&&a.instanceId===q.instanceId&&a.generation===q.generation&&a.requestId===q.requestId))}));
+        clearTimeout(timer);`,
+      JSON.stringify({ source: remote.binding, instanceId: session.instanceId, generation: session.generation, requestId: session.ask?.requestId })]);
+      if (result.exitCode !== 0) return undefined;
+      const value = JSON.parse(result.stdout);
+      if (![value.epoch, value.recipients, value.grants, value.outstanding].every(n => Number.isSafeInteger(n) && n >= 0) ||
+        typeof value.requestOutstanding !== "boolean") return undefined;
+      return { epoch: value.epoch, recipients: value.recipients, grants: value.grants,
+        outstanding: value.outstanding, requestOutstanding: value.requestOutstanding };
+    } catch (error) { rethrowPushSafetyFailure(error); return undefined; }
+  };
+  const restartClearScalars = async (session: SessionMetadata): Promise<Record<string, boolean | number>> => {
+    const restart = restartClear;
+    if (phase !== "fleet_restart_verified" || restart?.upAt === undefined || !remoteIds.has(session.instanceId)) return {};
+    restart.session ??= session;
+    if (session.instanceId !== restart.session.instanceId || session.generation !== restart.session.generation ||
+      session.ask?.requestId !== restart.session.ask?.requestId) return {};
+    const ledger = await restartLedger(session), before = restart.before;
+    const stableCounts = ledger !== undefined && before !== undefined &&
+      ledger.recipients === before.recipients && ledger.grants === before.grants && ledger.epoch > before.epoch;
+    let gcmReadFailed = true, gcmConnected = false, gcmWifi = false, gcmReceiveAgeMs = -1;
+    try {
+      const dump = await boundedAdb(await selectDevice(),
+        ["shell", "dumpsys activity service GcmService; date +GCM_CLOCK:%H:%M:%S"], 3_000);
+      const transport = parseGcmTransport(dump);
+      const receipts = dump.split("\n").filter(line => line.includes("Received") && line.includes("com.android.chrome"));
+      const seconds = (text: string): number | undefined => {
+        const parts = /(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?/u.exec(text);
+        return parts === null ? undefined : Number(parts[1]) * 3600 + Number(parts[2]) * 60 + Number(parts[3]) + Number(parts[4] ?? 0) / 1000;
+      };
+      const last = seconds(receipts.at(-1) ?? ""), now = seconds(dump.match(/GCM_CLOCK:[^\r\n]+/u)?.[0] ?? "");
+      if (last !== undefined && now !== undefined) gcmReceiveAgeMs = Math.round(Math.max(0, now - last < -1 ? now - last + 86400 : now - last) * 1000);
+      gcmReadFailed = false; gcmConnected = transport.connected === true; gcmWifi = transport.wifi;
+    } catch (error) { rethrowPushSafetyFailure(error); }
+    return { sinceCoordinatorUpMs: Math.round(runtime.now() - restart.upAt),
+      ledgerReadFailed: ledger === undefined, ledgerBaselinePresent: before?.requestOutstanding === true,
+      ledgerCountsStable: stableCounts, ledgerRequestOutstanding: ledger?.requestOutstanding === true,
+      ledgerClearAccepted: stableCounts && before?.requestOutstanding === true && ledger?.requestOutstanding === false,
+      ledgerOutstanding: ledger?.outstanding ?? -1, gcmReadFailed, gcmConnected, gcmWifi, gcmReceiveAgeMs };
+  };
   const worker = async <T>(operation: "armBadgeObserver" | "observeBadge" | "observe" | "notificationCleared" | "restartReplacement" | "restoreBadgeObserver" | "replay",
     expression: string, readOnly = false): Promise<T> => {
     const errors: unknown[] = [], started = performance.now();
@@ -597,6 +648,16 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       async host(operation, epoch) {
         if (identity.candidate === undefined) throw new Error("fleet fixture requires the candidate identity");
         await runtime.beforeEffect();
+        if (operation === "coordinator-down" && phase === "fleet_restart_verified") {
+          restartClear = {};
+          try {
+            const session = await snapshot(epoch, "remote");
+            if (session?.ask !== undefined) {
+              const before = await restartLedger(session);
+              restartClear = { session, ...(before === undefined ? {} : { before }) };
+            }
+          } catch (error) { rethrowPushSafetyFailure(error); }
+        }
         if (operation === "prepare") fleetPrepared = true;
         const result = await execute([options.fixtureBun ?? process.execPath,
           posix.join(options.fixtureScripts ?? import.meta.dir, "fleet-push-fixture.ts"), operation, fleetRoot(epoch), epoch, identity.origin, identity.candidate.sourceCommit]);
@@ -624,6 +685,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             catch { return false; }
           }, "fleet coordinator readiness");
         }
+        if (operation === "coordinator-up" && restartClear !== undefined && restartClear.upAt === undefined) restartClear.upAt = runtime.now();
       },
       async select(enabled) {
         await page("select", async driver => {
@@ -1045,6 +1107,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     snapshot,
     async beginNotificationPhase(epoch, currentPhase) {
       if (currentPhase !== undefined) phase = currentPhase;
+      restartClear = undefined;
       const [primary, secondary] = [await snapshot(epoch), await snapshot(epoch, "secondary")];
       if (primary === undefined) throw new Error("Push fixture missing before notification phase");
       packageName ??= await requireWebApk(command, identity.origin);
@@ -1169,11 +1232,11 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     async notificationCleared(session) {
       const tag = notificationTag(session);
       const records = (await phaseRecords()).filter(record => record.tag.endsWith(tag));
-      const observed = (cacheHit: boolean, workerObserved: boolean, workerCleared: boolean) => {
+      const observed = async (cacheHit: boolean, workerObserved: boolean, workerCleared: boolean) => {
         // Closed scalar diagnostics only; no tag, source binding, request or OS identity.
         if (fleetEnabled) console.log("android-fleet-clear: " + JSON.stringify({
           phase, remote: remoteIds.has(session.instanceId), osCount: records.length,
-          cacheHit, workerObserved, workerCleared,
+          cacheHit, workerObserved, workerCleared, ...await restartClearScalars(session),
         }));
         return workerCleared;
       };

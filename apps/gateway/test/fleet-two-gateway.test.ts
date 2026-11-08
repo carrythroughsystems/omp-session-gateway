@@ -55,10 +55,16 @@ class Clock implements FleetCoordinatorClock {
 class CapturingPush implements PushTransport {
   readonly calls: Array<{ endpoint: string; payload: string; message: FleetPushMessage; effects: readonly FleetEffect[] }> = [];
   readonly workers = new Map<string, { state: FleetWorkerState; displayed: FleetDisplayedNotification[] }>();
+  readonly failedClears: FleetPushMessage[] = [];
+  failClears = 0;
   constructor(readonly clock: Clock) {}
   async send(subscription: BrowserPushSubscription, payload: string): Promise<void> {
     // No external push service: observe the actual PushService plaintext, not a rebuilt envelope.
     const message = parseFleetPushMessage(JSON.parse(payload));
+    if (message.type === "clear" && this.failClears > 0) {
+      this.failClears--; this.failedClears.push(message);
+      throw new Error("synthetic clear transport failure");
+    }
     const worker = this.workers.get(subscription.endpoint) ?? { state: EMPTY_FLEET_WORKER_STATE, displayed: [] };
     const reduction = reduceFleetPush(worker.state, message, worker.displayed, this.clock.now());
     worker.state = reduction.state;
@@ -91,11 +97,21 @@ interface FeedCapture {
 class CapturingFeeds {
   boot = 0;
   readonly calls: FeedCapture[] = [];
+  readonly faults: Array<"disconnect" | "hang"> = [];
   fetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const headers = new Headers(init?.headers);
     const call: FeedCapture = { grantId: headers.get("Authorization")!.slice(7).split(".")[0]!,
       boot: this.boot, status: 0, headerNames: [...headers.keys()].sort(), frames: [], events: [], closed: false };
     this.calls.push(call);
+    const fault = this.faults.shift();
+    if (fault !== undefined) {
+      if (fault === "hang") await new Promise<void>(resolve => {
+        if (init?.signal?.aborted) resolve();
+        else init?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      call.closed = true;
+      throw new Error("synthetic feed connection failure");
+    }
     // This seam records a real loopback HTTP stream; it never supplies a feed event or identity.
     let response: Response;
     try { response = await fetch(input, init); }
@@ -226,10 +242,10 @@ async function fixture(identities = false) {
     const observe = reader.observe.bind(reader);
     if (cold) reader.observe = async () => { await gate.promise; return observe(); };
     else gate.resolve();
+    // Match runServe: fully load PushService before starting discovery and the coordinator.
+    const push = await PushService.open({ config, registry, logger, transport });
     const poller = startHostPoller({ reader, registry, intervalMs: 60_000,
       onEvent: (event, detail) => logger.event("info", event, detail) });
-    if (!cold) await poller.poll();
-    const push = await PushService.open({ config, registry, logger, transport });
     const source = role === "studio" ? await FleetSourceService.open({ config, registry, poller, now: clock.now,
       // Bounded polling observes real heartbeats without waiting the production 15-second period.
       heartbeatMs: 10 }) : undefined;
@@ -243,6 +259,8 @@ async function fixture(identities = false) {
       launchResolver: new OmpLaunchResolver({ registry, reader }), logger, now: clock.now,
       // Production identity path only in the owner-isolation test; never forwarded by the puller.
       tailnetPresent: () => true }));
+    // Synchronize the test only after all daemon services have opened, not before PushService.
+    if (!cold) await poller.poll();
     let stopped = false;
     return { config, registry, poller, push, source, coordinator, server: bound.server,
       async warm() { gate.resolve(); await poller.poll(); },
@@ -329,8 +347,8 @@ async function fixture(identities = false) {
   }
   return { clock, transport, feeds, local, remote, resolvedHost, unseenHost, target, browser, device, enroll, select, status, leaks, secrets,
     get home() { return home; }, get studio() { return studio; },
-    async restartHome(down: () => Promise<void> = async () => {}) {
-      await home.stop(); await down(); home = await runtime("home", listener(homeConfig.http.port));
+    async restartHome(down: () => Promise<void> = async () => {}, cold = false) {
+      await home.stop(); await down(); home = await runtime("home", listener(homeConfig.http.port), cold);
     },
     async restartStudioCold() {
       await studio.stop(); feeds.boot++;
@@ -355,6 +373,96 @@ function ask(registry: SessionRegistry, instanceId = shared): string {
 
 // This is Tested server/worker-contract evidence, not physical Push or device qualification.
 describe("two real fleet gateways over loopback", () => {
+  for (const scenario of ["warm", "discovery-warms", "discovery-deadline", "one-hung-connect", "two-hung-connects", "disconnect-backoff", "clear-retry", "unhealthy-state"] as const) {
+    test(`daemon-order restart exact clear: ${scenario}`, async () => {
+      const f = await fixture(), endpoint = await f.device("restart", "private");
+      await f.enroll(); await f.select(endpoint, [f.target.id]);
+      f.remote.snapshot.inputRequired = true; await f.studio.poller.poll();
+      await until(() => f.transport.for(endpoint).length === 1); await settled(f.home.coordinator!);
+      const old = f.transport.for(endpoint)[0]!.message;
+      expect(old.type).toBe("attention");
+      if (old.type !== "attention") throw new Error("initial attention missing");
+      const statePath = join(f.home.config.paths.stateDir, "fleet-notifications.json");
+      const ledger = async () => JSON.parse(await readFile(statePath, "utf8")).recipients
+        .flatMap((row: { outstanding: unknown[] }) => row.outstanding);
+      expect(await ledger()).toHaveLength(1);
+      const started = f.clock.now(), offset = f.feeds.calls.length;
+      const cold = scenario === "discovery-warms" || scenario === "discovery-deadline";
+      await f.restartHome(async () => {
+        f.remote.snapshot.inputRequired = false; await f.studio.poller.poll();
+        if (scenario === "one-hung-connect") f.feeds.faults.push("hang");
+        if (scenario === "two-hung-connects") f.feeds.faults.push("hang", "hang");
+        if (scenario === "disconnect-backoff") f.feeds.faults.push(...Array<"disconnect">(6).fill("disconnect"));
+        if (scenario === "clear-retry") f.transport.failClears = 1;
+        if (scenario === "unhealthy-state") await writeFile(statePath, "{synthetic-corruption}", { mode: 0o600 });
+      }, cold);
+      expect(f.home.push.fleetRecipients()).toHaveLength(1);
+      if (scenario === "unhealthy-state") {
+        expect(f.home.coordinator!.healthy).toBe(false);
+        f.clock.advance(60_000); await settled(f.home.coordinator!);
+        expect(f.feeds.calls).toHaveLength(offset);
+        expect(f.transport.for(endpoint)).toHaveLength(1);
+        expect(await readFile(statePath, "utf8")).toBe("{synthetic-corruption}");
+        return;
+      }
+      expect(f.home.coordinator!.healthy).toBe(true);
+      expect(f.home.coordinator!.diagnostics()).toMatchObject({ grants: 1, recipients: 1 });
+      await until(() => f.feeds.calls.length > offset);
+      let elapsed = 0;
+      const noClear = async () => {
+        await settled(f.home.coordinator!);
+        expect(f.transport.for(endpoint)).toHaveLength(1);
+        expect(await ledger()).toHaveLength(1);
+        expect(f.transport.displayed(endpoint)).toHaveLength(1);
+      };
+      const retry = async (delay: number) => {
+        await until(() => [...f.clock.timers.values()].some(timer => timer.at === f.clock.now() + delay));
+        await noClear();
+        f.clock.advance(delay - 1); elapsed += delay - 1; await noClear();
+        f.clock.advance(1); elapsed++;
+      };
+      if (scenario === "one-hung-connect" || scenario === "two-hung-connects") {
+        const attempts = scenario === "one-hung-connect" ? 1 : 2;
+        for (let index = 0; index < attempts; index++) {
+          await until(() => f.feeds.calls.length === offset + index + 1);
+          await noClear();
+          f.clock.advance(44_999); elapsed += 44_999; await noClear();
+          expect(f.feeds.calls.at(-1)!.closed).toBe(false);
+          f.clock.advance(1); elapsed++;
+          await retry(1_000 * 2 ** index);
+        }
+      }
+      if (scenario === "disconnect-backoff") for (let index = 0; index < 6; index++) await retry(1_000 * 2 ** index);
+      await until(() => f.feeds.calls.at(-1)!.events.some(event => event.type === "snapshot"));
+      if (cold) {
+        await noClear();
+        expect(f.home.poller.discoveryWarm).toBe(false);
+        f.clock.advance(scenario === "discovery-warms" ? 10_000 : 29_999);
+        elapsed = scenario === "discovery-warms" ? 10_000 : 29_999; await noClear();
+        if (scenario === "discovery-warms") await f.home.warm();
+        else { f.clock.advance(1); elapsed++; }
+      }
+      if (scenario === "clear-retry") {
+        await until(() => f.transport.failedClears.length === 1);
+        await retry(30_000);
+      }
+      await until(() => f.transport.for(endpoint).length === 2); await settled(f.home.coordinator!);
+      const clear = f.transport.for(endpoint)[1]!;
+      expect(clear.message).toMatchObject({ type: "clear", source: old.source, instanceId: old.instanceId,
+        generation: old.generation, requestId: old.requestId });
+      expect(clear.message.seq.epoch).toBeGreaterThan(old.seq.epoch);
+      expect(clear.effects.some(effect => effect.kind === "close")).toBe(true);
+      expect(f.transport.displayed(endpoint)).toEqual([]);
+      expect(await ledger()).toEqual([]);
+      expect(f.clock.now() - started).toBe(elapsed);
+      expect(elapsed).toBe(({ warm: 0, "discovery-warms": 10_000, "discovery-deadline": 30_000,
+        "one-hung-connect": 46_000, "two-hung-connects": 93_000, "disconnect-backoff": 63_000, "clear-retry": 30_000 })[scenario]);
+      if (scenario === "clear-retry") expect(clear.message).toEqual(f.transport.failedClears[0]!);
+      await f.home.coordinator!.status("dev-localhost"); await settled(f.home.coordinator!);
+      expect(f.transport.for(endpoint)).toHaveLength(2);
+    });
+  }
+
   test("enrolls, routes exact asks/stops/revocation, and reconciles warm restarts and stale outages", async () => {
     const f = await fixture();
     const sessionDevice = await f.device("session", "session"), privateDevice = await f.device("private", "private");

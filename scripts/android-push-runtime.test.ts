@@ -849,6 +849,82 @@ test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
+test.each(["pending", "accepted", "handled", "worker-pending", "ledger-unreadable", "recipient-removed", "gcm-unreadable"] as const)(
+  "restart clear diagnostics preserve the verdict and export only closed scalars (%s)", async scenario => {
+    const primary = { instanceId: "synthetic-local", generation: 1, canView: true, canControl: true, inputRequired: false,
+      startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic" };
+    const remote = { ...primary, instanceId: "synthetic-remote", cwdLabel: "omp-push-remote", inputRequired: true,
+      ask: { requestId: "req_synthetic_restart", since: "2026-01-01T00:00:00.000Z" } };
+    const source = fleetPushSource(identity.origin), tag = `omp-attention-${source.binding}-${remote.instanceId}`;
+    const record = { key: "synthetic", tag, postedAt: 1, seen: true, visibleSince: 1, title: "OMP session needs attention", body: "", text: "" };
+    let time = 0, ledgerReads = 0, osReads = 0, workerReads = 0;
+    const messages: string[] = [];
+    const absent = scenario === "handled" || scenario === "worker-pending";
+    const driver = {
+      browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
+        { type: "page", targetId: "page", url: identity.origin + "/" },
+        { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
+      ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
+      sessionSend: async () => { workerReads++; return { result: { value: scenario === "handled" } }; },
+      attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
+      evaluate: async (expression: string) => expression === "document.readyState" ? "complete" :
+        expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
+    };
+    const spies = [
+      spyOn(console, "log").mockImplementation(message => { messages.push(String(message)); }),
+      spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [primary, remote] }), { preconnect: globalThis.fetch.preconnect })),
+      spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+      spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+      spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+      spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+      spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++osReads > 1 && absent ? [] : [record]),
+      spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+      spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
+        expect(args).toEqual(["shell", "dumpsys activity service GcmService; date +GCM_CLOCK:%H:%M:%S"]);
+        expect(options?.timeoutMs).toBe(3_000);
+        if (scenario === "gcm-unreadable") throw new Error("synthetic GCM unavailable");
+        return "Is client connected: true\nIn-use by client: GcmNetwork{1 VPN(17) [WiFi(1)]}\n23:59:59.500 Received com.android.chrome SYNTHETIC_PRIVATE_GCM\nGCM_CLOCK:00:00:01\n";
+      }),
+    ];
+    try {
+      const runtime = createAndroidPushRuntime({ ...identity, candidate: { tag: "v0.10.0", sourceCommit: "a".repeat(40), archivePath: "/synthetic", archiveSha256: "b".repeat(64) } }, {
+        execute: async argv => {
+          if (argv[1] !== "-e") return { exitCode: 0, stdout: "" };
+          ledgerReads++;
+          expect(JSON.parse(argv[3]!)).toEqual({ source: source.binding, instanceId: remote.instanceId, generation: 1, requestId: remote.ask.requestId });
+          if (ledgerReads > 1 && scenario === "ledger-unreadable") return { exitCode: 1, stdout: "" };
+          return { exitCode: 0, stdout: JSON.stringify({ epoch: ledgerReads === 1 ? 1 : 2,
+            recipients: ledgerReads > 1 && scenario === "recipient-removed" ? 0 : 1, grants: 1,
+            outstanding: ledgerReads === 1 || scenario === "pending" ? 1 : 0,
+            requestOutstanding: ledgerReads === 1 || scenario === "pending", ignoredSecret: "SYNTHETIC_PRIVATE_LEDGER" }) };
+        },
+      });
+      runtime.now = () => time; runtime.beforeEffect = async () => {};
+      await runtime.fleet.host("prepare", "synthetic");
+      await runtime.fleet.select(true);
+      await runtime.beginNotificationPhase("synthetic", "fleet_restart_verified");
+      await runtime.fleet.host("coordinator-down", "synthetic");
+      await runtime.fleet.host("coordinator-up", "synthetic");
+      time = 5_000;
+      expect(await runtime.notificationCleared(remote)).toBe(scenario === "handled");
+      const message = JSON.parse(messages.find(message => message.startsWith("android-fleet-clear: "))!.slice("android-fleet-clear: ".length));
+      expect(message).toMatchObject({ sinceCoordinatorUpMs: 5_000, osCount: absent ? 0 : 1,
+        workerObserved: absent, workerCleared: scenario === "handled",
+        ledgerReadFailed: scenario === "ledger-unreadable", ledgerBaselinePresent: true,
+        ledgerRequestOutstanding: scenario === "pending",
+        ledgerClearAccepted: !["pending", "ledger-unreadable", "recipient-removed"].includes(scenario),
+        gcmReadFailed: scenario === "gcm-unreadable", gcmReceiveAgeMs: scenario === "gcm-unreadable" ? -1 : 1_500 });
+      expect(workerReads).toBe(absent ? 1 : 0);
+      expect(Object.entries(message).every(([key, value]) => key === "phase" || typeof value === "boolean" || typeof value === "number")).toBe(true);
+      expect(messages.join("\n")).not.toMatch(/SYNTHETIC_PRIVATE|synthetic-remote|req_synthetic_restart/u);
+      // A repeated sample stays scoped to the original coordinator-up, never resets its clock.
+      time = 6_000;
+      await runtime.fleet.host("coordinator-up", "synthetic");
+      await runtime.notificationCleared(remote);
+      expect(JSON.parse(messages.at(-1)!.slice("android-fleet-clear: ".length)).sinceCoordinatorUpMs).toBe(6_000);
+    } finally { for (const spy of spies) spy.mockRestore(); }
+  });
+
 test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch", "phase", "missing", "reappeared", "privacy", "late-snapshot",
   "lag-empty", "lag-duplicate", "lag-version", "lag-type", "lag-source", "lag-instance", "persistent-mismatch"] as const)(
   "fleet metadata reuse is bound to the exact phase record (%s)", async scenario => {

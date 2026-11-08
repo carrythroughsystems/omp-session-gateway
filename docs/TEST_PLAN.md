@@ -321,6 +321,17 @@ notification enumeration catches up, a negative worker sample retains the observ
 evidence and must be re-observed; it cannot become a permanent negative cache. Closed
 `android-fleet-clear:` diagnostics record phase, remote/local role, OS count and worker/cache
 booleans only, never notification or request identities.
+The restart clear wait additionally samples elapsed milliseconds since coordinator-up, exact remote
+outstanding membership, baseline membership, stable recipient/grant counts and the advanced epoch,
+plus Chrome GCM receive age and connection/Wi-Fi booleans. The ledger is projected on the host;
+no private ledger or GCM dump is exported. Removal after accepted baseline membership, with an
+advanced epoch and unchanged counts, is clear-acceptance evidence in this isolated, non-mutating
+window. GCM receipts are Chrome-wide, not request-specific: a fresh receipt alone cannot distinguish
+this clear from the local replacement. An OS-present sample deliberately does not wake/read the
+worker and reports `workerObserved=false`, not proof that the worker received no clear. Failed
+diagnostic reads stay explicitly unavailable and never change the original verdict or 60-second
+wait. The product does not persist its volatile restart gate or source-feed knowledge, so these
+cannot be reconstructed from ledger state; no product instrumentation is added.
 Restart answers the remote
 ask while the coordinator is down, then proves its old alert closed. The memory-only home registry
 re-mints the still-pending local ask (#605): the lane requires its old exact-request tombstone in
@@ -332,6 +343,12 @@ retry boundary as well as its next reconciliation, and the resolved remote alert
 before arming a new remote ask. No re-alert, a missing old clear, concurrent duplicates, a second
 local re-alert, or a remote repeat fail. Pending-remote identity across a home restart is
 unit-proven in `fleet-coordinator.test.ts`, not physically proven by this resolved-remote scenario.
+`fleet-two-gateway.test.ts` opens PushService before discovery and coordination, matching the daemon,
+and proves subscription reload, healthy/corrupt startup, cold discovery, hanging/rejected feed
+connections, and clear retries with the real 30/45-second timers under a fake clock. Warm restart
+clears immediately; one hung connect clears at 46 seconds, two at 93 seconds, six immediate
+disconnects at 63 seconds, and one failed clear retries after 30 seconds. These fault-injection
+timings explain possible delays, not historical physical failures or a stronger delivery guarantee.
 The expired-host replay must close before re-baselining.
 The remote sink sweep runs while the remote session launched by the PWA's real Control tap is
 still alive, using that same generation's Control capability and the detectable positive control;
