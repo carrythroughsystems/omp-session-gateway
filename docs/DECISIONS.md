@@ -2494,14 +2494,19 @@ Chrome or the worker dropped it is unknown.
 
 `PushService` now sends to one subscription endpoint one push at a time, in call order, each
 starting at least `PUSH_ENDPOINT_SPACING_MS` (1 s) after the previous send to that endpoint settled.
-This covers Push v2 and v3 alike. The wait happens before a send slot is taken, so other
-subscriptions are not held back. Owner, selection, grant and expiry are still rechecked inside the
-slot, so a push revoked while waiting is skipped; a skipped push never reached the push service and
-releases the subscription without a gap. Wire bytes, sequences, retries and capability boundaries
-are unchanged.
+This covers Push v2 and v3 alike. The wait happens before a send slot is taken. When its turn comes,
+a waiting push is rechecked: fleet sends against owner, selection, grant and expiry; Push v2 sends
+against the live subscription record (so an unsubscribe, eviction or renewal during the wait wins)
+and, for an activity stop, against its registry marker. A skipped push never reached the push
+service and releases the subscription without a gap. While pacing is on, the coordinator launches
+one delivery per endpoint at a time and serves other queued endpoints first, so a burst to one
+device does not occupy its eight-delivery window. Wire bytes, sequences, retries and capability
+boundaries are unchanged.
 
 Consequences: a burst to one device drains about one push per second. A coordinator restart's exact
 clears, or a flood bounded by the 256-entry queue, can take that many seconds to reach one phone.
-Ordinary asks and clears are seconds apart, so they rarely wait. If the loss persists with pacing,
-the physical lane's held-observer counts (push entry versus reduction) identify which side drops
-it.
+Push v2 keeps each session's pushes in order across devices, so a backlog on one device can hold
+back that session's next push to another; with more than eight busy fleet endpoints, a ninth waits
+for a window entry. Ordinary asks and clears are seconds apart, so they rarely wait. If the loss
+persists with pacing, the physical lane's held-observer counts (push entry versus reduction)
+identify which side drops it.

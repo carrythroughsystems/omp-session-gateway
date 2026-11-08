@@ -706,6 +706,8 @@ describe("Web Push service", () => {
     expect(log).not.toContain(renewedKeys.p256dh);
   });
 
+  // Pacing is a real-time gap kept by the platform timer inside async send chains, so the tests
+  // below measure it against the clock with small spacings; only the default check waits 1 s.
   const fleetClear = (n: number) => ({ version: 3, type: "clear", instanceId: "push-instance-000001", generation: 1,
     requestId: `synthetic-paced-request-${n}`, seq: { epoch: 1, n }, badge: { count: 0, complete: true } }) as const;
 
@@ -773,6 +775,45 @@ describe("Web Push service", () => {
       ])).toEqual(["skipped", "delivered"]);
       expect(started).toHaveLength(1);
       expect(started[0]! - begun).toBeLessThan(1_000);
+    } finally { await service.stop(); }
+  });
+
+  test("a legacy push that waited for its subscription's turn is dropped once that subscription is gone", async () => {
+    const root = await createRoot();
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 }), transport = new RecordingTransport();
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 20 });
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+      transport.blockWhen = () => transport.calls.length === 1;
+      registry.reconcile({ observed: [observedSession(true), { ...observedSession(true), instanceId: "push-other-instance-0001" }], retained: new Set() });
+      const release = await transport.nextBlockedSend();
+      // The second session's push waits behind the first while the device unsubscribes.
+      expect(await service.unsubscribe("dev-localhost", { version: PUSH_API_VERSION, endpoint })).toBe(true);
+      release();
+      await service.flush();
+      expect(transport.calls).toHaveLength(1);
+    } finally { await service.stop(); }
+  });
+
+  test("a legacy activity stop that waited for its subscription's turn is dropped once the session resumed", async () => {
+    const root = await createRoot();
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 }), transport = new RecordingTransport();
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 20 });
+    const session = observedSession(false), asking = { ...observedSession(true), instanceId: "push-other-instance-0001" };
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+      registry.reconcile({ observed: [{ ...session, busy: true }], retained: new Set() });
+      transport.blockWhen = () => transport.calls.length === 1;
+      registry.reconcile({ observed: [{ ...session, busy: true }, asking], retained: new Set() });
+      const release = await transport.nextBlockedSend();
+      // The stop edge passes its queue-time checks and waits behind the held push (one event-loop
+      // turn drains the microtasks that get it there); then the session resumes.
+      registry.reconcile({ observed: [{ ...session, busy: false }, asking], retained: new Set() });
+      await new Promise(resolve => setImmediate(resolve));
+      registry.reconcile({ observed: [{ ...session, busy: true }, asking], retained: new Set() });
+      release();
+      await service.flush();
+      expect(transport.calls.map(call => parseAttentionPushMessage(JSON.parse(call.payload)).type)).toEqual(["attention"]);
     } finally { await service.stop(); }
   });
 

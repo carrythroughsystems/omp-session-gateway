@@ -122,9 +122,12 @@ messages to a burst of 20 per app per device, refilling one every three minutes,
 clear, and stop traffic would be delayed by minutes. Without a topic, a push service holding
 messages for an offline device delivers every unexpired one on reconnect, not only the newest.
 The gateway sends to one browser subscription one push at a time, in order, starting each no sooner
-than one second after the previous send to it settled; other subscriptions are not delayed. On a
-Pixel, two pushes accepted about 25 ms apart both reached Chrome, but the worker received only one
-(ADR-048 amendment, 2026-11-08). A burst to one device therefore drains about one push per second.
+than one second after the previous send to it settled. Pacing adds no wait to sends for other
+subscriptions, but Push v2 keeps each session's pushes in order across devices, so a backlog on one
+device can hold back that session's next push to another. When a waiting push's turn comes, it is
+rechecked against the live subscription, and an activity stop against its marker. On a Pixel, two
+pushes accepted about 25 ms apart both reached Chrome, but the worker received only one (ADR-048
+amendment, 2026-11-08). A burst to one device therefore drains about one push per second.
 
 ## Activity-stop notifications
 

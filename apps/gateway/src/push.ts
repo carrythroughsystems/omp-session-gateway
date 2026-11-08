@@ -328,6 +328,11 @@ export class PushService {
     this.#fleetReady.resolve();
   }
 
+  /** True when sends to one endpoint are paced; the coordinator then launches one delivery per endpoint. */
+  get pacesEndpoints(): boolean {
+    return this.#endpointSpacingMs > 0;
+  }
+
   fleetRecipients(): readonly FleetPushRecipient[] {
     return this.#subscriptions.filter(subscription => this.#identityAllowed(subscription.identityKey)).map(subscription => ({
       endpoint: subscription.endpoint, owner: subscription.identityKey, detailLevel: subscription.detailLevel,
@@ -559,15 +564,19 @@ export class PushService {
 
   #queueActivityStop(event: SessionActivityStopEvent): void {
     const { instanceId, generation } = event.session;
-    this.#queueDelivery(instanceId, "activity_stop", async sequence => {
-      // A later ask, resume, unreadable poll, or replacement invalidates this edge even if the
-      // session has already returned to the same stopped metadata while delivery was queued.
-      const pendingAskCount = this.#pendingAskCount();
+    // A later ask, resume, unreadable poll, or replacement invalidates this edge even if the
+    // session has already returned to the same stopped metadata while delivery was queued.
+    const currentStop = (): SessionMetadata | undefined => {
       const current = this.#registry.authorizeLaunch(instanceId, generation, "view");
-      if (current.status !== "ok") return;
+      if (current.status !== "ok") return undefined;
       const { session } = current;
-      if (!session.canView || session.busy !== false || session.inputRequired || session.ask !== undefined) return;
-      if (!this.#registry.isCurrentActivityStop(event)) return;
+      if (!session.canView || session.busy !== false || session.inputRequired || session.ask !== undefined) return undefined;
+      return this.#registry.isCurrentActivityStop(event) ? session : undefined;
+    };
+    this.#queueDelivery(instanceId, "activity_stop", async sequence => {
+      const pendingAskCount = this.#pendingAskCount();
+      const session = currentStop();
+      if (session === undefined) return;
       await this.#deliver(sequence, subscription => {
         const body = sessionNotificationBody(session, subscription.detailLevel === "private" ? "private" : "session");
         return {
@@ -579,7 +588,7 @@ export class PushService {
           title: "OMP session activity stopped",
           ...(body === undefined ? {} : { body }),
         };
-      });
+      }, undefined, false, 0, () => currentStop() !== undefined);
     });
   }
 
@@ -613,12 +622,14 @@ export class PushService {
     this.#deliveryChains.set(instanceId, delivery);
   }
 
+  /** `stillCurrent` is rechecked with the live subscription inside the send slot, after any pacing wait. */
   async #deliver(
     sequence: number,
     messageFor: (subscription: StoredPushSubscription) => AttentionPushMessage,
     selectedSubscriptions?: readonly StoredPushSubscription[],
     subscriptionReplay = false,
     requestAlias = 0,
+    stillCurrent: () => boolean = () => true,
   ): Promise<void> {
     // Discovery may finish while the coordinator is still loading private recipient state.
     // Do not downgrade those devices to v2 during that startup window.
@@ -632,8 +643,11 @@ export class PushService {
     if (subscriptions.length === 0) return;
     const stale: StoredPushSubscription[] = [];
     await Promise.all(
-      subscriptions.map(subscription => this.#paced(subscription.endpoint, transmitting => this.#withSendSlot(async () => {
-        if (!this.#identityAllowed(subscription.identityKey) || this.#fleet?.includes(subscription.identityKey, subscription.endpoint)) return;
+      subscriptions.map(selected => this.#paced(selected.endpoint, transmitting => this.#withSendSlot(async () => {
+        // Unsubscribe, eviction, or renewal may have happened while this send waited for its turn.
+        const subscription = this.#subscriptions.find(candidate => candidate.endpoint === selected.endpoint && candidate.identityKey === selected.identityKey);
+        if (subscription === undefined || !this.#identityAllowed(subscription.identityKey) ||
+          this.#fleet?.includes(subscription.identityKey, subscription.endpoint) || !stillCurrent()) return;
         const message = messageFor(subscription);
         const start = performance.now();
         this.#logger.event("info", "push.send_started", { sequence, request_alias: requestAlias, attention: message.type === "attention", clear: message.type === "clear",
