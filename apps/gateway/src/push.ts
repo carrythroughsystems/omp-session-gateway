@@ -29,6 +29,12 @@ const PUSH_STATE_VERSION = 1 as const;
 const MAX_PUSH_SUBSCRIPTIONS = 8;
 const PUSH_TTL_SECONDS = 5 * 60;
 const PUSH_TIMEOUT_MS = 10_000;
+/**
+ * Minimum gap between pushes to one subscription endpoint, measured from the previous send to it
+ * settling. On a Pixel (Chrome WebAPK) two pushes accepted ~25 ms apart both reached Chrome, but the
+ * service worker reduced only one (ADR-048 amendment, 2026-11-08). Other endpoints are not delayed.
+ */
+export const PUSH_ENDPOINT_SPACING_MS = 1_000;
 const VAPID_PUBLIC_KEY_PATTERN = /^[A-Za-z0-9_-]{80,128}$/u;
 const VAPID_PRIVATE_KEY_PATTERN = /^[A-Za-z0-9_-]{40,64}$/u;
 const IDENTITY_PATTERN = /^[^\0\r\n]{1,320}$/u;
@@ -258,6 +264,9 @@ export class PushService {
   readonly #fleetReady = Promise.withResolvers<void>();
   #sending = 0;
   readonly #sendWaiters: Array<() => void> = [];
+  readonly #endpointSpacingMs: number;
+  /** Per endpoint, the turn the next send waits for; an entry lasts one spacing after its send. */
+  readonly #endpointTurns = new Map<string, Promise<void>>();
 
   private constructor(options: {
     config: GatewayConfig;
@@ -266,6 +275,7 @@ export class PushService {
     transport: PushTransport;
     path: string;
     state: PushState;
+    endpointSpacingMs: number;
   }) {
     this.#config = options.config;
     this.#registry = options.registry;
@@ -273,6 +283,7 @@ export class PushService {
     this.#transport = options.transport;
     this.#path = options.path;
     this.#vapid = options.state.vapid;
+    this.#endpointSpacingMs = options.endpointSpacingMs;
     this.#subscriptions = options.state.subscriptions.filter(subscription =>
       subscription.expirationTime === null || subscription.expirationTime > Date.now(),
     );
@@ -288,7 +299,11 @@ export class PushService {
     readonly logger?: SafeLogger;
     readonly transport?: PushTransport;
     readonly statePath?: string;
+    /** Test seam: the per-endpoint gap, where 0 disables pacing. Production uses `PUSH_ENDPOINT_SPACING_MS`. */
+    readonly endpointSpacingMs?: number;
   }): Promise<PushService> {
+    const endpointSpacingMs = options.endpointSpacingMs ?? PUSH_ENDPOINT_SPACING_MS;
+    if (!Number.isSafeInteger(endpointSpacingMs) || endpointSpacingMs < 0) throw new Error("push endpoint spacing must be a non-negative integer");
     const path = options.statePath ?? join(options.config.paths.stateDir, "push-state.json");
     const state = await loadOrCreatePushState(options.config, path);
     return new PushService({
@@ -298,6 +313,7 @@ export class PushService {
       transport: options.transport ?? defaultTransport,
       path,
       state,
+      endpointSpacingMs,
     });
   }
 
@@ -327,10 +343,11 @@ export class PushService {
   /** Recheck both subscription ownership and the coordinator's authority after acquiring a send slot. */
   async sendFleet(owner: string, endpoint: string, message: FleetPushMessage, authorized: () => boolean): Promise<"delivered" | "gone" | "failed" | "skipped"> {
     const payload = JSON.stringify(parseFleetPushMessage(message));
-    return this.#withSendSlot(async () => {
+    return this.#paced(endpoint, transmitting => this.#withSendSlot(async () => {
       const subscription = this.#subscriptions.find(candidate => candidate.endpoint === endpoint && candidate.identityKey === owner);
       if (subscription === undefined || !this.#identityAllowed(owner) || !authorized()) return "skipped";
       try {
+        transmitting();
         await this.#transport.send(subscription, payload, {
           subject: VAPID_SUBJECT, publicKey: this.#vapid.publicKey, privateKey: this.#vapid.privateKey, ttlSeconds: PUSH_TTL_SECONDS,
         });
@@ -344,7 +361,32 @@ export class PushService {
         }
         return "failed";
       }
-    });
+    }));
+  }
+
+  /**
+   * Sends to one endpoint run one at a time in call order. A send that reached the transport holds
+   * the endpoint for the spacing after it settled; one skipped before transport releases it at once.
+   * The wait happens before a send slot is taken, so a paced endpoint never holds back another
+   * endpoint; callers re-check authority inside the slot.
+   */
+  async #paced<T>(endpoint: string, send: (transmitting: () => void) => Promise<T>): Promise<T> {
+    if (this.#endpointSpacingMs === 0) return send(() => {});
+    const previous = this.#endpointTurns.get(endpoint);
+    const turn = Promise.withResolvers<void>();
+    this.#endpointTurns.set(endpoint, turn.promise);
+    let transmitted = false;
+    try {
+      await previous;
+      return await send(() => { transmitted = true; });
+    } finally {
+      const release = (): void => {
+        turn.resolve();
+        if (this.#endpointTurns.get(endpoint) === turn.promise) this.#endpointTurns.delete(endpoint);
+      };
+      if (transmitted) setTimeout(release, this.#endpointSpacingMs);
+      else release();
+    }
   }
 
   async #withSendSlot<T>(send: () => Promise<T>): Promise<T> {
@@ -590,13 +632,14 @@ export class PushService {
     if (subscriptions.length === 0) return;
     const stale: StoredPushSubscription[] = [];
     await Promise.all(
-      subscriptions.map(subscription => this.#withSendSlot(async () => {
+      subscriptions.map(subscription => this.#paced(subscription.endpoint, transmitting => this.#withSendSlot(async () => {
         if (!this.#identityAllowed(subscription.identityKey) || this.#fleet?.includes(subscription.identityKey, subscription.endpoint)) return;
         const message = messageFor(subscription);
         const start = performance.now();
         this.#logger.event("info", "push.send_started", { sequence, request_alias: requestAlias, attention: message.type === "attention", clear: message.type === "clear",
           activity_stop: message.type === "activity_stop", subscriptions: subscriptions.length, subscription_replay: subscriptionReplay });
         try {
+          transmitting();
           await this.#transport.send(subscription, JSON.stringify(message), {
             subject: VAPID_SUBJECT,
             publicKey: this.#vapid.publicKey,
@@ -609,7 +652,7 @@ export class PushService {
           this.#logger.event("warn", "push.send_failed", { sequence, request_alias: requestAlias, elapsed_ms: performance.now() - start, status: code });
           if (code === 404 || code === 410) stale.push(subscription);
         }
-      })),
+      }))),
     );
     if (stale.length > 0) {
       let removed = 0;

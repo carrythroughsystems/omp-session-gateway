@@ -229,7 +229,7 @@ async function fixture(identities = false) {
     const poller = startHostPoller({ reader, registry, intervalMs: 60_000,
       onEvent: (event, detail) => logger.event("info", event, detail) });
     if (!cold) await poller.poll();
-    const push = await PushService.open({ config, registry, logger, transport });
+    const push = await PushService.open({ config, registry, logger, transport, endpointSpacingMs: 0 });
     const source = role === "studio" ? await FleetSourceService.open({ config, registry, poller, now: clock.now,
       // Bounded polling observes real heartbeats without waiting the production 15-second period.
       heartbeatMs: 10 }) : undefined;

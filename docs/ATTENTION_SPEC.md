@@ -121,6 +121,10 @@ Messages carry no Web Push `Topic`: FCM treats a topic as a collapse key and thr
 messages to a burst of 20 per app per device, refilling one every three minutes, so ordinary ask,
 clear, and stop traffic would be delayed by minutes. Without a topic, a push service holding
 messages for an offline device delivers every unexpired one on reconnect, not only the newest.
+The gateway sends to one browser subscription one push at a time, in order, starting each no sooner
+than one second after the previous send to it settled; other subscriptions are not delayed. On a
+Pixel, two pushes accepted about 25 ms apart both reached Chrome, but the worker received only one
+(ADR-048 amendment, 2026-11-08). A burst to one device therefore drains about one push per second.
 
 ## Activity-stop notifications
 

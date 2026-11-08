@@ -125,9 +125,12 @@ Failed sends retain reservations through each delivery's own 30-second cooldown:
 retry the same envelope and sequence; attentions release for current-ask reconciliation.
 Skipped deliveries release immediately without a cooldown.
 A full 256-entry delivery queue refuses new alerts/stops while deferred clears remain represented
-in the bounded outstanding set until queue space opens. Transport rechecks owner, selection, grant and expiry
-after acquiring its send slot. Corrupt/unwritable state fails fleet routes closed without deleting
-evidence; local alerts fall back to unchanged Push v2. The ordinary directory and capability
+in the bounded outstanding set until queue space opens. Sends to one subscription are paced: one at
+a time, in call order, each starting at least one second after the previous one to it settled, and
+waiting before taking a send slot so other subscriptions are not held back. Transport rechecks
+owner, selection, grant and expiry after acquiring its send slot. Corrupt/unwritable state fails
+fleet routes closed without deleting evidence; local alerts fall back to unchanged Push v2. The
+ordinary directory and capability
 broker remain independent.
 
 ### 1.4 OMP Sessions PWA

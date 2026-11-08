@@ -1054,7 +1054,7 @@ describe("HTTP boundary", () => {
         tokenPath: join(root, "config", "readiness-token"), configPath: join(root, "config", "config.json") },
     };
     const registry = populatedRegistry();
-    const push = await PushService.open({ config: gatewayConfig, registry, transport: { async send() {} } });
+    const push = await PushService.open({ config: gatewayConfig, registry, transport: { async send() {} }, endpointSpacingMs: 0 });
     // A valid endpoint at the push contract's byte limit makes status/selection bodies exceed 4 KiB.
     const prefix = "https://push.example.test/send/synthetic-fleet-http-";
     const endpoint = prefix + "x".repeat(MAX_PUSH_ENDPOINT_BYTES - prefix.length);
@@ -1113,6 +1113,7 @@ describe("HTTP boundary", () => {
       config: gatewayConfig,
       registry,
       transport: { async send(): Promise<void> {} },
+      endpointSpacingMs: 0,
     });
     const handler = createTestHttpHandler({ config: gatewayConfig, registry, staticAssets: assets, pushService });
     const configResponse = await handler(request("/api/v1/push/config"), peer);
@@ -1163,7 +1164,7 @@ describe("HTTP boundary", () => {
     const registry = populatedRegistry();
     const logger = new SafeLogger(new QualificationLogSink(logs));
     const pushService = await PushService.open({ config: gatewayConfig, registry, logger,
-      transport: { async send() { throw Object.assign(new Error("SYNTHETIC-PROVIDER-BODY"), { statusCode: 503 }); } } });
+      transport: { async send() { throw Object.assign(new Error("SYNTHETIC-PROVIDER-BODY"), { statusCode: 503 }); } }, endpointSpacingMs: 0 });
     try {
       await pushService.subscribe("allowed@example.com", { version: 2, detailLevel: "private", subscription: {
         endpoint: "https://push.example.test/send/fixture", expirationTime: null, keys: { p256dh: "P".repeat(88), auth: "A".repeat(22) },
@@ -1216,6 +1217,7 @@ describe("HTTP boundary", () => {
       config: gatewayConfig,
       registry,
       transport: { async send(): Promise<void> {} },
+      endpointSpacingMs: 0,
     });
     const handler = createTestHttpHandler({ config: gatewayConfig, registry, staticAssets: assets, pushService });
     const sharedEndpoint = "https://push.example.test/send/shared-device";

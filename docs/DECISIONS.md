@@ -2482,3 +2482,26 @@ identity limitation on that source.
 This clarifies the restart contract without changing product bytes, durable state schemas,
 capability boundaries, or the memory-only registry invariant. Deterministic coordinator tests prove
 a still-pending remote request is not repeated across a home restart.
+
+### 2026-11-08 amendment — pace pushes to one subscription
+
+**Founder decision (2026-11-08).** Mitigate an observed loss rather than wait for its cause. On the
+physical Android Push rig (Pixel, Chrome WebAPK), the home coordinator sent a local and a remote
+attention to one subscription about 25 ms apart. GcmService acknowledged and broadcast both to
+Chrome at high priority, but the service worker reduced only one; the other never entered its
+reducer. That was 1 miss in 8 development runs with the diagnostics armed (3 in 11 overall). Whether
+Chrome or the worker dropped it is unknown.
+
+`PushService` now sends to one subscription endpoint one push at a time, in call order, each
+starting at least `PUSH_ENDPOINT_SPACING_MS` (1 s) after the previous send to that endpoint settled.
+This covers Push v2 and v3 alike. The wait happens before a send slot is taken, so other
+subscriptions are not held back. Owner, selection, grant and expiry are still rechecked inside the
+slot, so a push revoked while waiting is skipped; a skipped push never reached the push service and
+releases the subscription without a gap. Wire bytes, sequences, retries and capability boundaries
+are unchanged.
+
+Consequences: a burst to one device drains about one push per second. A coordinator restart's exact
+clears, or a flood bounded by the 256-entry queue, can take that many seconds to reach one phone.
+Ordinary asks and clears are seconds apart, so they rarely wait. If the loss persists with pacing,
+the physical lane's held-observer counts (push entry versus reduction) identify which side drops
+it.

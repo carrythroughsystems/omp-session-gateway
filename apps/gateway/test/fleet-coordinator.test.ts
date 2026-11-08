@@ -144,7 +144,7 @@ async function fixture(sources = [sourceA, sourceB]) {
   const config = gatewayConfig(root), registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 1000 }), transport = new Transport(), feeds = new Feeds(), clock = new Clock();
   const logs: string[] = [];
   const logger = new SafeLogger({ write: line => logs.push(line) });
-  const push = await PushService.open({ config, registry, transport, logger });
+  const push = await PushService.open({ config, registry, transport, logger, endpointSpacingMs: 0 });
   const coordinatorConfig: FleetCoordinatorConfig = { publicOrigin: config.http.publicOrigin, ownLabel: "Home", sources };
   let coordinator = await FleetCoordinator.open({ config: coordinatorConfig, stateDir: config.paths.stateDir, push, registry, fetch: feeds.fetch, clock, logger, random: () => 0.5 });
   cleanups.push(async () => { transport.release(); await coordinator.stop(); await push.stop(); });
@@ -692,7 +692,7 @@ describe("fleet coordinator", () => {
     const f = await fixture(); const device = await f.device(); await f.grant(alice, sourceA.id);
     await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator); await f.coordinator.stop(); await f.push.stop();
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 1000 });
-    const push = await PushService.open({ config: { ...f.config, notifications: { sources: [sourceA.id] } }, registry, transport: f.transport, logger: new SafeLogger({ write() {} }) });
+    const push = await PushService.open({ config: { ...f.config, notifications: { sources: [sourceA.id] } }, registry, transport: f.transport, logger: new SafeLogger({ write() {} }), endpointSpacingMs: 0 });
     registry.reconcile({ observed: [observed(true)], retained: new Set() });
     await Bun.sleep(1); expect(f.transport.legacy).toHaveLength(0);
     const coordinator = await FleetCoordinator.open({ config: f.coordinatorConfig, push, registry, stateDir: f.config.paths.stateDir, fetch: f.feeds.fetch, clock: f.clock });
