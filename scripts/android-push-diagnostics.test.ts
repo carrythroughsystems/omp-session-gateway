@@ -67,9 +67,12 @@ test.each(["chrome", "webapk", "summary", "both", "absent", "tombstoned", "no-da
         if (scenario === "worker-error") throw new Error("SYNTHETIC_PRIVATE_WORKER");
         const notices = scenario === "absent" ? [] : [{ data: { version: 3, type: "attention", instanceId: session.instanceId,
           requestId: scenario === "wrong-identity" ? "synthetic-foreign" : session.ask!.requestId } }];
+        // The held observer's per-arm counts; absent when no observer patched this worker.
+        const counts = { entered: 2, withData: 2, json: 1, localAttention: 1, remoteAttention: 0, clear: 0, other: 0,
+          shows: 1, showsSettled: 0, showsRejected: 0 };
         return runInNewContext(expression, { Promise, indexedDB, self: { registration: {
           getNotifications: async (options: unknown) => { expect(options).toEqual({ tag }); return notices; },
-        } } });
+        }, ...(scenario === "no-database" ? {} : { __ompQualificationPush: { counts } }) } });
       },
     });
     expect(evaluations).toBe(1); // Includes OS absence and read failures.
@@ -95,6 +98,9 @@ test.each(["chrome", "webapk", "summary", "both", "absent", "tombstoned", "no-da
     expect(result.received).toBe(["worker-error", "database-error", "no-database"].includes(scenario) ? -1 : 9);
     expect(result.sessionTouched).toBe(["worker-error", "database-error", "no-database"].includes(scenario) ? -1 : 8);
     for (const read of ["os", "rate", "process", "worker"]) expect(result[`${read}ReadTimedOut`]).toBe(false);
+    const observed = !["worker-error", "no-database"].includes(scenario);
+    expect([result.pushEntered, result.pushWithData, result.pushJson, result.pushLocalAttention, result.pushRemoteAttention,
+      result.showCalls, result.showSettled, result.showRejected]).toEqual(observed ? [2, 2, 1, 1, 0, 1, 0, 0] : [-1, -1, -1, -1, -1, -1, -1, -1]);
     if (scenario === "chrome") expect(result).toMatchObject({ chromeAttentionTotal: 2, chromePostAskDeltaMs: 250, chromePostShownDeltaMs: 50 });
     expect(result.pushTimeKnown).toBe(false); expect(result.chromePostPushDeltaMs).toBe(-1);
     expect(opens).toBe(["worker-error", "no-database"].includes(scenario) ? 0 : 1);

@@ -293,6 +293,10 @@ for the WebAPK and Chrome packages, Android's notification rate-limit refusals, 
 flags, and the held worker's notification identity and durable shown/tombstone/mark/receipt state.
 Every read is bounded at 3 s and a stalled read is recorded as unknown; the verdict never awaits a
 sample, samples never overlap, and an unanswered worker read is not repeated on the same observer.
+Each arm of the held observer also resets per-arm worker counts: push events as the worker receives
+them (with data, decodable, and local/remote attention, clear or other), and `showNotification` calls
+and settlements. A miss therefore shows whether Chrome dispatched the push or the worker dropped it.
+The listener and wrapper only count and pass through; fleet restoration removes both.
 The lane serializes checkpoint callbacks, including concurrent local/remote asks and restoration,
 so the campaign, CLI and private runner cannot race a shared progress writer. Each caller still
 receives its own persistence failure; a failed write does not prevent later restoration checkpoints.

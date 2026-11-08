@@ -2153,6 +2153,67 @@ test.each(["none", "enrollment", "owner", "host", "connection", "mutation"] as c
   } finally { chrome.mockRestore(); }
 });
 
+test("held push observer counts worker push entry and shows per arm, passes through, and restores", async () => {
+  type Listener = (event: { data: { json(): unknown } | null }) => void;
+  const listeners = new Set<Listener>(), shown: string[] = [];
+  let settle = Promise.withResolvers<void>();
+  const prototype = { showNotification(title: string) { shown.push(title); return settle.promise; } };
+  const registration = Object.create(prototype) as typeof prototype;
+  const navigator = { setAppBadge: () => Promise.resolve(), clearAppBadge: () => Promise.resolve() };
+  const self: Record<string, unknown> = { registration,
+    addEventListener: (type: string, listener: Listener) => { expect(type).toBe("push"); listeners.add(listener); },
+    removeEventListener: (type: string, listener: Listener) => { expect(type).toBe("push"); listeners.delete(listener); } };
+  const context = { navigator, self, Promise, Reflect, Object, Number };
+  const driver = {
+    onEvent: () => () => {},
+    browserSend: async (method: string) => method === "Target.getTargets" ?
+      { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
+      method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {},
+    sessionSend: async (_session: string, _method: string, parameters: { expression: string }) =>
+      ({ result: { value: await runInNewContext(parameters.expression, context) } }),
+  };
+  const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
+    (async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome);
+  const counts = () => (self.__ompQualificationPush as { counts: Record<string, number> } | undefined)?.counts;
+  const deliver = (data: { json(): unknown } | null) => { for (const listener of listeners) listener({ data }); };
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execute: async () => ({ exitCode: 0, stdout: "" }) });
+    runtime.beforeEffect = async () => {};
+    runtime.fleet.host = async () => {}; runtime.fleet.select = async () => {}; runtime.fixture = async () => {};
+    await runtime.fleet.armBadgeObserver();
+    expect(listeners.size).toBe(1);
+    expect(Object.hasOwn(registration, "showNotification")).toBe(true);
+    deliver({ json: () => ({ version: 3, type: "attention", instanceId: "synthetic-local", requestId: "synthetic-a" }) });
+    deliver({ json: () => ({ version: 3, type: "attention", source: "synthetic-source", instanceId: "synthetic-remote", requestId: "synthetic-b" }) });
+    deliver({ json: () => ({ version: 3, type: "clear", instanceId: "synthetic-local", requestId: "synthetic-a" }) });
+    deliver(null);
+    deliver({ json: () => { throw new SyntaxError("synthetic undecodable payload"); } });
+    // The wrapper returns the platform's own promise and only counts its settlement.
+    const pending = registration.showNotification("synthetic title");
+    expect(pending).toBe(settle.promise);
+    expect(shown).toEqual(["synthetic title"]);
+    expect(counts()).toEqual({ entered: 5, withData: 4, json: 3, localAttention: 1, remoteAttention: 1, clear: 1, other: 0,
+      shows: 1, showsSettled: 0, showsRejected: 0 });
+    const before = counts()!;
+    settle.resolve(); await pending; await Promise.resolve();
+    expect(before.showsSettled).toBe(1);
+    // Each arm starts fresh counts; the same listener is kept, not stacked.
+    await runtime.fleet.armBadgeObserver();
+    expect(listeners.size).toBe(1);
+    expect(counts()).toMatchObject({ entered: 0, shows: 0, showsSettled: 0 });
+    settle = Promise.withResolvers<void>();
+    const rejected = registration.showNotification("synthetic second").catch(() => {});
+    settle.reject(new Error("synthetic show failure")); await rejected; await Promise.resolve();
+    expect(counts()).toMatchObject({ shows: 1, showsSettled: 0, showsRejected: 1 });
+    await runtime.cleanup("fleet", { epoch: "a3a77f8e-956b-45d0-a684-a33e6b336dc0", fleetPrepared: true } as AndroidPushProgress);
+    expect(listeners.size).toBe(0);
+    expect(Object.hasOwn(registration, "showNotification")).toBe(false);
+    expect(registration.showNotification).toBe(prototype.showNotification);
+    expect(self.__ompQualificationPush).toBeUndefined();
+    expect(self.__ompQualificationBadge).toBeUndefined();
+  } finally { chrome.mockRestore(); }
+});
+
 test("held worker admission cancellation releases the connection without creating a page", async () => {
   const controller = new AbortController(), cancelled = new Error("synthetic observer cancellation"), methods: string[] = [];
   let closes = 0;

@@ -21,6 +21,9 @@ import { fleetPushSource, FLEET_PUSH_LOCAL_LABEL } from "./fleet-push-fixture.ts
 type Scalars = Record<string, boolean | number>;
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+/** Per-arm counts from the held observer's worker push listener and showNotification wrapper. */
+const PUSH_OBSERVER_KEYS = ["pushEntered", "pushWithData", "pushJson", "pushLocalAttention", "pushRemoteAttention",
+  "pushClear", "pushOther", "showCalls", "showSettled", "showRejected"] as const;
 
 /** Settles within `milliseconds`. A late or failed read is unknown, never an observed absence. */
 async function boundedDiagnosticRead<T>(read: () => Promise<T>, milliseconds: number): Promise<{ value: T } | { timedOut: boolean }> {
@@ -52,6 +55,7 @@ export async function fleetAttentionDiagnostics(input: {
     webApkProcessPresent: false, webApkCached: false, webApkFrozen: false,
     chromeProcessPresent: false, chromeCached: false, chromeFrozen: false,
     webApkRateLimited: -1, chromeRateLimited: -1, rateLimitAgeMs: -1,
+    ...Object.fromEntries(PUSH_OBSERVER_KEYS.map(key => [key, -1])),
     // The accepted ledger does not retain the push's send timestamp or sequence. Do not label
     // the ask timestamp (producer trigger) or worker persistence time as transport send time.
     pushTimeKnown: false };
@@ -110,6 +114,11 @@ export async function fleetAttentionDiagnostics(input: {
         requestMatches:data?.requestId===${JSON.stringify(input.session.ask?.requestId) ?? "undefined"},
         durableReadFailed:true,databasePresent:false,statePresent:false,shown:false,tombstoned:false,
         shownAt:-1,markPresent:false,epochMatches:false,markAtOrAbove:false,received:-1,sessionTouched:-1};
+      // Per-arm push-entry and showNotification counts from the held observer, read before any await.
+      const counts=self.__ompQualificationPush?.counts, count=key=>Number.isSafeInteger(counts?.[key])?counts[key]:-1;
+      Object.assign(result,{pushEntered:count("entered"),pushWithData:count("withData"),pushJson:count("json"),
+        pushLocalAttention:count("localAttention"),pushRemoteAttention:count("remoteAttention"),pushClear:count("clear"),
+        pushOther:count("other"),showCalls:count("shows"),showSettled:count("showsSettled"),showRejected:count("showsRejected")});
       try {
         result.databasePresent=(await indexedDB.databases()).some(db=>db.name==="omp-notification-ordering");
         if (!result.databasePresent) { result.durableReadFailed=false; return result; }
@@ -147,7 +156,7 @@ export async function fleetAttentionDiagnostics(input: {
       for (const key of ["workerReadFailed", "durableReadFailed", "databasePresent", "statePresent", "versionThree", "attention",
         "sourceMatches", "instanceMatches", "requestMatches", "shown", "tombstoned", "markPresent", "epochMatches", "markAtOrAbove"])
         if (typeof value?.[key] === "boolean") result[key] = value[key]!;
-      for (const key of ["workerCount", "shownAt", "received", "sessionTouched"])
+      for (const key of ["workerCount", "shownAt", "received", "sessionTouched", ...PUSH_OBSERVER_KEYS])
         if (typeof value?.[key] === "number" && Number.isSafeInteger(value[key])) result[key] = value[key]!;
       result.identityMatches = result.workerCount === 1 && ["versionThree", "attention", "sourceMatches", "instanceMatches", "requestMatches"].every(key => result[key] === true);
     }
@@ -908,6 +917,38 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             };
           }
           self.__ompQualificationBadge.observation = null;
+          // Diagnosis only: count push events as the worker receives them and showNotification
+          // calls/settlements, per arm. Closed counts; payloads never leave the worker.
+          if (!self.__ompQualificationPush && typeof self.addEventListener === "function" &&
+            typeof self.registration?.showNotification === "function") {
+            const registration = self.registration, show = registration.showNotification;
+            const push = self.__ompQualificationPush = { show, counts: null, listener: null,
+              showDescriptor: Object.getOwnPropertyDescriptor(registration, "showNotification") };
+            push.listener = event => {
+              const counts = push.counts;
+              counts.entered++;
+              try {
+                if (event.data === null) return;
+                counts.withData++;
+                const value = event.data.json();
+                counts.json++;
+                if (value?.version !== 3) counts.other++;
+                else if (value.type === "attention") value.source === undefined ? counts.localAttention++ : counts.remoteAttention++;
+                else if (value.type === "clear") counts.clear++;
+                else counts.other++;
+              } catch { /* A failed read stays visible as entered without json. */ }
+            };
+            self.addEventListener("push", push.listener);
+            registration.showNotification = function() {
+              const counts = push.counts;
+              counts.shows++;
+              const result = Reflect.apply(show, this, arguments);
+              Promise.resolve(result).then(() => { counts.showsSettled++; }, () => { counts.showsRejected++; });
+              return result;
+            };
+          }
+          if (self.__ompQualificationPush) self.__ompQualificationPush.counts = { entered: 0, withData: 0, json: 0,
+            localAttention: 0, remoteAttention: 0, clear: 0, other: 0, shows: 0, showsSettled: 0, showsRejected: 0 };
           return true;
         })()`);
         if (!armed) throw new Error("fleet platform badge API unavailable");
@@ -1893,6 +1934,14 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
                 () => runtime.fixture("stop", progress.epoch, "remote"),
                 async () => {
                   workerRestored = await worker<boolean>("restoreBadgeObserver", `(() => {
+                    const push = self.__ompQualificationPush;
+                    if (push) {
+                      self.removeEventListener("push", push.listener);
+                      if (push.showDescriptor) Object.defineProperty(self.registration, "showNotification", push.showDescriptor);
+                      else delete self.registration.showNotification;
+                      if (self.registration.showNotification !== push.show) return false;
+                      delete self.__ompQualificationPush;
+                    }
                     const state = self.__ompQualificationBadge;
                     if (!state) return true; // This worker restarted, or was already unpatched.
                     if (state.setDescriptor) Object.defineProperty(navigator, "setAppBadge", state.setDescriptor); else delete navigator.setAppBadge;
