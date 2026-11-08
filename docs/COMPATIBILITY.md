@@ -53,8 +53,8 @@ green results cannot be reused. See [browser evidence policy](TEST_PLAN.md#brows
   through grant, feed, coordination, delivery, coordinator restart, and revocation;
   `browser-notifications` (Chromium at Pixel sizes) and `browser-core` (desktop Chromium and WebKit
   with iPhone-class emulation) run the installed-app fleet flows. Development runs on the physical
-  Pixel also passed 8 of 12 planned fleet steps; they are not release qualification
-  ([fleet notification status](RELEASE_STATUS.md#fleet-notifications-adr-048--tested-not-qualified)).
+  Pixel passed every fleet phase; release qualification includes them from the release after
+  v0.10.0 ([fleet notification status](RELEASE_STATUS.md#fleet-notifications-adr-048--tested-not-qualified)).
 - **Browser versions.** The client uses CSS `color-mix()`, `:has()`, and dynamic viewport units, so
   browsers older than Chrome and Edge 111, Firefox 121, and Safari 16.2 render incorrectly.
 - **Windows** starts the gateway at interactive logon, not at unattended boot.
