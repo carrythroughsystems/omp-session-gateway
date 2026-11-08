@@ -1623,6 +1623,10 @@ test.each(Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS) as FleetPushDevelopmentStep[
       selected === "legacy-tail" ? ["fleet_enrolled"] : selected === "fleet-identity" ?
         ["fleet_enrolled", "fleet_private_verified", "fleet_session_verified", "fleet_preview_verified"] : ["fleet_enrolled", selected]);
     expect(progress.results.stale_taps_verified !== undefined).toBe(step === "fleet-identity");
+    if (step === "fleet-identity") expect(Object.keys(progress.results)).toEqual([
+      "subscription_ready", "stale_taps_verified", "fleet_enrolled",
+      "fleet_private_verified", "fleet_session_verified", "fleet_preview_verified",
+    ]);
     expect(progress.results.private_verified).toBeUndefined();
     expect(progress.results.evidence_complete).toBeUndefined();
     expect(progress.results.force_stop_verified !== undefined).toBe(step === "legacy-tail");

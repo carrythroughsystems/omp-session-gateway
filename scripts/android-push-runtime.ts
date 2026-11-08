@@ -1128,8 +1128,8 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       if (records.length > 0) { presentWorkerTopics.add(expected.tag); clearedWorkerPosts.delete(expected.tag); }
       else verifiedWorkerPosts.delete(expected.tag);
       if (fleetEnabled && kind === "attention" && records.length === 1 && owned !== undefined) {
-        // Read Android first. Even a negative metadata verdict is immutable for this OS
-        // record: a different request cannot arrive without changing its key/post time.
+        // Read Android first, but do not freeze a negative cross-process sample:
+        // getNotifications() can lag a newly posted OS record. Only reuse proven metadata.
         let prior = verifiedWorkerPosts.get(expected.tag);
         if (prior?.key !== owned.key || prior.postedAt !== owned.postedAt) {
           const metadata = await worker<WorkerIdentity>("observe", `(async () => {
@@ -1139,7 +1139,6 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             source: data?.source, instanceId: data?.instanceId, requestId: data?.requestId};
         })()`);
           prior = { key: owned.key, postedAt: owned.postedAt, metadata };
-          verifiedWorkerPosts.set(expected.tag, prior);
         }
         const data = prior.metadata;
         const matches = data.count === 1 && data.version === 3 && data.type === "attention" &&
@@ -1148,6 +1147,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           (prior.generation === undefined || prior.generation === session.generation);
         console.log("android-fleet-worker: " + JSON.stringify({
           phase, remote: remoteIds.has(session.instanceId), count: data.count,
+          cacheHit: cached !== undefined && cached.key === owned.key && cached.postedAt === owned.postedAt,
           versionThree: data.version === 3, attention: data.type === "attention",
           sourceMatches: data.source === (remoteIds.has(session.instanceId) ? remote.binding : undefined),
           instanceMatches: data.instanceId === session.instanceId, requestMatches: data.requestId === session.ask?.requestId,
@@ -1157,6 +1157,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         // as the new request's deduplication baseline, or mistake the old row for delivery.
         if (!matches) return { count: 0, titleMatches: false, bodyMatches: false, forbiddenFound };
         prior.generation = session.generation;
+        verifiedWorkerPosts.set(expected.tag, prior);
       }
       if (records.length === 1 && owned !== undefined) {
         try { trackUnchangedNotificationPost(observedPosts, session, kind, owned); } catch (error) { throw privacyFailure({ cause: error }); }

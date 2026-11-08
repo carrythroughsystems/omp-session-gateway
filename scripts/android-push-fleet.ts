@@ -68,9 +68,10 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
   let sinkAudit: Record<string, boolean | number> | undefined;
   let activePhase: AndroidPushPhase = "fleet_enrolled";
   const attempt: FleetPhaseContext["attempt"] = (phase, action) => {
+    const identity = step === "fleet-identity" &&
+      (phase === "fleet_private_verified" || phase === "fleet_session_verified" || phase === "fleet_preview_verified");
     if (step !== undefined && phase !== "fleet_enrolled" &&
-      !(step === "fleet-identity" && (["fleet_private_verified", "fleet_session_verified", "fleet_preview_verified"] as readonly string[]).includes(phase)) &&
-      phase !== FLEET_PUSH_DEVELOPMENT_STEPS[step]) return Promise.resolve();
+      !identity && phase !== FLEET_PUSH_DEVELOPMENT_STEPS[step]) return Promise.resolve();
     activePhase = phase;
     return c.attempt(phase, action);
   };

@@ -849,14 +849,17 @@ test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
-test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch", "phase", "missing", "reappeared", "privacy", "late-snapshot"] as const)(
+test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch", "phase", "missing", "reappeared", "privacy", "late-snapshot",
+  "lag-empty", "lag-duplicate", "lag-version", "lag-type", "lag-source", "lag-instance", "persistent-mismatch"] as const)(
   "fleet metadata reuse is bound to the exact phase record (%s)", async scenario => {
     let session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
       startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
       ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
     const record = { key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
       title: "OMP session needs attention", body: "", text: "" };
-    let records: typeof record[] = [], workerReads = 0, matches = !["mismatch", "late-snapshot"].includes(scenario), frozen = false;
+    const lag = scenario.startsWith("lag-");
+    let records: typeof record[] = [], workerReads = 0,
+      matches = !["mismatch", "late-snapshot", "persistent-mismatch"].includes(scenario) && !lag, frozen = false;
     const driver = {
       browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
         { type: "page", targetId: "page", url: identity.origin + "/" },
@@ -864,8 +867,13 @@ test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch"
       ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
       sessionSend: async () => {
         if (frozen) throw new Error("unchanged OS record evaluated in a frozen worker");
-        workerReads++; return { result: { value: { count: 1, version: 3, type: "attention",
-          instanceId: session.instanceId, requestId: matches ? session.ask?.requestId : "synthetic-other-request" } } };
+        workerReads++; return { result: { value: {
+          count: !matches && scenario === "lag-empty" ? 0 : !matches && scenario === "lag-duplicate" ? 2 : 1,
+          version: !matches && scenario === "lag-version" ? 2 : 3,
+          type: !matches && scenario === "lag-type" ? "activity_stop" : "attention",
+          ...(!matches && scenario === "lag-source" ? { source: "synthetic-wrong-source" } : {}),
+          instanceId: !matches && scenario === "lag-instance" ? "synthetic-other-instance" : session.instanceId,
+          requestId: matches || lag ? session.ask?.requestId : "synthetic-other-request" } } };
       },
       attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
       evaluate: async (expression: string) => expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
@@ -896,7 +904,7 @@ test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch"
       if (scenario === "new-key") records = [{ ...record, key: "synthetic-replacement" }];
       if (scenario === "request") { session = { ...session, ask: { ...session.ask!, requestId: "synthetic-new-request" } }; matches = false; }
       if (scenario === "generation") { session = { ...session, generation: 2 }; matches = false; }
-      if (scenario === "mismatch") matches = true;
+      if (scenario === "mismatch" || lag) matches = true;
       if (scenario === "late-snapshot") session = { ...session, ask: { ...session.ask!, requestId: "synthetic-other-request" } };
       if (["missing", "reappeared"].includes(scenario)) {
         records = [];
@@ -906,14 +914,19 @@ test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch"
         if (scenario === "reappeared") { records = [record]; frozen = false; }
       }
       if (scenario === "privacy") records = [{ ...record, text: PUSH_FIXTURE_ASK_BODY }];
-      if (["unchanged", "request", "generation", "mismatch", "privacy", "late-snapshot"].includes(scenario)) frozen = true;
+      if (["unchanged", "request", "generation", "privacy"].includes(scenario)) frozen = true;
       if (["repost", "new-key"].includes(scenario)) await expect(runtime.observe(session, "attention", "private")).rejects.toBeInstanceOf(QualificationFailure);
       else {
         const observed = await runtime.observe(session, "attention", "private");
-        expect(observed.count).toBe(["request", "generation", "mismatch", "missing"].includes(scenario) ? 0 : 1);
+        expect(observed.count).toBe(["request", "generation", "missing", "persistent-mismatch"].includes(scenario) ? 0 : 1);
         expect(observed.forbiddenFound).toBe(scenario === "privacy");
       }
-      expect(workerReads).toBe(["repost", "new-key", "phase", "reappeared"].includes(scenario) ? 2 : 1);
+      expect(workerReads).toBe(lag || ["repost", "new-key", "phase", "reappeared", "mismatch", "late-snapshot", "persistent-mismatch"].includes(scenario) ? 2 : 1);
+      if (lag || scenario === "mismatch") {
+        frozen = true;
+        expect((await runtime.observe(session, "attention", "private")).count).toBe(1);
+        expect(workerReads).toBe(2); // A proven record still needs no frozen-worker evaluation.
+      }
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 

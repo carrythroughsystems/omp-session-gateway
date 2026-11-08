@@ -267,18 +267,23 @@ OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts 
 ```
 
 The step names are `fleet-identity`, `coordinator-restart`, `revocation`, `fleet-sinks`,
-`fleet-restoration`, and `legacy-tail`. Each starts from a fresh epoch, captures the Pixel baseline, starts the local fixture,
+`fleet-restoration`, and `legacy-tail`. Each starts from a fresh epoch, captures the Pixel baseline,
+starts the local fixture,
 subscribes, prepares the same isolated source/config/Serve mapping and grants through PWA enrollment,
 and admits the warm worker observer once. `fleet-identity` first runs the legacy delayed-tap phase
 to retain its generation change, notification replays and browser lifecycle, then runs fleet Private,
 Session and Preview together, sharing their real tags and one held observer. Other selections skip
-the earlier local and fleet checks, not their
-assertions inside the selected step. `fleet-sinks` first performs the real remote Control tap and
+the earlier local and fleet checks, not their assertions inside the selected step.
+`fleet-sinks` first performs the real remote Control tap and
 answer/clear needed to scan that exact live capability; `legacy-tail` first restores the fleet
 source and releases the observer, then runs force-stop, permission, lock/resume, network, Doze and
 the legacy sink sweep together. Every outcome attempts the existing Pixel and fleet restoration.
 Partial runs never set `evidence_complete`; their private `tested-evidence.json` explicitly names
 the step and records `development: true, qualified: false`.
+Fleet delivery observations read OS records first and reuse only positively matched worker metadata
+for that exact key/post time. A negative worker sample is read again within the original delivery
+deadline; it cannot turn into a permanent negative cache. Per-sample OS counts/post times, cache-hit
+and worker identity-match booleans are retained without notification or request identifiers.
 
 Both development modes refuse any existing release-host campaign lease row or held Pixel lock.
 An unrestored attempt retains ownership: stop and use
