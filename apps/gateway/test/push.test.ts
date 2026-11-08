@@ -13,7 +13,7 @@ import {
 } from "@omp-session-gateway/protocol";
 import type { GatewayConfig } from "../src/config.ts";
 import { SafeLogger } from "../src/logger.ts";
-import { PushService, type PushSendOptions, type PushTransport, webPushOptions } from "../src/push.ts";
+import { PUSH_ENDPOINT_SPACING_MS, PushService, type PushSendOptions, type PushTransport, webPushOptions } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { HANG_DEADLINE_MS } from "./test-support.ts";
 
@@ -124,7 +124,7 @@ describe("Web Push service", () => {
     "reports skipped fleet delivery for %s without calling transport", async reason => {
       const root = await createRoot(), gatewayConfig = config(root);
       const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 }), transport = new RecordingTransport();
-      const service = await PushService.open({ config: gatewayConfig, registry, transport });
+      const service = await PushService.open({ config: gatewayConfig, registry, transport, endpointSpacingMs: 0 });
       try {
         await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
         if (reason === "missing subscription") await service.unsubscribe("dev-localhost", { version: PUSH_API_VERSION, endpoint });
@@ -147,7 +147,7 @@ describe("Web Push service", () => {
   test("authenticated push config counts eligible global recipients without listing private state", async () => {
     const root = await createRoot();
     const gatewayConfig = config(root), registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
-    const service = await PushService.open({ config: gatewayConfig, registry, transport: new RecordingTransport() });
+    const service = await PushService.open({ config: gatewayConfig, registry, transport: new RecordingTransport(), endpointSpacingMs: 0 });
     try {
       expect(service.configResponse()).toMatchObject({ subscriptionCount: 0 });
       for (const suffix of ["one", "two"]) await service.subscribe("dev-localhost", {
@@ -169,7 +169,7 @@ describe("Web Push service", () => {
     const transport = new RecordingTransport();
     transport.statusCode = status;
     const lines: string[] = [];
-    const service = await PushService.open({ config: config(root), registry, transport, logger: new SafeLogger({ write: line => lines.push(line) }) });
+    const service = await PushService.open({ config: config(root), registry, transport, logger: new SafeLogger({ write: line => lines.push(line) }), endpointSpacingMs: 0 });
     await service.subscribe("dev-localhost", parsePushSubscriptionRequest({ version: PUSH_API_VERSION, detailLevel: "preview", subscription }));
     registry.reconcile({ observed: [observedSession(false)], retained: new Set() });
     registry.reconcile({ observed: [observedSession(true)], retained: new Set() });
@@ -198,7 +198,7 @@ describe("Web Push service", () => {
     const gatewayConfig = config(root);
     const statePath = join(gatewayConfig.paths.stateDir, "push-state.json");
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
-    const service = await PushService.open({ config: gatewayConfig, registry, transport: new RecordingTransport() });
+    const service = await PushService.open({ config: gatewayConfig, registry, transport: new RecordingTransport(), endpointSpacingMs: 0 });
     const publicKey = service.configResponse().applicationServerKey;
     await service.subscribe(
       "dev-localhost",
@@ -215,7 +215,7 @@ describe("Web Push service", () => {
     expect(state).toContain('"detailLevel": "preview"');
     expect((await stat(statePath)).mode & 0o077).toBe(0);
 
-    const reopened = await PushService.open({ config: gatewayConfig, registry, transport: new RecordingTransport() });
+    const reopened = await PushService.open({ config: gatewayConfig, registry, transport: new RecordingTransport(), endpointSpacingMs: 0 });
     expect(reopened.configResponse().applicationServerKey).toBe(publicKey);
     await reopened.stop();
   });
@@ -224,7 +224,7 @@ describe("Web Push service", () => {
     const root = await createRoot();
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: config(root), registry, transport });
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 0 });
     await service.subscribe(
       "dev-localhost",
       parsePushSubscriptionRequest({ version: PUSH_API_VERSION, detailLevel: "private", subscription }),
@@ -250,7 +250,7 @@ describe("Web Push service", () => {
     const statePath = join(gatewayConfig.paths.stateDir, "push-state.json");
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: gatewayConfig, registry, transport });
+    const service = await PushService.open({ config: gatewayConfig, registry, transport, endpointSpacingMs: 0 });
     const subscriptions = (["private", "session", "preview"] as const).map((detailLevel, index) => ({
       version: PUSH_API_VERSION,
       detailLevel,
@@ -295,7 +295,7 @@ describe("Web Push service", () => {
     registry.reconcile({ observed: [{ ...session, busy: false }], retained: new Set() });
     await service.flush();
     expect(transport.calls).toHaveLength(6);
-    const restarted = await PushService.open({ config: gatewayConfig, registry, transport });
+    const restarted = await PushService.open({ config: gatewayConfig, registry, transport, endpointSpacingMs: 0 });
     for (const request of subscriptions) await restarted.subscribe("dev-localhost", request);
     await restarted.subscribe("dev-localhost", {
       version: PUSH_API_VERSION,
@@ -320,7 +320,7 @@ describe("Web Push service", () => {
       clock: { monotonicNowMs: () => now, wallNowIso: () => new Date(now).toISOString() },
     });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: config(root), registry, transport });
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 0 });
     await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, detailLevel: "private", subscription });
     let session = observedSession(false, 2);
     const sample = (busy: boolean): void => {
@@ -383,7 +383,7 @@ describe("Web Push service", () => {
     const root = await createRoot();
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: config(root), registry, transport });
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 0 });
     await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, detailLevel: "private", subscription });
     const sample = (busy: boolean): void => {
       registry.reconcile({ observed: [{ ...observedSession(false), busy }], retained: new Set() });
@@ -413,7 +413,7 @@ describe("Web Push service", () => {
       ttlSeconds: 35, maxSessions: 10, requestIdFactory: () => `push-request-${++requests}-identity`,
     });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: config(root), registry, transport });
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 0 });
     await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, detailLevel: "private", subscription });
     const sample = (busy: boolean, inputRequired: boolean): void => {
       registry.reconcile({ observed: [{ ...observedSession(inputRequired), busy }], retained: new Set() });
@@ -453,7 +453,7 @@ describe("Web Push service", () => {
     const root = await createRoot();
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: config(root), registry, transport });
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 0 });
     registry.reconcile({ observed: [{ ...observedSession(false), busy: true }], retained: new Set() });
     registry.reconcile({ observed: [{ ...observedSession(false), busy: false }], retained: new Set() });
     await service.flush();
@@ -467,7 +467,7 @@ describe("Web Push service", () => {
     const root = await createRoot();
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: config(root), registry, transport });
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 0 });
     await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, detailLevel: "private", subscription });
     const session = observedSession(false);
     const other = { ...observedSession(true), instanceId: "push-other-instance-0001" };
@@ -498,7 +498,7 @@ describe("Web Push service", () => {
     const statePath = join(gatewayConfig.paths.stateDir, "push-state.json");
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: gatewayConfig, registry, transport });
+    const service = await PushService.open({ config: gatewayConfig, registry, transport, endpointSpacingMs: 0 });
     await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, detailLevel: "private", subscription });
     const sample = (busy: boolean): void => {
       registry.reconcile({ observed: [{ ...observedSession(false), busy }], retained: new Set() });
@@ -541,7 +541,7 @@ describe("Web Push service", () => {
       requestIdFactory: () => "push-request-identity-0001",
     });
     const transport = new RecordingTransport();
-    const service = await PushService.open({ config: config(root), registry, transport });
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 0 });
     const subscriptions = (["private", "session", "preview"] as const).map((detailLevel, index) => ({
       detailLevel,
       subscription: {
@@ -620,7 +620,7 @@ describe("Web Push service", () => {
     transport.statusCode = 410;
     const lines: string[] = [];
     const logger = new SafeLogger({ write(line): void { lines.push(line); } });
-    const service = await PushService.open({ config: gatewayConfig, registry, transport, logger });
+    const service = await PushService.open({ config: gatewayConfig, registry, transport, logger, endpointSpacingMs: 0 });
     await service.subscribe(
       "dev-localhost",
       parsePushSubscriptionRequest({
@@ -649,7 +649,7 @@ describe("Web Push service", () => {
     const transport = new RecordingTransport();
     const lines: string[] = [];
     const logger = new SafeLogger({ write(line): void { lines.push(line); } });
-    const service = await PushService.open({ config: gatewayConfig, registry, transport, logger });
+    const service = await PushService.open({ config: gatewayConfig, registry, transport, logger, endpointSpacingMs: 0 });
     const subscribeWith = async (keys: PushSubscriptionKeys): Promise<void> => {
       await service.subscribe(
         "dev-localhost",
@@ -704,5 +704,142 @@ describe("Web Push service", () => {
     expect(log).not.toContain(renewedKeys.auth);
     expect(log).not.toContain(previousKeys.p256dh);
     expect(log).not.toContain(renewedKeys.p256dh);
+  });
+
+  // Pacing is a real-time gap kept by the platform timer inside async send chains, so the tests
+  // below measure it against the clock with small spacings; only the default check waits 1 s.
+  const fleetClear = (n: number) => ({ version: 3, type: "clear", instanceId: "push-instance-000001", generation: 1,
+    requestId: `synthetic-paced-request-${n}`, seq: { epoch: 1, n }, badge: { count: 0, complete: true } }) as const;
+
+  test("sends to one subscription one at a time in order, spaced after each settles, without holding back another", async () => {
+    const root = await createRoot(), spacing = 50;
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 }), transport = new RecordingTransport();
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: spacing });
+    const paced = `${endpoint}/paced`, other = `${endpoint}/other`;
+    const sequence = () => transport.calls.filter(call => call.subscription.endpoint === paced).map(call => JSON.parse(call.payload).seq.n);
+    try {
+      for (const target of [paced, other]) {
+        await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription: { ...subscription, endpoint: target } });
+      }
+      transport.blockWhen = candidate => candidate.endpoint === paced;
+      const sends = [1, 2, 3].map(n => service.sendFleet("dev-localhost", paced, fleetClear(n), () => true));
+      const first = await transport.nextBlockedSend();
+      // Another device is not delayed while this one has a send in flight and two queued.
+      expect(await service.sendFleet("dev-localhost", other, fleetClear(9), () => true)).toBe("delivered");
+      expect(sequence()).toEqual([1]);
+      // A failed send still releases the subscription and paces the next one.
+      first(pushError(503));
+      let settled = performance.now();
+      const second = await transport.nextBlockedSend();
+      expect(performance.now() - settled).toBeGreaterThanOrEqual(spacing - 5);
+      expect(sequence()).toEqual([1, 2]);
+      second();
+      settled = performance.now();
+      const third = await transport.nextBlockedSend();
+      expect(performance.now() - settled).toBeGreaterThanOrEqual(spacing - 5);
+      third();
+      expect(await Promise.all(sends)).toEqual(["failed", "delivered", "delivered"]);
+      expect(sequence()).toEqual([1, 2, 3]);
+    } finally { await service.stop(); }
+  });
+
+  test("a send that waited for its subscription's turn re-checks authority before going out", async () => {
+    const root = await createRoot();
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 }), transport = new RecordingTransport();
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 20 });
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+      transport.blockWhen = () => transport.calls.length === 1;
+      let authorized = true;
+      const first = service.sendFleet("dev-localhost", endpoint, fleetClear(1), () => true);
+      const waiting = service.sendFleet("dev-localhost", endpoint, fleetClear(2), () => authorized);
+      const release = await transport.nextBlockedSend();
+      // The grant is revoked while the second push waits behind the first.
+      authorized = false;
+      release();
+      expect(await Promise.all([first, waiting])).toEqual(["delivered", "skipped"]);
+      expect(transport.calls).toHaveLength(1);
+    } finally { await service.stop(); }
+  });
+
+  test("a send skipped before transport does not hold its subscription for the gap", async () => {
+    const root = await createRoot(), started: number[] = [];
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
+    const service = await PushService.open({ config: config(root), registry, transport: { async send() { started.push(performance.now()); } }, endpointSpacingMs: 2_000 });
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+      const begun = performance.now();
+      expect(await Promise.all([
+        service.sendFleet("dev-localhost", endpoint, fleetClear(1), () => false),
+        service.sendFleet("dev-localhost", endpoint, fleetClear(2), () => true),
+      ])).toEqual(["skipped", "delivered"]);
+      expect(started).toHaveLength(1);
+      expect(started[0]! - begun).toBeLessThan(1_000);
+    } finally { await service.stop(); }
+  });
+
+  test("a legacy push that waited for its subscription's turn is dropped once that subscription is gone", async () => {
+    const root = await createRoot();
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 }), transport = new RecordingTransport();
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 20 });
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+      transport.blockWhen = () => transport.calls.length === 1;
+      registry.reconcile({ observed: [observedSession(true), { ...observedSession(true), instanceId: "push-other-instance-0001" }], retained: new Set() });
+      const release = await transport.nextBlockedSend();
+      // The second session's push waits behind the first while the device unsubscribes.
+      expect(await service.unsubscribe("dev-localhost", { version: PUSH_API_VERSION, endpoint })).toBe(true);
+      release();
+      await service.flush();
+      expect(transport.calls).toHaveLength(1);
+    } finally { await service.stop(); }
+  });
+
+  test("a legacy activity stop that waited for its subscription's turn is dropped once the session resumed", async () => {
+    const root = await createRoot();
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 }), transport = new RecordingTransport();
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: 20 });
+    const session = observedSession(false), asking = { ...observedSession(true), instanceId: "push-other-instance-0001" };
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+      registry.reconcile({ observed: [{ ...session, busy: true }], retained: new Set() });
+      transport.blockWhen = () => transport.calls.length === 1;
+      registry.reconcile({ observed: [{ ...session, busy: true }, asking], retained: new Set() });
+      const release = await transport.nextBlockedSend();
+      // The stop edge passes its queue-time checks and waits behind the held push (one event-loop
+      // turn drains the microtasks that get it there); then the session resumes.
+      registry.reconcile({ observed: [{ ...session, busy: false }, asking], retained: new Set() });
+      await new Promise(resolve => setImmediate(resolve));
+      registry.reconcile({ observed: [{ ...session, busy: true }, asking], retained: new Set() });
+      release();
+      await service.flush();
+      expect(transport.calls.map(call => parseAttentionPushMessage(JSON.parse(call.payload)).type)).toEqual(["attention"]);
+    } finally { await service.stop(); }
+  });
+
+  test("paces legacy pushes for different sessions to one subscription", async () => {
+    const root = await createRoot(), spacing = 50, started: Array<{ at: number; instanceId: string }> = [];
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
+    const transport: PushTransport = { async send(_subscription, payload) { started.push({ at: performance.now(), instanceId: JSON.parse(payload).instanceId }); } };
+    const service = await PushService.open({ config: config(root), registry, transport, endpointSpacingMs: spacing });
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, detailLevel: "private", subscription });
+      // Two sessions ask at once: their delivery chains are independent, the subscription is not.
+      registry.reconcile({ observed: [observedSession(true), { ...observedSession(true), instanceId: "push-other-instance-0001" }], retained: new Set() });
+      await service.flush();
+      expect(started.map(entry => entry.instanceId).sort()).toEqual(["push-instance-000001", "push-other-instance-0001"]);
+      expect(started[1]!.at - started[0]!.at).toBeGreaterThanOrEqual(spacing - 5);
+    } finally { await service.stop(); }
+  });
+
+  test("defaults to a one-second gap between pushes to one subscription", async () => {
+    const root = await createRoot(), started: number[] = [];
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
+    const service = await PushService.open({ config: config(root), registry, transport: { async send() { started.push(performance.now()); } } });
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+      expect(await Promise.all([1, 2].map(n => service.sendFleet("dev-localhost", endpoint, fleetClear(n), () => true)))).toEqual(["delivered", "delivered"]);
+      expect(started[1]! - started[0]!).toBeGreaterThanOrEqual(PUSH_ENDPOINT_SPACING_MS - 5);
+    } finally { await service.stop(); }
   });
 });

@@ -181,6 +181,8 @@ export class FleetCoordinator {
   readonly #pullers = new Map<string, Puller>();
   readonly #queue: Delivery[] = [];
   readonly #inflight = new Set<Promise<void>>();
+  /** Endpoints with a launched delivery; consulted only while PushService paces endpoints. */
+  readonly #sendingTo = new Set<string>();
   readonly #pendingDeliveries = new Map<Recipient, PendingDeliveries>();
   readonly #retryDeliveries = new Map<Delivery, number>();
   readonly #unsubscribers: Array<() => void> = [];
@@ -695,9 +697,14 @@ export class FleetCoordinator {
     if (!this.#healthy || this.#stopped || this.#mutating) return;
     this.#retryReadyDeliveries();
     while (this.#healthy && !this.#stopped && !this.#mutating && this.#inflight.size < 8 && this.#queue.length > 0) {
-      const delivery = this.#queue.shift()!;
+      // A paced endpoint takes one send at a time: a second launched delivery would only wait in
+      // PushService while holding one of the eight entries, so it stays queued and others go first.
+      const index = this.#push.pacesEndpoints ? this.#queue.findIndex(candidate => !this.#sendingTo.has(candidate.endpoint)) : 0;
+      if (index === -1) break;
+      const delivery = this.#queue.splice(index, 1)[0]!;
       this.#retryReadyDeliveries();
       let reconcile = false;
+      this.#sendingTo.add(delivery.endpoint);
       const task = this.#push.sendFleet(delivery.recipient.owner, delivery.endpoint, delivery.message, () => this.#authorized(delivery))
         .then(async outcome => {
           const { recipient, message } = delivery;
@@ -721,6 +728,7 @@ export class FleetCoordinator {
         })
         .catch(() => this.#logger.event("warn", "fleet.send_failed", { failed: true }))
         .finally(() => {
+          this.#sendingTo.delete(delivery.endpoint);
           if (!this.#retryDeliveries.has(delivery)) this.#releaseDelivery(delivery);
           this.#inflight.delete(task); this.#drain();
           if (reconcile || this.#deferredClears || this.#state.recipients.some(recipient => recipient.sources.length === 0)) this.#scheduleReconcile();

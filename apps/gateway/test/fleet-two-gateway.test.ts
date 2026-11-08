@@ -243,7 +243,7 @@ async function fixture(identities = false) {
     if (cold) reader.observe = async () => { await gate.promise; return observe(); };
     else gate.resolve();
     // Match runServe: fully load PushService before starting discovery and the coordinator.
-    const push = await PushService.open({ config, registry, logger, transport });
+    const push = await PushService.open({ config, registry, logger, transport, endpointSpacingMs: 0 });
     const poller = startHostPoller({ reader, registry, intervalMs: 60_000,
       onEvent: (event, detail) => logger.event("info", event, detail) });
     const source = role === "studio" ? await FleetSourceService.open({ config, registry, poller, now: clock.now,
