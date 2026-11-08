@@ -71,8 +71,16 @@ const nonProviderFetches: Readonly<Record<string, readonly string[]>> = {
   // single no-cors reachability probe of the public collaboration relay host (opaque, never read).
   "android-device.ts": ['"http://127.0.0.1:" + port + "/json/version"', "${JSON.stringify(COLLAB_RELAY_PROBE_URL)}"],
   "android-leak-sweep.ts": ['origin + "/api/v1/sessions"'],
-  // Authenticated reads of the owned retained gateway, never subscription endpoints or a provider.
-  "android-push-runtime.ts": ['`${identity.origin}/api/v1/sessions`', '`${identity.origin}/api/v1/push/config`', "'/api/v1/sessions'", "'/api/v1/sessions/'+${JSON.stringify(fixture.instanceId)}+'/launch'"],
+  // Owned coordinator/source probes and browser-direct grant/launch actions, never subscription
+  // endpoints or providers. Status POST keeps the endpoint out of URLs; action POSTs must not retry.
+  "android-push-runtime.ts": [
+    '`${identity.origin}/api/v1/sessions`', '`${identity.origin}/api/v1/push/config`', "'/api/v1/sessions'", "'/api/v1/sessions/'+${JSON.stringify(fixture.instanceId)}+'/launch'",
+    '`${role === "remote" ? remote.origin : identity.origin}/api/v1/sessions`',
+    '`${identity.origin}/api/v1/health`',
+    '"/api/v1/push/fleet/status"',
+    '${JSON.stringify(remote.origin)} + "/api/v1/notification-grants/" + row.grantId + "/revoke"',
+    '${JSON.stringify(remote.origin)} + "/api/v1/sessions/" + ${JSON.stringify(remoteSession.instanceId)} + "/launch"',
+  ],
   "browser-journey.ts": ['"/api/v1/sessions"', '"/api/v1/sessions/" + target.instanceId + "/launch"'],
   "device-cloud-runtime.ts": ['`${origin}/`', '`${origin}/api/v1/sessions`', '`${origin}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`'],
   // Single-shot latency and stream measurements of the isolated loopback gateway; a retry would skew them.

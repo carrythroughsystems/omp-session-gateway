@@ -89,7 +89,7 @@ describe("retained-Mac Push fixture staging", () => {
     // The fixture runs on the retained Mac from these staged copies alone, so a new relative import
     // that is not staged would break the campaign there and nowhere else.
     const closure = new Set<string>();
-    const pending = ["push-qualification-fixture.ts"];
+    const pending = ["push-qualification-fixture.ts", "fleet-push-fixture.ts"];
     while (pending.length > 0) {
       const file = pending.pop()!;
       if (closure.has(file)) continue;

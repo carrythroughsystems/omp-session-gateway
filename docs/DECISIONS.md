@@ -2480,8 +2480,9 @@ old one, which could suppress a genuinely new ask. Source restarts have the same
 identity limitation on that source.
 
 This clarifies the restart contract without changing product bytes, durable state schemas,
-capability boundaries, or the memory-only registry invariant. Deterministic coordinator tests prove
-a still-pending remote request is not repeated across a home restart.
+capability boundaries, or the memory-only registry invariant. The physical Push lane proves the
+resolved-remote exact clear and local replacement-once; deterministic coordinator tests separately
+prove a still-pending remote request is not repeated across a home restart.
 
 ### 2026-11-08 amendment — pace pushes to one subscription
 

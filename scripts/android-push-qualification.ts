@@ -16,6 +16,10 @@ import { everyError, pixelUnrestored } from "./restoration.ts";
 import { FAILURE_LIMITS, PUSH_BROWSER_STEPS, normalizeQualificationFailures, QualificationFailure } from "./qualification-failure.ts";
 import type { QualificationLogWindow, PushDeliveryTelemetry } from "./qualification-logs.ts";
 import { parsePixelBaseline, type PixelBaseline } from "./android-device.ts";
+import { Database } from "bun:sqlite";
+import { withReleaseHostLease } from "./release-host-lease.ts";
+import { runFleetPushPhases, FLEET_PUSH_PHASES, FLEET_PUSH_RESULT_FIELDS, FLEET_PUSH_DEVELOPMENT_STEPS,
+  type FleetPushRuntime, type FleetPushDevelopmentStep } from "./android-push-fleet.ts";
 
 export interface PushExecution { readonly signal: AbortSignal; readonly deadline: number; readonly nextFailureId: () => number }
 export interface PushDeliveryMetrics {
@@ -203,9 +207,9 @@ export interface PushTapObservation {
   readonly writable: boolean; readonly readOnly: boolean; readonly expired: boolean;
 }
 export type PushNetwork = "wifi" | "cellular" | "airplane";
-export type PushCleanupStep = "fixtureAsk" | "notifications" | "browser" | "doze" | "network" | "task" | "fixture";
+export type PushCleanupStep = "fixtureAsk" | "notifications" | "browser" | "doze" | "network" | "task" | "fixture" | "fleet";
 /** The lane owns two disposable hosts; the secondary exists only for the queue-order and expiry checks. */
-export type PushFixtureRole = "primary" | "secondary";
+export type PushFixtureRole = "primary" | "secondary" | "remote";
 /** One device-local triage control in the installed app. `settleMs` keeps observing before the read. */
 export type TriageAction =
   | { readonly kind: "hold" | "requeue" | "hide"; readonly instanceId: string; readonly settleMs?: number }
@@ -219,6 +223,7 @@ export interface TriageObservation {
   readonly mutations: number;
 }
 export interface AndroidPushRuntime {
+  readonly fleet: FleetPushRuntime;
   now(): number;
   pause(milliseconds: number): Promise<void>;
   beforeEffect: () => Promise<void>;
@@ -243,6 +248,8 @@ export interface AndroidPushRuntime {
   openPwa(): Promise<void>;
   lock(): Promise<void>;
   observe(session: SessionMetadata, kind: "attention" | "activity_stop", detail: PushDetailLevel): Promise<NotificationObservation>;
+  /** Both the OS and worker have no notification on this session's tag, regardless of request. */
+  notificationCleared(session: SessionMetadata): Promise<boolean>;
   presentation(session: SessionMetadata, detail: PushDetailLevel): Promise<boolean>;
   tap(session: SessionMetadata, kind: "attention" | "activity_stop", stale: boolean): Promise<PushTapObservation>;
   /** Reads the installed app's directory, after performing `action` when one is given. */
@@ -277,10 +284,16 @@ export interface AndroidPushRuntime {
  * Steady-state waits keep the one-minute bound.
  */
 const PUSH_RECOVERY_MS = 160_000;
+const LEGACY_PUSH_HEAD_PHASES = ["private_verified", "session_verified", "preview_verified", "attention_tap_verified",
+  "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified"] as const;
+const LEGACY_PUSH_TAIL_PHASES = ["force_stop_verified", "permission_verified", "lock_resume_verified",
+  "network_verified", "doze_verified", "forbidden_sinks_verified"] as const;
+/** Diagnosis only: how long a missed delivery keeps being sampled before cleanup answers its ask. */
+const LATE_DELIVERY_WATCH_MS = 120_000;
 
-export const ANDROID_PUSH_PHASES = ["baseline_captured", "subscription_ready", "private_verified", "session_verified", "preview_verified",
-  "attention_tap_verified", "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified",
-  "force_stop_verified", "permission_verified", "lock_resume_verified", "network_verified", "doze_verified", "forbidden_sinks_verified",
+export const ANDROID_PUSH_PHASES = ["baseline_captured", "subscription_ready", ...LEGACY_PUSH_HEAD_PHASES,
+  ...FLEET_PUSH_PHASES,
+  ...LEGACY_PUSH_TAIL_PHASES,
   "evidence_complete", "restored"] as const;
 export type AndroidPushPhase = (typeof ANDROID_PUSH_PHASES)[number];
 export interface AndroidPushProgress extends Record<string, unknown> {
@@ -289,6 +302,9 @@ export interface AndroidPushProgress extends Record<string, unknown> {
   notificationTopicDigest: string | null;
   /** The secondary host's topic, for cleanup of an interrupted triage or expiry check. */
   secondaryNotificationTopicDigest: string | null;
+  /** Persisted before the first fleet host mutation; false only after its restoration. */
+  fleetPrepared?: boolean;
+  remoteNotificationTopicDigest?: string | null;
   results: Record<string, Record<string, boolean | number | string | number[]>>;
   /** Read after a complete restoration in the same Pixel lease turn: settlement proof only. */
   pixelBaseline?: PixelBaseline;
@@ -301,9 +317,10 @@ interface LaneInput {
   readonly execution?: PushExecution;
 }
 const PROGRESS_KEYS = "binding,browser,cleanupRequired,device,epoch,lane,notificationTopicDigest,phase,results,secondaryNotificationTopicDigest";
-const CLEANUP_STEPS: readonly PushCleanupStep[] = ["fixtureAsk", "doze", "network", "fixture", "notifications", "browser", "task"];
+const CLEANUP_STEPS: readonly PushCleanupStep[] = ["fixtureAsk", "doze", "network", "fleet", "fixture", "notifications", "browser", "task"];
 const DELIVERY_FIELDS = Object.keys(emptyPushDeliveryMetrics()).filter(key => key !== "deliveryTimings");
 const RESULT_FIELDS: Partial<Record<AndroidPushPhase, readonly string[]>> = {
+  ...FLEET_PUSH_RESULT_FIELDS,
   subscription_ready: ["enabled"],
   private_verified: ["delivered", "locked", "singleNotification", "detailMatched", "elapsedMs"],
   session_verified: ["delivered", "locked", "singleNotification", "detailMatched", "elapsedMs"],
@@ -340,7 +357,7 @@ export function parseAndroidPushProgress(value: unknown): AndroidPushProgress {
   const keys = Object.keys(p).sort().join(",");
   // Progress written before the secondary host existed has no secondary topic, and cleans up the same way.
   const required = PROGRESS_KEYS.split(",").filter(key => key !== "secondaryNotificationTopicDigest");
-  const expected = [...required, ...["secondaryNotificationTopicDigest", "pixelBaseline"].filter(key => Object.hasOwn(p, key))].sort().join(",");
+  const expected = [...required, ...["secondaryNotificationTopicDigest", "pixelBaseline", "fleetPrepared", "remoteNotificationTopicDigest"].filter(key => Object.hasOwn(p, key))].sort().join(",");
   if (keys !== expected || p.lane !== "androidPush" ||
     typeof p.epoch !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(p.epoch) ||
     typeof p.binding !== "string" || !/^[a-f0-9]{64}$/u.test(p.binding) || typeof p.cleanupRequired !== "boolean" ||
@@ -350,7 +367,8 @@ export function parseAndroidPushProgress(value: unknown): AndroidPushProgress {
     // Only a completed restoration records a baseline.
     if (p.cleanupRequired) throw new Error("invalid Android Push progress");
   }
-  for (const digest of [p.notificationTopicDigest, p.secondaryNotificationTopicDigest ?? null]) {
+  if (p.fleetPrepared !== undefined && typeof p.fleetPrepared !== "boolean" || p.fleetPrepared === true && !p.cleanupRequired) throw new Error("invalid fleet restoration state");
+  for (const digest of [p.notificationTopicDigest, p.secondaryNotificationTopicDigest ?? null, p.remoteNotificationTopicDigest ?? null]) {
     if (digest !== null && (typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest))) throw new Error("invalid Android Push notification ownership");
   }
   const device = p.device;
@@ -416,6 +434,7 @@ async function restore(input: LaneInput, runtime: AndroidPushRuntime, progress: 
     catch (error) { persistenceErrors.push(error); }
   };
   for (const step of CLEANUP_STEPS) {
+    if (step === "fleet" && progress.fleetPrepared !== true) continue;
     try { await runtime.beforeEffect(); await runtime.cleanup(step, progress); } catch (error) { failures.push(step); errors.push(error); }
     if (["fixtureAsk", "doze", "network"].includes(step)) await sampleLate?.();
   }
@@ -622,7 +641,7 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
       while (true) {
         const observed = await runtime.observe(settled, "attention", "private");
         requireBudget();
-        if (observed.count === 0) break;
+        if (observed.count === 0 && await runtime.notificationCleared(settled)) break;
         await runtime.pause(500);
         requireBudget();
       }
@@ -655,6 +674,25 @@ export async function runAndroidPushReadiness(input: LaneInput): Promise<Record<
 }
 
 export async function runAndroidPush(input: LaneInput): Promise<Record<string, unknown>> {
+  return runAndroidPushLane(input);
+}
+
+/** Tested evidence only: never accepts a partial selection through the release lane entrypoint. */
+export async function runAndroidPushDevelopmentStep(input: LaneInput, step: FleetPushDevelopmentStep): Promise<Record<string, unknown>> {
+  if (!Object.hasOwn(FLEET_PUSH_DEVELOPMENT_STEPS, step)) throw new Error("unknown Android Push development step");
+  return runAndroidPushLane(input, step);
+}
+
+async function runAndroidPushLane(input: LaneInput, developmentStep?: FleetPushDevelopmentStep): Promise<Record<string, unknown>> {
+  // Concurrent fleet asks share one progress writer, including private development providers.
+  // Queue each caller's cloned snapshot; retain its rejection while permitting restoration saves.
+  const checkpoint = input.checkpoint;
+  let checkpointTail = Promise.resolve();
+  input = { ...input, checkpoint: next => {
+    const operation = checkpointTail.then(() => checkpoint(next));
+    checkpointTail = operation.catch(() => {});
+    return operation;
+  } };
   let localId = 0;
   const nextFailureId = () => input.execution?.nextFailureId() ?? ++localId;
   const bind = binding(input.identity);
@@ -710,8 +748,9 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       const evidence = { id: nextFailureId(), lane: "androidPush" as const, step: activePhase,
         class: "harness" as const, operation: "read_only" as const,
         elapsedMs: pushMilliseconds(runtime.now() - start), observations: { timeoutMs: timeout } };
-      if (name === "metadata") throw new QualificationFailure({ ...evidence, reason: "delivery_metadata_timeout" });
-      throw new QualificationFailure({ ...evidence, reason: "delivery_timeout" });
+      const diagnostic = { cause: new Error(`Android Push wait expired: ${name}`) };
+      if (name === "metadata") throw new QualificationFailure({ ...evidence, reason: "delivery_metadata_timeout" }, diagnostic);
+      throw new QualificationFailure({ ...evidence, reason: "delivery_timeout" }, diagnostic);
     };
     const snapshot = async (predicate: (s: SessionMetadata) => boolean, role: PushFixtureRole = "primary") => wait("metadata", async () => {
       const session = await runtime.snapshot(progress.epoch, role);
@@ -784,7 +823,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         const current = await runtime.snapshot(progress.epoch, role);
         if (current === undefined || current.inputRequired) return undefined;
         await proveAskClear(role);
-        return (await runtime.observe(current, "attention", "private")).count === 0 ? true : undefined;
+        return await runtime.notificationCleared(current) ? true : undefined;
       }, timeout, start);
       metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - start);
     };
@@ -817,7 +856,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
             const current = await runtime.snapshot(progress.epoch);
             if (current === undefined || current.inputRequired) return undefined;
             return await proveAskClear("primary") && armedAsks.get("primary")?.clearAlias === old.qualificationPushAlias &&
-              (await runtime.observe(current, "attention", detail)).count === 0 ? current : undefined;
+              await runtime.notificationCleared(current) ? current : undefined;
           }, timeout, clearing);
           lateDelivery = undefined;
           metrics.clearMs = pushMilliseconds(metrics.clearMs + runtime.now() - clearing);
@@ -834,6 +873,10 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       return { session: observed, milliseconds: pushMilliseconds(runtime.now() - start) };
     };
     const attempt = async (phase: AndroidPushPhase, action: () => Promise<void>): Promise<void> => {
+      if (developmentStep !== undefined && !FLEET_PUSH_PHASES.some(value => value === phase) &&
+        !(developmentStep === "fleet-identity" && phase === "stale_taps_verified") &&
+        !(developmentStep === "legacy-head-identity" && LEGACY_PUSH_HEAD_PHASES.some(value => value === phase)) &&
+        !(developmentStep === "legacy-tail" && LEGACY_PUSH_TAIL_PHASES.some(value => value === phase))) return;
       activePhase = phase; phaseStarted = runtime.now(); metrics = emptyPushDeliveryMetrics();
       armedAsks.clear();
       for (let index = 0; index < 2; index += 1) {
@@ -844,7 +887,10 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
             await save();
           } catch (persistenceError) { throw new AggregateError([error, persistenceError], "Android Push phase and checkpoint failed"); }
           if (!everyError(error, nested => nested instanceof NotificationOverlapError)) throw error;
-          if (index !== 0) throw error;
+          // Enrollment/outage/revocation transactions cannot be replayed by the home-only clear
+          // recovery below. In particular, a remote request has no home registry alias proving its
+          // exact outbound clear. Preserve the overlap and restore, rather than retry ambiguously.
+          if (index !== 0 || FLEET_PUSH_PHASES.some(fleetPhase => fleetPhase === phase)) throw error;
           lateDelivery = undefined;
           progress.results[phase] = { ...progress.results[phase], rearmCount: 1, rearmReason: "unowned_notification_overlap" };
           await save();
@@ -1079,6 +1125,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
         await staleTap(expiring, "expired-host");
         await finish("stale_taps_verified", { resolved: true, rearmed: true, replaced: true, expired: true, launches: 0, scrubbed: true, replayed: true });
       });
+      await runFleetPushPhases({ runtime, progress, save, attempt, finish, fixture, snapshot, delivered, clear, wait, assertion }, developmentStep);
       await attempt("force_stop_verified", async () => {
         // Its privacy check reads Private notices; the triage and delayed-tap phases leave Session.
         await runtime.detail("private"); await runtime.forceStop(); await fixture("ask");
@@ -1175,7 +1222,7 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           return current !== undefined && !current.inputRequired ? current : undefined;
         }, 60_000, clearing);
         await runtime.openPwa();
-        await wait("authoritative clear after Doze", async () => (await runtime.observe(settled, "attention", "private")).count === 0 ? true : undefined, 60_000, clearing);
+        await wait("authoritative clear after Doze", async () => await runtime.notificationCleared(settled) ? true : undefined, 60_000, clearing);
         await proveAskClear("primary");
         await runtime.closePwa();
         await finish("doze_verified", { variant: duringDoze ? "delivered_during_doze" : afterExit ? "delivered_after_doze_exit" : "undelivered_after_doze_exit" });
@@ -1191,8 +1238,17 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
           operation: "read_only", elapsedMs: pushMilliseconds(runtime.now() - phaseStarted), observations: {} });
         await finish("forbidden_sinks_verified", sinks);
       });
-      await finish("evidence_complete", { passed: !progress.results.network_verified?.blocked });
+      if (developmentStep === undefined) await finish("evidence_complete", { passed: !progress.results.network_verified?.blocked });
     } catch (error) { primary = error; }
+    // Cleanup answers the missed ask, which clears any late notification. In the head diagnosis,
+    // keep sampling first so a late OS post is distinguished from one that never arrives.
+    if (developmentStep === "legacy-head-identity" && primary !== undefined && lateDelivery !== undefined) {
+      const until = runtime.now() + LATE_DELIVERY_WATCH_MS;
+      try {
+        await lateDelivery();
+        while (metrics.latePostCount === 0 && runtime.now() < until) { await runtime.pause(5_000); await lateDelivery(); }
+      } catch { /* The restoration's own late samples report observation failures. */ }
+    }
     let cleanup: Record<string, unknown>;
     runtime.beginCleanup?.();
     try { cleanup = await restore(input, runtime, progress, nextFailureId, async () => {
@@ -1209,14 +1265,64 @@ export async function runAndroidPush(input: LaneInput): Promise<Record<string, u
       throw failure;
     }
     if (primary !== undefined) throw primary;
-    return { epoch: progress.epoch, binding: bind, passed: progress.results.evidence_complete?.passed === true,
+    return { epoch: progress.epoch, binding: bind,
+      ...(developmentStep === undefined ? { passed: progress.results.evidence_complete?.passed === true } :
+        { development: true, qualified: false, step: developmentStep, passed: !progress.results.network_verified?.blocked }),
       platform: admission, ompVersion: input.identity.omp.version, bunVersion: input.identity.omp.bunVersion, phases: progress.results, cleanup };
   });
 }
 
+export function parseAndroidPushDevelopmentArguments(argv: readonly string[]): {
+  mode: "development" | "development-step" | "cleanup"; archive: string; step?: FleetPushDevelopmentStep;
+} {
+  const [mode, first, second] = argv;
+  if (mode === "development-step" && argv.length === 3 && first !== undefined && second &&
+    Object.hasOwn(FLEET_PUSH_DEVELOPMENT_STEPS, first)) {
+    return { mode, archive: second, step: first as FleetPushDevelopmentStep };
+  }
+  if ((mode === "development" || mode === "cleanup") && argv.length === 2 && first) return { mode, archive: first };
+  throw new Error(`usage: android-push-qualification.ts development|cleanup <published-archive> | development-step <${Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS).join("|")}> <published-archive>`);
+}
+
+/** Shares the campaign lock inode; only explicit cleanup may resume this development owner. */
+export async function withAndroidPushDevelopmentLease<T>(action: () => Promise<T>, restored: () => boolean,
+  options: { cleanup?: boolean; scope?: "installed" | "retained-guest"; hostDirectory?: string; pixelDirectory?: string } = {}): Promise<T> {
+  const hostDirectory = options.hostDirectory ?? join(homedir(), ".local/state/omp-session-gateway/release-host");
+  const prefix = `PushLane androidPush ${options.scope ?? "installed"} development:`;
+  let owner = `${prefix}${randomUUID()}`;
+  let resuming = false;
+  if (await Bun.file(join(hostDirectory, "lease.sqlite")).exists()) {
+    const database = new Database(join(hostDirectory, "lease.sqlite"), { readonly: true });
+    try {
+      const previous = database.query<{ owner: string }, []>("SELECT owner FROM campaign").get();
+      if (previous !== null) {
+        if (!options.cleanup || !previous.owner.startsWith(prefix)) throw new Error("release-host campaign lease exists; refusing development run");
+        owner = previous.owner;
+        resuming = true;
+      }
+    } finally { database.close(); }
+  }
+  let primary: unknown;
+  const result = await withReleaseHostLease(owner, async () => {
+    let entered = false;
+    try {
+      const result = await withDevelopmentPixelLease(owner, () => { entered = true; return action(); }, restored,
+        options.pixelDirectory ?? "/tmp/omp-gw-pixel.lock", options.cleanup === true);
+      if (!restored()) throw new Error("Android Push development restoration incomplete; ownership retained");
+      return result;
+    } catch (error) {
+      // A restored failed step releases ownership; unproven restoration retains both leases.
+      if ((entered || resuming) && !restored()) throw error;
+      primary = error;
+      return undefined;
+    }
+  }, hostDirectory);
+  if (primary !== undefined) throw primary;
+  return result as T;
+}
+
 if (import.meta.main) {
-  const [mode, archive] = process.argv.slice(2);
-  if (!["development", "cleanup"].includes(mode ?? "") || archive === undefined) throw new Error("usage: android-push-qualification.ts development|cleanup <published-archive>");
+  const { mode, archive, step } = parseAndroidPushDevelopmentArguments(process.argv.slice(2));
   const config = await loadGatewayConfig();
   const installed = await currentInstalledRuntime(config);
   if (installed === undefined) throw new Error("development run needs an installed gateway; it never installs one");
@@ -1237,7 +1343,7 @@ if (import.meta.main) {
   const path = join(directory, "progress.json");
   let progress: unknown = await readFile(path, "utf8").then(text => JSON.parse(text)).catch(error => { if (error.code === "ENOENT") return undefined; throw error; });
   // A restored attempt for another candidate, origin or OMP pin needs no cleanup: keep it beside the new one.
-  if (mode === "development" && progress !== undefined) {
+  if (mode !== "cleanup" && progress !== undefined) {
     const previous = parseAndroidPushProgress(progress);
     if (!previous.cleanupRequired && previous.binding !== binding(identity)) {
       await rename(path, join(directory, `progress-${previous.epoch}-restored.json`));
@@ -1250,11 +1356,11 @@ if (import.meta.main) {
     if (typeof progress !== "object" || progress === null || !("phase" in progress) || next.phase !== progress.phase) console.log(JSON.stringify({ phase: next.phase }));
     progress = next;
   };
-  const pixel = async <T>(_owner: string, action: () => Promise<T>): Promise<T> => {
-    return withDevelopmentPixelLease("PushLane androidPush", action, () => progress === undefined || !androidPushNeedsCleanup(progress), "/tmp/omp-gw-pixel.lock", true);
-  };
   try {
-    const result = await (mode === "cleanup" ? cleanupAndroidPush : runAndroidPush)({ identity, progress, checkpoint, pixel });
+    const result = await withAndroidPushDevelopmentLease(async () => {
+      const input = { identity, progress, checkpoint, pixel: async <T>(_owner: string, action: () => Promise<T>) => action() };
+      return mode === "cleanup" ? cleanupAndroidPush(input) : step === undefined ? runAndroidPush(input) : runAndroidPushDevelopmentStep(input, step);
+    }, () => progress === undefined || !androidPushNeedsCleanup(progress), { cleanup: mode === "cleanup" });
     await writeFile(join(directory, "tested-evidence.json"), JSON.stringify({ development: true, qualified: false, gatewayVersion: release.version, result }), { mode: 0o600 });
     console.log(JSON.stringify({ development: true, qualified: false, gatewayVersion: release.version, result }));
   } catch (error) {

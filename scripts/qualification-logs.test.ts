@@ -27,6 +27,7 @@ test.skipIf(process.platform === "win32")("private browser diagnostic preserves 
     const path = join(root, "browser-substep.json");
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
       substep: "browser_context", message: cause.message, cdpMethod: "Runtime.evaluate", elapsedMs: 2606,
+      privateQualificationFailure: privateQualificationFailureDiagnostic(wrapper),
     });
     expect(statSync(path).mode & 0o777).toBe(0o600);
     await expect(logs.browserFailure("browser_context", cause, 1)).rejects.toThrow();
