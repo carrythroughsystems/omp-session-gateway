@@ -219,6 +219,7 @@ test.each(["read", "mutation", "checkpoint", "cancelled", "expired", "typed"] as
 
 test.each([false, true])("567 VPN recovery cleanup checks only a non-Airplane Wi-Fi baseline (mobile=%s)", async mobile => {
   const restore = spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined);
+  const dns = spyOn(deviceOperations, "ensureAndroidPublicDns");
   const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
   const adb = spyOn(deviceOperations, "runAdb").mockResolvedValue(VPN_CONNECTIVITY);
   try {
@@ -231,6 +232,7 @@ test.each([false, true])("567 VPN recovery cleanup checks only a non-Airplane Wi
         events.push("transport"); expect(target).toEqual({ wifi, mobile }); return false;
       };
       restore.mockImplementation(async () => { events.push("radios"); });
+      dns.mockImplementation(async () => { events.push("dns"); return { vpnReconnected: false }; });
       adb.mockImplementation(async (_serial, args, options) => {
         events.push("vpn"); expect(args).toEqual(["shell", "dumpsys", "connectivity"]);
         expect(options?.timeoutMs).toBeGreaterThan(0); expect(options?.timeoutMs).toBeLessThanOrEqual(10_000);
@@ -238,13 +240,30 @@ test.each([false, true])("567 VPN recovery cleanup checks only a non-Airplane Wi
       });
       runtime.device = async () => { events.push("baseline"); return baseline; };
       await runtime.cleanup("network", { epoch: "synthetic", device: baseline } as AndroidPushProgress);
-      expect(events).toEqual(wifi && !airplane ? ["radios", "transport", "vpn", "baseline"] : ["radios", "baseline"]);
+      expect(events).toEqual(wifi && !airplane ? ["radios", "dns", "transport", "vpn", "baseline"] : ["radios", "baseline"]);
     }
-  } finally { adb.mockRestore(); select.mockRestore(); restore.mockRestore(); }
+  } finally { adb.mockRestore(); select.mockRestore(); dns.mockRestore(); restore.mockRestore(); }
+});
+
+// 2026-11-08: radio restoration left every public name unresolved, so the browser step that
+// follows could not re-register its Web Push subscription. The proof now fails network cleanup.
+test("network cleanup fails on unresolved public names before push transport recovery", async () => {
+  const restore = spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined);
+  const failure = new Error("Pixel could not resolve public hosts after radio restoration, even after one VPN reconnect");
+  const dns = spyOn(deviceOperations, "ensureAndroidPublicDns").mockRejectedValue(failure);
+  try {
+    const runtime = createAndroidPushRuntime(identity), events: string[] = [];
+    runtime.pushTransport = async () => { events.push("transport"); return true; };
+    runtime.device = async () => { events.push("baseline"); return { wifi: true, mobile: true, airplane: false } as PushDeviceBaseline; };
+    const baseline = { wifi: true, mobile: true, airplane: false } as PushDeviceBaseline;
+    await expect(runtime.cleanup("network", { device: baseline } as AndroidPushProgress)).rejects.toBe(failure);
+    expect(events).toEqual([]);
+  } finally { dns.mockRestore(); restore.mockRestore(); }
 });
 
 test.each([true, false])("567 VPN recovery cleanup requires the VPN to be back (present=%s)", async present => {
   const restore = spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined);
+  const dns = spyOn(deviceOperations, "ensureAndroidPublicDns").mockResolvedValue({ vpnReconnected: true });
   const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
   const adb = spyOn(deviceOperations, "runAdb").mockResolvedValue(present ? VPN_CONNECTIVITY : WIFI_CONNECTIVITY);
   try {
@@ -256,12 +275,14 @@ test.each([true, false])("567 VPN recovery cleanup requires the VPN to be back (
     if (present) await cleanup;
     else await expect(cleanup).rejects.toThrow("Tailscale VPN was not restored after push transport recovery");
     expect(adb).toHaveBeenCalledTimes(1);
+    expect(dns).toHaveBeenCalledTimes(1);
     expect(events).toEqual(present ? ["transport", "baseline"] : ["transport"]);
-  } finally { adb.mockRestore(); select.mockRestore(); restore.mockRestore(); }
+  } finally { adb.mockRestore(); select.mockRestore(); dns.mockRestore(); restore.mockRestore(); }
 });
 
 test.each(["adb", "execution"] as const)("567 network cleanup retains push transport %s failures", async stage => {
   const restore = spyOn(deviceOperations, "restoreAndroidRadios").mockResolvedValue(undefined);
+  const dns = spyOn(deviceOperations, "ensureAndroidPublicDns").mockResolvedValue({ vpnReconnected: false });
   try {
     const runtime = createAndroidPushRuntime(identity);
     const error = stage === "adb" ? new deviceOperations.AndroidAdbError(23) :
@@ -271,7 +292,7 @@ test.each(["adb", "execution"] as const)("567 network cleanup retains push trans
     runtime.device = async () => { throw new Error("baseline read after failed transport"); };
     const baseline = { wifi: true, mobile: true, airplane: false } as PushDeviceBaseline;
     await expect(runtime.cleanup("network", { device: baseline } as AndroidPushProgress)).rejects.toBe(error);
-  } finally { restore.mockRestore(); }
+  } finally { dns.mockRestore(); restore.mockRestore(); }
 });
 
 test.each(["connected", "recovered", "disconnected"] as const)("GCM readiness uses one bounded Wi-Fi remedy when %s", async scenario => {
@@ -366,6 +387,8 @@ test.each(["checkpoint-bound", "execution-deadline", "cancelled", "rejected"] as
     let cancellation: ReturnType<typeof setTimeout> | undefined, watchdog: ReturnType<typeof setTimeout> | undefined;
     const raw = new Error(`synthetic post-disable checkpoint ${stage}`);
     const select = spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic");
+    // Public resolution has its own cleanup tests; this one isolates gcmReadiness's checkpoints.
+    const dns = spyOn(deviceOperations, "ensureAndroidPublicDns").mockResolvedValue({ vpnReconnected: false });
     const adb = spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args) => {
       const command = args.join(" "); commands.push(command);
       if (command === "shell dumpsys activity service GcmService") return "Is client connected: false\nReconnect Scheduler Alarm: OFF";
@@ -429,7 +452,7 @@ test.each(["checkpoint-bound", "execution-deadline", "cancelled", "rejected"] as
         expect(checkpointBounds[0]).toBeGreaterThan(0);
         expect(checkpointBounds[0]).toBeLessThanOrEqual(150);
       }
-    } finally { clearTimeout(watchdog); clearTimeout(cancellation); timer.mockRestore(); adb.mockRestore(); select.mockRestore(); }
+    } finally { clearTimeout(watchdog); clearTimeout(cancellation); timer.mockRestore(); adb.mockRestore(); dns.mockRestore(); select.mockRestore(); }
   });
 
 test.each([

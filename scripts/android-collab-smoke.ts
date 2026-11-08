@@ -1,5 +1,5 @@
 import { isProtectedLabel, targetEligibility } from "./acceptance-target.ts";
-import { ensureRelayReachable, reconnectTailscaleVpn, RELAY_REACHABLE_EXPRESSION, runAdb, withAndroidChrome, type AndroidExecution } from "./android-device.ts";
+import { ensureWithOneVpnReconnect, reconnectTailscaleVpn, RELAY_REACHABLE_EXPRESSION, runAdb, withAndroidChrome, type AndroidExecution } from "./android-device.ts";
 import { ANDROID_COLLAB_STAGES, announceAndroidStage } from "./android-stages.ts";
 import { APP_ASSET_PATTERN, runCollaborationJourney } from "./browser-journey.ts";
 
@@ -108,7 +108,7 @@ export async function runAndroidCollabSmoke(options: AndroidCollabSmokeOptions):
     await driver.openTab();
     if (options.relayReachability === true) {
       // The blank tab has no page CSP; this proves only that the relay host answers.
-      const relay = await ensureRelayReachable(
+      const relay = await ensureWithOneVpnReconnect("Pixel browser could not reach the collaboration relay",
         () => driver.evaluate<boolean>(RELAY_REACHABLE_EXPRESSION),
         () => reconnectTailscaleVpn((...args) => runAdb(driver.serial, args, { timeoutMs: 10_000 }), milliseconds => Bun.sleep(milliseconds)),
         milliseconds => Bun.sleep(milliseconds),
