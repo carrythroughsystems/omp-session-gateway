@@ -4558,19 +4558,33 @@ grant, feed, coordination, delivery, coordinator restart, and revocation), `brow
 (Chromium at Pixel sizes), and `browser-core` (desktop Chromium and WebKit with iPhone-class
 emulation).
 
-On 2026-11-07, development runs of the Android Push lane's proposed fleet phases (PR #585, not
-merged) on the Studio Pixel 8 Pro passed 8 of 12 planned fleet steps against the fleet-enabled
-app. Those steps were enrollment through Settings → Hosts; Private, Session, and Preview identity;
-the clear/new-request race, with exact clears seen on the device; exact-source taps; stale and
-expired taps without a launch; and source outage with last-known retention, the plain badge
-marker, and recovery. Coordinator restart, revocation, the fleet sink sweep, and fleet restoration
-have not passed on a device. Every run stopped in test instrumentation, never in a product
-assertion, and every run restored the Pixel and the retained Mac guest exactly. These are
-development runs, not signed-candidate qualification.
+On 2026-11-07 and 2026-11-08, development runs of the Android Push lane's fleet phases on the
+Studio Pixel 8 Pro exercised every fleet phase. The phases cover:
 
-Release qualification adds fleet phases only after #585 lands. Until then, the release's
-`androidPush` lane qualifies single-host background alerts on the Pixel, and fleet notifications
-stay **Tested**.
+- enrollment through Settings → Hosts;
+- Private, Session and Preview identity, with concurrent local and remote asks;
+- the clear/new-request race;
+- exact-source taps;
+- stale and expired taps without a launch;
+- source outage;
+- coordinator restart, with exact clears and the once-only local replacement (ADR-048 amendment,
+  #605);
+- revocation;
+- the fleet sink sweep;
+- fleet restoration.
+
+Earlier runs, including the step loops, used the published v0.10.0 archive. In 3 of the 11 runs
+that reached fleet identity after the legacy phases, the first local alert of a concurrent local and
+remote pair was not shown; in the one caught with device logs, both pushes reached Chrome but the
+service worker received only one.
+#607 now paces pushes to each browser subscription (ADR-048 amendment, 2026-11-08). On 2026-11-08,
+a full development run with #585's lane and an archive built from #607 passed every phase. Every
+run restored the Pixel and the retained Mac guest exactly. These are development runs, not
+signed-candidate qualification.
+
+#585 merged on 2026-11-08. From the next release, the `androidPush` lane runs these fleet phases,
+so a release that passes them qualifies fleet notifications on the Pixel. v0.10.0 and earlier stay
+**Tested**, and they do not pace pushes.
 
 ## Embedded client v18.12.6 — source integration only
 
