@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { parsePushConfigResponse, parseSessionListResponse } from "../packages/protocol/src/validation.ts";
 import { PUSH_API_VERSION, type PushDetailLevel, type SessionMetadata } from "../packages/protocol/src/types.ts";
-import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget, parseAndroidVpnNetwork, parseGcmTransport, readPixelBaseline,
+import { AndroidBrowserCleanupError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget, parseAndroidVpnNetwork, parseGcmTransport, readPixelBaseline, ensureAndroidPublicDns,
   runAdb, wakeAndroidDisplay, unlockAndroidKeyguard, showAndroidPinBouncer, type AndroidAdbCommand, type AndroidChromeDriver, type AndroidExecution } from "./android-device.ts";
 import { closeWebApk, openWebApk, requireWebApk, webApkTasks } from "./android-webapk.ts";
 import { readAndroidUi, findAndroidNotification, tapAndroidNotification, readAndroidNotificationRecords, notificationMatchesDigest, trackUnchangedNotificationPost, NotificationOverlapError, type AndroidUiNode, type NotificationExpectation } from "./android-notification.ts";
@@ -1235,6 +1235,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           await restoreAndroidRadios(progress.device, command, mutate);
           // An Airplane baseline intentionally has no live VPN path to recover.
           if (progress.device.wifi && !progress.device.airplane) {
+            // Before push transport and VPN checks, so they observe the network any reconnect leaves.
+            const dns = await ensureAndroidPublicDns(command, mutate, milliseconds => runtime.pause(milliseconds));
+            console.error(`android-public-dns: ${JSON.stringify({ resolved: true, vpnReconnected: dns.vpnReconnected })}`);
             await runtime.pushTransport!({ wifi: true, mobile: progress.device.mobile });
             const connectivity = await boundedAdb(await selectDevice(), ["shell", "dumpsys", "connectivity"], 10_000);
             checkExecution();

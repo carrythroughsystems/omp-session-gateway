@@ -137,7 +137,7 @@ function radios() {
   const command: AndroidAdbCommand = async (...args) => {
     const call = args.join(" ");
     calls.push(call);
-    if (call.startsWith("shell ping ")) return "1 packets transmitted, 1 received, 0% packet loss";
+    if (call.startsWith("shell ping ")) return "PING fixture (100.64.0.1) 56(84) bytes of data.\n1 packets transmitted, 1 received, 0% packet loss";
     if (call === "shell dumpsys connectivity") return `Current Networks:\n${WIFI}${network.vpn ? VPN : ""}Network Requests:\n`;
     if (args.includes("settings")) {
       const key = args.at(-1);
@@ -177,7 +177,7 @@ test("acceptance accepts device-origin HTTPS when ICMP is unavailable and record
   const device = radios(), evidence: unknown[] = [];
   let probes = 0, ran = false;
   const command: AndroidAdbCommand = async (...args) => args.join(" ").startsWith("shell ping ")
-    ? "1 packets transmitted, 0 received, 100% packet loss" : device.command(...args);
+    ? "PING fixture (100.64.0.1) 56(84) bytes of data.\n1 packets transmitted, 0 received, 100% packet loss" : device.command(...args);
   const result = await withAndroidAcceptanceRestoration(command, async () => {
     expect(evidence).toEqual([{ icmp: "unreachable", https: "reachable", satisfiedBy: "https" }]);
     ran = true;
@@ -249,6 +249,34 @@ test("acceptance restores the Wi-Fi-on, data-off baseline rather than enabling r
     return "phase complete";
   }, "https://gateway-fixture.invalid", { httpsProbe: async () => true });
   expect(result).toBe("phase complete");
+  expect(device.state).toEqual({ airplane: false, wifi: true, mobile: false });
+});
+
+// 2026-11-08: a radio cycle left every public name unresolved while the tailnet worked, and the
+// next consumer of the phone could not register Web Push; restoration now proves resolution.
+test("acceptance restoration repairs unresolved public names with exactly one VPN reconnect", async () => {
+  const device = radios(), broadcasts: string[] = [];
+  let connected = false, time = 0;
+  const command: AndroidAdbCommand = async (...args) => {
+    const call = args.join(" ");
+    if (call.includes("'android.clients.google.com'")) {
+      device.calls.push(call);
+      return connected ? "PING android.l.google.com (192.0.2.14) 56(84) bytes of data." : "ping: unknown host android.clients.google.com";
+    }
+    if (args.includes("broadcast")) {
+      broadcasts.push(args[4]!);
+      if (args[4] === "com.tailscale.ipn.CONNECT_VPN") connected = true;
+      return "";
+    }
+    return device.command(...args);
+  };
+  const result = await withAndroidAcceptanceRestoration(command, async () => {
+    device.state.airplane = true;
+    return "phase complete";
+  }, "https://gateway-fixture.invalid", { httpsProbe: async () => true,
+    tailnetRecovery: { now: () => time, pause: async milliseconds => { time += milliseconds; } } });
+  expect(result).toBe("phase complete");
+  expect(broadcasts).toEqual(["com.tailscale.ipn.DISCONNECT_VPN", "com.tailscale.ipn.CONNECT_VPN"]);
   expect(device.state).toEqual({ airplane: false, wifi: true, mobile: false });
 });
 

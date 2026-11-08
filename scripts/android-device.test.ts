@@ -32,7 +32,9 @@ import {
   resolveAndroidBrowserTarget,
   restoreAndroidRadios,
   wakeAndroidChrome,
-  ensureRelayReachable,
+  ensureWithOneVpnReconnect,
+  ensureAndroidPublicDns,
+  androidResolvesHost,
   waitForDevtoolsEndpoint,
 } from "./android-device.ts";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
@@ -739,7 +741,7 @@ describe("Android display bootstrap", () => {
     { name: "stays unreachable", outcomes: Array.from({ length: 18 }, () => false), reconnects: 1, result: "failed" },
   ])("the relay precondition repairs at most once and fails before the journey ($name)", async ({ outcomes, reconnects, result }) => {
     let probes = 0, repaired = 0, pauses = 0;
-    const outcome = await ensureRelayReachable(
+    const outcome = await ensureWithOneVpnReconnect("Pixel browser could not reach the collaboration relay",
       async () => {
         const value = outcomes[probes] ?? false;
         probes += 1;
@@ -756,6 +758,54 @@ describe("Android display bootstrap", () => {
       expect(probes).toBe(18);
     } else expect(outcome).toBe(result);
     expect(pauses).toBeLessThan(probes);
+  });
+
+  test("an adb transport failure during a precondition probe is fatal, never a reconnect", async () => {
+    let repaired = 0;
+    await expect(ensureWithOneVpnReconnect("synthetic precondition", async () => { throw new AndroidAdbError(1); },
+      async () => { repaired += 1; }, async () => {})).rejects.toBeInstanceOf(AndroidAdbError);
+    expect(repaired).toBe(0);
+  });
+
+  test("public resolution reads only whether the name resolved, not whether ping was answered", async () => {
+    const answer = (output: string) => async (...args: string[]) => {
+      expect(args).toEqual(["shell", "ping -c 1 -W 2 'android.clients.google.com' 2>&1 || true"]);
+      return output;
+    };
+    expect(await androidResolvesHost("android.clients.google.com", answer(
+      "PING android.l.google.com (192.0.2.14) 56(84) bytes of data.\n\n--- android.l.google.com ping statistics ---\n1 packets transmitted, 0 received, 100% packet loss\n"))).toBe(true);
+    expect(await androidResolvesHost("android.clients.google.com", answer("ping: unknown host android.clients.google.com\n"))).toBe(false);
+    expect(await androidResolvesHost("android.clients.google.com", answer(""))).toBe(false);
+    await expect(androidResolvesHost("x'; svc wifi disable; '", answer(""))).rejects.toThrow("invalid Android resolution host");
+  });
+
+  // 2026-11-08: after the Push lane's radio sequence no public name resolved for over 40 minutes,
+  // so Play services could not register the restored Web Push subscription; one reconnect fixed it.
+  test.each([
+    { name: "resolves at once", resolvesAfter: 0, reconnects: 0, result: "clean" },
+    { name: "is repaired by one VPN reconnect", resolvesAfter: 4, reconnects: 1, result: "repaired" },
+    { name: "stays unresolved", resolvesAfter: Infinity, reconnects: 1, result: "failed" },
+  ])("radio restoration proves public resolution and reconnects the VPN at most once ($name)", async ({ resolvesAfter, reconnects, result }) => {
+    let pings = 0, connected = false;
+    const broadcasts: string[] = [];
+    const command = async (...args: string[]) => {
+      expect(args[1]).toStartWith("ping ");
+      pings += 1;
+      return pings > resolvesAfter && (resolvesAfter === 0 || connected) ?
+        "PING android.l.google.com (192.0.2.14) 56(84) bytes of data." : "ping: unknown host android.clients.google.com";
+    };
+    const mutate = async (...args: string[]) => {
+      broadcasts.push(args[4]!);
+      if (args[4] === "com.tailscale.ipn.CONNECT_VPN") connected = true;
+      return "";
+    };
+    const outcome = await ensureAndroidPublicDns(command, mutate, async () => {})
+      .then(value => value.vpnReconnected ? "repaired" : "clean", (error: unknown) => (error as Error).message);
+    expect(broadcasts).toEqual(reconnects === 0 ? [] : ["com.tailscale.ipn.DISCONNECT_VPN", "com.tailscale.ipn.CONNECT_VPN"]);
+    if (result === "failed") {
+      expect(outcome).toBe("Pixel could not resolve public hosts after radio restoration, even after one VPN reconnect");
+      expect(pings).toBe(13);
+    } else expect(outcome).toBe(result);
   });
 
   test("parses keyguard state and rejects missing state", () => {

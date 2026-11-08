@@ -30,6 +30,7 @@ import {
   runAdb,
   readAndroidRadioBaseline,
   restoreAndroidRadios,
+  ensureAndroidPublicDns,
   unlockAndroidKeyguard,
   wakeAndroidDisplay,
   withAndroidChrome,
@@ -327,6 +328,12 @@ export async function withAndroidAcceptanceRestoration<T>(
     },
     () => command("shell", "dumpsys", "deviceidle", "unforce"),
     () => command("shell", "dumpsys", "battery", "reset"),
+    // A radio cycle can leave every public name unresolved while the tailnet works (2026-11-08).
+    async () => {
+      if (baseline.wifi && !baseline.airplane) {
+        await ensureAndroidPublicDns(recoveryCommand, recoveryCommand, recoveryOptions.pause ?? (milliseconds => Bun.sleep(milliseconds)));
+      }
+    },
     () => requireAndroidAcceptanceTailnetRecovery(origin, "restoration", recoveryCommand, { ...recoveryOptions, httpsProbe }),
   ]);
 }

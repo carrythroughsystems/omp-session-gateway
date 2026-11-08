@@ -830,11 +830,12 @@ export const RELAY_REACHABLE_EXPRESSION = `(async () => {
 })()`;
 
 /**
- * Establishes that the phone's browser reaches the collaboration relay before a physical-client
- * journey. The only repair is one Tailscale VPN reconnect (the #567 remedy); a relay that stays
- * unreachable fails here, before any capability opens, instead of as a View timeout.
+ * Establishes a network precondition on the phone whose only repair is one Tailscale VPN reconnect
+ * (the #567 remedy). A precondition that stays unmet fails here with `subject`, instead of as a
+ * later timeout. A failing probe counts as unmet, except an adb transport failure, which is fatal.
  */
-export async function ensureRelayReachable(
+export async function ensureWithOneVpnReconnect(
+  subject: string,
   probe: () => Promise<boolean>,
   reconnectVpn: () => Promise<void>,
   pause: (milliseconds: number) => Promise<void>,
@@ -842,7 +843,7 @@ export async function ensureRelayReachable(
 ): Promise<{ readonly vpnReconnected: boolean }> {
   const poll = async (count: number): Promise<boolean> => {
     for (let attempt = 0; attempt < count; attempt += 1) {
-      if (await probe().catch(() => false)) return true;
+      if (await probe().catch(error => { if (error instanceof AndroidAdbError) throw error; return false; })) return true;
       if (attempt + 1 < count) await pause(2_000);
     }
     return false;
@@ -850,7 +851,33 @@ export async function ensureRelayReachable(
   if (await poll(attempts.before)) return { vpnReconnected: false };
   await reconnectVpn();
   if (await poll(attempts.after)) return { vpnReconnected: true };
-  throw new Error("Pixel browser could not reach the collaboration relay, even after one VPN reconnect");
+  throw new Error(`${subject}, even after one VPN reconnect`);
+}
+
+/** A public name the lanes need: Play services registers Web Push subscriptions through it. */
+export const PUBLIC_DNS_PROBE_HOST = "android.clients.google.com";
+
+/** Name resolution only: toybox ping prints `PING <name> (<address>)` once a name resolves, reply or not. */
+export async function androidResolvesHost(host: string, command: AndroidAdbCommand): Promise<boolean> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/u.test(host)) throw new Error("invalid Android resolution host");
+  const output = await command("shell", `ping -c 1 -W 2 '${host}' 2>&1 || true`);
+  return /^PING \S+ \([0-9A-Fa-f:.]+\)/mu.test(output);
+}
+
+/**
+ * After a radio sequence the phone's Tailscale VPN can stop resolving every public name for over
+ * 40 minutes while the VPN, tailnet traffic, the push socket and `navigator.onLine` look healthy
+ * (2026-11-08): Web Push registration then fails with "push service error" and the relay is
+ * unreachable. Radio restoration therefore proves public resolution.
+ */
+export function ensureAndroidPublicDns(
+  command: AndroidAdbCommand,
+  mutate: AndroidAdbCommand,
+  pause: (milliseconds: number) => Promise<void>,
+): Promise<{ readonly vpnReconnected: boolean }> {
+  return ensureWithOneVpnReconnect("Pixel could not resolve public hosts after radio restoration",
+    () => androidResolvesHost(PUBLIC_DNS_PROBE_HOST, command), () => reconnectTailscaleVpn(mutate, pause), pause,
+    { before: 3, after: 10 });
 }
 
 /** Disconnects and reconnects the phone's Tailscale VPN through its documented broadcast receiver. */
