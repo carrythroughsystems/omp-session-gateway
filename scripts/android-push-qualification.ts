@@ -681,6 +681,15 @@ export async function runAndroidPushDevelopmentStep(input: LaneInput, step: Flee
 }
 
 async function runAndroidPushLane(input: LaneInput, developmentStep?: FleetPushDevelopmentStep): Promise<Record<string, unknown>> {
+  // Concurrent fleet asks share one progress writer, including private development providers.
+  // Queue each caller's cloned snapshot; retain its rejection while permitting restoration saves.
+  const checkpoint = input.checkpoint;
+  let checkpointTail = Promise.resolve();
+  input = { ...input, checkpoint: next => {
+    const operation = checkpointTail.then(() => checkpoint(next));
+    checkpointTail = operation.catch(() => {});
+    return operation;
+  } };
   let localId = 0;
   const nextFailureId = () => input.execution?.nextFailureId() ?? ++localId;
   const bind = binding(input.identity);

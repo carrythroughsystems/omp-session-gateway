@@ -1,6 +1,6 @@
 import { expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runAndroidPush, runAndroidPushReadiness, waitForPushDelivery, emptyPushDeliveryMetrics, cleanupAndroidPush, parseAndroidPushProgress, androidPushNeedsCleanup,
@@ -1600,6 +1600,62 @@ test("queue order, Hold, Hide and delayed taps pass on the device and leave no l
   expect(final.results.stale_taps_verified).toMatchObject({ resolved: true, rearmed: true, replaced: true, expired: true, launches: 0, replayed: true });
   expect(final.secondaryNotificationTopicDigest).toBe(notificationTopicDigest(`omp-attention-${SECONDARY}`));
   expect(f.state()).toMatchObject({ started: false, secondaryStarted: false, localRecords: 0, shown: undefined, device: baseline, browser: browserBaseline });
+});
+
+test("fleet concurrent asks serialize checkpoint providers and leave a valid progress file", async () => {
+  const host = fake(), checkpoint = host.input.checkpoint;
+  const directory = await mkdtemp(join(tmpdir(), "push-checkpoint-"));
+  const path = join(directory, "progress.json");
+  let active = false, overlaps = 0, writes = 0;
+  const pending = new Set<Promise<void>>();
+  host.input.checkpoint = next => {
+    const operation = (async () => {
+      if (active) { overlaps++; throw new Error("concurrent checkpoint provider entry"); }
+      active = true;
+      try {
+        // Keep the provider entered across a task turn so concurrent fixture saves overlap
+        // deterministically without lane serialization. Match the CLI's shared temp name.
+        await Bun.sleep(1);
+        await writeFile(`${path}.tmp`, JSON.stringify(next), { mode: 0o600 });
+        await rename(`${path}.tmp`, path);
+        writes++;
+        await checkpoint(next);
+      } finally { active = false; }
+    })();
+    pending.add(operation);
+    void operation.then(() => pending.delete(operation), () => pending.delete(operation));
+    return operation;
+  };
+  try {
+    expect((await runAndroidPushDevelopmentStep(host.input, "fleet-identity")).passed).toBe(true);
+    expect(overlaps).toBe(0);
+    expect(writes).toBeGreaterThan(10);
+    expect(parseAndroidPushProgress(JSON.parse(await readFile(path, "utf8")))).toMatchObject({
+      phase: "restored", cleanupRequired: false, fleetPrepared: false,
+      results: { fleet_private_verified: { local: true, remote: true },
+        fleet_session_verified: { local: true, remote: true }, fleet_preview_verified: { local: true, remote: true } },
+    });
+    expect(await readdir(directory)).toEqual(["progress.json"]);
+  } finally {
+    await Promise.allSettled(pending);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a queued checkpoint failure reaches its caller without poisoning restoration saves", async () => {
+  const host = fake(), checkpoint = host.input.checkpoint;
+  let failed = false;
+  host.input.checkpoint = async next => {
+    if (next.fleetPrepared === true && !failed) {
+      failed = true;
+      throw new Error("synthetic queued checkpoint failure");
+    }
+    await checkpoint(next);
+  };
+  await expect(runAndroidPushDevelopmentStep(host.input, "fleet-identity")).rejects.toThrow("synthetic queued checkpoint failure");
+  expect(failed).toBe(true);
+  expect(host.checkpoints.at(-1)).toMatchObject({ phase: "restored", cleanupRequired: false, fleetPrepared: false });
+  expect(host.state()).toMatchObject({ started: false, remoteStarted: false, fleetPrepared: false });
 });
 
 test.each(Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS) as FleetPushDevelopmentStep[])(

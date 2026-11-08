@@ -284,6 +284,9 @@ Fleet delivery observations read OS records first and reuse only positively matc
 for that exact key/post time. A negative worker sample is read again within the original delivery
 deadline; it cannot turn into a permanent negative cache. Per-sample OS counts/post times, cache-hit
 and worker identity-match booleans are retained without notification or request identifiers.
+The lane serializes checkpoint callbacks, including concurrent local/remote asks and restoration,
+so the campaign, CLI and private runner cannot race a shared progress writer. Each caller still
+receives its own persistence failure; a failed write does not prevent later restoration checkpoints.
 
 Both development modes refuse any existing release-host campaign lease row or held Pixel lock.
 An unrestored attempt retains ownership: stop and use
