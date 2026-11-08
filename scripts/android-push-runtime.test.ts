@@ -804,7 +804,7 @@ test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
   "fleet tag clear requires zero OS and worker notifications (os=%s worker=%s)", async (osCount, workerCount, cleared) => {
     const session = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: false,
       startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic" };
-    let reads = 0, workerReads = 0;
+    let reads = 0, workerReads = 0, remaining = workerCount;
     const driver = {
       browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
         { type: "page", targetId: "page", url: identity.origin + "/" },
@@ -814,7 +814,7 @@ test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
         expect(params.expression).toContain('getNotifications({tag:"omp-attention-synthetic"})');
         expect(params.expression).not.toContain("requestId");
         workerReads++;
-        return { result: { value: workerCount === 0 } };
+        return { result: { value: remaining === 0 } };
       },
       attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
       evaluate: async (expression: string) => expression === "document.readyState" ? "complete" :
@@ -839,9 +839,13 @@ test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(
       await runtime.beginNotificationPhase("synthetic", "fleet_private_verified");
       expect(await runtime.notificationCleared(session)).toBe(cleared);
       expect(workerReads).toBe(osCount === 0 ? 1 : 0);
-      // Rechecking unchanged absence never evaluates a worker Android may now have frozen.
-      expect(await runtime.notificationCleared(session)).toBe(cleared);
-      expect(workerReads).toBe(osCount === 0 ? 1 : 0);
+      // A first OS0/worker1 sample is a race, not a permanent negative cache.
+      // Only proven OS0/worker0 may be reused when the worker later freezes.
+      remaining = 0;
+      expect(await runtime.notificationCleared(session)).toBe(osCount === 0);
+      expect(workerReads).toBe(osCount === 0 ? workerCount === 0 ? 1 : 2 : 0);
+      expect(await runtime.notificationCleared(session)).toBe(osCount === 0);
+      expect(workerReads).toBe(osCount === 0 ? workerCount === 0 ? 1 : 2 : 0);
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
@@ -913,7 +917,7 @@ test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch"
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
-test.each(["replacement", "no-clear", "wrong-clear", "old-post", "duplicates", "wrong-source", "wrong-request", "wrong-instance", "generation", "second-post"] as const)(
+test.each(["replacement", "no-clear", "wrong-clear", "old-post", "duplicates", "wrong-source", "wrong-request", "wrong-instance", "generation", "second-post", "handoff-post", "retry-boundary"] as const)(
   "restart replacement binds the old tombstone, new OS post and worker identity (%s)", async scenario => {
     const previous: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
       startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
@@ -968,6 +972,11 @@ test.each(["replacement", "no-clear", "wrong-clear", "old-post", "duplicates", "
     try {
       const runtime = createAndroidPushRuntime(identity);
       runtime.beforeEffect = async () => {}; runtime.dndOff = async () => true;
+      let elapsed = 0;
+      runtime.pause = async milliseconds => {
+        elapsed += milliseconds;
+        if (scenario === "retry-boundary" && elapsed >= 30_000) records = [{ ...record, postedAt: 3 }];
+      };
       await runtime.fleet.select(true); await runtime.beginNotificationPhase("synthetic", "fleet_restart_verified");
       records = [record];
       expect((await runtime.observe(previous, "attention", "private")).count).toBe(1);
@@ -979,11 +988,15 @@ test.each(["replacement", "no-clear", "wrong-clear", "old-post", "duplicates", "
       if (scenario !== "no-clear") tombstones[`local\0synthetic\0${scenario === "wrong-clear" ? "other" : previous.ask!.requestId}`] = 1;
       if (scenario === "duplicates") await expect(runtime.fleet.restartReplacement(previous, current)).rejects.toBeInstanceOf(QualificationFailure);
       else {
-        expect(await runtime.fleet.restartReplacement(previous, current)).toBe(["replacement", "second-post"].includes(scenario));
-        if (scenario === "replacement" || scenario === "second-post") {
+        expect(await runtime.fleet.restartReplacement(previous, current)).toBe(["replacement", "second-post", "handoff-post", "retry-boundary"].includes(scenario));
+        if (scenario === "handoff-post") {
+          records = [{ ...record, postedAt: 3 }];
+          await expect(runtime.observe(current, "attention", "private")).rejects.toBeInstanceOf(QualificationFailure);
+        } else if (scenario === "replacement" || scenario === "second-post" || scenario === "retry-boundary") {
           expect((await runtime.observe(current, "attention", "private")).count).toBe(1);
-          if (scenario === "second-post") {
-            records = [{ ...record, postedAt: 3 }];
+          if (scenario === "second-post" || scenario === "retry-boundary") {
+            if (scenario === "second-post") records = [{ ...record, postedAt: 3 }];
+            else await runtime.pause(35_000);
             await expect(runtime.observe(current, "attention", "private")).rejects.toBeInstanceOf(QualificationFailure);
           } else expect((await runtime.observe(current, "attention", "private")).count).toBe(1);
         }

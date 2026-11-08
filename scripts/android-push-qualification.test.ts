@@ -138,7 +138,7 @@ function fake(options: FakeOptions = {}) {
       diagnostic: new Error("GcmService censored sample: Is client connected: true; Reconnect Scheduler Alarm: OFF") }),
     pause: async milliseconds => {
       time += milliseconds;
-      if (phase === "fleet_restart_verified" && milliseconds === 21_000) {
+      if (phase === "fleet_restart_verified" && milliseconds >= 30_000) {
         if (options.fleetFailure === "restart-second-realert") { request++; askedAt = time; show(); }
         if (options.fleetFailure === "restart-remote-repeat") remote.shown = true;
       }
@@ -1911,6 +1911,17 @@ test.each([undefined, "restart-no-realert", "restart-duplicate", "restart-second
     expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
   });
 
+test("restart stability observes beyond the coordinator's failed-send cooldown", async () => {
+  const host = fake(), pause = host.runtime.pause;
+  let windows = 0;
+  host.runtime.pause = async milliseconds => {
+    if (milliseconds >= 20_000) { windows++; expect(milliseconds).toBeGreaterThanOrEqual(35_000); }
+    await pause(milliseconds);
+  };
+  expect((await runAndroidPushDevelopmentStep(host.input, "coordinator-restart")).passed).toBe(true);
+  expect(windows).toBe(1);
+});
+
 test.each(["zero", "send", "send-mismatch", "unavailable", "absent"] as const)(
   "fleet restart retains the quiet badge only with complete zero-send telemetry (%s)", async scenario => {
     const host = fake(), events = eventBackedTelemetry(host);
@@ -1920,7 +1931,7 @@ test.each(["zero", "send", "send-mismatch", "unavailable", "absent"] as const)(
     host.runtime.beginNotificationPhase = async (...args) => { phase = args[1] ?? ""; await begin(...args); };
     host.runtime.pause = async milliseconds => {
       await pause(milliseconds);
-      if (phase === "fleet_restart_verified" && milliseconds === 21_000) {
+      if (phase === "fleet_restart_verified" && milliseconds >= 35_000) {
         quiet = true;
         if (scenario.startsWith("send")) events.push({ index: events.length + 1, timestamp: "2026-01-01T00:00:00.000Z",
           level: "info", event: "push.send_started", sequence: 999, request_alias: 0, clear: true, subscriptions: 1 });

@@ -304,12 +304,20 @@ Control taps, resolved/replaced/expired remote taps without a launch, clear-befo
 source stale/last-known recovery, coordinator restart with one local replacement, grant revocation,
 replacement/deduplication, foreground reconciliation, and privacy sink scans on both identities.
 Clear proof requires both OS records and worker notifications to be absent on the session's tag,
-independent of request ID; delivery still matches the exact request. Restart answers the remote
+independent of request ID; delivery still matches the exact request. The clear observer caches
+only a proven positive clear. If Android removes the OS row before the worker's
+notification enumeration catches up, a negative worker sample retains the observed-presence
+evidence and must be re-observed; it cannot become a permanent negative cache. Closed
+`android-fleet-clear:` diagnostics record phase, remote/local role, OS count and worker/cache
+booleans only, never notification or request identities.
+Restart answers the remote
 ask while the coordinator is down, then proves its old alert closed. The memory-only home registry
 re-mints the still-pending local ask (#605): the lane requires its old exact-request tombstone in
 the worker's existing IndexedDB state, exactly one newly posted OS record, and matching new worker
-request/source/instance with the same authoritative generation. The new request and OS post must
-stay unchanged across the next reconciliation, and the resolved remote alert must remain absent,
+request/source/instance with the same authoritative generation. That replacement's OS key and
+post timestamp are pinned immediately, before delivery re-observation. The new request and exact
+pinned OS post must stay unchanged for 35 seconds, beyond the coordinator's 30-second failed-send
+retry boundary as well as its next reconciliation, and the resolved remote alert must remain absent,
 before arming a new remote ask. No re-alert, a missing old clear, concurrent duplicates, a second
 local re-alert, or a remote repeat fail. Pending-remote identity across a home restart is
 unit-proven in `fleet-coordinator.test.ts`, not physically proven by this resolved-remote scenario.

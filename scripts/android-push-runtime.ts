@@ -701,7 +701,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if (records.length !== 1 || records[0]!.postedAt <= prior.postedAt) return false;
         // Replacement alone is not an exact clear. Read the real worker's durable tombstone
         // without creating/upgrading its database, and bind the one displayed replacement.
-        return worker<boolean>("restartReplacement", `(async () => {
+        const verified = await worker<boolean>("restartReplacement", `(async () => {
           if (!(await indexedDB.databases()).some(db => db.name === "omp-notification-ordering")) return false;
           const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open("omp-notification-ordering");
@@ -724,6 +724,13 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
             notices.length === 1 && data?.version === 3 && data?.type === "attention" && data?.source === undefined &&
             data?.instanceId === ${JSON.stringify(current.instanceId)} && data?.requestId === ${JSON.stringify(current.ask.requestId)};
         })()`, true);
+        // Pin the post sampled with the exact-clear proof, not whichever post a later
+        // delivered() happens to see. That closes the proof-to-delivery handoff race.
+        if (verified) {
+          try { trackUnchangedNotificationPost(observedPosts, current, "attention", records[0]!); }
+          catch (error) { throw privacyFailure({ cause: error }); }
+        }
+        return verified;
       },
       async revoke() {
         await page("revoke", async driver => {
@@ -1146,21 +1153,33 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     },
     async notificationCleared(session) {
       const tag = notificationTag(session);
-      if ((await phaseRecords()).some(record => record.tag.endsWith(tag))) {
+      const records = (await phaseRecords()).filter(record => record.tag.endsWith(tag));
+      const observed = (cacheHit: boolean, workerObserved: boolean, workerCleared: boolean) => {
+        // Closed scalar diagnostics only; no tag, source binding, request or OS identity.
+        if (fleetEnabled) console.log("android-fleet-clear: " + JSON.stringify({
+          phase, remote: remoteIds.has(session.instanceId), osCount: records.length,
+          cacheHit, workerObserved, workerCleared,
+        }));
+        return workerCleared;
+      };
+      if (records.length > 0) {
         presentWorkerTopics.add(tag); clearedWorkerPosts.delete(tag);
-        return false;
+        return observed(false, false, false);
       }
       verifiedWorkerPosts.delete(tag);
       if (fleetEnabled) {
-        const prior = clearedWorkerPosts.get(tag);
-        if (prior !== undefined) return prior;
+        if (clearedWorkerPosts.get(tag) === true) return observed(true, false, true);
         // No observed delivery/clear means no thaw evidence. An absent OS row alone is
         // not the worker's authoritative clear proof; fail closed without waking it.
-        if (!presentWorkerTopics.delete(tag)) return false;
+        if (!presentWorkerTopics.has(tag)) return observed(false, false, false);
       }
       const cleared = await worker<boolean>("notificationCleared", `(async () => (await self.registration.getNotifications({tag:${JSON.stringify(tag)}})).length === 0)()`, true);
-      if (fleetEnabled) clearedWorkerPosts.set(tag, cleared);
-      return cleared;
+      if (fleetEnabled && cleared) {
+        clearedWorkerPosts.set(tag, true); presentWorkerTopics.delete(tag);
+      }
+      // OS removal can precede getNotifications() catching up. A negative worker
+      // sample is not stable absence; retain the thaw evidence until a true clear.
+      return observed(false, true, cleared);
     },
     async presentation(session, level) {
       await mutate("shell", "input", "keyevent", "224");

@@ -244,7 +244,9 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
     await delivered(restarted);
     const quietWindow = await r.beginDeliveryTelemetry?.("fleet_restart_verified").catch(() => undefined);
     await badge("restart-exact-clear", 1, true);
-    await r.pause(21_000); await delivered(restarted);
+    // DELIVERY_RETRY_MS in gateway/fleet-coordinator.ts is private (30 s). Observe
+    // beyond that retry boundary as well as the normal reconcile interval.
+    await r.pause(35_000); await delivered(restarted);
     const settledLocal = await snapshot(s => s.inputRequired);
     if (settledLocal.instanceId !== restarted.instanceId || settledLocal.generation !== restarted.generation ||
       settledLocal.ask?.requestId !== restarted.ask?.requestId) throw assertion("Fleet restart re-alerted the local ask again");
