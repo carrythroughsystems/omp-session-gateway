@@ -7,7 +7,7 @@ import { PUSH_API_VERSION, type PushDetailLevel, type SessionMetadata } from "..
 import { AndroidBrowserCleanupError, AndroidDevtoolsConnectionError, withAndroidChrome, requireSingleDevice, parseAndroidPackageVersion, parseAlternateBouncerFocused, requireAndroidDevicePreconditions, parseKeyguardShowing, readAndroidRadioBaseline, restoreAndroidRadios, readAndroidQualificationPin, resolveAndroidBrowserTarget, parseAndroidVpnNetwork, parseGcmTransport, readPixelBaseline, ensureAndroidPublicDns,
   runAdb, wakeAndroidDisplay, unlockAndroidKeyguard, showAndroidPinBouncer, type AndroidAdbCommand, type AndroidChromeDriver, type AndroidExecution } from "./android-device.ts";
 import { closeWebApk, openWebApk, requireWebApk, webApkTasks } from "./android-webapk.ts";
-import { readAndroidUi, findAndroidNotification, tapAndroidNotification, readAndroidNotificationRecords, notificationMatchesDigest, trackUnchangedNotificationPost, NotificationOverlapError, type AndroidUiNode, type NotificationExpectation } from "./android-notification.ts";
+import { readAndroidUi, findAndroidNotification, tapAndroidNotification, readAndroidNotificationRecords, parseAndroidNotificationRecords, notificationMatchesDigest, trackUnchangedNotificationPost, NotificationOverlapError, type AndroidUiNode, type NotificationExpectation } from "./android-notification.ts";
 import { commandPushFixture, executeFixture, type FixtureExecutor, type PushFixtureLocation } from "./push-qualification-fixture.ts";
 import { PUSH_FIXTURE_ASK_BODY, PUSH_FIXTURE_ASK_TITLE } from "./fixtures/push-qualification-extension.ts";
 import { PAGE_PRELUDE } from "./android-leak-probe.ts";
@@ -17,6 +17,117 @@ import type { QualificationLogs } from "./qualification-logs.ts";
 import { QualificationFailure, type PushBrowserStep } from "./qualification-failure.ts";
 import { fleetNotificationTag } from "../packages/protocol/src/fleet-ordering.ts";
 import { fleetPushSource, FLEET_PUSH_LOCAL_LABEL } from "./fleet-push-fixture.ts";
+
+type Scalars = Record<string, boolean | number>;
+
+/** Independent observations only. Never feed these values into a qualification verdict or cache. */
+export async function fleetAttentionDiagnostics(input: {
+  command: AndroidAdbCommand; packageName: string; tag: string; session: SessionMetadata; source?: string;
+  evaluate?: <T>(expression: string) => Promise<T>;
+  counter?: { epoch: number; n: number };
+}): Promise<Scalars> {
+  const result: Scalars = { sampledAt: Date.now(), osReadFailed: true, processReadFailed: true,
+    workerReadFailed: true, durableReadFailed: true, databasePresent: false, statePresent: false,
+    workerCount: -1, versionThree: false, attention: false, sourceMatches: false,
+    instanceMatches: false, requestMatches: false, identityMatches: false,
+    shown: false, tombstoned: false, markPresent: false, counterKnown: input.counter !== undefined,
+    markAtOrAbove: false, epochMatches: false, shownAt: -1,
+    webApkProcessPresent: false, webApkFrozen: false, chromeProcessPresent: false, chromeFrozen: false,
+    // The accepted ledger does not retain the push's send timestamp or sequence. Do not label
+    // the ask timestamp (producer trigger) or worker persistence time as transport send time.
+    pushTimeKnown: false };
+  let dump: string | undefined;
+  try { dump = await input.command("exec-out", "dumpsys", "notification", "--noredact"); }
+  catch { /* Diagnostic read failure cannot replace the original observation. */ }
+  // Sample freezer state before evaluating the worker: evaluation itself may affect scheduling.
+  try {
+    const processes = (await input.command("shell", "dumpsys", "activity", "processes")).split(/\n\s*\*APP\*/u).slice(1);
+    for (const [prefix, name] of [["webApk", input.packageName], ["chrome", "com.android.chrome"]] as const) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      const owned = processes.filter(block => new RegExp(`(?:^|[\\s:/])${escaped}(?:[\\s:/}]|$)`, "u").test(block.split("\n", 1)[0]!));
+      result[`${prefix}ProcessPresent`] = owned.length > 0;
+      result[`${prefix}Frozen`] = owned.some(block => /\bisFrozen=true\b/u.test(block));
+    }
+    result.processReadFailed = false;
+  } catch { /* No process dump or identifiers leave this function. */ }
+  if (input.evaluate !== undefined) {
+    try {
+      const sessionKey = `${input.source ?? "local"}\0${input.session.instanceId}`;
+      const requestKey = `${sessionKey}\0${input.session.ask?.requestId ?? ""}`;
+      const value = await input.evaluate<Scalars>(`(async () => {
+        const notices = await self.registration.getNotifications({tag:${JSON.stringify(input.tag)}});
+        const data = notices[0]?.data;
+        const result = {workerReadFailed:false,workerCount:notices.length,
+          versionThree:data?.version===3,attention:data?.type==="attention",
+          sourceMatches:data?.source===${JSON.stringify(input.source) ?? "undefined"},
+          instanceMatches:data?.instanceId===${JSON.stringify(input.session.instanceId)},
+          requestMatches:data?.requestId===${JSON.stringify(input.session.ask?.requestId) ?? "undefined"},
+          durableReadFailed:true,databasePresent:false,statePresent:false,shown:false,tombstoned:false,
+          shownAt:-1,markPresent:false,epochMatches:false,markAtOrAbove:false};
+        try {
+          result.databasePresent=(await indexedDB.databases()).some(db=>db.name==="omp-notification-ordering");
+          if (!result.databasePresent) { result.durableReadFailed=false; return result; }
+          const opened=Promise.withResolvers(), request=indexedDB.open("omp-notification-ordering");
+          request.onupgradeneeded=()=>{request.transaction.abort();opened.reject(Error("worker database changed"));};
+          request.onerror=request.onblocked=()=>opened.reject(Error("worker database unavailable"));
+          request.onsuccess=()=>opened.resolve(request.result);
+          const db=await opened.promise;
+          let state;
+          try {
+            const read=Promise.withResolvers();
+            const transaction=db.transaction("state","readonly"), request=transaction.objectStore("state").get("worker");
+            transaction.oncomplete=()=>read.resolve(request.result);
+            transaction.onerror=transaction.onabort=()=>read.reject(Error("worker state unavailable"));
+            state=await read.promise;
+          } finally { db.close(); }
+          result.statePresent=state!==undefined;
+          const shown=state?.shown?.[${JSON.stringify(requestKey)}], mark=state?.marks?.[${JSON.stringify(sessionKey)}];
+          result.shown=typeof shown==="number";
+          result.shownAt=Number.isSafeInteger(shown)?shown:-1;
+          result.tombstoned=typeof state?.tombstones?.[${JSON.stringify(requestKey)}]==="number";
+          result.markPresent=typeof mark==="number";
+          result.epochMatches=state?.epoch===${input.counter?.epoch ?? -1};
+          result.markAtOrAbove=${input.counter !== undefined}&&result.epochMatches&&typeof mark==="number"&&mark>=${input.counter?.n ?? -1};
+          result.durableReadFailed=false;
+        } catch { /* Read-only diagnostic; retain unavailable state, not private errors. */ }
+        return result;
+      })()`);
+      // Whitelist and type-check the worker projection, even if the browser returns extra data.
+      for (const key of ["workerReadFailed", "durableReadFailed", "databasePresent", "statePresent", "versionThree", "attention",
+        "sourceMatches", "instanceMatches", "requestMatches", "shown", "tombstoned", "markPresent", "epochMatches", "markAtOrAbove"])
+        if (typeof value?.[key] === "boolean") result[key] = value[key]!;
+      for (const key of ["workerCount", "shownAt"]) if (typeof value?.[key] === "number" && Number.isSafeInteger(value[key])) result[key] = value[key]!;
+      result.identityMatches = result.workerCount === 1 && ["versionThree", "attention", "sourceMatches", "instanceMatches", "requestMatches"].every(key => result[key] === true);
+    } catch { /* No wake, reconnect, mutation or assertion substitution. */ }
+  }
+  for (const [prefix, name] of [["webApk", input.packageName], ["chrome", "com.android.chrome"]] as const) {
+    result[`${prefix}Count`] = -1; result[`${prefix}AttentionTotal`] = -1;
+    result[`${prefix}GroupChild`] = false; result[`${prefix}GroupSummary`] = false;
+    result[`${prefix}PostPushDeltaMs`] = -1;
+    result[`${prefix}PostAskDeltaMs`] = -1; result[`${prefix}PostShownDeltaMs`] = -1;
+    try {
+      if (dump === undefined) continue;
+      const records = parseAndroidNotificationRecords(dump, name), matches = records.filter(record => record.tag.endsWith(input.tag));
+      result[`${prefix}Count`] = matches.length;
+      result[`${prefix}AttentionTotal`] = records.filter(record => record.tag.includes("omp-attention-")).length;
+      for (const record of matches) {
+        const flags = Number(record.text.match(/\bflags=(0x[0-9a-f]+|\d+)\b/iu)?.[1] ?? 0);
+        const summary = (flags & 0x200) !== 0 || /\bisGroupSummary=true\b/u.test(record.text);
+        const grouped = /\b(?:g|groupKey|mGroupKey|mOverrideGroupKey)=(?!null\b)[^\s)]+/u.test(record.text);
+        if (summary) result[`${prefix}GroupSummary`] = true;
+        else if (grouped) result[`${prefix}GroupChild`] = true;
+      }
+      if (matches.length === 1) {
+        const since = Date.parse(input.session.ask?.since ?? "");
+        if (Number.isFinite(since)) result[`${prefix}PostAskDeltaMs`] = matches[0]!.postedAt - since;
+        if (typeof result.shownAt === "number" && result.shownAt >= 0) result[`${prefix}PostShownDeltaMs`] = matches[0]!.postedAt - result.shownAt;
+      }
+      result.osReadFailed = false;
+    } catch { /* Keep unknown counts distinct from observed absence. */ }
+  }
+  result.elapsedMs = Date.now() - Number(result.sampledAt);
+  return result;
+}
 
 export interface AndroidPushRuntimeOptions {
   readonly fixtureBase?: string;
@@ -1870,6 +1981,25 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           break;
       }
     },
+  };
+  const observe = runtime.observe;
+  runtime.observe = async (session, kind, level) => {
+    try { return await observe(session, kind, level); }
+    finally {
+      if (fleetEnabled && kind === "attention" && packageName !== undefined) {
+        // Sample after the original verdict is fixed. Use only the already-held worker;
+        // diagnostics must not admit a new target, wake a page, or populate verdict caches.
+        const scalars = await fleetAttentionDiagnostics({
+          command: async (...args) => boundedAdb(await selectDevice(), args, 3_000),
+          packageName, tag: notificationTag(session), session,
+          ...(remoteIds.has(session.instanceId) ? { source: remote.binding } : {}),
+          ...(fleetObserver === undefined ? {} : { evaluate: <T>(expression: string) => fleetObserver!.evaluate<T>(expression) }),
+        });
+        console.log("android-fleet-attention-diagnostic: " + JSON.stringify({
+          phase, remote: remoteIds.has(session.instanceId), ...scalars,
+        }));
+      }
+    }
   };
   return runtime;
 }
