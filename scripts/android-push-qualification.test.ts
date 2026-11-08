@@ -1675,15 +1675,22 @@ test.each(Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS) as FleetPushDevelopmentStep[
     expect(admissions).toBe(1);
     const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
     const selected = FLEET_PUSH_DEVELOPMENT_STEPS[step];
+    const identitySelection = selected === "fleet-identity" || selected === "legacy-head-identity";
     expect(Object.keys(progress.results).filter(phase => phase.startsWith("fleet_"))).toEqual(
-      selected === "legacy-tail" ? ["fleet_enrolled"] : selected === "fleet-identity" ?
+      selected === "legacy-tail" ? ["fleet_enrolled"] : identitySelection ?
         ["fleet_enrolled", "fleet_private_verified", "fleet_session_verified", "fleet_preview_verified"] : ["fleet_enrolled", selected]);
-    expect(progress.results.stale_taps_verified !== undefined).toBe(step === "fleet-identity");
+    expect(progress.results.stale_taps_verified !== undefined).toBe(identitySelection);
     if (step === "fleet-identity") expect(Object.keys(progress.results)).toEqual([
       "subscription_ready", "stale_taps_verified", "fleet_enrolled",
       "fleet_private_verified", "fleet_session_verified", "fleet_preview_verified",
     ]);
-    expect(progress.results.private_verified).toBeUndefined();
+    // The head diagnosis reaches fleet identity in full-lane order, after every legacy head phase.
+    if (step === "legacy-head-identity") expect(Object.keys(progress.results)).toEqual([
+      "subscription_ready", "private_verified", "session_verified", "preview_verified", "attention_tap_verified",
+      "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified",
+      "fleet_enrolled", "fleet_private_verified", "fleet_session_verified", "fleet_preview_verified",
+    ]);
+    expect(progress.results.private_verified !== undefined).toBe(step === "legacy-head-identity");
     expect(progress.results.evidence_complete).toBeUndefined();
     expect(progress.results.force_stop_verified !== undefined).toBe(step === "legacy-tail");
     if (step === "fleet-sinks") {
@@ -1702,6 +1709,40 @@ test.each(Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS) as FleetPushDevelopmentStep[
       await expect(runAndroidPushDevelopmentStep(host.input, step)).rejects.toThrow("synthetic interruption");
       expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
       expect(host.state()).toMatchObject({ started: false, remoteStarted: false, fleetPrepared: false, device: baseline, browser: browserBaseline });
+    }
+  });
+
+test.each([["legacy-head-identity", "late"], ["legacy-head-identity", "never"], ["fleet-identity", "never"]] as const)(
+  "%s samples a missed fleet Session delivery before cleanup answers its ask (%s)", async (step, scenario) => {
+    const host = fake(), { observe, beginNotificationPhase, cleanup } = host.runtime;
+    let phase = "", start = -1, cleanupAt = -1, watched = 0;
+    host.runtime.beginNotificationPhase = async (epoch, next) => { phase = next ?? phase; await beginNotificationPhase(epoch, next); };
+    host.runtime.observe = async (session, kind, detail) => {
+      const observation = await observe(session, kind, detail);
+      if (phase !== "fleet_session_verified" || session.instanceId === REMOTE) return observation;
+      if (start < 0) start = host.runtime.now();
+      const elapsed = host.runtime.now() - start;
+      if (elapsed >= 60_000 && cleanupAt < 0) watched++;
+      // A late OS post lands 75 s after the ask, past the 60 s delivery bound.
+      return scenario === "late" && elapsed >= 75_000 ? observation : { ...observation, count: 0 };
+    };
+    host.runtime.cleanup = async (...args) => { if (cleanupAt < 0) cleanupAt = host.runtime.now(); await cleanup(...args); };
+    await expect(runAndroidPushDevelopmentStep(host.input, step)).rejects.toMatchObject({ evidence: { reason: "delivery_timeout" } });
+    const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
+    expect(progress.cleanupRequired).toBe(false);
+    const missed = progress.results.fleet_session_verified;
+    if (step === "fleet-identity") {
+      // Only the delivery wait's own sample at its bound; cleanup starts at once.
+      expect(watched).toBe(1);
+      expect(cleanupAt - start).toBeLessThan(61_000);
+    } else if (scenario === "late") {
+      expect(missed).toMatchObject({ latePostCount: 1 });
+      expect(Number(missed?.latePostMs)).toBeGreaterThanOrEqual(75_000);
+      expect(cleanupAt - start).toBeLessThan(80_000);
+    } else {
+      expect(missed).toMatchObject({ latePostCount: 0 });
+      expect(watched).toBeGreaterThanOrEqual(25);
+      expect(cleanupAt - start).toBeGreaterThanOrEqual(180_000);
     }
   });
 

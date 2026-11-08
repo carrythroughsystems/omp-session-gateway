@@ -10,6 +10,7 @@ export const FLEET_PUSH_PHASES = ["fleet_enrolled", "fleet_private_verified", "f
   "fleet_revocation_verified", "fleet_sinks_verified", "fleet_restored"] as const;
 export const FLEET_PUSH_DEVELOPMENT_STEPS = {
   "fleet-identity": "fleet-identity",
+  "legacy-head-identity": "legacy-head-identity",
   "coordinator-restart": "fleet_restart_verified",
   revocation: "fleet_revocation_verified",
   "fleet-sinks": "fleet_sinks_verified",
@@ -68,7 +69,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
   let sinkAudit: Record<string, boolean | number> | undefined;
   let activePhase: AndroidPushPhase = "fleet_enrolled";
   const attempt: FleetPhaseContext["attempt"] = (phase, action) => {
-    const identity = step === "fleet-identity" &&
+    const identity = (step === "fleet-identity" || step === "legacy-head-identity") &&
       (phase === "fleet_private_verified" || phase === "fleet_session_verified" || phase === "fleet_preview_verified");
     if (step !== undefined && phase !== "fleet_enrolled" &&
       !identity && phase !== FLEET_PUSH_DEVELOPMENT_STEPS[step]) return Promise.resolve();

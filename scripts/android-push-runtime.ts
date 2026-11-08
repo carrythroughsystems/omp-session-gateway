@@ -20,87 +20,139 @@ import { fleetPushSource, FLEET_PUSH_LOCAL_LABEL } from "./fleet-push-fixture.ts
 
 type Scalars = Record<string, boolean | number>;
 
-/** Independent observations only. Never feed these values into a qualification verdict or cache. */
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/** Settles within `milliseconds`. A late or failed read is unknown, never an observed absence. */
+async function boundedDiagnosticRead<T>(read: () => Promise<T>, milliseconds: number): Promise<{ value: T } | { timedOut: boolean }> {
+  const expired = Promise.withResolvers<{ timedOut: boolean }>();
+  const timer = setTimeout(() => expired.resolve({ timedOut: true }), milliseconds);
+  try {
+    return await Promise.race([Promise.resolve().then(read).then(value => ({ value }), () => ({ timedOut: false })), expired.promise]);
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * Independent observations only. Never feed these values into a qualification verdict or cache.
+ * Each read settles within `boundMs`; a timed-out read is recorded as unknown, not as absence.
+ */
 export async function fleetAttentionDiagnostics(input: {
   command: AndroidAdbCommand; packageName: string; tag: string; session: SessionMetadata; source?: string;
   evaluate?: <T>(expression: string) => Promise<T>;
   counter?: { epoch: number; n: number };
+  boundMs?: number;
 }): Promise<Scalars> {
   const result: Scalars = { sampledAt: Date.now(), osReadFailed: true, processReadFailed: true,
-    workerReadFailed: true, durableReadFailed: true, databasePresent: false, statePresent: false,
+    workerReadFailed: true, durableReadFailed: true, rateReadFailed: true,
+    osReadTimedOut: false, processReadTimedOut: false, workerReadTimedOut: false, rateReadTimedOut: false,
+    databasePresent: false, statePresent: false,
     workerCount: -1, versionThree: false, attention: false, sourceMatches: false,
     instanceMatches: false, requestMatches: false, identityMatches: false,
     shown: false, tombstoned: false, markPresent: false, counterKnown: input.counter !== undefined,
-    markAtOrAbove: false, epochMatches: false, shownAt: -1,
-    webApkProcessPresent: false, webApkFrozen: false, chromeProcessPresent: false, chromeFrozen: false,
+    markAtOrAbove: false, epochMatches: false, shownAt: -1, received: -1, sessionTouched: -1,
+    webApkProcessPresent: false, webApkCached: false, webApkFrozen: false,
+    chromeProcessPresent: false, chromeCached: false, chromeFrozen: false,
+    webApkRateLimited: -1, chromeRateLimited: -1, rateLimitAgeMs: -1,
     // The accepted ledger does not retain the push's send timestamp or sequence. Do not label
     // the ask timestamp (producer trigger) or worker persistence time as transport send time.
     pushTimeKnown: false };
-  let dump: string | undefined;
-  try { dump = await input.command("exec-out", "dumpsys", "notification", "--noredact"); }
-  catch { /* Diagnostic read failure cannot replace the original observation. */ }
-  // Sample freezer state before evaluating the worker: evaluation itself may affect scheduling.
-  try {
-    const processes = (await input.command("shell", "dumpsys", "activity", "processes")).split(/\n\s*\*APP\*/u).slice(1);
-    for (const [prefix, name] of [["webApk", input.packageName], ["chrome", "com.android.chrome"]] as const) {
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-      const owned = processes.filter(block => new RegExp(`(?:^|[\\s:/])${escaped}(?:[\\s:/}]|$)`, "u").test(block.split("\n", 1)[0]!));
-      result[`${prefix}ProcessPresent`] = owned.length > 0;
-      result[`${prefix}Frozen`] = owned.some(block => /\bisFrozen=true\b/u.test(block));
-    }
-    result.processReadFailed = false;
-  } catch { /* No process dump or identifiers leave this function. */ }
-  if (input.evaluate !== undefined) {
+  const read = async <T>(name: "os" | "rate" | "process" | "worker", action: () => Promise<T>): Promise<T | undefined> => {
+    const settled = await boundedDiagnosticRead(action, input.boundMs ?? 3_000);
+    if ("value" in settled) return settled.value;
+    result[`${name}ReadTimedOut`] = settled.timedOut;
+    return undefined;
+  };
+  const packages = [["webApk", input.packageName], ["chrome", "com.android.chrome"]] as const;
+  const dump = await read("os", () => input.command("exec-out", "dumpsys", "notification", "--noredact"));
+  // NotificationManagerService logs each post it sheds (enqueue rate) or refuses (per-app cap).
+  const rates = await read("rate", () => input.command("shell", "logcat -d -b system -v epoch -s NotificationService; echo DEVICE_EPOCH:$(date +%s)"));
+  if (rates !== undefined) {
     try {
-      const sessionKey = `${input.source ?? "local"}\0${input.session.instanceId}`;
-      const requestKey = `${sessionKey}\0${input.session.ask?.requestId ?? ""}`;
-      const value = await input.evaluate<Scalars>(`(async () => {
-        const notices = await self.registration.getNotifications({tag:${JSON.stringify(input.tag)}});
-        const data = notices[0]?.data;
-        const result = {workerReadFailed:false,workerCount:notices.length,
-          versionThree:data?.version===3,attention:data?.type==="attention",
-          sourceMatches:data?.source===${JSON.stringify(input.source) ?? "undefined"},
-          instanceMatches:data?.instanceId===${JSON.stringify(input.session.instanceId)},
-          requestMatches:data?.requestId===${JSON.stringify(input.session.ask?.requestId) ?? "undefined"},
-          durableReadFailed:true,databasePresent:false,statePresent:false,shown:false,tombstoned:false,
-          shownAt:-1,markPresent:false,epochMatches:false,markAtOrAbove:false};
+      const now = Number(/DEVICE_EPOCH:(\d+)/u.exec(rates)?.[1]) * 1000;
+      const refused = rates.split("\n").filter(line => /\bNotificationService\b/u.test(line) && /\bShedding\b|Not showing more/u.test(line));
+      let latest = -1;
+      for (const [prefix, name] of packages) {
+        const owned = refused.filter(line => new RegExp(`package=${escapeRegExp(name)}(?:\\s|$)`, "u").test(line));
+        result[`${prefix}RateLimited`] = owned.length;
+        for (const line of owned) {
+          const at = Number(/^\s*(\d+(?:\.\d+)?)\s/u.exec(line)?.[1]) * 1000;
+          if (Number.isFinite(at)) latest = Math.max(latest, at);
+        }
+      }
+      if (latest >= 0 && Number.isFinite(now)) result.rateLimitAgeMs = Math.max(0, Math.round(now - latest));
+      result.rateReadFailed = false;
+    } catch { /* No log line or identifier leaves this function. */ }
+  }
+  // Sample freezer state before evaluating the worker: evaluation itself may affect scheduling.
+  const processes = await read("process", () => input.command("shell", "dumpsys", "activity", "processes"));
+  if (processes !== undefined) {
+    try {
+      const blocks = processes.split(/\n\s*\*APP\*/u).slice(1);
+      for (const [prefix, name] of packages) {
+        const owned = blocks.filter(block => new RegExp(`(?:^|[\\s:/])${escapeRegExp(name)}(?:[\\s:/}]|$)`, "u").test(block.split("\n", 1)[0]!));
+        result[`${prefix}ProcessPresent`] = owned.length > 0;
+        result[`${prefix}Cached`] = owned.some(block => /\bcached=true\b/u.test(block));
+        result[`${prefix}Frozen`] = owned.some(block => /\bisFrozen=true\b/u.test(block));
+      }
+      result.processReadFailed = false;
+    } catch { /* No process dump or identifiers leave this function. */ }
+  }
+  if (input.evaluate !== undefined) {
+    const evaluate = input.evaluate;
+    const sessionKey = `${input.source ?? "local"}\0${input.session.instanceId}`;
+    const requestKey = `${sessionKey}\0${input.session.ask?.requestId ?? ""}`;
+    const value = await read("worker", () => evaluate<Scalars>(`(async () => {
+      const notices = await self.registration.getNotifications({tag:${JSON.stringify(input.tag)}});
+      const data = notices[0]?.data;
+      const result = {workerReadFailed:false,workerCount:notices.length,
+        versionThree:data?.version===3,attention:data?.type==="attention",
+        sourceMatches:data?.source===${JSON.stringify(input.source) ?? "undefined"},
+        instanceMatches:data?.instanceId===${JSON.stringify(input.session.instanceId)},
+        requestMatches:data?.requestId===${JSON.stringify(input.session.ask?.requestId) ?? "undefined"},
+        durableReadFailed:true,databasePresent:false,statePresent:false,shown:false,tombstoned:false,
+        shownAt:-1,markPresent:false,epochMatches:false,markAtOrAbove:false,received:-1,sessionTouched:-1};
+      try {
+        result.databasePresent=(await indexedDB.databases()).some(db=>db.name==="omp-notification-ordering");
+        if (!result.databasePresent) { result.durableReadFailed=false; return result; }
+        const opened=Promise.withResolvers(), request=indexedDB.open("omp-notification-ordering");
+        request.onupgradeneeded=()=>{request.transaction.abort();opened.reject(Error("worker database changed"));};
+        request.onerror=request.onblocked=()=>opened.reject(Error("worker database unavailable"));
+        request.onsuccess=()=>opened.resolve(request.result);
+        const db=await opened.promise;
+        let state;
         try {
-          result.databasePresent=(await indexedDB.databases()).some(db=>db.name==="omp-notification-ordering");
-          if (!result.databasePresent) { result.durableReadFailed=false; return result; }
-          const opened=Promise.withResolvers(), request=indexedDB.open("omp-notification-ordering");
-          request.onupgradeneeded=()=>{request.transaction.abort();opened.reject(Error("worker database changed"));};
-          request.onerror=request.onblocked=()=>opened.reject(Error("worker database unavailable"));
-          request.onsuccess=()=>opened.resolve(request.result);
-          const db=await opened.promise;
-          let state;
-          try {
-            const read=Promise.withResolvers();
-            const transaction=db.transaction("state","readonly"), request=transaction.objectStore("state").get("worker");
-            transaction.oncomplete=()=>read.resolve(request.result);
-            transaction.onerror=transaction.onabort=()=>read.reject(Error("worker state unavailable"));
-            state=await read.promise;
-          } finally { db.close(); }
-          result.statePresent=state!==undefined;
-          const shown=state?.shown?.[${JSON.stringify(requestKey)}], mark=state?.marks?.[${JSON.stringify(sessionKey)}];
-          result.shown=typeof shown==="number";
-          result.shownAt=Number.isSafeInteger(shown)?shown:-1;
-          result.tombstoned=typeof state?.tombstones?.[${JSON.stringify(requestKey)}]==="number";
-          result.markPresent=typeof mark==="number";
-          result.epochMatches=state?.epoch===${input.counter?.epoch ?? -1};
-          result.markAtOrAbove=${input.counter !== undefined}&&result.epochMatches&&typeof mark==="number"&&mark>=${input.counter?.n ?? -1};
-          result.durableReadFailed=false;
-        } catch { /* Read-only diagnostic; retain unavailable state, not private errors. */ }
-        return result;
-      })()`);
+          const read=Promise.withResolvers();
+          const transaction=db.transaction("state","readonly"), request=transaction.objectStore("state").get("worker");
+          transaction.oncomplete=()=>read.resolve(request.result);
+          transaction.onerror=transaction.onabort=()=>read.reject(Error("worker state unavailable"));
+          state=await read.promise;
+        } finally { db.close(); }
+        result.statePresent=state!==undefined;
+        const shown=state?.shown?.[${JSON.stringify(requestKey)}], mark=state?.marks?.[${JSON.stringify(sessionKey)}];
+        const touched=state?.touched?.[${JSON.stringify(sessionKey)}];
+        result.shown=typeof shown==="number";
+        result.shownAt=Number.isSafeInteger(shown)?shown:-1;
+        result.tombstoned=typeof state?.tombstones?.[${JSON.stringify(requestKey)}]==="number";
+        result.markPresent=typeof mark==="number";
+        // Pushes the worker has reduced, and that count when this session last received one.
+        result.received=Number.isSafeInteger(state?.received)?state.received:-1;
+        result.sessionTouched=Number.isSafeInteger(touched)?touched:-1;
+        result.epochMatches=state?.epoch===${input.counter?.epoch ?? -1};
+        result.markAtOrAbove=${input.counter !== undefined}&&result.epochMatches&&typeof mark==="number"&&mark>=${input.counter?.n ?? -1};
+        result.durableReadFailed=false;
+      } catch { /* Read-only diagnostic; retain unavailable state, not private errors. */ }
+      return result;
+    })()`));
+    if (value !== undefined) {
       // Whitelist and type-check the worker projection, even if the browser returns extra data.
       for (const key of ["workerReadFailed", "durableReadFailed", "databasePresent", "statePresent", "versionThree", "attention",
         "sourceMatches", "instanceMatches", "requestMatches", "shown", "tombstoned", "markPresent", "epochMatches", "markAtOrAbove"])
         if (typeof value?.[key] === "boolean") result[key] = value[key]!;
-      for (const key of ["workerCount", "shownAt"]) if (typeof value?.[key] === "number" && Number.isSafeInteger(value[key])) result[key] = value[key]!;
+      for (const key of ["workerCount", "shownAt", "received", "sessionTouched"])
+        if (typeof value?.[key] === "number" && Number.isSafeInteger(value[key])) result[key] = value[key]!;
       result.identityMatches = result.workerCount === 1 && ["versionThree", "attention", "sourceMatches", "instanceMatches", "requestMatches"].every(key => result[key] === true);
-    } catch { /* No wake, reconnect, mutation or assertion substitution. */ }
+    }
   }
-  for (const [prefix, name] of [["webApk", input.packageName], ["chrome", "com.android.chrome"]] as const) {
+  for (const [prefix, name] of packages) {
     result[`${prefix}Count`] = -1; result[`${prefix}AttentionTotal`] = -1;
     result[`${prefix}GroupChild`] = false; result[`${prefix}GroupSummary`] = false;
     result[`${prefix}PostPushDeltaMs`] = -1;
@@ -1983,23 +2035,35 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     },
   };
   const observe = runtime.observe;
+  // One diagnostic sample at a time, started after each original verdict is fixed and never awaited
+  // by it: a frozen worker or slow adb read cannot consume the caller's delivery deadline. A sample
+  // uses only the already-held worker (no new target, page wake or verdict cache) and skips the
+  // worker read while an earlier one on the same observer is still unanswered.
+  let sampling = false, skipped = 0, samples = 0;
+  let workerRead: { observer: PushWorkerObserver; read: Promise<unknown> } | undefined;
+  const sampleAttention = (session: SessionMetadata, owner: string) => {
+    if (sampling) { skipped++; return; }
+    sampling = true;
+    const observer = fleetObserver, deferred = observer !== undefined && workerRead?.observer === observer;
+    const context = { phase, remote: remoteIds.has(session.instanceId), sample: ++samples, skipped, workerDeferred: deferred };
+    skipped = 0;
+    void fleetAttentionDiagnostics({
+      command: async (...args) => boundedAdb(await selectDevice(), args, 3_000),
+      packageName: owner, tag: notificationTag(session), session,
+      ...(remoteIds.has(session.instanceId) ? { source: remote.binding } : {}),
+      ...(observer === undefined || deferred ? {} : { evaluate: <T>(expression: string) => {
+        const entry = { observer, read: observer.evaluate<T>(expression) };
+        const settle = () => { if (workerRead === entry) workerRead = undefined; };
+        workerRead = entry; entry.read.then(settle, settle);
+        return entry.read;
+      } }),
+    }).then(scalars => { console.log("android-fleet-attention-diagnostic: " + JSON.stringify({ ...context, ...scalars })); },
+      () => { /* A diagnostic never feeds or replaces a verdict. */ })
+      .finally(() => { sampling = false; });
+  };
   runtime.observe = async (session, kind, level) => {
     try { return await observe(session, kind, level); }
-    finally {
-      if (fleetEnabled && kind === "attention" && packageName !== undefined) {
-        // Sample after the original verdict is fixed. Use only the already-held worker;
-        // diagnostics must not admit a new target, wake a page, or populate verdict caches.
-        const scalars = await fleetAttentionDiagnostics({
-          command: async (...args) => boundedAdb(await selectDevice(), args, 3_000),
-          packageName, tag: notificationTag(session), session,
-          ...(remoteIds.has(session.instanceId) ? { source: remote.binding } : {}),
-          ...(fleetObserver === undefined ? {} : { evaluate: <T>(expression: string) => fleetObserver!.evaluate<T>(expression) }),
-        });
-        console.log("android-fleet-attention-diagnostic: " + JSON.stringify({
-          phase, remote: remoteIds.has(session.instanceId), ...scalars,
-        }));
-      }
-    }
+    finally { if (fleetEnabled && kind === "attention" && packageName !== undefined) sampleAttention(session, packageName); }
   };
   return runtime;
 }

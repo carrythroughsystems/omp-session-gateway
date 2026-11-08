@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { runInNewContext } from "node:vm";
 import * as deviceOperations from "./android-device.ts";
 import * as webApkOperations from "./android-webapk.ts";
@@ -798,6 +798,90 @@ test("fleet replacement observation never hides forbidden content in a mismatche
     await runtime.beginNotificationPhase("synthetic", "fleet_private_verified");
     expect(await runtime.observe(session, "attention", "private")).toMatchObject({ count: 0, forbiddenFound: true });
   } finally { for (const spy of spies) spy.mockRestore(); }
+});
+
+test("fleet attention diagnostics never hold a delivery verdict or stack unanswered worker reads", async () => {
+  const session: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
+    startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
+    ask: { requestId: "synthetic-request", since: "2026-01-01T00:00:00.000Z" } };
+  const prefix = "android-fleet-attention-diagnostic: ", stalled = Promise.withResolvers<Record<string, unknown>>();
+  const messages: string[] = [];
+  let reads = 0, diagnosticReads = 0;
+  const driver = {
+    browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
+      { type: "page", targetId: "page", url: identity.origin + "/" },
+      { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
+    ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
+    onEvent: () => () => {},
+    sessionSend: async (_session: string, _method: string, params: { expression: string }) => {
+      if (params.expression.includes("omp-notification-ordering")) {
+        // The first sample's read stays unanswered, as against a frozen worker.
+        diagnosticReads++;
+        return diagnosticReads === 1 ? stalled.promise : { result: { value: { workerReadFailed: false, workerCount: 1 } } };
+      }
+      if (params.expression.includes("__ompQualificationBadge")) return { result: { value: true } };
+      return { result: { value: { count: 1, version: 3, type: "attention", instanceId: session.instanceId, requestId: session.ask!.requestId } } };
+    },
+    attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
+    evaluate: async (expression: string) => expression === "document.readyState" ? "complete" :
+      expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
+  };
+  const spies = [
+    spyOn(console, "log").mockImplementation(message => { messages.push(String(message)); }),
+    spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [session] }), { preconnect: globalThis.fetch.preconnect })),
+    spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+    spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+    spyOn(deviceOperations, "runAdb").mockResolvedValue(""),
+    spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+    spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+    spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++reads === 1 ? [] : [{
+      key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
+      title: "OMP session needs attention", body: "", text: "",
+    }]),
+    spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+  ];
+  const runtime = createAndroidPushRuntime(identity, { execute: async () => ({ exitCode: 1, stdout: "" }) });
+  const diagnostics = () => messages.filter(line => line.startsWith(prefix)).map(line => JSON.parse(line.slice(prefix.length)));
+  const until = async (done: () => boolean) => {
+    for (let turn = 0; turn < 1_000 && !done(); turn++) await Promise.resolve();
+    expect(done()).toBe(true);
+  };
+  try {
+    runtime.beforeEffect = async () => {}; runtime.dndOff = async () => true;
+    await runtime.fleet.select(true);
+    await runtime.beginNotificationPhase("synthetic", "fleet_session_verified");
+    await runtime.fleet.armBadgeObserver();
+    jest.useFakeTimers();
+    // The verdict returns while its sample still waits on the worker.
+    expect(await runtime.observe(session, "attention", "session")).toMatchObject({ count: 1 });
+    await until(() => diagnosticReads === 1);
+    expect(await runtime.observe(session, "attention", "session")).toMatchObject({ count: 1 });
+    expect(diagnostics()).toHaveLength(0);
+    jest.advanceTimersByTime(3_000);
+    await until(() => diagnostics().length === 1);
+    expect(diagnostics()[0]).toMatchObject({ phase: "fleet_session_verified", remote: false, sample: 1, skipped: 0,
+      workerDeferred: false, workerReadTimedOut: true, workerReadFailed: true, processReadFailed: false });
+    // Still unanswered: the next sample keeps its device reads but does not ask the worker again.
+    await runtime.observe(session, "attention", "session");
+    await until(() => diagnostics().length === 2);
+    expect(diagnostics()[1]).toMatchObject({ sample: 2, skipped: 1, workerDeferred: true, workerReadTimedOut: false, workerReadFailed: true });
+    expect(diagnosticReads).toBe(1);
+    stalled.resolve({ result: { value: { workerReadFailed: false, workerCount: 1 } } });
+    await Promise.resolve(); await Promise.resolve();
+    await runtime.observe(session, "attention", "session");
+    await until(() => diagnostics().length === 3);
+    expect(diagnostics()[2]).toMatchObject({ sample: 3, skipped: 0, workerDeferred: false, workerReadFailed: false, workerCount: 1 });
+    expect(diagnosticReads).toBe(2);
+    for (const entry of diagnostics()) {
+      expect(Object.entries(entry).every(([key, value]) => key === "phase" || typeof value === "boolean" || typeof value === "number")).toBe(true);
+    }
+    expect(JSON.stringify(diagnostics())).not.toContain("synthetic");
+  } finally {
+    jest.useRealTimers();
+    runtime.fleet.select = async () => {}; runtime.fleet.host = async () => {};
+    await runtime.cleanup("fleet", { epoch: "synthetic", fleetPrepared: true } as AndroidPushProgress);
+    for (const spy of spies) spy.mockRestore();
+  }
 });
 
 test.each([[0, 0, true], [1, 1, false], [0, 1, false]] as const)(

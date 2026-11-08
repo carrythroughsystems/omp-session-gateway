@@ -266,14 +266,18 @@ For one remaining fleet step instead of a full lane, use:
 OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development-step coordinator-restart "$PUBLISHED_ARCHIVE"
 ```
 
-The step names are `fleet-identity`, `coordinator-restart`, `revocation`, `fleet-sinks`,
-`fleet-restoration`, and `legacy-tail`. Each starts from a fresh epoch, captures the Pixel baseline,
-starts the local fixture,
+The step names are `fleet-identity`, `legacy-head-identity`, `coordinator-restart`, `revocation`,
+`fleet-sinks`, `fleet-restoration`, and `legacy-tail`. Each starts from a fresh epoch, captures the
+Pixel baseline, starts the local fixture,
 subscribes, prepares the same isolated source/config/Serve mapping and grants through PWA enrollment,
 and admits the warm worker observer once. `fleet-identity` first runs the legacy delayed-tap phase
 to retain its generation change, notification replays and browser lifecycle, then runs fleet Private,
-Session and Preview together, sharing their real tags and one held observer. Other selections skip
-the earlier local and fleet checks, not their assertions inside the selected step.
+Session and Preview together, sharing their real tags and one held observer. `legacy-head-identity`
+is a diagnosis step: it runs every legacy phase through `stale_taps_verified`, then fleet Private,
+Session and Preview, the order in which a full lane reaches fleet Session. When one of its deliveries
+misses the 60 s bound, it keeps sampling that notification every 5 s for up to 120 s before cleanup
+answers the ask, so a late OS post is told apart from one that never arrives; the phase still fails.
+Other selections skip the earlier local and fleet checks, not their assertions inside the selected step.
 `fleet-sinks` first performs the real remote Control tap and
 answer/clear needed to scan that exact live capability; `legacy-tail` first restores the fleet
 source and releases the observer, then runs force-stop, permission, lock/resume, network, Doze and
@@ -284,6 +288,11 @@ Fleet delivery observations read OS records first and reuse only positively matc
 for that exact key/post time. A negative worker sample is read again within the original delivery
 deadline; it cannot turn into a permanent negative cache. Per-sample OS counts/post times, cache-hit
 and worker identity-match booleans are retained without notification or request identifiers.
+Each fleet attention observation also starts one closed diagnostic sample beside the lane: OS counts
+for the WebAPK and Chrome packages, Android's notification rate-limit refusals, cached/frozen process
+flags, and the held worker's notification identity and durable shown/tombstone/mark/receipt state.
+Every read is bounded at 3 s and a stalled read is recorded as unknown; the verdict never awaits a
+sample, samples never overlap, and an unanswered worker read is not repeated on the same observer.
 The lane serializes checkpoint callbacks, including concurrent local/remote asks and restoration,
 so the campaign, CLI and private runner cannot race a shared progress writer. Each caller still
 receives its own persistence failure; a failed write does not prevent later restoration checkpoints.

@@ -13,14 +13,25 @@ const record = (packageName: string, suffix = tag, flags = "0x10") => `
     mUpdateTimeMs=${at + 250}
     android.title=String (SYNTHETIC_PRIVATE_TITLE)
 `;
+const seconds = at / 1000;
+const rateLog = (limited: boolean) => [
+  "--------- beginning of system",
+  ...(limited ? [
+    `${seconds - 30}.500  1000  1200 E NotificationService: Package enqueue rate is 7.5. Shedding 0|${pkg}|1|SYNTHETIC_PRIVATE_KEY|1. package=${pkg}`,
+    `${seconds - 10}.250  1000  1200 E NotificationService: Package has already posted or enqueued 50 notifications.  Not showing more.  package=com.android.chrome`,
+    `${seconds - 5}.000  1000  1200 E NotificationService: Package enqueue rate is 9.0. Shedding SYNTHETIC_PRIVATE_KEY. package=${pkg}.foreign`,
+  ] : []),
+  `${seconds}.000  1000  1200 I NotificationService: SYNTHETIC_PRIVATE_UNRELATED package=${pkg}`,
+  `DEVICE_EPOCH:${seconds}`,
+].join("\n");
 
-test.each(["chrome", "webapk", "summary", "both", "absent", "tombstoned", "no-database", "database-error", "worker-error", "reads-error", "wrong-identity"] as const)(
+test.each(["chrome", "webapk", "summary", "both", "absent", "tombstoned", "no-database", "database-error", "worker-error", "reads-error", "wrong-identity", "rate-limited"] as const)(
   "fleet attention diagnostics remain read-only and closed (%s)", async scenario => {
     let opens = 0, closes = 0, evaluations = 0;
     const calls: string[][] = [];
     const shown = scenario === "absent" ? {} : { [`local\0${session.instanceId}\0${session.ask!.requestId}`]: at + 200 };
     const state = { epoch: 2, shown, tombstones: scenario === "tombstoned" ? { [`local\0${session.instanceId}\0${session.ask!.requestId}`]: at } : {},
-      marks: { [`local\0${session.instanceId}`]: 7 } };
+      marks: { [`local\0${session.instanceId}`]: 7 }, received: 9, touched: { [`local\0${session.instanceId}`]: 8 } };
     const indexedDB = {
       databases: async () => scenario === "no-database" ? [] : [{ name: "omp-notification-ordering" }],
       open: (name: string) => {
@@ -47,11 +58,12 @@ test.each(["chrome", "webapk", "summary", "both", "absent", "tombstoned", "no-da
           (["webapk", "both"].includes(scenario) ? record(pkg) : "") +
           (["chrome", "summary", "both"].includes(scenario) ? record("com.android.chrome", tag, scenario === "summary" ? "0x210" : "0x10") : "") +
           record("com.android.chrome", "omp-attention-foreign-synthetic") + "\nRanking Config:";
-        return `\n *APP* ProcessRecord{synthetic 1:${pkg}/u0a1}\n isFrozen=true\n *APP* ProcessRecord{synthetic 2:com.android.chrome/u0a2}\n isFrozen=false\n *APP* ProcessRecord{synthetic 3:${pkg}.foreign/u0a3}\n isFrozen=false`;
+        if (args[1]?.startsWith("logcat ")) return rateLog(scenario === "rate-limited");
+        return `\n *APP* ProcessRecord{synthetic 1:${pkg}/u0a1}\n isFrozen=true\n *APP* ProcessRecord{synthetic 2:com.android.chrome/u0a2}\n cached=true isFrozen=false\n *APP* ProcessRecord{synthetic 3:${pkg}.foreign/u0a3}\n isFrozen=false`;
       },
       evaluate: async <T>(expression: string): Promise<T> => {
         evaluations++;
-        expect(calls).toHaveLength(2); // Freezer sampled before worker evaluation.
+        expect(calls).toHaveLength(3); // Freezer sampled before worker evaluation.
         if (scenario === "worker-error") throw new Error("SYNTHETIC_PRIVATE_WORKER");
         const notices = scenario === "absent" ? [] : [{ data: { version: 3, type: "attention", instanceId: session.instanceId,
           requestId: scenario === "wrong-identity" ? "synthetic-foreign" : session.ask!.requestId } }];
@@ -61,7 +73,8 @@ test.each(["chrome", "webapk", "summary", "both", "absent", "tombstoned", "no-da
       },
     });
     expect(evaluations).toBe(1); // Includes OS absence and read failures.
-    expect(calls).toEqual([["exec-out", "dumpsys", "notification", "--noredact"], ["shell", "dumpsys", "activity", "processes"]]);
+    expect(calls).toEqual([["exec-out", "dumpsys", "notification", "--noredact"],
+      ["shell", "logcat -d -b system -v epoch -s NotificationService; echo DEVICE_EPOCH:$(date +%s)"], ["shell", "dumpsys", "activity", "processes"]]);
     expect(Object.values(result).every(value => typeof value === "boolean" || typeof value === "number")).toBe(true);
     expect(JSON.stringify(result)).not.toMatch(/synthetic|SYNTHETIC_PRIVATE/u);
     expect(result.workerReadFailed).toBe(scenario === "worker-error");
@@ -74,6 +87,14 @@ test.each(["chrome", "webapk", "summary", "both", "absent", "tombstoned", "no-da
     expect(result.chromeGroupSummary).toBe(scenario === "summary");
     expect(result.chromeGroupChild).toBe(["chrome", "both"].includes(scenario));
     expect(result.webApkFrozen).toBe(scenario !== "reads-error"); expect(result.chromeFrozen).toBe(false);
+    expect(result.chromeCached).toBe(scenario !== "reads-error"); expect(result.webApkCached).toBe(false);
+    expect(result.webApkRateLimited).toBe(scenario === "reads-error" ? -1 : scenario === "rate-limited" ? 1 : 0);
+    expect(result.chromeRateLimited).toBe(scenario === "reads-error" ? -1 : scenario === "rate-limited" ? 1 : 0);
+    expect(result.rateLimitAgeMs).toBe(scenario === "rate-limited" ? 9_750 : -1);
+    expect(result.rateReadFailed).toBe(scenario === "reads-error");
+    expect(result.received).toBe(["worker-error", "database-error", "no-database"].includes(scenario) ? -1 : 9);
+    expect(result.sessionTouched).toBe(["worker-error", "database-error", "no-database"].includes(scenario) ? -1 : 8);
+    for (const read of ["os", "rate", "process", "worker"]) expect(result[`${read}ReadTimedOut`]).toBe(false);
     if (scenario === "chrome") expect(result).toMatchObject({ chromeAttentionTotal: 2, chromePostAskDeltaMs: 250, chromePostShownDeltaMs: 50 });
     expect(result.pushTimeKnown).toBe(false); expect(result.chromePostPushDeltaMs).toBe(-1);
     expect(opens).toBe(["worker-error", "no-database"].includes(scenario) ? 0 : 1);
@@ -85,4 +106,15 @@ test("missing worker and unknown message counter are not negative durable eviden
     command: async () => { throw new Error("unavailable"); } });
   expect(result).toMatchObject({ workerReadFailed: true, durableReadFailed: true, counterKnown: false, markAtOrAbove: false,
     osReadFailed: true, processReadFailed: true, webApkCount: -1, chromeCount: -1 });
+});
+
+test("a stalled read settles within its bound as unknown, without waiting for the device or worker", async () => {
+  const never = <T>() => Promise.withResolvers<T>().promise;
+  const started = performance.now();
+  const result = await fleetAttentionDiagnostics({ packageName: pkg, tag, session, boundMs: 20,
+    command: async (...args) => args[2] === "notification" ? never<string>() : "", evaluate: never });
+  expect(performance.now() - started).toBeLessThan(1_000);
+  expect(result).toMatchObject({ osReadTimedOut: true, osReadFailed: true, webApkCount: -1, chromeCount: -1,
+    rateReadTimedOut: false, rateReadFailed: false, webApkRateLimited: 0, processReadTimedOut: false, processReadFailed: false,
+    workerReadTimedOut: true, workerReadFailed: true, durableReadFailed: true, workerCount: -1, identityMatches: false });
 });

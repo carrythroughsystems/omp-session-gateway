@@ -284,11 +284,14 @@ export interface AndroidPushRuntime {
  * Steady-state waits keep the one-minute bound.
  */
 const PUSH_RECOVERY_MS = 160_000;
+const LEGACY_PUSH_HEAD_PHASES = ["private_verified", "session_verified", "preview_verified", "attention_tap_verified",
+  "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified"] as const;
 const LEGACY_PUSH_TAIL_PHASES = ["force_stop_verified", "permission_verified", "lock_resume_verified",
   "network_verified", "doze_verified", "forbidden_sinks_verified"] as const;
+/** Diagnosis only: how long a missed delivery keeps being sampled before cleanup answers its ask. */
+const LATE_DELIVERY_WATCH_MS = 120_000;
 
-export const ANDROID_PUSH_PHASES = ["baseline_captured", "subscription_ready", "private_verified", "session_verified", "preview_verified",
-  "attention_tap_verified", "activity_stop_verified", "stale_generation_verified", "clear_verified", "triage_verified", "stale_taps_verified",
+export const ANDROID_PUSH_PHASES = ["baseline_captured", "subscription_ready", ...LEGACY_PUSH_HEAD_PHASES,
   ...FLEET_PUSH_PHASES,
   ...LEGACY_PUSH_TAIL_PHASES,
   "evidence_complete", "restored"] as const;
@@ -872,6 +875,7 @@ async function runAndroidPushLane(input: LaneInput, developmentStep?: FleetPushD
     const attempt = async (phase: AndroidPushPhase, action: () => Promise<void>): Promise<void> => {
       if (developmentStep !== undefined && !FLEET_PUSH_PHASES.some(value => value === phase) &&
         !(developmentStep === "fleet-identity" && phase === "stale_taps_verified") &&
+        !(developmentStep === "legacy-head-identity" && LEGACY_PUSH_HEAD_PHASES.some(value => value === phase)) &&
         !(developmentStep === "legacy-tail" && LEGACY_PUSH_TAIL_PHASES.some(value => value === phase))) return;
       activePhase = phase; phaseStarted = runtime.now(); metrics = emptyPushDeliveryMetrics();
       armedAsks.clear();
@@ -1236,6 +1240,15 @@ async function runAndroidPushLane(input: LaneInput, developmentStep?: FleetPushD
       });
       if (developmentStep === undefined) await finish("evidence_complete", { passed: !progress.results.network_verified?.blocked });
     } catch (error) { primary = error; }
+    // Cleanup answers the missed ask, which clears any late notification. In the head diagnosis,
+    // keep sampling first so a late OS post is distinguished from one that never arrives.
+    if (developmentStep === "legacy-head-identity" && primary !== undefined && lateDelivery !== undefined) {
+      const until = runtime.now() + LATE_DELIVERY_WATCH_MS;
+      try {
+        await lateDelivery();
+        while (metrics.latePostCount === 0 && runtime.now() < until) { await runtime.pause(5_000); await lateDelivery(); }
+      } catch { /* The restoration's own late samples report observation failures. */ }
+    }
     let cleanup: Record<string, unknown>;
     runtime.beginCleanup?.();
     try { cleanup = await restore(input, runtime, progress, nextFailureId, async () => {
