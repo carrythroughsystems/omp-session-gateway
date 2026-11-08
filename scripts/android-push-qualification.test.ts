@@ -37,7 +37,8 @@ interface FakeOptions { failAfter?: number; forceDelivery?: boolean; dozeDeliver
   /** The directory shows the waiting asks newest first. */ wrongOrder?: boolean; /** That triage control reaches the gateway. */ triageMutation?: TriageAction["kind"]; /** A delayed stale tap still launches. */ staleLaunch?: boolean;
   /** A foreign post arrives while an owned activity-stop notice is showing. */ foreignDuringStop?: boolean;
   fleetFailure?: "enrollment" | "badge" | "revocation" | "sinks" | "remote-tap" | "remote-stale-tap" | "retained" |
-    "clear" | "race-clear" | "restart-clear" | "stale-row" | "stopped-replay" }
+    "clear" | "race-clear" | "restart-clear" | "restart-no-realert" | "restart-duplicate" |
+    "restart-second-realert" | "restart-remote-repeat" | "stale-row" | "stopped-replay" }
 const SECONDARY = "synthetic-secondary";
 const REMOTE = "synthetic-remote";
 function fake(options: FakeOptions = {}) {
@@ -51,6 +52,7 @@ function fake(options: FakeOptions = {}) {
   // `clearing`: the gateway's clear for a removed host's ask is still in flight to the device.
   const second = { started: false, asking: false, request: 0, askedAt: 0, shown: false, clearing: false, detail: browserBaseline.detail };
   const remote = { ...second, shownRequest: "", generation: 1, prepared: false, selected: false, online: true, coordinator: true, revoked: false };
+  const restartClears = new Set<string>();
   let tappedRole: "primary" | "remote" = "primary";
   // The installed app's device-local Hold and Hide records, keyed as the app keys them.
   const held = new Set<string>(); const hidden: string[] = []; let toastUntil = -Infinity;
@@ -104,6 +106,10 @@ function fake(options: FakeOptions = {}) {
         if (operation === "source-up") remote.online = true;
         if (operation === "coordinator-down") remote.coordinator = false;
         if (operation === "coordinator-up") {
+          if (!remote.coordinator && asking && options.fleetFailure !== "restart-no-realert") {
+            restartClears.add(`synthetic-request-${request}`);
+            request++; askedAt = time; show();
+          }
           remote.coordinator = true;
           if (options.fleetFailure !== "restart-clear" || phase !== "fleet_restart_verified") {
             remote.shown = remote.asking; remote.shownRequest = `synthetic-remote-request-${remote.request}`;
@@ -115,6 +121,8 @@ function fake(options: FakeOptions = {}) {
       coverage: async () => ({ selected: remote.selected, state: options.fleetFailure === "enrollment" ? "pending" :
         remote.revoked ? "unauthorized" : remote.online ? "current" : "stale", covered: remote.online && !remote.revoked }),
       armBadgeObserver: async () => {},
+      restartReplacement: async (previous, current) => restartClears.has(previous.ask!.requestId) &&
+        current.ask?.requestId === primarySnapshot()?.ask?.requestId && shown === "attention",
       observeBadge: async () => ({ count: options.fleetFailure === "badge" ? 9 : Number(asking) + Number(remote.asking && !remote.revoked),
         complete: remote.online && !remote.revoked,
         ...(options.fleetFailure === "badge" ? { call: { method: "setAppBadge" as const, arguments: 1, argument: 9 } } : {}) }),
@@ -130,6 +138,10 @@ function fake(options: FakeOptions = {}) {
       diagnostic: new Error("GcmService censored sample: Is client connected: true; Reconnect Scheduler Alarm: OFF") }),
     pause: async milliseconds => {
       time += milliseconds;
+      if (phase === "fleet_restart_verified" && milliseconds === 21_000) {
+        if (options.fleetFailure === "restart-second-realert") { request++; askedAt = time; show(); }
+        if (options.fleetFailure === "restart-remote-repeat") remote.shown = true;
+      }
       if (time < socketStaleUntil) return;
       // The reconnected socket delivers in send order: a held ask, then its clear.
       if (heldAsk) { heldAsk = false; show(); }
@@ -189,7 +201,9 @@ function fake(options: FakeOptions = {}) {
       const notice = session.instanceId === SECONDARY ? second.shown ? "attention" : undefined : shown;
       const sentPrivate = (session.instanceId === SECONDARY ? second.detail : shownDetail) === "private";
       if (notice === "activity_stop" && foreignDuringStop) { foreignDuringStop = false; throw new NotificationOverlapError(); }
-      return { count: notice === undefined ? 0 : options.duplicate ? 2 : 1, titleMatches: notice === kind, bodyMatches: notice === kind && sentPrivate === (detail === "private"), forbiddenFound: false };
+      const duplicate = options.duplicate || options.fleetFailure === "restart-duplicate" &&
+        phase === "fleet_restart_verified" && restartClears.size > 0 && session.instanceId !== SECONDARY;
+      return { count: notice === undefined ? 0 : duplicate ? 2 : 1, titleMatches: notice === kind, bodyMatches: notice === kind && sentPrivate === (detail === "private"), forbiddenFound: false };
     },
     notificationCleared: async session => {
       if (session.instanceId === REMOTE) {
@@ -1880,6 +1894,22 @@ test.each(["race", "restart"] as const)("fleet %s refuses to conceal a missing o
   expect(events.slice(0, 2)).toEqual(["ask", "answer"]);
   expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
 });
+
+test.each([undefined, "restart-no-realert", "restart-duplicate", "restart-second-realert", "restart-remote-repeat"] as const)(
+  "restart requires exactly one local replacement and no remote repeat (%s)", async fleetFailure => {
+    const host = fake(fleetFailure === undefined ? {} : { fleetFailure });
+    const result = await runAndroidPushDevelopmentStep(host.input, "coordinator-restart").catch(error => error);
+    if (fleetFailure === undefined) {
+      expect(result.passed).toBe(true);
+      expect(host.checkpoints.at(-1)).toMatchObject({ results: {
+        fleet_restart_verified: { exactClear: true, localRealertedOnce: true, noRepeats: true },
+      } });
+    } else {
+      expect(result).toBeInstanceOf(QualificationFailure);
+      expect(result.evidence.step).toBe("fleet_restart_verified");
+    }
+    expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  });
 
 test.each(["zero", "send", "send-mismatch", "unavailable", "absent"] as const)(
   "fleet restart retains the quiet badge only with complete zero-send telemetry (%s)", async scenario => {

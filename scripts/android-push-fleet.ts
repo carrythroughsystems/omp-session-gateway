@@ -25,7 +25,7 @@ export const FLEET_PUSH_RESULT_FIELDS = {
   fleet_taps_verified: ["local", "remote", "exactRequest", "scrubbed", "devtoolsObserver"],
   fleet_stale_taps_verified: ["resolved", "replaced", "expired", "launches", "replayed", "devtoolsObserver"],
   fleet_outage_verified: ["stale", "lastKnownKept", "badgeFlag", "recovered", "devtoolsObserver"],
-  fleet_restart_verified: ["exactClear", "noRepeats", "newAsk", "badgeReconciled", "devtoolsObserver"],
+  fleet_restart_verified: ["exactClear", "localRealertedOnce", "noRepeats", "newAsk", "badgeReconciled", "devtoolsObserver"],
   fleet_revocation_verified: ["unauthorized", "cleared", "launches", "devtoolsObserver"],
   fleet_sinks_verified: ["clean", "detectable", "sinks", "findings", "devtoolsObserver"],
   fleet_restored: ["restored", "grantsRemoved", "sourceStopped", "serveRestored", "devtoolsObserver"],
@@ -41,6 +41,8 @@ export interface FleetPushRuntime {
   observeBadge(): Promise<{ count: number; complete: boolean;
     call?: { method: "setAppBadge" | "clearAppBadge"; arguments: number; argument?: number | "undefined" } } | undefined>;
   armBadgeObserver(): Promise<void>;
+  /** Exact old-request tombstone plus one newly posted, identity-bound local replacement. */
+  restartReplacement(previous: SessionMetadata, current: SessionMetadata): Promise<boolean>;
   revoke(): Promise<void>;
   audit(epoch: string): Promise<Record<string, boolean | number>>;
 }
@@ -231,14 +233,22 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
     await cold(); const local = await ask("primary"), old = await ask("remote");
     await f.host("coordinator-down", p.epoch);
     // Answer without a replacement while no coordinator can send. Only a restart-time
-    // clear can now remove the old remote alert; the local alert must remain unchanged.
+    // clear can now remove the old remote alert. The memory-only local registry re-mints
+    // its still-pending ask; prove its exact old clear and exactly one replacement (#605).
     await r.fixture("answer", p.epoch, "remote"); await snapshot(s => !s.inputRequired, "remote");
     await f.host("coordinator-up", p.epoch);
     await wait("restart remote exact clear", async () => await r.notificationCleared(old) ? true : undefined);
-    await delivered(local);
+    const restarted = await snapshot(s => s.inputRequired && s.instanceId === local.instanceId &&
+      s.generation === local.generation && s.ask?.requestId !== local.ask?.requestId);
+    await wait("restart local exact clear and replacement", async () => await f.restartReplacement(local, restarted) ? true : undefined);
+    await delivered(restarted);
     const quietWindow = await r.beginDeliveryTelemetry?.("fleet_restart_verified").catch(() => undefined);
     await badge("restart-exact-clear", 1, true);
-    await r.pause(21_000); await delivered(local);
+    await r.pause(21_000); await delivered(restarted);
+    const settledLocal = await snapshot(s => s.inputRequired);
+    if (settledLocal.instanceId !== restarted.instanceId || settledLocal.generation !== restarted.generation ||
+      settledLocal.ask?.requestId !== restarted.ask?.requestId) throw assertion("Fleet restart re-alerted the local ask again");
+    if (!await r.notificationCleared(old)) throw assertion("Fleet restart repeated the resolved remote alert");
     const quiet = quietWindow === undefined ? undefined : await r.deliveryTelemetry?.(quietWindow).catch(() => undefined);
     // A complete, healthy coordinator log window with zero sends globally is stronger
     // than zero sends to this subscription. With the page still closed, retain the badge
@@ -246,10 +256,10 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
     if (quiet?.sends !== 0 || quiet.acknowledgements !== 0 || quiet.failures !== 0) await badge("restart-no-repeat", 1, true);
     const fresh = await ask("remote");
     if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet restart did not replace its request");
-    await delivered(local); await badge("new-ask", 2, true);
+    await delivered(restarted); await badge("new-ask", 2, true);
     await clear(); await delivered(fresh); await badge("local-cleared", 1, true);
     await clear(60_000, "remote"); await badge("settled", 0, true);
-    await finish("fleet_restart_verified", { exactClear: true, noRepeats: true, newAsk: true, badgeReconciled: true });
+    await finish("fleet_restart_verified", { exactClear: true, localRealertedOnce: true, noRepeats: true, newAsk: true, badgeReconciled: true });
   });
   await attempt("fleet_revocation_verified", async () => {
     await cold(); const remote = await ask("remote");

@@ -529,7 +529,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     if (records.some(record => record.tag.includes("omp-attention-") && !observedTopics.some(topic => record.tag.endsWith(topic)) && baselineRecords.get(record.key) !== record.postedAt)) throw new NotificationOverlapError();
     return records;
   };
-  const worker = async <T>(operation: "armBadgeObserver" | "observeBadge" | "observe" | "notificationCleared" | "restoreBadgeObserver" | "replay",
+  const worker = async <T>(operation: "armBadgeObserver" | "observeBadge" | "observe" | "notificationCleared" | "restartReplacement" | "restoreBadgeObserver" | "replay",
     expression: string, readOnly = false): Promise<T> => {
     const errors: unknown[] = [], started = performance.now();
     for (let attempt = 0; ; attempt++) {
@@ -689,6 +689,41 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       },
       async observeBadge() {
         return (await worker<Awaited<ReturnType<AndroidPushRuntime["fleet"]["observeBadge"]>> | null>("observeBadge", "self.__ompQualificationBadge?.observation ?? null", true)) ?? undefined;
+      },
+      async restartReplacement(previous, current) {
+        if (remoteIds.has(previous.instanceId) || previous.instanceId !== current.instanceId ||
+          previous.generation !== current.generation || !current.inputRequired || previous.ask === undefined ||
+          current.ask === undefined || previous.ask.requestId === current.ask.requestId) return false;
+        const tag = notificationTag(previous), prior = verifiedWorkerPosts.get(tag);
+        if (prior?.metadata.requestId !== previous.ask.requestId || prior.generation !== previous.generation) return false;
+        const records = (await phaseRecords()).filter(record => record.tag.endsWith(tag));
+        if (records.length > 1) throw privacyFailure({ cause: new Error("concurrent local restart notifications") });
+        if (records.length !== 1 || records[0]!.postedAt <= prior.postedAt) return false;
+        // Replacement alone is not an exact clear. Read the real worker's durable tombstone
+        // without creating/upgrading its database, and bind the one displayed replacement.
+        return worker<boolean>("restartReplacement", `(async () => {
+          if (!(await indexedDB.databases()).some(db => db.name === "omp-notification-ordering")) return false;
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("omp-notification-ordering");
+            request.onupgradeneeded = () => { request.transaction.abort(); reject(Error("worker database changed")); };
+            request.onerror = request.onblocked = () => reject(Error("worker database unavailable"));
+            request.onsuccess = () => resolve(request.result);
+          });
+          let state;
+          try {
+            state = await new Promise((resolve, reject) => {
+              const transaction = db.transaction("state", "readonly");
+              const request = transaction.objectStore("state").get("worker");
+              transaction.oncomplete = () => resolve(request.result);
+              transaction.onerror = transaction.onabort = () => reject(Error("worker state unavailable"));
+            });
+          } finally { db.close(); }
+          const notices = await self.registration.getNotifications({tag:${JSON.stringify(tag)}});
+          const data = notices[0]?.data;
+          return typeof state?.tombstones?.[${JSON.stringify(`local\0${previous.instanceId}\0${previous.ask.requestId}`)}] === "number" &&
+            notices.length === 1 && data?.version === 3 && data?.type === "attention" && data?.source === undefined &&
+            data?.instanceId === ${JSON.stringify(current.instanceId)} && data?.requestId === ${JSON.stringify(current.ask.requestId)};
+        })()`, true);
       },
       async revoke() {
         await page("revoke", async driver => {

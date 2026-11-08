@@ -253,7 +253,13 @@ older pushed badge never overwrites a newer one (a badge set when the app opens 
 next push). Asks on different hosts are ordered by first observation
 at the coordinator, never by host clocks. The coordinator remembers which asks it alerted each device
 about; after it restarts it sends exact clears for the ones resolved meanwhile, or whose host was
-revoked, removed, or deselected, and alerts only asks the device has not seen. Opening the app
+revoked, removed, or deselected. A home-gateway restart also gives each still-pending local ask a
+new request identity: the registry is memory-only and OMP exposes only `inputRequired`, not an ask
+identity that can survive a gateway restart. The old local request is exactly cleared and its alert
+is replaced once by the new request, never two concurrent alerts for that session and no further
+re-alert on subsequent reconciliation. Still-pending asks on remote sources keep their identity
+and are not repeated when only the home gateway restarts. This avoids suppressing a genuinely new
+local ask posed during downtime (founder decision 2026-11-08, #605). Opening the app
 reconciles from fresh snapshots of each source, but never closes an alert, or changes the badge,
 on the strength of a snapshot older than a push the phone received while the app was loading.
 

@@ -301,12 +301,19 @@ This is a representative isolated server identity, not evidence of a second phys
 Enrollment uses the installed Pixel PWA's Settings → Hosts switch. The phases require concurrent
 local/remote asks, all three detail levels (fleet Preview falls back to Session), exact-source
 Control taps, resolved/replaced/expired remote taps without a launch, clear-before-rearm races,
-source stale/last-known recovery, coordinator restart without repeats, grant revocation,
+source stale/last-known recovery, coordinator restart with one local replacement, grant revocation,
 replacement/deduplication, foreground reconciliation, and privacy sink scans on both identities.
 Clear proof requires both OS records and worker notifications to be absent on the session's tag,
 independent of request ID; delivery still matches the exact request. Restart answers the remote
-ask while the coordinator is down, then proves its old alert closed while the local alert stayed
-unchanged, before arming a new remote ask. The expired-host replay must close before re-baselining.
+ask while the coordinator is down, then proves its old alert closed. The memory-only home registry
+re-mints the still-pending local ask (#605): the lane requires its old exact-request tombstone in
+the worker's existing IndexedDB state, exactly one newly posted OS record, and matching new worker
+request/source/instance with the same authoritative generation. The new request and OS post must
+stay unchanged across the next reconciliation, and the resolved remote alert must remain absent,
+before arming a new remote ask. No re-alert, a missing old clear, concurrent duplicates, a second
+local re-alert, or a remote repeat fail. Pending-remote identity across a home restart is
+unit-proven in `fleet-coordinator.test.ts`, not physically proven by this resolved-remote scenario.
+The expired-host replay must close before re-baselining.
 The remote sink sweep runs while the remote session launched by the PWA's real Control tap is
 still alive, using that same generation's Control capability and the detectable positive control;
 two identical-generation Control launches must return equal capability bytes in page memory
@@ -662,7 +669,7 @@ platform support, or release qualification.
 | Browser-direct enrollment and narrow credentials | Two real loopback HTTP gateways use separate origins/state directories; pending verifier → source grant → activation → device selection uses the actual routes. A grant bearer cannot reach another coordinator/source API or launch, and the machine pull carries no owner headers. |
 | Same instance on local and remote hosts | Parsed v3 envelopes run through the shared worker reducer: distinct source-qualified tags and request IDs coexist with badge 2; Session/Preview remote bodies contain only configured label and suffix, Private has no body. |
 | Resolution, live stop, revocation | Exact request/generation clears preserve the local ask; only an observed busy → idle edge produces a stop. Source revocation closes its feed, becomes unauthorized, and clears only that owner's selected devices. |
-| Coordinator/source restart and outage | A persisted coordinator epoch advances; outstanding diff clears resolved asks, alerts unseen asks, and neither repeats unchanged asks nor invents stops. A cold, empty source registry emits only heartbeats until real discovery warms; an unreachable source retains its ask with an incomplete badge. |
+| Coordinator/source restart and outage | A persisted coordinator epoch advances; outstanding diff clears resolved asks and does not repeat stable remote request identities or invent stops. A home restart re-mints each pending local ask and replaces its alert once (ADR-048 amendment, #605); the physical lane separately proves that transition. A cold, empty source registry emits only heartbeats until real discovery warms; an unreachable source retains its ask with an incomplete badge. |
 | Owner/device isolation and leak boundaries | Two owners each have selected/unselected devices and different detail preferences. Cross-owner selection/activation/renewal is refused; one owner's revocation leaves the other covered. Remote title/cwd/preview canaries and grant secrets are scanned across payloads, feeds, both gateways' logs, state files, and diagnostics archives; secrets are permitted only in coordinator fleet state. |
 
 `scripts/capability-leak-rules.test.ts` additionally exercises the fleet grant bearer's UUIDv4

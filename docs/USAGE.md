@@ -124,6 +124,11 @@ To stop alerts from a remote host on this device, turn its switch off under **Se
 
 For the full coordinator, grant, ordering, and wire contract, see [Fleet notifications in `ATTENTION_SPEC.md`](ATTENTION_SPEC.md#fleet-notifications).
 
+**After a home-gateway restart:** resolved asks are cleared. Each still-pending ask on the home
+host alerts once again, replacing its old alert rather than showing two. The gateway cannot tell
+whether a local ask changed while it was down, so it assigns a new request identity; subsequent
+updates do not re-alert it. Still-pending asks on remote hosts that did not restart are not repeated.
+
 ## Install as an app
 
 Open your gateway's Tailscale Serve HTTPS address (`https://host.example.ts.net`) from your allowlisted Tailscale device. Always install the directory address itself — never bookmark or save an individual collaboration link.

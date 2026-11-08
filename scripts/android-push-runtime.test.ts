@@ -913,6 +913,85 @@ test.each(["unchanged", "repost", "new-key", "request", "generation", "mismatch"
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
+test.each(["replacement", "no-clear", "wrong-clear", "old-post", "duplicates", "wrong-source", "wrong-request", "wrong-instance", "generation", "second-post"] as const)(
+  "restart replacement binds the old tombstone, new OS post and worker identity (%s)", async scenario => {
+    const previous: SessionMetadata = { instanceId: "synthetic", generation: 1, canView: true, canControl: true, inputRequired: true,
+      startedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z", cwdLabel: "omp-push-synthetic",
+      ask: { requestId: "synthetic-old-request", since: "2026-01-01T00:00:00.000Z" } };
+    const current = { ...previous, generation: scenario === "generation" ? 2 : 1,
+      ask: { ...previous.ask!, requestId: "synthetic-new-request" } };
+    const record = { key: "synthetic", tag: "omp-attention-synthetic", postedAt: 1, seen: true, visibleSince: 1,
+      title: "OMP session needs attention", body: "", text: "" };
+    let records: typeof record[] = [], data = { version: 3, type: "attention", instanceId: previous.instanceId, requestId: previous.ask!.requestId, source: undefined as string | undefined };
+    const tombstones: Record<string, number> = {};
+    let reads = 0, closes = 0;
+    const indexedDB = {
+      databases: async () => [{ name: "omp-notification-ordering" }],
+      open: (name: string) => {
+        expect(name).toBe("omp-notification-ordering");
+        const request = { onsuccess: () => {}, result: {
+          close: () => { closes++; },
+          transaction: (store: string, mode: string) => {
+            expect([store, mode]).toEqual(["state", "readonly"]); reads++;
+            const transaction = { oncomplete: () => {}, objectStore: (storeName: string) => {
+              expect(storeName).toBe("state");
+              return { get: (key: string) => { expect(key).toBe("worker"); return { result: { tombstones } }; } };
+            } };
+            queueMicrotask(() => transaction.oncomplete());
+            return transaction;
+          },
+        } };
+        queueMicrotask(() => request.onsuccess());
+        return request;
+      },
+    };
+    const driver = {
+      browserSend: async (method: string) => method === "Target.getTargets" ? { targetInfos: [
+        { type: "page", targetId: "page", url: identity.origin + "/" },
+        { type: "service_worker", targetId: "worker", url: identity.origin + "/service-worker.js" },
+      ] } : method === "Target.attachToTarget" ? { sessionId: "worker" } : {},
+      sessionSend: async (_session: string, _method: string, params: { expression: string }) => ({ result: { value: await runInNewContext(params.expression, {
+        indexedDB, self: { registration: { getNotifications: async () => [{ data }] } },
+      }) } }),
+      attachTab: async () => {}, navigate: async () => {}, send: async () => ({}),
+      evaluate: async (expression: string) => expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
+    };
+    const spies = [
+      spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [previous] }), { preconnect: globalThis.fetch.preconnect })),
+      spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
+      spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
+      spyOn(webApkOperations, "requireWebApk").mockResolvedValue("org.chromium.webapk.synthetic"),
+      spyOn(webApkOperations, "openWebApk").mockResolvedValue(undefined),
+      spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => records),
+      spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
+    ];
+    try {
+      const runtime = createAndroidPushRuntime(identity);
+      runtime.beforeEffect = async () => {}; runtime.dndOff = async () => true;
+      await runtime.fleet.select(true); await runtime.beginNotificationPhase("synthetic", "fleet_restart_verified");
+      records = [record];
+      expect((await runtime.observe(previous, "attention", "private")).count).toBe(1);
+      records = [{ ...record, postedAt: scenario === "old-post" ? 1 : 2 }];
+      if (scenario === "duplicates") records.push({ ...records[0]!, key: "synthetic-concurrent" });
+      data = { ...data, instanceId: scenario === "wrong-instance" ? "other" : previous.instanceId,
+        requestId: scenario === "wrong-request" ? previous.ask!.requestId : current.ask.requestId,
+        source: scenario === "wrong-source" ? "remote" : undefined };
+      if (scenario !== "no-clear") tombstones[`local\0synthetic\0${scenario === "wrong-clear" ? "other" : previous.ask!.requestId}`] = 1;
+      if (scenario === "duplicates") await expect(runtime.fleet.restartReplacement(previous, current)).rejects.toBeInstanceOf(QualificationFailure);
+      else {
+        expect(await runtime.fleet.restartReplacement(previous, current)).toBe(["replacement", "second-post"].includes(scenario));
+        if (scenario === "replacement" || scenario === "second-post") {
+          expect((await runtime.observe(current, "attention", "private")).count).toBe(1);
+          if (scenario === "second-post") {
+            records = [{ ...record, postedAt: 3 }];
+            await expect(runtime.observe(current, "attention", "private")).rejects.toBeInstanceOf(QualificationFailure);
+          } else expect((await runtime.observe(current, "attention", "private")).count).toBe(1);
+        }
+      }
+      expect(closes).toBe(reads);
+    } finally { for (const spy of spies) spy.mockRestore(); }
+  });
+
 test.each(["idle", "blocked", "unavailable"] as const)("resumed fleet deselection accepts hidden Hosts with alerts %s", async state => {
   let toggleActions = 0, controlReads = 0;
   const driver = {
