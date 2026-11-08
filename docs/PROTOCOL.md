@@ -437,7 +437,12 @@ checks it against its configuration with `parseFleetPushMessage(payload, remoteL
 sending; the worker checks its shape), and a local alert shows `fleet.label` before the existing
 Push v2 Session detail.
 There is no snapshot message: after a restart the coordinator sends exact clears and attentions from
-the outstanding asks it persisted per recipient. Payloads stay under 3 KiB and use the same urgency,
+the outstanding asks it persisted per recipient. Reconstructing the memory-only local registry
+assigns a new request ID to each still-pending local ask (OMP exposes only `inputRequired`).
+The old request is exactly cleared and one new alert replaces it, without concurrent duplicate
+alerts or further re-alerts on reconciliation. Still-pending remote asks keep their identity and
+are not repeated when only the home gateway restarts (ADR-048 amendment, 2026-11-08, #605).
+Payloads stay under 3 KiB and use the same urgency,
 TTL, and absent `Topic` as Push v2.
 
 The page reconciles in the foreground by first asking the worker for its push receipt count, then

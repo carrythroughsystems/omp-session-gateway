@@ -2373,7 +2373,8 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   pass, it sends exact clears for outstanding asks that are resolved, belong to a source that is now
   unauthorized, removed, re-pointed, or deselected, and attentions for asks it has not alerted;
   a stale source keeps its outstanding asks. After a source reconnect it diffs the new snapshot the
-  same way. Neither path emits a stop or repeats an alert. Opening the app reconciles from fresh
+  same way. Neither path emits a stop; the amendment below defines the once-only local re-alert
+  when the home gateway's memory-only registry is reconstructed. Opening the app reconciles from fresh
   snapshots of each source, but the page first captures the worker's push count: only alerts whose
   session received no push since then may be closed, and the page's badge applies only if no push
   arrived at all. These rules live in one pure reducer in `packages/protocol` with shared test
@@ -2462,3 +2463,22 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
 - A foreground reconciliation's badge holds only until the next push. A push generated before the
   page's snapshots but delivered after them, or an older reconciliation from a second window, can
   show its older count until the next push or reconciliation; alerts themselves are unaffected.
+
+### 2026-11-08 amendment — once-only local re-alert after a home restart
+
+**Founder decision:** [#605](https://github.com/carrythroughsystems/omp-session-gateway/issues/605).
+Document the observed behavior rather than persist the session registry or infer continuity from
+OMP's boolean `inputRequired`. OMP exposes no durable ask identity; while the gateway is down an
+old ask can resolve and a genuinely new ask can appear on the same session and generation.
+
+After a home-gateway (coordinator) restart, exact clears still remove asks resolved meanwhile.
+Each still-pending local ask receives a fresh request ID. Its old request is exactly cleared and
+one new alert replaces it: never two concurrent alerts for the session, and no further re-alert
+on the next reconciliation. Still-pending asks from remote sources that did not restart keep their
+request identity and are not repeated. A new local identity must not be silently mapped back to the
+old one, which could suppress a genuinely new ask. Source restarts have the same local-registry
+identity limitation on that source.
+
+This clarifies the restart contract without changing product bytes, durable state schemas,
+capability boundaries, or the memory-only registry invariant. Deterministic coordinator tests prove
+a still-pending remote request is not repeated across a home restart.
