@@ -139,12 +139,12 @@ function subscription(device: string): BrowserPushSubscription {
 function observed(inputRequired: boolean): ObservedSessionInput {
   return { instanceId, generation: 1, pid: 1234, sessionId: "synthetic-session", title: "SYNTHETIC_LOCAL_TITLE", cwdLabel: "SYNTHETIC_LOCAL_PROJECT", model: "test/model", startedAt: "2026-11-07T00:00:00.000Z", inputRequired, canControl: true, busy: false };
 }
-async function fixture(sources = [sourceA, sourceB]) {
+async function fixture(sources = [sourceA, sourceB], endpointSpacingMs = 0) {
   const root = await mkdtemp(join(tmpdir(), "fleet-coordinator-"));
   const config = gatewayConfig(root), registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 1000 }), transport = new Transport(), feeds = new Feeds(), clock = new Clock();
   const logs: string[] = [];
   const logger = new SafeLogger({ write: line => logs.push(line) });
-  const push = await PushService.open({ config, registry, transport, logger });
+  const push = await PushService.open({ config, registry, transport, logger, endpointSpacingMs });
   const coordinatorConfig: FleetCoordinatorConfig = { publicOrigin: config.http.publicOrigin, ownLabel: "Home", sources };
   let coordinator = await FleetCoordinator.open({ config: coordinatorConfig, stateDir: config.paths.stateDir, push, registry, fetch: feeds.fetch, clock, logger, random: () => 0.5 });
   cleanups.push(async () => { transport.release(); await coordinator.stop(); await push.stop(); });
@@ -216,6 +216,20 @@ describe("fleet coordinator", () => {
     expect(f.transport.workers.get(two)!.displayed).toHaveLength(0);
     const state = JSON.parse(await readFile(join(f.config.paths.stateDir, "fleet-notifications.json"), "utf8"));
     expect(state.grants).toHaveLength(0);
+  });
+
+  test("a paced burst to one device does not hold back another device's alerts", async () => {
+    const f = await fixture([sourceA, sourceB], 20); const one = await f.device(alice, "one"), two = await f.device(alice, "two");
+    const sessions = Array.from({ length: 12 }, (_, index) => ({ instanceId: `synthetic-paced-${index}`, generation: 1, requestId }));
+    await f.grant(alice, sourceA.id, sessions);
+    await f.coordinator.select(alice, one, [sourceA.id]); await f.coordinator.select(alice, two, [sourceA.id]);
+    await settled(f.coordinator);
+    const endpoints = f.transport.calls.map(call => call.endpoint);
+    expect(endpoints.filter(value => value === one)).toHaveLength(12);
+    expect(endpoints.filter(value => value === two)).toHaveLength(12);
+    // Eight launched deliveries waiting on `one`'s pacing would otherwise queue `two` behind them.
+    expect(endpoints.indexOf(two)).toBeLessThan(3);
+    expect(f.transport.workers.get(two)!.displayed).toHaveLength(12);
   });
 
   test("snapshot diff clears old requests before alerting replacements; stops are live only", async () => {
@@ -692,7 +706,7 @@ describe("fleet coordinator", () => {
     const f = await fixture(); const device = await f.device(); await f.grant(alice, sourceA.id);
     await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator); await f.coordinator.stop(); await f.push.stop();
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 1000 });
-    const push = await PushService.open({ config: { ...f.config, notifications: { sources: [sourceA.id] } }, registry, transport: f.transport, logger: new SafeLogger({ write() {} }) });
+    const push = await PushService.open({ config: { ...f.config, notifications: { sources: [sourceA.id] } }, registry, transport: f.transport, logger: new SafeLogger({ write() {} }), endpointSpacingMs: 0 });
     registry.reconcile({ observed: [observed(true)], retained: new Set() });
     await Bun.sleep(1); expect(f.transport.legacy).toHaveLength(0);
     const coordinator = await FleetCoordinator.open({ config: f.coordinatorConfig, push, registry, stateDir: f.config.paths.stateDir, fetch: f.feeds.fetch, clock: f.clock });
