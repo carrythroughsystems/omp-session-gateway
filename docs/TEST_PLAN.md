@@ -266,10 +266,13 @@ For one remaining fleet step instead of a full lane, use:
 OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development-step coordinator-restart "$PUBLISHED_ARCHIVE"
 ```
 
-The step names are `coordinator-restart`, `revocation`, `fleet-sinks`, `fleet-restoration`, and
-`legacy-tail`. Each starts from a fresh epoch, captures the Pixel baseline, starts the local fixture,
+The step names are `fleet-identity`, `coordinator-restart`, `revocation`, `fleet-sinks`,
+`fleet-restoration`, and `legacy-tail`. Each starts from a fresh epoch, captures the Pixel baseline, starts the local fixture,
 subscribes, prepares the same isolated source/config/Serve mapping and grants through PWA enrollment,
-and admits the warm worker observer once. It skips the earlier local and fleet checks, not their
+and admits the warm worker observer once. `fleet-identity` first runs the legacy delayed-tap phase
+to retain its generation change, notification replays and browser lifecycle, then runs fleet Private,
+Session and Preview together, sharing their real tags and one held observer. Other selections skip
+the earlier local and fleet checks, not their
 assertions inside the selected step. `fleet-sinks` first performs the real remote Control tap and
 answer/clear needed to scan that exact live capability; `legacy-tail` first restores the fleet
 source and releases the observer, then runs force-stop, permission, lock/resume, network, Doze and

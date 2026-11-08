@@ -1115,6 +1115,13 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const records = (await phaseRecords()).filter(record => record.tag.endsWith(expected.tag));
       const owned = records[0];
       const forbiddenFound = records.some(record => expected.forbidden.some(value => record.text.includes(value)));
+      const cached = verifiedWorkerPosts.get(expected.tag);
+      if (fleetEnabled) console.log("android-fleet-delivery: " + JSON.stringify({
+        phase, remote: remoteIds.has(session.instanceId), osCount: records.length,
+        postTime: owned?.postedAt ?? 0, baselineTime: owned === undefined ? 0 : baselineRecords.get(owned.key) ?? 0,
+        cacheHit: cached !== undefined && cached.key === owned?.key && cached.postedAt === owned?.postedAt,
+        titleMatches: owned?.title === expected.title, bodyMatches: owned?.body === expected.body, forbiddenFound,
+      }));
       if (records.length === 1 && owned !== undefined && owned.postedAt <= (baselineRecords.get(owned.key) ?? 0)) {
         throw new Error("owned notification did not advance from its record baseline");
       }
@@ -1139,6 +1146,13 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           data.source === (remoteIds.has(session.instanceId) ? remote.binding : undefined) &&
           data.instanceId === session.instanceId && data.requestId === session.ask?.requestId &&
           (prior.generation === undefined || prior.generation === session.generation);
+        console.log("android-fleet-worker: " + JSON.stringify({
+          phase, remote: remoteIds.has(session.instanceId), count: data.count,
+          versionThree: data.version === 3, attention: data.type === "attention",
+          sourceMatches: data.source === (remoteIds.has(session.instanceId) ? remote.binding : undefined),
+          instanceMatches: data.instanceId === session.instanceId, requestMatches: data.requestId === session.ask?.requestId,
+          generationMatches: prior.generation === undefined || prior.generation === session.generation, matches,
+        }));
         // A replaced request's previous OS row may still be settling. Do not record its post time
         // as the new request's deduplication baseline, or mistake the old row for delivery.
         if (!matches) return { count: 0, titleMatches: false, bodyMatches: false, forbiddenFound };

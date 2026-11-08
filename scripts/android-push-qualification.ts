@@ -862,6 +862,7 @@ async function runAndroidPushLane(input: LaneInput, developmentStep?: FleetPushD
     };
     const attempt = async (phase: AndroidPushPhase, action: () => Promise<void>): Promise<void> => {
       if (developmentStep !== undefined && !FLEET_PUSH_PHASES.some(value => value === phase) &&
+        !(developmentStep === "fleet-identity" && phase === "stale_taps_verified") &&
         !(developmentStep === "legacy-tail" && LEGACY_PUSH_TAIL_PHASES.some(value => value === phase))) return;
       activePhase = phase; phaseStarted = runtime.now(); metrics = emptyPushDeliveryMetrics();
       armedAsks.clear();

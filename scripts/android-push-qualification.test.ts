@@ -1620,7 +1620,9 @@ test.each(Object.keys(FLEET_PUSH_DEVELOPMENT_STEPS) as FleetPushDevelopmentStep[
     const progress = parseAndroidPushProgress(host.checkpoints.at(-1));
     const selected = FLEET_PUSH_DEVELOPMENT_STEPS[step];
     expect(Object.keys(progress.results).filter(phase => phase.startsWith("fleet_"))).toEqual(
-      selected === "legacy-tail" ? ["fleet_enrolled"] : ["fleet_enrolled", selected]);
+      selected === "legacy-tail" ? ["fleet_enrolled"] : selected === "fleet-identity" ?
+        ["fleet_enrolled", "fleet_private_verified", "fleet_session_verified", "fleet_preview_verified"] : ["fleet_enrolled", selected]);
+    expect(progress.results.stale_taps_verified !== undefined).toBe(step === "fleet-identity");
     expect(progress.results.private_verified).toBeUndefined();
     expect(progress.results.evidence_complete).toBeUndefined();
     expect(progress.results.force_stop_verified !== undefined).toBe(step === "legacy-tail");
