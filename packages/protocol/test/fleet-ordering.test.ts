@@ -141,6 +141,22 @@ describe("fleet ordering bounds", () => {
     expect(Object.keys(state.asks).some(key => key.endsWith("req_flood_00000001"))).toBe(false);
   });
 
+  test("a reconcile at the bound counts exactly the asks it keeps", () => {
+    let state = EMPTY_FLEET_WORKER_STATE;
+    for (let n = 1; n <= MAX_FLEET_WORKER_RECORDS; n++) {
+      const id = String(n).padStart(8, "0");
+      state = reduceFleetPush(state, fleetMessage({ type: "attention", source: "studio", instanceId: `inst${id}`, requestId: `req_bound_${id}`, seq: [1, n], badge: [n, true] }), [], n).state;
+    }
+    const reconcile = parseFleetReconcileMessage({
+      type: "omp-notification-reconcile", version: 3, asOf: { received: state.received }, fresh: ["local"],
+      pending: [{ instanceId: "local0001", generation: 1, requestId: "req_bound_local_01" }], counted: ["local", aliases.studio], complete: false,
+    });
+    const first = reduceFleetReconcile(state, reconcile, [], 0);
+    expect(Object.keys(first.state.asks)).toHaveLength(MAX_FLEET_WORKER_RECORDS);
+    expect(first.effects).toContainEqual({ kind: "badge", count: MAX_FLEET_WORKER_RECORDS, complete: false });
+    expect(reduceFleetReconcile(first.state, reconcile, [], 0).effects).toContainEqual({ kind: "badge", count: MAX_FLEET_WORKER_RECORDS, complete: false });
+  });
+
   test("an older epoch changes nothing at all", () => {
     const newer = reduceFleetPush(EMPTY_FLEET_WORKER_STATE, fleetMessage({ type: "attention", instanceId: "aaaa1111bbbb2222", requestId: "req_epoch_check_0a", seq: [9, 1], badge: [1, true] }), [], 0);
     const older = reduceFleetPush(newer.state, fleetMessage({ type: "clear", instanceId: "aaaa1111bbbb2222", requestId: "req_epoch_check_0a", seq: [8, 9], badge: [0, true] }), [], 0);

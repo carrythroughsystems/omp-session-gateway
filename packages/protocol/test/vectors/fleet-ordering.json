@@ -239,6 +239,19 @@
         { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local"], "complete": true } }
       ],
       "expect": { "displayed": ["omp-attention-xeffoL_kxqTcht3AiIR0FT-aaaa1111bbbb2222|attention|req_uncounted_00a"], "badge": [0, true], "alerts": 1 }
+    },
+    {
+      "name": "an ignored older duplicate never stops a snapshot from recording its session's newer ask",
+      "steps": [
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_dup_shield_0a", "seq": [14, 1], "badge": [1, true] } },
+        { "push": { "type": "clear", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_dup_shield_0a", "seq": [14, 2], "badge": [0, true] } },
+        { "capture": true },
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_dup_shield_0a", "seq": [14, 1], "badge": [1, true] } },
+        { "reconcile": { "fresh": ["local", "studio"], "pending": [{ "source": "studio", "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_dup_shield_0b" }], "counted": ["local", "studio"], "complete": true } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local", "studio"], "complete": false } }
+      ],
+      "expect": { "displayed": [], "badge": [1, false], "alerts": 1 }
     }
   ]
 }

@@ -452,9 +452,10 @@ where `fresh` lists `local` or bindings whose `pending` asks are complete, `coun
 the selected `current` or `stale` bindings the badge counts (every fresh source among them), and
 `complete` is the coverage flag. The worker closes only alerts whose session received no push since
 `asOf`. It keeps one pending ask per source session: a Push v3 attention records it, an exact clear
-removes it, and a fresh source's snapshot replaces it for sessions without a push since `asOf`. If
-no push arrived since `asOf`, the worker sets the badge to the number of known asks of `counted`
-sources, so an unreachable source counts what pushes and earlier snapshots taught the worker.
+removes it, and a fresh source's snapshot replaces it unless an attention recorded it after
+`asOf`. If no push arrived since `asOf`, the worker sets the badge to the number of known asks of
+`counted` sources, so an unreachable source counts what pushes and earlier snapshots taught the
+worker.
 
 Fleet notification data is `{ version: 3, type, source?, instanceId, requestId }` for attention
 and `{ version: 3, type, source?, instanceId, generation }` for a stop. Routes append

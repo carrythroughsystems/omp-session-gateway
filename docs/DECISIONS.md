@@ -2527,10 +2527,11 @@ The worker now keeps one pending ask per source session in its durable state, bo
 request keys (oldest dropped first). A Push v3 attention that passes the epoch and per-session order
 checks records its request unless it is tombstoned; every exact clear, v3 or v2, removes its
 request; Push v2 attentions and stops leave the map alone. A reconcile replaces a fresh source's
-entries for sessions without a push since `asOf` and never records a tombstoned request; a session
-pushed during the fetch keeps its push-derived entry. The page posts `counted` (local plus selected
-`current` or `stale` bindings) and `complete` instead of a count. If no push arrived since `asOf`,
-the worker sets the badge to the known asks of `counted` sources. The page keeps no ask state.
+entries, except an ask an attention recorded after `asOf`, and never records a tombstoned request;
+an ignored duplicate push records nothing, so it never shields a snapshot's ask. The page posts
+`counted` (local plus selected `current` or `stale` bindings) and `complete` instead of a count. If
+no push arrived since `asOf`, the worker sets the badge to the known asks of `counted` sources. The
+page keeps no ask state.
 
 The map is valid only while its `asksReceived` equals the worker's `received`. An older worker
 carries both fields through its spreads but advances `received` on every push, so after a downgrade
