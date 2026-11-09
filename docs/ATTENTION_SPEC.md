@@ -275,7 +275,10 @@ including an unreachable host's last-known asks. When the count is zero but a se
 `Covered`, the badge shows the platform's plain marker instead of clearing. The directory's fleet
 `All clear` appears only when every selected host is `Covered` and none has a pending ask;
 otherwise it shows known work with the unavailable hosts named.
-Last-known asks are those the open app last observed: if the app is opened while a selected host is unreachable, that host's displayed alerts stay and the badge shows the plain marker (not a count for that host) until the host recovers.
+An unreachable host's last-known asks are the ones the phone last learned of: those in the app's
+last fresh snapshot of that host, updated by every alert and clear pushed since. The phone keeps
+them across app and phone restarts. Opening the app during an outage therefore still counts that
+host's asks, and an ask whose clear reached the phone is never counted again.
 
 **Taps.** A remote alert's route adds `&source=<binding>`. The app maps the binding to a currently
 configured source; an unknown binding, a changed origin, or a revoked host shows the expired notice

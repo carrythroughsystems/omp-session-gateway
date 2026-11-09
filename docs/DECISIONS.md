@@ -2376,18 +2376,20 @@ never enter push. Operators commonly pair an always-on desktop with laptops that
   same way. Neither path emits a stop; the amendment below defines the once-only local re-alert
   when the home gateway's memory-only registry is reconstructed. Opening the app reconciles from fresh
   snapshots of each source, but the page first captures the worker's push count: only alerts whose
-  session received no push since then may be closed, and the page's badge applies only if no push
-  arrived at all. These rules live in one pure reducer in `packages/protocol` with shared test
-  vectors, used by the worker and the qualification harness.
+  session received no push since then may be closed, and the reconciled badge applies only if no
+  push arrived at all (the 2026-11-09 amendment below moves its count into the worker). These rules
+  live in one pure reducer in `packages/protocol` with shared test vectors, used by the worker and
+  the qualification harness.
 - **Coverage and badges.** Each selected source is `current`, `stale`, `unauthorized`,
   `unsupported`, or `pending`; unselected sources are excluded. *Notifications enabled* (permission
   and subscription) is reported separately from *All selected hosts covered* (every selected
   source current). The badge counts known pending Control-capable asks, including a stale source's
-  last-known asks; a zero count with incomplete coverage shows the platform's badge flag instead of
-  clearing. Fleet "All clear" needs every selected source current and an empty reconciled set. A
-  stale source keeps its last-known alerts. When a grant becomes unauthorized or its source leaves
-  the configuration, the coordinator clears that source's alerts for the owner's devices and reports
-  the source as unauthorized, never as empty.
+  last-known asks as the worker knows them (2026-11-09 amendment); a zero count with incomplete
+  coverage shows the platform's badge flag instead of clearing. Fleet "All clear" needs every
+  selected source current and an empty reconciled set. A stale source keeps its last-known alerts.
+  When a grant becomes unauthorized or its source leaves the configuration, the coordinator clears
+  that source's alerts for the owner's devices and reports the source as unauthorized, never as
+  empty.
   A source answering 404 (`unsupported`) has its alerts cleared like a removed source.
 - **Detail.** The coordinator applies detail before transport. In v3, Private shows fixed titles and
   no body. Session and Preview show, for a remote session, the target's configured label and a
@@ -2511,3 +2513,35 @@ back that session's next push to another; with more than eight busy fleet endpoi
 for a window entry. Ordinary asks and clears are seconds apart, so they rarely wait. If the loss
 persists with pacing, the physical lane's held-observer counts (push entry versus reduction)
 identify which side drops it.
+
+### 2026-11-09 amendment — the worker counts an unreachable source's asks
+
+**Founder decision (2026-11-09):** fix
+[#598](https://github.com/carrythroughsystems/omp-session-gateway/issues/598) and the fresh-open
+count in one package. The page used to count a source it could not refresh from its own retained
+snapshot. That view could predate a clear the phone had already received, so an answered ask was
+counted again while its host was unreachable; a freshly opened app had no view at all and showed
+the plain marker instead of that host's count.
+
+The worker now keeps one pending ask per source session in its durable state, bounded at 2,048
+request keys (oldest dropped first). A Push v3 attention that passes the epoch and per-session order
+checks records its request unless it is tombstoned; every exact clear, v3 or v2, removes its
+request; Push v2 attentions and stops leave the map alone. A reconcile replaces a fresh source's
+entries, except an ask an attention recorded after `asOf`, and never records a tombstoned request;
+an ignored duplicate push records nothing, so it never shields a snapshot's ask. The page posts
+`counted` (local plus selected `current` or `stale` bindings) and `complete` instead of a count. If
+no push arrived since `asOf`, the worker sets the badge to the known asks of `counted` sources. The
+page keeps no ask state.
+
+The map is valid only while its `asksReceived` equals the worker's `received`. An older worker
+carries both fields through its spreads but advances `received` on every push, so after a downgrade
+during which any push arrived the map reads as empty until pushes and fresh snapshots rebuild it. A
+record saved before the map existed reads the same way.
+
+Consequences: receipt order still decides between a snapshot and a later push, so a delayed older
+attention takes its session's entry until its successor clear or attention arrives, as its alert
+does. A lost push leaves the count stale until that source's next fresh snapshot, as a lost clear
+leaves its alert. After a downgrade with reconciles but no push, an older worker's reconcile can
+leave a resolved ask in the map until that source's next fresh snapshot. A failed IndexedDB write
+keeps the existing in-memory fallback. Push bytes, the coordinator, and capability boundaries are
+unchanged.

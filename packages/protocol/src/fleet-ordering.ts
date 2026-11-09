@@ -31,6 +31,17 @@ export interface FleetWorkerState {
   readonly tombstones: Readonly<Record<string, number>>;
   /** Requests already shown, so a repeated attention does not alert again. */
   readonly shown: Readonly<Record<string, number>>;
+  /**
+   * Each source session's pending ask, by request key, with `received` when it was recorded. Push v3
+   * attentions and fresh page snapshots record it; exact clears remove it. The badge counts a selected
+   * source the page could not refresh from here. Records saved before this field existed lack it.
+   */
+  readonly asks: Readonly<Record<string, number>>;
+  /**
+   * `received` when `asks` was last maintained. A worker without `asks` keeps both fields through its
+   * spreads but advances `received`, so any push it handled leaves `asks` unknown (read as empty).
+   */
+  readonly asksReceived: number;
   /** Sequence of the badge currently applied, or null when only Push v2 has set it. */
   readonly badge: FleetSequence | null;
   /** True once the page enabled fleet delivery for this device; Push v2 counts stop applying. */
@@ -38,7 +49,8 @@ export interface FleetWorkerState {
 }
 
 export const EMPTY_FLEET_WORKER_STATE: FleetWorkerState = {
-  epoch: 0, lastN: 0, marks: {}, received: 0, touched: {}, tombstones: {}, shown: {}, badge: null, fleet: false,
+  epoch: 0, lastN: 0, marks: {}, received: 0, touched: {}, tombstones: {}, shown: {}, asks: {}, asksReceived: 0,
+  badge: null, fleet: false,
 };
 
 /** A notification currently displayed by this worker, with its parsed metadata-only data. */
@@ -79,6 +91,11 @@ function bounded(record: Readonly<Record<string, number>>, keep: (value: number)
   return Object.fromEntries(entries.slice(0, MAX_FLEET_WORKER_RECORDS));
 }
 
+/** The asks this state vouches for: none before they existed or after another worker handled a push. */
+function knownAsks(state: FleetWorkerState): Readonly<Record<string, number>> {
+  return state.asks !== undefined && state.asksReceived === state.received ? state.asks : {};
+}
+
 /** Age out tombstones and shown requests, and count this push against the session it names. */
 function received(state: FleetWorkerState, now: number, session: string): FleetWorkerState {
   const fresh = (recordedAt: number): boolean => now - recordedAt < FLEET_TOMBSTONE_RETENTION_MS;
@@ -89,6 +106,8 @@ function received(state: FleetWorkerState, now: number, session: string): FleetW
     touched: bounded({ ...state.touched, [session]: count }),
     tombstones: bounded(state.tombstones, fresh),
     shown: bounded(state.shown, fresh),
+    asks: knownAsks(state),
+    asksReceived: count,
   };
 }
 
@@ -96,7 +115,7 @@ function badgeEffect(badge: FleetBadge): FleetEffect {
   return { kind: "badge", count: badge.count, complete: badge.complete };
 }
 
-/** Record a clear: tombstone the exact request and close it only if that request is displayed. */
+/** Record a clear: tombstone the exact request, forget it as pending, and close it only if displayed. */
 function clearRequest(
   state: FleetWorkerState,
   source: string | undefined,
@@ -108,7 +127,8 @@ function clearRequest(
   const key = requestKey(source, instanceId, requestId);
   const tag = fleetNotificationTag(source, instanceId);
   const { [key]: _shown, ...shown } = state.shown;
-  const next = { ...state, tombstones: bounded({ ...state.tombstones, [key]: now }), shown };
+  const { [key]: _ask, ...asks } = state.asks;
+  const next = { ...state, tombstones: bounded({ ...state.tombstones, [key]: now }), shown, asks };
   const visible = displayed.some(notification => notification.tag === tag &&
     notification.intent.kind === "attention" && notification.intent.requestId === requestId);
   return { state: next, effects: visible ? [{ kind: "close", tag, requestId }] : [] };
@@ -171,6 +191,12 @@ export function reduceFleetPush(
     const attentionShown = displayed.some(notification => notification.tag === tag && notification.intent.kind === "attention");
     return { state, effects: attentionShown ? effects : [...effects, { kind: "show", tag, renotify: false }] };
   }
+  const key = requestKey(source, instanceId, message.requestId);
+  if (state.tombstones[key] === undefined) {
+    // An applied attention is its session's one pending ask.
+    const others = Object.entries(state.asks).filter(([existing]) => !existing.startsWith(`${session}\0`));
+    state = { ...state, asks: bounded({ ...Object.fromEntries(others), [key]: state.received }) };
+  }
   const shown = showAttention(state, source, instanceId, message.requestId, displayed, now, true);
   return { state: shown.state, effects: [...effects, ...shown.effects] };
 }
@@ -203,13 +229,16 @@ export function reduceLegacyPush(
 /**
  * Foreground reconciliation from the page's fresh, authenticated snapshots. `asOf.received` is the
  * worker's push count when the page began fetching: only alerts whose session received no push since
- * may be closed as resolved, and the page's badge applies only if no push at all arrived since. The
+ * may be closed as resolved. A fresh source's snapshot replaces its known asks, except one a push
+ * recorded after `asOf`, and never records a cleared request. The badge applies only if no push at
+ * all arrived since; it counts the known asks of `counted` sources, so a source the page could not
+ * refresh keeps what pushes and earlier snapshots taught this worker, never an older page's view. The
  * applied badge is pinned to the newest coordinator sequence seen, so a delayed older push cannot
  * overwrite it.
  */
 export function reduceFleetReconcile(
   previous: FleetWorkerState,
-  snapshot: Pick<FleetReconcileMessage, "asOf" | "fresh" | "pending" | "badge">,
+  snapshot: Pick<FleetReconcileMessage, "asOf" | "fresh" | "pending" | "counted" | "complete">,
   displayed: readonly FleetDisplayedNotification[],
   now: number,
 ): FleetReduction {
@@ -227,10 +256,30 @@ export function reduceFleetReconcile(
     tombstones[key] = now;
     effects.push({ kind: "close", tag: notification.tag, requestId: intent.requestId });
   }
+  // An ask recorded by `asOf` is older than this snapshot. A later attention keeps receipt order; an
+  // ignored duplicate records nothing, so it never shields the snapshot's ask for that session.
+  const asks: Record<string, number> = {};
+  const claimed = new Set<string>();
+  for (const [key, at] of Object.entries(knownAsks(previous))) {
+    const isFresh = fresh.has(key.slice(0, key.indexOf("\0")));
+    if (isFresh && at <= snapshot.asOf.received) continue;
+    asks[key] = at;
+    if (isFresh) claimed.add(key.slice(0, key.lastIndexOf("\0")));
+  }
+  for (const ask of snapshot.pending) {
+    const session = sessionKey(ask.source, ask.instanceId);
+    const key = requestKey(ask.source, ask.instanceId, ask.requestId);
+    if (claimed.has(session) || tombstones[key] !== undefined) continue;
+    claimed.add(session);
+    asks[key] = previous.received;
+  }
+  const known = bounded(asks);
   let badge = previous.badge;
   if (previous.received === snapshot.asOf.received) {
-    effects.push(badgeEffect(snapshot.badge));
+    const counted = new Set(snapshot.counted);
+    const count = Object.keys(known).filter(key => counted.has(key.slice(0, key.indexOf("\0")))).length;
+    effects.push(badgeEffect({ count, complete: snapshot.complete }));
     if (previous.epoch > 0) badge = { epoch: previous.epoch, n: previous.lastN };
   }
-  return { state: { ...previous, tombstones: bounded(tombstones), badge }, effects };
+  return { state: { ...previous, tombstones: bounded(tombstones), asks: known, asksReceived: previous.received, badge }, effects };
 }

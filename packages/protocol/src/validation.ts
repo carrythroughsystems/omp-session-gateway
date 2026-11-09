@@ -1073,16 +1073,24 @@ export function parseFleetPushMessage(value: unknown, remoteLabels?: ReadonlyMap
   throw new ProtocolValidationError();
 }
 
+/** A reconcile message's source list: `local` or bindings, each at most once. */
+function parseFleetSourceTokens(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > MAX_FLEET_SOURCES) throw new ProtocolValidationError();
+  const tokens = value.map(entry => entry === LOCAL_FLEET_SOURCE_ID ? entry : requireBinding(entry));
+  if (new Set(tokens).size !== tokens.length) throw new ProtocolValidationError();
+  return tokens;
+}
+
 /** The page's authoritative snapshot handed to the worker; `asOf` is the worker sequence it captured first. */
 export function parseFleetReconcileMessage(value: unknown): FleetReconcileMessage {
   const record = requireRecord(value);
-  requireExactKeys(record, ["type", "version", "asOf", "fresh", "pending", "badge"]);
+  requireExactKeys(record, ["type", "version", "asOf", "fresh", "pending", "counted", "complete"]);
   if (record.type !== "omp-notification-reconcile" || record.version !== FLEET_PUSH_VERSION) throw new ProtocolValidationError();
   const asOf = requireRecord(record.asOf);
   requireExactKeys(asOf, ["received"]);
-  if (!Array.isArray(record.fresh) || record.fresh.length > MAX_FLEET_SOURCES) throw new ProtocolValidationError();
-  const fresh = record.fresh.map(entry => entry === LOCAL_FLEET_SOURCE_ID ? entry : requireBinding(entry));
-  if (new Set(fresh).size !== fresh.length) throw new ProtocolValidationError();
+  const fresh = parseFleetSourceTokens(record.fresh);
+  const counted = parseFleetSourceTokens(record.counted);
+  if (fresh.some(token => !counted.includes(token)) || typeof record.complete !== "boolean") throw new ProtocolValidationError();
   if (!Array.isArray(record.pending) || record.pending.length > MAX_FLEET_BADGE_COUNT) throw new ProtocolValidationError();
   const pending = record.pending.map(parseFleetPendingAsk);
   if (pending.some(ask => !fresh.includes(ask.source ?? LOCAL_FLEET_SOURCE_ID))) throw new ProtocolValidationError();
@@ -1092,7 +1100,8 @@ export function parseFleetReconcileMessage(value: unknown): FleetReconcileMessag
     asOf: { received: requireInteger(asOf.received, 0) },
     fresh,
     pending,
-    badge: parseFleetBadge(record.badge),
+    counted,
+    complete: record.complete,
   };
 }
 

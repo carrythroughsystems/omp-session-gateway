@@ -253,7 +253,6 @@ let fleetNotificationRows: readonly FleetSourceStatus[] = [];
 const fleetNotificationErrors = new Map<string, string>();
 const fleetNotificationBusy = new Set<string>();
 const bindings = new Map<SourceKey, string>();
-const knownNotificationAsks = new Map<SourceKey, readonly FleetPendingAsk[]>();
 const renewedFleetGrants = new Map<string, number>();
 const rejectedFleetGrants = new Set<string>();
 const fleetNotifications = new FleetNotificationTransport();
@@ -695,12 +694,6 @@ async function refreshFleetNotifications(renew = true, probe = false): Promise<v
         await applyFleetWorkerMode(fleetWorkerModePending);
       }
     } finally {
-      const retained = new Set<SourceKey>([localKey]);
-      for (const row of fleetNotificationRows) {
-        const source = configuredNotificationSource(row.sourceId);
-        if (source !== undefined && row.selected && (row.state === "current" || row.state === "stale")) retained.add(sourceKey(source));
-      }
-      for (const key of knownNotificationAsks.keys()) if (!retained.has(key)) knownNotificationAsks.delete(key);
       renderNotificationHosts();
       render();
       scheduleFleetStatusRefresh();
@@ -812,15 +805,15 @@ async function reconcileFleetNotificationSnapshot(probe: boolean): Promise<void>
   if (!fleetNotificationsOffered || fleetWorkerModePending !== undefined) return;
   const fresh: string[] = [];
   const pending: FleetPendingAsk[] = [];
-  const selectedKeys = new Set<SourceKey>([localKey]);
+  // The badge counts local and selected current or stale sources; the worker counts a source this
+  // page could not refresh from the asks it learned itself, never from this page's older view.
+  const countedKeys = new Set<SourceKey>([localKey]);
   const observe = (key: SourceKey, metadata: readonly Metadata[]): void => {
     const source = bindings.get(key);
-    const asks = metadata.flatMap(session => session.inputRequired && session.canControl && session.ask !== undefined
-      ? [{ ...(source === undefined ? {} : { source }), instanceId: session.instanceId,
-        generation: session.generation, requestId: session.ask.requestId }] : []);
-    knownNotificationAsks.set(key, asks);
     fresh.push(source ?? "local");
-    pending.push(...asks);
+    pending.push(...metadata.flatMap(session => session.inputRequired && session.canControl && session.ask !== undefined
+      ? [{ ...(source === undefined ? {} : { source }), instanceId: session.instanceId,
+        generation: session.generation, requestId: session.ask.requestId }] : []));
   };
   await Promise.all([
     (async () => {
@@ -829,23 +822,23 @@ async function reconcileFleetNotificationSnapshot(probe: boolean): Promise<void>
       try {
         const response = await fetch("/api/v1/sessions", { cache: "no-store", credentials: "same-origin", redirect: "error", signal: controller.signal });
         if (response.ok) observe(localKey, parseSessionListResponse(await boundedJson(response, SNAPSHOT_BYTES)).sessions);
-      } catch { /* No fresh observation: retain known asks, never close this source. */ }
+      } catch { /* No fresh observation: the worker keeps this source's known asks and closes nothing. */ }
       finally { window.clearTimeout(timeout); }
     })(),
     ...selected.map(async row => {
       const source = configuredNotificationSource(row.sourceId);
       if (source === undefined) return;
       const key = sourceKey(source);
-      if (row.state === "current" || row.state === "stale") selectedKeys.add(key);
+      if (row.state === "current" || row.state === "stale") countedKeys.add(key);
       if (row.state === "current" && await remotes.get(key)?.refreshAfterCurrent() === "healthy") {
         observe(key, remotes.get(key)!.snapshot!.sessions);
       }
     }),
   ]);
-  const count = [...selectedKeys].reduce((sum, key) => sum + (knownNotificationAsks.get(key)?.length ?? 0), 0);
+  const counted = [...countedKeys].flatMap(key => key === localKey ? ["local"] : bindings.has(key) ? [bindings.get(key)!] : []);
   notificationRegistration?.active?.postMessage(parseFleetReconcileMessage({
-    type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received }, fresh, pending,
-    badge: { count, complete: notificationCoverageComplete() && fresh.length === selected.length + 1 },
+    type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received }, fresh, pending, counted,
+    complete: notificationCoverageComplete() && fresh.length === selected.length + 1,
   }));
 }
 

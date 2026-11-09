@@ -4983,7 +4983,7 @@ describe("fleet background notifications", () => {
       await settleUntil(() => harness.workerMessages.some(message =>
         (message as { type: string }).type === "omp-notification-reconcile"), 1_000);
       expect(harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-reconcile").at(-1))
-        .toMatchObject({ pending: [{ instanceId: current.instanceId }], badge: { count: 1, complete: true } });
+        .toMatchObject({ pending: [{ instanceId: current.instanceId }], counted: ["local", await fleetSourceBinding("remote", "https://remote.example")], complete: true });
     } finally { harness.setVisibility("hidden"); }
   });
 
@@ -5010,7 +5010,7 @@ describe("fleet background notifications", () => {
       for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
       const messages = harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-reconcile");
       expect(messages.length).toBeGreaterThanOrEqual(2);
-      expect(messages.at(-1)).toMatchObject({ fresh: ["local"], pending: [], badge: { count: 0, complete: true } });
+      expect(messages.at(-1)).toMatchObject({ fresh: ["local"], pending: [], counted: ["local"], complete: true });
     } finally { snapshot.resolve(); harness.setVisibility("hidden"); }
   });
 
@@ -5292,23 +5292,28 @@ describe("fleet background notifications", () => {
   }
 
   for (const state of ["unauthorized", "not_enrolled", "unsupported", "deselected", "stale"] as const) {
-    test(`focused remediation: badge asks ${state === "stale" ? "retain" : "exclude"} a formerly current ${state} host`, async () => {
+    test(`focused remediation: the badge ${state === "stale" ? "keeps counting" : "stops counting"} a formerly current ${state} host`, async () => {
       const current = session("badge-remote-known", { inputRequired: true });
       const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
       const harness = await bootApp({
         permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
         initialSessions: [], remoteSessions: [current], fleetResponse: api.respond, suffix: `fleet-badge-exclusion-${state}`,
       });
-      const reconciles = (): { badge: { count: number; complete: boolean } }[] => harness.workerMessages.filter(message =>
-        (message as { type: string }).type === "omp-notification-reconcile") as { badge: { count: number; complete: boolean } }[];
+      const binding = await fleetSourceBinding("remote", "https://remote.example");
+      const reconciles = (): { fresh: string[]; pending: unknown[]; counted: string[]; complete: boolean }[] => harness.workerMessages.filter(message =>
+        (message as { type: string }).type === "omp-notification-reconcile") as { fresh: string[]; pending: unknown[]; counted: string[]; complete: boolean }[];
       try {
-        await settleUntil(() => reconciles().at(-1)?.badge.count === 1, 1_000);
+        await settleUntil(() => reconciles().at(-1)?.pending.length === 1, 1_000);
+        expect(reconciles().at(-1)).toMatchObject({ fresh: ["local", binding], counted: ["local", binding], complete: true });
         const before = reconciles().length;
         api.rows = state === "not_enrolled" ? [{ sourceId: "remote", state, selected: true }]
           : api.rows.map(row => ({ ...row, state: state === "deselected" ? "current" : state, selected: state !== "deselected" }));
         harness.elements.settingsButton.dispatchEvent(new Event("click"));
         await settleUntil(() => reconciles().length > before, 1_000);
-        expect(reconciles().at(-1)?.badge).toEqual({ count: state === "stale" ? 1 : 0, complete: state === "deselected" });
+        // The worker counts a stale host from the asks it already learned, not from this page.
+        expect(reconciles().at(-1)).toEqual(expect.objectContaining({
+          fresh: ["local"], pending: [], counted: state === "stale" ? ["local", binding] : ["local"], complete: state === "deselected",
+        }));
       } finally { harness.setVisibility("hidden"); }
     });
   }
@@ -5712,7 +5717,7 @@ describe("fleet background notifications", () => {
       pending: [
         { instanceId: current.instanceId, generation: 1, requestId: current.ask!.requestId },
         { source: await fleetSourceBinding("remote", "https://remote.example"), instanceId: current.instanceId, generation: 1, requestId: current.ask!.requestId },
-      ], badge: { count: 2, complete: true },
+      ], counted: ["local", await fleetSourceBinding("remote", "https://remote.example")], complete: true,
     });
     harness.setVisibility("hidden");
   });
