@@ -2760,17 +2760,24 @@ test.each([false, true, "invalid-command"] as const)("495 round2 fixture require
     await writeFile(join(root, "command.json"), JSON.stringify(changed === "invalid-command" ? { invalid: true }
       : { epoch, sequence: 1, operation: "ask", expectedSessionId: "session-before" }), { mode: 0o600 });
     expect(((await stat(join(root, "command.json"))).mode & 0o077) === 0).toBe(process.platform !== "win32");
-    let ack: Record<string, unknown> | undefined;
-    const deadline = performance.now() + HANG_DEADLINE_MS;
-    while (performance.now() < deadline) {
-      ack = await readFile(join(root, "ack.json"), "utf8").then(text => JSON.parse(text)).catch(() => undefined);
-      // Unsafe/malformed commands fail before admitting their sequence; that is terminal readiness.
-      if (ack?.sequence === 1 || ack?.phase === "failed") break;
-      await Bun.sleep(5);
-    }
     // This retained-Mac fixture deliberately requires POSIX private files. Windows cannot make
     // this command's mode 0600; prove refusal there rather than weakening the admission check.
     const refused = changed !== false || process.platform === "win32";
+    let ack: Record<string, unknown> | undefined;
+    if (refused) {
+      // A refused command ends the handler after its failed ack. Polling meanwhile would race the
+      // extension's rename over ack.json, which Windows refuses while a reader holds it open.
+      await running;
+      ack = JSON.parse(await readFile(join(root, "ack.json"), "utf8"));
+    } else {
+      // An accepted handler keeps serving its real 100 ms command poll, so only its ack can end this wait.
+      const deadline = performance.now() + HANG_DEADLINE_MS;
+      while (performance.now() < deadline) {
+        ack = await readFile(join(root, "ack.json"), "utf8").then(text => JSON.parse(text)).catch(() => undefined);
+        if (ack?.sequence === 1) break;
+        await Bun.sleep(5);
+      }
+    }
     expect(ack?.phase).toBe(refused ? "failed" : "accepted");
     expect(ack?.sequence).toBe(changed === "invalid-command" || process.platform === "win32" ? 0 : 1);
     expect(selected).toBe(refused ? 0 : 1);
