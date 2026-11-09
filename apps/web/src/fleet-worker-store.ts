@@ -43,14 +43,33 @@ export class FleetWorkerStore {
     const database = await this.open();
     if (database !== undefined) {
       try {
-        const { promise, resolve, reject } = Promise.withResolvers<FleetWorkerState | undefined>();
+        const { promise, resolve, reject } = Promise.withResolvers<unknown>();
         const transaction = database.transaction("state", "readonly");
         const request = transaction.objectStore("state").get("worker");
-        // This store has one versioned, worker-owned record, written only from the shared reducer.
-        transaction.oncomplete = () => resolve(request.result as FleetWorkerState | undefined);
+        transaction.oncomplete = () => resolve(request.result);
         transaction.onerror = transaction.onabort = () => reject(new Error("worker state unavailable"));
         const saved = await promise;
-        if (saved !== undefined) this.memory = saved;
+        if (typeof saved === "object" && saved !== null && !Array.isArray(saved)) {
+          const record = saved as Record<string, unknown>;
+          const counter = (value: unknown): boolean => Number.isSafeInteger(value) && (value as number) >= 0;
+          // Structured clone can hand back a Map or Date; the reducer indexes plain objects only.
+          const map = (value: unknown): boolean => typeof value === "object" && value !== null &&
+            (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null) &&
+            Object.values(value).every(counter);
+          // Pre-ask-ledger workers have neither field. Retain their ordering/tombstones, not
+          // an invented ask history; the reducer already treats that history as unknown.
+          const legacyAsks = !Object.hasOwn(record, "asks") && !Object.hasOwn(record, "asksReceived");
+          const valid = Object.keys(record).every(key => Object.hasOwn(EMPTY_FLEET_WORKER_STATE, key)) &&
+            Object.keys(EMPTY_FLEET_WORKER_STATE).every(key => {
+              if (legacyAsks && (key === "asks" || key === "asksReceived")) return true;
+              const value = record[key];
+              if (key === "fleet") return typeof value === "boolean";
+              if (key === "badge") return value === null || (typeof value === "object" && !Array.isArray(value) &&
+                Object.keys(value).length === 2 && "epoch" in value && "n" in value && counter(value.epoch) && counter(value.n));
+              return typeof EMPTY_FLEET_WORKER_STATE[key as keyof FleetWorkerState] === "number" ? counter(value) : map(value);
+            });
+          if (valid) this.memory = { ...EMPTY_FLEET_WORKER_STATE, ...record } as FleetWorkerState;
+        }
       } catch { this.database = Promise.resolve(undefined); database.close(); }
     }
     this.loaded = true;

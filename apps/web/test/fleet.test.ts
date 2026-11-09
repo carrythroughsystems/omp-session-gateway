@@ -243,6 +243,32 @@ describe("creation preferences", () => {
 });
 
 describe("fleet transport", () => {
+  test("audit: identical fresh snapshots update only the observation clock", async () => {
+    const time = new Clock();
+    let changes = 0;
+    let revision = 1;
+    const transport = new FleetTransport(remote, () => { changes++; },
+      (async () => snapshot(revision)) as unknown as typeof fetch, time);
+    transport.setVisible(true);
+    await transport.refresh();
+    const initial = changes;
+    const payload = transport.snapshot;
+    time.advance(10_000);
+    await transport.refresh();
+    expect(changes).toBe(initial);
+    expect(transport.snapshot).toBe(payload);
+    expect(transport.freshAt).toBe(10_000);
+    revision++;
+    await transport.refresh();
+    expect(changes).toBe(initial + 1);
+    transport.setVisible(false);
+    transport.setVisible(true);
+    const before = changes;
+    await transport.refresh();
+    expect(changes).toBe(before + 1);
+    expect(transport.status).toBe("fresh");
+    transport.setVisible(false);
+  });
   test("visibility revalidation is refreshing, not a failed snapshot", async () => {
     const time = new Clock();
     // This fixture uses only the callable fetch interface, not Bun's extra fetch properties.
@@ -464,6 +490,24 @@ describe("fleet transport", () => {
 });
 
 describe("fleet record identity and migration", () => {
+  test("audit: a triage set over the documented bound keeps its newest records", () => {
+    for (const key of [HELD_KEY, DISMISSED_KEY] as const) {
+      const storage = new Storage();
+      const records = Array.from({ length: 101 }, (_, index) => ({
+        sourceId: local.id, sourceOrigin: local.origin, instanceId: `synthetic-session-${index}`,
+        ...(key === HELD_KEY ? { requestId: "synthetic-request-0001", heldAt: "2026-07-21T10:00:00.000Z" }
+          : { generation: 1, dismissedAt: "2026-07-21T10:00:00.000Z" }),
+      }));
+      storage.setItem(key, JSON.stringify(records.slice(0, 100)));
+      expect(readSourceRecords(storage, key, [local], true).size).toBe(100);
+      storage.setItem(key, JSON.stringify(records));
+      const kept = readSourceRecords(storage, key, [local], true);
+      expect(kept.size).toBe(100);
+      // Writers append newest last, so the oldest record is the one that falls off.
+      expect([...kept.values()].some(record => record.instanceId === "synthetic-session-0")).toBeFalse();
+      expect([...kept.values()].some(record => record.instanceId === "synthetic-session-100")).toBeTrue();
+    }
+  });
   test("same instance ids never collide across host bindings", () => {
     expect(sourceKey(local)).not.toBe(sourceKey(remote));
     expect(sessionKey({ sourceKey: sourceKey(local), instanceId: "same-id-0001" })).not.toBe(

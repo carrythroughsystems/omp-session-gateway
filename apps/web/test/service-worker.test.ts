@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
-import { parseNotificationData } from "@omp-session-gateway/protocol";
+import { EMPTY_FLEET_WORKER_STATE, parseNotificationData } from "@omp-session-gateway/protocol";
 import vectors from "../../../packages/protocol/test/vectors/fleet-ordering.json" with { type: "json" };
 
 const GLOBAL_NAMES = [
@@ -277,6 +277,43 @@ describe("fleet vectors through the actual worker listeners and durable store", 
     await settledPush({ ...message, type: "clear" });
     await settledPush({ ...message, type: "attention", generation: 1, title: "OMP session needs attention" });
     expect(shownNotifications).toHaveLength(0);
+  });
+
+  test("audit: foreign or malformed worker records recover on the next fleet push", async () => {
+    for (const saved of [
+      { garbage: true },
+      { ...EMPTY_FLEET_WORKER_STATE, marks: null },
+      { ...EMPTY_FLEET_WORKER_STATE, tombstones: { synthetic: "bad" } },
+      { ...EMPTY_FLEET_WORKER_STATE, fleet: "true" },
+      { ...EMPTY_FLEET_WORKER_STATE, badge: { epoch: 1 } },
+    ]) {
+      database.values.set("worker", saved);
+      await restartWorker();
+      shownNotifications.length = 0;
+      await settledPush({
+        version: 3, type: "attention", instanceId: "synthetic-recovery-session", generation: 1,
+        requestId: "synthetic-recovery-request", seq: { epoch: 1, n: 1 },
+        badge: { count: 1, complete: true }, title: "OMP session needs attention",
+      });
+      expect(shownNotifications).toHaveLength(1);
+      expect(database.values.get("worker")).toMatchObject({ received: 1, epoch: 1, fleet: false });
+      expect(database.values.get("worker")).not.toHaveProperty("garbage");
+    }
+  });
+
+  test("audit: legacy worker records retain their cleared-request ordering on upgrade", async () => {
+    const { asks: _asks, asksReceived: _asksReceived, ...legacy } = EMPTY_FLEET_WORKER_STATE;
+    database.values.set("worker", { ...legacy, received: 4,
+      tombstones: { "local\0synthetic-legacy-session\0synthetic-legacy-request": 0 } });
+    await restartWorker();
+    shownNotifications.length = 0;
+    await settledPush({
+      version: 3, type: "attention", instanceId: "synthetic-legacy-session", generation: 1,
+      requestId: "synthetic-legacy-request", seq: { epoch: 1, n: 1 },
+      badge: { count: 0, complete: true }, title: "OMP session needs attention",
+    });
+    expect(shownNotifications).toHaveLength(0);
+    expect(database.values.get("worker")).toMatchObject({ received: 5 });
   });
 
   for (const failure of ["open", "commit"] as const) {

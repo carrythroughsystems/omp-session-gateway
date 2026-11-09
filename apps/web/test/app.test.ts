@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, mock, test } from "bun:test";
-import { MAX_FRAME_BYTES, MAX_SESSIONS, fleetSourceBinding, type FleetSourceStatus, type SessionMetadata } from "@omp-session-gateway/protocol";
+import { MAX_FRAME_BYTES, MAX_LOCAL_TRIAGE_RECORDS, fleetSourceBinding, type FleetSourceStatus, type SessionMetadata } from "@omp-session-gateway/protocol";
 import fc, { type AsyncCommand } from "fast-check";
 import type { CollabEmbedOptions } from "../../../packages/collab-client/upstream/src/embed-contract";
 import { validInitialPromptDraft } from "../src/session-creation";
@@ -525,6 +525,7 @@ async function bootApp(options: {
   readonly remoteSessions?: readonly SessionMetadata[];
   readonly remotePayload?: unknown;
   readonly remoteResponse?: (init: RequestInit) => Promise<Response>;
+  readonly pushResponse?: (path: string, init: RequestInit) => Promise<Response>;
   readonly launchGate?: Promise<void>;
   readonly launchResponse?: (path: string, init: RequestInit) => Promise<Response>;
   readonly creationResponse?: (path: string, init: RequestInit) => Promise<Response>;
@@ -758,9 +759,11 @@ async function bootApp(options: {
       return Response.json({ mode: body.mode, generation: body.generation, capability: ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__") });
     }
     if (path === "/api/v1/push/config") {
+      if (options.pushResponse !== undefined) return await options.pushResponse(path, init);
       return Response.json({ version: 2, applicationServerKey: "V".repeat(87), subscriptionCount: 0 });
     }
     if (path === "/api/v1/push/subscription") {
+      if (options.pushResponse !== undefined) return await options.pushResponse(path, init);
       const body = typeof init.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
       if (init.method === "DELETE") {
         unsubscribeRequests.push(body);
@@ -2769,7 +2772,7 @@ describe("dashboard attention and notifications", () => {
     const excessStorage = new FakeStorage();
     excessStorage.setItem(
       "omp.sessions.dismissed.v1",
-      JSON.stringify(Array.from({ length: MAX_SESSIONS + 1 }, () => dismissedRecord)),
+      JSON.stringify(Array.from({ length: MAX_LOCAL_TRIAGE_RECORDS + 1 }, () => dismissedRecord)),
     );
     const excess = await bootApp({
       permission: "denied",
@@ -2778,7 +2781,11 @@ describe("dashboard attention and notifications", () => {
       initialSessions: [dismissedSession],
     });
     expect(excessStorage.getItem("omp.sessions.dismissed.v1")).toBeNull();
-    expect(excess.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
+    // A set that outgrew the bound keeps its newest records: the dismissal survives migration.
+    expect(excess.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
+    expect(JSON.parse(excessStorage.getItem("omp.sessions.dismissed.v2") ?? "null")).toEqual([
+      { ...dismissedRecord, sourceId: "local", sourceOrigin: "https://sessions.example" },
+    ]);
   });
 
   test("retains local routing choices when an authoritative refresh is unavailable", async () => {
@@ -2818,6 +2825,186 @@ describe("fleet directory bindings", () => {
     targets: [{ id: "remote", label: "Remote", origin: "https://remote.example" }],
     speech: { browserRecognition: false },
   };
+
+  test("audit: unchanged remote polls preserve row identity", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], remoteSessions: [session("audit-remote-row")],
+      clientConfig: config, suffix: "audit-unchanged-poll",
+    });
+    try {
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      const row = harness.elements.sessionList.querySelector(".working-row");
+      expect(row).not.toBeNull();
+      harness.window.runTimersWithDelay(10_000);
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      expect(harness.elements.sessionList.querySelector(".working-row") === row).toBeTrue();
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("audit: writing local triage evicts the oldest of 100 records and survives reload", async () => {
+    const items = Array.from({ length: 101 }, (_, index) => session(`synthetic-bounded-${index}`));
+    const storage = new FakeStorage();
+    storage.setItem("omp.sessions.dismissed.v2", JSON.stringify(items.slice(0, 100).map(item => ({
+      sourceId: "local", sourceOrigin: "https://sessions.example", instanceId: item.instanceId,
+      generation: 1, dismissedAt: "2026-07-21T10:00:00.000Z",
+    }))));
+    const harness = await bootApp({ permission: "denied", initialSessions: items, storage, suffix: "audit-triage-write" });
+    harness.elements.sessionList.querySelector(".dismiss-session")!.dispatchEvent(new Event("click"));
+    const saved = JSON.parse(storage.getItem("omp.sessions.dismissed.v2")!) as { instanceId: string }[];
+    expect(saved).toHaveLength(100);
+    expect(saved[0]?.instanceId).toBe(items[1]!.instanceId);
+    expect(saved.at(-1)?.instanceId).toBe(items[100]!.instanceId);
+    harness.setVisibility("hidden");
+    const reloaded = await bootApp({ permission: "denied", initialSessions: items, storage, suffix: "audit-triage-reload" });
+    expect(reloaded.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
+    expect(reloaded.elements.sessionList.querySelector(".working-row")?.dataset.instanceId).toBe(items[0]!.instanceId);
+    reloaded.setVisibility("hidden");
+  });
+
+  test("audit: removed session transition names are retired without colliding with live rows", async () => {
+    const first = session("synthetic-name-first", { busy: true });
+    const second = session("synthetic-name-second", { busy: true });
+    const harness = await bootApp({ permission: "denied", initialSessions: [first, second], suffix: "audit-row-names" });
+    const fakeDocument = document as unknown as Record<string, unknown>;
+    class FakeViewTransition { get types(): Set<string> { return new Set(); } }
+    Object.defineProperty(globalThis, "ViewTransition", { configurable: true, value: FakeViewTransition });
+    fakeDocument.startViewTransition = (options: { update: () => void }) => {
+      options.update();
+      return { ready: Promise.resolve(), finished: Promise.resolve(), updateCallbackDone: Promise.resolve(), skipTransition(): void {} };
+    };
+    const names = (): string[] => harness.elements.sessionList.querySelectorAll(".working-row-frame")
+      .map(row => row.style.getPropertyValue("view-transition-name"));
+    try {
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: { ...first, busy: false } });
+      const original = names();
+      harness.emit("session_remove", { type: "session_remove", revision: 3, instanceId: first.instanceId, generation: 1 });
+      harness.emit("session_upsert", { type: "session_upsert", revision: 4, session: first });
+      expect(new Set(names()).size).toBe(2);
+      expect(names()).not.toContain(original[0]!);
+      const afterRemove = names();
+      harness.emit("snapshot", { type: "snapshot", revision: 5, sessions: [second] });
+      harness.emit("snapshot", { type: "snapshot", revision: 6, sessions: [first, second] });
+      expect(names()).not.toContain(afterRemove[0]!);
+      expect(new Set(names()).size).toBe(2);
+    } finally {
+      delete fakeDocument.startViewTransition;
+      delete (globalThis as Record<string, unknown>).ViewTransition;
+      harness.setVisibility("hidden");
+    }
+  });
+
+  test("audit: three visibility notifications coalesce into one directory rebuild", async () => {
+    let stall = false;
+    const responses = Promise.withResolvers<Response>();
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [session("audit-visible-home")],
+      clientConfig: { ...config, targets: ["one", "two", "three"].map(id =>
+        ({ id, label: id, origin: `https://${id}.example` })) },
+      remoteResponse: async () => stall ? await responses.promise : Response.json({ revision: 1, sessions: [] }),
+      suffix: "audit-visible-coalesce",
+    });
+    try {
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      harness.setVisibility("hidden");
+      await Promise.resolve();
+      stall = true;
+      let rebuilds = 0;
+      const list = harness.elements.sessionList;
+      const replace = list.replaceChildren.bind(list);
+      list.replaceChildren = (...children): void => { rebuilds++; replace(...children); };
+      harness.setVisibility("visible");
+      await Promise.resolve();
+      expect(rebuilds).toBe(1);
+    } finally {
+      harness.setVisibility("hidden");
+      responses.resolve(Response.json({ revision: 1, sessions: [] }));
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+    }
+  });
+
+  test("audit: working and secondary row controls retain exact focus after unrelated SSE updates", async () => {
+    const first = session("audit-focused-row");
+    const other = session("audit-other-row");
+    const harness = await bootApp({ permission: "denied", initialSessions: [first, other], suffix: "audit-row-focus" });
+    try {
+      for (const [index, selector] of [".working-row", ".dismiss-session"].entries()) {
+        const control = harness.elements.sessionList.querySelector(selector)!;
+        const instanceId = control.closest("[data-instance-id]")?.dataset.instanceId ??
+          control.parent!.querySelector("[data-instance-id]")!.dataset.instanceId;
+        control.focus();
+        harness.emit("session_upsert", { type: "session_upsert", revision: 2 + index, session: { ...other, busy: true } });
+        const rebuilt = harness.elements.sessionList.querySelectorAll(selector).find(candidate =>
+          (candidate.closest("[data-instance-id]")?.dataset.instanceId ??
+            candidate.parent!.querySelector("[data-instance-id]")!.dataset.instanceId) === instanceId)!;
+        expect(rebuilt === control).toBeFalse();
+        expect((document as unknown as FakeDocument).activeElement === rebuilt).toBeTrue();
+      }
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("audit: a pending launch stays busy across a changed remote poll and resets after failure", async () => {
+    const gate = Promise.withResolvers<Response>();
+    let revision = 0;
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [session("audit-pending-local")], clientConfig: config,
+      remoteResponse: async () => Response.json({ revision: ++revision, sessions: [] }),
+      launchResponse: async () => await gate.promise, suffix: "audit-pending-row",
+    });
+    try {
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      const old = harness.elements.sessionList.querySelector(".working-row")!;
+      old.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.launchRequests.length === 1, 100);
+      harness.window.runTimersWithDelay(10_000);
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      const rebuilt = harness.elements.sessionList.querySelector(".working-row")!;
+      expect(rebuilt === old).toBeFalse();
+      expect(rebuilt.disabled).toBeTrue();
+      expect(rebuilt.dataset.busy).toBe("true");
+      expect(rebuilt.getAttribute("aria-busy")).toBe("true");
+      gate.resolve(new Response(null, { status: 503 }));
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      expect(harness.elements.sessionList.querySelector(".working-row")?.disabled).toBeFalse();
+      expect(harness.elements.sessionList.querySelector(".working-row")?.dataset.busy).toBeUndefined();
+    } finally {
+      gate.resolve(new Response(null, { status: 503 }));
+      harness.setVisibility("hidden");
+    }
+  });
+
+  test("audit: keepalives preserve the unchanged configuration retry action", async () => {
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [session("audit-banner-home")],
+      clientConfigStatus: 503, suffix: "audit-banner-stability",
+    });
+    try {
+      const action = harness.elements.statusBanner.querySelector(".status-action")!;
+      expect(action).not.toBeNull();
+      action.focus();
+      harness.emit("keepalive", {});
+      harness.emit("keepalive", {});
+      expect(harness.elements.statusBanner.querySelector(".status-action") === action).toBeTrue();
+      expect((document as unknown as FakeDocument).activeElement === action).toBeTrue();
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("audit: an unchanged failing host row survives another host poll", async () => {
+    let calls = 0;
+    const harness = await bootApp({
+      permission: "denied", initialSessions: [], suffix: "audit-fleet-status-stability",
+      clientConfig: { ...config, targets: [...config.targets, { id: "other", label: "Other", origin: "https://other.example" }] },
+      remoteResponse: async () => ++calls === 1 ? new Response(null, { status: 403 })
+        : Response.json({ revision: calls, sessions: [] }),
+    });
+    try {
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      const row = harness.elements.fleetStatus.children[0];
+      expect(row?.dataset.state).toBe("forbidden");
+      harness.window.runTimersWithDelay(10_000);
+      for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+      expect(harness.elements.fleetStatus.children[0] === row).toBeTrue();
+    } finally { harness.setVisibility("hidden"); }
+  });
 
   async function failedControlLaunch(suffix: string) {
     const home = session(`followups-${suffix}`);
@@ -3700,6 +3887,7 @@ describe("fleet directory bindings", () => {
       await settleUntil(() => page.pendingDelays().includes(graceDelay), 100);
       page.advanceClock(35_001);
       page.window.runTimersWithDelay(graceDelay);
+      await Promise.resolve();
       expect(page.elements.emptyState.textContent).toContain("Session lists expired");
     } finally {
       harness?.window.dispatchEvent(new Event("pagehide"));
@@ -3896,13 +4084,13 @@ describe("fleet directory bindings", () => {
     }
   });
 
-  test("remote launch deadlines abort stalled headers and bodies through the gateway-unavailable path", async () => {
+  for (const source of ["local", "remote"]) test(`audit: ${source} launch deadlines abort stalled headers and bodies through the gateway-unavailable path`, async () => {
     for (const stage of ["headers", "body"]) {
       const current = session("stalled-launch-0001");
       let bodyStarted = false;
       const harness = await bootApp({
-        permission: "denied", initialSessions: [], remoteSessions: [current],
-        clientConfig: config, suffix: `launch-timeout-${stage}`,
+        permission: "denied", initialSessions: source === "local" ? [current] : [], remoteSessions: source === "remote" ? [current] : [],
+        clientConfig: config, suffix: `launch-timeout-${source}-${stage}`,
         async launchResponse(_path, init): Promise<Response> {
           if (stage === "headers") {
             const { promise, reject } = Promise.withResolvers<Response>();
@@ -3924,16 +4112,41 @@ describe("fleet directory bindings", () => {
       if (stage === "body") await settleUntil(() => bodyStarted, 100);
       expect(harness.pendingDelaysSince(mark)).toContain(10_000);
       harness.runTimersSince(mark);
-      await settleUntil(() => harness.elements.fleetStatus.textContent?.includes("Gateway unavailable.") === true, 100);
+      const failure = source === "local" ? harness.elements.statusBanner : harness.elements.fleetStatus;
+      await settleUntil(() => failure.textContent?.includes("Gateway unavailable.") === true, 100);
       expect(harness.launchRequests[0]?.init.signal?.aborted).toBeTrue();
-      expect(harness.elements.statusBanner.hidden).toBeTrue();
-      expect(harness.elements.fleetStatus.textContent).toContain("Remote: Gateway unavailable. Check your tailnet connection and try again.");
+      expect(failure.textContent).toContain("Gateway unavailable. Check your tailnet connection and try again.");
       expect(harness.embedCalls).toHaveLength(0);
       expect(harness.elements.sessionList.querySelector(".working-row")?.disabled).toBeFalse();
       expect(harness.pendingDelaysSince(mark)).not.toContain(10_000);
       harness.setVisibility("hidden");
     }
   });
+
+  for (const path of ["/api/v1/push/config", "/api/v1/push/subscription"]) {
+    test(`audit: stalled ${path} settles background alert initialization within five seconds`, async () => {
+      let signal: AbortSignal | undefined;
+      const harness = await bootApp({
+        permission: "granted", existingSubscription: true, initialSessions: [], suffix: `audit-timeout-${path.split("/").at(-1)}`,
+        pushResponse: async (request, init) => {
+          if (request !== path) return Response.json({ version: 2, applicationServerKey: "V".repeat(87), subscriptionCount: 0 });
+          signal = init.signal ?? undefined;
+          return await new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+          });
+        },
+        beforeNotificationReady: async clock => {
+          for (let turn = 0; turn < 100; turn++) await Promise.resolve();
+          clock.runTimersWithDelay(5_000);
+        },
+      });
+      try {
+        expect(harness.elements.notificationButton.textContent).toBe("Background alerts unavailable");
+        expect(signal?.aborted).toBeTrue();
+        expect(harness.pendingDelays()).not.toContain(5_000);
+      } finally { harness.setVisibility("hidden"); }
+    });
+  }
 
   test("a forbidden remote Next ask preserves the local shell and offers an explicit return to Sessions", async () => {
     const home = session("withdrawn-home-0001", { inputRequired: true });
@@ -4182,6 +4395,7 @@ describe("fleet directory bindings", () => {
       if (action === "held-directory") {
         openHeroOptions(harness)?.dispatchEvent(new Event("click"));
         harness.setVisibility("hidden");
+        await Promise.resolve();
         expect(harness.elements.sessionList.querySelector(".all-held-summary")?.textContent).toContain("checking other hosts");
         expect(harness.elements.sessionList.textContent).not.toContain("unavailable");
       } else {
@@ -5720,6 +5934,155 @@ describe("fleet background notifications", () => {
       ], counted: ["local", await fleetSourceBinding("remote", "https://remote.example")], complete: true,
     });
     harness.setVisibility("hidden");
+  });
+
+  test("audit: idle fleet ticks request the local list after the capture and poll each remote at most once", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], remoteSessions: [], fleetResponse: api.respond, suffix: "audit-idle-fleet-ticks",
+    });
+    try {
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      const count = (path: string): number => harness.fetchPaths.filter(value => value === path).length;
+      const local = count("/api/v1/sessions");
+      for (let tick = 0; tick < 2; tick++) {
+        const remote = count("https://remote.example/api/v1/sessions");
+        const messages = harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-reconcile").length;
+        harness.advanceClock(5_000);
+        harness.emit("keepalive", {});
+        harness.advanceClock(5_000);
+        harness.emit("keepalive", {});
+        harness.window.runTimersWithDelay(10_000);
+        for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+        // The local list is always requested after the capture (never reused from the stream).
+        expect(count("/api/v1/sessions")).toBe(local + tick + 1);
+        expect(count("https://remote.example/api/v1/sessions") - remote).toBeLessThanOrEqual(1);
+        const reconciles = harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-reconcile");
+        expect(reconciles).toHaveLength(messages + 1);
+        // `fresh` is a set: the reused remote observation now precedes the awaited local list.
+        expect(reconciles.at(-1)).toMatchObject({ complete: true,
+          fresh: expect.arrayContaining(["local", await fleetSourceBinding("remote", "https://remote.example")]) });
+      }
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("audit: a remote snapshot whose request started before the capture is never reused for that capture", async () => {
+    // Request A starts before capture P1 and completes after it with the host as it was before P1;
+    // the next periodic tick (asOf = P1) must not post A's stale sessions, which would clear an
+    // ask pushed between A's start and P1. Completion time proves nothing; only the start does.
+    const current = session("audit-stale-remote-ask", { inputRequired: true });
+    const binding = await fleetSourceBinding("remote", "https://remote.example");
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const savedNow = Date.now;
+    let now = savedNow();
+    Date.now = () => now;
+    let remoteCalls = 0, staleCall = Number.POSITIVE_INFINITY;
+    const stalls = new Map<number, ReturnType<typeof Promise.withResolvers<void>>>();
+    let receiptGate: ReturnType<typeof Promise.withResolvers<void>> | undefined;
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], fleetResponse: api.respond, suffix: "audit-stale-remote-observation",
+      remoteResponse: async () => {
+        // Request A (the stale call) answers empty; every reply after it carries the ask.
+        const call = ++remoteCalls;
+        await stalls.get(call)?.promise;
+        return Response.json({ revision: call, sessions: call > staleCall ? [current] : [] });
+      },
+      workerReply: async message => {
+        const request = message as { type: string; version: number };
+        if (request.type === "omp-notification-mode") return { type: "omp-notification-mode-set", version: 3 };
+        if (request.version !== 3) return { type: "omp-notification-support-response", version: 2 };
+        if (receiptGate !== undefined) await receiptGate.promise;
+        return { type: "omp-notification-support-response", version: 3, received: 1 };
+      },
+    });
+    const reconciles = () => harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-reconcile");
+    try {
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      const settledAfterBoot = reconciles().length;
+      expect(settledAfterBoot).toBeGreaterThan(0);
+      // Tick 1: the transport's poll (request A, call 2) stalls; the receipt read waits so capture
+      // P1 is taken strictly after A started.
+      const base = remoteCalls;
+      staleCall = base + 1;
+      stalls.set(staleCall, Promise.withResolvers<void>());
+      receiptGate = Promise.withResolvers<void>();
+      now += 10_000;
+      harness.window.runTimersWithDelay(10_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(remoteCalls).toBe(staleCall);
+      // Date.now stays frozen across A's start, capture P1 and A's completion: ordering must not
+      // depend on millisecond timestamps (ties and backward clock steps included).
+      receiptGate.resolve(); receiptGate = undefined;
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      // A completes after P1 with the stale (empty) list and becomes the current snapshot.
+      stalls.get(staleCall)!.resolve();
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      const afterTickOne = reconciles().length;
+      // Tick 2 (asOf = P1): the transport's poll (request C) stalls so A is still the current
+      // snapshot when the periodic path decides; C carries the ask once released.
+      stalls.set(staleCall + 1, Promise.withResolvers<void>());
+      now += 10_000;
+      harness.window.runTimersWithDelay(10_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      stalls.get(staleCall + 1)!.resolve();
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(remoteCalls).toBeGreaterThanOrEqual(staleCall + 1);
+      const posted = reconciles().slice(afterTickOne);
+      expect(posted.length).toBeGreaterThan(0);
+      expect(posted.at(-1)).toMatchObject({ asOf: { received: 1 }, fresh: expect.arrayContaining(["local", binding]),
+        pending: [{ source: binding, instanceId: current.instanceId }] });
+    } finally {
+      for (const stall of stalls.values()) stall.resolve();
+      receiptGate?.resolve();
+      harness.setVisibility("hidden");
+      Date.now = savedNow;
+    }
+  });
+
+  test("audit: a periodic receipt cannot force a second in-flight remote poll or overrule newer pushes", async () => {
+    const api = notificationApi([{ sourceId: "remote", state: "current", selected: true, grantId: fleetGrantId, expiresAt: fleetExpiry() }]);
+    const savedNow = Date.now;
+    let now = savedNow();
+    Date.now = () => now;
+    let received = 1;
+    let stall = false;
+    const gate = Promise.withResolvers<void>();
+    const harness = await bootApp({
+      permission: "granted", existingSubscription: true, workerV3: true, clientConfig: fleetPageConfig,
+      initialSessions: [], fleetResponse: api.respond, suffix: "audit-receipt-inflight",
+      remoteResponse: async () => {
+        if (stall) await gate.promise;
+        return Response.json({ revision: 1, sessions: [] });
+      },
+      workerReply: message => {
+        const request = message as { type: string; version: number };
+        return request.type === "omp-notification-mode" ? { type: "omp-notification-mode-set", version: 3 }
+          : request.version === 3 ? { type: "omp-notification-support-response", version: 3, received }
+            : { type: "omp-notification-support-response", version: 2 };
+      },
+    });
+    try {
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      const before = harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions").length;
+      expect(harness.workerMessages.some(message => (message as { type: string }).type === "omp-notification-reconcile")).toBeTrue();
+      stall = true;
+      received = 2;
+      now += 10_000;
+      harness.emit("keepalive", {});
+      harness.window.runTimersWithDelay(10_000);
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      gate.resolve();
+      for (let turn = 0; turn < 1_000; turn++) await Promise.resolve();
+      expect(harness.fetchPaths.filter(path => path === "https://remote.example/api/v1/sessions")).toHaveLength(before + 1);
+      expect(harness.workerMessages.filter(message => (message as { type: string }).type === "omp-notification-reconcile").at(-1))
+        .toMatchObject({ asOf: { received: 1 }, complete: true });
+    } finally {
+      gate.resolve();
+      harness.setVisibility("hidden");
+      Date.now = savedNow;
+    }
   });
 
   test("fleet badge reconciliation does not discard a remote tap's in-flight launch", async () => {
