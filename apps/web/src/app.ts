@@ -2456,15 +2456,19 @@ function renderDirectory(arrived = false): void {
   renderDirectoryContents(arrived);
   // Snapshot/SSE refreshes replace row nodes even when there is no structural animation.
   if (focusRef !== undefined && focused !== null) {
+    let restored = false;
     for (const control of sessionList.querySelectorAll<HTMLElement>(focused.tagName)) {
       const row = control.closest<HTMLElement>("[data-instance-id]");
       if (row?.dataset.instanceId === focusRef.instanceId &&
         (row.dataset.sourceKey ?? localKey) === focusRef.sourceKey &&
         control.className === focused.className && control.getAttribute("role") === focused.getAttribute("role")) {
         control.focus({ preventScroll: true });
+        restored = true;
         break;
       }
     }
+    // A control that left the list falls back to its row's request, then the title, never <body>.
+    if (!restored) focusDirectoryRequest(focusRef);
   }
 }
 
