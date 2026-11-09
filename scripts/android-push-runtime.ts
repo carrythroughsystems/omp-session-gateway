@@ -712,6 +712,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   };
   type RestartLedger = { epoch: number; recipients: number; grants: number; outstanding: number; requestOutstanding: boolean };
   let restartClear: { session?: SessionMetadata; before?: RestartLedger; upAt?: number } | undefined;
+  let restartReplacementReport = "";
   const restartLedger = async (session: SessionMetadata): Promise<RestartLedger | undefined> => {
     try {
       // Project on the host: the private ledger, endpoint keys and grant secrets never leave it.
@@ -1005,14 +1006,32 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           previous.generation !== current.generation || !current.inputRequired || previous.ask === undefined ||
           current.ask === undefined || previous.ask.requestId === current.ask.requestId) return false;
         const tag = notificationTag(previous), prior = verifiedWorkerPosts.get(tag);
-        if (prior?.metadata.requestId !== previous.ask.requestId || prior.generation !== previous.generation) return false;
+        // Closed scalars only, logged when they change: which check still withholds the proof.
+        const checks: Scalars = { priorVerified: false, osRecords: -1, osReposted: false, workerRead: false };
+        const report = (verified: boolean): boolean => {
+          const line = JSON.stringify({ phase, ...checks, verified });
+          if (line !== restartReplacementReport) {
+            restartReplacementReport = line;
+            console.log("android-fleet-restart-replacement: " + JSON.stringify({ phase,
+              sinceCoordinatorUpMs: restartClear?.upAt === undefined ? -1 : Math.round(runtime.now() - restartClear.upAt),
+              ...checks, verified }));
+          }
+          return verified;
+        };
+        if (prior?.metadata.requestId !== previous.ask.requestId || prior.generation !== previous.generation) return report(false);
+        checks.priorVerified = true;
         const records = (await phaseRecords()).filter(record => record.tag.endsWith(tag));
+        checks.osRecords = records.length;
         if (records.length > 1) throw privacyFailure({ cause: new Error("concurrent local restart notifications") });
-        if (records.length !== 1 || records[0]!.postedAt <= prior.postedAt) return false;
+        checks.osReposted = records.length === 1 && records[0]!.postedAt > prior.postedAt;
+        if (!checks.osReposted) return report(false);
         // Replacement alone is not an exact clear. Read the real worker's durable tombstone
         // without creating/upgrading its database, and bind the one displayed replacement.
-        const verified = await worker<boolean>("restartReplacement", `(async () => {
-          if (!(await indexedDB.databases()).some(db => db.name === "omp-notification-ordering")) return false;
+        const observed = await worker<Scalars | undefined>("restartReplacement", `(async () => {
+          const checks = { databasePresent: false, oldTombstoned: false, notices: -1, versionThree: false, attention: false,
+            localSource: false, instanceMatches: false, requestMatches: false, previousRequest: false };
+          if (!(await indexedDB.databases()).some(db => db.name === "omp-notification-ordering")) return checks;
+          checks.databasePresent = true;
           const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open("omp-notification-ordering");
             request.onupgradeneeded = () => { request.transaction.abort(); reject(Error("worker database changed")); };
@@ -1030,10 +1049,23 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
           } finally { db.close(); }
           const notices = await self.registration.getNotifications({tag:${JSON.stringify(tag)}});
           const data = notices[0]?.data;
-          return typeof state?.tombstones?.[${JSON.stringify(`local\0${previous.instanceId}\0${previous.ask.requestId}`)}] === "number" &&
-            notices.length === 1 && data?.version === 3 && data?.type === "attention" && data?.source === undefined &&
-            data?.instanceId === ${JSON.stringify(current.instanceId)} && data?.requestId === ${JSON.stringify(current.ask.requestId)};
+          checks.oldTombstoned = typeof state?.tombstones?.[${JSON.stringify(`local\0${previous.instanceId}\0${previous.ask.requestId}`)}] === "number";
+          checks.notices = notices.length;
+          checks.versionThree = data?.version === 3;
+          checks.attention = data?.type === "attention";
+          checks.localSource = data?.source === undefined;
+          checks.instanceMatches = data?.instanceId === ${JSON.stringify(current.instanceId)};
+          checks.requestMatches = data?.requestId === ${JSON.stringify(current.ask.requestId)};
+          checks.previousRequest = data?.requestId === ${JSON.stringify(previous.ask.requestId)};
+          return checks;
         })()`, true);
+        checks.workerRead = true;
+        // Whitelist and type-check the worker projection before it reaches a verdict or log line.
+        for (const key of ["databasePresent", "oldTombstoned", "versionThree", "attention", "localSource",
+          "instanceMatches", "requestMatches", "previousRequest"]) checks[key] = observed?.[key] === true;
+        checks.notices = Number.isSafeInteger(observed?.notices) ? observed!.notices! : -1;
+        const verified = report(checks.oldTombstoned === true && checks.notices === 1 && checks.versionThree === true &&
+          checks.attention === true && checks.localSource === true && checks.instanceMatches === true && checks.requestMatches === true);
         // Pin the post sampled with the exact-clear proof, not whichever post a later
         // delivered() happens to see. That closes the proof-to-delivery handoff race.
         if (verified) {
@@ -2157,6 +2189,13 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
   runtime.observe = async (session, kind, level) => {
     try { return await observe(session, kind, level); }
     finally { if (fleetEnabled && kind === "attention" && packageName !== undefined) sampleAttention(session, packageName); }
+  };
+  const restartReplacement = runtime.fleet.restartReplacement;
+  // While the proof is withheld, sample the re-minted request's worker, OS and freezer state.
+  runtime.fleet.restartReplacement = async (previous, current) => {
+    const verified = await restartReplacement(previous, current);
+    if (!verified && fleetEnabled && packageName !== undefined) sampleAttention(current, packageName);
+    return verified;
   };
   return runtime;
 }

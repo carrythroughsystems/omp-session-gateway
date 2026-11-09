@@ -356,6 +356,11 @@ retry boundary as well as its next reconciliation, and the resolved remote alert
 before arming a new remote ask. No re-alert, a missing old clear, concurrent duplicates, a second
 local re-alert, or a remote repeat fail. Pending-remote identity across a home restart is
 unit-proven in `fleet-coordinator.test.ts`, not physically proven by this resolved-remote scenario.
+While that proof is withheld, closed `android-fleet-restart-replacement:` lines record each change
+in the first withholding check: verified prior post, OS record count and repost, then the worker's
+old-request tombstone, notice count and replacement source/instance/request booleans. Each
+withheld check also takes one non-verdict `android-fleet-attention-diagnostic:` sample of the
+re-minted request. Neither changes the verdict or the 60-second wait.
 `fleet-two-gateway.test.ts` opens PushService before discovery and coordination, matching the daemon,
 and proves subscription reload, healthy/corrupt startup, cold discovery, hanging/rejected feed
 connections, and clear retries with the real 30/45-second timers under a fake clock. Warm restart
