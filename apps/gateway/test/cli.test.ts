@@ -107,6 +107,96 @@ test("exits promptly and closes staged resources when HTTP startup fails", async
   }
 }, 2 * HANG_DEADLINE_MS);
 
+test("stops the poller and opened services when fleet coordinator startup rejects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "gateway-cli-fleet-startup-"));
+  const configPath = join(root, "config", "omp-session-gateway", "config.json");
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  await writePrivateTextFile(configPath, JSON.stringify({
+    http: { trustedDashboardOrigins: ["http://127.0.0.1:4412"] },
+    fleet: { targets: [{ id: "dev-target", label: "Synthetic target", origin: "http://127.0.0.1:4413" }] },
+    notifications: { sources: ["dev-target"], coordinators: [{ id: "home", origin: "http://127.0.0.1:4412" }] },
+  }));
+  const subprocess = Bun.spawn([process.execPath, "--eval", `
+    import { main } from ${JSON.stringify(GATEWAY_CLI)};
+    import { FleetCoordinator } from ${JSON.stringify(new URL("../src/fleet-coordinator.ts", import.meta.url).href)};
+    import { FleetSourceService } from ${JSON.stringify(new URL("../src/fleet-source.ts", import.meta.url).href)};
+    import { PushService } from ${JSON.stringify(new URL("../src/push.ts", import.meta.url).href)};
+    import { SessionCreationService } from ${JSON.stringify(new URL("../src/tern-creation.ts", import.meta.url).href)};
+    const interval = globalThis.setInterval, clear = globalThis.clearInterval, timers = new Set();
+    globalThis.setInterval = (...args) => { const timer = interval(...args); timers.add(timer); return timer; };
+    globalThis.clearInterval = timer => { timers.delete(timer); clear(timer); };
+    const stops = { push: 0, source: 0, creation: 0 }, opened = [];
+    for (const [name, Service] of [["push", PushService], ["source", FleetSourceService], ["creation", SessionCreationService]]) {
+      const open = Service.open;
+      Service.open = async (...args) => {
+        const service = await open.apply(Service, args), stop = service.stop.bind(service);
+        service.stop = async () => { stops[name]++; await stop(); };
+        opened.push(stop);
+        return service;
+      };
+    }
+    FleetCoordinator.open = async () => { throw new Error("synthetic coordinator startup failure"); };
+    let rejected = false;
+    try { await main(["serve", "--dev-localhost"]); }
+    catch (error) { rejected = error.message === "synthetic coordinator startup failure"; }
+    console.log(JSON.stringify({ rejected, timers: timers.size, stops }));
+    for (const timer of timers) clear(timer);
+    for (const stop of opened.reverse()) await stop();
+  `], {
+    cwd: REPOSITORY_ROOT, env: sandboxEnvironment(root), stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  try {
+    const [exitCode, stdout, stderr] = await Promise.all([
+      subprocess.exited, new Response(subprocess.stdout).text(), new Response(subprocess.stderr).text(),
+    ]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+    const result = JSON.parse(stdout.trimEnd().split("\n").at(-1)!);
+    expect(result).toEqual({ rejected: true, timers: 0, stops: { push: 1, source: 1, creation: 1 } });
+  } finally {
+    if (subprocess.exitCode === null) subprocess.kill(9);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("releases the qualification log claim and the poller when push service startup rejects", async () => {
+  // The sink's exclusive `claim` file outlives the process by design, so a startup rejection
+  // before the daemon ever served must close the sink or the next start refuses the directory.
+  // The sink refuses symlinked path components, so the root is the real temp directory.
+  const root = await mkdtemp(join(await realpath(tmpdir()), "gateway-cli-push-startup-"));
+  const configPath = join(root, "config", "omp-session-gateway", "config.json");
+  const logDirectory = join(root, "qualification-log");
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  await mkdir(logDirectory, { recursive: true, mode: 0o700 });
+  await writePrivateTextFile(configPath, JSON.stringify({}));
+  const subprocess = Bun.spawn([process.execPath, "--eval", `
+    import { existsSync } from "node:fs";
+    import { main } from ${JSON.stringify(GATEWAY_CLI)};
+    import { PushService } from ${JSON.stringify(new URL("../src/push.ts", import.meta.url).href)};
+    const interval = globalThis.setInterval, clear = globalThis.clearInterval, timers = new Set();
+    globalThis.setInterval = (...args) => { const timer = interval(...args); timers.add(timer); return timer; };
+    globalThis.clearInterval = timer => { timers.delete(timer); clear(timer); };
+    PushService.open = async () => { throw new Error("synthetic push startup failure"); };
+    let rejected = false;
+    try { await main(["serve", "--dev-localhost", "--qualification-log-dir", ${JSON.stringify(logDirectory)}]); }
+    catch (error) { rejected = error.message === "synthetic push startup failure"; }
+    console.log(JSON.stringify({ rejected, timers: timers.size, claim: existsSync(${JSON.stringify(join(logDirectory, "claim"))}) }));
+    for (const timer of timers) clear(timer);
+  `], {
+    cwd: REPOSITORY_ROOT, env: sandboxEnvironment(root), stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  try {
+    const [exitCode, stdout, stderr] = await Promise.all([
+      subprocess.exited, new Response(subprocess.stdout).text(), new Response(subprocess.stderr).text(),
+    ]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+    const result = JSON.parse(stdout.trimEnd().split("\n").at(-1)!);
+    expect(result).toEqual({ rejected: true, timers: 0, claim: false });
+  } finally {
+    if (subprocess.exitCode === null) subprocess.kill(9);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("development serve loads preserved config and wires the real notification source lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-cli-fleet-"));
   const portReservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });

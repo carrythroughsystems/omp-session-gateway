@@ -1,7 +1,7 @@
 import { chmod, link, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
   LOCAL_FLEET_SOURCE_ID,
   MAX_FLEET_SOURCES,
@@ -1202,14 +1202,6 @@ export async function rotateReadinessToken(config: GatewayConfig): Promise<strin
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   return writeFreshToken(config.paths.tokenPath);
-}
-
-export function readinessTokenMatches(expected: string, supplied: string): boolean {
-  const expectedBytes = Buffer.from(expected, "utf8");
-  const suppliedBytes = Buffer.from(supplied, "utf8");
-  const padded = Buffer.alloc(expectedBytes.length);
-  suppliedBytes.copy(padded, 0, 0, expectedBytes.length);
-  return timingSafeEqual(expectedBytes, padded) && suppliedBytes.length === expectedBytes.length;
 }
 
 /**

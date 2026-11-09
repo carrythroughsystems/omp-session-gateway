@@ -7,6 +7,7 @@ import type { GatewayConfig } from "../src/config.ts";
 import {
   installUserService,
   serviceDefinition,
+  serializedPathForms,
   serviceDefinitionPath,
   type ServiceHost,
   serviceProgramBelongsTo,
@@ -404,6 +405,25 @@ describe("systemd unit structure", () => {
       expect(content.split("\n").length).toBe(serviceDefinition(config, "linux").content.split("\n").length);
       // Lossless, not merely safe: systemd must still exec on the exact directory it was given.
       expect(unitTokens(content, "ReadWritePaths")).toContain(hostile);
+    });
+  });
+
+  test("escapes systemd specifiers everywhere and variable references only on the command line", () => {
+    withEnv("XDG_RUNTIME_DIR", undefined, () => {
+      const stateDir = join(sep, "tmp", "synthetic-%h-$HOME-state");
+      const installedCli = join(stateDir, "cli.js");
+      const content = serviceDefinition({ paths: { ...config.paths, stateDir } }, "linux", installedCli).content;
+      // ReadWritePaths= expands specifiers but never `$VAR`, so `$` stays literal there.
+      expect(unitTokens(content, "ReadWritePaths")).toContain(join(sep, "tmp", "synthetic-%%h-$HOME-state"));
+      // ExecStart= expands both, so both are doubled on the command line.
+      expect(unitTokens(content, "ExecStart")).toContain(resolve(join(sep, "tmp", "synthetic-%%h-$$HOME-state", "cli.js")));
+      // Readers that locate the staged program and version in a rendered unit must recognize both
+      // spellings as they appear inside the JSON-quoted token (backslashes doubled on Windows paths).
+      for (const spelling of ["synthetic-%%h-$$HOME-state", "synthetic-%%h-$HOME-state"]) {
+        expect(serializedPathForms(stateDir)).toContain(JSON.stringify(join(sep, "tmp", spelling)).slice(1, -1));
+      }
+      expect(serviceProgramBelongsTo(content, stateDir)).toBeTrue();
+      expect(serviceProgramBelongsTo(content, join(sep, "tmp", "synthetic-%h-$HOME-state-2"))).toBeFalse();
     });
   });
 

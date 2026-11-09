@@ -318,7 +318,7 @@ async function publicSessions(config: GatewayConfig, tailscaleIp?: string): Prom
       ?.split(",")
       .map(value => value.trim().toLowerCase());
     if (!response.ok || cacheDirectives?.includes("no-store") !== true) return undefined;
-    return parseSessionListResponse(await response.json());
+    return parseSessionListResponse(await boundedResponseJson(response, MAX_COMMAND_OUTPUT_BYTES));
   } catch {
     return undefined;
   }
@@ -364,8 +364,34 @@ function versionAtLeast(observed: string, minimum: string): boolean {
 async function installedOmpVersion(): Promise<string | undefined> {
   try {
     const probe = Bun.spawn(["omp", "--version"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const [output] = await Promise.all([new Response(probe.stdout).text(), probe.exited]);
-    return probe.exitCode === 0 ? output : undefined;
+    const timeout = setTimeout(() => probe.kill(9), 5_000);
+    try {
+      const reader = probe.stdout.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const result = await reader.read();
+        if (result.done) break;
+        total += result.value.byteLength;
+        if (total > MAX_COMMAND_OUTPUT_BYTES) {
+          probe.kill(9);
+          await reader.cancel().catch(() => undefined);
+          await probe.exited;
+          return undefined;
+        }
+        chunks.push(result.value);
+      }
+      if ((await probe.exited) !== 0) return undefined;
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return undefined;
   }

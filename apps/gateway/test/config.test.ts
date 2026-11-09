@@ -15,7 +15,6 @@ import {
   loadGatewayConfig,
   loadOrCreateReadinessToken,
   loadReadinessToken,
-  readinessTokenMatches,
   publicOriginHttpsPort,
   projectPreFleetConfig,
   projectPreTernConfig,
@@ -566,9 +565,6 @@ describe("secure config", () => {
     const second = await rotateReadinessToken(config);
     expect(await loadOrCreateReadinessToken(config)).toBe(second);
     expect(second).not.toBe(first);
-    expect(readinessTokenMatches(second, second)).toBeTrue();
-    expect(readinessTokenMatches(second, `${second}x`)).toBeFalse();
-    expect(readinessTokenMatches(second, first)).toBeFalse();
   }, 20_000);
 
   test("rotation remediates an unsafe token leaf without following it", async () => {

@@ -14,14 +14,14 @@ const QUALIFICATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "http.listening": ["port"], "http.authorization_denied": ["identity_untrustworthy", "suppressed"],
   "http.identity_trust_declared": [], "http.identity_trust_restored": [], "http.identity_trust_unsound": [],
   "http.request_failed": [], "registry.listener_failed": [], "registry.expired": ["removed"],
-  "omp.entry_unreadable": [], "omp.discovery_unreadable": [], "omp.poll_failed": [],
+  "omp.entry_unreadable": ["suppressed"], "omp.discovery_unreadable": ["suppressed"], "omp.poll_failed": [],
   "omp.directory_changed": ["inserted", "removed", "hosts"],
-  "ipc.protocol_rejected": ["suppressed"], "ipc.authentication_denied": ["suppressed"],
-  "ipc.connection_timeout": ["suppressed"], "ipc.connection_error": ["suppressed"],
+  "fleet.state_unavailable": ["healthy"], "fleet.send_failed": ["failed"],
   "push.queue_accepted": ["sequence", "request_alias", "attention", "clear", "activity_stop", "subscription_replay"],
   "push.send_started": ["sequence", "request_alias", "attention", "clear", "activity_stop", "subscriptions", "subscription_replay"],
   "push.send_acknowledged": ["sequence", "request_alias", "elapsed_ms"],
   "push.send_failed": ["sequence", "request_alias", "elapsed_ms", "status"],
+  "push.fleet_send_failed": ["status"],
   "push.subscription_evicted": ["sequence", "request_alias", "count"],
   "push.delivery_failed": [],
 };
@@ -41,12 +41,12 @@ export function parseQualificationLogEvent(value: unknown): QualificationLogEven
     if (["timestamp", "level", "event", "index"].includes(key)) continue;
     if (!fields.includes(key) || (typeof item !== "boolean" && !(typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= Number.MAX_SAFE_INTEGER))) throw new Error("unsafe qualification event");
   }
-  if (record.event !== "http.authorization_denied" && record.event !== "push.send_failed" &&
+  if (record.event !== "http.authorization_denied" && record.event !== "push.send_failed" && record.event !== "push.fleet_send_failed" &&
     fields.some(key => key !== "suppressed" && record[key] === undefined)) throw new Error("incomplete qualification event");
   if (record.event === "push.send_failed" && (record.sequence === undefined || record.request_alias === undefined || record.elapsed_ms === undefined)) throw new Error("incomplete qualification event");
   for (const key of fields) {
     if (record[key] === undefined) continue;
-    const boolean = ["attention", "clear", "activity_stop", "subscription_replay", "identity_untrustworthy"].includes(key);
+    const boolean = ["attention", "clear", "activity_stop", "subscription_replay", "identity_untrustworthy", "healthy", "failed"].includes(key);
     if (typeof record[key] !== (boolean ? "boolean" : "number") ||
       !boolean && key !== "elapsed_ms" && !Number.isSafeInteger(record[key])) throw new Error("invalid qualification field type");
   }
@@ -265,10 +265,8 @@ const stdoutSink: LogSink = {
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMITED_EVENTS = new Set([
   "http.authorization_denied",
-  "ipc.protocol_rejected",
-  "ipc.authentication_denied",
-  "ipc.connection_timeout",
-  "ipc.connection_error",
+  "omp.entry_unreadable",
+  "omp.discovery_unreadable",
 ]);
 
 interface RateLimitState {

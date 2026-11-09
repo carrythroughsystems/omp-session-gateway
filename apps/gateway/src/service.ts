@@ -33,11 +33,25 @@ function xmlEscape(value: string): string {
 }
 
 /**
+ * One JSON-quoted systemd token. Specifiers (`%h`) expand in every path-valued setting, so `%` is
+ * always doubled; `$VAR` expansion happens only on command lines (`ExecStart=`), so `$` is doubled
+ * there and left literal in `ReadWritePaths=`, which would otherwise name a `$$`-spelled directory.
+ */
+function systemdToken(value: string, commandLine: boolean): string {
+  const specifiers = value.replaceAll("%", "%%");
+  return JSON.stringify(commandLine ? specifiers.replaceAll("$", () => "$$") : specifiers);
+}
+
+/**
  * Every form in which a rendered service definition can embed `path`: raw, XML-escaped (LaunchAgent
- * plist and Windows task XML), or JSON-escaped (systemd `ExecStart`). Readers match all of them.
+ * plist and Windows task XML), JSON-escaped, and the two systemd token spellings (command line and
+ * path setting). Readers match all of them.
  */
 export function serializedPathForms(path: string): readonly string[] {
-  return [...new Set([path, xmlEscape(path), JSON.stringify(path).slice(1, -1)])];
+  return [...new Set([
+    path, xmlEscape(path), JSON.stringify(path).slice(1, -1),
+    systemdToken(path, true).slice(1, -1), systemdToken(path, false).slice(1, -1),
+  ])];
 }
 
 /** Where `platform`'s service definition lives. Needs no installing user, unlike its content. */
@@ -76,7 +90,7 @@ export function serviceDefinition(
   if (qualificationLogDirectory !== undefined) assertQualificationLogDirectory(qualificationLogDirectory);
   const argv = serviceArgv(installedCli, readinessInstance, qualificationLogDirectory);
   if (platform === "linux") {
-    const command = argv.map(value => JSON.stringify(value)).join(" ");
+    const command = argv.map(value => systemdToken(value, true)).join(" ");
     // systemd refuses to start a unit whose ReadWritePaths= names a path that does not exist, and
     // the runtime directory does not exist until the daemon binds its socket. That is invisible at
     // install time, when a previous run has already created it, and fatal after a reboot: the user
@@ -96,7 +110,7 @@ export function serviceDefinition(
     return {
       identifier: "omp-session-gateway",
       path: serviceDefinitionPath(config, platform, homeDirectory),
-      content: `[Unit]\nDescription=OMP Session Gateway\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${command}\nRestart=on-failure\nRestartSec=5\n${qualificationLogDirectory === undefined ? "" : "StandardOutput=null\nStandardError=null\n"}NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n${runtimeDirectory}ReadWritePaths=${readWritePaths.map(value => JSON.stringify(value)).join(" ")}\n\n[Install]\nWantedBy=default.target\n`,
+      content: `[Unit]\nDescription=OMP Session Gateway\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${command}\nRestart=on-failure\nRestartSec=5\n${qualificationLogDirectory === undefined ? "" : "StandardOutput=null\nStandardError=null\n"}NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\n${runtimeDirectory}ReadWritePaths=${readWritePaths.map(value => systemdToken(value, false)).join(" ")}\n\n[Install]\nWantedBy=default.target\n`,
     };
   }
   if (platform === "darwin") {
@@ -202,12 +216,7 @@ const systemServiceHost: ServiceHost = {
  */
 export function serviceProgramBelongsTo(programText: string | undefined, stateDir: string): boolean {
   if (programText === undefined) return false;
-  return ["/", "\\"].some(separator => {
-    const prefix = `${stateDir}${separator}`;
-    const jsonEncoded = JSON.stringify(prefix).slice(1, -1);
-    const xmlEncoded = xmlEscape(prefix);
-    return programText.includes(prefix) || programText.includes(jsonEncoded) || programText.includes(xmlEncoded);
-  });
+  return ["/", "\\"].some(separator => serializedPathForms(`${stateDir}${separator}`).some(form => programText.includes(form)));
 }
 
 type ServiceProgramLookup =

@@ -60,13 +60,6 @@ interface ParsedArguments {
 
 const MISSING_OPTION_VALUE = "\0";
 
-/**
- * Cadence for confirming the registry socket path still resolves to the live listener. The OS can
- * remove it underneath a long-lived daemon (macOS reaps idle `TMPDIR` entries), which silently
- * stops every publisher from connecting while HTTP keeps serving.
- */
-const ENDPOINT_WATCHDOG_INTERVAL_MS = 15_000;
-
 /** Gap between readiness attempts while a freshly (re)installed service is still starting. */
 const READINESS_POLL_INTERVAL_MS = 100;
 
@@ -201,30 +194,16 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     onFault: (event, detail) => logger.event("warn", event, detail),
   });
   const launchResolver = new OmpLaunchResolver({ registry, reader });
-  const pushService = await PushService.open({ config, registry, logger });
+  let pushService: PushService | undefined;
   const poller = startHostPoller({
     reader,
     registry,
     intervalMs: config.registry.heartbeatSeconds * 1_000,
     onEvent: (event, detail) => logger.event("info", event, detail),
   });
-  const creationService = await SessionCreationService.open({ config, poller, registry });
-  const fleetSourceService = config.notifications?.coordinators?.length
-    ? await FleetSourceService.open({ config, poller, registry }) : undefined;
-  const fleetCoordinator = config.notifications?.sources?.length
-    ? await FleetCoordinator.open({
-      config: {
-        publicOrigin: config.http.publicOrigin,
-        ownLabel: config.fleet.label,
-        sources: config.fleet.targets.filter(source => config.notifications?.sources?.includes(source.id)),
-      },
-      stateDir: config.paths.stateDir,
-      push: pushService,
-      registry,
-      logger,
-      discoveryWarm: () => poller.discoveryWarm,
-      subscribeObservations: poller.subscribeObservations,
-    }) : undefined;
+  let creationService: SessionCreationService | undefined;
+  let fleetSourceService: FleetSourceService | undefined;
+  let fleetCoordinator: FleetCoordinator | undefined;
   let stopping = false;
   let resolveStop: () => void = () => undefined;
   const stopped = new Promise<void>(resolve => {
@@ -237,12 +216,33 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
   };
   let http: Bun.Server<undefined> | undefined;
   let sweeper: ReturnType<typeof setInterval> | undefined;
-  const loggingHealth = sink === undefined ? undefined : setInterval(() => {
-    if (!sink.healthy) { process.exitCode = 1; stop(); }
-  }, 1_000);
+  let loggingHealth: ReturnType<typeof setInterval> | undefined;
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
+    // Every awaited open sits inside this try: the qualification sink's exclusive claim and the
+    // poller are released by the finally even when a later open rejects.
+    pushService = await PushService.open({ config, registry, logger });
+    creationService = await SessionCreationService.open({ config, poller, registry });
+    fleetSourceService = config.notifications?.coordinators?.length
+      ? await FleetSourceService.open({ config, poller, registry }) : undefined;
+    fleetCoordinator = config.notifications?.sources?.length
+      ? await FleetCoordinator.open({
+        config: {
+          publicOrigin: config.http.publicOrigin,
+          ownLabel: config.fleet.label,
+          sources: config.fleet.targets.filter(source => config.notifications?.sources?.includes(source.id)),
+        },
+        stateDir: config.paths.stateDir,
+        push: pushService,
+        registry,
+        logger,
+        discoveryWarm: () => poller.discoveryWarm,
+        subscribeObservations: poller.subscribeObservations,
+      }) : undefined;
+    loggingHealth = sink === undefined ? undefined : setInterval(() => {
+      if (!sink.healthy) { process.exitCode = 1; stop(); }
+    }, 1_000);
     http = startHttpServer({
       config,
       registry,
@@ -277,10 +277,10 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
         await http?.stop(true);
       } finally {
         try {
-          await creationService.stop();
+          await creationService?.stop();
         } finally {
           try { await fleetCoordinator?.stop(); }
-          finally { await pushService.stop(); }
+          finally { await pushService?.stop(); }
         }
       }
     }

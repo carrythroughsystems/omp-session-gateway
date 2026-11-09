@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,7 +11,7 @@ import {
 } from "@omp-session-gateway/protocol";
 import { FleetCoordinator, FleetCoordinatorProblem, fleetCoordinatorStateHealthy, type FleetCoordinatorClock, type FleetCoordinatorConfig } from "../src/fleet-coordinator.ts";
 import { FleetSourceService } from "../src/fleet-source.ts";
-import type { GatewayConfig } from "../src/config.ts";
+import { type GatewayConfig, writePrivateTextFile } from "../src/config.ts";
 import { createHttpHandler } from "../src/http.ts";
 import { SafeLogger } from "../src/logger.ts";
 import { OmpHostReader, startHostPoller, type HostPoller, type OmpDiscoveryObservation } from "../src/omp-registry.ts";
@@ -184,6 +185,75 @@ async function outstanding(f: Awaited<ReturnType<typeof fixture>>) {
 
 // Every recorded v3 payload is parsed and applied to the real shared reducer by Transport.send.
 describe("fleet coordinator", () => {
+  test("a rejected open releases its restart timer and subscriptions", async () => {
+    // The epoch write succeeds, then the final reconcile must write again (a persisted recipient
+    // whose subscription no longer exists is pruned) and that write fails: open rejects with
+    // nothing left armed.
+    const f = await fixture(); const device = await f.device(); await f.grant(alice, sourceA.id);
+    await f.coordinator.select(alice, device, [sourceA.id]); await settled(f.coordinator); await f.coordinator.stop();
+    const path = join(f.config.paths.stateDir, "fleet-notifications.json");
+    const state = JSON.parse(await readFile(path, "utf8"));
+    expect(state.recipients).toHaveLength(1);
+    state.recipients[0].key = "f".repeat(64);
+    await writeFile(path, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    let writes = 0, subscribed = 0, unsubscribed = 0;
+    const clock = new Clock();
+    await expect(FleetCoordinator.open({
+      config: f.coordinatorConfig, stateDir: f.config.paths.stateDir, push: f.push, registry: f.registry, fetch: f.feeds.fetch, clock, random: () => 0.5,
+      subscribeObservations: () => { subscribed++; return () => { unsubscribed++; }; },
+      writeState: async (target, text) => { if (++writes === 2) throw new Error("synthetic state write failure"); await writePrivateTextFile(target, text); },
+    })).rejects.toMatchObject({ status: 503 });
+    expect(writes).toBe(2);
+    // Nothing the caller never received can be stopped later: the 30 s restart timer and every
+    // subscription (registry snapshot, activity stops, poll observations) are released on rejection.
+    expect(clock.timers.size).toBe(0);
+    expect({ subscribed, unsubscribed }).toEqual({ subscribed: 1, unsubscribed: 1 });
+  });
+
+  test("unchanged poll observations preserve the state inode until a real change", async () => {
+    const f = await fixture();
+    let observe!: () => void;
+    await f.restart(f.coordinatorConfig, () => true, listener => {
+      observe = () => listener({ round: 1, startedAt: 0, directoryHealthy: true, knownInstanceIds: [], hosts: [] });
+      return () => {};
+    });
+    await settled(f.coordinator);
+    const path = join(f.config.paths.stateDir, "fleet-notifications.json"), before = statSync(path);
+    for (let index = 0; index < 3; index++) { observe(); await settled(f.coordinator); }
+    expect(statSync(path).ino).toBe(before.ino);
+    expect(statSync(path).mtimeMs).toBe(before.mtimeMs);
+    await f.device();
+    await f.coordinator.createGrant(alice, sourceA.id);
+    await settled(f.coordinator);
+    expect(statSync(path).ino).not.toBe(before.ino);
+    expect(JSON.parse(await readFile(path, "utf8")).grants).toHaveLength(1);
+  });
+
+  test("identical feed upserts neither reconcile, send nor rewrite state after a snapshot", async () => {
+    const f = await fixture(); const device = await f.device();
+    const session = { instanceId, generation: 1, requestId };
+    const grant = await f.grant(alice, sourceA.id, [session]);
+    await f.coordinator.select(alice, device, [sourceA.id]);
+    await until(() => f.feeds.connections.filter(connection => connection.grantId === grant).length >= 2);
+    await settled(f.coordinator);
+    const path = join(f.config.paths.stateDir, "fleet-notifications.json"), before = statSync(path), sends = f.transport.calls.length;
+    const snapshot = spyOn(f.registry, "snapshot");
+    try {
+      for (let index = 0; index < 3; index++) {
+        f.feeds.live(grant).send({ version: 1, type: "upsert", session: { ...session } });
+        await settled(f.coordinator);
+      }
+      expect(snapshot).not.toHaveBeenCalled();
+      expect(f.transport.calls).toHaveLength(sends);
+      expect(statSync(path).ino).toBe(before.ino);
+      expect(statSync(path).mtimeMs).toBe(before.mtimeMs);
+    } finally { snapshot.mockRestore(); }
+    f.feeds.live(grant).send({ version: 1, type: "upsert", session: { ...session, requestId: nextRequest } });
+    await until(() => f.transport.calls.length === sends + 2); await settled(f.coordinator);
+    expect(f.transport.calls.slice(sends).map(call => call.message.type)).toEqual(["clear", "attention"]);
+    expect(statSync(path).ino).not.toBe(before.ino);
+  });
+
   test("same instance on two sources has independent tags, asks, counts; selections are owner/device scoped", async () => {
     const f = await fixture();
     const a1 = await f.device(alice, "a1"), a2 = await f.device(alice, "a2"), b1 = await f.device(bob, "b1");

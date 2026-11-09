@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -50,6 +50,66 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     process.env.XDG_RUNTIME_DIR = join(root, "run");
     return root;
   }
+
+  test.skipIf(process.platform === "win32")("kills a hung installed OMP version probe within five seconds", async () => {
+    const root = await realpath(await isolatedRoot()), executable = join(root, "omp"), pidPath = join(root, "probe-pid");
+    await writeFile(executable, `#!${process.execPath}
+await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));
+await Bun.sleep(30_000);
+console.log("omp/18.1.20");
+`);
+    await chmod(executable, 0o700);
+    const child = Bun.spawn([process.execPath, "--eval", `
+      import { runDoctorChecks } from ${JSON.stringify(new URL("../src/doctor.ts", import.meta.url).href)};
+      globalThis.fetch = async () => new Response(null, { status: 503 });
+      console.log(JSON.stringify(await runDoctorChecks({ serviceStatus: async () => ({ installed: false, active: false }) })));
+    `], { env: { ...process.env, PATH: root }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const stdout = new Response(child.stdout).text(), stderr = new Response(child.stderr).text();
+    try {
+      // hang-deadline: behavior-under-test -- the real probe must kill its child at five seconds.
+      const exitCode = await Promise.race([child.exited, Bun.sleep(6_000).then(() => undefined)]);
+      expect(exitCode).toBe(0);
+      expect(await stderr).toBe("");
+      expect(JSON.parse(await stdout).checks.compatibility).toBe(false);
+    } finally {
+      try { process.kill(Number(await readFile(pidPath, "utf8")), "SIGKILL"); } catch { /* Already reaped by the probe. */ }
+      if (child.exitCode === null) child.kill(9);
+      await child.exited;
+    }
+  }, 15_000);
+
+  test.skipIf(process.platform === "win32")("rejects an installed OMP version banner over the command byte cap", async () => {
+    const root = await realpath(await isolatedRoot()), executable = join(root, "omp");
+    await writeFile(executable, `#!${process.execPath}
+console.log("omp/18.1.20" + " ".repeat(1024 * 1024));
+`);
+    await chmod(executable, 0o700);
+    const child = Bun.spawn([process.execPath, "--eval", `
+      import { runDoctorChecks } from ${JSON.stringify(new URL("../src/doctor.ts", import.meta.url).href)};
+      globalThis.fetch = async () => new Response(null, { status: 503 });
+      console.log(JSON.stringify(await runDoctorChecks({ serviceStatus: async () => ({ installed: false, active: false }) })));
+    `], { env: { ...process.env, PATH: root }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+    expect(JSON.parse(stdout).checks.compatibility).toBe(false);
+  });
+
+  test.each(["content-length", "stream"] as const)("bounds public session response bytes via %s", async variant => {
+    const root = await isolatedRoot();
+    process.env.PATH = root;
+    const body = `${" ".repeat(1024 * 1024)}{"revision":1,"sessions":[]}`;
+    const network = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) =>
+      String(input).endsWith("/api/v1/sessions")
+        ? new Response(body, { headers: { "Cache-Control": "no-store",
+          ...(variant === "content-length" ? { "Content-Length": String(Buffer.byteLength(body)) } : {}) } })
+        : new Response(null, { status: 503 })) as typeof fetch);
+    try {
+      const report = await runDoctorChecks({ ompVersion: async () => "18.1.20",
+        serviceStatus: async () => ({ installed: false, active: false }) });
+      expect(report.checks.identityAllowed).toBe(false);
+      expect(report.checks.sessionHealth).toBe(false);
+    } finally { network.mockRestore(); }
+  });
 
   test("withholds trust without a tunnel device and compatibility without a reachable OMP", async () => {
     await isolatedRoot();
