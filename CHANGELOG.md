@@ -6,6 +6,85 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.10.1] — 2026-11-09
+
+This release uses stock OMP v18.18.0 as its engineering baseline. The 34 changelog entries below record the changes since v0.10.0. Historical receipts do not qualify these bytes.
+
+### Added
+
+- Record bounded, closed fleet attention diagnostics in the physical Android Push lane (worker
+  shown state, per-arm push-entry and showNotification counts, process freezer state,
+  notification rate-limit refusals) without delaying delivery verdicts, and add a
+  `legacy-head-identity` development step that reaches fleet identity in full-lane order.
+- Add isolated Android fleet Push development steps with campaign/Pixel lease refusal and the
+  existing restoration proof. Read notification identity from Android first and reuse unchanged
+  worker metadata instead of evaluating frozen processes; partial runs remain Tested, not Qualified.
+- Extend physical Android Push qualification with fleet enrollment, notification detail levels,
+  races, taps, stale taps, outage, coordinator restart, revocation, sink sweep, and restoration.
+  Fleet phases use an attached DevTools observer and do not claim process-cold wake qualification.
+- Record closed restart-clear transmission, device receipt and observer scalars in the physical
+  Android Push lane without changing its assertions, timeouts or published product bytes.
+
+### Changed
+
+- Document the once-only replacement alert for a pending local ask after a home-gateway restart,
+  preserving exact clears and stable remote requests.
+- Cap listener request bodies at 64 KiB before dispatching them to HTTP handlers.
+
+### Removed
+
+- Remove retired fork-era IPC events from the closed qualification-log vocabulary.
+
+### Fixed
+
+- Cap user-specified math dimensions at 100 em to prevent oversized transcript spacers.
+- Show normal empty-directory guidance while alert coverage is still being checked, reserving
+  the incomplete-host warning for known gaps and keeping All clear blocked until coverage is known.
+- Skip unchanged remote directory renders, preserve row focus and busy states, and keep live-region
+  retry controls stable during routine updates.
+- Rate-limit repeated unreadable OMP discovery diagnostics, retaining suppressed-event counts.
+- Bound doctor version probes to five seconds and cap version and session-response bytes.
+- Reuse only remote observations requested after the receipt capture for periodic fleet alert
+  reconciliation, without duplicate remote polls or overruling newer push receipts.
+- Count an unreachable host's asks from what the phone learned: an ask cleared by push is no
+  longer counted again during the outage, and opening the app while a host is unreachable counts
+  that host's asks instead of showing the plain marker (#598).
+- Strip tabs and line breaks from session, fleet, and notification labels.
+- Reject display labels over 2,048 UTF-16 units before normalization to bound parser work.
+- Bound local and remote launches to 10 seconds and background alert setup requests to 5 seconds.
+- Enforce the documented 100-record local triage limit, keeping the newest records of a larger set,
+  and retire transition names for removed sessions.
+- Sanitize Markdown image sources in settled and streaming messages without letting malformed
+  URLs disable surrounding Markdown formatting.
+- Send Web Push messages to each browser subscription one at a time, in order and at least one
+  second apart, after a Pixel received only one of two pushes accepted milliseconds apart; each
+  device is paced separately.
+- Require the exact pinned Bun runtime in the release builder and signed-release workflow.
+- Qualification: Android acceptance and Push lane radio restoration now prove that the Pixel
+  resolves public names, reconnecting its Tailscale VPN at most once, so a radio cycle can no
+  longer leave later Push registration or relay access failing while the tailnet still works.
+- Align published schemas with additive OMP metadata, Control request identities, and fleet origins.
+- Accept typed fleet failure events in qualification logs without stopping the daemon
+  on push errors.
+- Stop discovery polling, opened services, a half-opened fleet coordinator, and the qualification
+  log claim when any serve startup step fails.
+- Preserve literal percent and dollar characters in systemd units: specifiers are doubled in every
+  path token and variable references only on the command line, and the staged-program readers
+  recognize both spellings.
+- Skip unchanged fleet state writes and redundant reconciliation of identical source updates.
+- Recover background notification delivery from malformed stored worker state while preserving valid
+  legacy notification ordering records.
+
+### Security
+
+- Reject shared-parser JSON nested beyond 64 levels with a protocol validation error.
+- Omit droplet network addresses from retained provider-response evidence.
+- Restrict tool-result thumbnails and opened blobs to JPEG, PNG, WebP, and GIF images,
+  rejecting HTML and SVG content.
+- Refuse Serve identity and fleet feeds when the request host differs from the public origin host.
+- Scan published site HTML, stylesheets, XML, and text for capabilities and private identifiers.
+- Pass the qualification teardown's Tailscale API credential to curl through stdin, not argv.
+
 ## [v0.10.0] — 2026-11-07
 
 This release uses stock OMP v18.18.0 as its engineering baseline. The 17 changelog entries below record the changes since v0.9.1. Historical receipts do not qualify these bytes.

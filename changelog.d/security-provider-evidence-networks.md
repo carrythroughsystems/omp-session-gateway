@@ -1,1 +1,0 @@
-- Omit droplet network addresses from retained provider-response evidence.
