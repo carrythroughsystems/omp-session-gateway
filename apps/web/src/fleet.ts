@@ -1,5 +1,5 @@
 import {
-  MAX_CLIENT_CONFIG_BYTES, MAX_SESSIONS, INSTANCE_ID_PATTERN,
+  MAX_CLIENT_CONFIG_BYTES, MAX_LOCAL_TRIAGE_RECORDS, INSTANCE_ID_PATTERN,
   parseClientConfigResponse, parseSessionListResponse, parseFleetSourceId, parseFleetOrigin,
   parseJsonFrame, parseSessionCreationOptions, parseSessionCreationRequest, parseSessionCreationReceipt,
   parseSessionCreationStatus, parseSessionCreationUuid,
@@ -61,6 +61,12 @@ interface FleetClock {
   clearTimeout(timer: number): void;
 }
 /**
+ * Orders observations against worker receipt captures without a clock: two events in the same
+ * millisecond (or across a backward clock step) are still strictly ordered by this counter.
+ */
+let observationSequence = 0;
+export function nextObservationSequence(): number { return ++observationSequence; }
+/**
  * Every timer this document schedules goes through `window`, never the bare global: the page's
  * owner (and the test harness standing in for it) can then cancel all of them together, so no
  * poll, grace, or deadline callback can outlive the document that armed it.
@@ -95,6 +101,8 @@ export class FleetTransport {
   sequence = 0;
   revision = -1;
   freshAt: number | undefined;
+  /** Observation sequence taken when the request that produced or verified the snapshot started. */
+  freshStartedSequence: number | undefined;
   staleSince: number | undefined;
   private visible = false;
   private failures = 0;
@@ -108,6 +116,7 @@ export class FleetTransport {
     private readonly changed: (source: FleetTransport) => void,
     private readonly fetcher: typeof fetch = fetch,
     private readonly time: FleetClock = clock,
+    private readonly unchanged?: (source: FleetTransport) => void,
   ) { this.key = sourceKey(source); }
 
   setVisible(visible: boolean): void {
@@ -229,6 +238,9 @@ export class FleetTransport {
 
   private async fetchSnapshot(controller: AbortController, epoch: number, sequence: number, notification = false): Promise<SnapshotResult> {
     let timedOut = false;
+    // Taken before the request leaves: a response that completes after a receipt capture may
+    // still describe the host as it was before that capture.
+    const startedSequence = nextObservationSequence();
     const timeout = this.time.setTimeout(() => { timedOut = true; controller.abort(); }, 5_000);
     const current = (): boolean => notification ? this.notificationRequest === controller
       : this.epoch === epoch && this.sequence === sequence && this.visible;
@@ -243,11 +255,20 @@ export class FleetTransport {
       if (!response.ok) throw new Error("snapshot unavailable");
       const payload = parseSessionListResponse(await boundedJson(response, SNAPSHOT_BYTES));
       if (!current() || controller.signal.aborted) return "unavailable";
+      if (this.epoch === epoch && this.status === "fresh" && payload.revision === this.revision &&
+        JSON.stringify(payload.sessions) === JSON.stringify(this.snapshot?.sessions)) {
+        this.freshAt = this.time.now();
+        this.freshStartedSequence = startedSequence;
+        // Launch feedback may recover even when there is no directory change to announce.
+        this.unchanged?.(this);
+        return "healthy";
+      }
       // Full snapshots are authoritative by request order, not by daemon-local revision.
       this.snapshot = payload;
       this.revision = payload.revision;
       this.status = "fresh";
       this.freshAt = this.time.now();
+      this.freshStartedSequence = startedSequence;
       this.staleSince = undefined;
       this.failures = 0;
       if (this.graceTimer !== undefined) this.time.clearTimeout(this.graceTimer);
@@ -480,8 +501,10 @@ export function readSourceRecords(
     let values: unknown;
     try { values = serialized.length <= 512_000 ? JSON.parse(serialized) : undefined; }
     catch { values = undefined; }
-    if (Array.isArray(values) && values.length <= MAX_SESSIONS) {
-      for (const value of values) {
+    // Writers append newest last; a set that outgrew the bound keeps its newest records rather
+    // than losing every triage decision on the next authoritative read.
+    if (Array.isArray(values)) {
+      for (const value of values.slice(-MAX_LOCAL_TRIAGE_RECORDS)) {
         if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
         const record = value as Record<string, unknown>;
         const held = key === HELD_KEY;

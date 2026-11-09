@@ -3,6 +3,8 @@ export const MAX_FRAME_BYTES = 64 * 1024;
 export const MAX_CAPABILITY_BYTES = 8 * 1024;
 export const MAX_LABEL_CODEPOINTS = 256;
 export const MAX_SESSIONS = 1_000;
+/** Per device-local held-ask or dismissed-session record set, within its 512,000-character bound. */
+export const MAX_LOCAL_TRIAGE_RECORDS = 100;
 /**
  * OMP mints every instance identity now, so its own `COLLAB_INSTANCE_ID_PATTERN` is the contract:
  * 8-64 characters of `[a-z0-9-]`. A host is free to use the 8-character minimum, and a gateway that

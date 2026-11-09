@@ -2,6 +2,7 @@ import {
   INSTANCE_ID_PATTERN,
   MAX_FRAME_BYTES,
   MAX_SESSIONS,
+  MAX_LOCAL_TRIAGE_RECORDS,
   PUSH_API_VERSION,
   FLEET_PUSH_VERSION,
   FLEET_GRANT_RENEW_WITHIN_MS,
@@ -30,7 +31,7 @@ import type {
   CollabEmbedState,
 } from "../../../packages/collab-client/upstream/src/embed-contract";
 import {
-  FleetTransport, loadClientConfig, sourceKey, sessionKey, recordKey, recordRef,
+  FleetTransport, loadClientConfig, nextObservationSequence, sourceKey, sessionKey, recordKey, recordRef,
   readSourceRecords, boundedJson, SNAPSHOT_BYTES, HELD_KEY, DISMISSED_KEY,
   FleetNotificationTransport, FleetNotificationError,
   type SourceKey, type SessionRef, type HeldAsk, type DismissedSession, type SnapshotResult,
@@ -261,6 +262,7 @@ let fleetStatusRequest: Promise<void> | undefined;
 let fleetReconciliation: Promise<void> | undefined;
 let fleetReconciliationDirty = false;
 let fleetReconciliationProbe = false;
+let fleetReceiptCapture: { received: number; sequence: number } | undefined;
 
 let initialPromptDraft: { ref: SessionRef; text: string } | undefined;
 const sameBinding = (left: SessionRef, right: SessionRef): boolean =>
@@ -630,7 +632,7 @@ function scheduleFleetStatusRefresh(): void {
   fleetStatusTimer = window.setTimeout(() => {
     fleetStatusTimer = undefined;
     if (notificationState === "enabled" && document.visibilityState === "visible" &&
-      fleetWorkerModePending === undefined && fleetNotificationsOffered !== false && shouldRefreshFleetStatus()) void reconcileFleetNotifications();
+      fleetWorkerModePending === undefined && fleetNotificationsOffered !== false && shouldRefreshFleetStatus()) void reconcileFleetNotifications(false, true);
   }, 10_000);
 }
 
@@ -775,7 +777,7 @@ async function changeNotificationHost(source: FleetSource, enabled: boolean): Pr
   }
 }
 
-async function reconcileFleetNotifications(probe = false): Promise<void> {
+async function reconcileFleetNotifications(probe = false, periodic = false): Promise<void> {
   if (notificationWorkerV3 === false || notificationState !== "enabled") return;
   if (fleetReconciliation !== undefined) {
     fleetReconciliationDirty = true;
@@ -787,7 +789,8 @@ async function reconcileFleetNotifications(probe = false): Promise<void> {
     try {
       do {
         fleetReconciliationDirty = false;
-        await reconcileFleetNotificationSnapshot(probe);
+        await reconcileFleetNotificationSnapshot(probe, periodic);
+        periodic = false;
         probe = fleetReconciliationProbe;
         fleetReconciliationProbe = false;
       } while (fleetReconciliationDirty);
@@ -796,10 +799,15 @@ async function reconcileFleetNotifications(probe = false): Promise<void> {
   await fleetReconciliation;
 }
 
-async function reconcileFleetNotificationSnapshot(probe: boolean): Promise<void> {
+async function reconcileFleetNotificationSnapshot(probe: boolean, periodic: boolean): Promise<void> {
   // Capture first. Never reuse a snapshot request started before this worker reply.
   const received = await notificationReceiptCount();
   if (received === undefined) { renderNotificationHosts(); render(); return; }
+  // Periodic reconciliation may use observations since the preceding capture. Its older asOf
+  // deliberately leaves every push received since that capture authoritative in the worker.
+  const previous = periodic ? fleetReceiptCapture : undefined;
+  fleetReceiptCapture = { received, sequence: nextObservationSequence() };
+  const capture = previous ?? fleetReceiptCapture;
   await refreshFleetNotifications(true, probe);
   const selected = fleetNotificationRows.filter(row => row.selected);
   if (!fleetNotificationsOffered || fleetWorkerModePending !== undefined) return;
@@ -817,6 +825,8 @@ async function reconcileFleetNotificationSnapshot(probe: boolean): Promise<void>
   };
   await Promise.all([
     (async () => {
+      // The local list is always requested after the capture: an SSE event received since then
+      // may still describe the host as it was before, so the stream is never reused here.
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
       try {
@@ -830,14 +840,23 @@ async function reconcileFleetNotificationSnapshot(probe: boolean): Promise<void>
       if (source === undefined) return;
       const key = sourceKey(source);
       if (row.state === "current" || row.state === "stale") countedKeys.add(key);
-      if (row.state === "current" && await remotes.get(key)?.refreshAfterCurrent() === "healthy") {
-        observe(key, remotes.get(key)!.snapshot!.sessions);
+      const remote = remotes.get(key);
+      if (row.state !== "current" || remote === undefined) return;
+      // Only a snapshot whose request started after the capture can be posted with that capture's
+      // receipt count; completion time proves nothing about the host state it carries, and the
+      // shared sequence orders a same-millisecond start strictly.
+      const startedAfterCapture = (): boolean => remote.status === "fresh" &&
+        remote.freshStartedSequence !== undefined && remote.freshStartedSequence > capture.sequence;
+      if (previous !== undefined && startedAfterCapture()) {
+        observe(key, remote.snapshot!.sessions);
+      } else if (await remote.refreshAfterCurrent() === "healthy" && startedAfterCapture()) {
+        observe(key, remote.snapshot!.sessions);
       }
     }),
   ]);
   const counted = [...countedKeys].flatMap(key => key === localKey ? ["local"] : bindings.has(key) ? [bindings.get(key)!] : []);
   notificationRegistration?.active?.postMessage(parseFleetReconcileMessage({
-    type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received }, fresh, pending, counted,
+    type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received: capture.received }, fresh, pending, counted,
     complete: notificationCoverageComplete() && fresh.length === selected.length + 1,
   }));
 }
@@ -851,15 +870,20 @@ async function savePushSubscription(
     ...(detailLevel === undefined ? {} : { detailLevel }),
     subscription: subscription.toJSON(),
   });
-  const response = await fetch("/api/v1/push/subscription", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-    cache: "no-store",
-    credentials: "same-origin",
-  });
-  if (!response.ok) throw new Error("push subscription was rejected");
-  return parsePushSubscriptionResponse(await response.json()).detailLevel;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetch("/api/v1/push/subscription", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("push subscription was rejected");
+    return parsePushSubscriptionResponse(await response.json()).detailLevel;
+  } finally { window.clearTimeout(timeout); }
 }
 
 function selectNotificationDetail(detailLevel: PushDetailLevel): void {
@@ -967,7 +991,17 @@ async function initializeNotifications(
   try {
     const [registered, configResponse] = await Promise.all([
       workerRegistration,
-      fetch("/api/v1/push/config", { cache: "no-store", credentials: "same-origin" }),
+      (async () => {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 5_000);
+        try {
+          const response = await fetch("/api/v1/push/config", {
+            cache: "no-store", credentials: "same-origin", signal: controller.signal,
+          });
+          if (!response.ok) throw new Error("push configuration unavailable");
+          return parsePushConfigResponse(await response.json());
+        } finally { window.clearTimeout(timeout); }
+      })(),
     ]);
     if (registered === undefined) {
       setNotificationControl("unavailable");
@@ -975,14 +1009,13 @@ async function initializeNotifications(
     }
     const registration = registered.active === null ? await navigator.serviceWorker.ready : registered;
     if (
-      !configResponse.ok ||
       typeof registration.showNotification !== "function" ||
       !(await checkNotificationWorker(registration))
     ) {
       setNotificationControl("unavailable");
       return;
     }
-    const config = parsePushConfigResponse(await configResponse.json());
+    const config = configResponse;
     notificationRegistration = registration;
     await notificationReceiptCount();
     applicationServerKey = config.applicationServerKey;
@@ -1099,7 +1132,11 @@ if (location.pathname === "/update/" || location.pathname === "/client/") {
 
 type StatusKind = "ready" | "offline" | "tailnet" | "desktop" | "gateway" | "configuration" | "unauthorized" | "expired" | "loading";
 
+let bannerSignature: string | undefined;
 function writeBanner(kind: StatusKind, content: HTMLElement): void {
+  const signature = JSON.stringify([kind, content.textContent]);
+  if (signature === bannerSignature) return;
+  bannerSignature = signature;
   statusBanner.dataset.kind = kind;
   statusBanner.replaceChildren(content);
   statusBanner.hidden = kind === "ready";
@@ -1412,7 +1449,7 @@ function writeLocalRecords(key: string, records: Iterable<HeldAsk | DismissedSes
 function setBoundedLocalRecord<RecordType>(map: Map<string, RecordType>, key: string, record: RecordType): void {
   map.delete(key);
   map.set(key, record);
-  while (map.size > MAX_SESSIONS) {
+  while (map.size > MAX_LOCAL_TRIAGE_RECORDS) {
     const oldest = map.keys().next().value as string | undefined;
     if (oldest === undefined) break;
     map.delete(oldest);
@@ -1488,6 +1525,7 @@ function replaceSessionSnapshot(nextSessions: readonly Metadata[], authority: So
     sessions.set(sessionKey(session), session);
     observeAsk(session);
   }
+  for (const key of rowNames.keys()) if (!sessions.has(key)) rowNames.delete(key);
   if (fresh) reconcileLocalRecords(authority);
   const currentAsks = new Set([...sessions.values()].flatMap(session =>
     session.ask === undefined ? [] : [localRecordKey(session, session.ask.requestId)]));
@@ -1618,6 +1656,7 @@ function releaseLaunchFailure(sourceKey: SourceKey): void {
   }
 }
 
+let remoteRenderQueued = false;
 function remoteChanged(remote: FleetTransport): void {
   replaceSessionSnapshot(remote.snapshot?.sessions ?? [], remote.key, remote.status === "fresh");
   if (remote.status === "fresh") releaseLaunchFailure(remote.key);
@@ -1628,13 +1667,17 @@ function remoteChanged(remote: FleetTransport): void {
     cancelLaunch(remote.key);
     if (activeCollabShell?.sourceKey === remote.key) returnToDirectory();
   }
-  render();
+  if (!remoteRenderQueued) {
+    remoteRenderQueued = true;
+    queueMicrotask(() => { remoteRenderQueued = false; render(); });
+  }
   if (remote.status === "fresh") reconcileActiveCollabShell();
   if (remote.status === "forbidden") applyActivatedWorkerUpdate();
 }
 
+let fleetStatusSignature: string | undefined;
 function renderFleetStatus(): void {
-  fleetStatus.replaceChildren();
+  const rows: { key: SourceKey; state: string; detail: string; retry: string | undefined; remote: FleetTransport }[] = [];
   // The banner owns this gateway; only independent remote failures belong here.
   for (const [key, remote] of remotes) {
     const availability = sourceAvailability(key);
@@ -1643,13 +1686,23 @@ function renderFleetStatus(): void {
       (navigator.onLine === false && remote.status !== "forbidden")) continue;
     const detail = remote.status === "forbidden" ? "Access withdrawn."
       : availability.failed ? `Host unavailable. ${availability.copy}` : launchFailure!;
+    rows.push({ key, state: availability.failed ? remote.status : "launch-failed",
+      detail: `${remote.source.label}: ${detail}`,
+      retry: availability.retry || launchFailure !== undefined ? availability.failed ? "Retry" : "Refresh host" : undefined,
+      remote });
+  }
+  const signature = JSON.stringify(rows.map(({ key, state, detail, retry }) => [key, state, detail, retry]));
+  if (signature === fleetStatusSignature) return;
+  fleetStatusSignature = signature;
+  fleetStatus.replaceChildren();
+  for (const { key, state, detail, retry: retryLabel, remote } of rows) {
     const row = document.createElement("div");
     row.className = "fleet-status-row";
-    row.append(createTextElement("span", "fleet-status-copy", `${remote.source.label}: ${detail}`));
+    row.append(createTextElement("span", "fleet-status-copy", detail));
     row.dataset.sourceKey = key;
-    row.dataset.state = availability.failed ? remote.status : "launch-failed";
-    if (availability.retry || launchFailure !== undefined) {
-      const retry = createTextElement("button", "status-action", availability.failed ? "Retry" : "Refresh host");
+    row.dataset.state = state;
+    if (retryLabel !== undefined) {
+      const retry = createTextElement("button", "status-action", retryLabel);
       retry.addEventListener("click", () => void remote.refresh(true));
       row.append(retry);
     }
@@ -1671,7 +1724,11 @@ async function initializeFleet(): Promise<void> {
       for (const target of config.targets) {
         const key = sourceKey(target);
         sources.set(key, target);
-        remotes.set(key, new FleetTransport(target, remoteChanged));
+        remotes.set(key, new FleetTransport(target, remoteChanged, undefined, undefined, remote => {
+          if (!remoteLaunchFailures.has(remote.key) && activeCollabShell?.launchFailureSource !== remote.key) return;
+          releaseLaunchFailure(remote.key);
+          renderFleetStatus();
+        }));
         bindings.set(key, await fleetSourceBinding(target.id, target.origin));
       }
     }
@@ -1976,6 +2033,8 @@ function restoreDismissedSessions(): void {
 function createWorkingRow(session: SessionMetadata): HTMLElement {
   const frame = document.createElement("div");
   frame.className = "working-row-frame";
+  frame.dataset.instanceId = session.instanceId;
+  frame.dataset.sourceKey = session.sourceKey;
   frame.dataset.fresh = String(sourceFresh(session.sourceKey));
   const button = document.createElement("button");
   button.type = "button";
@@ -1983,6 +2042,11 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   button.dataset.instanceId = session.instanceId;
   button.dataset.sourceKey = session.sourceKey;
   button.disabled = !session.canView || !sourceFresh(session.sourceKey);
+  if (pendingLaunch !== undefined && sameBinding(pendingLaunch.ref, session)) {
+    button.disabled = true;
+    button.dataset.busy = "true";
+    button.setAttribute("aria-busy", "true");
+  }
   button.setAttribute("aria-label", `View ${spokenTitle(session)}`);
   const copy = document.createElement("span");
   copy.className = "working-copy";
@@ -2019,6 +2083,11 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
   button.dataset.instanceId = session.instanceId;
   button.dataset.sourceKey = session.sourceKey;
   button.disabled = !sourceFresh(session.sourceKey) || (mode === "control" ? !session.canControl : !session.canView);
+  if (pendingLaunch !== undefined && sameBinding(pendingLaunch.ref, session)) {
+    button.disabled = true;
+    button.dataset.busy = "true";
+    button.setAttribute("aria-busy", "true");
+  }
   button.setAttribute(
     "aria-label",
     session.canControl ? `Open request in ${spokenTitle(session)}` : `View ${spokenTitle(session)}`,
@@ -2052,6 +2121,11 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   open.type = "button";
   open.className = "held-open";
   open.disabled = !sourceFresh(session.sourceKey) || (mode === "control" ? !session.canControl : !session.canView);
+  if (pendingLaunch !== undefined && sameBinding(pendingLaunch.ref, session)) {
+    open.disabled = true;
+    open.dataset.busy = "true";
+    open.setAttribute("aria-busy", "true");
+  }
   open.setAttribute("aria-label", `Open held request in ${spokenTitle(session)}`);
   const copy = document.createElement("span");
   copy.className = "row-copy";
@@ -2190,6 +2264,11 @@ function renderWaitingQueue(
     primary.className = "action action-request";
     primary.textContent = hero.canControl ? "Open request" : "View transcript";
     primary.disabled = !sourceFresh(hero.sourceKey) || (hero.canControl ? false : !hero.canView);
+    if (pendingLaunch !== undefined && sameBinding(pendingLaunch.ref, hero)) {
+      primary.disabled = true;
+      primary.dataset.busy = "true";
+      primary.setAttribute("aria-busy", "true");
+    }
     primary.addEventListener("click", () => {
       const mode: LaunchMode = hero.canControl ? "control" : "view";
       void launch(hero, mode, primary, hero.ask?.requestId, selectedScope, "request-tray");
@@ -2257,6 +2336,7 @@ function renderWaitingQueue(
 type MotionType = "forward" | "back" | "list";
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const rowNames = new Map<string, string>();
+let rowNameSequence = 0;
 
 function motionAllowed(): boolean {
   return typeof document.startViewTransition === "function" &&
@@ -2280,7 +2360,7 @@ function transitionDocument(type: MotionType, update: () => void): ViewTransitio
 function rowName(key: string): string {
   let name = rowNames.get(key);
   if (name === undefined) {
-    name = `omp-row-${rowNames.size + 1}`;
+    name = `omp-row-${++rowNameSequence}`;
     rowNames.set(key, name);
   }
   return name;
@@ -2292,7 +2372,8 @@ function nameDirectoryRows(named: boolean): void {
     const element = child as HTMLElement;
     const keyed = element.matches("[data-instance-id]") ? element : element.querySelector<HTMLElement>("[data-instance-id]");
     if (keyed === null) continue;
-    element.style.setProperty("view-transition-name", named ? rowName(`${keyed.dataset.sourceKey ?? ""}\0${keyed.dataset.instanceId ?? ""}`) : "");
+    const key = `${keyed.dataset.sourceKey ?? ""}\0${keyed.dataset.instanceId ?? ""}`;
+    element.style.setProperty("view-transition-name", named && sessions.has(key) ? rowName(key) : "");
     element.style.setProperty("view-transition-class", named ? "omp-row" : "");
   }
 }
@@ -2366,7 +2447,7 @@ function render(): void {
 
 function renderDirectory(arrived = false): void {
   const focused = document.activeElement;
-  const keyed = focused?.matches(".action-request, .queue-row, .held-open")
+  const keyed = focused !== null && sessionList.contains(focused)
     ? focused.closest<HTMLElement>("[data-instance-id]") : null;
   const focusRef = keyed?.dataset.instanceId === undefined ? undefined : {
     sourceKey: keyed.dataset.sourceKey ?? localKey,
@@ -2374,7 +2455,17 @@ function renderDirectory(arrived = false): void {
   };
   renderDirectoryContents(arrived);
   // Snapshot/SSE refreshes replace row nodes even when there is no structural animation.
-  if (focusRef !== undefined) focusDirectoryRequest(focusRef);
+  if (focusRef !== undefined && focused !== null) {
+    for (const control of sessionList.querySelectorAll<HTMLElement>(focused.tagName)) {
+      const row = control.closest<HTMLElement>("[data-instance-id]");
+      if (row?.dataset.instanceId === focusRef.instanceId &&
+        (row.dataset.sourceKey ?? localKey) === focusRef.sourceKey &&
+        control.className === focused.className && control.getAttribute("role") === focused.getAttribute("role")) {
+        control.focus({ preventScroll: true });
+        break;
+      }
+    }
+  }
 }
 
 function renderEmptyState(): void {
@@ -3382,13 +3473,19 @@ async function launch(
   };
 
   const resetButton = (): void => {
-    if (button === undefined) return;
-    const current = sessions.get(sessionKey(attempt.ref));
-    button.disabled = !sourceFresh(session.sourceKey) || current?.generation !== attempt.ref.generation ||
-      (mode === "view" ? !current.canView : !current.canControl);
-    delete button.dataset.busy;
-    button.removeAttribute("aria-busy");
-    if (labelOnly) button.textContent = idleLabel;
+    // A newer attempt for this binding owns the busy state now and resets it when it settles.
+    if (pendingLaunch !== undefined && pendingLaunch !== attempt && sameBinding(pendingLaunch.ref, attempt.ref)) return;
+    if (button !== undefined) {
+      const current = sessions.get(sessionKey(attempt.ref));
+      button.disabled = !sourceFresh(session.sourceKey) || current?.generation !== attempt.ref.generation ||
+        (mode === "view" ? !current.canView : !current.canControl);
+      delete button.dataset.busy;
+      button.removeAttribute("aria-busy");
+      if (labelOnly) button.textContent = idleLabel;
+    }
+    // Rows rebuilt while this attempt was pending carry its busy mark; each control's own rule
+    // (role, permission, freshness) decides its state, so rebuild them from current state.
+    if ([...sessionList.querySelectorAll<HTMLButtonElement>("button")].some(control => control !== button && control.dataset.busy === "true")) render();
   };
   let stylesheet: HTMLLinkElement | undefined;
   let startCollabWithCapability: StartCollabWithCapability;
@@ -3455,7 +3552,7 @@ async function launch(
   let response: Response;
   try {
     const remote = session.sourceKey !== localKey;
-    if (remote) attempt.deadline = window.setTimeout(() => attempt.controller.abort(), 10_000);
+    attempt.deadline = window.setTimeout(() => attempt.controller.abort(), 10_000);
     response = await fetch(`${remote ? source.origin : ""}/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3564,6 +3661,7 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
     if (current?.generation === event.generation) {
       if (current.ask !== undefined) observedAsks.delete(localRecordKey(current, current.ask.requestId));
       sessions.delete(key);
+      rowNames.delete(key);
     }
   }
   if (event.type !== "snapshot") reconcileLocalRecords();
