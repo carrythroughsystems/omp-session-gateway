@@ -1327,8 +1327,8 @@ REMOTE
   # shellcheck disable=SC2329
   omp_session_present() {
     kill -0 "$omp_ssh_pid" >/dev/null 2>&1 || return 1
-    remote_user ALLOWED_LOGIN="$SYNTHETIC_DENIED_LOGIN" GATEWAY_PORT="$GATEWAY_PORT" <<'REMOTE'
-curl -fsS -H "Tailscale-User-Login: $ALLOWED_LOGIN" \
+    remote_user DNS_NAME="$dns_name" ALLOWED_LOGIN="$SYNTHETIC_DENIED_LOGIN" GATEWAY_PORT="$GATEWAY_PORT" <<'REMOTE'
+curl -fsS -H "Tailscale-User-Login: $ALLOWED_LOGIN" -H "Host: ${DNS_NAME}" \
   "http://127.0.0.1:${GATEWAY_PORT}/api/v1/sessions" |
   jq -e '
     [.sessions[] | select(.cwdLabel == "omp-linux-qualification")] as $matched
@@ -1345,7 +1345,7 @@ REMOTE
     GATEWAY_PORT="$GATEWAY_PORT" FIXTURE_MODEL="$fixture_model" <<'REMOTE'
 set -euo pipefail
 show() { printf '   %-38s %s\n' "$1:" "$2"; }
-sessions="$(curl -fsS -H "Tailscale-User-Login: $ALLOWED_LOGIN" \
+sessions="$(curl -fsS -H "Tailscale-User-Login: $ALLOWED_LOGIN" -H "Host: ${DNS_NAME}" \
   "http://127.0.0.1:${GATEWAY_PORT}/api/v1/sessions")"
 record="$(printf '%s' "$sessions" |
   jq -c '[.sessions[] | select(.cwdLabel == "omp-linux-qualification")] | if length == 1 then .[0] else error("expected exactly one mainline OMP session") end')"
@@ -1364,6 +1364,7 @@ for mode in view control; do
     '{generation: $generation, mode: $mode}')"
   curl -fsS -D "$headers" \
     -H "Tailscale-User-Login: $ALLOWED_LOGIN" \
+    -H "Host: ${DNS_NAME}" \
     -H "Origin: https://${DNS_NAME}" \
     -H "Sec-Fetch-Site: same-origin" \
     -H "Content-Type: application/json" \
@@ -1387,8 +1388,8 @@ REMOTE
 
   # shellcheck disable=SC2329
   omp_session_absent() {
-    remote_user ALLOWED_LOGIN="$SYNTHETIC_DENIED_LOGIN" GATEWAY_PORT="$GATEWAY_PORT" <<'REMOTE'
-curl -fsS -H "Tailscale-User-Login: $ALLOWED_LOGIN" \
+    remote_user DNS_NAME="$dns_name" ALLOWED_LOGIN="$SYNTHETIC_DENIED_LOGIN" GATEWAY_PORT="$GATEWAY_PORT" <<'REMOTE'
+curl -fsS -H "Tailscale-User-Login: $ALLOWED_LOGIN" -H "Host: ${DNS_NAME}" \
   "http://127.0.0.1:${GATEWAY_PORT}/api/v1/sessions" |
   jq -e '[.sessions[] | select(.cwdLabel == "omp-linux-qualification")] | length == 0' >/dev/null
 REMOTE

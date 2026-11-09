@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { SecretCapability, fleetOwnerDigest, MAX_PUSH_ENDPOINT_BYTES, parsePushSubscriptionRequest, type ObservedSessionInput } from "@omp-session-gateway/protocol";
+import { SecretCapability, fleetGrantVerifier, fleetOwnerDigest, MAX_PUSH_ENDPOINT_BYTES, parsePushSubscriptionRequest, type ObservedSessionInput } from "@omp-session-gateway/protocol";
 import type { GatewayConfig } from "../src/config.ts";
 import { requestHasTrustedDashboardContext, requestHasValidMutationContext } from "../src/auth.ts";
 import { createHttpHandler, startHttpServer } from "../src/http.ts";
@@ -14,6 +14,7 @@ import { finalizeHttpResponse } from "../src/http-policy.ts";
 import { QualificationLogSink, SafeLogger } from "../src/logger.ts";
 import { PushService } from "../src/push.ts";
 import { FleetCoordinator } from "../src/fleet-coordinator.ts";
+import { FleetSourceService } from "../src/fleet-source.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { StaticAssetStore } from "../src/static.ts";
 import { SessionCreationProblem, type SessionCreationService } from "../src/tern-creation.ts";
@@ -175,6 +176,7 @@ test.skipIf(process.platform === "win32")("495 round2 HTTP shutdown settles admi
     launchResolver: { async resolve() { entered.resolve(); await release.promise; throw new Error("synthetic handler failure"); } } });
   let settled = false;
   const req = launchRequest();
+  req.headers.set("Host", new URL(origin).host);
   const response = fetch(new URL("/api/v1/sessions/http-instance-000001/launch", server.url), {
     method: "POST", headers: req.headers, body: await req.text(),
   }).catch(() => undefined);
@@ -187,6 +189,50 @@ test.skipIf(process.platform === "win32")("495 round2 HTTP shutdown settles admi
     sink.close();
     expect(await readFile(join(root, "events.0.jsonl"), "utf8")).toContain('"event":"http.request_failed"');
   } finally { release.resolve(); await server.stop(true); await response; await rm(root, { recursive: true, force: true }); }
+});
+
+test("rejects bodies above 64 KiB before invoking the HTTP handler", async () => {
+  const base = config();
+  let authorizationReads = 0, launches = 0;
+  const server = startHttpServer({
+    config: { ...base, http: { ...base.http, port: 0 },
+      auth: { ...base.auth, get mode() { authorizationReads++; return base.auth.mode; } } },
+    registry: populatedRegistry(), staticAssets: assets, readinessToken: "synthetic-readiness",
+    launchResolver: { async resolve() { launches++; return { status: "missing" }; } },
+  });
+  authorizationReads = 0;
+  try {
+    const req = launchRequest();
+    req.headers.set("Host", new URL(origin).host);
+    const response = await fetch(new URL("/api/v1/sessions/http-instance-000001/launch", server.url), {
+      method: "POST", headers: req.headers, body: " ".repeat(70 * 1024),
+    });
+    await response.body?.cancel();
+    expect(response.status).toBe(413);
+    expect(authorizationReads).toBe(0);
+    expect(launches).toBe(0);
+  } finally { await server.stop(true); }
+});
+
+test("a started listener admits Serve identity only under the public origin host on a real loopback socket", async () => {
+  // The Host rule relies on Bun deriving request.url from the inbound Host header. Prove it over a
+  // live socket in both directions: Serve-shaped traffic (public host) is admitted, a DNS-rebound
+  // page's request (attacker host, same loopback peer, forged identity) is refused.
+  const base = config();
+  const server = startHttpServer({
+    config: { ...base, http: { ...base.http, port: 0 } },
+    registry: populatedRegistry(), staticAssets: assets, readinessToken: "synthetic-readiness",
+    launchResolver: { async resolve() { return { status: "missing" }; } },
+  });
+  try {
+    const sessions = new URL("/api/v1/sessions", server.url);
+    const admitted = await fetch(sessions, { headers: { Host: new URL(origin).host, "Tailscale-User-Login": "allowed@example.com" } });
+    await admitted.body?.cancel();
+    expect(admitted.status).toBe(200);
+    const rebound = await fetch(sessions, { headers: { Host: "attacker.example:4317", "Tailscale-User-Login": "allowed@example.com" } });
+    await rebound.body?.cancel();
+    expect(rebound.status).toBe(403);
+  } finally { await server.stop(true); }
 });
 
 async function readSseEvent(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
@@ -396,6 +442,72 @@ describe("HTTP boundary", () => {
         // The launch surface mints capabilities, so it must refuse on the same evidence.
         expect((await handler(proxiedLaunch(headers), peer)).status).toBe(403);
       }
+    });
+
+    test("refuses an allowlisted identity when the request host is not the public origin host", async () => {
+      const lines: string[] = [];
+      const handler = createTestHttpHandler({
+        config: measured(),
+        registry: populatedRegistry(),
+        staticAssets: assets,
+        logger: new SafeLogger({ write: line => lines.push(line) }),
+        tailnetPresent: () => true,
+      });
+      for (const path of ["/api/v1/sessions", "/api/v1/events", "/api/v1/client-config",
+        "/api/v1/push/config", "/api/v1/session-creation-options"]) {
+        const denied = await handler(new Request(`http://attacker.example:4317${path}`, {
+          headers: { "Tailscale-User-Login": "allowed@example.com", "Sec-Fetch-Site": "same-origin" },
+        }), peer);
+        await denied.body?.cancel();
+        expect(denied.status).toBe(403);
+      }
+      const events = lines.map(line => JSON.parse(line) as { event: string; identity_untrustworthy?: boolean });
+      expect(events.find(entry => entry.event === "http.authorization_denied")?.identity_untrustworthy).toBe(true);
+    });
+
+    test("compares the request and forwarded hosts case-insensitively", async () => {
+      const base = measured();
+      const handler = createTestHttpHandler({
+        config: { ...base, http: { ...base.http, publicOrigin: origin.toUpperCase() } },
+        registry: populatedRegistry(),
+        staticAssets: assets,
+        tailnetPresent: () => true,
+      });
+      const served = await handler(new Request(`${origin.toUpperCase()}/api/v1/sessions`, {
+        headers: { "Tailscale-User-Login": "allowed@example.com", "X-Forwarded-Host": new URL(origin).host.toUpperCase() },
+      }), peer);
+      expect(served.status).toBe(200);
+    });
+
+    test("refuses a valid fleet feed grant when the request host is not the public origin host", async () => {
+      const root = await mkdtemp(join(tmpdir(), "http-feed-host-"));
+      const base = measured(), coordinator = "https://home.example.ts.net";
+      const gatewayConfig: GatewayConfig = { ...base,
+        http: { ...base.http, trustedDashboardOrigins: [coordinator] },
+        notifications: { coordinators: [{ id: "home", origin: coordinator }] },
+        paths: { configDir: join(root, "config"), stateDir: join(root, "state"), runtimeDir: join(root, "runtime"),
+          configPath: join(root, "config/config.json"), tokenPath: join(root, "config/readiness-token") } };
+      const registry = populatedRegistry();
+      const source = await FleetSourceService.open({ config: gatewayConfig, registry,
+        poller: { discoveryWarm: true, subscribeObservations: () => () => {} } });
+      try {
+        const handler = createTestHttpHandler({ config: gatewayConfig, registry, staticAssets: assets,
+          fleetSourceService: source, tailnetPresent: () => true });
+        const grantId = "11111111-2222-4333-8444-555555555555";
+        const secret = "SYNTHETIC_HTTP_FLEET_SECRET_".padEnd(43, "0");
+        const created = await handler(request("/api/v1/notification-grants", {
+          method: "POST", headers: { Origin: coordinator, "Content-Type": "application/json", "Sec-Fetch-Site": "cross-site" },
+          body: JSON.stringify({ version: 1, grantId, verifier: await fleetGrantVerifier(grantId, secret) }),
+        }), peer);
+        expect(created.status).toBe(201);
+        const headers = { Authorization: `Bearer ${grantId}.${secret}` };
+        const valid = await handler(request("/api/v1/notification-feed", { headers }, ""), peer);
+        await valid.body?.cancel();
+        expect(valid.status).toBe(200);
+        const denied = await handler(new Request("http://attacker.example:4317/api/v1/notification-feed", { headers }), peer);
+        await denied.body?.cancel();
+        expect(denied.status).toBe(401);
+      } finally { await source.stop(); await rm(root, { recursive: true, force: true }); }
     });
 
     test("admits the request shape Tailscale Serve actually produces", async () => {

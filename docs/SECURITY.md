@@ -95,18 +95,21 @@ version of that mistake fails closed instead of silently granting control. An HT
 marks that Serve never produces, and a remote caller cannot instruct the proxy in front of it to
 stop inserting them. Measured against Serve's own proxy (`ipn/ipnlocal/serve.go`,
 `addProxyForwardedHeaders` and `addTailscaleIdentityHeaders`), a Serve-originated request carries
-`X-Forwarded-For` set to exactly one address — the tailnet source — and `X-Forwarded-Host` set to
-the host Serve answered on, and Serve deletes every inbound `Tailscale-*` header before setting its
-own. `authorizeHttpRequest` therefore refuses, before reading the identity header, when
+`X-Forwarded-For` set to exactly one address — the tailnet source — and preserves the inbound `Host`,
+setting `X-Forwarded-Host` to that same host. Serve deletes every inbound `Tailscale-*` header before
+setting its own. `authorizeHttpRequest` therefore refuses, before reading the identity header, when
 `X-Forwarded-For` names more than one hop or a non-Tailscale address, when `X-Forwarded-Host`
-disagrees with the configured public origin, when `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`,
-`CF-Ray`, or `X-Forwarded-Server` is present, or when the request is marked as Funnel.
+or the request's own `Host` disagrees with the configured public origin's host (case-insensitively),
+when `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`, `CF-Ray`, or `X-Forwarded-Server` is present, or
+when the request is marked as Funnel. A browser cannot set `Host`, so a page under an attacker's
+hostname whose DNS is rebound to the loopback listener cannot reach the identity path. The same
+host checks apply to machine requests for the notification feed.
 
 **This is defence in depth and explicitly not authentication.** It catches Cloudflare Tunnel,
 ngrok, and ordinary reverse proxies, which all insert at least one of those headers. It does not
-catch a raw TCP forwarder — `socat`, `ssh -L`, a bare tunnel — which inserts nothing and remains
-indistinguishable from Serve, and it does not make the operator rule above optional. Only an
-authenticator the gateway can verify itself closes that gap. The mode dispatch in
+catch a raw TCP forwarder — `socat`, `ssh -L`, a bare tunnel — which inserts nothing and can carry
+the expected `Host`, remaining indistinguishable from Serve; it does not make the operator rule above
+optional. Only an authenticator the gateway can verify itself closes that gap. The mode dispatch in
 `authorizeHttpRequest` is exhaustive for the same reason: a future auth mode denies until it is
 given an explicit arm, rather than inheriting Tailscale header trust by omission.
 

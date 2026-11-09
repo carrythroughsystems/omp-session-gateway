@@ -302,6 +302,7 @@ jobs:
             status="$(curl -fsS --max-time 5 "http://127.0.0.1:$CAPACITY_PORT/api/v1/health" 2>/dev/null | jq -r '.status' 2>/dev/null || printf 'unavailable')"
             if [ "$status" = ready ] && [ -d "$discovery" ] &&
               curl -fsS --max-time 5 -H "Tailscale-User-Login: $CAPACITY_LOGIN" \
+                -H "Host: gateway.example.ts.net" \
                 "http://127.0.0.1:$CAPACITY_PORT/api/v1/sessions" 2>/dev/null |
                 jq -e 'has("revision")' >/dev/null 2>&1; then
               break
@@ -345,6 +346,7 @@ jobs:
             fi
             sessions="$(curl -fsS --max-time 10 --retry 2 --retry-all-errors \
               -H "Tailscale-User-Login: $CAPACITY_LOGIN" \
+              -H "Host: gateway.example.ts.net" \
               "http://127.0.0.1:$CAPACITY_PORT/api/v1/sessions" | jq '.sessions | length')"
             if [ "$sessions" -ge "$CAPACITY_PUBLISHERS" ]; then break; fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -397,6 +399,7 @@ jobs:
 
             body="$(curl -fsS --max-time 10 --retry 2 --retry-all-errors \
               -H "Tailscale-User-Login: $CAPACITY_LOGIN" \
+              -H "Host: gateway.example.ts.net" \
               "http://127.0.0.1:$CAPACITY_PORT/api/v1/sessions")"
             sessions="$(printf '%s' "$body" | jq '.sessions | length')"
 
@@ -718,6 +721,7 @@ jobs:
           # leave files whose socket liveness is resolved by a subsequent poll.
           sleep 11
           remaining="$(curl -fsS --max-time 5 -H "Tailscale-User-Login: $CAPACITY_LOGIN" \
+            -H "Host: gateway.example.ts.net" \
             "http://127.0.0.1:$CAPACITY_PORT/api/v1/sessions" 2>/dev/null |
             jq '.sessions | length' 2>/dev/null || printf 'not observed')"
           printf 'sessions remaining after clean host shutdown: %s\n' "$remaining"
