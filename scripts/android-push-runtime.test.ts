@@ -1101,6 +1101,17 @@ test.each(["replacement", "no-clear", "wrong-clear", "old-post", "duplicates", "
       title: "OMP session needs attention", body: "", text: "" };
     let records: typeof record[] = [], data = { version: 3, type: "attention", instanceId: previous.instanceId, requestId: previous.ask!.requestId, source: undefined as string | undefined };
     const tombstones: Record<string, number> = {};
+    const prefix = "android-fleet-restart-replacement: ", messages: string[] = [];
+    // Closed check scalars that name the first check withholding the proof (or none).
+    const withheld: Partial<Record<typeof scenario, Record<string, boolean | number>>> = {
+      replacement: { workerRead: true, oldTombstoned: true, notices: 1, requestMatches: true, previousRequest: false, verified: true },
+      "no-clear": { workerRead: true, oldTombstoned: false, requestMatches: true, verified: false },
+      "wrong-clear": { workerRead: true, oldTombstoned: false, verified: false },
+      "old-post": { priorVerified: true, osRecords: 1, osReposted: false, workerRead: false, verified: false },
+      "wrong-source": { workerRead: true, oldTombstoned: true, localSource: false, verified: false },
+      "wrong-request": { workerRead: true, requestMatches: false, previousRequest: true, verified: false },
+      "wrong-instance": { workerRead: true, instanceMatches: false, requestMatches: true, verified: false },
+    };
     let reads = 0, closes = 0;
     const indexedDB = {
       databases: async () => [{ name: "omp-notification-ordering" }],
@@ -1134,6 +1145,7 @@ test.each(["replacement", "no-clear", "wrong-clear", "old-post", "duplicates", "
       evaluate: async (expression: string) => expression.includes("href: location.href") ? { href: identity.origin + "/", secure: true } : true,
     };
     const spies = [
+      spyOn(console, "log").mockImplementation(message => { messages.push(String(message)); }),
       spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => Response.json({ revision: 1, sessions: [previous] }), { preconnect: globalThis.fetch.preconnect })),
       spyOn(deviceOperations, "requireSingleDevice").mockResolvedValue("synthetic"),
       spyOn(deviceOperations, "wakeAndroidDisplay").mockResolvedValue("Awake"),
@@ -1162,6 +1174,13 @@ test.each(["replacement", "no-clear", "wrong-clear", "old-post", "duplicates", "
       if (scenario === "duplicates") await expect(runtime.fleet.restartReplacement(previous, current)).rejects.toBeInstanceOf(QualificationFailure);
       else {
         expect(await runtime.fleet.restartReplacement(previous, current)).toBe(["replacement", "second-post", "handoff-post", "retry-boundary"].includes(scenario));
+        const expected = withheld[scenario];
+        if (expected !== undefined) {
+          const lines = messages.filter(line => line.startsWith(prefix)).map(line => JSON.parse(line.slice(prefix.length)));
+          expect(lines.at(-1)).toMatchObject({ phase: "fleet_restart_verified", sinceCoordinatorUpMs: -1, ...expected });
+          expect(lines.every(line => Object.entries(line).every(([key, value]) => key === "phase" || typeof value === "boolean" || typeof value === "number"))).toBe(true);
+          expect(JSON.stringify(lines)).not.toContain("synthetic");
+        }
         if (scenario === "handoff-post") {
           records = [{ ...record, postedAt: 3 }];
           await expect(runtime.observe(current, "attention", "private")).rejects.toBeInstanceOf(QualificationFailure);
