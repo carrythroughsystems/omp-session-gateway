@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.10.1] — 2026-11-09
 
-This release uses stock OMP v18.18.0 as its engineering baseline. The 34 changelog entries below record the changes since v0.10.0. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.18.0 as its engineering baseline. The 35 changelog entries below record the changes since v0.10.0. Historical receipts do not qualify these bytes.
 
 ### Added
 
@@ -74,6 +74,9 @@ This release uses stock OMP v18.18.0 as its engineering baseline. The 34 changel
 - Skip unchanged fleet state writes and redundant reconciliation of identical source updates.
 - Recover background notification delivery from malformed stored worker state while preserving valid
   legacy notification ordering records.
+- Retry transient release-download failures when qualification lanes fetch pinned tools: doctl,
+  cosign, gh and Bun for the Debian droplet, and the Windows guest's Bun, Tailscale and OMP
+  native archives.
 
 ### Security
 
