@@ -1101,12 +1101,13 @@ show() { printf '   %-38s %s\n' "$1:" "$2"; }
 cd ~/candidate
 mkdir -p ~/tools
 
+# github.com release downloads intermittently answer 504; curl retries those transient responses.
 if [ ! -x ~/tools/cosign ]; then
-  curl -fsSL -o ~/tools/cosign "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+  curl -fsSL --retry 5 --retry-delay 10 -o ~/tools/cosign "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
   chmod 0755 ~/tools/cosign
 fi
 if [ ! -x ~/tools/gh ]; then
-  curl -fsSL -o /tmp/gh.tar.gz "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
+  curl -fsSL --retry 5 --retry-delay 10 -o /tmp/gh.tar.gz "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
   tar -xzf /tmp/gh.tar.gz -C /tmp
   install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_amd64/bin/gh" ~/tools/gh
   rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_CLI_VERSION}_linux_amd64"
@@ -1154,7 +1155,12 @@ show "release-info version / runtime" "$(jq -r '.version + " / " + .runtime' "$r
 show "cli mode" "$(stat -c '%a %n' "$root/apps/gateway/src/cli.js")"
 
 if [ ! -x ~/.bun/bin/bun ]; then
-  curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" >/dev/null 2>&1
+  # The installer fetches its release zip once; retry the whole install until the binary exists.
+  for _ in 1 2 3; do
+    curl -fsSL --retry 5 --retry-delay 10 https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" >/dev/null 2>&1
+    [ -x ~/.bun/bin/bun ] && break
+    sleep 10
+  done
 fi
 show "bun version" "$(~/.bun/bin/bun --version)"
 REMOTE
