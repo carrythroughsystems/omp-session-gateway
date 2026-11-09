@@ -226,6 +226,9 @@ OMP encrypts collaboration frames client-side. The relay can observe room identi
 
 The existing relay is acceptable for v1 when this metadata/availability dependency is understood. Self-hosting can reduce third-party exposure but introduces TLS, WebSocket, update, and availability responsibilities. Treat it as an explicit advanced mode and run long-lived connection tests through the exact deployment path.
 
+The embedded client renders and opens tool-result images only for JPEG, PNG, WebP, and GIF MIME
+types, rejecting HTML and SVG before thumbnails or blob windows are created.
+
 Phone photos are prompt content, not gateway metadata. A writable client accepts only JPEG, PNG,
 or WebP source files up to 24 MiB, rejects source dimensions above an 8,192px edge or 20 megapixels,
 canvas-re-encodes at most four as JPEG with a 2,048px edge and 1 MiB per-image cap, and thereby
@@ -272,9 +275,10 @@ descriptors, DOM attributes and history state never contain capability material.
 close requests consume Back without tray history entries; only promotion replaces the route with
 `/client/`. Closing disposes the client synchronously. The bfcache resume intent retains only the
 metadata binding and full/tray presentation, then reacquires a fresh capability after revalidation.
-Both one-shot and streaming-tail Markdown route links through the same browser-URL scheme
-sanitizer; raw HTML stays escaped and KaTeX emits MathML with `trust: false`. Only pure
-TypeScript parser sources are vendored, with no pi-utils/pi-natives runtime dependency.
+Both one-shot and streaming-tail Markdown route links and image sources through the same browser-URL
+scheme sanitizer (HTTP(S)/relative only for images); raw HTML stays escaped and KaTeX emits MathML
+with `trust: false` and `maxSize: 100`.
+Only pure TypeScript parser sources are vendored, with no pi-utils/pi-natives runtime dependency.
 
 `inputRequired` and optional boolean `busy` are the accepted host attention/activity signals.
 Missing/null activity is unknown, never idle or completion. The gateway may

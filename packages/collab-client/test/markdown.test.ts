@@ -8,6 +8,43 @@ function renderMarkdown(text: string): string {
 }
 
 describe("transcript Markdown", () => {
+  const imageRenderers = {
+    settled: renderMarkdown,
+    "streaming tail": (text: string): string => renderStreamingMarkdown(text, { source: "", html: "" }).html,
+    "frozen block": (text: string): string => {
+      const rendered = renderStreamingMarkdown(`${text}\n\nTail`, { source: "", html: "" });
+      expect(rendered.prefix.source).toBe(`${text}\n\n`);
+      return rendered.prefix.html;
+    },
+  };
+
+  for (const [path, renderImage] of Object.entries(imageRenderers)) {
+    test(`rejects unsafe Markdown image sources: ${path}`, () => {
+      for (const href of ["javascript:alert(1)", "java&#x09;script:alert(1)", "data:image/png;base64,c3ludGhldGlj", "mailto:synthetic@example.invalid"]) {
+        const html = renderImage(`**bold** ![p](${href})`);
+        expect(html).toContain("<strong>bold</strong>");
+        expect(html).toContain("p");
+        expect(html).not.toContain("<img");
+      }
+      expect(renderImage("![<b>](javascript:alert(1))")).toContain("&lt;b&gt;");
+    });
+
+    test(`keeps surrounding Markdown for lone-surrogate image sources: ${path}`, () => {
+      const html = renderImage("**bold** ![p](\uD800)");
+      expect(html).toContain("<strong>bold</strong>");
+      expect(html).toContain("<img");
+    });
+
+    test(`preserves safe Markdown image sources and escapes attributes: ${path}`, () => {
+      for (const href of ["https://example.invalid/synthetic.png", "http://example.invalid/synthetic.png", "/synthetic.png"]) {
+        expect(renderImage(`![p](${href})`)).toContain(`<img src="${href}" alt="p">`);
+      }
+      const html = renderImage('![p & q](/synthetic.png?x=1&y=2 "synthetic & title")');
+      expect(html).toContain('src="/synthetic.png?x=1&amp;y=2"');
+      expect(html).toContain('alt="p &amp; q" title="synthetic &amp; title"');
+    });
+  }
+
   test("rejects unsafe schemes after browser URL normalization", () => {
     for (const href of ["javascript:alert(1)", "java\tscript:alert(1)", "data:text/html,probe"]) {
       const html = renderMarkdown(`[probe](<${href}>)`);
@@ -94,6 +131,15 @@ describe("transcript Markdown", () => {
     expect(html).toContain("<math");
     expect(html).not.toContain("<a ");
     expect(html).not.toContain("<a>");
+  });
+
+  test("caps rendered math dimensions at 100 em", () => {
+    const html = renderMarkdown(String.raw`$\rule{99999em}{1em}$`);
+    const width = html.match(/<mspace\b[^>]*\bwidth="([\d.]+)em"/)?.[1];
+
+    expect(width).toBeDefined();
+    expect(Number(width)).toBeGreaterThan(0);
+    expect(Number(width)).toBeLessThanOrEqual(100);
   });
 
   test("renders an own-line block as one display equation with its rows intact", () => {
