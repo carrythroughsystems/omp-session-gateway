@@ -43,7 +43,7 @@ function unescapeHtml(raw: string): string {
 		}
 	});
 }
-function safeHref(href: string): string | null {
+function safeHref(href: string, allowMailto = true): string | null {
 	const trimmed = unescapeHtml(href).trim();
 	// The fork leaves href entities encoded and expands source tabs to spaces.
 	// Validate the decoded scheme before emitting anything; spaces in a scheme
@@ -58,7 +58,7 @@ function safeHref(href: string): string | null {
 	} catch {
 		return null;
 	}
-	if (protocol === "https:" || protocol === "http:" || protocol === "mailto:") return trimmed;
+	if (protocol === "https:" || protocol === "http:" || (allowMailto && protocol === "mailto:")) return trimmed;
 	return null; // unknown scheme (javascript:, data:, …)
 }
 
@@ -77,6 +77,12 @@ const md = new Marked({
 			if (url === null) return inner;
 			const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
 			return `<a href="${escapeHtml(url)}"${titleAttr} target="_blank" rel="noopener">${inner}</a>`;
+		},
+		image({ href, title, text }) {
+			const url = safeHref(href, false);
+			if (url === null) return escapeHtml(text);
+			const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+			return `<img src="${escapeHtml(url)}" alt="${escapeHtml(text)}"${titleAttr}>`;
 		},
 	},
 	breaks: true,

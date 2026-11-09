@@ -107,7 +107,7 @@
     "active": [
       {
         "id": "safe-markdown-links",
-        "purpose": "Reject unsafe schemes after href entity decoding, source-tab normalization and browser URL parsing in settled and streaming Markdown.",
+        "purpose": "Reject unsafe link/image schemes after entity decoding, source-tab normalization and browser URL parsing in settled and streaming Markdown; preserve rendering for malformed image URLs.",
         "files": [
           "src/components/transcript/Markdown.tsx"
         ],
@@ -115,10 +115,49 @@
           {
             "file": "packages/collab-client/test/markdown.test.ts",
             "case": "sanitizes obfuscated javascript links in both frozen blocks and streaming tails"
+          },
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "rejects unsafe Markdown image sources: ${path}"
+          },
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "keeps surrounding Markdown for lone-surrogate image sources: ${path}"
           }
         ],
         "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
-        "removeWhen": "Upstream applies the same URL allowlist to both settled and streaming links."
+        "removeWhen": "Upstream applies the same link/image URL allowlists in settled and streaming Markdown without URI-encoding image sources."
+      },
+      {
+        "id": "raster-only-tool-images",
+        "purpose": "Render and open only JPEG, PNG, WebP and GIF tool-result images; normalize blob MIME types to lowercase.",
+        "files": [
+          "src/tool-render/util.ts",
+          "src/tool-render/parts.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "renders and opens only raster tool result images: ${mimeType}"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream rejects non-raster tool images before rendering and uses lowercase allowlisted blob MIME types."
+      },
+      {
+        "id": "bounded-math-sizes",
+        "purpose": "Cap KaTeX user-specified dimensions at 100 em with maxSize while retaining untrusted MathML output.",
+        "files": [
+          "src/components/transcript/math.ts"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/markdown.test.ts",
+            "case": "caps rendered math dimensions at 100 em"
+          }
+        ],
+        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "removeWhen": "Upstream sets the same bounded maxSize for KaTeX rendering."
       },
       {
         "id": "memory-only-embed",

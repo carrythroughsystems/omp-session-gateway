@@ -161,7 +161,12 @@ export function resultImagesOf(result: ToolResultLike | undefined): ToolResultIm
 	const images: ToolResultImage[] = [];
 	for (const block of result.content) {
 		const img = block as Partial<ToolResultImage>;
-		if (block.type === "image" && typeof img.data === "string" && typeof img.mimeType === "string") {
+		if (
+			block.type === "image" &&
+			typeof img.data === "string" &&
+			typeof img.mimeType === "string" &&
+			/^image\/(jpeg|png|webp|gif)$/i.test(img.mimeType)
+		) {
 			images.push(img as ToolResultImage);
 		}
 	}

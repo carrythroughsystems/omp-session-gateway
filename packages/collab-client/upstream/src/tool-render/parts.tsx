@@ -183,7 +183,7 @@ function openImage(img: ToolResultImage): void {
 		const bin = atob(img.data);
 		const bytes = new Uint8Array(bin.length);
 		for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-		const url = URL.createObjectURL(new Blob([bytes], { type: img.mimeType }));
+		const url = URL.createObjectURL(new Blob([bytes], { type: img.mimeType.toLowerCase() }));
 		window.open(url, "_blank", "noopener");
 		setTimeout(() => URL.revokeObjectURL(url), 60_000);
 	} catch {

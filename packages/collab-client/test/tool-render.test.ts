@@ -1,9 +1,49 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ToolView, type ToolViewProps } from "../upstream/src/tool-render/ToolView";
+import { click, installDomGlobals, mount, queryAll, restoreDomGlobals, unmountAll } from "./react-dom-harness";
 
 const render = (props: ToolViewProps): string => renderToStaticMarkup(createElement(ToolView, { defaultOpen: true, ...props }));
+
+describe("tool result image safety", () => {
+  beforeEach(installDomGlobals);
+  afterEach(unmountAll);
+  afterAll(restoreDomGlobals);
+
+  for (const [mimeType, accepted] of [
+    ["text/html", false], ["image/svg+xml", false],
+    ["image/png", true], ["IMAGE/PNG", true], ["image/jpeg", true], ["image/webp", true], ["image/gif", true],
+  ] as const) {
+    test(`renders and opens only raster tool result images: ${mimeType}`, async () => {
+      const open = mock(() => null);
+      const previousOpen = Object.getOwnPropertyDescriptor(window, "open");
+      Object.defineProperty(window, "open", { configurable: true, value: open });
+      const createObjectURL = spyOn(URL, "createObjectURL").mockReturnValue("blob:synthetic-tool-image");
+      try {
+        const props: ToolViewProps = {
+          name: "synthetic_image_tool",
+          result: { content: [{ type: "image", mimeType, data: btoa("<b>x</b>") }] },
+        };
+        expect(render(props).includes('class="tv-img"')).toBe(accepted);
+        const tree = await mount(createElement(ToolView, { defaultOpen: true, ...props }));
+        const images = queryAll(tree.container, "tv-img");
+        expect(images).toHaveLength(accepted ? 1 : 0);
+        await click(images[0] ?? tree.container);
+        expect(createObjectURL).toHaveBeenCalledTimes(accepted ? 1 : 0);
+        expect(open).toHaveBeenCalledTimes(accepted ? 1 : 0);
+        if (accepted) {
+          expect((createObjectURL.mock.calls[0]![0] as Blob).type).toBe(mimeType.toLowerCase());
+          expect(open).toHaveBeenCalledWith("blob:synthetic-tool-image", "_blank", "noopener");
+        }
+      } finally {
+        createObjectURL.mockRestore();
+        if (previousOpen) Object.defineProperty(window, "open", previousOpen);
+        else Reflect.deleteProperty(window, "open");
+      }
+    });
+  }
+});
 
 describe("tool renderers across supported OMP releases", () => {
   test("renders eval printed views once and preserves their surrounding text order", () => {

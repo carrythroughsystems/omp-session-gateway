@@ -29,6 +29,7 @@ function renderMath(token: Tokens.Generic): string | false {
 			// `trust: false` refuses \href, \htmlClass, \includegraphics.
 			strict: false,
 			trust: false,
+			maxSize: 100,
 		});
 		// A display equation gets a wrapper to scroll in (`.tr-math`), because
 		// scrolling the `math` element itself traps a few pixels of vertical scroll:
