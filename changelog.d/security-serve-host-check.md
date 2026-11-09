@@ -1,1 +1,0 @@
-- Refuse Serve identity and fleet feeds when the request host differs from the public origin host.

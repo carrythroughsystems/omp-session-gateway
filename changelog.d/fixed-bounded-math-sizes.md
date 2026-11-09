@@ -1,1 +1,0 @@
-- Cap user-specified math dimensions at 100 em to prevent oversized transcript spacers.

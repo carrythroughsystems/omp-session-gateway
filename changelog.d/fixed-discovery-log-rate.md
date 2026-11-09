@@ -1,1 +1,0 @@
-- Rate-limit repeated unreadable OMP discovery diagnostics, retaining suppressed-event counts.

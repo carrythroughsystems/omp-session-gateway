@@ -1,1 +1,0 @@
-- Bound local and remote launches to 10 seconds and background alert setup requests to 5 seconds.

@@ -1,1 +1,0 @@
-- Require the exact pinned Bun runtime in the release builder and signed-release workflow.
