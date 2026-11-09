@@ -2437,12 +2437,16 @@ for (const scenario of ["abort-attach", "deadline-open", "abort-create", "close-
   }
   globalThis.WebSocket = Socket as unknown as typeof WebSocket;
   const nativeTimeout = globalThis.setTimeout;
-  const timers = scenario.includes("495-") ? spyOn(globalThis, "setTimeout").mockImplementation(((callback: TimerHandler, milliseconds?: number, ...args: unknown[]) =>
+  // A slow macOS runner spent the former 100 ms deadline before the socket opened (Compatibility run
+  // 42529181002, attempt 1). Keep the deadline out of reach: deadline-open and 495-create-timeout
+  // expire through ≥10 s timers shrunk to 5 ms, which fire only while the pipeline waits on what the
+  // mocks never answer, because every other reply arrives in a microtask.
+  const timers = scenario.includes("495-") || scenario === "deadline-open" ? spyOn(globalThis, "setTimeout").mockImplementation(((callback: TimerHandler, milliseconds?: number, ...args: unknown[]) =>
     nativeTimeout(callback, milliseconds !== undefined && milliseconds >= 10_000 ? 5 : milliseconds, ...args)) as typeof setTimeout) : undefined;
   const started = performance.now();
   try {
     const result = withAndroidChrome(async driver => { await driver.openTab(); await driver.closeTab(); throw new Error("synthetic completion"); }, { port: 9238, launchBrowser: false,
-      execution: { signal: controller.signal, deadline: started + 100 } });
+      execution: { signal: controller.signal, deadline: started + 60_000 } });
     if (scenario.startsWith("495-")) await expect(result).rejects.toMatchObject({ pixelUnrestored: true, remainingResources: 1 });
     else await expect(result).rejects.toThrow();
     if (scenario === "abort-attach" || scenario === "abort-create") expect(calls).toContain("Target.closeTarget");
