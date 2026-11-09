@@ -2153,6 +2153,70 @@ test.each(["none", "enrollment", "owner", "host", "connection", "mutation"] as c
   } finally { chrome.mockRestore(); }
 });
 
+test("an armed badge read waits in the worker across a freeze and answers inside the thaw", async () => {
+  const navigator = { setAppBadge: (_count?: number) => Promise.resolve(), clearAppBadge: () => Promise.resolve() };
+  // A frozen worker runs no interval tick; the test runs each tick the worker would run.
+  const ticks: (() => void)[] = [];
+  const self: Record<string, unknown> = {
+    setInterval: (callback: () => void) => ticks.push(callback),
+    clearInterval: (id: number) => { ticks[id - 1] = () => { throw new Error("cleared interval ran"); }; },
+  };
+  const context = { navigator, self };
+  const timeouts: (number | undefined)[] = [];
+  let broken = false;
+  const driver = {
+    onEvent: () => () => {},
+    browserSend: async (method: string) => method === "Target.getTargets" ?
+      { targetInfos: [{ type: "service_worker", targetId: "synthetic", url: `${identity.origin}/service-worker.js` }] } :
+      method === "Target.attachToTarget" ? { sessionId: "synthetic-worker" } : {},
+    sessionSend: async (_session: string, _method: string, parameters: { expression: string }, options?: { timeoutMs?: number }) => {
+      if (broken) throw new AndroidDevtoolsConnectionError("protocol_timeout", "CDP timeout: Runtime.evaluate");
+      timeouts.push(options?.timeoutMs);
+      return { result: { value: await runInNewContext(parameters.expression, context) } };
+    },
+  };
+  const chrome = spyOn(deviceOperations, "withAndroidChrome").mockImplementation(
+    (async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome);
+  try {
+    const runtime = createAndroidPushRuntime(identity, { execute: async () => ({ exitCode: 0, stdout: "" }) });
+    runtime.beforeEffect = async () => {};
+    await runtime.fleet.armBadgeObserver();
+    await navigator.setAppBadge(1);
+    // Armed before the push: frozen, the worker neither answers nor spends its budget.
+    const newAsk = runtime.fleet.expectBadge(2, true);
+    expect(ticks).toHaveLength(1);
+    expect(timeouts.at(-1)).toBe(240_000);
+    // The push thaws the worker; its handler sets the badge and the next tick answers.
+    await navigator.setAppBadge(2);
+    ticks[0]!();
+    expect(await newAsk.settle()).toEqual({ matched: true,
+      observation: { count: 2, complete: true, call: { method: "setAppBadge", arguments: 1, argument: 2 } } });
+    // Already true when armed: answered at once, without a tick.
+    expect(await runtime.fleet.expectBadge(2, true).settle()).toMatchObject({ matched: true });
+    expect(ticks).toHaveLength(1);
+    // Unmatched: only ticks the worker ran end the wait, which reports the last observation.
+    const settled = runtime.fleet.expectBadge(0, true);
+    for (let tick = 0; tick < 1_199; tick++) ticks[1]!();
+    let answered = false;
+    void settled.settle().then(() => { answered = true; });
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+    expect(answered).toBe(false);
+    ticks[1]!();
+    expect(await settled.settle()).toEqual({ matched: false,
+      observation: { count: 2, complete: true, call: { method: "setAppBadge", arguments: 1, argument: 2 } } });
+    // An unpatched observer ends a pending wait on its next tick.
+    const unpatched = runtime.fleet.expectBadge(0, true);
+    delete self.__ompQualificationBadge;
+    ticks[2]!();
+    expect(await unpatched.settle()).toMatchObject({ matched: false });
+    // A lost transport is the lane's typed read-only transport failure, not an assertion.
+    broken = true;
+    const lost = await runtime.fleet.expectBadge(1, true).settle().catch(error => error);
+    expect(lost.evidence).toMatchObject({ lane: "androidPush", reason: "invalid_evidence", operation: "read_only",
+      observations: { transportFailure: true, attempts: 1 } });
+  } finally { chrome.mockRestore(); }
+});
+
 test("held push observer counts worker push entry and shows per arm, passes through, and restores", async () => {
   type Listener = (event: { data: { json(): unknown } | null }) => void;
   const listeners = new Set<Listener>(), shown: string[] = [];

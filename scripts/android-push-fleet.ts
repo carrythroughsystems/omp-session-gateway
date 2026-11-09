@@ -33,6 +33,13 @@ export const FLEET_PUSH_RESULT_FIELDS = {
   fleet_restored: ["restored", "grantsRemoved", "sourceStopped", "serveRestored", "devtoolsObserver"],
 } as const;
 
+/** The worker's last observed platform badge call, recorded by the qualification wrapper. */
+export interface FleetBadgeObservation {
+  count: number;
+  complete: boolean;
+  call?: { method: "setAppBadge" | "clearAppBadge"; arguments: number; argument?: number | "undefined" };
+}
+
 export interface FleetPushRuntime {
   readonly binding: string;
   host(operation: FleetFixtureOperation, epoch: string): Promise<void>;
@@ -40,8 +47,12 @@ export interface FleetPushRuntime {
   /** Reads the Hosts row in the installed PWA, not a synthetic enrollment API client. */
   coverage(): Promise<{ selected: boolean; state: string; covered: boolean }>;
   /** Observes the real worker's calls; the wrapper forwards unchanged to the platform. */
-  observeBadge(): Promise<{ count: number; complete: boolean;
-    call?: { method: "setAppBadge" | "clearAppBadge"; arguments: number; argument?: number | "undefined" } } | undefined>;
+  observeBadge(): Promise<FleetBadgeObservation | undefined>;
+  /**
+   * Arms a worker-side wait for this badge before the push that thaws Chrome. `settle()` returns
+   * whether the worker saw it, or the last observation once the worker's running budget ends.
+   */
+  expectBadge(count: number, complete: boolean): { settle(): Promise<{ matched: boolean; observation?: FleetBadgeObservation }> };
   armBadgeObserver(): Promise<void>;
   /** Exact old-request tombstone plus one newly posted, identity-bound local replacement. */
   restartReplacement(previous: SessionMetadata, current: SessionMetadata): Promise<boolean>;
@@ -78,7 +89,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
   };
   const finish: FleetPhaseContext["finish"] = (phase, result) => c.finish(phase, { ...result, devtoolsObserver: observerAttached });
   const badge = async (step: string, count: number, complete: boolean) => {
-    let last: Awaited<ReturnType<FleetPushRuntime["observeBadge"]>>;
+    let last: FleetBadgeObservation | undefined;
     try {
       await wait(`fleet badge reconciliation: ${activePhase}/${step}`, async () => {
         last = await f.observeBadge();
@@ -92,6 +103,16 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
       }
       throw error;
     }
+  };
+  // Android can refreeze the cached browser within seconds of a push, so a worker read issued
+  // after the delivery checks can find every Chrome process frozen. Arm the read before the push
+  // that thaws Chrome: the worker answers inside that thaw, with no wake, page open or freezer change.
+  const armBadge = (step: string, count: number, complete: boolean) => {
+    const armed = f.expectBadge(count, complete);
+    return async () => {
+      // Unmatched within the worker's running budget: the ordinary read keeps its diagnostics.
+      if (!(await armed.settle()).matched) await badge(step, count, complete);
+    };
   };
   const ask = async (role: "primary" | "remote", detail: PushDetailLevel = "session") => {
     await fixture("ask", role);
@@ -144,13 +165,15 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
   for (const detail of ["private", "session", "preview"] as const) {
     await attempt(`fleet_${detail}_verified`, async () => {
       await cold(detail);
+      const concurrent = armBadge("concurrent", 2, true);
       await Promise.all([fixture("ask"), fixture("ask", "remote")]);
       const local = await snapshot(s => s.inputRequired), remote = await snapshot(s => s.inputRequired, "remote");
       await delivered(local, "attention", detail); await delivered(remote, "attention", detail);
-      await badge("concurrent", 2, true);
+      await concurrent();
       await r.pause(21_000);
       // observe() also compares OS post timestamps: replacing the same request fails deduplication.
       await delivered(local, "attention", detail); await delivered(remote, "attention", detail);
+      let settled: () => Promise<void>;
       if (detail === "private") {
         // Private rows deliberately have identical title/body. Keep the concurrent OS/tag/badge
         // proof above, then prove each lock-screen row alone instead of guessing which row is which.
@@ -159,26 +182,33 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
         await clear(); await cold(detail);
         const isolatedRemote = await ask("remote", detail);
         if (!await r.presentation(isolatedRemote, detail)) throw assertion("Fleet remote Private presentation differed");
+        settled = armBadge("settled", 0, true);
         await clear(60_000, "remote");
       } else {
         if (!await r.presentation(local, detail) || !await r.presentation(remote, detail)) throw assertion("Fleet host identity or privacy presentation differed");
-        await clear(); await clear(60_000, "remote");
+        await clear();
+        settled = armBadge("settled", 0, true);
+        await clear(60_000, "remote");
       }
-      await badge("settled", 0, true);
+      await settled();
       await finish(`fleet_${detail}_verified`, { local: true, remote: true, identity: true, previewFallback: detail === "preview", deduplicated: true });
     });
   }
   await attempt("fleet_race_verified", async () => {
     await cold();
+    const concurrent = armBadge("concurrent", 2, true);
     const local = await ask("primary"), old = await ask("remote");
-    await badge("concurrent", 2, true);
+    await concurrent();
     // Replacement on a shared tag cannot prove the old request's clear.
-    await clear(60_000, "remote"); await delivered(local); await badge("old-remote-cleared", 1, true);
+    const oldRemoteCleared = armBadge("old-remote-cleared", 1, true);
+    await clear(60_000, "remote"); await delivered(local); await oldRemoteCleared();
+    const replacement = armBadge("replacement", 2, true);
     const fresh = await ask("remote");
     if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet race did not replace its request");
     await r.pause(21_000);
-    await delivered(fresh); await delivered(local); await badge("replacement", 2, true);
-    await clear(); await delivered(fresh); await badge("local-cleared", 1, true);
+    await delivered(fresh); await delivered(local); await replacement();
+    const localCleared = armBadge("local-cleared", 1, true);
+    await clear(); await delivered(fresh); await localCleared();
     await r.openPwa(); await delivered(fresh); await badge("foreground", 1, true);
     await clear(60_000, "remote"); await badge("settled", 0, true);
     await finish("fleet_race_verified", { concurrent: true, exactClear: true, replacement: true, badgeReconciled: true });
@@ -241,6 +271,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
     // clear can now remove the old remote alert. The memory-only local registry re-mints
     // its still-pending ask; prove its exact old clear and exactly one replacement (#605).
     await r.fixture("answer", p.epoch, "remote"); await snapshot(s => !s.inputRequired, "remote");
+    const exactClear = armBadge("restart-exact-clear", 1, true);
     await f.host("coordinator-up", p.epoch);
     await wait("restart remote exact clear", async () => await r.notificationCleared(old) ? true : undefined);
     const restarted = await snapshot(s => s.inputRequired && s.instanceId === local.instanceId &&
@@ -248,7 +279,7 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
     await wait("restart local exact clear and replacement", async () => await f.restartReplacement(local, restarted) ? true : undefined);
     await delivered(restarted);
     const quietWindow = await r.beginDeliveryTelemetry?.("fleet_restart_verified").catch(() => undefined);
-    await badge("restart-exact-clear", 1, true);
+    await exactClear();
     // DELIVERY_RETRY_MS in gateway/fleet-coordinator.ts is private (30 s). Observe
     // beyond that retry boundary as well as the normal reconcile interval.
     await r.pause(35_000); await delivered(restarted);
@@ -261,11 +292,14 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
     // than zero sends to this subscription. With the page still closed, retain the badge
     // verified inside this window; any push activity or unavailable log reads it fresh.
     if (quiet?.sends !== 0 || quiet.acknowledgements !== 0 || quiet.failures !== 0) await badge("restart-no-repeat", 1, true);
+    const newAsk = armBadge("new-ask", 2, true);
     const fresh = await ask("remote");
     if (fresh.ask?.requestId === old.ask?.requestId) throw assertion("Fleet restart did not replace its request");
-    await delivered(restarted); await badge("new-ask", 2, true);
-    await clear(); await delivered(fresh); await badge("local-cleared", 1, true);
-    await clear(60_000, "remote"); await badge("settled", 0, true);
+    await delivered(restarted); await newAsk();
+    const localCleared = armBadge("local-cleared", 1, true);
+    await clear(); await delivered(fresh); await localCleared();
+    const settled = armBadge("settled", 0, true);
+    await clear(60_000, "remote"); await settled();
     await finish("fleet_restart_verified", { exactClear: true, localRealertedOnce: true, noRepeats: true, newAsk: true, badgeReconciled: true });
   });
   await attempt("fleet_revocation_verified", async () => {
