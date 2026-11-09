@@ -78,14 +78,14 @@ function run(scenario: (typeof vectors.scenarios)[number]) {
       apply(reduceLegacyPush(state, message, surface, now), message.type === "clear" ? undefined : intentOf(message));
     } else {
       const reconcile = step.reconcile as Json;
-      const [count, complete] = reconcile.badge as [number, boolean];
       const message = parseFleetReconcileMessage({
         type: "omp-notification-reconcile",
         version: 3,
         asOf: { received: captured },
         fresh: (reconcile.fresh as string[]).map(token => token === "local" ? token : binding(token)!),
-        pending: reconcile.pending,
-        badge: { count, complete },
+        pending: (reconcile.pending as Json[]).map(ask => ask.source === undefined ? ask : { ...ask, source: binding(ask.source) }),
+        counted: (reconcile.counted as string[]).map(token => token === "local" ? token : binding(token)!),
+        complete: reconcile.complete,
       });
       apply(reduceFleetReconcile(state, message, surface, now));
     }
@@ -129,6 +129,18 @@ describe("fleet ordering bounds", () => {
     expect(Object.keys(state.tombstones).some(key => key.endsWith("req_flood_00000001"))).toBe(false);
   });
 
+  test("pending asks stay bounded under an attention flood and keep the newest", () => {
+    let state = EMPTY_FLEET_WORKER_STATE;
+    const total = MAX_FLEET_WORKER_RECORDS + 64;
+    for (let n = 1; n <= total; n++) {
+      const id = String(n).padStart(8, "0");
+      state = reduceFleetPush(state, fleetMessage({ type: "attention", instanceId: `inst${id}`, requestId: `req_flood_${id}`, seq: [1, n], badge: [1, true] }), [], n).state;
+    }
+    expect(Object.keys(state.asks)).toHaveLength(MAX_FLEET_WORKER_RECORDS);
+    expect(Object.keys(state.asks).some(key => key.endsWith(`req_flood_${String(total).padStart(8, "0")}`))).toBe(true);
+    expect(Object.keys(state.asks).some(key => key.endsWith("req_flood_00000001"))).toBe(false);
+  });
+
   test("an older epoch changes nothing at all", () => {
     const newer = reduceFleetPush(EMPTY_FLEET_WORKER_STATE, fleetMessage({ type: "attention", instanceId: "aaaa1111bbbb2222", requestId: "req_epoch_check_0a", seq: [9, 1], badge: [1, true] }), [], 0);
     const older = reduceFleetPush(newer.state, fleetMessage({ type: "clear", instanceId: "aaaa1111bbbb2222", requestId: "req_epoch_check_0a", seq: [8, 9], badge: [0, true] }), [], 0);
@@ -138,10 +150,39 @@ describe("fleet ordering bounds", () => {
 
   test("a reconciliation claiming more receipts than the worker has seen changes nothing", () => {
     const message = parseFleetReconcileMessage({
-      type: "omp-notification-reconcile", version: 3, asOf: { received: 5 }, fresh: ["local"], pending: [], badge: { count: 0, complete: true },
+      type: "omp-notification-reconcile", version: 3, asOf: { received: 5 }, fresh: ["local"], pending: [], counted: ["local"], complete: true,
     });
     const result = reduceFleetReconcile(EMPTY_FLEET_WORKER_STATE, message, [], 0);
     expect(result.state).toBe(EMPTY_FLEET_WORKER_STATE);
     expect(result.effects).toEqual([]);
+  });
+});
+
+describe("worker-kept asks across worker versions", () => {
+  const remoteAsk = (requestId: string, n: number) =>
+    fleetMessage({ type: "attention", source: "studio", instanceId: "aaaa1111bbbb2222", requestId, seq: [1, n], badge: [1, true] });
+  const outage = (received: number) => parseFleetReconcileMessage({
+    type: "omp-notification-reconcile", version: 3, asOf: { received }, fresh: ["local"], pending: [], counted: ["local", aliases.studio], complete: false,
+  });
+
+  test("a push handled by a worker without asks makes them unknown, so a downgrade cannot re-count a cleared ask", () => {
+    const recorded = reduceFleetPush(EMPTY_FLEET_WORKER_STATE, remoteAsk("req_downgrade_000a", 1), [], 0).state;
+    expect(reduceFleetReconcile(recorded, outage(recorded.received), [], 0).effects).toContainEqual({ kind: "badge", count: 1, complete: false });
+    // The predecessor reducer spreads unknown fields and advances `received` for the clear it handles,
+    // without knowing to remove the ask.
+    const downgraded: FleetWorkerState = { ...recorded, received: recorded.received + 1 };
+    expect(reduceFleetReconcile(downgraded, outage(downgraded.received), [], 0).effects).toContainEqual({ kind: "badge", count: 0, complete: false });
+    // The next push on this worker starts from known-empty asks; the stale entry never returns.
+    const upgraded = reduceFleetPush(downgraded, remoteAsk("req_downgrade_000b", 2), [], 0).state;
+    expect(Object.keys(upgraded.asks)).toEqual([`${aliases.studio}\0aaaa1111bbbb2222\0req_downgrade_000b`]);
+    expect(reduceFleetReconcile(upgraded, outage(upgraded.received), [], 0).effects).toContainEqual({ kind: "badge", count: 1, complete: false });
+  });
+
+  test("a record saved before asks existed counts none until a push records one", () => {
+    const { asks: _asks, asksReceived: _asksReceived, ...saved } = { ...EMPTY_FLEET_WORKER_STATE, received: 4 };
+    const older = saved as FleetWorkerState;
+    expect(reduceFleetReconcile(older, outage(4), [], 0).effects).toContainEqual({ kind: "badge", count: 0, complete: false });
+    const learned = reduceFleetPush(older, remoteAsk("req_reupgrade_000a", 1), [], 0).state;
+    expect(reduceFleetReconcile(learned, outage(learned.received), [], 0).effects).toContainEqual({ kind: "badge", count: 1, complete: false });
   });
 });

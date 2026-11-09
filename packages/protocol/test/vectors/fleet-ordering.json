@@ -1,5 +1,5 @@
 {
-  "comment": "Fleet worker ordering vectors (ADR-048). Shared by protocol, service-worker, and harness tests. A step is a v3 push (`push`), a v2 push (`legacy`), a page capture of the worker's receipt count before it fetches snapshots (`capture`), a page reconciliation using the last capture (`reconcile`), a worker restart that keeps only persisted state (`restart`), or a clock advance in milliseconds (`advance`). `expect.displayed` lists `tag|kind|requestId-or-generation` after the last step; `expect.badge` is the last applied badge; `expect.alerts` counts shows that alert (`renotify` or a new tag).",
+  "comment": "Fleet worker ordering vectors (ADR-048). Shared by protocol, service-worker, and harness tests. A step is a v3 push (`push`), a v2 push (`legacy`), a page capture of the worker's receipt count before it fetches snapshots (`capture`), a page reconciliation using the last capture (`reconcile`, naming `fresh` and `counted` sources, the fresh sources' `pending` asks, and coverage `complete`), a worker restart that keeps only persisted state (`restart`), or a clock advance in milliseconds (`advance`). Source names are aliases from `defaults`. `expect.displayed` lists `tag|kind|requestId-or-generation` after the last step; `expect.badge` is the last applied badge; `expect.alerts` counts shows that alert (`renotify` or a new tag).",
   "defaults": { "studio": "xeffoL_kxqTcht3AiIR0FT", "laptop": "Zm7JF6omGejLZ9M1ygWBi2" },
   "scenarios": [
     {
@@ -120,7 +120,7 @@
         { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_reconcile_00a", "seq": [2, 1], "badge": [1, true] } },
         { "push": { "type": "attention", "source": "laptop", "instanceId": "cccc3333dddd4444", "requestId": "req_reconcile_00b", "seq": [2, 3], "badge": [2, true] } },
         { "capture": true },
-        { "reconcile": { "fresh": ["local", "studio"], "pending": [], "badge": [1, false] } },
+        { "reconcile": { "fresh": ["local", "studio"], "pending": [], "counted": ["local", "studio", "laptop"], "complete": false } },
         { "push": { "type": "attention", "source": "studio", "instanceId": "eeee5555ffff6666", "requestId": "req_reconcile_00c", "seq": [2, 2], "badge": [5, true] } }
       ],
       "expect": {
@@ -136,7 +136,7 @@
       "steps": [
         { "capture": true },
         { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_stale_snap_0a", "seq": [5, 2], "badge": [1, true] } },
-        { "reconcile": { "fresh": ["local", "studio"], "pending": [], "badge": [0, true] } }
+        { "reconcile": { "fresh": ["local", "studio"], "pending": [], "counted": ["local", "studio"], "complete": true } }
       ],
       "expect": { "displayed": ["omp-attention-xeffoL_kxqTcht3AiIR0FT-aaaa1111bbbb2222|attention|req_stale_snap_0a"], "badge": [1, true], "alerts": 1 }
     },
@@ -146,7 +146,7 @@
         { "push": { "type": "attention", "instanceId": "aaaa1111bbbb2222", "requestId": "req_mixed_snap_0a", "seq": [6, 1], "badge": [1, true] } },
         { "capture": true },
         { "push": { "type": "attention", "instanceId": "cccc3333dddd4444", "requestId": "req_mixed_snap_0b", "seq": [6, 2], "badge": [2, true] } },
-        { "reconcile": { "fresh": ["local"], "pending": [], "badge": [0, true] } }
+        { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local"], "complete": true } }
       ],
       "expect": { "displayed": ["omp-attention-cccc3333dddd4444|attention|req_mixed_snap_0b"], "badge": [2, true], "alerts": 2 }
     },
@@ -160,6 +160,85 @@
         { "push": { "type": "attention", "instanceId": "aaaa1111bbbb2222", "requestId": "req_retention_00a", "seq": [2, 2], "badge": [1, true] } }
       ],
       "expect": { "displayed": ["omp-attention-aaaa1111bbbb2222|attention|req_retention_00a"], "badge": [1, true], "alerts": 1 }
+    },
+    {
+      "name": "an ask cleared by push before its host became unreachable is not counted again",
+      "steps": [
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_unreach_0000a", "seq": [7, 1], "badge": [1, true] } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local", "studio"], "pending": [{ "source": "studio", "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_unreach_0000a" }], "counted": ["local", "studio"], "complete": true } },
+        { "push": { "type": "clear", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_unreach_0000a", "seq": [7, 2], "badge": [0, true] } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local", "studio"], "complete": false } }
+      ],
+      "expect": { "displayed": [], "badge": [0, false], "alerts": 1 }
+    },
+    {
+      "name": "an app opened during an outage counts the asks its host already pushed",
+      "steps": [
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_reopen_00000a", "seq": [8, 1], "badge": [1, true] } },
+        { "restart": true },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local", "studio"], "complete": false } }
+      ],
+      "expect": { "displayed": ["omp-attention-xeffoL_kxqTcht3AiIR0FT-aaaa1111bbbb2222|attention|req_reopen_00000a"], "badge": [1, false], "alerts": 1 }
+    },
+    {
+      "name": "an ask pushed after its host's last fresh snapshot still counts while the host is unreachable",
+      "steps": [
+        { "capture": true },
+        { "reconcile": { "fresh": ["local", "studio"], "pending": [], "counted": ["local", "studio"], "complete": true } },
+        { "push": { "type": "attention", "source": "studio", "instanceId": "cccc3333dddd4444", "requestId": "req_after_snap_00b", "seq": [9, 1], "badge": [1, true] } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local", "studio"], "complete": false } }
+      ],
+      "expect": { "displayed": ["omp-attention-xeffoL_kxqTcht3AiIR0FT-cccc3333dddd4444|attention|req_after_snap_00b"], "badge": [1, false], "alerts": 1 }
+    },
+    {
+      "name": "a delayed older attention never suppresses or uncounts a newer ask a snapshot saw",
+      "steps": [
+        { "capture": true },
+        { "reconcile": { "fresh": ["local", "studio"], "pending": [{ "source": "studio", "instanceId": "aaaa1111bbbb2222", "generation": 1, "requestId": "req_newer_ask_000b" }], "counted": ["local", "studio"], "complete": true } },
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_older_ask_000a", "seq": [10, 1], "badge": [1, true] } },
+        { "push": { "type": "clear", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_older_ask_000a", "seq": [10, 2], "badge": [1, true] } },
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_newer_ask_000b", "seq": [10, 3], "badge": [1, true] } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local", "studio"], "complete": false } }
+      ],
+      "expect": { "displayed": ["omp-attention-xeffoL_kxqTcht3AiIR0FT-aaaa1111bbbb2222|attention|req_newer_ask_000b"], "badge": [1, false], "alerts": 2 }
+    },
+    {
+      "name": "a long outage never re-raises an answered ask after its tombstone ages out",
+      "steps": [
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_long_outage_0a", "seq": [11, 1], "badge": [1, true] } },
+        { "push": { "type": "clear", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_long_outage_0a", "seq": [11, 2], "badge": [0, true] } },
+        { "advance": 1800001 },
+        { "push": { "type": "attention", "instanceId": "cccc3333dddd4444", "requestId": "req_long_local_00b", "seq": [11, 3], "badge": [1, true] } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [{ "instanceId": "cccc3333dddd4444", "generation": 1, "requestId": "req_long_local_00b" }], "counted": ["local", "studio"], "complete": false } }
+      ],
+      "expect": { "displayed": ["omp-attention-cccc3333dddd4444|attention|req_long_local_00b"], "badge": [1, false], "alerts": 2 }
+    },
+    {
+      "name": "a fresh snapshot replaces its host's asks but keeps a session pushed during the fetch",
+      "steps": [
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_replace_snap_a", "seq": [12, 1], "badge": [1, true] } },
+        { "capture": true },
+        { "push": { "type": "attention", "source": "studio", "instanceId": "cccc3333dddd4444", "requestId": "req_replace_snap_b", "seq": [12, 2], "badge": [2, true] } },
+        { "reconcile": { "fresh": ["local", "studio"], "pending": [], "counted": ["local", "studio"], "complete": true } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local", "studio"], "complete": false } }
+      ],
+      "expect": { "displayed": ["omp-attention-xeffoL_kxqTcht3AiIR0FT-cccc3333dddd4444|attention|req_replace_snap_b"], "badge": [1, false], "alerts": 2 }
+    },
+    {
+      "name": "an uncounted host's asks stay out of the badge while its alert awaits a clear",
+      "steps": [
+        { "push": { "type": "attention", "source": "studio", "instanceId": "aaaa1111bbbb2222", "requestId": "req_uncounted_00a", "seq": [13, 1], "badge": [1, true] } },
+        { "capture": true },
+        { "reconcile": { "fresh": ["local"], "pending": [], "counted": ["local"], "complete": true } }
+      ],
+      "expect": { "displayed": ["omp-attention-xeffoL_kxqTcht3AiIR0FT-aaaa1111bbbb2222|attention|req_uncounted_00a"], "badge": [0, true], "alerts": 1 }
     }
   ]
 }

@@ -147,13 +147,18 @@ describe("fleet push messages", () => {
     reject(() => parseFleetPushMessage({ ...attention, generation: 0 }));
   });
 
-  test("a reconciliation names only fresh sources' pending asks and the receipt count it captured", () => {
-    const reconcile = { type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received: 4 }, badge: { count: 1, complete: true } };
+  test("a reconciliation names fresh sources' pending asks, the counted sources, and the receipt count it captured", () => {
+    const reconcile = { type: "omp-notification-reconcile", version: FLEET_PUSH_VERSION, asOf: { received: 4 }, counted: ["local", binding], complete: true };
     const ask = { instanceId, generation: 1, requestId };
-    expect(parseFleetReconcileMessage({ ...reconcile, fresh: ["local"], pending: [ask] }).asOf).toEqual({ received: 4 });
+    expect(parseFleetReconcileMessage({ ...reconcile, fresh: ["local"], pending: [ask] }))
+      .toMatchObject({ asOf: { received: 4 }, counted: ["local", binding], complete: true });
     reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: [binding], pending: [ask] }));
     reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: ["local", "local"], pending: [] }));
     reject(() => parseFleetReconcileMessage({ ...reconcile, fresh: ["laptop"], pending: [] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, counted: [binding], fresh: ["local"], pending: [] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, counted: ["local", "local"], fresh: [], pending: [] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, complete: "true", fresh: ["local"], pending: [] }));
+    reject(() => parseFleetReconcileMessage({ ...reconcile, badge: { count: 1, complete: true }, fresh: ["local"], pending: [] }));
     reject(() => parseFleetReconcileMessage({ ...reconcile, asOf: { epoch: 1, n: 1 }, fresh: ["local"], pending: [] }));
     reject(() => parseFleetReconcileMessage({ ...reconcile, type: "omp-notification-sync", fresh: ["local"], pending: [] }));
   });

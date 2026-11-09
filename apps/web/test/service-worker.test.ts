@@ -230,11 +230,12 @@ describe("fleet vectors through the actual worker listeners and durable store", 
           }) });
         } else {
           const snapshot = step.reconcile as VectorStep;
-          const [count, complete] = snapshot.badge as [number, boolean];
           const delivery = workerMessage({
             type: "omp-notification-reconcile", version: 3, asOf: { received: captured },
             fresh: (snapshot.fresh as string[]).map(token => token === "local" ? token : vectorBinding(token)),
-            pending: snapshot.pending, badge: { count, complete },
+            pending: (snapshot.pending as VectorStep[]).map(ask => ask.source === undefined ? ask : { ...ask, source: vectorBinding(ask.source) }),
+            counted: (snapshot.counted as string[]).map(token => token === "local" ? token : vectorBinding(token)),
+            complete: snapshot.complete,
           });
           for (let turn = 0; turn < 60; turn++) await Promise.resolve();
           jest.runAllTimers();

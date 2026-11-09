@@ -404,7 +404,7 @@ export type FleetPushMessage =
 /**
  * Page → worker foreground reconciliation from fresh, authenticated source snapshots. `asOf` is the
  * worker's push receipt count captured before the page fetched them, so a snapshot can never
- * overrule a push the worker received after the page began.
+ * overrule a push the worker received after the page began. The worker counts the badge itself.
  */
 export interface FleetReconcileMessage {
   readonly type: "omp-notification-reconcile";
@@ -413,7 +413,10 @@ export interface FleetReconcileMessage {
   /** `local` or remote bindings whose pending sets below are complete and authoritative. */
   readonly fresh: readonly string[];
   readonly pending: readonly FleetPendingAsk[];
-  readonly badge: FleetBadge;
+  /** `local` and the selected bindings the badge counts (current or stale); includes every fresh one. */
+  readonly counted: readonly string[];
+  /** Whether every selected source is covered; a zero count shows the plain marker otherwise. */
+  readonly complete: boolean;
 }
 
 /** Coordinator view of one configured notification source for the calling owner. */
