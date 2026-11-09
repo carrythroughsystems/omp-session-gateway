@@ -1,0 +1,1 @@
+- Pass the qualification teardown's Tailscale API credential to curl through stdin, not argv.

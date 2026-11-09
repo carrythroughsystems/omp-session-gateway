@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { dirname, extname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ArtworkManifest } from "./media/render-brand-assets.ts";
 import { CHANGELOG_FRAGMENT_PATH } from "./release-policy.ts";
+import { CAPABILITY_TEXT_EXTENSIONS } from "./capability-leak-rules.ts";
+import { IDENTIFIER_TEXT_EXTENSIONS } from "./identifier-leak-rules.ts";
+import { repositoryFiles } from "./repository-files.ts";
 
 const rootPath = fileURLToPath(new URL("../", import.meta.url));
 const sitePath = join(rootPath, "site");
@@ -23,6 +26,17 @@ const STAGED_SITE_ASSETS: Record<string, string> = {
   "screen-needs-you.png": "docs/media/02-needs-you.png",
   "screen-open-request.png": "docs/media/03-open-request.png",
 };
+
+test("both leak scanners cover every committed site text extension", async () => {
+  const files = (await repositoryFiles(rootPath))
+    .filter(path => path.startsWith(sitePath + sep) && extname(path) !== ".woff2");
+  expect(files.length).toBeGreaterThan(0);
+  for (const path of files) {
+    const extension = extname(path);
+    expect(CAPABILITY_TEXT_EXTENSIONS.has(extension), relative(rootPath, path)).toBe(true);
+    expect(IDENTIFIER_TEXT_EXTENSIONS.has(extension), relative(rootPath, path)).toBe(true);
+  }
+});
 
 async function sitePages(): Promise<Array<{ path: string; url: string }>> {
   const out: Array<{ path: string; url: string }> = [];

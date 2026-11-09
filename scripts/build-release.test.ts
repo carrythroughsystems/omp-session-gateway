@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import packageManifest from "../package.json";
 import {
+  assertBuilderRuntime,
   PRODUCT_VERSION,
   RELEASE_QUALIFICATIONS,
   RUNTIME_LICENSES,
@@ -49,6 +50,14 @@ const expectedRuntimeDependencies = [
   "web-push@3.6.7",
 ];
 const deterministicSource = releaseSourceFromEpoch("a".repeat(40), "1700000000");
+
+test("release builders require the exact pinned Bun runtime", () => {
+  const pinned = packageManifest.packageManager.replace(/^bun@/u, "");
+  expect(() => assertBuilderRuntime(pinned, pinned)).not.toThrow();
+  for (const version of ["0.0.0", `${pinned}-canary`, "1.4.5", ""]) {
+    expect(() => assertBuilderRuntime(version, pinned)).toThrow("release builder requires Bun");
+  }
+});
 
 async function releaseInputs(): Promise<{ lock: BunLockfile; lockSha256: string; client: VendoredClientLockfile }> {
   const [lockText, clientText] = await Promise.all([

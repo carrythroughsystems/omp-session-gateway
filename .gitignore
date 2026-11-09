@@ -35,3 +35,6 @@ site/screen-open-request.png
 
 # Python bytecode
 __pycache__/
+
+# Local planning exports, never committed.
+prompt-exports/

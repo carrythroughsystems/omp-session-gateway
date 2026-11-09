@@ -267,7 +267,9 @@ provider_request() {
   PROVIDER_STATUS="${response##*$'\n'}"
   PROVIDER_BODY="${response%$'\n'*}"
   PROVIDER_BODY="${PROVIDER_BODY//"$token"/[REDACTED_CREDENTIAL]}"
-  printf '%s\n' "$PROVIDER_BODY" >"$prefix.body.json" || die "cannot retain provider response"
+  printf '%s\n' "$PROVIDER_BODY" |
+    jq -Rsc 'try (fromjson | del(.. | .networks?)) catch {error: "unparseable provider response"}' \
+      >"$prefix.body.json" || die "cannot retain provider response"
   jq -n --arg method "$method" --arg path "$path" --arg status "$PROVIDER_STATUS" \
     --argjson curl_exit "$curl_exit" \
     '{method: $method, path: $path, http_status: $status, curl_exit: $curl_exit}' >"$prefix.request.json" ||
@@ -923,8 +925,8 @@ REMOTE
   fi
   measure "tailscale node id" "${node_id:-<unknown>}"
   if [ -n "${TS_API_KEY:-}" ] && [ -n "$node_id" ]; then
-    code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
-      -H "Authorization: Bearer ${TS_API_KEY}" \
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$TS_API_KEY" |
+      curl --disable --config - -sS -o /dev/null -w '%{http_code}' -X DELETE \
       "https://api.tailscale.com/api/v2/device/${node_id}" 2>/dev/null || echo request-failed)"
     measure "device delete HTTP status" "$code (200 removed, 404 already gone)"
   else

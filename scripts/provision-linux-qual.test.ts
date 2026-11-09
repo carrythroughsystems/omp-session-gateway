@@ -54,9 +54,15 @@ const root = process.env.PROVIDER_FIXTURE;
 const scenario = JSON.parse(readFileSync(root + "/scenario.json", "utf8"));
 const args = process.argv.slice(2);
 const config = await Bun.stdin.text();
+const url = args.at(-1);
+if (url.startsWith("https://api.tailscale.com/")) {
+  writeFileSync(root + "/tailscale-call.json", JSON.stringify({args, config}));
+  if (scenario.tailscaleExit) process.exit(scenario.tailscaleExit);
+  process.stdout.write("200");
+  process.exit(0);
+}
 if (config !== 'header = "Authorization: Bearer ' + process.env.PROVIDER_TEST_TOKEN + '"\n') process.exit(92);
 const method = args[args.indexOf("--request") + 1];
-const url = args.at(-1);
 const calls = existsSync(root + "/calls.json") ? JSON.parse(readFileSync(root + "/calls.json", "utf8")) : [];
 const stateFile = root + "/state/omp-session-gateway-qual/omp-gateway-qual.json";
 calls.push({method, url, args, savedId: existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")).droplet_id : null});
@@ -195,13 +201,57 @@ test.skipIf(process.platform === "win32")("droplet create id survives null netwo
     ]);
     const evidence = await fixture.evidence();
     for (const status of ["200", "202", "204", "404"]) expect(evidence).toContain(`"http_status": "${status}"`);
-    expect(evidence).toContain('"networks":null');
+    expect(evidence).not.toContain('"networks"');
     expect(evidence + JSON.stringify(calls) + provision.stdout + provision.stderr + destroy.stdout + destroy.stderr)
       .not.toContain(PROVIDER_TEST_TOKEN);
   } finally {
     await fixture.dispose();
   }
 });
+
+test.skipIf(process.platform === "win32")("provider evidence omits droplet network addresses without changing readiness", async () => {
+  const syntheticPublicIpv4 = [23, 45, 67, 89].join(".");
+  const fixture = await dropletHarness({}, false, {
+    ...PROVIDER_DROPLET,
+    networks: { v4: [{ type: "public", ip_address: syntheticPublicIpv4 }] },
+  });
+  try {
+    const result = await fixture.run("provision");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(syntheticPublicIpv4);
+    const evidence = await fixture.evidence();
+    expect(evidence).not.toContain(syntheticPublicIpv4);
+    expect(evidence).not.toContain('"networks"');
+    expect(evidence).toContain('"id":4242');
+    expect(evidence).toContain('"http_status": "202"');
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+for (const tailscaleExit of [0, 28]) {
+  test.skipIf(process.platform === "win32")(`destroy keeps the tailnet API key on curl stdin when curl exits ${tailscaleExit}`, async () => {
+    const fixture = await dropletHarness({ tailscaleExit }, true);
+    const key = "synthetic-tailnet-credential-not-real";
+    try {
+      const result = await fixture.run("destroy", false, `
+TS_API_KEY=${JSON.stringify(key)}
+state_write ts_node_id synthetic-node-for-destroy
+`);
+      expect(result.exitCode).toBe(0);
+      const call = await Bun.file(join(fixture.home, "tailscale-call.json")).json();
+      expect(call.args).toContain("--disable");
+      expect(call.args.slice(call.args.indexOf("--config"), call.args.indexOf("--config") + 2))
+        .toEqual(["--config", "-"]);
+      expect(call.args.join(" ")).not.toContain(key);
+      expect(call.config).toBe(`header = "Authorization: Bearer ${key}"\n`);
+      expect(result.stdout + result.stderr + await fixture.evidence()).not.toContain(key);
+      if (tailscaleExit !== 0) expect(result.stdout).toContain("request-failed");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+}
 
 test.skipIf(process.platform === "win32")("IPv4 readiness exhaustion retains the create id and still permits exact-id cleanup", async () => {
   const fixture = await dropletHarness({ getBodies: [{ droplet: { ...PROVIDER_DROPLET, networks: null } }] });

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import {
   MAX_FRAME_BYTES,
   ProtocolValidationError,
@@ -10,6 +12,7 @@ import {
   observedSessionFromSnapshot,
   parseJsonFrame,
   parseClientConfigResponse,
+  parseFleetLabel,
   parseFleetOrigin,
   parseLaunchRequest,
   parseLaunchResponse,
@@ -30,6 +33,15 @@ const encoder = new TextEncoder();
 const instanceId = "aaaa1111bbbb2222";
 const entryId = "eaaa1111bbbb2222";
 const capability = ["VIEW", "CANARY", "VALUE", "0000000000000000"].join("__");
+const ajv = new Ajv2020({ strict: true, allErrors: true });
+addFormats(ajv);
+const [registrySchema, launchSchema, clientConfigSchema] = await Promise.all(
+  ["omp-host-registry", "launch-request", "client-config"].map(async (name) =>
+    ajv.compile(await Bun.file(new URL(`../../../schemas/${name}.schema.json`, import.meta.url)).json())),
+);
+const snapshotSchema = ajv.getSchema(
+  "https://example.invalid/omp-session-gateway/omp-host-registry.schema.json#/$defs/snapshot",
+)!;
 
 function discoveryFile(overrides: Record<string, unknown> = {}) {
   return {
@@ -200,6 +212,27 @@ describe("strict protocol validation", () => {
     expect(() => parseOmpHostSnapshot(hostSnapshot({ busy: "true" }))).toThrow(ProtocolValidationError);
   });
 
+  test("the published OMP schema accepts additive v1 fields and nullable busy metadata", () => {
+    for (const snapshot of [
+      hostSnapshot({ busy: true }), hostSnapshot({ busy: false }), hostSnapshot({ busy: null }),
+      hostSnapshot({ futureField: 1 }),
+      hostSnapshot({ model: { provider: "provider", id: "model", futureField: 1 } }),
+    ]) {
+      expect(snapshotSchema(snapshot)).toBe(true);
+      expect(registrySchema!({ ok: true, v: 1, snapshot, futureField: 1 })).toBe(true);
+    }
+    expect(registrySchema!(discoveryFile({ futureField: 1 }))).toBe(true);
+    expect(registrySchema!({ ok: true, v: 1, url: capability, futureField: 1 })).toBe(true);
+    expect(registrySchema!({ ok: false, v: 1, error: "stale_generation", futureField: 1 })).toBe(true);
+    expect(snapshotSchema(hostSnapshot({ busy: "true" }))).toBe(false);
+    // Additive never means ask content: the schema refuses exactly the keys the parser refuses.
+    for (const forbiddenKey of ["prompt", "question", "options", "prefill", "answer", "requestId", "count"]) {
+      const snapshot = hostSnapshot({ [forbiddenKey]: "CONTENT_CANARY" });
+      expect(snapshotSchema(snapshot)).toBe(false);
+      expect(registrySchema!({ ok: true, v: 1, snapshot })).toBe(false);
+    }
+  });
+
   test("bounds snapshot timestamps before projecting them into ISO metadata", () => {
     const lastRepresentableTimestamp = 8_640_000_000_000_000;
     expect(() =>
@@ -248,6 +281,19 @@ describe("strict protocol validation", () => {
     );
   });
 
+  test("rejects JSON nesting beyond 64 levels as a protocol validation error", () => {
+    expect(() => parseJsonFrame(encoder.encode("[".repeat(4096) + "]".repeat(4096))))
+      .toThrow(ProtocolValidationError);
+    const nested = "[".repeat(32) + "]".repeat(32);
+    expect(parseJsonFrame(encoder.encode(nested))).toEqual(JSON.parse(nested));
+    expect(() => parseJsonFrame(encoder.encode("[".repeat(65) + "]".repeat(65))))
+      .toThrow(ProtocolValidationError);
+    const boundary = "[".repeat(64) + "]".repeat(64);
+    expect(parseJsonFrame(encoder.encode(boundary))).toEqual(JSON.parse(boundary));
+    expect(() => parseJsonFrame(encoder.encode('{"nested":'.repeat(65) + "0" + "}".repeat(65))))
+      .toThrow(ProtocolValidationError);
+  });
+
   test("binds control launches to an exact current request", () => {
     expect(
       parseLaunchRequest({
@@ -266,6 +312,19 @@ describe("strict protocol validation", () => {
     expect(() =>
       parseLaunchRequest({ mode: "control", generation: 1, requestId: "short" }),
     ).toThrow(ProtocolValidationError);
+  });
+
+  test("the published launch schema permits request identities only in control mode", () => {
+    const launch = { mode: "control", generation: 1, requestId: "request-identity-000001" };
+    expect(launchSchema!(launch)).toBe(true);
+    expect(launchSchema!({ ...launch, mode: "view" })).toBe(false);
+    for (const requestId of ["a".repeat(16), "A_0-".repeat(32)]) {
+      expect(launchSchema!({ ...launch, requestId })).toBe(true);
+    }
+    for (const requestId of ["a".repeat(15), "a".repeat(129), "invalid.request.identity", null]) {
+      expect(launchSchema!({ ...launch, requestId })).toBe(false);
+    }
+    expect(launchSchema!({ mode: "view", generation: 1, futureField: 1 })).toBe(false);
   });
 
   test("projects a host into basename-only metadata rather than exposing its full path or identity", () => {
@@ -295,6 +354,26 @@ describe("strict protocol validation", () => {
     expect(observed.cwdLabel).toBe("repository");
   });
 
+  test("rejects oversized raw titles and fleet labels before normalization", () => {
+    const title = "x".repeat(1024 * 1024);
+    const removableTitle = "\u0007".repeat(1024 * 1024) + "safe";
+    const started = performance.now();
+    for (const sessionName of [title, removableTitle]) {
+      expect(() => parseOmpHostSnapshot(hostSnapshot({ sessionName }))).toThrow(ProtocolValidationError);
+    }
+    for (const label of [title, removableTitle]) {
+      expect(() => parseFleetLabel(label)).toThrow(ProtocolValidationError);
+    }
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(parseOmpHostSnapshot(hostSnapshot({ sessionName: "😀".repeat(256) })).sessionName)
+      .toBe("😀".repeat(256));
+    // A decomposed label that fits the code-point bound once composed is still accepted: 256
+    // Hangul syllables written as three conjoining jamo each are 768 raw units.
+    const decomposed = "\u1112\u1161\u11ab".repeat(256);
+    expect(parseOmpHostSnapshot(hostSnapshot({ sessionName: decomposed })).sessionName).toBe("\ud55c".repeat(256));
+    expect(parseFleetLabel("\u1112\u1161\u11ab".repeat(64))).toBe("\ud55c".repeat(64));
+  });
+
   test("wraps a link reply URL before it can be serialized or inspected", () => {
     const url = new URL("https://collab.example.test");
     url.hash = capability;
@@ -313,8 +392,15 @@ describe("strict protocol validation", () => {
   });
 
   test("removes control and bidi characters from display labels", () => {
-    const snapshot = parseOmpHostSnapshot(hostSnapshot({ sessionName: "safe\u202etext\u0007" }));
-    expect(observedSessionFromSnapshot(snapshot).title).toBe("safetext");
+    for (const sessionName of ["safe\u202etext\u0007", "safe\u000atext\u000d", "safe\u0009text"]) {
+      const snapshot = parseOmpHostSnapshot(hostSnapshot({ sessionName }));
+      expect(observedSessionFromSnapshot(snapshot).title).toBe("safetext");
+      expect(parseFleetLabel(sessionName)).toBe("safetext");
+      expect(parseAttentionPushMessage({
+        version: 2, type: "activity_stop", instanceId, generation: 1,
+        pendingAskCount: 0, title: "OMP session activity stopped", body: sessionName,
+      })).toMatchObject({ body: "safetext" });
+    }
   });
 
   /**
@@ -508,6 +594,31 @@ describe("strict protocol validation", () => {
       "",
     ]) {
       expect(() => parseFleetOrigin(origin)).toThrow(ProtocolValidationError);
+    }
+  });
+
+  test("the published client config schema rejects non-canonical fleet origins", () => {
+    const config = (origin: string) => ({
+      version: 1, local: { id: "local", label: "Example", origin },
+      targets: [], speech: { browserRecognition: false },
+    });
+    for (const origin of [
+      "https://studio.example.ts.net", "https://studio.example.ts.net:4318",
+      "https://studio.example.ts.net:0", "https://studio.example.ts.net:65535",
+      "https://127.0.0.1", "https://[::1]", "http://127.0.0.1:4318", "http://[::1]:4318",
+    ]) {
+      expect(parseFleetOrigin(origin)).toBe(origin);
+      expect(clientConfigSchema!(config(origin))).toBe(true);
+    }
+    for (const origin of [
+      "https://nyc.example.ts.net/", "https://nyc.example.ts.net/path",
+      "https://nyc.example.ts.net?x=1", "https://nyc.example.ts.net#frag",
+      "https://user:secret@nyc.example.ts.net", "https://NYC.example.ts.net",
+      "https://nyc.example.ts.net:443", "https://nyc.example.ts.net:65536", "http://nyc.example.ts.net",
+      "http://localhost:4318", "http://10.0.0.5:4318", "wss://nyc.example.ts.net", "null", "",
+    ]) {
+      expect(() => parseFleetOrigin(origin)).toThrow(ProtocolValidationError);
+      expect(clientConfigSchema!(config(origin))).toBe(false);
     }
   });
 
