@@ -206,8 +206,9 @@ export async function runRelaySoak(config: RelaySoakConfig): Promise<void> {
     await writeFile(config.samplesPath, "elapsed_s,rss_kib,cpu_s\n", { flag: "wx", mode: 0o600 });
   }
 
+  const publicHost = new URL(config.publicOrigin).host;
   const listResponse = await fetch(`${config.gatewayOrigin}/api/v1/sessions`, {
-    headers: { "Tailscale-User-Login": config.tailscaleLogin },
+    headers: { "Tailscale-User-Login": config.tailscaleLogin, Host: publicHost },
     cache: "no-store",
   });
   assertNoStore(listResponse);
@@ -226,6 +227,7 @@ export async function runRelaySoak(config: RelaySoakConfig): Promise<void> {
       headers: {
         "Content-Type": "application/json",
         "Tailscale-User-Login": config.tailscaleLogin,
+        Host: publicHost,
         Origin: config.publicOrigin,
       },
       body: JSON.stringify({ mode: "view", generation: session.generation }),

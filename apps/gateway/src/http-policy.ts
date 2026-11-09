@@ -19,20 +19,24 @@ function securityHeaders(targets: readonly string[], microphone: boolean): Recor
   };
 }
 
+const NON_DOCUMENT_SECURITY_HEADERS = securityHeaders([], false);
+const NO_STORE_CACHE_CONTROL = "no-store, max-age=0";
+const NO_STORE_PRAGMA = "no-cache";
+
 export function documentSecurityHeaders(config: GatewayConfig): Record<string, string> {
   return securityHeaders(config.fleet.targets.map(target => target.origin), config.speech.browserRecognition);
 }
 
 export function apiSecurityHeaders(): Record<string, string> {
   return {
-    ...securityHeaders([], false),
-    "Cache-Control": "no-store, max-age=0",
-    Pragma: "no-cache",
+    ...NON_DOCUMENT_SECURITY_HEADERS,
+    "Cache-Control": NO_STORE_CACHE_CONTROL,
+    Pragma: NO_STORE_PRAGMA,
   };
 }
 
-function corsRouteMethod(request: Request): "GET" | "POST" | undefined {
-  const pathname = new URL(request.url).pathname;
+function corsRouteMethod(url: URL): "GET" | "POST" | undefined {
+  const pathname = url.pathname;
   if (isNotificationGrantRoute(pathname)) return "POST";
   if (pathname === "/api/v1/sessions") return "GET";
   if (pathname === "/api/v1/session-creation-options") return "GET";
@@ -49,12 +53,12 @@ export function isNotificationGrantRoute(pathname: string): boolean {
   return match !== null && SESSION_CREATION_UUID_PATTERN.test(match[1]!);
 }
 
-export function corsAdmission(request: Request, config: GatewayConfig): string | undefined {
-  const method = corsRouteMethod(request);
+export function corsAdmission(request: Request, config: GatewayConfig, url: URL): string | undefined {
+  const method = corsRouteMethod(url);
   if (method === undefined || (request.method !== method && request.method !== "OPTIONS")) return undefined;
   const origin = request.headers.get("Origin");
   if (origin === null || !config.http.trustedDashboardOrigins.includes(origin)) return undefined;
-  if (isNotificationGrantRoute(new URL(request.url).pathname) &&
+  if (isNotificationGrantRoute(url.pathname) &&
       !config.notifications?.coordinators?.some(peer => peer.origin === origin)) return undefined;
   return origin;
 }
@@ -64,10 +68,10 @@ export type PreflightDecision =
   | { readonly allowed: false };
 
 /** Identity authorization remains the handler's responsibility, including for OPTIONS. */
-export function preflightDecision(request: Request, config: GatewayConfig): PreflightDecision {
-  if (request.method !== "OPTIONS" || new URL(request.url).search !== "") return { allowed: false };
-  const origin = corsAdmission(request, config);
-  const method = corsRouteMethod(request);
+export function preflightDecision(request: Request, config: GatewayConfig, url: URL): PreflightDecision {
+  if (request.method !== "OPTIONS" || url.search !== "") return { allowed: false };
+  const origin = corsAdmission(request, config, url);
+  const method = corsRouteMethod(url);
   if (origin === undefined || method === undefined || request.headers.get("Access-Control-Request-Method") !== method) {
     return { allowed: false };
   }
@@ -90,12 +94,11 @@ export function finalizeHttpResponse(
   },
 ): Response {
   const headers = new Headers(response.headers);
-  const policy = options.document ? documentSecurityHeaders(config) : securityHeaders([], false);
+  const policy = options.document ? documentSecurityHeaders(config) : NON_DOCUMENT_SECURITY_HEADERS;
   for (const [name, value] of Object.entries(policy)) headers.set(name, value);
   if (options.noStore) {
-    const api = apiSecurityHeaders();
-    headers.set("Cache-Control", api["Cache-Control"]!);
-    headers.set("Pragma", api.Pragma!);
+    headers.set("Cache-Control", NO_STORE_CACHE_CONTROL);
+    headers.set("Pragma", NO_STORE_PRAGMA);
   }
   const origin = options.preflight?.origin ?? options.corsOrigin;
   if (origin !== undefined) {

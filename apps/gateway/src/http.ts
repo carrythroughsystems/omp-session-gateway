@@ -634,8 +634,8 @@ export function createHttpHandler(options: {
       });
     }
     try {
-      admittedOrigin = corsAdmission(request, config);
-      preflight = request.method === "OPTIONS" ? preflightDecision(request, config) : undefined;
+      admittedOrigin = corsAdmission(request, config, url);
+      preflight = request.method === "OPTIONS" ? preflightDecision(request, config, url) : undefined;
       response = await route(request, peer, url, admittedOrigin, preflight);
     } catch {
       logger.event("error", "http.request_failed");
@@ -674,6 +674,7 @@ export function startHttpServer(options: {
   const server = Bun.serve({
     hostname: options.config.http.hostname,
     port: options.config.http.port,
+    maxRequestBodySize: MAX_FRAME_BYTES,
     // Must exceed the five-second SSE keepalive interval or Bun repeatedly closes event streams.
     idleTimeout: 30,
     async fetch(request, bunServer) {

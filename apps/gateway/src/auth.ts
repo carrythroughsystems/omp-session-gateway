@@ -43,9 +43,11 @@ function isTailscaleAddress(address: string): boolean {
  * marks that Serve never produces, and a remote caller cannot remove marks the proxy itself adds.
  *
  * Measured against Serve's proxy (`ipn/ipnlocal/serve.go`, `addProxyForwardedHeaders` and
- * `addTailscaleIdentityHeaders`): it sets `X-Forwarded-Host` to the inbound host, sets
- * `X-Forwarded-For` to the single tailnet source address, and deletes every inbound `Tailscale-*`
- * header before setting its own. It never sets `Forwarded`, `X-Real-IP`, or vendor headers.
+ * `addTailscaleIdentityHeaders`): it preserves the inbound `Host`, sets `X-Forwarded-Host` to that
+ * host, sets `X-Forwarded-For` to the single tailnet source address, and deletes every inbound
+ * `Tailscale-*` header before setting its own. Both hosts must match the public origin's host,
+ * case-insensitively. A browser cannot forge `Host`, so a DNS-rebound page cannot reach the identity
+ * path under an attacker's hostname. Serve never sets `Forwarded`, `X-Real-IP`, or vendor headers.
  *
  * This is defence in depth and not authentication: a raw TCP forwarder inserts no headers at all and
  * remains indistinguishable from Serve. Only an authenticator the gateway can verify closes that.
@@ -58,16 +60,15 @@ export function secondHopEvidence(request: Request, publicOrigin: string): strin
     if (hops.length !== 1) return "forwarded_chain";
     if (!isTailscaleAddress(hops[0]!)) return "forwarded_source";
   }
-  const forwardedHost = request.headers.get("X-Forwarded-Host");
-  if (forwardedHost !== null) {
-    let expected: string;
-    try {
-      expected = new URL(publicOrigin).host.toLowerCase();
-    } catch {
-      return "forwarded_host";
-    }
-    if (forwardedHost.trim().toLowerCase() !== expected) return "forwarded_host";
+  let expected: string;
+  try {
+    expected = new URL(publicOrigin).host.toLowerCase();
+  } catch {
+    return "forwarded_host";
   }
+  if (new URL(request.url).host.toLowerCase() !== expected) return "host";
+  const forwardedHost = request.headers.get("X-Forwarded-Host");
+  if (forwardedHost !== null && forwardedHost.trim().toLowerCase() !== expected) return "forwarded_host";
   // Serve sets none of these. Each is inserted by a proxy the caller cannot instruct to stop.
   for (const header of ["Forwarded", "X-Real-IP", "CF-Connecting-IP", "CF-Ray", "X-Forwarded-Server"]) {
     if (request.headers.get(header) !== null) return "proxy_marker";

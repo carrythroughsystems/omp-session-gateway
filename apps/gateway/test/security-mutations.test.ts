@@ -137,6 +137,14 @@ const MUTATIONS: readonly Mutation[] = [
     target: "apps/gateway/test/http.test.ts",
     mustFail: "refuses an allowlisted identity carrying evidence of a second HTTP hop",
   },
+  {
+    name: "a DNS-rebound browser can forge Serve identity under another request host",
+    file: "apps/gateway/src/auth.ts",
+    find: 'if (new URL(request.url).host.toLowerCase() !== expected) return "host";',
+    replace: 'if (false && new URL(request.url).host.toLowerCase() !== expected) return "host";',
+    target: "apps/gateway/test/http.test.ts",
+    mustFail: "refuses an allowlisted identity when the request host is not the public origin host",
+  },
   // Deliberately absent: withholding `listenerLoopbackOnly` on unsound trust. That check is
   // unobservable without a live daemon on the fixture's port, because the value is
   // `checks.daemon && hostname is loopback` and is false either way in an isolated root. Adding the
