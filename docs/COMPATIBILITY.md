@@ -104,7 +104,7 @@ expansion, or release qualification; the effectful smoke remains pending.
 ## Current claim
 
 <!-- release-generate:release:start -->
-v0.10.1 is qualified for stable promotion; publication is pending. [Release v0.10.1](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.10.1). Signed candidate v0.10.1-prealpha.4; source 7a10a409f5f16f66226b82be6188856fe0317f84; archive SHA-256 1f0cc09c80beaedcde9efeb65d57ebc9ef975f3711ada779ebc369dd037e0373. Published v0.10.0 remains the predecessor. Stock OMP v18.18.0 (b5a6b2f7e5b6606b6562e678ead83f21738f34a0), Bun 1.4.4. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
+Stable v0.10.1 is published as immutable GitHub Latest. [Release v0.10.1](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.10.1). Signed candidate v0.10.1-prealpha.4; source 7a10a409f5f16f66226b82be6188856fe0317f84; archive SHA-256 1f0cc09c80beaedcde9efeb65d57ebc9ef975f3711ada779ebc369dd037e0373. Published v0.10.0 remains the predecessor. Stock OMP v18.18.0 (b5a6b2f7e5b6606b6562e678ead83f21738f34a0), Bun 1.4.4. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
 <!-- release-generate:release:end -->
 
 The current Mac host qualification runs in a Virtualization.framework guest (`VirtualMac2,1`),
