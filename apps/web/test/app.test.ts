@@ -2942,6 +2942,20 @@ describe("fleet directory bindings", () => {
     } finally { harness.setVisibility("hidden"); }
   });
 
+  test("a focused row control whose session is removed falls back to the directory title", async () => {
+    const waiting = session("removed-focus-request", { inputRequired: true });
+    const working = session("removed-focus-working");
+    const harness = await bootApp({ permission: "denied", initialSessions: [waiting, working], suffix: "removed-row-focus" });
+    try {
+      for (const [index, [removed, selector]] of ([[waiting, ".action-request"], [working, ".working-row"]] as const).entries()) {
+        harness.elements.sessionList.querySelector(selector)!.focus();
+        harness.emit("session_remove", { type: "session_remove", revision: 2 + index, instanceId: removed.instanceId, generation: removed.generation });
+        expect(harness.elements.sessionList.querySelector(selector)).toBeNull();
+        expect((document as unknown as FakeDocument).activeElement === harness.elements.directoryTitle).toBeTrue();
+      }
+    } finally { harness.setVisibility("hidden"); }
+  });
+
   test("audit: a pending launch stays busy across a changed remote poll and resets after failure", async () => {
     const gate = Promise.withResolvers<Response>();
     let revision = 0;
