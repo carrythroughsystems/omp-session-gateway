@@ -113,7 +113,8 @@ jobs:
           DOCTL_SHA256: 1596424b64091a7939bde561daf2402ca8a141966429928e688d20d17091ec89
         run: |
           cd "$RUNNER_TEMP"
-          curl -fsSL -o doctl.tar.gz \
+          # github.com release downloads intermittently answer 504; curl retries those transient responses.
+          curl -fsSL --retry 5 --retry-delay 10 -o doctl.tar.gz \
             "https://github.com/digitalocean/doctl/releases/download/v${DOCTL_VERSION}/doctl-${DOCTL_VERSION}-linux-amd64.tar.gz"
           printf '%s  doctl.tar.gz\n' "$DOCTL_SHA256" | sha256sum --check --strict -
           tar -xzf doctl.tar.gz

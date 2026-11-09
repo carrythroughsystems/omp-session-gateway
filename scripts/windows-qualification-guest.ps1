@@ -205,7 +205,13 @@ switch ($p.action) {
       @{ url = "https://registry.npmjs.org/@oh-my-pi/pi-natives-win32-x64/-/pi-natives-win32-x64-$($p.pins.omp.version).tgz"; file = 'native.tgz'; digest = $p.pins.omp.nativeTarballSha256 }
     )
     foreach ($d in $downloads) {
-      if (-not (Test-Path "$root\$($d.file)") -or (Digest "$root\$($d.file)") -ne $d.digest) { Invoke-WebRequest -UseBasicParsing -Uri $d.url -OutFile "$root\$($d.file)" }
+      if (-not (Test-Path "$root\$($d.file)") -or (Digest "$root\$($d.file)") -ne $d.digest) {
+        # github.com release downloads intermittently answer 504; retry the pinned download a bounded number of times.
+        for ($attempt = 1; ; $attempt++) {
+          try { Invoke-WebRequest -UseBasicParsing -Uri $d.url -OutFile "$root\$($d.file)"; break }
+          catch { if ($attempt -ge 5) { throw }; Start-Sleep -Seconds 10 }
+        }
+      }
       if ((Digest "$root\$($d.file)") -ne $d.digest) { throw 'toolchain archive digest mismatch' }
     }
     Expand-Archive -LiteralPath "$root\bun.zip" -DestinationPath "$root\bun" -Force
