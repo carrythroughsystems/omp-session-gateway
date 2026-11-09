@@ -359,7 +359,7 @@ export class PushService {
         return "delivered";
       } catch (error) {
         const code = statusCode(error);
-        this.#logger.event("warn", "push.send_failed", { status: code, fleet: true });
+        this.#logger.event("warn", "push.fleet_send_failed", { status: code });
         if (code === 404 || code === 410) {
           await this.#mutateSubscriptions(current => current.filter(candidate => !isSameDeliveryTarget(candidate, subscription)));
           return "gone";

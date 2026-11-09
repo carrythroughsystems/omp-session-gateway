@@ -3,7 +3,43 @@ import * as fs from "node:fs";
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { QualificationLogSink, SafeLogger } from "../src/logger.ts";
+import { parseQualificationLogEvent, QualificationLogSink, SafeLogger } from "../src/logger.ts";
+
+test.each([
+  ["fleet.state_unavailable", { healthy: false }, { healthy: 0 }],
+  ["fleet.send_failed", { failed: true }, { failed: 1 }],
+  ["push.fleet_send_failed", { status: 410 }, { status: true }],
+  ["push.fleet_send_failed", {}, { status: "SYNTHETIC_STATUS" }],
+] as const)("accepts typed fleet qualification evidence for %s (%j)", (event, fields, invalid) => {
+  const envelope = { timestamp: "2026-11-08T00:00:00.000Z", level: "warn", event, index: 1 };
+  expect(parseQualificationLogEvent({ ...envelope, ...fields })).toMatchObject({ event, ...fields });
+  expect(() => parseQualificationLogEvent({ ...envelope, ...invalid })).toThrow();
+  if (event.startsWith("fleet.")) expect(() => parseQualificationLogEvent(envelope)).toThrow();
+});
+
+test.skipIf(process.platform === "win32")("fleet failures leave the real qualification sink healthy", async () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "fleet-logs-")); chmodSync(dir, 0o700);
+  try {
+    const sink = new QualificationLogSink(dir), logger = new SafeLogger(sink);
+    expect(() => {
+      logger.event("error", "fleet.state_unavailable", { healthy: false });
+      logger.event("warn", "fleet.send_failed", { failed: true });
+      logger.event("warn", "push.fleet_send_failed", { status: 410 });
+      logger.event("warn", "push.fleet_send_failed", { status: undefined });
+    }).not.toThrow();
+    await Promise.resolve();
+    expect(sink.healthy).toBe(true);
+    expect(readFileSync(join(dir, "events.0.jsonl"), "utf8").trimEnd().split("\n")).toHaveLength(4);
+    sink.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test.each(["ipc.protocol_rejected", "ipc.authentication_denied", "ipc.connection_timeout", "ipc.connection_error"])(
+  "rejects retired qualification event %s", event => {
+    expect(() => parseQualificationLogEvent({
+      timestamp: "2026-11-08T00:00:00.000Z", level: "warn", event, index: 1,
+    })).toThrow();
+  });
 
 test.skipIf(process.platform === "win32")("495 round2 a late producer is refused without throwing into an admitted handler", () => {
   const dir = mkdtempSync(join(realpathSync(tmpdir()), "closed-log-")); chmodSync(dir, 0o700);
@@ -117,6 +153,37 @@ test("coalesces repetitive denial events into a bounded log rate", () => {
   });
 });
 
+test.each(["omp.entry_unreadable", "omp.discovery_unreadable"])("coalesces repetitive discovery event %s", event => {
+  const lines: string[] = [];
+  let now = 1_000;
+  const logger = new SafeLogger({ write: line => lines.push(line) }, () => now);
+  for (let index = 0; index < 3; index++) logger.event("warn", event);
+  expect(lines).toHaveLength(1);
+  now += 60_000;
+  logger.event("warn", event);
+  expect(lines).toHaveLength(2);
+  expect(JSON.parse(lines[1]!)).toMatchObject({ event, suppressed: 2 });
+});
+
+test.skipIf(process.platform === "win32").each(["omp.entry_unreadable", "omp.discovery_unreadable"])(
+  "retains rate-limited discovery evidence in the real qualification sink: %s", async event => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "discovery-logs-")); chmodSync(dir, 0o700);
+    try {
+      let now = 1_000;
+      const sink = new QualificationLogSink(dir), logger = new SafeLogger(sink, () => now);
+      for (let index = 0; index < 3; index++) logger.event("warn", event);
+      expect(readFileSync(join(dir, "events.0.jsonl"), "utf8").trimEnd().split("\n")).toHaveLength(1);
+      now += 60_000;
+      expect(() => logger.event("warn", event)).not.toThrow();
+      await Promise.resolve();
+      const events = readFileSync(join(dir, "events.0.jsonl"), "utf8").trimEnd().split("\n").map(line => parseQualificationLogEvent(JSON.parse(line)));
+      expect(events).toHaveLength(2);
+      expect(events[1]).toMatchObject({ event, suppressed: 2 });
+      expect(sink.healthy).toBe(true);
+      sink.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
 test.skipIf(process.platform === "win32")("R1 write-ahead health survives a directory that cannot unlink the old success marker", () => {
   const dir = mkdtempSync(join(realpathSync(tmpdir()), "health-state-")); chmodSync(dir, 0o700);
   try {
@@ -129,14 +196,13 @@ test.skipIf(process.platform === "win32")("R1 write-ahead health survives a dire
   } finally { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test.skipIf(process.platform === "win32")("U1 restart validates every rotated event and all rate-limited IPC events remain safe", async () => {
+test.skipIf(process.platform === "win32")("U1 restart validates every rotated event and rate-limited denial events remain safe", async () => {
   const dir = mkdtempSync(join(realpathSync(tmpdir()), "health-vocabulary-")); chmodSync(dir, 0o700);
   try {
     let now = 0;
     const sink = new QualificationLogSink(dir), logger = new SafeLogger(sink, () => now);
-    for (const event of ["ipc.protocol_rejected", "ipc.authentication_denied", "ipc.connection_timeout", "ipc.connection_error"]) {
-      logger.event("warn", event); logger.event("warn", event); now += 60_000; logger.event("warn", event);
-    }
+    logger.event("warn", "http.authorization_denied"); logger.event("warn", "http.authorization_denied");
+    now += 60_000; logger.event("warn", "http.authorization_denied");
     await Promise.resolve();
     sink.close();
     const restarted = new QualificationLogSink(dir);

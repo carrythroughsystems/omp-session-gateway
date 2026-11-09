@@ -1,0 +1,1 @@
+- Skip unchanged fleet state writes and redundant reconciliation of identical source updates.

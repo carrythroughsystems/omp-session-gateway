@@ -590,7 +590,7 @@ discarded with a bounded in-memory drop count, not thrown into a late handler. A
 stays inside the accepted service writable location. Restart and collection require
 contiguous records in oldest-to-newest file order, beginning at index 1 unless the committed rotation
 boundary explains the prefix. Missing/truncated retained files and record reordering are failures.
-Rate-limited IPC events use the same closed vocabulary. Raw daemon
+Rate-limited discovery and authorization events use the same closed vocabulary. Raw daemon
 stdout/stderr remain discarded independently of structured retention, proven on the gateway's host.
 Install/rollback/repair only forward the logging option to runtimes advertising `structured-v1`;
 older installed runtimes omit it rather than receiving an unsupported command-line option.
@@ -914,7 +914,8 @@ prefer gateway-mediated access wherever a session is being recorded or supervise
 - CI builds from tagged source;
 - checksums, SBOM, and provenance for release artifacts;
 - signed tags/artifacts where maintainers can support them;
-- installer verifies downloaded artifacts before execution;
+- operators verify published checksums/attestations per [Verify a published build](RELEASE.md#verify-a-published-build)
+  before extracting; `omp-gateway install` never downloads and performs no signature check itself;
 - no self-update channel in v1 unless it is signed, rollback-safe, and separately threat-modeled;
 - preserve upstream OMP attribution for vendored or adapted code.
 

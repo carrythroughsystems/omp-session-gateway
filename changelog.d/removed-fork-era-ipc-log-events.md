@@ -1,0 +1,1 @@
+- Remove retired fork-era IPC events from the closed qualification-log vocabulary.

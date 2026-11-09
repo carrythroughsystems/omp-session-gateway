@@ -120,6 +120,26 @@ async function createRoot(): Promise<string> {
 }
 
 describe("Web Push service", () => {
+  test.each([410, 503, undefined])("separates fleet transport failure evidence from attributed local sends (%s)", async status => {
+    const root = await createRoot(), registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
+    const lines: string[] = [];
+    const transport: PushTransport = { async send() { throw status === undefined ? new Error("SYNTHETIC_TRANSPORT_FAILURE") : pushError(status); } };
+    const service = await PushService.open({ config: config(root), registry, transport,
+      logger: new SafeLogger({ write: line => lines.push(line) }), endpointSpacingMs: 0 });
+    try {
+      await service.subscribe("dev-localhost", { version: PUSH_API_VERSION, subscription });
+      const outcome = await service.sendFleet("dev-localhost", endpoint, {
+        version: 3, type: "attention", instanceId: "synthetic-fleet-failure", generation: 1, requestId: "synthetic-fleet-request",
+        seq: { epoch: 1, n: 1 }, badge: { count: 1, complete: false }, title: "OMP session needs attention",
+      }, () => true);
+      expect(outcome).toBe(status === 410 ? "gone" : "failed");
+      const event = lines.map(line => JSON.parse(line)).find(event => event.event === "push.fleet_send_failed");
+      expect(event).toEqual({ timestamp: expect.any(String), level: "warn", event: "push.fleet_send_failed",
+        ...(status === undefined ? {} : { status }) });
+      expect(lines.some(line => JSON.parse(line).event === "push.send_failed")).toBe(false);
+    } finally { await service.stop(); }
+  });
+
   test.each(["missing subscription", "disallowed identity", "rejected authority"] as const)(
     "reports skipped fleet delivery for %s without calling transport", async reason => {
       const root = await createRoot(), gatewayConfig = config(root);

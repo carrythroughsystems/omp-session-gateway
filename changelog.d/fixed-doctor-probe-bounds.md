@@ -1,0 +1,1 @@
+- Bound doctor version probes to five seconds and cap version and session-response bytes.

@@ -92,6 +92,8 @@ export interface FleetCoordinatorOptions {
   logger?: SafeLogger;
   discoveryWarm?: () => boolean;
   subscribeObservations?: HostPoller["subscribeObservations"];
+  /** Durable state writer; tests inject failures that real private-file writes cannot schedule. */
+  writeState?: typeof writePrivateTextFile;
 }
 
 export class FleetCoordinatorProblem extends Error {
@@ -173,6 +175,7 @@ export class FleetCoordinator {
   readonly #clock: FleetCoordinatorClock;
   readonly #fetch: typeof fetch;
   readonly #random: () => number;
+  readonly #writeState: typeof writePrivateTextFile;
   readonly #logger: SafeLogger;
   readonly #warm: () => boolean;
   readonly #bindings = new Map<string, string>();
@@ -187,6 +190,7 @@ export class FleetCoordinator {
   readonly #retryDeliveries = new Map<Delivery, number>();
   readonly #unsubscribers: Array<() => void> = [];
   #state: State = { version: 1, epoch: 0, grants: [], recipients: [] };
+  #persisted: string | undefined;
   #healthy = true;
   #stopped = false;
   #sequence = 0;
@@ -206,6 +210,7 @@ export class FleetCoordinator {
     this.#config = options.config; this.#push = options.push; this.#registry = options.registry;
     this.#path = join(options.stateDir, "fleet-notifications.json"); this.#clock = options.clock ?? systemClock;
     this.#fetch = options.fetch ?? fetch; this.#random = options.random ?? Math.random;
+    this.#writeState = options.writeState ?? writePrivateTextFile;
     this.#logger = options.logger ?? new SafeLogger(); this.#warm = options.discoveryWarm ?? (() => true);
   }
 
@@ -244,7 +249,13 @@ export class FleetCoordinator {
         await coordinator.#persist();
       }).catch(() => undefined).finally(() => { coordinator.#pendingStops--; });
     }));
-    await coordinator.#serial(async () => { coordinator.#prune(); coordinator.#syncPullers(); await coordinator.#reconcile(); });
+    try {
+      await coordinator.#serial(async () => { coordinator.#prune(); coordinator.#syncPullers(); await coordinator.#reconcile(); });
+    } catch (error) {
+      // The caller never receives this instance, so nothing else can stop it: release what was armed.
+      await coordinator.stop();
+      throw error;
+    }
     return coordinator;
   }
 
@@ -282,6 +293,7 @@ export class FleetCoordinator {
   #assertHealthy(allowStopped = false): void { if (!this.#healthy || this.#stopped && !allowStopped) throw new FleetCoordinatorProblem(503, "fleet_unavailable"); }
   #failClosed(): void {
     this.#healthy = false;
+    this.#persisted = undefined;
     for (const puller of this.#pullers.values()) puller.abort.abort();
     this.#queue.length = 0;
     this.#logger.event("error", "fleet.state_unavailable", { healthy: false });
@@ -289,8 +301,10 @@ export class FleetCoordinator {
   async #persist(): Promise<void> {
     try {
       const text = `${JSON.stringify(this.#state)}\n`;
+      if (text === this.#persisted) return;
       if (Buffer.byteLength(text) > MAX_STATE_BYTES) throw new Error("fleet state capacity");
-      await writePrivateTextFile(this.#path, text);
+      await this.#writeState(this.#path, text);
+      this.#persisted = text;
     } catch { this.#failClosed(); throw new FleetCoordinatorProblem(503, "fleet_unavailable"); }
   }
   /**
@@ -562,6 +576,9 @@ export class FleetCoordinator {
       knowledge.sessions = new Map(event.sessions.map(session => [session.instanceId, session])); knowledge.state = "current"; knowledge.reported = true; knowledge.snapshot = true;
       for (const [id, puller] of this.#pullers) if (!this.#state.grants.some(value => value.grantId === id)) puller.abort.abort();
     } else if (event.type === "upsert") {
+      const current = knowledge.sessions.get(event.session.instanceId);
+      if (current?.instanceId === event.session.instanceId && current.generation === event.session.generation &&
+        current.requestId === event.session.requestId) return;
       if (!knowledge.sessions.has(event.session.instanceId) && knowledge.sessions.size >= MAX_SESSIONS) throw new Error("feed capacity");
       knowledge.sessions.set(event.session.instanceId, event.session);
     } else if (event.type === "remove") {
