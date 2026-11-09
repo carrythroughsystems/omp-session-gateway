@@ -402,6 +402,12 @@ records query freshly after the observed delivery, and reposts still fail dedupl
 queries the worker only after observed OS presence becomes absence, retaining both the zero-OS
 and zero-worker assertion; unchanged absence reuses that verdict. Initial absence without a
 delivery/clear transition cannot prove fleet clearance. No freezer setting or worker wake changes.
+Android can refreeze the closed app's cached browser within seconds of a push, so a badge check
+that follows an ask, clear or coordinator restart while the page is closed is armed before that
+action. Its worker-side wait is already in flight when the push thaws Chrome and answers inside
+that thaw; it counts only ticks the worker runs, so a frozen process cannot spend its budget. An
+unmatched answer falls back to the ordinary read and its diagnostics (`v0.10.1-prealpha.2` lost
+`fleet_restart_verified` when that later read found all six Chrome processes frozen).
 The restart phase carries its verified badge across the closed-page quiet window only when a
 complete, healthy coordinator telemetry window records zero sends, acknowledgements and failures
 globally; any push activity or unavailable telemetry requires a fresh worker evaluation.

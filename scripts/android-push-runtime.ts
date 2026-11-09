@@ -17,6 +17,7 @@ import type { QualificationLogs } from "./qualification-logs.ts";
 import { QualificationFailure, type PushBrowserStep } from "./qualification-failure.ts";
 import { fleetNotificationTag } from "../packages/protocol/src/fleet-ordering.ts";
 import { fleetPushSource, FLEET_PUSH_LOCAL_LABEL } from "./fleet-push-fixture.ts";
+import type { FleetBadgeObservation } from "./android-push-fleet.ts";
 
 type Scalars = Record<string, boolean | number>;
 
@@ -24,6 +25,10 @@ const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\
 /** Per-arm counts from the held observer's worker push listener and showNotification wrapper. */
 const PUSH_OBSERVER_KEYS = ["pushEntered", "pushWithData", "pushJson", "pushLocalAttention", "pushRemoteAttention",
   "pushClear", "pushOther", "showCalls", "showSettled", "showRejected"] as const;
+/** Running-time budget of an armed worker badge wait: 1,200 ticks of 100 ms while the worker runs. */
+const BADGE_EXPECTATION_TICKS = 1_200;
+/** An armed badge read stays in flight across the action that sends its push (ask, clear, restart). */
+const BADGE_EXPECTATION_TIMEOUT_MS = 240_000;
 
 /** Settles within `milliseconds`. A late or failed read is unknown, never an observed absence. */
 async function boundedDiagnosticRead<T>(read: () => Promise<T>, milliseconds: number): Promise<{ value: T } | { timedOut: boolean }> {
@@ -290,7 +295,8 @@ export function pushLaunchRequestKind(url: string, method: unknown): "preflight"
 type PermissionConnection = (run: (driver: Pick<AndroidChromeDriver, "browserSend">) => Promise<void>, execution?: AndroidExecution) => Promise<void>;
 
 interface PushWorkerObserver {
-  evaluate<T>(expression: string): Promise<T>;
+  /** `timeoutMs` keeps a read in flight past the default per-call timeout. */
+  evaluate<T>(expression: string, timeoutMs?: number): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -330,12 +336,15 @@ export async function holdPushWorkerObserver(origin: string, execution?: Android
         // registration identity: never replace the attachment or re-arm badge state from them.
         await driver.browserSend("Target.setDiscoverTargets", { discover: true });
         ready.resolve({
-          async evaluate<T>(expression: string): Promise<T> {
+          async evaluate<T>(expression: string, timeoutMs?: number): Promise<T> {
             if (ended !== undefined) throw ended;
             if (closed) throw new Error("fleet worker observer already closed");
             const before = { ...lifecycle };
             let result: Record<string, unknown>;
-            try { result = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }); }
+            try {
+              result = await driver.sessionSend(sessionId, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true },
+                timeoutMs === undefined ? undefined : { timeoutMs });
+            }
             catch (error) {
               let inventory = "not_probed", context = "not_probed";
               let processes: { total: number; cached: number; frozen: number } | undefined;
@@ -954,7 +963,42 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         if (!armed) throw new Error("fleet platform badge API unavailable");
       },
       async observeBadge() {
-        return (await worker<Awaited<ReturnType<AndroidPushRuntime["fleet"]["observeBadge"]>> | null>("observeBadge", "self.__ompQualificationBadge?.observation ?? null", true)) ?? undefined;
+        return (await worker<FleetBadgeObservation | null>("observeBadge", "self.__ompQualificationBadge?.observation ?? null", true)) ?? undefined;
+      },
+      expectBadge(count, complete) {
+        const started = performance.now(), observer = fleetObserver;
+        // In flight before the push that thaws Chrome, so the worker answers inside that thaw.
+        // Interval ticks advance only while the worker runs: a frozen process cannot spend the
+        // budget, and an unpatched badge observer ends the wait at once.
+        const pending = (async () => {
+          checkExecution();
+          if (observer === undefined) throw new Error("fleet badge expectation requires the held worker observer");
+          try {
+            const answer = await evaluation("worker/expectBadge", () => observer.evaluate<{ matched: boolean; observation: FleetBadgeObservation | null }>(`(async () => {
+              const state = self.__ompQualificationBadge, count = ${JSON.stringify(count)}, complete = ${JSON.stringify(complete)};
+              const matches = () => state.observation !== null && state.observation.count === count && (count > 0 || state.observation.complete === complete);
+              if (!state || matches()) return { matched: !!state, observation: state?.observation ?? null };
+              const { promise, resolve } = Promise.withResolvers();
+              let ticks = 0;
+              const timer = self.setInterval(() => {
+                const detached = self.__ompQualificationBadge !== state, matched = !detached && matches();
+                if (matched || detached || ++ticks >= ${BADGE_EXPECTATION_TICKS}) { self.clearInterval(timer); resolve({ matched, observation: state.observation }); }
+              }, 100);
+              return await promise;
+            })()`, BADGE_EXPECTATION_TIMEOUT_MS));
+            return { matched: answer.matched === true, ...(answer.observation === null ? {} : { observation: answer.observation }) };
+          } catch (error) {
+            if (error instanceof AndroidBrowserCleanupError) throw pushBrowserCleanupFailure(error, nextFailureId);
+            rethrowPushSafetyFailure(error);
+            if (!(error instanceof AndroidDevtoolsConnectionError)) throw error;
+            throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase, class: "harness", reason: "invalid_evidence",
+              operation: "read_only", elapsedMs: Math.round(performance.now() - started), observations: { transportFailure: true, attempts: 1 } },
+              { cause: new AggregateError([error], "Fleet worker DevTools connection failed") });
+          }
+        })();
+        // Settled after the push-sending action; a rejection meanwhile is not unhandled.
+        pending.catch(() => {});
+        return { settle: () => pending };
       },
       async restartReplacement(previous, current) {
         if (remoteIds.has(previous.instanceId) || previous.instanceId !== current.instanceId ||

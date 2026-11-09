@@ -96,7 +96,16 @@ function fake(options: FakeOptions = {}) {
     if (!asking || browser.permission !== "granted" || offline || (forced && !options.forceDelivery) || (asleep && !options.dozeDelivery)) return;
     if (time < socketStaleUntil) heldAsk = true; else { shown = "attention"; shownDetail = browser.detail; }
   };
-  const effect = async (action: () => void) => { await runtime.beforeEffect(); effects++; action(); if (effects === options.failAfter) throw new Error("synthetic interruption"); };
+  // As the worker's armed wait does: a check sees each pushed state change, not just the final one.
+  const badgeWaiters = new Set<() => void>();
+  const badgeNow = () => ({ count: options.fleetFailure === "badge" ? 9 : Number(asking) + Number(remote.asking && !remote.revoked),
+    complete: remote.online && !remote.revoked,
+    ...(options.fleetFailure === "badge" ? { call: { method: "setAppBadge" as const, arguments: 1, argument: 9 } } : {}) });
+  const effect = async (action: () => void) => {
+    await runtime.beforeEffect(); effects++; action();
+    for (const check of badgeWaiters) check();
+    if (effects === options.failAfter) throw new Error("synthetic interruption");
+  };
   const runtime: AndroidPushRuntime = {
     fleet: {
       binding: "a".repeat(22),
@@ -123,9 +132,13 @@ function fake(options: FakeOptions = {}) {
       armBadgeObserver: async () => {},
       restartReplacement: async (previous, current) => restartClears.has(previous.ask!.requestId) &&
         current.ask?.requestId === primarySnapshot()?.ask?.requestId && shown === "attention",
-      observeBadge: async () => ({ count: options.fleetFailure === "badge" ? 9 : Number(asking) + Number(remote.asking && !remote.revoked),
-        complete: remote.online && !remote.revoked,
-        ...(options.fleetFailure === "badge" ? { call: { method: "setAppBadge" as const, arguments: 1, argument: 9 } } : {}) }),
+      observeBadge: async () => badgeNow(),
+      expectBadge: (count, complete) => {
+        let matched = false;
+        const check = () => { const badge = badgeNow(); if (badge.count === count && (count > 0 || badge.complete === complete)) matched = true; };
+        check(); badgeWaiters.add(check);
+        return { settle: async () => { badgeWaiters.delete(check); return { matched, observation: badgeNow() }; } };
+      },
       revoke: async () => { await effect(() => {
         if (options.fleetFailure !== "revocation") { remote.revoked = true; remote.shown = false; }
       }); },
@@ -2063,6 +2076,32 @@ test.each(["zero", "send", "send-mismatch", "unavailable", "absent"] as const)(
     if (scenario !== "absent") expect(windows).toBeGreaterThan(0);
     expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
   });
+
+test("post-push fleet badge reads survive a browser refrozen while the app is closed", async () => {
+  const host = fake();
+  eventBackedTelemetry(host);
+  const { fixture, openPwa, detail, tap } = host.runtime, fleet = host.runtime.fleet;
+  const { host: operate, observeBadge, expectBadge } = fleet;
+  let frozen = false, frozenReads = 0, armed = 0;
+  // As on the Pixel: Android refreezes the cached browser seconds after each push, while an app
+  // in front keeps it running. A worker read in that state times out as a transport failure.
+  const pushed = () => { if (!host.state().device.webApkTask) frozen = true; };
+  host.runtime.fixture = async (...args) => { await fixture(...args); if (args[0] === "ask" || args[0] === "answer") pushed(); };
+  fleet.host = async (operation, epoch) => { await operate(operation, epoch); if (operation === "coordinator-up") pushed(); };
+  host.runtime.openPwa = async () => { await openPwa(); frozen = false; };
+  host.runtime.detail = async level => { await detail(level); frozen = false; };
+  host.runtime.tap = async (...args) => { const result = await tap(...args); frozen = false; return result; };
+  fleet.observeBadge = async () => {
+    if (!frozen) return observeBadge();
+    frozenReads++;
+    throw new QualificationFailure({ id: 99, lane: "androidPush", step: "fleet_restart_verified", class: "harness",
+      reason: "invalid_evidence", operation: "read_only", elapsedMs: 25_000, observations: { transportFailure: true, attempts: 1 } });
+  };
+  fleet.expectBadge = (count, complete) => { armed++; return expectBadge(count, complete); };
+  expect((await runAndroidPush(host.input)).passed).toBe(true);
+  expect(frozenReads).toBe(0);
+  expect(armed).toBeGreaterThan(0);
+});
 
 test("fleet outage rejects a stale source whose directory drops the waiting row", async () => {
   const host = fake({ fleetFailure: "stale-row" });

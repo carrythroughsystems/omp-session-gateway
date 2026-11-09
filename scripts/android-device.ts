@@ -94,7 +94,8 @@ export interface AndroidChromeDriver {
   attachTab(targetId: string, existingSessionId?: string): Promise<void>;
   closeTab(): Promise<void>;
   browserSend(method: string, parameters?: Record<string, unknown>): Promise<Record<string, unknown>>;
-  sessionSend(session: string, method: string, parameters?: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** `timeoutMs` replaces the default per-call timeout for a call that is meant to stay in flight. */
+  sessionSend(session: string, method: string, parameters?: Record<string, unknown>, options?: { timeoutMs?: number }): Promise<Record<string, unknown>>;
   onEvent(listener: (method: string, parameters: Record<string, unknown>) => void): () => void;
   /** Navigates the owned tab and waits for document.readyState to become complete. */
   navigate(url: string): Promise<string>;
@@ -1083,10 +1084,11 @@ export async function withAndroidChrome<T>(
       catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
     });
 
-  const send = async (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning) => {
+  const send = async (method: string, parameters: Record<string, unknown> = {}, useSession = true, explicitSession?: string, cleanup = cleaning,
+    timeoutMs = CALL_TIMEOUT_MS) => {
     // Pin the attachment for the whole call, even if another target is admitted while waiting.
     const destination = explicitSession ?? (useSession ? sessionId : undefined);
-    const until = Math.min(performance.now() + (cleanup ? 10_000 : CALL_TIMEOUT_MS), cleanup ? Infinity : execution?.deadline ?? Infinity);
+    const until = Math.min(performance.now() + (cleanup ? 10_000 : timeoutMs), cleanup ? Infinity : execution?.deadline ?? Infinity);
     let contextUntil: number | undefined;
     for (;;) {
       try { return await sendOnce(method, parameters, destination, cleanup, until); }
@@ -1194,7 +1196,7 @@ export async function withAndroidChrome<T>(
         await closeTarget();
       },
       browserSend: (method, parameters) => send(method, parameters, false),
-      sessionSend: (session, method, parameters) => send(method, parameters, false, session),
+      sessionSend: (session, method, parameters, options) => send(method, parameters, false, session, cleaning, options?.timeoutMs),
       onEvent(listener) {
         eventListeners.add(listener);
         return () => { eventListeners.delete(listener); };
