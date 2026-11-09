@@ -38,6 +38,10 @@ jobs:
         with:
           bun-version: 1.4.4
 
+      - name: Verify pinned Bun
+        shell: bash
+        run: test "$(bun --version)" = 1.4.4
+
       - name: Validate signed release tag and derive its channel
         env:
           GH_TOKEN: ${{ github.token }}

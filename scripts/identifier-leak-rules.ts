@@ -23,7 +23,7 @@ export interface IdentifierFinding {
 }
 
 /** Extensions worth scanning. Binary and lockfile noise is skipped by the caller. */
-export const IDENTIFIER_TEXT_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".mjs", ".json", ".md", ".yml", ".yaml", ".sh", ".ps1", ".hujson", ".patch"]);
+export const IDENTIFIER_TEXT_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".mjs", ".json", ".md", ".yml", ".yaml", ".sh", ".ps1", ".hujson", ".patch", ".html", ".css", ".xml", ".txt"]);
 
 /**
  * Literals that look like an identifier but are documentation, reserved, or otherwise safe.

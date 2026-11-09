@@ -1,0 +1,1 @@
+- Reject display labels over 2,048 UTF-16 units before normalization to bound parser work.

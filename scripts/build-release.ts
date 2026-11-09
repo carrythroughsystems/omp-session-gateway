@@ -18,6 +18,10 @@ const MARKED_FORK_LICENSE_PATH = "licenses/pi-utils-marked/LICENSE";
 const NERD_FONT_LICENSE_PATH = "licenses/fonts/nerd-fonts/LICENSE";
 const NERD_FONT_ICON_SETS_PATH = "licenses/fonts/nerd-fonts/ICON_SETS.md";
 
+export function assertBuilderRuntime(version: string, pinned: string): void {
+  if (version !== pinned) throw new Error(`release builder requires Bun ${pinned}, not ${version}`);
+}
+
 export interface ArchiveFile {
   readonly path: string;
   readonly content: Buffer;
@@ -651,6 +655,7 @@ async function archiveFiles(directory: string): Promise<ArchiveFile[]> {
 }
 
 async function buildRelease(): Promise<void> {
+  assertBuilderRuntime(Bun.version, PINNED_BUN_VERSION);
   // Resolved before anything is read or written so an unknown channel fails the build immediately.
   const qualification = releaseQualification();
   const releaseDirectory = process.env.RELEASE_OUTPUT_DIR ?? defaultReleaseRoot;

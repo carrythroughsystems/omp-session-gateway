@@ -1,0 +1,1 @@
+- Reject shared-parser JSON nested beyond 64 levels with a protocol validation error.

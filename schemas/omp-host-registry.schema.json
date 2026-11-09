@@ -16,7 +16,6 @@
     "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
     "discovery": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["version", "instanceId", "pid", "endpoint", "createdAt", "token"],
       "properties": {
         "version": { "$ref": "#/$defs/positiveInteger" },
@@ -29,8 +28,9 @@
     },
     "snapshot": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["instanceId", "generation", "pid", "sessionId", "startedAt", "participants", "relayConnected", "inputRequired", "access"],
+      "$comment": "Additive fields are ignored (ADR-028), but ask content never belongs in a metadata snapshot: these keys are refused.",
+      "propertyNames": { "not": { "enum": ["prompt", "question", "options", "prefill", "answer", "requestId", "count"] } },
       "properties": {
         "instanceId": { "$ref": "#/$defs/instanceId" },
         "generation": { "$ref": "#/$defs/positiveInteger" },
@@ -43,7 +43,6 @@
             { "type": "null" },
             {
               "type": "object",
-              "additionalProperties": false,
               "required": ["provider", "id"],
               "properties": {
                 "provider": { "type": "string" },
@@ -56,12 +55,12 @@
         "participants": { "$ref": "#/$defs/nonnegativeInteger" },
         "relayConnected": { "type": "boolean" },
         "inputRequired": { "type": "boolean" },
+        "busy": { "type": ["boolean", "null"] },
         "access": { "enum": ["view", "control"] }
       }
     },
     "snapshotReply": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["ok", "v", "snapshot"],
       "properties": {
         "ok": { "const": true },
@@ -71,7 +70,6 @@
     },
     "linkReply": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["ok", "v", "url"],
       "properties": {
         "ok": { "const": true },
@@ -81,7 +79,6 @@
     },
     "errorReply": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["ok", "v", "error"],
       "properties": {
         "ok": { "const": false },

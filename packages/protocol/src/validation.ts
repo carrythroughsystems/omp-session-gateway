@@ -83,8 +83,18 @@ import {
   type SourceGrantResponse,
 } from "./types.ts";
 
+const UTF8_ENCODER = new TextEncoder();
+const JSON_WHITESPACE_PATTERN = /\s/u;
+const JSON_VALUE_DELIMITER_PATTERN = /[\s,}\]]/u;
+const MAX_JSON_NESTING_DEPTH = 64;
+/**
+ * Raw UTF-16 units a label may carry before NFC normalization. A canonical decomposition expands one
+ * code point to at most four, each at most two units, so no longer string can normalize to the
+ * code-point bound; the check costs nothing a legitimate decomposed label would pay.
+ */
+const MAX_LABEL_RAW_UNITS = MAX_LABEL_CODEPOINTS * 8;
 const SESSION_ID_PATTERN = /^[^\0\r\n]{1,256}$/u;
-const DISALLOWED_LABEL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/gu;
+const DISALLOWED_LABEL_PATTERN = /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/gu;
 const PUSH_KEY_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/u;
 const PUSH_DETAIL_LEVELS: Readonly<Record<PushDetailLevel, true>> = {
@@ -159,7 +169,7 @@ function requireInstanceId(value: unknown): string {
 function requireRequestId(value: unknown): string {
   if (
     typeof value !== "string" ||
-    new TextEncoder().encode(value).byteLength > MAX_REQUEST_ID_BYTES ||
+    UTF8_ENCODER.encode(value).byteLength > MAX_REQUEST_ID_BYTES ||
     !REQUEST_ID_PATTERN.test(value)
   ) {
     throw new ProtocolValidationError();
@@ -176,7 +186,7 @@ function requireDateTime(value: unknown): string {
 
 function optionalLabel(value: unknown): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "string") throw new ProtocolValidationError();
+  if (typeof value !== "string" || value.length > MAX_LABEL_RAW_UNITS) throw new ProtocolValidationError();
   const normalized = value.normalize("NFC").replace(DISALLOWED_LABEL_PATTERN, "").trim();
   if ([...normalized].length > MAX_LABEL_CODEPOINTS) throw new ProtocolValidationError();
   return normalized;
@@ -185,7 +195,7 @@ function optionalLabel(value: unknown): string | undefined {
 function assertNoDuplicateObjectKeys(text: string): void {
   let index = 0;
   const skipWhitespace = (): void => {
-    while (/\s/u.test(text[index] ?? "")) index += 1;
+    while (JSON_WHITESPACE_PATTERN.test(text[index] ?? "")) index += 1;
   };
   const parseString = (): string => {
     const start = index;
@@ -208,9 +218,12 @@ function assertNoDuplicateObjectKeys(text: string): void {
     }
     throw new ProtocolValidationError();
   };
-  const parseValue = (): void => {
+  const parseValue = (depth: number): void => {
     skipWhitespace();
     const current = text[index];
+    if ((current === "{" || current === "[") && depth >= MAX_JSON_NESTING_DEPTH) {
+      throw new ProtocolValidationError();
+    }
     if (current === "{") {
       index += 1;
       const keys = new Set<string>();
@@ -228,7 +241,7 @@ function assertNoDuplicateObjectKeys(text: string): void {
         skipWhitespace();
         if (text[index] !== ":") throw new ProtocolValidationError();
         index += 1;
-        parseValue();
+        parseValue(depth + 1);
         skipWhitespace();
         if (text[index] === "}") {
           index += 1;
@@ -247,7 +260,7 @@ function assertNoDuplicateObjectKeys(text: string): void {
         return;
       }
       while (index < text.length) {
-        parseValue();
+        parseValue(depth + 1);
         skipWhitespace();
         if (text[index] === "]") {
           index += 1;
@@ -263,11 +276,11 @@ function assertNoDuplicateObjectKeys(text: string): void {
       return;
     }
     const start = index;
-    while (index < text.length && !/[\s,}\]]/u.test(text[index] ?? "")) index += 1;
+    while (index < text.length && !JSON_VALUE_DELIMITER_PATTERN.test(text[index] ?? "")) index += 1;
     if (start === index) throw new ProtocolValidationError();
   };
 
-  parseValue();
+  parseValue(0);
   skipWhitespace();
   if (index !== text.length) throw new ProtocolValidationError();
 }
@@ -438,7 +451,7 @@ export function parseLaunchRequest(value: unknown): LaunchRequest {
   };
 }
 function requirePushEndpoint(value: unknown): string {
-  if (typeof value !== "string" || new TextEncoder().encode(value).byteLength > MAX_PUSH_ENDPOINT_BYTES) {
+  if (typeof value !== "string" || UTF8_ENCODER.encode(value).byteLength > MAX_PUSH_ENDPOINT_BYTES) {
     throw new ProtocolValidationError();
   }
   let endpoint: URL;
@@ -800,7 +813,7 @@ export function parseSessionCreationUuid(value: unknown): string {
 function boundedRecord(value: unknown, bound: number): JsonRecord {
   const record = requireRecord(value);
   try {
-    if (new TextEncoder().encode(JSON.stringify(record)).byteLength > bound) throw new ProtocolValidationError();
+    if (UTF8_ENCODER.encode(JSON.stringify(record)).byteLength > bound) throw new ProtocolValidationError();
   } catch {
     throw new ProtocolValidationError();
   }
@@ -895,7 +908,7 @@ export function parseSessionCreationStatus(value: unknown): SessionCreationStatu
 
 /** Operator-authored display text: NFC, control and bidi characters stripped, 1..64 code points. */
 export function parseFleetLabel(value: unknown): string {
-  if (typeof value !== "string") throw new ProtocolValidationError();
+  if (typeof value !== "string" || value.length > MAX_LABEL_RAW_UNITS) throw new ProtocolValidationError();
   const normalized = value.normalize("NFC").replace(DISALLOWED_LABEL_PATTERN, "").trim();
   const length = [...normalized].length;
   if (length === 0 || length > MAX_FLEET_LABEL_CODEPOINTS) throw new ProtocolValidationError();

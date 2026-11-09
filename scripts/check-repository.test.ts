@@ -4,6 +4,18 @@ import { readFile } from "node:fs/promises";
 import packageManifest from "../package.json";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
 
+test("local planning prompt exports stay ignored", async () => {
+  const gitignore = await readFile(new URL("../.gitignore", import.meta.url), "utf8");
+  expect(gitignore.split("\n")).toContain("prompt-exports/");
+});
+
+test("signed releases verify the exact pinned Bun runtime before building", async () => {
+  const source = await readFile(new URL("../.github/workflows/signed-release.yml", import.meta.url), "utf8");
+  const pinned = packageManifest.packageManager.replace(/^bun@/u, "");
+  expect(source).toContain(`run: test "$(bun --version)" = ${pinned}`);
+  expect(checkWorkflowBunVersions("signed-release.yml", source, packageManifest.packageManager)).toEqual([]);
+});
+
 test("hang deadlines reject the pre-fix CLI exit race and admit the migrated source", async () => {
   const path = "apps/gateway/test/cli.test.ts";
   const before = "const exited = await Promise.race([subprocess.exited.then(() => true), Bun.sleep(5_000).then(() => false)]);";

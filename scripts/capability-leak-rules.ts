@@ -10,6 +10,9 @@ export const CAPABILITY_TEXT_EXTENSIONS = new Set([
   ".yaml",
   ".toml",
   ".txt",
+  ".html",
+  ".css",
+  ".xml",
   ".sh",
   ".ps1",
 ]);

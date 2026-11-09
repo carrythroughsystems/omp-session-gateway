@@ -1,0 +1,1 @@
+- Strip tabs and line breaks from session, fleet, and notification labels.

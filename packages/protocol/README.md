@@ -10,6 +10,11 @@ Enforced invariants:
 - secret-bearing records are structurally distinct from browser-facing metadata;
 - OMP registry v1 input (discovery entries and snapshot/link replies) strictly validates consumed fields and tolerates additive unknown fields, while refusing forbidden prompt/answer keys in snapshots;
 - gateway browser API (`schemas/session-list.schema.json`, `schemas/launch-request.schema.json`, `schemas/launch-response.schema.json`, `schemas/sse-event.schema.json`, `schemas/client-config.schema.json`), fleet origin/source validators (`parseFleetOrigin`, `parseFleetSourceId`, `parseFleetLabel`, `parseClientConfigResponse`), and Push v2 envelopes are strict and reject unknown versions or unknown fields;
-- duplicate JSON keys, NUL bytes, invalid UTF-8, and out-of-bounds inputs are rejected across all frames;
+- `parseJsonFrame` rejects duplicate JSON keys, NUL bytes, invalid UTF-8, oversized frames,
+  and JSON objects/arrays nested beyond 64 levels. Remote fleet session lists are an exception:
+  the PWA uses plain `JSON.parse` under an 8 MiB body cap, then validates the metadata shape,
+  without the shared parser's duplicate-key or nesting checks;
+- labels reject raw input over 2,048 UTF-16 units before NFC normalization and control/bidi stripping,
+  then enforce 256 code points for session labels or 64 for fleet labels;
 - capability wrappers cannot be serialized and redact string/inspector conversion; and
 - distinctive synthetic capability fixtures are covered by the repository leak scanner.

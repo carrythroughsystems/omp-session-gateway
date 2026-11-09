@@ -18,6 +18,19 @@
     "generation": {
       "type": "integer",
       "minimum": 1
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{16,128}$"
+    }
+  },
+  "if": {
+    "properties": { "requestId": {} },
+    "required": ["requestId"]
+  },
+  "then": {
+    "properties": {
+      "mode": { "const": "control" }
     }
   }
 }

@@ -1,0 +1,1 @@
+- Scan published site HTML, stylesheets, XML, and text for capabilities and private identifiers.
