@@ -354,6 +354,155 @@ test("withdrawn request access returns to the directory and a recovered client r
   } finally { await fixture.stop(); }
 });
 
+for (const staleStream of [false, true]) {
+  test(`answered request stops offering Hold with ${staleStream ? "a stale directory stream" : "lagging directory metadata"}`, async ({ page, context }) => {
+    const key = randomBytes(32);
+    const fixture = await startDashboardFixture([GATEWAY_WAITING], { roomKey: key });
+    try {
+      await installSyntheticProductFixture(context, key, { answerRequests: true });
+      await page.goto(fixture.origin);
+      await page.getByRole("button", { name: "Open request", exact: true }).click();
+      const bar = page.locator(".triage-bar");
+      await expect(bar).toBeVisible();
+      await expect(bar).toHaveAttribute("data-kind", "hold");
+      const oldHold = await page.locator(".triage-action").elementHandle();
+      if (staleStream) {
+        await page.route("**/api/v1/events", route => route.abort());
+        expect(fixture.disconnectEvents()).toBeGreaterThan(0);
+      }
+      await page.locator(".sh-ask-send").click();
+      await expect(page.locator(".sh-composer-ask-embedded")).toHaveCount(0);
+      // The real client has received ui-request-end; the directory still has the opened Ask.
+      await expect(bar).toBeHidden();
+      expect(await page.evaluate(() => localStorage.getItem("omp.sessions.held-asks.v2"))).toBeNull();
+      // A retained action must not park the answered request even before discovery catches up.
+      await oldHold!.evaluate(button => (button as HTMLButtonElement).click());
+      expect(await page.evaluate(() => localStorage.getItem("omp.sessions.held-asks.v2"))).toBeNull();
+      expect(fixture.launchRequests).toHaveLength(1);
+      await page.evaluate(async () => {
+        const socket = (globalThis as typeof globalThis & {
+          __ompSyntheticSocket: { sendHostFrame(frame: unknown): Promise<void> };
+        }).__ompSyntheticSocket;
+        await socket.sendHostFrame({ t: "ui-request-end", reqId: 7 });
+      });
+      // A later client callback and repeated directory observation cannot resurrect Hold.
+      fixture.upsert(GATEWAY_WAITING);
+      await expect(bar).toBeHidden();
+      if (staleStream) {
+        await page.unroute("**/api/v1/events");
+        await page.evaluate(() => window.dispatchEvent(new Event("online")));
+      }
+      // A different gateway request is new work, not the old request's Hold action.
+      const successor = {
+        ...GATEWAY_WAITING,
+        ask: { ...GATEWAY_WAITING.ask!, requestId: "hold-regression-successor" },
+      };
+      fixture.upsert(successor);
+      await expect(page.locator(".triage-copy")).toHaveText("✓ Answered — 1 more needs you");
+      await expect(page.locator(".triage-action")).toHaveText("Next ask →");
+      await page.locator(".triage-action").click();
+      await expect(page.locator(".sh-ask-send")).toBeVisible();
+      await expect(bar).toHaveAttribute("data-kind", "hold");
+      expect(fixture.launchRequests.at(-1)?.requestId).toBe(successor.ask.requestId);
+      await page.locator(".sh-ask-send").click();
+      await expect(page.locator(".sh-composer-ask-embedded")).toHaveCount(0);
+      await expect(bar).toBeHidden();
+      fixture.upsert(GATEWAY_WORKING);
+      await expect(page.locator(".triage-copy")).toHaveText("Answered — all clear · 1 live");
+      await assertPrivate(page, fixture);
+    } finally { await page.close(); await fixture.stop(); }
+  });
+}
+
+test("Hold remains available for unanswered sections of a multi-question Ask", async ({ page, context }) => {
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([GATEWAY_WAITING], { roomKey: key });
+  try {
+    await installSyntheticProductFixture(context, key, { answerRequests: true });
+    await page.goto(fixture.origin);
+    await page.getByRole("button", { name: "Open request", exact: true }).click();
+    const bar = page.locator(".triage-bar");
+    await expect(bar).toHaveAttribute("data-kind", "hold");
+    await page.evaluate(async () => {
+      const socket = (globalThis as typeof globalThis & {
+        __ompSyntheticSocket: { sendHostFrame(frame: unknown): Promise<void> };
+      }).__ompSyntheticSocket;
+      await socket.sendHostFrame({
+        t: "ui-request",
+        request: { reqId: 8, kind: "select", title: "Second section", options: ["Continue"], initialIndex: 0 },
+      });
+    });
+    await page.locator(".sh-ask-send").click();
+    await expect(page.locator(".sh-ask-option")).toHaveText("1 · Continue");
+    await expect(bar).toBeVisible();
+    await expect(bar).toHaveAttribute("data-kind", "hold");
+    await page.locator(".sh-ask-send").click();
+    await expect(bar).toHaveAttribute("data-kind", "sending");
+    await page.evaluate(async () => {
+      const socket = (globalThis as typeof globalThis & {
+        __ompSyntheticSocket: { sendHostFrame(frame: unknown): Promise<void> };
+      }).__ompSyntheticSocket;
+      await socket.sendHostFrame({ t: "ui-request-end", reqId: 8 });
+    });
+    await expect(page.locator(".sh-composer-ask-embedded")).toHaveCount(0);
+    await expect(bar).toBeHidden();
+    // Sequential sections can arrive after a gap with requestPending=false.
+    await page.evaluate(async () => {
+      const socket = (globalThis as typeof globalThis & {
+        __ompSyntheticSocket: { sendHostFrame(frame: unknown): Promise<void> };
+      }).__ompSyntheticSocket;
+      await socket.sendHostFrame({
+        t: "ui-request",
+        request: { reqId: 9, kind: "select", title: "Last section", options: ["Finish"], initialIndex: 0 },
+      });
+    });
+    await expect(page.locator(".sh-ask-option")).toHaveText("1 · Finish");
+    await expect(bar).toBeVisible();
+    await expect(bar).toHaveAttribute("data-kind", "hold");
+    await page.locator(".sh-ask-send").click();
+    await expect(bar).toHaveAttribute("data-kind", "sending");
+    await page.evaluate(async () => {
+      const socket = (globalThis as typeof globalThis & {
+        __ompSyntheticSocket: { sendHostFrame(frame: unknown): Promise<void> };
+      }).__ompSyntheticSocket;
+      await socket.sendHostFrame({ t: "ui-request-end", reqId: 9 });
+    });
+    await expect(page.locator(".sh-composer-ask-embedded")).toHaveCount(0);
+    await expect(bar).toBeHidden();
+    fixture.upsert(GATEWAY_WORKING);
+    await expect(page.locator(".triage-copy")).toHaveText("Answered — all clear · 1 live");
+    await assertPrivate(page, fixture);
+  } finally { await page.close(); await fixture.stop(); }
+});
+
+test("Hold does not park an answered request while its successor launch is pending", async ({ page, context }) => {
+  const key = randomBytes(32);
+  const fixture = await startDashboardFixture([GATEWAY_WAITING, RELEASE_WAITING], { roomKey: key });
+  const intercepted = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  try {
+    await installSyntheticProductFixture(context, key, { answerRequests: true });
+    await page.goto(fixture.origin);
+    await page.locator(".action-request").click();
+    await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+    await page.route(`**/sessions/${RELEASE_WAITING.instanceId}/launch`, async route => {
+      const response = await route.fetch();
+      intercepted.resolve();
+      await release.promise;
+      await route.fulfill({ response }).catch(() => undefined);
+    });
+    await page.locator(".triage-action").click();
+    await intercepted.promise;
+    await page.locator(".sh-ask-send").click();
+    await expect(page.locator(".sh-composer-ask-embedded")).toHaveCount(0);
+    release.resolve();
+    await expect(page.locator(".shell-title")).toHaveText("Release qualification");
+    await expect(page.locator(".triage-action")).toHaveText("Hold → next");
+    expect(await page.evaluate(() => localStorage.getItem("omp.sessions.held-asks.v2"))).toBeNull();
+    await assertPrivate(page, fixture);
+  } finally { release.resolve(); await page.close(); await fixture.stop(); }
+});
+
 test("request lifecycle: a delayed successor inherits the promoted shell", async ({ page, context }, info) => {
   test.skip(!info.project.name.startsWith("pixel"));
   const key = randomBytes(32);

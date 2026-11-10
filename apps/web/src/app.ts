@@ -2954,11 +2954,21 @@ async function resumeDisposedCollabShell(): Promise<void> {
   await launch(session, resume.mode, undefined, requestId, resume.scope, resume.presentation);
 }
 
+function hasPendingCollabRequest(shell: ActiveCollabShell): boolean {
+  const state = shell.latestEmbedState;
+  // View cannot answer an Ask; retain its metadata-only Hold behavior.
+  return state?.phase === "live" && state.loading === null && !state.responsePending &&
+    (shell.mode === "view" || state.requestPending);
+}
+
 async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: SessionMetadata): Promise<void> {
   const currentRequestId = current.ask?.requestId;
   const authoritativeCurrent = sessions.get(sessionKey(current));
   if (
+    activeCollabShell !== shell ||
+    !hasPendingCollabRequest(shell) ||
     currentRequestId === undefined ||
+    currentRequestId !== shell.openedRequestId ||
     authoritativeCurrent?.generation !== current.generation ||
     authoritativeCurrent.ask?.requestId !== currentRequestId
   ) {
@@ -2974,7 +2984,7 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
     const mode: LaunchMode = next.canControl ? "control" : "view";
     const opened = await launch(next, mode, undefined, next.ask?.requestId, shell.scope);
     if (opened) {
-      holdSession(current, false);
+      if (hasPendingCollabRequest(shell)) holdSession(current, false);
       return;
     }
     if (activeCollabShell === shell) reconcileActiveCollabShell();
@@ -2999,6 +3009,11 @@ function reconcileActiveCollabShell(): void {
     if (current === undefined || !sameBinding(current, initialPromptDraft.ref)) clearCreationDraft();
   }
   const shell = activeCollabShell;
+  // Client acknowledgement precedes discovery (and can arrive while its stream is stale).
+  // Do not latch completion here: another section or a replayed request can still need input.
+  if (shell?.triageBar.dataset.kind === "hold" && !hasPendingCollabRequest(shell)) {
+    hideTriageBar(shell);
+  }
   if (
     shell === undefined ||
     shell.answerShown ||
@@ -3019,7 +3034,7 @@ function reconcileActiveCollabShell(): void {
   if (shell.launchFailureSource !== undefined) return;
   if (shell.openedRequestId !== undefined && current.ask?.requestId === shell.openedRequestId) {
     if (
-      shell.latestEmbedState?.phase === "live" &&
+      hasPendingCollabRequest(shell) &&
       current.inputRequired &&
       isHeld(current) === false &&
       (shell.triageBar.hidden || shell.triageBar.dataset.kind !== "hold")
