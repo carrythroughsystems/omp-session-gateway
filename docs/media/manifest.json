@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceRevision": "fe5f765b1a5484addc3e31b84129d9cfe61f9157",
+  "sourceRevision": "85aaaec3527ff98344d7829a67ce47bd73c225f1",
   "upstreamClient": {
     "tag": "v18.18.0",
     "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
@@ -33,8 +33,8 @@
   },
   "assets": {
     "omp-session-gateway-demo.gif": {
-      "bytes": 404596,
-      "sha256": "e99424794328f679f22ab91d1cee8f263e935c0a58396bbdb016a84ab2af2eb2",
+      "bytes": 367013,
+      "sha256": "08e5b9c3d9d614f7c102301d270bd74d5422073a45bce40ce26ffb38bcf915dd",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
@@ -45,29 +45,33 @@
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "5be178feff8a24ddb4a8237706a8b160411984ce3988101261bdf0c83ab0a5a0"
+          "sha256": "40c2b68697f5058df8ba2401f9d63668000aa07f314433a9711ed7b0273795e0"
         },
         {
           "id": "runtime:discovered-live-five",
-          "sha256": "41eddcd8251a1482b0bb8399c7a1859de685117bfdf9b9770617ee174a386891"
+          "sha256": "981fefc5e9d2927498cf8ff852ed3c0bf8a402cdabd03318e43ec80c03f203ea"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9"
+          "sha256": "870c00b352a358668e79752fdd2d00a83c70986898a3519d5e373c0093b8906b"
         },
         {
           "id": "runtime:03-open-request.png",
-          "sha256": "ac4120b2d1722c074c0ba3e5a5fa9591e613276b90b18e6c3d5f909fed6b43a8"
+          "sha256": "b6ca02c26adafe7b0435e7b3ff2f97ff48cdcfdde7de1ce76a12a8e1364c6488"
         },
         {
           "id": "brand:assets/logo.svg",
-          "sha256": "4adfd1c978e8cef7b61c3b474842e16deae05f5917a590cb80403ffe9582cb6e"
+          "sha256": "d6d9ed5327fdc913cb9b42617d98125c5e7680e47382380fee4536c3e79ea42a"
+        },
+        {
+          "id": "brand:apps/web/src/fonts/geist/geist-latin.woff2",
+          "sha256": "5cb9ff5717ad7d1c46752d3431b70b81611f456ca75a705e47d134e6bed8e03b"
         }
       ]
     },
     "omp-session-gateway-demo.mp4": {
-      "bytes": 419321,
-      "sha256": "f63d07ff4f24aa85baaa4438c55f4a3c9c1be71e0010853ba9957f77c59fbdca",
+      "bytes": 398745,
+      "sha256": "01e375039d0c4be3602a95e7be295a1ec412b9ad813df4ce871ca0b98ff5de28",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
@@ -79,93 +83,105 @@
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "5be178feff8a24ddb4a8237706a8b160411984ce3988101261bdf0c83ab0a5a0"
+          "sha256": "40c2b68697f5058df8ba2401f9d63668000aa07f314433a9711ed7b0273795e0"
         },
         {
           "id": "runtime:discovered-live-five",
-          "sha256": "41eddcd8251a1482b0bb8399c7a1859de685117bfdf9b9770617ee174a386891"
+          "sha256": "981fefc5e9d2927498cf8ff852ed3c0bf8a402cdabd03318e43ec80c03f203ea"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9"
+          "sha256": "870c00b352a358668e79752fdd2d00a83c70986898a3519d5e373c0093b8906b"
         },
         {
           "id": "runtime:03-open-request.png",
-          "sha256": "ac4120b2d1722c074c0ba3e5a5fa9591e613276b90b18e6c3d5f909fed6b43a8"
+          "sha256": "b6ca02c26adafe7b0435e7b3ff2f97ff48cdcfdde7de1ce76a12a8e1364c6488"
         },
         {
           "id": "brand:assets/logo.svg",
-          "sha256": "4adfd1c978e8cef7b61c3b474842e16deae05f5917a590cb80403ffe9582cb6e"
+          "sha256": "d6d9ed5327fdc913cb9b42617d98125c5e7680e47382380fee4536c3e79ea42a"
+        },
+        {
+          "id": "brand:apps/web/src/fonts/geist/geist-latin.woff2",
+          "sha256": "5cb9ff5717ad7d1c46752d3431b70b81611f456ca75a705e47d134e6bed8e03b"
         }
       ]
     },
     "omp-session-gateway-demo-poster.png": {
-      "bytes": 76116,
-      "sha256": "3b6d081cd0fadcf81b98e1ac542a4de53b18ddcc6b5d5920129cb2e68a9dfaf2",
+      "bytes": 71649,
+      "sha256": "9bfa8abcb307226ebfba8880985a5f4452cc13770422b4a96575011a9535ca58",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
       "compositeInputs": [
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9"
+          "sha256": "870c00b352a358668e79752fdd2d00a83c70986898a3519d5e373c0093b8906b"
         },
         {
           "id": "brand:assets/logo.svg",
-          "sha256": "4adfd1c978e8cef7b61c3b474842e16deae05f5917a590cb80403ffe9582cb6e"
+          "sha256": "d6d9ed5327fdc913cb9b42617d98125c5e7680e47382380fee4536c3e79ea42a"
+        },
+        {
+          "id": "brand:apps/web/src/fonts/geist/geist-latin.woff2",
+          "sha256": "5cb9ff5717ad7d1c46752d3431b70b81611f456ca75a705e47d134e6bed8e03b"
         }
       ],
       "sourceFrame": 60
     },
     "omp-session-gateway-product-flow.png": {
-      "bytes": 192055,
-      "sha256": "946f16dcb60730b05241f09c0f350e5477dbd80a7f7be412111dde49f17a9dc4",
+      "bytes": 186001,
+      "sha256": "42c9aaf54dca3f593e3e38dd2870e4c6b9f1bbd51c11c1fc848f0cac8f7e2414",
       "width": 1600,
       "height": 980,
       "provenance": "capture-only-presentation-composite",
       "compositeInputs": [
         {
           "id": "runtime:01-all-clear.png",
-          "sha256": "5be178feff8a24ddb4a8237706a8b160411984ce3988101261bdf0c83ab0a5a0"
+          "sha256": "40c2b68697f5058df8ba2401f9d63668000aa07f314433a9711ed7b0273795e0"
         },
         {
           "id": "runtime:02-needs-you.png",
-          "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9"
+          "sha256": "870c00b352a358668e79752fdd2d00a83c70986898a3519d5e373c0093b8906b"
         },
         {
           "id": "runtime:03-open-request.png",
-          "sha256": "ac4120b2d1722c074c0ba3e5a5fa9591e613276b90b18e6c3d5f909fed6b43a8"
+          "sha256": "b6ca02c26adafe7b0435e7b3ff2f97ff48cdcfdde7de1ce76a12a8e1364c6488"
         },
         {
           "id": "brand:assets/logo.svg",
-          "sha256": "4adfd1c978e8cef7b61c3b474842e16deae05f5917a590cb80403ffe9582cb6e"
+          "sha256": "d6d9ed5327fdc913cb9b42617d98125c5e7680e47382380fee4536c3e79ea42a"
+        },
+        {
+          "id": "brand:apps/web/src/fonts/geist/geist-latin.woff2",
+          "sha256": "5cb9ff5717ad7d1c46752d3431b70b81611f456ca75a705e47d134e6bed8e03b"
         }
       ]
     },
     "01-all-clear.png": {
-      "bytes": 118202,
-      "sha256": "5be178feff8a24ddb4a8237706a8b160411984ce3988101261bdf0c83ab0a5a0",
+      "bytes": 131732,
+      "sha256": "40c2b68697f5058df8ba2401f9d63668000aa07f314433a9711ed7b0273795e0",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"
     },
     "02-needs-you.png": {
-      "bytes": 141230,
-      "sha256": "e07aadc6eafe519018e5942a1c691248f08aa155ee1531a2088a07c7371346a9",
+      "bytes": 163880,
+      "sha256": "870c00b352a358668e79752fdd2d00a83c70986898a3519d5e373c0093b8906b",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"
     },
     "03-open-request.png": {
-      "bytes": 118080,
-      "sha256": "ac4120b2d1722c074c0ba3e5a5fa9591e613276b90b18e6c3d5f909fed6b43a8",
+      "bytes": 122500,
+      "sha256": "b6ca02c26adafe7b0435e7b3ff2f97ff48cdcfdde7de1ce76a12a8e1364c6488",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime-with-pinned-collab-client"
     },
     "04-notification-settings.png": {
-      "bytes": 159432,
-      "sha256": "c1c38ac37c11c72dac211c379c21a34945af8fda3228d34bb67e31964c7fdc35",
+      "bytes": 156790,
+      "sha256": "4ed6fec9d48f24b97d71541548a06f356691dd7fdcce6531f5b9cdff9cb65857",
       "width": 780,
       "height": 1688,
       "provenance": "built-pwa-runtime"

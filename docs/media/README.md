@@ -15,7 +15,7 @@ bun run media:check
 
 `media:capture` builds the actual PWA and pinned collaboration client before capture. It publishes the canonical set only after staging the complete package. `media:check` verifies the binaries, manifest, public-safety rules, and root README references; it does not regenerate media. Both use `packages/collab-client/upstream/UPSTREAM.json` for browser-client provenance, independently of the OMP host baseline.
 
-Source revision: `fe5f765b1a5484addc3e31b84129d9cfe61f9157`  
+Source revision: `85aaaec3527ff98344d7829a67ce47bd73c225f1`  
 Pinned client: `v18.18.0` / `b5a6b2f7e5b6606b6562e678ead83f21738f34a0` (`@oh-my-pi/collab-web` 16.3.6)
 
 Normalized tool versions:
@@ -35,11 +35,11 @@ The synthetic clock is 2026-08-21T12:10:00.000Z, with locale en-US, timezone UTC
 | --- | --- |
 | `01-all-clear.png`, `02-needs-you.png`, `04-notification-settings.png` | Raw viewport screenshots of the actual built PWA. No frame, caption, marker, toast, crop, or compositor pixels. |
 | `03-open-request.png` | Raw viewport screenshot of gateway chrome containing the actual built, pinned OMP collaboration client and its synthetic encrypted ask. |
-| GIF, MP4, poster, product-flow board | Offline presentation composites. The embedded phone screens are complete runtime screenshots; the surrounding grid, editorial copy, phone frame, arrows, one tap marker, and Android notification toast are capture-only chrome. |
+| GIF, MP4, poster, product-flow board | Offline presentation composites. The embedded phone screens are complete runtime screenshots; the surrounding editorial copy, phone frame, arrows, one tap marker, and Android notification toast are capture-only chrome. |
 
 The capture-only Android toast uses the strict product title “OMP session needs attention” and the default Session-detail body. It is not a product DOM element or a real system notification. The animation’s discovered fifth session comes from a real fixture SSE upsert, and the tap marker is derived from the runtime Open request button bounds.
 
-Runtime requests are restricted to the same-origin loopback fixture. The compositor accepts no requests and embeds local images and the Gate mark as data URLs. The capture records no origin, port, capability, room key, endpoint, hostname, account, or filesystem path.
+Runtime requests are restricted to the same-origin loopback fixture. The compositor accepts no requests and embeds local images, the mark, and the Geist text face as data URLs. The capture records no origin, port, capability, room key, endpoint, hostname, account, or filesystem path.
 
 Security boundary: loopback-only gateway · memory-only capabilities · no transcript storage. Community project; not affiliated with OMP.
 
