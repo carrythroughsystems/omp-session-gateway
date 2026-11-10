@@ -48,3 +48,40 @@ test("the directory and an open request follow the system color scheme", { tag: 
     await fixture.stop();
   }
 });
+
+// Text has to stay readable on every surface it can sit on, including the pressed and hovered one.
+test("every text ink keeps a 4.5:1 contrast on every surface in both schemes", async ({ page }) => {
+  const fixture = await startDashboardFixture([session()]);
+
+  try {
+    await installSilentWebSocket(page);
+    await page.goto(fixture.origin);
+    for (const colorScheme of ["dark", "light"] as const) {
+      await page.emulateMedia({ colorScheme });
+      const low = await page.evaluate(() => {
+        const style = getComputedStyle(document.documentElement);
+        const luminance = (token: string): number => {
+          const hex = style.getPropertyValue(token).trim().slice(1);
+          const full = hex.length === 3 ? [...hex].map(digit => digit + digit).join("") : hex;
+          const [red, green, blue] = [0, 2, 4].map(index => {
+            const channel = Number.parseInt(full.slice(index, index + 2), 16) / 255;
+            return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+        };
+        const failures: string[] = [];
+        for (const ink of ["--ink", "--ink-2", "--ink-3", "--state-attention-text", "--state-danger-text"]) {
+          for (const surface of ["--ground", "--surface-1", "--surface-2", "--surface-3"]) {
+            const [text, behind] = [luminance(ink), luminance(surface)];
+            const ratio = (Math.max(text, behind) + 0.05) / (Math.min(text, behind) + 0.05);
+            if (!(ratio >= 4.5)) failures.push(`${ink} on ${surface}: ${ratio.toFixed(2)}`);
+          }
+        }
+        return failures;
+      });
+      expect(low, colorScheme).toEqual([]);
+    }
+  } finally {
+    await fixture.stop();
+  }
+});

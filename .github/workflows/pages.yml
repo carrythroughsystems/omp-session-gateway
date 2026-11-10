@@ -42,6 +42,7 @@ jobs:
           cp assets/logo.svg assets/logo-light.svg assets/og.png apps/web/src/favicon.svg site/
           mkdir -p site/fonts
           cp apps/web/src/fonts/geist/geist-latin.woff2 apps/web/src/fonts/geist/geist-mono-latin.woff2 site/fonts/
+          cp licenses/fonts/geist/LICENSE site/fonts/LICENSE.txt
           cp docs/media/01-all-clear.png site/screen-all-clear.png
           cp docs/media/02-needs-you.png site/screen-needs-you.png
           cp docs/media/03-open-request.png site/screen-open-request.png

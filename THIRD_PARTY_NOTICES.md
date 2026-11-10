@@ -268,8 +268,9 @@ runtime component of this archive. The upstream OMP license text is retained at
 
 The canonical public site (`site/`, deployed to GitHub Pages) serves the same Geist and Geist Mono
 subsets described above. The Pages workflow stages `geist-latin.woff2` and
-`geist-mono-latin.woff2` from `apps/web/src/fonts/geist/` into `site/fonts/`, so no page requests a
-remote font service and the site carries no font file of its own.
+`geist-mono-latin.woff2` from `apps/web/src/fonts/geist/` into `site/fonts/` and publishes
+`licenses/fonts/geist/LICENSE` beside them as `fonts/LICENSE.txt`, so no page requests a remote
+font service and the site carries no font file of its own.
 
 The top-level `LICENSE` covers OMP Session Gateway itself. `NOTICE.md` describes the project's
 independent relationship to Oh My Pi; it does not replace any license text listed above.

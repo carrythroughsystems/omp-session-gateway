@@ -1,6 +1,7 @@
 /* OMP Session Gateway canonical site. Tokens from docs/BRANDING.md ("Signal"): a monochrome
    chassis where color is state, following the system color scheme. Fonts are the PWA's first-party
-   Geist subsets, staged into site/fonts at deploy time; no remote font requests. */
+   Geist subsets (SIL Open Font License 1.1, published beside them as fonts/LICENSE.txt), staged
+   into site/fonts at deploy time; no remote font requests. */
 @font-face {
   font-family: "Geist";
   font-style: normal;
@@ -54,7 +55,7 @@
     --border-strong: rgba(0, 0, 0, 0.22);
     --ink: #0b0b0c;
     --body: #3c3c41;
-    --muted: #66666d;
+    --muted: #616168;
     --faint: #77777e;
     --inverse: #0b0b0c;
     --on-inverse: #fff;

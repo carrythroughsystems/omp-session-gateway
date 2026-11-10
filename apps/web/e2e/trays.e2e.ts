@@ -147,6 +147,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       const shell = await tray.locator(".gateway-shell").boundingBox();
       expect(Math.abs(frame!.width - shell!.width)).toBeLessThanOrEqual(1);
       expect((await tray.locator(".triage-bar").boundingBox())!.height).toBeLessThan(100);
+      await expect(tray.locator(".triage-action")).toHaveCSS("min-height", "48px");
       const headerCenters = await header.locator(":scope > *").evaluateAll(elements => elements.map(element => {
         const box = element.getBoundingClientRect();
         return box.y + box.height / 2;

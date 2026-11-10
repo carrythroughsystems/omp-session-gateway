@@ -39,12 +39,12 @@ Hierarchy comes from surface steps and type, not from hue.
 | ground | `#000000` | `#F4F4F2` | page |
 | surface-1 | `#111113` | `#FFFFFF` | the one elevated card, trays |
 | surface-2 | `#1C1C1F` | `#EBEBE8` | controls, tiles, inset fields |
-| surface-3 | `#29292D` | `#DEDEDA` | pressed and hovered controls |
+| surface-3 | `#27272B` | `#DEDEDA` | pressed and hovered controls |
 | line | white 8% | black 8% | hairlines |
 | line-strong | white 17% | black 20% | grips, dashed outlines, underlines |
 | ink | `#F5F5F3` | `#0B0B0C` | titles, primary actions, focus, selection |
 | ink-2 | `#C9C9CD` | `#3C3C41` | body text |
-| ink-3 | `#8E8E95` | `#66666D` | metadata, labels; the faintest text |
+| ink-3 | `#8E8E95` | `#616168` | metadata, labels; the faintest text |
 | ink-4 | `#68686F` | `#86868D` | separators, quiet icons; never text |
 | live | `#30D67C` | `#12A150` | a session is live; an answer was accepted |
 | attention | `#FFB224` (text `#FFC24D`) | `#FFB224` (text `#8A4F00`) | your turn |
@@ -66,10 +66,11 @@ What each state color may touch:
   the operator — offline, tailnet, desktop, gateway, reconnecting — carry no color at all: the page
   loses its green, which is the signal.
 
-Contrast floors, measured on ground and on surfaces 1 and 2 in both schemes: every text token
-(ink through ink-3, attention text, danger text) is at least 4.5:1, and every icon or state
-graphic (ink-4, live) is at least 3:1 except light-scheme live on surface-2 (2.8:1), where it is
-always paired with its state in words.
+Contrast floors in both schemes: every text token (ink through ink-3, attention text, danger text)
+is at least 4.5:1 on ground and on surfaces 1 through 3, which `apps/web/e2e/theme.e2e.ts`
+asserts; every icon or state graphic (ink-4, live) is at least 3:1 on ground and on surfaces 1
+and 2, except light-scheme live on surface-2 (2.8:1), where it is always paired with its state in
+words.
 
 States never depend on hue alone: active is a filled dot and at rest is a ring, a cached row's tile
 is a dashed outline, and every colored surface also carries its state in words.
