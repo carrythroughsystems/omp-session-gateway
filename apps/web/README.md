@@ -100,6 +100,13 @@ bfcache resume revalidates and reacquires it with the original full/tray present
 View Transition runs while the dialog is open. `e2e/trays.e2e.ts` covers these transitions and
 capability non-persistence; optional `OMP_TRAY_SCREENSHOTS` writes synthetic smoke screenshots.
 
+In Control, **Hold → next** follows the embedded client's pending request, not just the polled
+directory Ask. Sending keeps **Sending…** until host acknowledgement; once no section remains,
+Hold disappears even if discovery is delayed or its event stream is stale. Another unanswered
+section or a request replay after reconnect can restore Hold for the same directory Ask. View
+retains metadata-only Hold behavior. **Answered** / **Next ask →** still wait for the opened
+directory request to clear or change; a different request in the same session is new queued work.
+
 The first-run introduction uses the same host after an authoritative render on a visible `/`
 entry, never during loading, a session, a routed launch, or another open tray. Connected uses
 the masthead mark and the current host label/session count. Background alerts moves the single
