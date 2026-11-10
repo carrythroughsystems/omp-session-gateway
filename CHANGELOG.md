@@ -6,6 +6,30 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.11.0] — 2026-11-10
+
+This release uses stock OMP v18.18.0 as its engineering baseline. The 6 changelog entries below record the changes since v0.10.1. Historical receipts do not qualify these bytes.
+
+### Changed
+
+- Show offline, tailnet, desktop, gateway, and reconnecting states without the amber warning
+  color, which now means only that a session is waiting for you; access denial stays red.
+- Replace the mark with "Portal" across the app icons, public site, and artwork, and give Android
+  notifications a monochrome status-bar badge instead of the full-color app icon.
+- Redesign **OMP Sessions** as the monochrome "Signal" system (ADR-049): color now marks only
+  state (green live, amber your turn, red denied), the theme follows the system's light or dark
+  scheme, text is self-hosted Geist, and the directory is one toolbar row, one elevated request
+  card, plain rows, and floating trays with drawn icons.
+- Make the public site follow the system color scheme and serve the same self-hosted Geist
+  files as the app; rendering the banner and social card no longer contacts Google Fonts.
+
+### Fixed
+
+- Hide the in-session Hold action when the client acknowledges the last Ask section, even while
+  directory metadata is delayed, and reject stale Hold actions for answered requests.
+- Restore the inset of the embedded request card on phones, where the client's compact composer
+  padding had left the card's label against its top edge.
+
 ## [v0.10.1] — 2026-11-09
 
 This release uses stock OMP v18.18.0 as its engineering baseline. The 37 changelog entries below record the changes since v0.10.0. Historical receipts do not qualify these bytes.
