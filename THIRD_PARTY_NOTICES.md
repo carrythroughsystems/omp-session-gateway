@@ -224,7 +224,7 @@ OMP itself is a separately installed mainline prerequisite, not a bundled or loc
 runtime component of this archive. The upstream OMP license text is retained at
 `licenses/oh-my-pi/LICENSE`; the client and runtime attributions above remain applicable.
 
-## Vendored font subset
+## Vendored font subsets
 
 ### Symbols Nerd Font Mono (Nerd Fonts v3.5.1)
 
@@ -248,31 +248,28 @@ runtime component of this archive. The upstream OMP license text is retained at
   <https://github.com/microsoft/vscode-codicons>,
   [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); modified as described above.
 
+### Geist and Geist Mono (Geist v1.9.2)
+
+- Source: <https://github.com/vercel/geist-font/tree/v1.9.2>
+- Source archive: <https://github.com/vercel/geist-font/releases/download/v1.9.2/geist-font-v1.9.2.zip>
+  (SHA-256 `15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8`)
+- License: SIL Open Font License 1.1 (`OFL-1.1`); the upstream license reserves no font name
+- Copyright: Copyright 2026 The Geist Project Authors (<https://github.com/vercel/geist-font>)
+- License text: `licenses/fonts/geist/LICENSE`
+- Distributed code: `apps/web/dist/assets/geist-latin.<content-hash>.woff2`,
+  `apps/web/dist/assets/geist-italic-latin.<content-hash>.woff2`, and
+  `apps/web/dist/assets/geist-mono-latin.<content-hash>.woff2`
+- Local modifications: the upright, italic, and mono variable faces subset to Latin, Latin-1
+  Supplement, Latin Extended-A, punctuation, arrows, and comparison operators with a fixed set of
+  layout features, hinting dropped, and converted to WOFF2 by `scripts/vendor-geist.ts`; per-file
+  digests are recorded in `apps/web/src/fonts/geist/manifest.json`.
+
 ## Public site fonts
 
-The canonical public site (`site/`, deployed to GitHub Pages) self-hosts two latin subsets as
-first-party assets so no page requests a remote font service. They are not part of the release
-archive or the PWA.
-
-### Space Grotesk
-
-- Source: <https://github.com/floriankarsten/space-grotesk>
-- License: SIL Open Font License 1.1 (`OFL-1.1`)
-- Copyright: Copyright 2020 The Space Grotesk Project Authors
-- License text: `licenses/fonts/space-grotesk/LICENSE`
-- Distributed file: `site/fonts/space-grotesk-latin.woff2` (variable `wght` axis, latin
-  unicode-range subset as served by Google Fonts `spacegrotesk/v22`;
-  SHA-256 `a0d054c4af557de20afd6ca59f47ab353bcaec49c63ff04b6c9d39d0f8910557`)
-
-### JetBrains Mono
-
-- Source: <https://github.com/JetBrains/JetBrainsMono>
-- License: SIL Open Font License 1.1 (`OFL-1.1`)
-- Copyright: Copyright 2020 The JetBrains Mono Project Authors
-- License text: `licenses/fonts/jetbrains-mono/LICENSE`
-- Distributed file: `site/fonts/jetbrains-mono-latin.woff2` (variable `wght` axis, latin
-  unicode-range subset as served by Google Fonts `jetbrainsmono/v24`;
-  SHA-256 `2c32b9b3ee358c119e210f6f5195f9bd34894d78a785ff2e95d60e718e400af4`)
+The canonical public site (`site/`, deployed to GitHub Pages) serves the same Geist and Geist Mono
+subsets described above. The Pages workflow stages `geist-latin.woff2` and
+`geist-mono-latin.woff2` from `apps/web/src/fonts/geist/` into `site/fonts/`, so no page requests a
+remote font service and the site carries no font file of its own.
 
 The top-level `LICENSE` covers OMP Session Gateway itself. `NOTICE.md` describes the project's
 independent relationship to Oh My Pi; it does not replace any license text listed above.

@@ -1,3 +1,5 @@
+import { createIcon } from "./icons";
+
 export interface TrayPanel {
   readonly id: string;
   readonly title: string;
@@ -138,7 +140,7 @@ export function createTray(host: HTMLDialogElement): Tray {
     }
     entry.height = height;
     entry.element.style.maxHeight = "";
-    host.style.height = `${Math.min(viewportHeight() - 16, height + (grip.hidden ? 0 : grip.offsetHeight) + 2)}px`;
+    host.style.height = `${Math.min(viewportHeight() - 16, height + (grip.hidden ? 0 : grip.offsetHeight))}px`;
   };
   const build = (panel: TrayPanel): PanelEntry => {
     const element = document.createElement("section");
@@ -153,7 +155,7 @@ export function createTray(host: HTMLDialogElement): Tray {
       leading.className = "tray-leading";
       const parent = current();
       leading.setAttribute("aria-label", panel.leadingLabel ?? (parent === undefined ? `Close ${panel.title}` : `Back to ${parent.panel.title}`));
-      leading.textContent = parent === undefined && panel.onBack === undefined ? "⌄" : "‹";
+      leading.append(createIcon(parent === undefined && panel.onBack === undefined ? "chevron-down" : "chevron-left"));
       leading.addEventListener("click", () => panel.onBack !== undefined ? panel.onBack() : stack.length > 1 ? pop() : close());
       heading = document.createElement("h2");
       heading.id = `tray-title-${++sequence}`;

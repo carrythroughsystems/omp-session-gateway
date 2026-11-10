@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="OMP Sessions">
+  <rect width="512" height="512" fill="#000"></rect>
+  <g transform="translate(88 84.5) scale(3.5)">
+    <path d="M25 80V47a23 23 0 0 1 46 0v33" fill="none" stroke="#F5F5F3" stroke-width="12"></path>
+    <circle cx="48" cy="63" r="9" fill="#30D67C"></circle>
+  </g>
+</svg>

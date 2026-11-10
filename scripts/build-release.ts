@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findCapabilityLeaks } from "./capability-leak-rules.ts";
+import geist from "../apps/web/src/fonts/geist/manifest.json";
 import nerdSymbols from "../apps/web/src/fonts/nerd-symbols/manifest.json";
 import packageManifest from "../package.json";
 
@@ -17,6 +18,7 @@ const COLLAB_WEB_LICENSE_PATH = "licenses/collab-web/LICENSE";
 const MARKED_FORK_LICENSE_PATH = "licenses/pi-utils-marked/LICENSE";
 const NERD_FONT_LICENSE_PATH = "licenses/fonts/nerd-fonts/LICENSE";
 const NERD_FONT_ICON_SETS_PATH = "licenses/fonts/nerd-fonts/ICON_SETS.md";
+const GEIST_LICENSE_PATH = "licenses/fonts/geist/LICENSE";
 
 export function assertBuilderRuntime(version: string, pinned: string): void {
   if (version !== pinned) throw new Error(`release builder requires Bun ${pinned}, not ${version}`);
@@ -544,6 +546,19 @@ export function createSpdxSbom(
     checksums: [{ algorithm: "SHA256", checksumValue: nerdSymbols.source.sha256.toUpperCase() }],
     sourceInfo: `PUA-only WOFF2 subsets of ${nerdSymbols.source.face}; local modifications documented in THIRD_PARTY_NOTICES.md`,
   };
+  const geistPackage = {
+    name: "Geist",
+    SPDXID: "SPDXRef-Vendored-Geist",
+    versionInfo: geist.source.version,
+    downloadLocation: `https://github.com/${geist.source.project}/releases/download/${geist.source.version}/${geist.source.archive}`,
+    filesAnalyzed: false,
+    licenseConcluded: geist.source.license,
+    licenseDeclared: geist.source.license,
+    licenseComments: `License text: ${GEIST_LICENSE_PATH}; the upstream license reserves no font name`,
+    copyrightText: "Copyright 2026 The Geist Project Authors (https://github.com/vercel/geist-font)",
+    checksums: [{ algorithm: "SHA256", checksumValue: geist.source.sha256.toUpperCase() }],
+    sourceInfo: "Latin WOFF2 subsets of the Geist and Geist Mono variable faces; local modifications documented in THIRD_PARTY_NOTICES.md",
+  };
 
   return `${JSON.stringify(
     {
@@ -556,7 +571,7 @@ export function createSpdxSbom(
         created: source.created,
         creators: ["Tool: omp-session-gateway deterministic release builder"],
       },
-      packages: [rootPackage, collabWebPackage, markedForkPackage, nerdFontPackage, ...dependencies],
+      packages: [rootPackage, collabWebPackage, markedForkPackage, nerdFontPackage, geistPackage, ...dependencies],
       relationships: [
         {
           spdxElementId: "SPDXRef-DOCUMENT",
@@ -577,6 +592,11 @@ export function createSpdxSbom(
           spdxElementId: rootPackage.SPDXID,
           relationshipType: "CONTAINS",
           relatedSpdxElement: nerdFontPackage.SPDXID,
+        },
+        {
+          spdxElementId: rootPackage.SPDXID,
+          relationshipType: "CONTAINS",
+          relatedSpdxElement: geistPackage.SPDXID,
         },
         ...dependencies.map(dependency => ({
           spdxElementId: rootPackage.SPDXID,
@@ -680,6 +700,9 @@ async function buildRelease(): Promise<void> {
   }
   if (!notices.includes(MARKED_FORK_LICENSE_PATH) || (await readFile(join(root, MARKED_FORK_LICENSE_PATH))).byteLength === 0) {
     throw new Error("vendored Markdown fork requires its original and fork license notices");
+  }
+  if (!notices.includes(GEIST_LICENSE_PATH) || (await readFile(join(root, GEIST_LICENSE_PATH))).byteLength === 0) {
+    throw new Error("vendored Geist faces require their license notice");
   }
   for (const dependency of dependencies) {
     const metadata = runtimeLicense(dependency);

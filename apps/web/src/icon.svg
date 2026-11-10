@@ -1,9 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="OMP Sessions">
-  <rect width="512" height="512" rx="116" fill="#0B0E11"></rect>
-  <g transform="translate(97.3 97.3) scale(3.306)">
-    <rect x="12" y="16" width="72" height="10" rx="2" fill="#E8ECEF"></rect>
-    <rect x="24" y="26" width="10" height="52" rx="2" fill="#E8ECEF"></rect>
-    <rect x="62" y="26" width="10" height="52" rx="2" fill="#E8ECEF"></rect>
-    <circle cx="48" cy="58" r="8" fill="#31C48D"></circle>
+  <rect width="512" height="512" rx="116" fill="#000"></rect>
+  <g transform="translate(54.4 50.2) scale(4.2)">
+    <path d="M25 80V47a23 23 0 0 1 46 0v33" fill="none" stroke="#F5F5F3" stroke-width="12"></path>
+    <circle cx="48" cy="63" r="9" fill="#30D67C"></circle>
   </g>
 </svg>

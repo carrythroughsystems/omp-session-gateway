@@ -6,8 +6,11 @@ on:
     paths:
       - site/**
       - assets/logo.svg
+      - assets/logo-light.svg
       - assets/og.png
       - apps/web/src/favicon.svg
+      - apps/web/src/fonts/geist/geist-latin.woff2
+      - apps/web/src/fonts/geist/geist-mono-latin.woff2
       - docs/media/01-all-clear.png
       - docs/media/02-needs-you.png
       - docs/media/03-open-request.png
@@ -31,12 +34,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The site carries no copies of brand or media assets; stage each from its canonical source
-      # so a brand or capture refresh cannot leave the site stale. Keep this list in step with
+      # The site carries no copies of brand, font, or media assets; stage each from its canonical
+      # source so a brand or capture refresh cannot leave the site stale. Keep this list in step with
       # STAGED_SITE_ASSETS in scripts/site-coherence.test.ts and the site/ block in .gitignore.
-      - name: Stage canonical brand and media assets
+      - name: Stage canonical brand, font, and media assets
         run: |
-          cp assets/logo.svg assets/og.png apps/web/src/favicon.svg site/
+          cp assets/logo.svg assets/logo-light.svg assets/og.png apps/web/src/favicon.svg site/
+          mkdir -p site/fonts
+          cp apps/web/src/fonts/geist/geist-latin.woff2 apps/web/src/fonts/geist/geist-mono-latin.woff2 site/fonts/
           cp docs/media/01-all-clear.png site/screen-all-clear.png
           cp docs/media/02-needs-you.png site/screen-needs-you.png
           cp docs/media/03-open-request.png site/screen-open-request.png

@@ -2,6 +2,7 @@ import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promis
 import { createHash } from "node:crypto";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import geist from "../apps/web/src/fonts/geist/manifest.json";
 import nerdSymbols from "../apps/web/src/fonts/nerd-symbols/manifest.json";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -93,7 +94,28 @@ for (const chunk of nerdSymbols.chunks) {
   unicode-range: ${chunk.unicodeRange};
 }`);
 }
+// Text faces. Upright Geist and Geist Mono draw the first paint, so they are preloaded and
+// precached with the shell; the italic is cached on first use, like the symbol chunks.
+const shellFonts: string[] = [];
+const textFaces: string[] = [];
+for (const face of geist.faces) {
+  const content = await readFile(join(webSource, "fonts", "geist", face.file));
+  const url = `/assets/${basename(face.file, ".woff2")}.${digest(content)}.woff2`;
+  await writeFile(join(outputRoot, url.slice(1)), content);
+  (face.style === "normal" ? shellFonts : lazyAssets).push(url);
+  textFaces.push(`@font-face {
+  font-family: "${face.family}";
+  font-style: ${face.style};
+  font-weight: ${geist.weight};
+  font-display: swap;
+  src: url("${url}") format("woff2");
+  unicode-range: ${geist.unicodeRange};
+}`);
+}
 const stylesheetSource = `${await readFile(join(webSource, "styles.css"), "utf8")}
+/* Generated: Geist and Geist Mono latin subsets (see apps/web/src/fonts/geist/manifest.json) */
+${textFaces.join("\n\n")}
+
 /* Generated: Nerd Font symbol subset (see apps/web/src/fonts/nerd-symbols/manifest.json) */
 ${fontFaces.join("\n\n")}
 `;
@@ -107,7 +129,12 @@ const indexHtml = indexTemplate
   .replace(
     "<!--ASSET_PRELOADS-->",
     // Warm the pinned collab client on first visit; repeat visits hit the service-worker cache.
-    `<link rel="modulepreload" href="${clientModule}" />\n    <link rel="preload" as="style" href="${clientStylesheet}" />`,
+    // A font preload needs `crossorigin` even on the same origin, or the face is fetched twice.
+    [
+      ...shellFonts.map(url => `<link rel="preload" as="font" type="font/woff2" href="${url}" crossorigin />`),
+      `<link rel="modulepreload" href="${clientModule}" />`,
+      `<link rel="preload" as="style" href="${clientStylesheet}" />`,
+    ].join("\n    "),
   )
   .replace("<!--ASSET_BUILD-->", buildTag)
   .replace("<!--ASSET_SCRIPT-->", `<script type="module" src="${webScript}"></script>`);
@@ -122,12 +149,14 @@ for (const asset of [
   "icon-512.png",
   "icon-maskable-512.png",
   "apple-touch-icon-180.png",
+  "badge-96.png",
 ]) {
   await copyFile(join(webSource, asset), join(outputRoot, asset));
 }
-// The collab client is part of the launch-critical shell: precaching it makes View/Control
-// taps independent of tailnet round-trips for static bytes. All entries stay content-hashed.
-const shellAssets = [webScript, stylesheet, clientModule, clientStylesheet];
+// The collab client and the text faces are part of the launch-critical shell: precaching them
+// makes View/Control taps and first paint independent of tailnet round-trips for static bytes.
+// All entries stay content-hashed.
+const shellAssets = [webScript, stylesheet, clientModule, clientStylesheet, ...shellFonts];
 const cacheName = `omp-sessions-shell-${digest(shellAssets.join("\0"))}`;
 const workerBuild = await buildEntrypoint(join(webSource, "service-worker.ts"), join(temporaryRoot, "worker"), {
   __SHELL_ASSETS__: JSON.stringify(shellAssets),

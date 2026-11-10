@@ -185,6 +185,9 @@ for (const state of VISUAL_STATES) {
       });
       await page.evaluate(async () => {
         await document.fonts.ready;
+        // Percy renders the serialized DOM in its own browsers, which prefer light. The stylesheet
+        // yields to the client's resolved-theme attribute, so pin it: the baseline is the dark scheme.
+        document.documentElement.dataset.theme = "dark";
         // The build identity is intentionally not a visual baseline input.
         const build = document.querySelector(".sheet-build code");
         if (build !== null) build.textContent = "synthetic-build";

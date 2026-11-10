@@ -1,0 +1,35 @@
+{
+  "source": {
+    "project": "vercel/geist-font",
+    "version": "v1.9.2",
+    "archive": "geist-font-v1.9.2.zip",
+    "sha256": "15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8",
+    "license": "OFL-1.1"
+  },
+  "weight": "100 900",
+  "unicodeRange": "U+0020-007E, U+00A0-017F, U+2010-2027, U+2030-203A, U+2044, U+20AC, U+2122, U+2190-2193, U+2196-2199, U+2212, U+2215, U+2248, U+2260, U+2264-2265",
+  "layoutFeatures": "kern,liga,calt,ccmp,locl,mark,mkmk,tnum,pnum,case,frac,ss08",
+  "faces": [
+    {
+      "family": "Geist",
+      "style": "normal",
+      "file": "geist-latin.woff2",
+      "sha256": "5cb9ff5717ad7d1c46752d3431b70b81611f456ca75a705e47d134e6bed8e03b",
+      "bytes": 32448
+    },
+    {
+      "family": "Geist",
+      "style": "italic",
+      "file": "geist-italic-latin.woff2",
+      "sha256": "b62ab8235bb0029593cb2bbd9cf05603fade92821cf2c240affc4540f660945f",
+      "bytes": 34008
+    },
+    {
+      "family": "Geist Mono",
+      "style": "normal",
+      "file": "geist-mono-latin.woff2",
+      "sha256": "a19d1adedd14dfb29bcd199a60f2844bed74239c26d55b89c51c85a9a2c2b2ad",
+      "bytes": 25520
+    }
+  ]
+}

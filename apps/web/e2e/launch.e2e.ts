@@ -272,7 +272,7 @@ test("installed-PWA View and Control mount in the current window without losing 
     };
     fixture.upsert(next);
     fixture.upsert(answeredSession(session()));
-    await expect(page.locator(".triage-copy")).toHaveText("✓ Answered — 1 more needs you");
+    await expect(page.locator(".triage-copy")).toHaveText("Answered — 1 more needs you");
     await expect(page.locator(".triage-action")).toHaveText("Next ask →");
     await page.locator(".triage-action").click();
     await expect(page.locator(".shell-title")).toHaveText("Next attention");
@@ -596,7 +596,7 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".sh-ask-option").first()).toHaveClass(/sh-ask-option-checked/u);
     await expect(page.locator(".sh-ask-option-label").first()).toContainText("1 · Implement ADR-0036 locally");
     await expect(page.locator(".sh-ask-send")).toHaveText("Send");
-    await expect(page.locator(".sh-ask-send")).toHaveCSS("background-color", "rgb(49, 196, 141)");
+    await expect(page.locator(".sh-ask-send")).toHaveCSS("background-color", "rgb(245, 245, 243)");
     await expect(
       page.locator(".sh-ask-option").filter({ hasText: "Implement ADR-0036 locally" }).locator(".sh-ask-option-recommended"),
     ).toHaveText("Recommended");

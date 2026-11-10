@@ -144,7 +144,8 @@ async function executeEffects(effects: readonly FleetEffect[], message?: Attenti
     const options = {
       tag,
       icon: "/icon-192.png",
-      badge: "/icon-192.png",
+      // Android draws the badge as a silhouette in the status bar: it has to be transparent.
+      badge: "/badge-96.png",
       renotify: effect.renotify,
       ...(message.body === undefined ? {} : { body: message.body }),
       data: {

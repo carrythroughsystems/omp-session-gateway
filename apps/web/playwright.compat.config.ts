@@ -19,7 +19,8 @@ export default defineConfig({
   workers: 1,
   retries: process.env.CI === "true" || process.env.CI === "1" ? 1 : 0,
   reporter: [["line"], [fileURLToPath(new URL("../../scripts/browser-flake-reporter.ts", import.meta.url)), { lane: "browser-core" }]],
-  use: { serviceWorkers: "allow", trace: "off", video: "off", screenshot: "off" },
+  // The theme follows the system. The suite asserts the dark palette; `theme.e2e.ts` emulates light.
+  use: { serviceWorkers: "allow", colorScheme: "dark", trace: "off", video: "off", screenshot: "off" },
   projects: [
     { name: "desktop-chromium", use: { browserName: "chromium", ...desktop } },
     { name: "desktop-firefox", use: { browserName: "firefox", ...desktop } },

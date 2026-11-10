@@ -3,17 +3,59 @@
   "artwork": {
     "assets/banner.png": {
       "source": "assets/banner.html",
-      "sourceSha256": "fe10c83e5c8580a68ae9f61fd6492247f9462c8bea340ab3ad12ff53aab17ed1",
-      "outputSha256": "8416e13b2f704b01360fec8ee30ee4b26875fc3e7b546ba79a7667a5a7129e86",
+      "sourceSha256": "590aef7f92cd32da4fa14372582f97db95f88f3453f1c906b9b0e98aae7f0837",
+      "outputSha256": "96cd52b1ff8dd633f92c8c95b9afeca9abdcc72482d495ecd250f32ce54bd9b9",
       "width": 2560,
-      "height": 640
+      "height": 640,
+      "inputs": {
+        "apps/web/src/fonts/geist/geist-latin.woff2": "5cb9ff5717ad7d1c46752d3431b70b81611f456ca75a705e47d134e6bed8e03b"
+      }
     },
     "assets/og.png": {
       "source": "assets/og.html",
-      "sourceSha256": "cd42383fa4006a7b0ed8eff592011a8b8620c990414ec4b4e46620cfac2e998e",
-      "outputSha256": "964bdda367189316558ce75df71513556b71f80c6180a1dffd571d3300307b56",
+      "sourceSha256": "7c88ee96333c95ae0f2b2ebff15dcd996b0fabafef538da92e5c52c8a7387c21",
+      "outputSha256": "dfcbb33f36697c9ace3c5e365b913644e486615404048be18d56d904595f7cbc",
       "width": 1280,
-      "height": 640
+      "height": 640,
+      "inputs": {
+        "apps/web/src/fonts/geist/geist-latin.woff2": "5cb9ff5717ad7d1c46752d3431b70b81611f456ca75a705e47d134e6bed8e03b",
+        "apps/web/src/fonts/geist/geist-mono-latin.woff2": "a19d1adedd14dfb29bcd199a60f2844bed74239c26d55b89c51c85a9a2c2b2ad"
+      }
+    },
+    "apps/web/src/icon-192.png": {
+      "source": "apps/web/src/icon.svg",
+      "sourceSha256": "902d5a593c83e95b3dc089d978ea339822a2dcc1a6cc10827c4c4157f44cf272",
+      "outputSha256": "69a61f8adbee8422ed3dd1a6c3ce5fe2e9291cf000a27228081023aace54e949",
+      "width": 192,
+      "height": 192
+    },
+    "apps/web/src/icon-512.png": {
+      "source": "apps/web/src/icon.svg",
+      "sourceSha256": "902d5a593c83e95b3dc089d978ea339822a2dcc1a6cc10827c4c4157f44cf272",
+      "outputSha256": "3f0a5ed828801d26ea41756ed6bf4567d2f9589eb406c0e794457ab4b4008c4a",
+      "width": 512,
+      "height": 512
+    },
+    "apps/web/src/icon-maskable-512.png": {
+      "source": "apps/web/src/icon-maskable.svg",
+      "sourceSha256": "d92599a7160412bb02016775f68e1e2e6246128fc473f9ca182c6ddf509c4b4a",
+      "outputSha256": "588cbe0744cb3e8640e42b0b9768ef794f42e43a9febaacf575ba112c2b528df",
+      "width": 512,
+      "height": 512
+    },
+    "apps/web/src/apple-touch-icon-180.png": {
+      "source": "apps/web/src/icon.svg",
+      "sourceSha256": "902d5a593c83e95b3dc089d978ea339822a2dcc1a6cc10827c4c4157f44cf272",
+      "outputSha256": "5c106a6fdde4e1456315d2d3595f8d4fbb2ce1a9c0edf9c558a8f33c9229e272",
+      "width": 180,
+      "height": 180
+    },
+    "apps/web/src/badge-96.png": {
+      "source": "apps/web/src/badge.svg",
+      "sourceSha256": "34ddb14eed6a00bdd54d9c48370ccae74059580904f5bd99d364e488aa732c0f",
+      "outputSha256": "66a289b39249582b2627ec9243f1a9b43c66a979620e5d202e6417370d12b571",
+      "width": 96,
+      "height": 96
     }
   }
 }

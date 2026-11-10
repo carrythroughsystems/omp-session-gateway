@@ -142,6 +142,8 @@ class FakeElement extends EventTarget {
       child.remove();
       this.children.unshift(child);
       child.parent = this;
+      // A stylesheet link loads wherever it is inserted.
+      if (child.tagName === "link") queueMicrotask(() => child.dispatchEvent(new Event("load")));
     }
   }
 
@@ -574,6 +576,7 @@ async function bootApp(options: {
     "#alert-scope": new FakeElement("p"),
     "#tray": trayHost,
     "#alerts-panel": new FakeElement("section"),
+    "#notification-hosts": new FakeElement("section"),
     "#detail-panel": new FakeElement("section"),
     "#alert-detail": alertDetailButton,
     "#undo-panel": new FakeElement("section"),
@@ -842,7 +845,7 @@ async function bootApp(options: {
       directoryCount,
       hostPicker,
       fleetStatus,
-      notificationHosts: bySelector["#alerts-panel"]!.querySelector(".notification-hosts")!,
+      notificationHosts: bySelector["#notification-hosts"]!,
       undoCopy,
       undoButton,
     },
@@ -1362,6 +1365,7 @@ describe("source-bound session creation", () => {
       const initial = currentPanel(harness);
       expect(initial.textContent).toContain("Starting on Synthetic execution host.");
       const stepStates = (): (string | undefined)[] => currentPanel(harness).querySelectorAll("li").map(step => step.dataset.state);
+      const drawnChecks = (): boolean[] => currentPanel(harness).querySelectorAll("li").map(step => step.querySelector("svg") !== null);
       expect(initial.querySelectorAll("li").map(step => step.textContent)).toEqual(["Starting in Tern", "Waiting for OMP", "Opening Control"]);
       expect(stepStates()).toEqual(["active", "future", "future"]);
       harness.window.runTimersWithDelay(1_000);
@@ -1370,11 +1374,11 @@ describe("source-bound session creation", () => {
       harness.window.runTimersWithDelay(1_000);
       await settleUntil(() => stepStates()[1] === "active", 100);
       expect(stepStates()).toEqual(["done", "active", "future"]);
-      expect(currentPanel(harness).querySelector("path")?.getAttribute("d")).toBe("M4 10l4 4 8-8");
+      expect(drawnChecks()).toEqual([true, false, false]);
       harness.window.runTimersWithDelay(1_000);
       await settleUntil(() => harness.launchRequests.length === 1, 200);
       expect(stepStates()).toEqual(["done", "done", "active"]);
-      expect(currentPanel(harness).querySelectorAll("svg")).toHaveLength(2);
+      expect(drawnChecks()).toEqual([true, true, false]);
       expect(harness.elements.trayHost.open).toBeTrue();
       if (close) {
         currentPanel(harness).querySelector(".tray-leading")!.dispatchEvent(new Event("click"));

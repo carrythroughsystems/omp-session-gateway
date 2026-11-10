@@ -12,15 +12,18 @@ export function syntheticSession(
   options: {
     /** Omitted renders "Activity unknown"; the README capture seeds every working row. */
     readonly busy?: boolean;
+    /** `provider/slug`, as OMP reports it; the directory shows the slug. */
+    readonly model?: string;
     readonly attention?: { readonly requestId: string; readonly since: string; readonly preview: string };
   } = {},
 ): SessionMetadata {
-  const { busy, attention } = options;
+  const { busy, model, attention } = options;
   return {
     instanceId,
     generation: 1,
     title,
     cwdLabel,
+    ...(model === undefined ? {} : { model }),
     startedAt,
     lastSeenAt,
     canView: true,
@@ -46,7 +49,7 @@ export const RELEASE_WORKING = syntheticSession(
   "omp-session-gateway",
   "2026-08-21T11:50:00.000Z",
   "2026-08-21T12:09:58.000Z",
-  { busy: true },
+  { busy: true, model: "openai/gpt-6-astra" },
 );
 export const ANDROID_WORKING = syntheticSession(
   "media-android-soak-0003",
@@ -54,7 +57,7 @@ export const ANDROID_WORKING = syntheticSession(
   "omp-session-gateway",
   "2026-08-21T11:40:00.000Z",
   "2026-08-21T12:09:57.000Z",
-  { busy: true },
+  { busy: true, model: "anthropic/claude-opus-5-5" },
 );
 /** The one idle row shows the directory's second resting state beside Working. */
 export const DOCS_WORKING = syntheticSession(
@@ -63,7 +66,7 @@ export const DOCS_WORKING = syntheticSession(
   "omp-session-gateway",
   "2026-08-21T11:30:00.000Z",
   "2026-08-21T12:09:56.000Z",
-  { busy: false },
+  { busy: false, model: "google/gemini-4-argon" },
 );
 export const UPSTREAM_WORKING = syntheticSession(
   "media-upstream-compat-0005",
@@ -71,7 +74,7 @@ export const UPSTREAM_WORKING = syntheticSession(
   "oh-my-pi",
   "2026-08-21T11:20:00.000Z",
   "2026-08-21T12:09:55.000Z",
-  { busy: true },
+  { busy: true, model: "anthropic/claude-opus-5-5" },
 );
 export const INITIAL_SESSIONS = [RELEASE_WORKING, ANDROID_WORKING, DOCS_WORKING, UPSTREAM_WORKING] as const;
 export const GATEWAY_WORKING = syntheticSession(
@@ -80,7 +83,7 @@ export const GATEWAY_WORKING = syntheticSession(
   "omp-session-gateway",
   "2026-08-21T12:00:00.000Z",
   "2026-08-21T12:09:59.000Z",
-  { busy: true },
+  { busy: true, model: "anthropic/claude-opus-5-5" },
 );
 export const GATEWAY_WAITING = syntheticSession(
   "media-gateway-auth-0001",
@@ -89,6 +92,7 @@ export const GATEWAY_WAITING = syntheticSession(
   "2026-08-21T12:00:00.000Z",
   "2026-08-21T12:09:59.000Z",
   {
+    model: "anthropic/claude-opus-5-5",
     attention: {
       requestId: "media-request-auth-0001",
       since: "2026-08-21T12:05:00.000Z",
@@ -103,6 +107,7 @@ export const RELEASE_WAITING = syntheticSession(
   "2026-08-21T11:50:00.000Z",
   "2026-08-21T12:09:58.000Z",
   {
+    model: "openai/gpt-6-astra",
     attention: {
       requestId: "media-request-release-0002",
       since: "2026-08-21T12:07:00.000Z",

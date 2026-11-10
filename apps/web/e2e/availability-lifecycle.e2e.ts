@@ -518,7 +518,7 @@ for (const advance of ["next", "hold"] as const) {
         await expect(page.locator(".triage-bar")).toBeVisible();
         await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "launch-failed");
         expect(await page.locator(".triage-bar").evaluate(bar => getComputedStyle(bar, "::before").backgroundColor))
-          .toBe(status === 403 ? "rgb(200, 80, 69)" : "rgb(201, 155, 69)");
+          .toBe(status === 403 ? "rgb(255, 99, 105)" : "rgb(142, 142, 149)");
         await expect(page.locator(".triage-copy")).toHaveText(notice!);
         await expect(page.locator(".triage-action")).toHaveText("Sessions");
         if (status === 403) {
@@ -576,7 +576,9 @@ for (const remote of [false, true]) {
             await expect(page.locator(".working-row")).toHaveAttribute("aria-label", `View ${withdrawnTitle}`);
             await expect(page.locator(".working-row")).toBeDisabled();
           } else {
-            await expect(page.locator(".action-request")).toHaveText("View transcript");
+            // Reading does not take the wheel, so the fallback primary gives up the attention color.
+            await expect(page.locator(".queue-hero .action")).toHaveText("View transcript");
+            await expect(page.locator(".queue-hero .action")).toHaveCSS("background-color", "rgb(245, 245, 243)");
           }
           release.resolve();
           await expect(page.locator(remote ? "#fleet-status" : "#status-banner"))

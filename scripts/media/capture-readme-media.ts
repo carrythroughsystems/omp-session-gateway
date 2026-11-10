@@ -366,14 +366,16 @@ async function renderComposites(
 ): Promise<number> {
   const framesDirectory = join(stagingRoot, "frames");
   await mkdir(framesDirectory);
-  const [logo, allClear, discovered, needsYou, openRequest] = await Promise.all([
+  const [logo, font, allClear, discovered, needsYou, openRequest] = await Promise.all([
     readFile(join(REPOSITORY_ROOT, "assets/logo.svg")),
+    readFile(join(REPOSITORY_ROOT, COMPOSITOR_FONT)),
     readFile(paths.allClear),
     readFile(paths.discovered),
     readFile(paths.needsYou),
     readFile(paths.openRequest),
   ]);
   const logoDataUrl = dataUrl("image/svg+xml", logo);
+  const fontDataUrl = dataUrl("font/woff2", font);
   const runtimeDataUrls = {
     allClear: dataUrl("image/png", allClear),
     discovered: dataUrl("image/png", discovered),
@@ -399,7 +401,7 @@ async function renderComposites(
 
   try {
     await page.setContent(
-      createDemoCompositorHtml({ logoDataUrl, screens: runtimeDataUrls, tapPoint }),
+      createDemoCompositorHtml({ logoDataUrl, fontDataUrl, screens: runtimeDataUrls, tapPoint }),
       { waitUntil: "load" },
     );
     await waitForEmbeddedImages(page);
@@ -435,6 +437,7 @@ async function renderComposites(
     await page.setContent(
       createFlowCompositorHtml({
         logoDataUrl,
+        fontDataUrl,
         screens: {
           allClear: runtimeDataUrls.allClear,
           needsYou: runtimeDataUrls.needsYou,
@@ -563,8 +566,11 @@ async function collectToolVersions(browser: Browser): Promise<ToolVersions> {
   };
 }
 
+/** The composites' text face: the PWA's own vendored Geist subset, embedded as a data URL. */
+const COMPOSITOR_FONT = "apps/web/src/fonts/geist/geist-latin.woff2";
+
 function compositeInputs(
-  logoHash: string,
+  brandHashes: Readonly<Record<"logo" | "font", string>>,
   hashes: Readonly<Record<"allClear" | "discovered" | "needsYou" | "openRequest", string>>,
   names: readonly (keyof typeof hashes)[],
 ): readonly CompositeInput[] {
@@ -576,7 +582,8 @@ function compositeInputs(
   };
   return [
     ...names.map(name => ({ id: idByName[name], sha256: hashes[name] })),
-    { id: "brand:assets/logo.svg", sha256: logoHash },
+    { id: "brand:assets/logo.svg", sha256: brandHashes.logo },
+    { id: `brand:${COMPOSITOR_FONT}`, sha256: brandHashes.font },
   ];
 }
 
@@ -623,18 +630,21 @@ async function buildManifest(
     needsYou: await sha256File(paths.needsYou),
     openRequest: await sha256File(paths.openRequest),
   };
-  const logoHash = await sha256File(join(REPOSITORY_ROOT, "assets/logo.svg"));
+  const brandHashes = {
+    logo: await sha256File(join(REPOSITORY_ROOT, "assets/logo.svg")),
+    font: await sha256File(join(REPOSITORY_ROOT, COMPOSITOR_FONT)),
+  };
   const allCompositeInputs = compositeInputs(
-    logoHash,
+    brandHashes,
     runtimeHashes,
     ["allClear", "discovered", "needsYou", "openRequest"],
   );
   const flowCompositeInputs = compositeInputs(
-    logoHash,
+    brandHashes,
     runtimeHashes,
     ["allClear", "needsYou", "openRequest"],
   );
-  const posterCompositeInputs = compositeInputs(logoHash, runtimeHashes, ["needsYou"]);
+  const posterCompositeInputs = compositeInputs(brandHashes, runtimeHashes, ["needsYou"]);
 
   const pngRecord = async (
     name: Extract<BinaryMediaName, `${string}.png`>,
@@ -789,11 +799,11 @@ The synthetic clock is ${manifest.capture.clock}, with locale ${manifest.capture
 | --- | --- |
 | \`01-all-clear.png\`, \`02-needs-you.png\`, \`04-notification-settings.png\` | Raw viewport screenshots of the actual built PWA. No frame, caption, marker, toast, crop, or compositor pixels. |
 | \`03-open-request.png\` | Raw viewport screenshot of gateway chrome containing the actual built, pinned OMP collaboration client and its synthetic encrypted ask. |
-| GIF, MP4, poster, product-flow board | Offline presentation composites. The embedded phone screens are complete runtime screenshots; the surrounding grid, editorial copy, phone frame, arrows, one tap marker, and Android notification toast are capture-only chrome. |
+| GIF, MP4, poster, product-flow board | Offline presentation composites. The embedded phone screens are complete runtime screenshots; the surrounding editorial copy, phone frame, arrows, one tap marker, and Android notification toast are capture-only chrome. |
 
 The capture-only Android toast uses the strict product title “OMP session needs attention” and the default Session-detail body. It is not a product DOM element or a real system notification. The animation’s discovered fifth session comes from a real fixture SSE upsert, and the tap marker is derived from the runtime Open request button bounds.
 
-Runtime requests are restricted to the same-origin loopback fixture. The compositor accepts no requests and embeds local images and the Gate mark as data URLs. The capture records no origin, port, capability, room key, endpoint, hostname, account, or filesystem path.
+Runtime requests are restricted to the same-origin loopback fixture. The compositor accepts no requests and embeds local images, the mark, and the Geist text face as data URLs. The capture records no origin, port, capability, room key, endpoint, hostname, account, or filesystem path.
 
 Security boundary: loopback-only gateway · memory-only capabilities · no transcript storage. Community project; not affiliated with OMP.
 

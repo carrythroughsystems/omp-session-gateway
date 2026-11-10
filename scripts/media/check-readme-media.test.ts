@@ -25,6 +25,7 @@ const FIXTURE_FILES = [
   "UPSTREAM.lock.json",
   "packages/collab-client/upstream/UPSTREAM.json",
   "assets/logo.svg",
+  "apps/web/src/fonts/geist/geist-latin.woff2",
   "scripts/media/readme-media-contract.ts",
   "scripts/media/readme-media-compositor.ts",
   "scripts/media/capture-readme-media.ts",

@@ -48,6 +48,8 @@ export default defineConfig({
     hasTouch: true,
     isMobile: true,
     serviceWorkers: "allow",
+    // The theme follows the system. The suite asserts the dark palette; `theme.e2e.ts` emulates light.
+    colorScheme: "dark",
     userAgent: androidUserAgent,
   },
   projects: [

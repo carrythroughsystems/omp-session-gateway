@@ -670,7 +670,7 @@ the permanent restore surface prevents local state from becoming irrecoverable.
 
 ## ADR-027 — Ship the couch-flow visual system with a Settings sheet and a precached client
 
-**Status:** Accepted
+**Status:** Accepted; its visual system is superseded by [ADR-049](#adr-049--signal-a-monochrome-system-in-which-color-is-state)
 
 **Context:** The first couch-flow directory carried a labeled "Dismiss here" button on every
 working row, rendered ask previews in uppercase mono, kept notification controls as a bottom-of-
@@ -1886,7 +1886,7 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 
 ## ADR-039 — Session identity tiles with a self-hosted Nerd Font symbol subset
 
-**Status:** Accepted
+**Status:** Accepted; the light tile and the system-font rule for ordinary text are superseded by [ADR-049](#adr-049--signal-a-monochrome-system-in-which-color-is-state)
 
 **Date:** 2026-10-24
 
@@ -1924,6 +1924,8 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 
 **Status:** Accepted; supersedes ADR-027's Settings-sheet presentation and the Hide/Undo toast
 presentation in ADR-026/ADR-040. Notification, local-routing and capability semantics are unchanged.
+The floating presentation and tone are restated by
+[ADR-049](#adr-049--signal-a-monochrome-system-in-which-color-is-state).
 
 **Date:** 2026-10-24
 
@@ -1982,7 +1984,7 @@ timing, recovery and capability sinks; the 18-state visual harness serializes th
 
 ## ADR-042 — First-run trays and one all-clear arrival
 
-**Status:** Accepted
+**Status:** Accepted; the mark and its colors are restated by [ADR-049](#adr-049--signal-a-monochrome-system-in-which-color-is-state)
 
 **Date:** 2026-10-24
 
@@ -2545,3 +2547,80 @@ leaves its alert. After a downgrade with reconciles but no push, an older worker
 leave a resolved ask in the map until that source's next fresh snapshot. A failed IndexedDB write
 keeps the existing in-memory fallback. Push bytes, the coordinator, and capability boundaries are
 unchanged.
+
+---
+
+## ADR-049 — Signal: a monochrome system in which color is state
+
+**Status:** Accepted; supersedes the visual system of
+[ADR-027](#adr-027--ship-the-couch-flow-visual-system-with-a-settings-sheet-and-a-precached-client)
+(palette, masthead, bordered cards), the light session tile and the "ordinary text stays on system
+font stacks" rule of
+[ADR-039](#adr-039--session-identity-tiles-with-a-self-hosted-nerd-font-symbol-subset), the
+edge-attached tray presentation of [ADR-041](#adr-041--one-native-tray-system), and the 32px
+first-run mark of [ADR-042](#adr-042--first-run-trays-and-one-all-clear-arrival). Tray behavior,
+motion gating, first-run sequencing, the all-clear arrival, and every capability, notification,
+and protocol rule are unchanged.
+
+**Date:** 2026-11-09
+
+**Context:** **OMP Sessions** answers one question on a phone — does anything need you? — but it
+read as an infrastructure dashboard. The masthead spent a third of the screen on a tracked
+uppercase eyebrow and a second row of tools; every object was a bordered box; white monogram tiles
+outshone the request they sat beside; emerald meant live, link, focus, selected, primary, and
+brand at once, so it meant nothing; text glyphs stood in for icons and changed shape with the
+platform font; and the mark read as two letters. The identity was dark-only and its text face was
+whatever the device supplied. The founder chose the "Signal" direction, the "Portal" mark, a
+theme that follows the system, and one coherent change across the PWA, icons, site, artwork, and
+media (2026-11-09).
+
+**Decision:**
+
+- **Color is state.** The chassis is monochrome. Green means live, amber means your turn, red
+  means denied; `docs/BRANDING.md` lists exactly what each may touch. Neutral primary actions,
+  focus, links, selection, and switches are ink. Faults that ask nothing of the operator —
+  offline, tailnet, desktop, gateway, reconnecting, a failed non-authorization launch — lose their
+  amber and carry no color: the page loses its green instead. Only a denial is red. No state
+  depends on hue alone: filled is active, a ring is at rest, a dashed tile is a cached row.
+- **The theme is the system's.** One stylesheet declares dark tokens and overrides them under
+  `prefers-color-scheme: light`; there is no toggle and no stored preference. The pinned client
+  writes its resolved theme to `data-theme` on the root, so the light block yields to
+  `data-theme="dark"` and the two can never disagree where that attribute is pinned. The document
+  declares both schemes and two `theme-color` values; the manifest keeps its one dark splash
+  color. README media and the visual lane are pinned to dark; the browser lanes pin dark and
+  `apps/web/e2e/theme.e2e.ts` proves light and a scheme change without reload.
+- **Type is Geist.** `scripts/vendor-geist.ts` subsets the upright, italic, and mono variable
+  faces from the SHA-256-pinned upstream release (OFL-1.1, no reserved font name) into
+  `apps/web/src/fonts/geist/` with a manifest of digests. The build emits content-hashed files
+  and `@font-face` rules; the two upright faces (58 KB) join the precached shell and are
+  preloaded, the italic is cached on first use, and `font-display: swap` keeps text visible. A
+  tray is sized in script, so it re-measures when a face arrives late. Mono is reserved for
+  identifiers. The site and the exported artwork load the same vendored files, which retires
+  Space Grotesk, JetBrains Mono, and the artwork's Google Fonts request. No remote font request
+  exists anywhere; `default-src 'self'` is unchanged.
+- **The mark is "Portal"**, an arch with a live dot inside it. Every raster icon, the artwork,
+  and a new monochrome notification badge (`badge-96.png`, white on transparent, because Android
+  draws the badge as a status-bar silhouette) render from committed sources through
+  `bun run media:brand` on a virtual origin with no network, and `assets/artwork.json` records
+  source, input, and output digests for the coherence test.
+- **Structure.** One toolbar row replaces the eyebrow and tool row. One elevated card holds the
+  request that needs you; every other session is a plain row. Trays float inside every edge with
+  no border. Session tiles are neutral so the state badge is the only color on a row. Icons are
+  drawn by `apps/web/src/icons.ts`. Labels are sentence case.
+- **The embedded client is themed from outside.** No vendored file changes. The gateway sets the
+  client's `--gateway-*` palette and the tokens embedded mode leaves on standalone values on its
+  own shell element, inserts the client stylesheet ahead of its own so its rules win every tie
+  against the client's global reset, and gives the request card one measure at every width. The
+  client's text face becomes Geist; its mono stack stays its own, because tool output needs
+  box-drawing and block glyphs at one advance width that a latin subset cannot supply. Gateway
+  token names are disjoint from the client's.
+
+**Consequences:** State is legible at a glance and without color vision; the request that needs
+the operator is the only elevated, colored object on the page. The light scheme is new surface
+area that every later change must consider, and the visual lane's dark baseline does not cover it.
+First paint costs two preloaded font files once, then nothing; a device that cannot fetch them
+renders the system fallback. The stylesheet relies on `:has()` for two refinements (the mark's
+dot and the first-run primary action), which degrade to the default presentation. The Percy
+baseline, README media, site, and social card all change together with this decision. The
+collaboration client's transcript rendering, the tray module's behavior, the motion gate, and
+every security invariant are untouched.

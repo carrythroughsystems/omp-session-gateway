@@ -1082,8 +1082,11 @@ artifacts retain only reconstructed, closed-set stdout/stderr and numeric summar
 `test-results/visual-diagnostics/`, never raw vendor output, credentials or URLs. Queued snapshots
 are not described as submitted until the owning CLI confirms build finalization. The six states are empty/all-clear/needs-you
 directory, Settings with Session alerts enabled, connected View and connected Control Ask, each at
-390×844, 810×1080 and 1280×800 with a fixed clock/randomness, en-US/UTC, dark theme, reduced
-motion and DPR 1. Directory asks are metadata-only, collaboration prose/code are authored synthetic,
+390×844, 810×1080 and 1280×800 with a fixed clock/randomness, en-US/UTC, the dark scheme, reduced
+motion and DPR 1. The theme follows the system (ADR-049): the lane pins dark through the
+resolved-theme attribute the stylesheet yields to, so its baseline does not cover the light
+scheme; `apps/web/e2e/theme.e2e.ts` exercises light and a scheme change without reload on every
+engine of the compatibility lane. Directory asks are metadata-only, collaboration prose/code are authored synthetic,
 and the desktop contract remains a 560px directory, 900px View transcript and aligned session
 header. Control Ask preserves the client's 880px bounded embedded body and checks exact
 source/serialized parity and session-header alignment instead of imposing a 900px inner transcript.
