@@ -98,8 +98,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await expect(page).toHaveURL(`${fixture.origin}/client/`);
       await page.locator(".shell-back").click();
       await expect(page.locator(".queue-hero")).toBeVisible();
-      await expect(page.locator(".hero-options")).toHaveCSS("min-height", "48px");
-      await expect(page.locator(".hero-options")).not.toHaveCSS("border-top-color", "rgba(0, 0, 0, 0)");
+      expect(await page.locator(".hero-options").evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(48);
       expect(await page.locator(".hero-options").evaluate(element => element.getBoundingClientRect().width))
         .toBeLessThan(await page.locator(".action-request").evaluate(element => element.getBoundingClientRect().width));
 
@@ -129,7 +128,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       await capture("request-connecting");
       releaseLaunch();
       await expect(tray.locator("#root .sh-app")).toHaveCount(1);
-      await expect(page.locator("body")).toHaveCSS("background-color", "rgb(6, 8, 9)");
+      await expect(page.locator("body")).toHaveCSS("background-color", "rgb(0, 0, 0)");
       await expect(page.locator("body")).toHaveCSS("font-size", "16px");
       await expect(page.locator(".sh-ask-send")).toBeEnabled();
       await expect.poll(async () => tray.evaluate(element => element.getAnimations().length)).toBe(0);
@@ -148,6 +147,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       const shell = await tray.locator(".gateway-shell").boundingBox();
       expect(Math.abs(frame!.width - shell!.width)).toBeLessThanOrEqual(1);
       expect((await tray.locator(".triage-bar").boundingBox())!.height).toBeLessThan(100);
+      await expect(tray.locator(".triage-action")).toHaveCSS("min-height", "48px");
       const headerCenters = await header.locator(":scope > *").evaluateAll(elements => elements.map(element => {
         const box = element.getBoundingClientRect();
         return box.y + box.height / 2;
@@ -398,7 +398,7 @@ for (const staleStream of [false, true]) {
         ask: { ...GATEWAY_WAITING.ask!, requestId: "hold-regression-successor" },
       };
       fixture.upsert(successor);
-      await expect(page.locator(".triage-copy")).toHaveText("✓ Answered — 1 more needs you");
+      await expect(page.locator(".triage-copy")).toHaveText("Answered — 1 more needs you");
       await expect(page.locator(".triage-action")).toHaveText("Next ask →");
       await page.locator(".triage-action").click();
       await expect(page.locator(".sh-ask-send")).toBeVisible();

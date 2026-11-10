@@ -23,11 +23,11 @@ Keep using [Oh My Pi](https://github.com/can1357/oh-my-pi) in your terminal. OMP
 [![License][license-badge]][license]
 
 [ci]: https://github.com/carrythroughsystems/omp-session-gateway/actions/workflows/ci.yml
-[ci-badge]: https://img.shields.io/github/actions/workflow/status/carrythroughsystems/omp-session-gateway/ci.yml?branch=main&label=CI&labelColor=0B0E11
+[ci-badge]: https://img.shields.io/github/actions/workflow/status/carrythroughsystems/omp-session-gateway/ci.yml?branch=main&label=CI&labelColor=111113
 [releases]: https://github.com/carrythroughsystems/omp-session-gateway/releases
-[release-badge]: https://img.shields.io/github/v/release/carrythroughsystems/omp-session-gateway?filter=v*&label=release&color=C99B45&labelColor=0B0E11
+[release-badge]: https://img.shields.io/github/v/release/carrythroughsystems/omp-session-gateway?filter=v*&label=release&color=29292D&labelColor=111113
 [license]: LICENSE
-[license-badge]: https://img.shields.io/github/license/carrythroughsystems/omp-session-gateway?color=1C232B&labelColor=0B0E11
+[license-badge]: https://img.shields.io/github/license/carrythroughsystems/omp-session-gateway?color=29292D&labelColor=111113
 
 Works with stock [OMP 18.1.20+](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20) — no fork or custom build.
 

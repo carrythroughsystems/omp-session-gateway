@@ -27,8 +27,12 @@ publisher-token
 
 # Staged into site/ from their canonical sources by .github/workflows/pages.yml; never commit copies.
 site/logo.svg
+site/logo-light.svg
 site/favicon.svg
 site/og.png
+site/fonts/geist-latin.woff2
+site/fonts/geist-mono-latin.woff2
+site/fonts/LICENSE.txt
 site/screen-all-clear.png
 site/screen-needs-you.png
 site/screen-open-request.png

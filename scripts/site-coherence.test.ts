@@ -15,13 +15,17 @@ const siteOrigin = "https://carrythroughsystems.github.io/omp-session-gateway/";
 
 /**
  * Assets the Pages workflow copies into `site/` at deploy time so the site never carries a
- * second copy of a brand or media file. Keys are site-relative names, values their canonical
+ * second copy of a brand, font, or media file. Keys are site-relative names, values their canonical
  * sources; `.github/workflows/pages.yml` and the `site/` block in `.gitignore` list the same set.
  */
 const STAGED_SITE_ASSETS: Record<string, string> = {
   "logo.svg": "assets/logo.svg",
+  "logo-light.svg": "assets/logo-light.svg",
   "favicon.svg": "apps/web/src/favicon.svg",
   "og.png": "assets/og.png",
+  "fonts/geist-latin.woff2": "apps/web/src/fonts/geist/geist-latin.woff2",
+  "fonts/geist-mono-latin.woff2": "apps/web/src/fonts/geist/geist-mono-latin.woff2",
+  "fonts/LICENSE.txt": "licenses/fonts/geist/LICENSE",
   "screen-all-clear.png": "docs/media/01-all-clear.png",
   "screen-needs-you.png": "docs/media/02-needs-you.png",
   "screen-open-request.png": "docs/media/03-open-request.png",
@@ -202,17 +206,21 @@ test("current release claims name only the locked release and candidate", async 
 });
 
 test("every relative asset a site page references exists after staging", async () => {
+  const workflow = await readFile(join(rootPath, ".github/workflows/pages.yml"), "utf8");
   for (const [name, source] of Object.entries(STAGED_SITE_ASSETS)) {
     expect(await Bun.file(join(rootPath, source)).exists(), `${source} is the canonical source of site/${name}`).toBe(true);
+    expect(workflow, `the Pages workflow stages ${source}`).toContain(source);
   }
+  // OFL-1.1 fonts are redistributed only with their license beside them.
+  expect(STAGED_SITE_ASSETS["fonts/LICENSE.txt"]).toBe("licenses/fonts/geist/LICENSE");
   for (const page of await sitePages()) {
     const html = await readFile(page.path, "utf8");
-    for (const match of html.matchAll(/\b(?:src|href)="([^"#]+)"/g)) {
+    for (const match of html.matchAll(/\b(?:src|srcset|href)="([^"#]+)"/g)) {
       const target = match[1] ?? "";
       if (/^(?:https?:)?\/\//.test(target) || target === "") continue;
       const resolved = join(dirname(page.path), target);
       const committed = await Bun.file(target.endsWith("/") ? join(resolved, "index.html") : resolved).exists();
-      const staged = Object.hasOwn(STAGED_SITE_ASSETS, relative(sitePath, resolved));
+      const staged = Object.hasOwn(STAGED_SITE_ASSETS, relative(sitePath, resolved).split(sep).join("/"));
       expect(committed || staged, `${relative(rootPath, page.path)} references missing ${target}`).toBe(true);
     }
   }
@@ -243,10 +251,21 @@ test("sitemap and canonical links name exactly the site pages under the canonica
 test("rendered artwork matches its committed source and the README promise", async () => {
   const sha256 = async (file: string) => createHash("sha256").update(await readFile(join(rootPath, file))).digest("hex");
   const manifest = JSON.parse(await readFile(join(rootPath, "assets/artwork.json"), "utf8")) as ArtworkManifest;
-  expect(Object.keys(manifest.artwork).sort()).toEqual(["assets/banner.png", "assets/og.png"]);
+  expect(Object.keys(manifest.artwork).sort()).toEqual([
+    "apps/web/src/apple-touch-icon-180.png",
+    "apps/web/src/badge-96.png",
+    "apps/web/src/icon-192.png",
+    "apps/web/src/icon-512.png",
+    "apps/web/src/icon-maskable-512.png",
+    "assets/banner.png",
+    "assets/og.png",
+  ]);
   for (const [output, record] of Object.entries(manifest.artwork)) {
     expect(await sha256(record.source), `${record.source} changed without \`bun run media:brand\``).toBe(record.sourceSha256);
     expect(await sha256(output), `${output} differs from the recorded render`).toBe(record.outputSha256);
+    for (const [input, digest] of Object.entries(record.inputs ?? {})) {
+      expect(await sha256(input), `${input} changed without \`bun run media:brand\``).toBe(digest);
+    }
   }
   expect(manifest.artwork[STAGED_SITE_ASSETS["og.png"] ?? ""]).toMatchObject({ width: 1280, height: 640 });
 

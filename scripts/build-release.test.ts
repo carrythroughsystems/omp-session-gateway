@@ -149,6 +149,7 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
     "@oh-my-pi/collab-web@16.3.6",
     "@oh-my-pi/pi-utils (vendored pure helpers)@18.18.0",
     "Symbols Nerd Font Mono@v3.5.1",
+    "Geist@v1.9.2",
     ...expectedRuntimeDependencies,
   ]);
   expect(document.packages[0]?.sourceInfo).toContain(lockSha256);
@@ -170,6 +171,7 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
   const font = document.packages.find(pkg => pkg.name === "Symbols Nerd Font Mono");
   expect(font?.licenseDeclared).toBe("MIT");
   expect(font?.licenseConcluded).toBe("MIT AND Apache-2.0 AND CC-BY-4.0 AND OFL-1.1 AND OFL-1.1-RFN AND Unlicense");
+  expect(document.packages.find(pkg => pkg.name === "Geist")?.licenseConcluded).toBe("OFL-1.1");
 
   const otherSourceDocument = JSON.parse(
     createSpdxSbom(lock, releaseSourceFromEpoch("c".repeat(40), "1700000000"), client, lockSha256),

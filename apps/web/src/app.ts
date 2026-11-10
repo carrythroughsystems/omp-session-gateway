@@ -38,6 +38,7 @@ import {
 } from "./fleet";
 import { sourceAvailability as describeSource, scopeCoverage as coverageForSources } from "./availability";
 import { createTray, type TrayPanel } from "./tray";
+import { createIcon } from "./icons";
 import { SessionCreationController } from "./session-creation";
 
 type SessionMetadata = Metadata & { readonly sourceKey: SourceKey };
@@ -83,11 +84,7 @@ const hostPickerLabel = requiredElement<HTMLElement>("#host-picker-label");
 const fleetStatus = requiredElement<HTMLElement>("#fleet-status");
 const alertScope = requiredElement<HTMLElement>("#alert-scope");
 const alertsPanel = requiredElement<HTMLElement>("#alerts-panel");
-const notificationHosts = document.createElement("section");
-notificationHosts.className = "notification-hosts";
-notificationHosts.hidden = true;
-notificationHosts.setAttribute("aria-label", "Hosts");
-alertsPanel.append(notificationHosts);
+const notificationHosts = requiredElement<HTMLElement>("#notification-hosts");
 const detailPanel = requiredElement<HTMLElement>("#detail-panel");
 const alertDetailButton = requiredElement<HTMLButtonElement>("#alert-detail");
 const settingsButton = requiredElement<HTMLButtonElement>("#settings");
@@ -110,7 +107,6 @@ const TRANSPORT_GUIDANCE_DELAY_MS = 45_000;
 const LOCAL_ACTION_UNDO_MS = 5_000;
 const HELD_ASKS_STORAGE_KEY = HELD_KEY;
 const DISMISSED_SESSIONS_STORAGE_KEY = DISMISSED_KEY;
-const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const FIRST_RUN_KEY = "omp.sessions.first-run.v1";
 const firstRunEntry = location.pathname === "/";
 type FirstRunStep = "connected" | "alerts" | "modes" | "done";
@@ -387,8 +383,8 @@ function firstRunPanel(step: Exclude<FirstRunStep, "done">): TrayPanel {
   if (step === "connected") {
     const mark = requiredElement<SVGElement>("#gateway-mark").cloneNode(true) as SVGElement;
     mark.removeAttribute("id");
-    mark.setAttribute("width", "32");
-    mark.setAttribute("height", "32");
+    mark.setAttribute("width", "44");
+    mark.setAttribute("height", "47");
     const count = scopedSessions().filter(session => sourceFresh(session.sourceKey)).length;
     body.append(mark, createTextElement("p", "first-run-copy",
       `This phone is on your tailnet. ${count === 0 ? "No live sessions are listed yet" : `${count} live session${count === 1 ? " is" : "s are"} listed across the checked hosts`}.`),
@@ -402,15 +398,16 @@ function firstRunPanel(step: Exclude<FirstRunStep, "done">): TrayPanel {
     body.append(alertsPanel, notNow);
   } else {
     for (const [label, glyph, copy] of [
-      ["View", "◉", "Watch a session live. Nothing you do reaches it."],
-      ["Control", "›", "Answer requests and send prompts. Opens only when you tap it."],
-    ]) {
+      ["View", "eye", "Watch a session live. Nothing you do reaches it."],
+      ["Control", "send", "Answer requests and send prompts. Opens only when you tap it."],
+    ] as const) {
       const row = document.createElement("div");
       row.className = "first-run-mode";
-      const icon = createTextElement("span", "first-run-glyph", glyph!);
+      const icon = createTextElement("span", "first-run-glyph", "");
+      icon.append(createIcon(glyph));
       icon.setAttribute("aria-hidden", "true");
       const text = document.createElement("div");
-      text.append(createTextElement("h3", "", label!), createTextElement("p", "", copy!));
+      text.append(createTextElement("h3", "", label), createTextElement("p", "", copy));
       row.append(icon, text);
       body.append(row);
     }
@@ -889,7 +886,9 @@ async function savePushSubscription(
 function selectNotificationDetail(detailLevel: PushDetailLevel): void {
   currentNotificationDetail = detailLevel;
   for (const input of notificationDetailInputs) input.checked = input.value === detailLevel;
-  alertDetailButton.textContent = `Alert detail · ${detailLevel[0]!.toUpperCase()}${detailLevel.slice(1)} ›`;
+  const level = `${detailLevel[0]!.toUpperCase()}${detailLevel.slice(1)}`;
+  alertDetailButton.setAttribute("aria-label", `Alert detail: ${level}`);
+  alertDetailButton.replaceChildren("Alert detail", createTextElement("span", "choice-value", level), createIcon("chevron-right"));
 }
 
 function clearUpdateReloadTimeout(): void {
@@ -1828,10 +1827,11 @@ function createTextElement(tagName: string, className: string, text: string): HT
   return element;
 }
 
-function createQueueKicker(label: string, detail?: string): HTMLElement {
+/** A section label; `wait` is how long the next request has waited, `note` describes the order. */
+function createQueueKicker(label: string, detail?: string, kind: "wait" | "note" = "wait"): HTMLElement {
   const kicker = createTextElement("p", "queue-kicker", label);
   if (detail !== undefined) {
-    kicker.append(createTextElement("span", "queue-wait", detail));
+    kicker.append(createTextElement("span", `queue-${kind}`, detail));
   }
   return kicker;
 }
@@ -1871,44 +1871,6 @@ function createSessionSummary(session: SessionMetadata): HTMLElement {
     contextFacts(session),
     sourceFresh(session.sourceKey) ? [["working-model", session.model === undefined ? undefined : modelSlug(session.model)]] : freshnessFacts(session),
   ]) ?? createTextElement("span", "row-meta", "Live OMP session");
-}
-
-function createHideIcon(): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
-  svg.setAttribute("viewBox", "0 0 20 20");
-  svg.setAttribute("width", "20");
-  svg.setAttribute("height", "20");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("aria-hidden", "true");
-  for (const [name, attributes] of [
-    ["path", { d: "M2.6 10c1.9-3 4.4-4.5 7.4-4.5s5.5 1.5 7.4 4.5c-1.9 3-4.4 4.5-7.4 4.5S4.5 13 2.6 10Z", "stroke-linejoin": "round" }],
-    ["circle", { cx: "10", cy: "10", r: "2.4" }],
-    ["path", { d: "M4.5 15.5l11-11", "stroke-linecap": "round" }],
-  ] as const) {
-    const shape = document.createElementNS(SVG_NAMESPACE, name);
-    shape.setAttribute("stroke", "currentColor");
-    shape.setAttribute("stroke-width", "1.6");
-    for (const [attribute, value] of Object.entries(attributes)) shape.setAttribute(attribute, value);
-    svg.append(shape);
-  }
-  return svg;
-}
-
-function createExpandIcon(): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
-  svg.setAttribute("viewBox", "0 0 20 20");
-  svg.setAttribute("width", "20");
-  svg.setAttribute("height", "20");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(SVG_NAMESPACE, "path");
-  path.setAttribute("d", "M12 3h5v5M17 3l-6 6M8 17H3v-5M3 17l6-6");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.6");
-  path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-linejoin", "round");
-  svg.append(path);
-  return svg;
 }
 
 async function closeHeldAskNotification(held: HeldAsk): Promise<void> {
@@ -2068,7 +2030,7 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   dismiss.className = "dismiss-session";
   dismiss.title = "Hide on this device — the OMP process keeps running";
   dismiss.setAttribute("aria-label", `Hide ${spokenTitle(session)} on this device`);
-  dismiss.append(createHideIcon());
+  dismiss.append(createIcon("eye-off"));
   dismiss.addEventListener("click", () => dismissSession(session));
   frame.append(button, dismiss);
   return frame;
@@ -2101,7 +2063,7 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
     createSessionTile(session, "waiting"),
     copy,
     createTextElement("span", "row-time", waitingLabel(session)),
-    createTextElement("span", "row-chevron", "›"),
+    createIcon("chevron-right", "icon row-chevron"),
   );
   button.addEventListener("click", () =>
     void launch(session, mode, button, session.ask?.requestId, selectedScope, "request-tray"),
@@ -2227,7 +2189,9 @@ function renderWaitingQueue(
     );
     sessionList.append(summary);
   } else {
-    sessionList.append(createQueueKicker("Up next", selectedScope === "all" && sources.size > 1 ? "observed waiting order" : waitingLabel(hero)));
+    sessionList.append(selectedScope === "all" && sources.size > 1
+      ? createQueueKicker("Up next", "observed waiting order", "note")
+      : createQueueKicker("Up next", waitingLabel(hero)));
     const article = document.createElement("article");
     article.className = "queue-hero";
     article.dataset.fresh = String(sourceFresh(hero.sourceKey));
@@ -2261,7 +2225,8 @@ function renderWaitingQueue(
 
     const primary = document.createElement("button");
     primary.type = "button";
-    primary.className = "action action-request";
+    // `action-request` stays the hero's primary hook; reading a transcript does not take the wheel.
+    primary.className = hero.canControl ? "action action-request" : "action action-request action-view";
     primary.textContent = hero.canControl ? "Open request" : "View transcript";
     primary.disabled = !sourceFresh(hero.sourceKey) || (hero.canControl ? false : !hero.canView);
     if (pendingLaunch !== undefined && sameBinding(pendingLaunch.ref, hero)) {
@@ -2626,23 +2591,17 @@ function showTriageBar(
   action?: () => void,
 ): void {
   if (shell.launchFailureSource !== undefined && kind !== "launch-failed" && kind !== "ended") return;
-  const drawCheck = kind === "clear" && copy.startsWith("✓ Answered — all clear") &&
-    shell.triageBar.dataset.kind !== "clear";
+  // The copy's leading "✓ " is drawn: an accepted answer is confirmed with the live color.
+  const answered = copy.startsWith("✓ ");
+  const drawCheck = answered && kind === "clear" && shell.triageBar.dataset.kind !== "clear";
   hideTriageBar(shell, false);
   shell.triageBar.dataset.kind = kind;
   shell.answerTriageVisible = kind === "next" || kind === "clear";
-  const message = createTextElement("span", "triage-copy", drawCheck ? copy.slice(2) : copy);
-  if (drawCheck) {
-    const check = document.createElementNS(SVG_NAMESPACE, "svg");
-    check.setAttribute("class", "triage-check");
-    check.setAttribute("viewBox", "0 0 20 20");
-    check.setAttribute("aria-hidden", "true");
-    const path = document.createElementNS(SVG_NAMESPACE, "path");
-    path.setAttribute("d", "M4 10l4 4 8-8");
-    path.setAttribute("pathLength", "1");
-    check.append(path);
+  const message = createTextElement("span", "triage-copy", answered ? copy.slice(2) : copy);
+  if (answered) {
+    const check = createIcon("check", "triage-check");
     message.prepend(check);
-    if (!reducedMotion.matches && document.visibilityState === "visible") check.dataset.arrived = "true";
+    if (drawCheck && !reducedMotion.matches && document.visibilityState === "visible") check.dataset.arrived = "true";
   }
   if (actionLabel !== undefined && action !== undefined) {
     const button = document.createElement("button");
@@ -3080,14 +3039,14 @@ async function loadCollabStylesheet(): Promise<HTMLLinkElement> {
   link.rel = "stylesheet";
   link.href = __COLLAB_CLIENT_STYLESHEET__;
   link.dataset.ompCollabStyles = "true";
-  const loaded = new Promise<HTMLLinkElement>((resolve, reject) => {
-    link.addEventListener("load", () => resolve(link), { once: true });
-    link.addEventListener("error", () => reject(new Error("collaboration client stylesheet failed to load")), {
-      once: true,
-    });
+  const { promise: loaded, resolve, reject } = Promise.withResolvers<HTMLLinkElement>();
+  link.addEventListener("load", () => resolve(link), { once: true });
+  link.addEventListener("error", () => reject(new Error("collaboration client stylesheet failed to load")), {
+    once: true,
   });
   collabStylesheetLoad = loaded;
-  document.head.append(link);
+  // Ahead of the gateway stylesheet, so the client's global reset loses every tie to it.
+  document.head.prepend(link);
   try { return await loaded; }
   catch (error) { collabStylesheetLoad = undefined; link.remove(); throw error; }
 }
@@ -3172,7 +3131,8 @@ function enterCollabClient(
   const back = document.createElement("button");
   back.type = "button";
   back.className = "shell-back";
-  back.textContent = "← Sessions";
+  back.setAttribute("aria-label", "Back to sessions");
+  back.append(createIcon("chevron-left"), createTextElement("span", "shell-back-label", "Sessions"));
   back.addEventListener("click", () => {
     if (shellState.presentation === "request-tray") returnToDirectory();
     else history.back();
@@ -3287,7 +3247,7 @@ function enterCollabClient(
       expand.type = "button";
       expand.className = "tray-expand";
       expand.setAttribute("aria-label", "Expand to full screen");
-      expand.append(createExpandIcon());
+      expand.append(createIcon("expand"));
       const promote = (): void => tray.promote(() => {
         if (activeCollabShell !== shellState || shellState.presentation !== "request-tray") return;
         if (shellState.latestEmbedState?.gatewayHealth.state === "forbidden") {
@@ -3980,6 +3940,8 @@ for (const id of ["#new-session", "#empty-new-session"]) {
 settingsButton.addEventListener("click", openAlerts);
 trayHost.addEventListener("close", maybeStartFirstRun);
 notificationButton.addEventListener("click", () => void toggleBackgroundNotifications());
+// A tray is sized in script from its content; a text face that arrives late changes that content.
+if ("fonts" in document) document.fonts.addEventListener("loadingdone", () => tray.refresh());
 alertDetailButton.addEventListener("click", () => tray.push({
   id: "detail", title: "Alert detail", tone: "neutral", body: detailPanel,
 }));

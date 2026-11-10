@@ -3,73 +3,29 @@
 <head>
 <meta charset="utf-8">
 <title>OMP Session Gateway — banner</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+  @font-face { font-family: "Geist"; font-weight: 100 900; src: url("../apps/web/src/fonts/geist/geist-latin.woff2") format("woff2"); }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #060809; font-family: 'Space Grotesk', system-ui, sans-serif; }
+  body { background: #000; font-family: "Geist", system-ui, sans-serif; font-feature-settings: "ss08"; -webkit-font-smoothing: antialiased; }
   .banner {
-    position: relative; width: 1280px; height: 320px; overflow: hidden;
-    background: #060809;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    width: 1280px; height: 320px; overflow: hidden; background: #000; color: #f5f5f3;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
   }
-  .grid {
-    position: absolute; inset: 0; opacity: 0.5;
-    background-image:
-      linear-gradient(rgba(232,236,239,0.025) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(232,236,239,0.025) 1px, transparent 1px);
-    background-size: 40px 40px;
-  }
-  .glow {
-    position: absolute; left: 50%; top: 50%; width: 560px; height: 280px;
-    transform: translate(-50%, -50%);
-    background: radial-gradient(ellipse, rgba(49,196,141,0.09) 0%, transparent 65%);
-  }
-  .lockup { position: relative; display: flex; align-items: center; gap: 26px; }
-  .title { color: #E8ECEF; font-size: 46px; font-weight: 600; letter-spacing: -0.015em; }
-  .tagline {
-    position: relative; display: flex; align-items: center; gap: 12px;
-    font-family: 'JetBrains Mono', monospace; font-size: 14px; letter-spacing: 0.22em;
-    text-transform: uppercase; color: #8A939D;
-  }
-  .tagline .bracket { color: #3A434D; font-weight: 400; }
-  .status {
-    position: relative; display: flex; align-items: center; gap: 10px;
-    font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: 0.06em; color: #5F6870;
-  }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: #31C48D; }
-  .kin { width: 5px; height: 5px; border-radius: 50%; background: #F97316; }
-  .edge { position: absolute; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(49,196,141,0.35), transparent); }
-  .edge.top { top: 0; } .edge.bottom { bottom: 0; }
+  .lockup { display: flex; align-items: center; gap: 22px; }
+  .title { font-size: 52px; font-weight: 680; letter-spacing: -0.045em; line-height: 1; }
+  .tagline { color: #8e8e95; font-size: 20px; font-weight: 500; letter-spacing: -0.01em; }
 </style>
 </head>
 <body>
 <div class="banner">
-  <div class="grid"></div>
-  <div class="glow"></div>
-  <div class="edge top"></div>
   <div class="lockup">
-    <svg width="76" height="76" viewBox="0 0 96 96">
-      <rect x="12" y="16" width="72" height="10" rx="2" fill="#E8ECEF"/>
-      <rect x="24" y="26" width="10" height="52" rx="2" fill="#E8ECEF"/>
-      <rect x="62" y="26" width="10" height="52" rx="2" fill="#E8ECEF"/>
-      <circle cx="48" cy="58" r="8" fill="#31C48D"/>
+    <svg width="68" height="68" viewBox="0 0 96 96" aria-hidden="true">
+      <path d="M25 80V47a23 23 0 0 1 46 0v33" fill="none" stroke="#F5F5F3" stroke-width="12"/>
+      <circle cx="48" cy="63" r="9" fill="#30D67C"/>
     </svg>
     <div class="title">OMP Session Gateway</div>
   </div>
-  <div class="tagline">
-    <span class="bracket">[</span>
-    <span>every live OMP session &middot; one private page &middot; any modern browser</span>
-    <span class="bracket">]</span>
-  </div>
-  <div class="status">
-    <span class="dot"></span>
-    <span>loopback-only &middot; tailnet identity &middot; memory-only capabilities</span>
-    <span style="color:#3A434D;">&middot;</span>
-    <span class="kin"></span>
-    <span>companion to oh-my-pi</span>
-  </div>
-  <div class="edge bottom"></div>
+  <p class="tagline">Every live OMP session. One private page, in any modern browser.</p>
 </div>
 </body>
 </html>

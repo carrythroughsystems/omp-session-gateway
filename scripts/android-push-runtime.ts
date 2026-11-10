@@ -1842,7 +1842,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       const posted = async () => (await phaseRecords()).filter(record => record.tag.endsWith(expected.tag));
       const before = Math.max(0, ...(await posted()).map(record => record.postedAt));
       // The worker's own fields for this request: metadata only, as the push that carried it.
-      const options = { tag: expected.tag, icon: "/icon-192.png", badge: "/icon-192.png", ...(expected.body === "" ? {} : { body: expected.body }),
+      const options = { tag: expected.tag, icon: "/icon-192.png", badge: "/badge-96.png", ...(expected.body === "" ? {} : { body: expected.body }),
         data: { version: fleetEnabled ? 3 : PUSH_API_VERSION, type: "attention", instanceId: session.instanceId, requestId: session.ask.requestId,
           ...(remoteIds.has(session.instanceId) ? { source: remote.binding } : {}) } };
       if (fleetObserver !== undefined) {

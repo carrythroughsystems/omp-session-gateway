@@ -4,6 +4,7 @@ import {
   type SourceKey, type CreationPreference,
 } from "./fleet";
 import type { Tray, TrayPanel } from "./tray";
+import { createIcon } from "./icons";
 
 type Step = "host" | "project" | "working-copy" | "profile" | "review";
 type ReadyBinding = Extract<SessionCreationStatus, { state: "ready" }>["session"];
@@ -318,15 +319,7 @@ export class SessionCreationController {
       step.dataset.state = index < active ? "done" : index === active ? "active" : "future";
       if (index === active) step.setAttribute("aria-current", "step");
       if (index < active) {
-        const check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        check.setAttribute("class", "triage-check creation-step-check");
-        check.setAttribute("viewBox", "0 0 20 20");
-        check.setAttribute("aria-hidden", "true");
-        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", "M4 10l4 4 8-8");
-        path.setAttribute("pathLength", "1");
-        check.append(path);
-        step.append(check);
+        step.append(createIcon("check", "triage-check creation-step-check"));
         step.setAttribute("aria-label", `${label}, completed`);
       } else {
         const dot = document.createElement("span");

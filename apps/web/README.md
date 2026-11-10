@@ -34,20 +34,35 @@ it is idle with no pending launch, routed notification, or mounted collaboration
 
 The dashboard receives metadata only. It must not render transcripts, prefetch capabilities, or implement the OMP collaboration protocol.
 
-The service worker precaches only immutable, versioned application-shell assets. Content-hashed,
-first-party-served Symbols Nerd Font Mono chunks cover only Private Use Area glyphs; they are
-downloaded lazily by `unicode-range`, cached on first use in the shell cache, and served cache-first
-thereafter. It must bypass `/api/`, `/client/`, launch responses, and collaboration navigation.
+The service worker precaches only immutable, versioned application-shell assets, which include the
+two upright text faces. Content-hashed, first-party-served Symbols Nerd Font Mono chunks cover only
+Private Use Area glyphs; they and the italic text face are downloaded lazily, cached on first use
+in the shell cache, and served cache-first thereafter. It must bypass `/api/`, `/client/`, launch
+responses, and collaboration navigation.
 Use no third-party runtime scripts, remote fonts, analytics, or CDNs.
 
-Text keeps system/local font stacks; the symbols use the Mono face's uniform one-em advance and
-never replace ordinary Unicode characters. Regenerate the vendored Nerd Fonts v3.5.1 subsets with
-`bun scripts/vendor-nerd-symbols.ts` (fontTools with Brotli and `pyftsubset` on `PATH`;
-`FONTTOOLS_PYTHON` can select its Python environment). The script downloads and SHA-256-verifies
-the pinned archive, or accepts `--source <directory>` for an already-extracted copy. Deterministic
-chunks contain at most 160 populated BMP PUA glyphs or 768 plane-15 glyphs each; the build hashes
-their bytes and appends their `@font-face` rules without changing the shell precache list.
-See `licenses/fonts/nerd-fonts/` and `THIRD_PARTY_NOTICES.md` for licenses and icon-set attributions.
+## Appearance
+
+`styles.css` implements the "Signal" system from [`docs/BRANDING.md`](../../docs/BRANDING.md)
+(ADR-049): a monochrome chassis in which color exists only as state. Its tokens are declared once
+on `:root`, dark by default and overridden under `prefers-color-scheme: light`; there is no theme
+toggle or stored preference. The pinned collaboration client is themed from outside: the gateway
+sets the client's `--gateway-*` palette on `.gateway-shell` and inserts the client stylesheet ahead
+of its own, so gateway rules win every tie against the client's global reset. Token names are
+disjoint from the client's, and the stylesheet never relies on user-agent margins. Icons are drawn
+by `icons.ts` on one 20px grid; no text glyph stands in for an icon.
+
+Text is Geist and identifiers are Geist Mono, self-hosted latin subsets with `font-display: swap`
+and system fallbacks. Regenerate them with `bun scripts/vendor-geist.ts` and the vendored Nerd Fonts
+v3.5.1 symbol subsets with `bun scripts/vendor-nerd-symbols.ts` (both need fontTools with Brotli
+and `pyftsubset` on `PATH`; `FONTTOOLS_PYTHON` can select the Python environment). Each script
+downloads and SHA-256-verifies its pinned archive, or accepts `--source <directory>` for an
+already-extracted copy, and writes a manifest of digests beside its output. The symbols use the
+Mono face's uniform one-em advance and never replace ordinary Unicode characters; deterministic
+chunks contain at most 160 populated BMP PUA glyphs or 768 plane-15 glyphs each. The build hashes
+every font file and appends its `@font-face` rule. Icons, the notification badge, and the artwork
+are rendered from their committed sources by `bun run media:brand`.
+See `licenses/fonts/` and `THIRD_PARTY_NOTICES.md` for licenses and icon-set attributions.
 
 ## Motion
 
@@ -61,7 +76,7 @@ a hidden page, an open dialog, or `prefers-reduced-motion` skips the transition 
 DOM directly. `e2e/motion.e2e.ts` pins which changes animate; the visual lane keeps reduced motion.
 
 ADR-042 adds one deliberate arrival inside a genuine same-scope `list` transition:
-`data-arrived="true"` expands/fades the emerald ring over `--motion-long`, raises the title
+`data-arrived="true"` expands/fades the live ring over `--motion-long`, raises the title
 4px over `--motion-medium`, and settles the copy 60ms later. The prior signature includes the
 scope and both waiting/held groups; a fresh load, scope change, or unchanged return never plays it.
 A queue emptied while a session was open does play on return. Cached rows lose the arrival
@@ -74,7 +89,7 @@ inline SVG stroke drawn once over medium. Reduced motion removes both effects.
 Each modal panel has one topic or primary action, a title, and a 48px leading Close or Back control.
 Settings opens **Background alerts**; only enabled alerts reveal **Alert detail**, whose radios
 apply immediately and return to the root. The existing notification elements are moved, not copied.
-The quiet, outlined **Options** chip opens **This request** with immediate Hold for desk and View transcript choices.
+The tonal **Options** pill beside the primary action opens **This request** with immediate Hold for desk and View transcript choices.
 
 Modal trays use `showModal()`, native focus containment and focus return, body scroll lock, and
 safe-area padding. Escape/platform close requests pop a child or dismiss the root without adding
@@ -89,7 +104,7 @@ grip or countdown. Its polite status announcement has a five-second Undo window 
 hovered or focused. Generation/source-bound Undo and persistent Show all
 retain their device-local semantics and storage formats.
 
-Open request immediately presents a compact amber loading tray. The ordinary validated launch
+Open request immediately presents a compact loading tray with the attention grip. The ordinary validated launch
 mounts the pinned client once inside a roughly 72%-visual-viewport panel. One header owns the
 session tile/title, connection dot and icon-only Expand control; the client's inner frame is flat,
 and its shell bar stays hidden until promotion. Expand (or tapping the
@@ -182,7 +197,7 @@ requests time out after four seconds; POST after ten. Remote calls use CORS with
 credentials and refused redirects; readable authorization loss revokes the source. Status polling
 starts one second after the preceding request completes, with a 120-second watching budget.
 Starting session shows **Starting in Tern → Waiting for OMP → Opening Control**: completed steps
-use the triage check, the active emerald dot uses the existing status pulse, and future steps are
+use the drawn check, the active live dot uses the existing status pulse, and future steps are
 muted. Reduced motion keeps the dot still. Opening Control remains visible and cancellable until
 the ordinary session shell mounts.
 Closing, changing scope, competing navigation/trays, authorization loss, backgrounding, freeze,

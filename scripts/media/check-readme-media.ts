@@ -51,6 +51,7 @@ const SAFE_COMPOSITE_INPUT_IDS: Readonly<Record<string, true>> = {
   "runtime:02-needs-you.png": true,
   "runtime:03-open-request.png": true,
   "brand:assets/logo.svg": true,
+  "brand:apps/web/src/fonts/geist/geist-latin.woff2": true,
 };
 const REQUIRED_README_REFERENCES = [
   "docs/media/omp-session-gateway-demo.gif",
@@ -384,6 +385,7 @@ async function validateManifestInputs(manifest: MediaManifest, failures: string[
     "runtime:02-needs-you.png": manifest.assets["02-needs-you.png"].sha256,
     "runtime:03-open-request.png": manifest.assets["03-open-request.png"].sha256,
     "brand:assets/logo.svg": await sha256File(join(repositoryRoot, "assets/logo.svg")),
+    "brand:apps/web/src/fonts/geist/geist-latin.woff2": await sha256File(join(repositoryRoot, "apps/web/src/fonts/geist/geist-latin.woff2")),
   };
   for (const name of BINARY_MEDIA_NAMES) {
     const record = manifest.assets[name];

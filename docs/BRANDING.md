@@ -1,74 +1,111 @@
 # OMP Session Gateway — brand & UI spec
 
-Identity for `omp-session-gateway`: a sober, security-first infra tool that is
-visibly a *companion* to [oh-my-pi](https://github.com/can1357/oh-my-pi) without
-copying its mark. This file is the design source of truth.
+Identity for `omp-session-gateway`: a consumer-grade companion to
+[oh-my-pi](https://github.com/can1357/oh-my-pi) for developers who already live in a terminal. It
+is visibly a *companion* and never copies upstream's mark. This file is the design source of truth;
+ADR-049 records the decision behind it.
 
-## The mark: "The Gate"
+The system is called **Signal**. Its one rule: the chassis is monochrome, and **color exists only
+as state**. Green is live. Amber is your turn. Red is denied. If a color would not change when the
+state changed, it should not be a color.
 
-A lintel over two posts — a gateway that quietly echoes π — with an emerald dot
-passing through: a live session crossing the boundary. Geometry (96×96 viewBox,
-all radii 2):
+## The mark: "Portal"
 
-- lintel `x12 y16 w72 h10`
-- posts `x24/x62 y26 w10 h52`
-- dot `cx48 cy58 r8` in Live emerald
+An arch — a gateway, drawn as one continuous stroke — with a dot inside it: a live session on the
+other side of the boundary. Geometry (96×96 viewBox, optical centre 48,49):
+
+- arch `M25 80V47a23 23 0 0 1 46 0v33`, stroke 12, butt caps, no fill
+- dot `cx48 cy63 r9`
 
 Rules:
 
 - Never use upstream OMP's π-with-plug mark or derivatives of it.
-- Clearspace: one dot diameter (16 units) on all sides. Minimum size 16px.
-- The dot is always Live emerald; the frame is Ink on dark surfaces
-  (`logo.svg`) or Ink-dark on light surfaces (`logo-light.svg`). Never recolor.
-- The dot doubles as the product-wide "live" motif (status dots, pills).
+- Clearspace: one dot diameter (18 units) on all sides. Minimum size 16px.
+- The arch is Ink (`logo.svg`, for dark surfaces) or Ink on light (`logo-light.svg`). The dot is
+  the live color of the surface it sits on. Never recolor the arch, add a fill, or round its feet.
+- The dot is the product-wide motif: every status badge, pulse and bullet is the same circle, and
+  Geist's rounded-dot set (`ss08`) makes the punctuation agree with it.
+- In the app the mark reports: its dot is live while this device can reach the gateway and steps
+  back to neutral when it cannot, and the empty state draws it with nothing inside.
+- The Android status-bar badge is the same mark in solid white on transparent (`badge-96.png`).
 
 ## Color
 
-Dark-first (GitHub audience, terminal-native product). Blue-black ground —
-deliberately cooler than OMP's warm `#0d0d0d`.
+The theme follows the system: one stylesheet, two schemes, no stored preference and no toggle.
+Hierarchy comes from surface steps and type, not from hue.
 
-| Token | Hex | oklch | Use |
+| Token | Dark | Light | Use |
 |---|---|---|---|
-| ground | `#060809` | oklch(0.13 0.005 240) | page background |
-| ink-dark | `#0B0E11` | oklch(0.16 0.008 240) | icon tiles, buttons on light |
-| surface | `#0E1319` | oklch(0.18 0.012 245) | cards, panels |
-| border-subtle | `#161C22` | oklch(0.22 0.012 245) | inner hairlines |
-| border | `#1C232B` | oklch(0.26 0.014 245) | card borders |
-| ink | `#E8ECEF` | oklch(0.94 0.004 240) | headings, primary buttons |
-| body | `#B6BEC7` | oklch(0.80 0.010 240) | body text |
-| muted | `#8A939D` | oklch(0.66 0.012 240) | meta, labels |
-| live | `#31C48D` | oklch(0.73 0.14 163) | live status, accents, links, focus |
-| control | `#C99B45` | oklch(0.73 0.11 80) | Control action (privileged) |
-| danger | `#C85045` | oklch(0.58 0.14 27) | unauthorized / error states |
-| kinship | `#F97316` | — (upstream orange) | see rule below |
+| ground | `#000000` | `#F4F4F2` | page |
+| surface-1 | `#111113` | `#FFFFFF` | the one elevated card, trays |
+| surface-2 | `#1C1C1F` | `#EBEBE8` | controls, tiles, inset fields |
+| surface-3 | `#27272B` | `#DEDEDA` | pressed and hovered controls |
+| line | white 8% | black 8% | hairlines |
+| line-strong | white 17% | black 20% | grips, dashed outlines, underlines |
+| ink | `#F5F5F3` | `#0B0B0C` | titles, primary actions, focus, selection |
+| ink-2 | `#C9C9CD` | `#3C3C41` | body text |
+| ink-3 | `#8E8E95` | `#616168` | metadata, labels; the faintest text |
+| ink-4 | `#68686F` | `#86868D` | separators, quiet icons; never text |
+| live | `#30D67C` | `#12A150` | a session is live; an answer was accepted |
+| attention | `#FFB224` (text `#FFC24D`) | `#FFB224` (text `#8A4F00`) | your turn |
+| danger | `#FF6369` (text `#FF9A9D`) | `#D92D3A` (text `#B4232E`) | access denied |
 
-**Kinship rule:** upstream orange appears at most once per surface, only as a
-micro-dot (≤5px UI, ≤8px banner) adjacent to an oh-my-pi mention — never in the
-mark, never on interactive elements, never as a fill. It is a citation, not an
-accent.
+What each state color may touch:
+
+- **Live (green):** the mark's dot, working and idle badges, the `Live · N` pill, the all-clear
+  dot, the active creation step, and the drawn check after an accepted answer. Nothing else.
+- **Attention (amber):** waiting and held badges, the `N waiting` pill and waiting times, the
+  request tray's grip and `Input required` label, and the four actions that take the wheel:
+  `Open request`, `Control`, `Create and open Control`, and `Hold → next`. A surface has at most
+  one amber fill.
+- **Danger (red):** an unauthorized banner, host row, connection chip or launch notice. Only a
+  denial is red.
+- **Everything else is ink.** Neutral primary actions (`Next`, `Done`, `Send`, `Enable background
+  alerts`, `Undo`, `View transcript`, `New session` on an empty directory) are inverse ink. Focus
+  rings, links, selected options, switches and text selection are ink. Faults that ask nothing of
+  the operator — offline, tailnet, desktop, gateway, reconnecting — carry no color at all: the page
+  loses its green, which is the signal.
+
+Contrast floors in both schemes: every text token (ink through ink-3, attention text, danger text)
+is at least 4.5:1 on ground and on surfaces 1 through 3, which `apps/web/e2e/theme.e2e.ts`
+asserts; every icon or state graphic (ink-4, live) is at least 3:1 on ground and on surfaces 1
+and 2, except light-scheme live on surface-2 (2.8:1), where it is always paired with its state in
+words.
+
+States never depend on hue alone: active is a filled dot and at rest is a ring, a cached row's tile
+is a dashed outline, and every colored surface also carries its state in words.
+
+The retired palette's upstream-orange "kinship" dot is gone; companionship is stated in prose.
 
 ## Type
 
-- **Runtime PWA:** system/local font stacks for text — `system-ui, sans-serif` /
-  `ui-monospace, monospace`. The PWA additionally uses one self-hosted, lazily loaded Symbols
-  Nerd Font Mono subset for Private Use Area glyphs, served as first-party assets. Runtime
-  assets must remain first-party; no remote fonts, Google Fonts requests, third-party scripts,
-  or CDNs. This is a privacy requirement, not an optional offline optimization.
-- **Public site:** the same first-party rule, satisfied by self-hosted latin subsets in
-  `site/fonts/` (Space Grotesk, variable weight, for the wordmark and headings; JetBrains Mono,
-  variable weight, for eyebrows, pills, and code; provenance in `THIRD_PARTY_NOTICES.md`).
-  Body text stays on the system sans stack. The site's only script is the inline copy-button
+- **Geist** for text and **Geist Mono** for identifiers, both self-hosted latin subsets vendored
+  from the pinned upstream release by `scripts/vendor-geist.ts`
+  (`apps/web/src/fonts/geist/`, OFL-1.1, provenance in `THIRD_PARTY_NOTICES.md`). The upright
+  faces are precached with the application shell and preloaded; the italic is cached on first use.
+  `font-display: swap`, system fallbacks behind them, `font-synthesis: none`.
+- Mono is for things a terminal would print: host labels, project names, model slugs, the build
+  hash, `code`. Words, counts, durations and labels are never mono.
+- Sentence case everywhere. No tracked capitals, no uppercase eyebrows.
+- Scale (app): H1 32–38px/680, tracking −0.04em; card and tray titles 20px/640; row titles
+  16px/600; body 15–17px/400; metadata 13px/400–600; identifiers 12.5px mono. Figures are tabular
+  wherever a number can change in place.
+- OMP's terminal title icons use the self-hosted **Symbols Nerd Font Mono** subset (Private Use
+  Area only, lazily loaded, ADR-039). The embedded collaboration client takes Geist for its text
+  and keeps its own mono stack: tool output needs box-drawing and block glyphs at one advance
+  width, which a latin subset cannot supply.
+- Runtime assets remain first-party: no remote fonts, third-party scripts, or CDNs. This is a
+  privacy requirement, not an offline optimization.
+- **Public site:** the same two subsets, staged into `site/fonts/` from the PWA's copies at deploy
+  time; the site carries no font file of its own. Its only script is the inline copy-button
   enhancement for setup commands; it makes no network, storage, or analytics calls.
-- **Exported artwork:** `assets/banner.html` and `assets/og.html` use Space Grotesk 500/600 and
-  JetBrains Mono 400/500 from Google Fonts to render static assets (`bun run media:brand`). Those
-  artwork sources are not runtime shells; do not copy their font-loading links into the app
-  or site. Existing media retains its recorded provenance.
-- Wordmark (artwork and site): "OMP Session Gateway", weight 600, letter-spacing −0.015em.
-  Mono labels: 11–12px, uppercase, letter-spacing 0.1–0.22em.
+- **Exported artwork:** `assets/banner.html` and `assets/og.html` load the same vendored files, and
+  `bun run media:brand` renders them and every raster icon with no network access.
+- Wordmark (artwork and site): "OMP Session Gateway", weight 640, letter-spacing −0.02em.
 
 ## Voice
 
-Sober and exact. Sentence case everywhere except mono eyebrows. No emoji, no
+Sober and exact. Sentence case everywhere. No emoji, no
 exclamation marks. Security claims stated as invariants ("Capabilities are
 requested only when you tap an action."). Keep the standing disclaimer in prose:
 "Community project; not affiliated with or endorsed by the Oh My Pi maintainers." (rendered artwork
@@ -98,29 +135,31 @@ README hierarchy: promise → demo → how it works → build and run → using 
 
 ## Asset inventory
 
-Paths below are relative to the repository root.
+Paths below are relative to the repository root. Every raster below is rendered from its committed
+source by `bun run media:brand`, which records source, input and output digests in
+`assets/artwork.json`; `scripts/site-coherence.test.ts` fails when any of them drifts.
 
 | File | Purpose |
 |---|---|
 | `assets/logo.svg` | mark, transparent, for dark backgrounds |
 | `assets/logo-light.svg` | mark for light backgrounds |
-| `assets/banner.html` | banner source (1280×320) for placements outside the README; `bun run media:brand` renders it |
-| `assets/banner.png` | rendered banner @2x (2560×640) |
-| `assets/og.html` | social preview source (1280×640); `bun run media:brand` renders it |
-| `assets/og.png` | GitHub social preview and site `og:image` (1280×640) |
-| `apps/web/src/icon.svg` | PWA icon source (512, rx116 tile); app favicon |
-| `apps/web/src/favicon.svg` | site favicon source (96, rx22 tile) |
+| `assets/banner.html` → `assets/banner.png` | banner (1280×320, rendered @2x) for placements outside the README |
+| `assets/og.html` → `assets/og.png` | GitHub social preview and site `og:image` (1280×640) |
+| `apps/web/src/icon.svg` | PWA icon source (512, rx116 black tile); app favicon |
 | `apps/web/src/icon-192.png` / `apps/web/src/icon-512.png` | manifest icons, `purpose: any` |
-| `apps/web/src/icon-maskable-512.png` | manifest icon, `purpose: maskable` |
-| `apps/web/src/apple-touch-icon-180.png` | apple-touch-icon |
-| `apps/web/src/index.html`, `apps/web/src/app.ts`, `apps/web/src/styles.css`, `apps/web/src/manifest.webmanifest` | maintained PWA shell, behavior, styles, and manifest; see [web app notes](../apps/web/README.md) |
-| `site/` | canonical public site (`carrythroughsystems.github.io/omp-session-gateway`), system font stacks only, no JavaScript; `pages.yml` stages the mark, favicon, `og.png`, and the three raw PWA captures (`screen-*.png` from `docs/media/0{1,2,3}-*.png`) from their canonical sources at deploy time, so `site/` never carries copies |
+| `apps/web/src/icon-maskable.svg` → `apps/web/src/icon-maskable-512.png` | manifest icon, `purpose: maskable` (full-bleed, mark inside the safe zone) |
+| `apps/web/src/apple-touch-icon-180.png` | apple-touch-icon (the icon source on an opaque black square) |
+| `apps/web/src/badge.svg` → `apps/web/src/badge-96.png` | notification badge: white on transparent, as Android's status bar requires |
+| `apps/web/src/favicon.svg` | site favicon source (96, rx22 tile) |
+| `apps/web/src/fonts/geist/` | vendored Geist and Geist Mono subsets with their manifest |
+| `apps/web/src/index.html`, `apps/web/src/app.ts`, `apps/web/src/icons.ts`, `apps/web/src/styles.css`, `apps/web/src/manifest.webmanifest` | maintained PWA shell, behavior, icons, styles, and manifest; see [web app notes](../apps/web/README.md) |
+| `site/` | canonical public site (`carrythroughsystems.github.io/omp-session-gateway`); `pages.yml` stages both marks, the favicon, `og.png`, the two Geist subsets, and the three raw PWA captures (`screen-*.png` from `docs/media/0{1,2,3}-*.png`) from their canonical sources at deploy time, so `site/` never carries copies |
 
 Manifest snippet:
 
 ```json
-"background_color": "#060809",
-"theme_color": "#060809",
+"background_color": "#000000",
+"theme_color": "#000000",
 "icons": [
   { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" },
   { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
@@ -129,117 +168,123 @@ Manifest snippet:
 ]
 ```
 
+The manifest has one splash color, so it stays dark; the document declares both schemes with two
+`theme-color` metas (`#000000` dark, `#f4f4f2` light) and `color-scheme: dark light`.
+
 README top: the mark via `<picture>` (`logo.svg` dark, `logo-light.svg` light) above the H1 and
-the one-line promise; the banner is not embedded. `<meta name="theme-color" content="#060809">`.
+the one-line promise; the banner is not embedded. README media and the visual lane are pinned to
+the dark scheme.
 
 ## PWA UI system ("OMP Sessions")
 
-Register: restraint — strong type, clear hierarchy,
-few colors, no decoration that isn't information. One accent per state:
-emerald = live, amber = needs-you/privileged, red = unauthorized.
+Register: one thing at a time. The page answers one question — does anything need you? — and the
+answer is the largest thing on it.
 
-- Layout: the directory is one couch-first triage column, `min(100% − 2rem, 35rem)`
-  at every viewport; open sessions widen separately (see Collaboration shell).
-  Spacing on a 4px grid. System font stacks for text in the app; only Private Use
-  Area symbols use the self-hosted, lazily loaded Nerd Font subset (Space
-  Grotesk/JetBrains Mono webfonts remain README/banner-only).
-- Radii: 12px rows/cards and hero, 999px pills. Borders 1px `border`;
-  shadows only on trays — hierarchy comes from surface
-  steps, not elevation.
-- Masthead: brand row (mark 20px + mono eyebrow `PRIVATE TAILNET DIRECTORY` in
-  live color + trailing 44px Settings control), then H1 `Sessions`/`Needs you`
-  beside the state pill (`Live · N` emerald / `N waiting` amber). With several
-  hosts configured, one compact native `select` (`All hosts` / host names,
-  `aria-label` only) scopes the directory under the heading.
-- Session identity (every row, the hero, and the collaboration shell header)
-  mirrors Tern's: a 40px light tile (`ink` on `raised`, 10px radius) holds the
-  title's leading Nerd Font icon from the self-hosted symbol face, or the
-  title's first letter as a monogram, with the session state as a 10px badge
-  on the tile's corner — filled emerald working, emerald ring idle, muted
-  unknown, amber waiting, amber ring held. The icon leaves the title text,
-  spoken names (`aria-label`, document title, push bodies) drop icons, and an
-  icon inside a title draws as a 1em cell with a fixed gap.
+- Layout: the directory is one triage column, `min(100% − 2rem, 35rem)` at every viewport; open
+  sessions widen separately (see Collaboration shell). Spacing on a 4px grid.
+- Surfaces: **one elevated card** (the request that needs you, `surface-1`, 24px radius) sits
+  over **plain rows** on the ground: no card, no border, a rounded surface only under a press or
+  hover. Secondary surfaces are **floating trays**. Controls are `surface-2` pills; nothing has a
+  border where a surface step will do. Dark elevation is a hairline ring, light elevation a soft
+  shadow.
+- Icons are drawn (`apps/web/src/icons.ts`): one 20px grid, 1.75px round strokes, the current text
+  color. No text glyph stands in for an icon.
+- Masthead: one 44px toolbar row — the mark at the left, then `New session` and the icon-only
+  Settings control — and below it the H1 `Sessions`/`Needs you` beside the state pill
+  (`Live · N` green / `Listed · N` neutral / `N waiting` amber). With several hosts configured, one
+  compact native `select` (`All hosts` / host names, `aria-label` only) scopes the directory under
+  the heading.
+- Session identity (every row, the hero, the tray header, and the collaboration shell header): a
+  44px neutral tile (`surface-2`, 13px radius) holds the title's leading Nerd Font icon, or the
+  title's first letter as a monogram, with the session state as a 13px badge on the tile's corner,
+  ringed in the surface behind it — filled green working, green ring idle, muted unknown, amber
+  waiting, amber ring held. The icon leaves the title text, spoken names (`aria-label`, document
+  title, push bodies) drop icons, and an icon inside a title draws as a 1em cell with a fixed gap.
 - Titles: 2-line clamp at weight 600 (`overflow-wrap: anywhere`), never a
   single-line ellipsis on phones; the shell header keeps one line.
-- Metadata line (`.row-meta`): discrete mono facts at 11.5px that wrap between
-  facts, never inside one; each fact carries its own trailing `·` separator,
-  and only a fact wider than the row truncates. Working rows order project ·
-  state (`Working`/`Idle`/`Activity unknown`) · `up <elapsed>` (`m`, `h m`,
-  `d h`) · model slug; the project is omitted when the title already is the
-  project, and the host appears first only while more than one host is in view
-  (several sources and `All hosts` scope). Waiting and held rows show project
-  (and host); the hero shows project · model (and host).
-- Needs-you queue: one amber `Up next` hero (tile + title + summary, sentence-case
-  ask preview with a 2px amber rule, block `Open request`, quiet 48px `Options`
-  opening `This request` with `Hold for desk`/`View transcript`), `Then` rows with chevrons, dashed `On hold`
-  rows with `Requeue`, then working rows.
-- Working rows: one bordered frame per session — whole-row View button (tile,
-  title, metadata line) and a quiet trailing 44px icon-only `Hide` control
-  (eye-off, `faint` → `ink` on hover) with the explicit `Hide … on this device`
-  accessible name.
-- Collaboration shell: one centered header row on wide screens (small 28px tile
-  before the one-line title, capped so Back and the actions never move). Phone
-  widths put Back and Control/connection state on the first row and give the
-  tile and title a full-width second row, so long titles never collide with
-  controls. From 37rem up, the session, its header row, and its triage bar
-  share one centered column, `min(100% − 2rem, 60rem)`: wide enough for the
-  client's 900px transcript, with no empty frame around it.
-- All clear: compact left-aligned status (ringed live dot, `All clear`, one muted
-  line), without repeating live counts already present in the masthead; incomplete
-  coverage uses a neutral dot and numeric host coverage. Alert state appears only while
-  background alerts are enabled; otherwise a pill chip routes to Settings.
-  Its sole delight moment is a same-scope queue → all-clear arrival: the emerald
-  ring expands to 2.5× and fades over the long token, the title rises 4px over
-  medium, and the copy follows 60ms later. The shell's answered/all-clear check
-  draws once over medium. No arrival on load, scope change, or routine refresh;
-  reduced motion shows only the final state (ADR-042).
+- Metadata (`.row-meta`): groups of discrete facts, one group per line — where the session runs
+  (host · project) and what it is doing (state · uptime · model). A group never wraps, so a
+  separator can never dangle; a group wider than the row truncates its identifiers first.
+  Identifiers are mono, words and durations are not. Working rows show project, then
+  `Working`/`Idle`/`Activity unknown` · `up <elapsed>` (`m`, `h m`, `d h`) · model slug; the project
+  is omitted when the title already is the project, and the host appears first only while more than
+  one host is in view. Waiting and held rows show project (and host); the hero shows project (and
+  host), then the model slug.
+- Needs-you queue: under `Up next`, one hero card — tile, title and summary, the ask set as a
+  message bubble, then amber `Open request` beside a tonal `Options` (opening `This request` with
+  `Hold for desk`/`View transcript`). A view-only hero's `View transcript` is ink, because reading
+  does not take the wheel. `Then` rows carry their wait and a chevron; `On hold` rows carry
+  `Requeue`; working rows follow.
+- Working rows: the whole row is the View target (tile, title, metadata), with a quiet trailing
+  44px icon-only `Hide` control (eye-off, `ink-4` → `ink` on hover) with the explicit
+  `Hide … on this device` accessible name.
+- Collaboration shell: one header row at every width — Back, a 30px tile before the one-line
+  title, then Control and the connection state. On a phone Back is its icon alone. From 37rem up,
+  the session, its header row, and its triage bar share one centered column,
+  `min(100% − 2rem, 60rem)`: wide enough for the client's 900px transcript, with no empty frame
+  around it. The embedded client reads the gateway palette through `--gateway-*` tokens set on
+  the shell, so it follows the scheme; its selection, focus and Send are ink.
+- All clear: a left-aligned status (ringed live dot, `All clear`, one muted line), without
+  repeating live counts already present in the masthead; incomplete coverage uses a neutral ring
+  and numeric host coverage. Alert state appears only while background alerts are enabled;
+  otherwise a pill routes to Settings. Its sole delight moment is a same-scope queue → all-clear
+  arrival: the live ring expands to 2.5× and fades over the long token, the title rises 4px over
+  medium, and the copy follows 60ms later. The shell's answered check draws once over medium. No
+  arrival on load, scope change, or routine refresh; reduced motion shows only the final state
+  (ADR-042).
 - First run (ADR-042): three neutral trays — `Connected`, `Background alerts`,
   `View or Control` — after the first authoritative directory render, never over
-  another tray. Reuse the 32px gateway mark and existing notification control;
-  show only current host/session facts and the explicit-action capability promise.
-  Each step has one topic, a distinct height, a primary Next/Done action, heading
-  focus and a 48px Close/Back control. Skip and Not now are real exits/advances,
-  not permission prompts. Resume the last step; completing or skipping stays done.
-  Noninteractive tray headings receive focus without an outline; interactive controls retain
-  their focus rings. The affiliation/build footer appears in Settings, not the introduction.
+  another tray. `Connected` draws the mark at 44px (the arch, then the session arriving in it) and
+  reuses the existing notification control; show only current host/session facts and the
+  explicit-action capability promise. Each step has one topic, a distinct height, a Next/Done
+  action in the header, heading focus and a 48px Close/Back control. A step has one primary action:
+  while alerts are off, `Enable background alerts` is primary and `Next` is tonal. Skip and Not now
+  are real exits/advances, not permission prompts. Resume the last step; completing or skipping
+  stays done. Noninteractive tray headings receive focus without an outline; interactive controls
+  retain their focus rings. The affiliation/build footer appears in Settings, not the introduction.
 
-- Settings trays: `Background alerts` contains the seven-state toggle and mono build line;
-  enabled alerts expose `Alert detail · <level>`, opening a child with the three radios.
-- Creation trays: visible `New session` actions in the heading area and empty state lead through
+- Settings trays: `Background alerts` contains the seven-state toggle and the build line;
+  enabled alerts expose an `Alert detail` row showing the current level, opening a child with the
+  three options. Options are cards with a drawn radio; the selected one is outlined in ink. Host
+  coverage uses ink switches.
+- Creation trays: visible `New session` actions in the toolbar and empty state lead through
   Host, Project, Working copy, Profile, and review, one focused neutral panel at a time. Logical
-  Back replaces the native panel; every step keeps heading focus, measured distinct heights and
-  48px targets. `Create and open Control` names the authority explicitly. Optional First task
-  stays in memory and seeds the composer without sending. Starting session shows three steps:
-  `Starting in Tern`, `Waiting for OMP`, `Opening Control`, with emerald completed checks, an
-  active status-pulse dot (still under reduced motion), and muted future steps. Opening Control
-  remains visible until the shell mounts. Starting/Stopped watching/terminal
-  copy distinguishes observing from stopping the host command; `Check creation` never silently
-  starts another operation. Unconfigured/older hosts offer `Retry options`, not a dead Create.
+  Back replaces the native panel; every step keeps heading focus, a measured height distinct from
+  its neighbour, and 48px targets. `Create and open Control` names the authority explicitly and is
+  the flow's one amber action. Optional First task stays in memory and seeds the composer without
+  sending. Starting session shows three steps on a rail: `Starting in Tern`, `Waiting for OMP`,
+  `Opening Control`, with drawn green checks for completed steps, a pulsing live dot for the active
+  one (still under reduced motion), and muted future steps. Opening Control remains visible until
+  the shell mounts. Starting/Stopped watching/terminal copy distinguishes observing from stopping
+  the host command; `Check creation` never silently starts another operation. Unconfigured/older
+  hosts offer `Retry options`, not a dead Create.
 - Trays (ADR-041): one native host for secondary surfaces, one topic/action per panel,
-  concise title and one 48px leading Close/Back control. Adjacent panels differ by at least
-  24px, with measured height and content transitions using ADR-040's Material tokens.
-  Context determines tone: requests are amber; alerts, recovery and Undo are neutral.
-  Native modality preserves context and focus; the grip alone drags, content scrolls,
+  concise title and one 48px leading Close/Back control. A tray **floats**: inset 8px from every
+  edge (more where a safe area asks), 32px radius, no border, over a plain scrim. Adjacent panels
+  differ by at least 24px, with measured height and content transitions using ADR-040's tokens.
+  Context sets the tone: a request tray carries amber on its grip; alerts, recovery and Undo are
+  neutral. Native modality preserves context and focus; the grip alone drags, content scrolls,
   and the bottom clears the safe area. Undo is a compact non-modal polite status row: tile,
   two-line copy and filled Undo action, without a heading, grip or countdown.
   Open request grows from metadata/Connecting to the actual pinned client at about 72%
   of the visual viewport. One header owns Close, session tile/title, connection dot and icon-only
   Expand; the inner shell bar is hidden and its frame flattened until promotion. Expand grows
   into the same full-screen session without remounting.
-- Status banner: full-width `surface` strip with a leading status dot
-  (live/loading/danger). Unauthorized uses `danger` text + dot and hides rows.
-- Empty state: ghost mark (22% opacity), `NO LIVE SESSIONS` kicker, mono hint
-  about `collab.autoStart`.
-- Focus: 2px `live` ring, 2px offset; modal trays focus the current panel heading.
+- Status banner: a `surface-1` card with a leading ring, a title, detail and its actions. Loading
+  is a single muted line with a pulsing dot, never a card. Unauthorized uses a danger wash with a
+  filled dot and hides rows.
+- Empty state: the mark with nothing inside it, `No live sessions`, the `collab.autoStart` hint,
+  and an inverse-ink `New session`.
+- Focus: 2px ink ring, 2px offset; modal trays focus the current panel heading.
 - Motion (ADR-040): only on user-initiated transitions and genuine state changes,
   never on routine refreshes. Directory ↔ session is a shared-axis slide with the
   tapped tile morphing into the header tile; rows slide when a session changes
   group, rise in when added, fade out when hidden, and the heading cross-fades
-  between `Sessions` and `Needs you`. Material 3 emphasized curves
-  (`--ease-emphasized`, `-decelerate`, `-accelerate`), 200–400 ms, no overshoot;
-  a pressed tile settles to 0.94. `prefers-reduced-motion` removes everything but
-  the final state, and the loading dot's pulse stops with it.
-- Links: `live` color, hover lighten (`#5FD9A9`).
+  between `Sessions` and `Needs you`. Emphasized curves
+  (`--ease-emphasized`, `-decelerate`, `-accelerate`), 120–400 ms, no overshoot. Touch answers
+  under the thumb: pills settle to 0.97, a pressed tile to 0.94, surfaces step one tone.
+  `prefers-reduced-motion` removes everything but the final state, and every pulse stops with it.
+- Links: ink with an underline; never color alone.
 
 Security-UX invariants (do not regress): capabilities fetched only on tap
 (no-store), never rendered into DOM attributes/history/storage; Background alerts
@@ -259,13 +304,13 @@ Cross-host Next-ask failures name the target in the existing triage bar, not the
 predecessor's connection chip, and offer Sessions to reach that host's list-only recovery.
 The target owns that notice through predecessor health and Hold updates. It has no expiry timer:
 Sessions, explicit dismissal, a new launch, or a successful target observation releases it.
-Its denial accent is red; non-auth target failures retain amber.
+Its denial accent is red; non-auth target failures are neutral.
 Local targets follow the same ownership as remote targets, including in-session mode withdrawal.
 Successful expiry refresh ends the failure notice; dismissing it restores Hold without waiting for refresh.
 Withdrawing View or Control during a launch names the unavailable mode instead of opening it.
 Coverage aggregates `N of M hosts up to date` without repeating labels. Only complete coverage
 earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Listed · N` pill and
-`Sessions`. Cached rows retain legible text, with dashed borders, muted state badges, and
+`Sessions`. Cached rows retain legible text, with dashed tile outlines, muted state badges, and
 `List as of {time}` metadata. Every availability clock formats the last successful observation
 with the same locale-aware hour/minute formatter, never the failed-check time.
 Multiple empty lists share an `as of` clock only when their underlying observation instants match,

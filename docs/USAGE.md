@@ -32,7 +32,7 @@ When your gateway is configured with `fleet.targets` ([Multi-host setup in `OPER
 Interactive `omp` sessions started inside **Tern** panes, tabs, or windows use stock OMP's native local registry and appear in **OMP Sessions** like any other terminal once `collab.autoStart` (`control` or `view`) is set. Multiple Tern windows mirroring the same `omp` process appear as one session row, and a remote Tern pane is listed by the gateway on the host where `omp` actually runs. Tapping **View** or **Control** always opens OMP's encrypted collaboration client in the browser — it never focuses or sends keystrokes to a native Tern pane.
 ## View and Control
 
-Tapping a session fetches a fresh link from OMP and opens OMP's own encrypted `collab-web` client in the same tab. The link lives only in memory and is never written to the address bar, browser history, or storage. Tap **← Sessions** in the top bar (or use browser Back) to return to the directory.
+Tapping a session fetches a fresh link from OMP and opens OMP's own encrypted `collab-web` client in the same tab. The link lives only in memory and is never written to the address bar, browser history, or storage. Tap the back arrow in the top bar (labelled **Sessions** on wider screens), or use browser Back, to return to the directory.
 
 - **View** is read-only (`Read-only session — watching only`): you can read the live transcript, streaming output, and tool cards without sending prompts or answering requests. Tapping any row under **Live sessions** opens **View**; if the session also permits Control, tap **Control** in the top bar to switch to writable mode in place.
 - **Control** is writable: you can send prompts, tap **Stop** to abort a running turn, and answer input requests.

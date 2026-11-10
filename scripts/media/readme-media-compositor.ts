@@ -1,5 +1,6 @@
 export interface DemoCompositorInputs {
   readonly logoDataUrl: string;
+  readonly fontDataUrl: string;
   readonly screens: {
     readonly allClear: string;
     readonly discovered: string;
@@ -14,6 +15,7 @@ export interface DemoCompositorInputs {
 
 export interface FlowCompositorInputs {
   readonly logoDataUrl: string;
+  readonly fontDataUrl: string;
   readonly screens: {
     readonly allClear: string;
     readonly needsYou: string;
@@ -25,38 +27,36 @@ function scriptJson(value: unknown): string {
   return JSON.stringify(value).replaceAll("<", "\\u003c");
 }
 
-const SHARED_TOKENS = `
+/**
+ * The "Signal" tokens from docs/BRANDING.md, dark only: README media is pinned to one scheme. The
+ * text face is the PWA's own Geist subset, embedded so a composite reads no network and renders
+ * the same on any capture host.
+ */
+function sharedTokens(fontDataUrl: string): string {
+  return `
+  @font-face {
+    font-family: "Geist";
+    font-style: normal;
+    font-weight: 100 900;
+    src: url("${fontDataUrl}") format("woff2");
+  }
   :root {
     color-scheme: dark;
-    --ground: #060809;
-    --raised: #0b0e11;
-    --surface: #0e1319;
-    --border-subtle: #161c22;
-    --border: #1c232b;
-    --ink: #e8ecef;
-    --body: #b6bec7;
-    --muted: #8a939d;
-    --faint: #5f6870;
-    --live: #31c48d;
-    --live-bright: #5fd9a9;
-    --control: #c99b45;
-    --control-border: #4a3b1e;
-    --grid-line: rgba(232, 236, 239, 0.035);
-    --live-wash: rgba(49, 196, 141, 0.12);
-    --control-wash: rgba(201, 155, 69, 0.14);
-    --shadow: rgba(6, 8, 9, 0.72);
-    --font-sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-    --font-mono: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace;
-    --space-1: 4px;
-    --space-2: 8px;
-    --space-3: 12px;
-    --space-4: 16px;
-    --space-5: 24px;
-    --space-6: 32px;
-    --space-7: 48px;
-    --radius-1: 4px;
-    --radius-2: 8px;
-    --radius-phone: 22px;
+    --ground: #000;
+    --surface-1: #111113;
+    --surface-2: #1c1c1f;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-strong: rgba(255, 255, 255, 0.17);
+    --ink: #f5f5f3;
+    --ink-2: #c9c9cd;
+    --ink-3: #8e8e95;
+    --ink-4: #77777e;
+    --attention: #ffb224;
+    --attention-wash: rgba(255, 178, 36, 0.16);
+    --shadow: rgba(0, 0, 0, 0.72);
+    --font-sans: "Geist", system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --radius-phone: 30px;
+    --radius-screen: 23px;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; overflow: hidden; }
@@ -64,47 +64,31 @@ const SHARED_TOKENS = `
     color: var(--ink);
     background: var(--ground);
     font-family: var(--font-sans);
+    font-feature-settings: "ss08";
     font-synthesis: none;
     -webkit-font-smoothing: antialiased;
-  }
-  .grid {
-    position: absolute;
-    inset: 0;
-    background-image:
-      linear-gradient(var(--grid-line) 1px, transparent 1px),
-      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-    background-size: 32px 32px;
-    mask-image: linear-gradient(to bottom, transparent, var(--ground) 18%, var(--ground) 82%, transparent);
-    pointer-events: none;
   }
   .brand {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
+    gap: 10px;
   }
-  .brand img { display: block; width: 30px; height: 30px; }
-  .brand-copy { display: grid; gap: 2px; }
+  .brand img { display: block; width: 28px; height: 28px; }
   .brand-name {
     color: var(--ink);
-    font-size: 13px;
-    font-weight: 650;
-    letter-spacing: 0.02em;
+    font-size: 15px;
+    font-weight: 640;
+    letter-spacing: -0.02em;
   }
-  .brand-kicker,
-  .eyebrow,
-  .step-label,
   .product-proof {
-    color: var(--live);
-    font-family: var(--font-mono);
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
+    color: var(--ink-3);
+    font-size: 12px;
+    font-weight: 500;
   }
   .phone {
     position: relative;
-    background: var(--raised);
-    border: 1px solid var(--border);
+    background: var(--surface-1);
+    border: 1px solid var(--line-strong);
     border-radius: var(--radius-phone);
     box-shadow: 0 22px 56px var(--shadow);
   }
@@ -115,8 +99,8 @@ const SHARED_TOKENS = `
     left: 50%;
     width: 42px;
     height: 4px;
-    border-radius: var(--radius-1);
-    background: var(--border);
+    border-radius: 2px;
+    background: var(--line-strong);
     content: "";
     transform: translateX(-50%);
   }
@@ -124,8 +108,7 @@ const SHARED_TOKENS = `
     position: absolute;
     overflow: hidden;
     background: var(--ground);
-    border: 1px solid var(--border-subtle);
-    border-radius: 14px;
+    border-radius: var(--radius-screen);
   }
   .phone-screen > img {
     position: absolute;
@@ -136,62 +119,69 @@ const SHARED_TOKENS = `
     object-fit: fill;
   }
 `;
+}
 
 export function createDemoCompositorHtml(inputs: DemoCompositorInputs): string {
+  const { fontDataUrl, ...scriptInputs } = inputs;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=960,height=540,initial-scale=1">
 <style>
-${SHARED_TOKENS}
+${sharedTokens(fontDataUrl)}
   html, body, main { width: 960px; height: 540px; }
   main { position: relative; isolation: isolate; }
   .topline { position: absolute; top: 32px; left: 48px; }
-  .product-proof { position: absolute; top: 42px; right: 48px; color: var(--muted); }
+  .product-proof { position: absolute; top: 39px; right: 48px; }
   .copy {
     position: absolute;
-    top: 146px;
+    top: 150px;
     left: 48px;
     width: 558px;
   }
-  .eyebrow { margin-bottom: var(--space-4); color: var(--control); }
+  .eyebrow {
+    margin-bottom: 14px;
+    color: var(--ink-3);
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
   .claim {
     min-height: 112px;
     margin: 0;
     max-width: 548px;
     color: var(--ink);
-    font-size: 45px;
-    font-weight: 630;
-    letter-spacing: -0.035em;
-    line-height: 1.02;
+    font-size: 46px;
+    font-weight: 680;
+    letter-spacing: -0.04em;
+    line-height: 1.03;
   }
   .support {
-    margin: var(--space-5) 0 0;
-    max-width: 510px;
-    color: var(--body);
-    font-size: 16px;
+    margin: 22px 0 0;
+    max-width: 500px;
+    color: var(--ink-2);
+    font-size: 17px;
     line-height: 1.5;
   }
   .trust {
     position: absolute;
-    bottom: 38px;
+    bottom: 36px;
     left: 48px;
     display: grid;
-    gap: var(--space-2);
+    gap: 6px;
     width: 566px;
   }
   .trust-line {
     margin: 0;
-    color: var(--live-bright);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.035em;
+    color: var(--ink-3);
+    font-size: 12.5px;
+    font-weight: 500;
   }
   .disclaimer {
     margin: 0;
-    color: var(--faint);
-    font-size: 10px;
+    color: var(--ink-4);
+    font-size: 11px;
   }
   .demo-phone {
     --screen-width: 207px;
@@ -215,33 +205,30 @@ ${SHARED_TOKENS}
     top: 12px;
     left: 9px;
     width: 189px;
-    padding: 9px 10px 10px;
-    border: 1px solid var(--control-border);
-    border-radius: var(--radius-2);
+    padding: 10px 12px 11px;
+    border-radius: 14px;
     color: var(--ink);
-    background: var(--raised);
-    box-shadow: 0 12px 28px var(--shadow);
+    background: var(--surface-2);
+    box-shadow: 0 0 0 1px var(--line), 0 12px 28px var(--shadow);
     opacity: 0;
   }
   .toast-kicker {
-    margin: 0 0 5px;
-    color: var(--control);
-    font-family: var(--font-mono);
-    font-size: 7px;
-    font-weight: 650;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    margin: 0 0 4px;
+    color: var(--ink-3);
+    font-size: 8px;
+    font-weight: 600;
   }
   .toast-title {
     margin: 0;
-    font-size: 10px;
-    font-weight: 700;
+    font-size: 10.5px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
     line-height: 1.3;
   }
   .toast-body {
-    margin: 4px 0 0;
-    color: var(--body);
-    font-size: 8px;
+    margin: 3px 0 0;
+    color: var(--ink-2);
+    font-size: 8.5px;
     line-height: 1.4;
   }
   .tap-ring {
@@ -251,10 +238,10 @@ ${SHARED_TOKENS}
     top: calc(var(--tap-y) * 1%);
     width: 36px;
     height: 36px;
-    border: 2px solid var(--control);
+    border: 2px solid var(--ink);
     border-radius: 50%;
-    background: var(--control-wash);
-    box-shadow: 0 0 0 5px var(--shadow);
+    background: rgba(245, 245, 243, 0.18);
+    box-shadow: 0 0 0 5px rgba(0, 0, 0, 0.28);
     opacity: 0;
     transform: translate(-50%, -50%) scale(0.72);
   }
@@ -264,31 +251,26 @@ ${SHARED_TOKENS}
     width: 5px;
     height: 5px;
     border-radius: 50%;
-    background: var(--control);
+    background: var(--ink);
     content: "";
     transform: translate(-50%, -50%);
   }
   .phone-caption {
     position: absolute;
     right: 54px;
-    bottom: 12px;
-    color: var(--faint);
-    font-family: var(--font-mono);
-    font-size: 8px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    bottom: 10px;
+    color: var(--ink-4);
+    font-size: 9px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
   }
 </style>
 </head>
 <body>
 <main aria-label="OMP Session Gateway presentation composite">
-  <div class="grid"></div>
   <div class="topline brand">
     <img id="brand-logo" alt="">
-    <div class="brand-copy">
-      <span class="brand-kicker">Private session path</span>
-      <span class="brand-name">OMP Session Gateway</span>
-    </div>
+    <span class="brand-name">OMP Session Gateway</span>
   </div>
   <span class="product-proof">Actual built PWA pixels</span>
   <section class="copy">
@@ -297,7 +279,7 @@ ${SHARED_TOKENS}
     <p class="support" id="stage-support"></p>
   </section>
   <section class="trust">
-    <p class="trust-line">loopback-only gateway · memory-only capabilities · no transcript storage</p>
+    <p class="trust-line">Loopback-only gateway · memory-only capabilities · no transcript storage</p>
     <p class="disclaimer">Community project; not affiliated with OMP.</p>
   </section>
   <div class="phone demo-phone" aria-hidden="true">
@@ -317,7 +299,7 @@ ${SHARED_TOKENS}
   <div class="phone-caption">390 × 844 · DPR 2 source</div>
 </main>
 <script>
-  const input = ${scriptJson(inputs)};
+  const input = ${scriptJson(scriptInputs)};
   document.querySelector("#brand-logo").src = input.logoDataUrl;
   for (const image of document.querySelectorAll("[data-screen]")) image.src = input.screens[image.dataset.screen];
   const screen = document.querySelector("#phone-screen");
@@ -399,6 +381,7 @@ ${SHARED_TOKENS}
 }
 
 export function createFlowCompositorHtml(inputs: FlowCompositorInputs): string {
+  const { fontDataUrl, ...scriptInputs } = inputs;
   const steps = [
     {
       screen: "allClear",
@@ -428,32 +411,32 @@ export function createFlowCompositorHtml(inputs: FlowCompositorInputs): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=1600,height=980,initial-scale=1">
 <style>
-${SHARED_TOKENS}
+${sharedTokens(fontDataUrl)}
   html, body, main { width: 1600px; height: 980px; }
   main { position: relative; isolation: isolate; }
   .flow-brand { position: absolute; top: 48px; left: 64px; }
-  .flow-proof { position: absolute; top: 58px; right: 64px; color: var(--muted); }
+  .flow-proof { position: absolute; top: 55px; right: 64px; font-size: 13px; }
   .flow-title {
     position: absolute;
-    top: 104px;
+    top: 100px;
     left: 64px;
     margin: 0;
     color: var(--ink);
-    font-size: 50px;
-    font-weight: 630;
-    letter-spacing: -0.035em;
+    font-size: 52px;
+    font-weight: 680;
+    letter-spacing: -0.04em;
   }
   .flow-subtitle {
     position: absolute;
-    top: 170px;
-    left: 66px;
+    top: 172px;
+    left: 65px;
     margin: 0;
-    color: var(--body);
-    font-size: 17px;
+    color: var(--ink-2);
+    font-size: 18px;
   }
   .steps {
     position: absolute;
-    top: 222px;
+    top: 226px;
     right: 64px;
     left: 64px;
     display: grid;
@@ -463,41 +446,50 @@ ${SHARED_TOKENS}
   .step { position: relative; min-width: 0; }
   .step + .step::before {
     position: absolute;
-    top: 248px;
+    top: 407px;
     left: -46px;
     width: 28px;
-    height: 1px;
-    background: var(--control-border);
+    height: 1.5px;
+    border-radius: 1px;
+    background: var(--ink-4);
     content: "";
   }
   .step + .step::after {
     position: absolute;
-    top: 244px;
-    left: -24px;
+    top: 403.5px;
+    left: -26px;
     width: 7px;
     height: 7px;
-    border-top: 1px solid var(--control);
-    border-right: 1px solid var(--control);
+    border-top: 1.5px solid var(--ink-4);
+    border-right: 1.5px solid var(--ink-4);
     content: "";
     transform: rotate(45deg);
   }
-  .step-label { display: flex; align-items: center; gap: var(--space-3); color: var(--control); }
-  .step-number { color: var(--faint); }
+  .step-label {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    color: var(--ink-2);
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .step-number { color: var(--ink-4); }
   .step h2 {
-    min-height: 62px;
-    margin: var(--space-3) 0 var(--space-2);
+    min-height: 32px;
+    margin: 12px 0 8px;
     color: var(--ink);
-    font-size: 26px;
-    font-weight: 620;
-    letter-spacing: -0.02em;
+    font-size: 27px;
+    font-weight: 660;
+    letter-spacing: -0.03em;
     line-height: 1.13;
   }
   .step-copy {
-    min-height: 72px;
+    min-height: 46px;
     margin: 0;
     max-width: 430px;
-    color: var(--body);
-    font-size: 14px;
+    color: var(--ink-2);
+    font-size: 15px;
     line-height: 1.5;
   }
   .flow-phone {
@@ -517,33 +509,29 @@ ${SHARED_TOKENS}
   .flow-footer {
     position: absolute;
     right: 64px;
-    bottom: 42px;
+    bottom: 40px;
     left: 64px;
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
-    gap: var(--space-6);
-    padding-top: var(--space-4);
-    border-top: 1px solid var(--border-subtle);
+    gap: 32px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
   }
   .flow-trust {
     margin: 0;
-    color: var(--live-bright);
-    font-family: var(--font-mono);
-    font-size: 11px;
+    color: var(--ink-3);
+    font-size: 13px;
+    font-weight: 500;
   }
-  .flow-disclaimer { margin: 0; color: var(--faint); font-size: 11px; }
+  .flow-disclaimer { margin: 0; color: var(--ink-4); font-size: 12px; }
 </style>
 </head>
 <body>
 <main aria-label="Discover, triage, and control product flow">
-  <div class="grid"></div>
   <div class="flow-brand brand">
     <img id="brand-logo" alt="">
-    <div class="brand-copy">
-      <span class="brand-kicker">Private session path</span>
-      <span class="brand-name">OMP Session Gateway</span>
-    </div>
+    <span class="brand-name">OMP Session Gateway</span>
   </div>
   <span class="flow-proof product-proof">Actual built PWA + pinned client pixels</span>
   <h1 class="flow-title">From running session to exact request.</h1>
@@ -559,12 +547,12 @@ ${SHARED_TOKENS}
     </article>`).join("")}
   </section>
   <footer class="flow-footer">
-    <p class="flow-trust">loopback-only gateway · memory-only capabilities · no transcript storage</p>
+    <p class="flow-trust">Loopback-only gateway · memory-only capabilities · no transcript storage</p>
     <p class="flow-disclaimer">Community project; not affiliated with OMP.</p>
   </footer>
 </main>
 <script>
-  const flowInput = ${scriptJson(inputs)};
+  const flowInput = ${scriptJson(scriptInputs)};
   document.querySelector("#brand-logo").src = flowInput.logoDataUrl;
   for (const image of document.querySelectorAll("[data-screen]")) image.src = flowInput.screens[image.dataset.screen];
 </script>

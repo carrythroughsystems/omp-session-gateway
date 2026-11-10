@@ -63,7 +63,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
       const connected = await settledTray(page, "connected");
       await expect(page.locator(".first-run-copy")).toContainText("5 live sessions are listed across the checked hosts.");
       await expect(page.locator(".first-run-note")).toHaveText("Capabilities are requested only when you tap an action.");
-      await expect(page.locator(".first-run-connected svg")).toHaveAttribute("width", "32");
+      await expect(page.locator(".first-run-connected svg")).toHaveAttribute("width", "44");
       expect(await record(page)).toBeNull();
       expect(fixture.launchRequests).toHaveLength(0);
       await capture("connected");
