@@ -15,7 +15,7 @@ bun run media:check
 
 `media:capture` builds the actual PWA and pinned collaboration client before capture. It publishes the canonical set only after staging the complete package. `media:check` verifies the binaries, manifest, public-safety rules, and root README references; it does not regenerate media. Both use `packages/collab-client/upstream/UPSTREAM.json` for browser-client provenance, independently of the OMP host baseline.
 
-Source revision: `85aaaec3527ff98344d7829a67ce47bd73c225f1`  
+Source revision: `b8c1641673632938b3270926611a7a0320484b3a`  
 Pinned client: `v18.18.0` / `b5a6b2f7e5b6606b6562e678ead83f21738f34a0` (`@oh-my-pi/collab-web` 16.3.6)
 
 Normalized tool versions:
