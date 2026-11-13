@@ -1,5 +1,15 @@
 # Release status
 
+## Engineering update — OMP v18.20.0 (not a release)
+
+The host source pin advances to `c308970263ae13744ea15ab67302e3dac840e266`
+(tree `ba890953dd69eb4bf73bb7233bbe50ccfacd6912`). This is source compatibility
+work only. The embedded client is reviewed separately; the Linux rewind canary
+needs its changed upstream status text recognized and a new live run.
+No candidate, qualification, signed publication or installed-byte smoke is
+recorded by this update. Published v0.11.0 and the generated evidence below
+remain unchanged.
+
 <!-- release-generate:current:start -->
 ## Mainline v0.11.0 — published stable
 

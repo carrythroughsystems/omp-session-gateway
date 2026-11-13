@@ -117,12 +117,25 @@ and [lifecycle coverage](LIFECYCLE_BRANCH_RESUME.md).
 Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit
 `4999b98bd5`) is the minimum supported host version: set `collab.autoStart`
 ([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
-plain `omp`. The current engineering baseline is `v18.18.0` (`UPSTREAM.lock.json`) and the
+plain `omp`. The current engineering baseline is `v18.20.0` (`UPSTREAM.lock.json`) and the
 qualified host baseline is recorded in the release-generated matrix below, while the independent
 embedded browser client pin is `v18.18.0` (wire `18.18.0`).
 Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
 fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
 gateway update.
+
+v18.20.0 (`c308970263ae13744ea15ab67302e3dac840e266`, tree
+`ba890953dd69eb4bf73bb7233bbe50ccfacd6912`) keeps the registry, settings, native IPC
+sources and `docs/collab.md` byte-identical to v18.18.0. Registry v1, discovery,
+minimum host `18.1.20` and relay framing stay unchanged. The host can now shed one
+slow guest and send `error.resync`; the matching browser client re-sends `hello`
+within a bounded rejoin budget. Select requests can carry optional `approval`
+metadata without changing their response shape. Ask tool results now describe HTML
+forms and task calls use name/agent/task/steps fields. These browser-client changes
+belong to a separate reviewed refresh, not the host-only baseline procedure.
+The Linux rewind canary's old success-text matcher does not recognize upstream's
+`Rewound N turns` status. A source-pin update alone does not settle that live
+canary or qualify a release; the published matrix below is unchanged.
 
 v18.18.0 (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, tree
 `cc847a53faf634167bde0ae8c12cb1d6ef38a412`) keeps those contracts unchanged from v18.17.0:

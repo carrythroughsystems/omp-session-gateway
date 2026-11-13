@@ -12,7 +12,7 @@ requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact login allowlist, and th
 | Surface | Pin or contract | Notes |
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
-| Engineering host baseline | `v18.18.0` (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`) | Exact OMP source and tree (`cc847a53faf634167bde0ae8c12cb1d6ef38a412`) in `UPSTREAM.lock.json` |
+| Engineering host baseline | `v18.20.0` (`c308970263ae13744ea15ab67302e3dac840e266`) | Exact OMP source and tree (`ba890953dd69eb4bf73bb7233bbe50ccfacd6912`) in `UPSTREAM.lock.json`; source pin, not new qualification |
 | Embedded browser client | `v18.18.0` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.18.0`) | Independent provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); shared wire envelopes, wait-list/legacy-result rendering, job-intent labels and exact-width Markdown code spans. Seven exact pure TypeScript helpers are vendored, without pi-utils/pi-natives or export-only omp-stats. |
 | Gateway runtime | Bun `1.4.4` | Required runtime for the CLI, daemon, and release archives |
 
@@ -24,7 +24,9 @@ For the current published release and its qualified hardware matrix, see
 Under registry v1, the gateway validates the fields it reads and ignores unknown additive fields
 (ADR-028). Any snapshot naming prompt, question, options, prefill, answer, requestId, or count is
 refused. The minimum host version stayed unchanged when the engineering baseline later moved to
-v18.18.0.
+v18.20.0. Its registry and native IPC sources are unchanged from v18.18.0; additive
+guest resync and approval markers affect the independently pinned browser client,
+not the gateway's metadata registry reader.
 
 Hosts from OMP `18.2.9` onward (upstream
 [PR #12844](https://github.com/can1357/oh-my-pi/pull/12844)) may include optional boolean `busy`

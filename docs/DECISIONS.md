@@ -946,6 +946,35 @@ published v0.7.6 remains qualified on v18.8.9.
 
 ---
 
+**Engineering baseline update (2026-11-13):** Pin published mainline v18.20.0
+(`c308970263ae13744ea15ab67302e3dac840e266`, tree
+`ba890953dd69eb4bf73bb7233bbe50ccfacd6912`) independently of the embedded client.
+`scripts/upstream-pins.ts` derives both native tarball/binary hashes after checking
+official npm integrity and shasum. Agent and wire packages are `18.20.0`;
+collab-web stays `16.3.6`, and Bun stays `1.4.4` (upstream requires `>=1.4.4`).
+The registry, collab settings, native IPC sources and collaboration documentation
+are byte-identical to v18.18.0: minimum host `18.1.20`, registry v1, discovery
+paths, query shapes and relay envelope remain unchanged.
+
+The host/relay changes isolate an overloaded guest rather than ending sharing
+and send the additive `error.resync` marker; the client must re-hello with a
+bounded retry budget. Optional `select.approval` metadata marks a permission
+wait without a new response shape. Ask rendering changes from question cards
+to HTML-form results, and task rendering consumes name/agent/task/steps. These
+require a separate reviewed client refresh and its patch/provenance proofs.
+Extension dialog budgets, pre-shutdown hooks, transcript attachment ordering,
+CLI-guest lifecycle and Tern TSP changes do not add gateway registry fields.
+
+Upstream `7027a619a41c1eccdae6a5f07de91c43e2a487e3` changes the successful
+rewind status from `Rewound to selected point` to `Rewound N turns` when turns
+were dropped. v18.19.0 and v18.20.0 contain that change; the gateway's exact
+old-text canary matcher does not. Correcting that matcher with deterministic
+tests is not a green Linux lifecycle receipt. No new live canary, candidate,
+qualification or installed-byte smoke is claimed, and published v0.11.0 stays
+bound to its recorded v18.18.0 qualification.
+
+---
+
 **Engineering baseline update (2026-11-07):** Accept published mainline v18.18.0
 (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, tree `cc847a53faf634167bde0ae8c12cb1d6ef38a412`)
 as the host engineering pin, with registry v1 and minimum host `18.1.20` unchanged.
