@@ -1,364 +1,214 @@
 # Architecture
 
+This document explains the components, runtime flows, trust boundaries, availability rules, and installation transactions of OMP Session Gateway for contributors working on the codebase.
+
+On each host, interactive Oh My Pi (OMP) processes — each an OMP host (one running `omp` process) — publish local discovery files and owner-only query endpoints. Per-user `omp-gatewayd` polls local discovery, serves the **OMP Sessions** Progressive Web App (PWA) on loopback behind Tailscale Serve over tailnet HTTPS, coordinates Web Push alerts, and brokers collaboration links on explicit **View** or **Control** taps while browsers connect directly to OMP's encrypted collaboration relay.
+
+Source-level file inventories are in the [gateway module map](../apps/gateway/README.md#module-map), the [web app module map](../apps/web/README.md#module-map), and the [protocol package overview](../packages/protocol/README.md).
+
 ## 1. Components
 
 ### 1.1 Mainline OMP discovery reader
 
-Stock mainline OMP `>= 18.1.20` owns its collaboration controller and per-host local registry.
-[PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). No fork, custom OMP build, or gateway-specific OMP plugin is required.
-The gateway remains a separate installation: enable `collab.autoStart` once, then start plain
-`omp`. Bun 1.4.4 and TUN-mode Tailscale Serve remain deployment prerequisites; see
-[OMP_INTEGRATION.md](OMP_INTEGRATION.md).
+Stock mainline OMP `>= 18.1.20` owns its collaboration controller and per-host local registry; no fork, custom OMP build, or gateway-specific OMP plugin is used. Operators enable `collab.autoStart` once and run plain `omp` alongside Bun 1.4.4 and TUN-mode Tailscale Serve; see [Mainline OMP integration](OMP_INTEGRATION.md).
 
-`OmpHostReader` reads discovery entries under `~/.omp/run/collab-hosts` (or the configured
-`omp.discoveryDir`) and queries each entry’s published `endpoint` with its per-host token.
-OMP may relocate a long socket path; deriving a socket name from the JSON filename is incorrect.
-The gateway never writes, renames, or unlinks anything in the discovery directory.
+`OmpHostReader` (`apps/gateway/src/omp-registry.ts`) reads discovery entries under `~/.omp/run/collab-hosts` (or configured `omp.discoveryDir`) and queries each entry's published `endpoint` with its per-host token. Because OMP relocates long socket paths, deriving a socket path from the JSON filename is invalid, and the gateway never writes, renames, or unlinks anything in the discovery directory.
 
-Snapshot queries return metadata only. OMP owns publication and cleanup, independently of the
-gateway. The file shape and one-request-per-connection wire contract are in [PROTOCOL.md](PROTOCOL.md).
+Snapshot queries return metadata only, while OMP owns publication and cleanup independently of the gateway. File shapes and the one-request-per-connection wire contract are specified in [Wire and HTTP protocol](PROTOCOL.md).
 
 ### 1.2 Host poller and launch broker
 
-`startHostPoller` coalesces concurrent polls, reads host snapshots, and reconciles the metadata-only
-`SessionRegistry`. `registry.heartbeatSeconds` is the poll interval (default 10 seconds), not a
-publisher heartbeat. Hosts absent from discovery or conclusively dead are removed; transient query
-failures retain an existing card until `registry.ttlSeconds` (default 35 seconds) expires. Only
-`ENOENT`/`ECONNREFUSED` proves a queried host finished; a timeout, `EMFILE`, `EACCES`, or wire
-error such as `snapshot_unavailable` must not retire it immediately.
+`startHostPoller` (`HostPoller`) coalesces concurrent polls, reads OMP host snapshots, and reconciles the in-memory, metadata-only `SessionRegistry` (`apps/gateway/src/registry.ts`). `registry.heartbeatSeconds` is the gateway's discovery poll interval (default 10 seconds); OMP processes never push heartbeats to the gateway.
 
-`OmpLaunchResolver` is the launch broker. After the HTTP authorization checks, it verifies the
-observed generation, requested access, and optional attention request identity; queries OMP for a
-`link` for that exact generation and access; and revalidates before returning a capability.
-`mode_unavailable` refuses a role no longer shared.
+Hosts absent from discovery or failing with `ENOENT` or `ECONNREFUSED` are removed immediately; timeouts, `EMFILE`, `EACCES`, and wire errors such as `snapshot_unavailable` retain an existing card until `registry.ttlSeconds` (default 35 seconds) expires.
 
-The gateway fetches capabilities **only per explicit launch**. It never stores or caches them,
-including in the registry: their gateway lifetime is confined to the query and no-store launch
-response. This is strictly narrower than the fork-era in-memory secret store, which retained links
-for the lifetime of a published session.
+`OmpLaunchResolver` is the per-tap launch broker; a View or Control link is a bearer secret, called a capability in the contracts. After HTTP authorization, it checks the observed generation (OMP's counter that increments when a session is replaced, preventing a stale card from opening a newer session), the requested mode, and any attention `requestId`, then queries OMP's `link` operation and revalidates before returning (`access_unavailable` maps to `409 mode_unavailable`).
 
-The opt-in creation service (`apps/gateway/src/tern-creation.ts`) subscribes to stripped poller
-observations in `apps/gateway/src/omp-registry.ts` through `subscribeObservations` and requests
-`refreshForAdoption` rounds started after the request, not merely an older in-flight poll.
-Reconciliation precedes observation publication. Concurrent fresh requests coalesce into one
-following round without overlapping reads; cancellation removes
-only the caller's wait. Observations contain binding/timing/Control metadata, never discovery
-tokens, endpoints, capabilities, full cwd, or Tern metadata. Ordinary polling, TTLs, and launch
-authorization remain unchanged.
+Capabilities exist in the gateway only during that per-launch query and `no-store` launch response and are never stored or cached in the registry.
+
+When opt-in session creation in Tern (a terminal execution environment where interactive `omp` processes run; [Running OMP inside Tern](OMP_INTEGRATION.md#running-omp-inside-tern)) awaits a spawned session (`apps/gateway/src/tern-creation.ts`), it subscribes to stripped poller observations via `subscribeObservations` and requests `refreshForAdoption` rounds started after the spawn rather than reusing an older in-flight poll.
+
+Reconciliation precedes observation publication, concurrent adoption requests coalesce into one round, cancellation drops only the caller's wait, and observations omit discovery tokens, endpoints, capabilities, full working directories, and Tern IDs.
 
 ### 1.3 `omp-gatewayd`
 
-A per-user daemon is the sole aggregator and remote authorization point.
+A per-user daemon (`omp-gatewayd`, invoked by `apps/gateway/src/cli.ts:runServe()`) is the sole local aggregator and remote authorization point on a host. Using `omp-gateway <command>` as shorthand for `bun apps/gateway/src/cli.js <command>` run from the extracted release archive (bundled from `cli.ts`), the CLI exposes `serve`, `install`, `uninstall`, `rollback`, `status`, `doctor`, `rotate-readiness-token`, `serve-guidance`, and `help`.
 
-Responsibilities:
+Daemon responsibilities (modules under `apps/gateway/src/`, per-user paths in [Paths](OPERATIONS.md#13-paths)):
 
-- read OMP discovery and query per-host endpoints;
-- maintain an in-memory metadata registry with process/session generations and freshness TTLs;
-- expose a loopback-only HTTP server and static PWA;
-- authorize requests using Tailscale Serve identity plus an application allowlist;
-- return a single capability only after an explicit View or Control action;
-- stream metadata-only updates with SSE;
-- start at desktop login and recover cleanly from restart;
-- embed or serve a pinned build/integration of OMP's existing `collab-web` client;
-- persist private VAPID/subscription material separately from the memory-only session registry and send metadata-only Web Push attention/resolution envelopes;
-- provide `install`, `status`, `doctor`, token rotation, and `uninstall` through `omp-gateway`.
-- serve `GET /api/v1/client-config` (same-origin only, `no-store`) and, when `http.trustedDashboardOrigins` is configured, admit browser-direct CORS requests from those exact origins only on `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), the three notification-grant POST routes (also requiring a configured coordinator), and their `OPTIONS` preflights (`apps/gateway/src/http-policy.ts`, [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors), ADR-048), without server-side launch proxying.
-- when explicitly configured, create a new interactive OMP process through the bounded Tern CLI
-  boundary and adopt it through OMP-native discovery, never through a terminal discovery adapter.
+- Read OMP discovery and query per-host endpoints, keeping `SessionRegistry` empty on startup until the first poll repopulates it.
+- Serve the loopback-only HTTP API (`http.ts`, `http-policy.ts`), static PWA shell (`static.ts`), and pinned `collab-web` bundle, authorizing Tailscale Serve identities (`auth.ts`, `tailnet.ts`) against `auth.allowedLogins`.
+- Serve same-origin `GET /api/v1/client-config` (`no-store`) and, when `http.trustedDashboardOrigins` is configured, admit browser-direct CORS requests from those exact origins only on the cross-origin routes ([Cross-origin access](PROTOCOL.md#cross-origin-access)), without server-side launch proxying.
+- Return a single capability only on an explicit **View** or **Control** launch and stream metadata-only directory updates over Server-Sent Events (SSE).
+- Persist private VAPID keys and owner-bound Push subscriptions in `<stateDir>/push-state.json` (`PushService` in `push.ts`) separately from the memory-only session registry, and send metadata-only Web Push envelopes.
+- When `tern` is configured, start new interactive `omp` tabs from administrator-approved choices (`tern-creation.ts`, `tern-cli.ts`) and adopt them through OMP-native discovery ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)).
 
-The registry is intentionally empty after daemon restart. The next host poll repopulates it; no capability store exists.
+`cli.ts:runServe()` owns `SessionCreationService`, `FleetSourceService`, `FleetCoordinator`, `PushService`, the poller, HTTP server, and clean shutdown, while `service.ts` manages OS login-service registration and `logger.ts` (`SafeLogger`) enforces numeric-and-boolean-only operational logs.
 
-`apps/gateway/src/cli.ts:runServe()` owns `SessionCreationService`, `FleetSourceService`,
-`FleetCoordinator`, the poller, HTTP server, and
-shutdown, just as it owns `PushService`; `service.ts` remains OS-service installation code.
-`tern-creation.ts` owns serialized admission, a private capability-free
-`<stateDir>/session-creations.json` ledger, state transitions, and adoption. `tern-cli.ts` owns
-only bounded subprocesses, lossless numeric-ID decoding, metadata projection, and child cleanup.
-Intent and every checkpoint are durable before exposure or dependent effects. Restart classifies
-in-flight operations conservatively without resuming or re-spawning; shutdown never closes Tern
-tabs, kills OMP, or modifies OMP discovery. See [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption).
+`tern-creation.ts` owns serialized admission, the capability-free `<stateDir>/session-creations.json` ledger, and adoption, and `tern-cli.ts` runs bounded subprocesses with lossless numeric-ID decoding and child cleanup.
+
+Intent and checkpoints are persisted before dependent effects, restart classifies interrupted operations conservatively without re-spawning, and daemon shutdown never closes Tern tabs, kills `omp`, or touches OMP discovery.
 
 #### Fleet notification source
 
-`fleet-source.ts` owns the source half of ADR-048: a private atomic version-1
-`notification-grants.json`, serialized grant mutations, verifier-only storage, 30-day expiry,
-expired-entry pruning, and at most 16 grants. The browser grants access only from an origin in
-both `notifications.coordinators` and `http.trustedDashboardOrigins`; the source authenticates
-the owner independently. The separate machine-authorization arm in `auth.ts` never reads an
-identity header and reaches only `GET /api/v1/notification-feed`. Measured Serve topology is
-required even when a loopback browser harness declares identity trust.
+For fleet notifications (background Web Push alerts from other hosts, coordinated by the home gateway under [ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator)), a remote host acting as an alert source runs `FleetSourceService` (`apps/gateway/src/fleet-source.ts`). It maintains an atomic version-1 `<stateDir>/notification-grants.json` with serialized mutations, verifier-only secret storage, 30-day expiry, expired-entry pruning, and at most 16 grants, one per owner and coordinator origin.
 
-Each grant owns at most one live SSE connection. It has a 256-event queue, identifier-only
-projection, 15-second heartbeat comments, and authorization checks before each write.
-`HostPoller.discoveryWarm` becomes true only after healthy discovery reconciliation; a cold
-source sends heartbeats, not an authoritative empty snapshot. Atomic registry subscription
-then establishes the snapshot before upserts/removes, while stops are live-only and revalidated
-against the current activity-stop edge before writing. Revocation/replacement closes the old
-connection before yielding to persistence; failed writes disable source authorization.
-Corruption preserves evidence and disables fleet routes with 503 without disabling ordinary
-directory/launch access. Doctor emits a boolean health finding; support archives never read
-either fleet state file. The coordinator puller and PWA enrollment are separate roles and are
-not implemented by this source service.
+- Browsers create, renew, or revoke grants only from an origin listed in both `notifications.coordinators` and `http.trustedDashboardOrigins`, while the source independently authenticates the Tailscale user login (`Tailscale-User-Login`) on that direct HTTPS request.
+- A separate machine-authorization branch in `auth.ts` never reads Tailscale identity headers and admits bearer grant credentials only on `GET /api/v1/notification-feed`; measured Tailscale Serve topology is required even when a loopback browser harness sets `auth.trustIdentityWithoutTailnetDevice`.
+- Each grant owns at most one live SSE connection with a 256-event queue, identifier-only session projection, 15-second heartbeat comments, and per-write authorization checks.
+- `HostPoller.discoveryWarm` turns true only after healthy discovery reconciliation, so a cold source emits heartbeats rather than an empty snapshot; once warm, atomic registry subscription sends a `snapshot` before `upsert` or `remove` events, and `stop` events are live-only and revalidated against a `busy: true`-to-`false` edge before write.
+- Grant revocation or replacement closes the active stream before persisting; write failure disables source authorization, and corrupt state preserves on-disk evidence and fails fleet routes with `503` while leaving ordinary directory and launch routes available.
+- `doctor` reports boolean `notificationGrantsHealthy`, and diagnostics bundles never read `notification-grants.json` or the coordinator's `fleet-notifications.json`.
 
 #### Fleet notification coordinator
 
-`fleet-coordinator.ts` owns the home role: at most 32 owner/source grants, eight recipients keyed
-by endpoint SHA-256, and 256 outstanding ask identities per recipient in private atomic
-`fleet-notifications.json`. It persists `max(previous epoch + 1, Unix seconds)` before delivery;
-one receipt counter spans all recipients within that epoch. `push-state.json` and legacy v2
-payloads are unchanged. The push service supplies the existing owner-bound subscriptions,
-VAPID transport and a shared eight-send semaphore; opted-in recipients receive validated v3
-messages for both local and selected remote sources.
+`FleetCoordinator` (`apps/gateway/src/fleet-coordinator.ts`) runs on the home gateway and persists up to 32 owner-and-source grants, eight recipients keyed by endpoint SHA-256, and 256 outstanding request IDs per recipient in `<stateDir>/fleet-notifications.json`.
 
-Each selected active grant owns one bounded SSE puller to its exact configured origin. It sends
-only the grant Authorization and SSE Accept headers, refuses redirects, and adds configured hosts
-to runtime proxy bypass lists. Snapshots verify the coordinator-bound owner digest before changing
-knowledge. Network failure retains stale asks; authorization failure clears that source's alerts.
-Reconnects back off from one second to five minutes; 401 and 404 retry every five minutes.
+Before delivery it persists `max(previous epoch + 1, Unix seconds)` with one receipt counter across recipients in that epoch; `PushService` supplies owner-bound subscriptions, VAPID transport, and a shared eight-send semaphore to deliver Push v3 envelopes for local and selected remote sources while keeping `<stateDir>/push-state.json` and non-fleet Push v2 payloads intact.
 
-After selected sources report or 30 seconds elapse, restart reconciliation compares persisted
-outstanding requests with current knowledge: exact clears first, then unseen current asks, never
-stops or repeated alerts. Stale sources retain their outstanding asks. Selection replay is scoped
-to one device. Outstanding identifiers change only after push acceptance; volatile per-recipient
-reservations deduplicate queued/in-flight asks and count pending attentions toward capacity.
-Failed sends retain reservations through each delivery's own 30-second cooldown: outstanding clears
-retry the same envelope and sequence; attentions release for current-ask reconciliation.
-Skipped deliveries release immediately without a cooldown.
-A full 256-entry delivery queue refuses new alerts/stops while deferred clears remain represented
-in the bounded outstanding set until queue space opens. Sends to one subscription are paced: one at
-a time, in call order, each starting at least one second after the previous one to it settled, and
-waiting before taking a send slot. While pacing is on, the coordinator launches one delivery per
-endpoint at a time and serves other queued endpoints first, so a burst to one device does not fill
-its eight-delivery window. Transport rechecks owner, selection, grant and expiry after acquiring its
-send slot. Corrupt/unwritable state fails fleet routes closed without deleting evidence; local
-alerts fall back to unchanged Push v2. The ordinary directory and capability broker remain
-independent.
+- Each selected active grant runs one bounded SSE puller to its configured origin, sending only `Authorization` and `Accept: text/event-stream`, refusing redirects, bypassing HTTP proxies for configured hosts, and verifying the coordinator-bound owner digest on every snapshot.
+- Activating a source waits at most 5 seconds for its first snapshot and otherwise reports `source_unreachable`; the other activation outcomes and their wire shapes are in [Fleet notifications](PROTOCOL.md#fleet-notifications).
+- Network errors retain stale asks and back off from 1 second to 5 minutes; `401` and `404` clear that source's alerts and retry every 5 minutes.
+- Once selected sources report or 30 seconds elapse, restart reconciliation compares persisted outstanding requests against live state, queuing exact `clear` messages first and unseen live requests second without sending `stop` messages or repeating unchanged remote requests; stale sources keep their persisted requests, and catch-up replay when a device changes its selected hosts is scoped to that device.
+- Outstanding request sets mutate only after push acceptance, while volatile per-recipient reservations deduplicate queued or in-flight requests and count against the 256-item cap.
+- Failed sends hold reservations across a per-delivery 30-second cooldown (`clear` retries reuse the exact envelope and sequence; failed attentions release for live reconciliation), skipped sends release immediately, and a full 256-entry delivery queue drops new attentions and stops while keeping deferred clears represented until space opens.
+- Per-endpoint pacing waits at least 1 second after the previous settle before acquiring one of the eight send slots, serves other queued endpoints first, and rechecks owner, selection, grant, and expiry after acquiring the slot; corrupt or unwritable state fails fleet routes closed while local alerts continue on Push v2.
 
 ### 1.4 OMP Sessions PWA
 
-The PWA is a deliberately small session directory and launcher.
+The PWA (modules under `apps/web/src/`, user flows in [Using OMP Sessions](USAGE.md)) is a small session directory and capability launcher that never renders transcripts outside the embedded client or prefetches capabilities.
 
-Each card may show only non-secret metadata:
+#### Directory metadata
 
-- friendly title;
-- repository or directory basename, with full paths disabled by default;
-- model label when configured;
-- process start and last-seen time;
-- health/streaming state if available without transcript data;
-- boolean response-required state, rendered as **Needs attention**, with an opaque request identity
-  and receipt timestamp but no prompt content or answer data;
-- **View** for ordinary read-only launches and **Open request** for attention requiring Control;
-- **Hold for desk** for exact-ask local queue routing; and
-- **Hide** for reversible device-local hiding of non-attention rows, presented as a
-  compact per-row control with an explicit accessible label.
+Each directory card renders non-secret metadata only: session title (or working-folder basename, falling back to `OMP session`), project basename (full paths off by default), model slug, uptime or waiting duration, and sampled `Working` / `Idle` / `Activity unknown` state.
 
-A directory with zero live sessions shows the `collab.autoStart` empty-state guidance instead of a
-zero-count summary. Device-scoped preferences — the background-alert toggle, notification detail,
-and build identity — live in the Background alerts tray and its Alert detail child behind a persistent masthead control; the `All
-clear` summary claims "You'll get pinged" only while alerts are enabled and otherwise offers the
-Settings path.
+When OMP reports boolean `inputRequired: true`, the gateway mints an opaque `ask.requestId` and `ask.since` timestamp (producing the **Needs you** heading and `Waiting for your input` hero card summary without prompt or answer text), alongside actions for read-only **View**, **Open request**, **Hold for desk**, and reversible device-local **Hide**.
 
-The PWA never prefetches capabilities. On bootstrap it fetches same-origin `GET /api/v1/client-config` (`cache: "no-store"`, `credentials: "same-origin"`, `redirect: "error"`, 4-second timeout, bounded to `MAX_CLIENT_CONFIG_BYTES`). A `404` response from an older gateway falls back to local-only operation with browser speech recognition disabled and no error banner. A failed or invalid configuration keeps the local directory usable and creates no remote sources. The banner owns `Fleet configuration unavailable` with **Try again** only while the local list is available; a local transport outage replaces that story, never adds a fleet row. Reconnect retries failed bootstrap after a successful local snapshot, coalescing concurrent recovery attempts; successful configuration clears the banner.
+When zero sessions are live on fresh coverage, the directory renders **No live sessions** with `collab.autoStart` setup guidance instead of a zero-count list.
 
-For the local source (`id: "local"`), the PWA receives metadata from `GET /api/v1/sessions` and `GET /api/v1/events`. When `fleet.targets` (up to 7 remote sources, 8 total with `local`) is configured, the PWA polls each remote target's `GET <origin>/api/v1/sessions` directly from the browser (`mode: "cors"`, `credentials: "omit"`, `cache: "no-store"`, `redirect: "error"`, 5-second timeout, 8 MiB response bound) immediately on visible start and every 10 seconds while visible, with at most one request in flight per source and jittered exponential failure backoff (1 s to 30 s). It never opens a remote `EventSource` or fetches remote `client-config`, `health`, or `push` routes. Each session is keyed in page memory by `SourceKey = id + "\0" + origin` and `SessionRef = { sourceKey, instanceId, generation, requestId? }`; the composite source key is never concatenated into an OMP `instanceId` or sent over the network.
+Device-scoped alert controls and build identity sit in the **Background alerts** tray (and its **Alert detail** and **Hosts** sections) opened from masthead **Settings**; **All clear** appends `Alerts are on for input requests and activity stops.` only when alerts cover the view and otherwise offers **Enable alerts to get pinged** (or **Alerts blocked · Settings**).
 
-A native `<select>` labeled **Host** filters the directory across **All hosts**, the local host label, and configured `fleet.targets` in configuration order; filter state lives in volatile page/history state only and never changes background polling. Every session row, hero card, held row, and active collaboration shell bar displays its host label. **All clear** and **No live sessions** require fresh snapshots for every source in scope. Otherwise, coverage aggregates counts, accessible names say **Listed**, and quiet checks are not host failures. Only independent failed remote sources get named rows; the banner owns device/local-gateway connectivity. Under **All hosts**, waiting sessions follow first observation of each exact ask (`observed waiting order`, tie-broken by `sourceKey` then `instanceId`); a selected host keeps `ask.since` FIFO. A readable remote `403` clears rows, marks the source forbidden, cancels its launches, stops automatic polling until a foreground/online recheck, and disposes its active shell; it offers no **Retry**. Other failures retain disabled stale rows for 35 seconds, then expire them while retaining the successful **List as of** clock and `Host unavailable` row. A retained empty observation says **No sessions as of** that clock, not that the host was never checked.
+#### Fleet sources
 
-`availability.ts` is the pure eight-state presentation model: loading, fresh, refreshing, stale,
-expired, unavailable, forbidden and withdrawn. An authorization-withdrawn observation cannot
-certify an empty list or reuse its old clock, including during a later offline retry; only a
-fresh authorized snapshot restores that observation. `fleet.ts` owns transport/retention; `app.ts` adapts its local
-and remote observations to the model and writes every banner through one single-child writer.
-Offline marks remotes stale without hiding them or stopping their retry chain; the grace deadline
-still runs. Every reconnect restores visibility idempotently, so recovery never requires an
-`online` event. Hiding/freezing still aborts without inventing a failure.
-A pending retry preserves the named local fault, even before the first successful snapshot.
-Remote launch denial uses its forbidden host row without replacing an independent local banner.
-Bootstrap recovery updates the existing local source's label in place; its origin-bound object
-identity remains stable for accepted creation intents and their exact Ready handoff.
-Visible guidance timing is separate from the named local fault: hiding, expiry messages, and
-remote mounts cannot clear that fault or cancel its retry chain. Only a successful local
-observation or a replacement named local fault changes its ownership.
-Local list, launch, creation and embedded-probe denials share one withdrawal transition: clear
-metadata and clock, invalidate the event epoch, close the stream, cancel local work, and require
-a fresh authorized snapshot. Late pre-denial upserts, keepalives and errors cannot resurrect it.
-Remote launch errors remain source-scoped, including 404/409 and transport failures. Their host
-notice lasts until that source is checked successfully or a launch succeeds; Refresh host never
-replays a capability request. Observation-aware empty copy also covers All hosts and single-host views.
-Denying, failing, discarding or programmatically cancelling an unmounted request preview restores
-and consumes its directory snapshot without starting another fetch or reverting a newer host selection.
-Pagehide is the exception: cancellation keeps the snapshot and metadata-only resume intent together
-until persisted pageshow revalidates and relaunches. Local authorization withdrawal does not skip
-remote refresh during restoration, and remote triage gates on its own source freshness, not local
-directory readiness. Cross-host Next-ask failures retain the target's notice across predecessor
-health updates; expired targets still refresh, and Sessions returns to list-only recovery.
-Target-owned triage arbitrates all predecessor writers, including Hold reconciliation and short
-connection interruptions. Explicit dismissal also invalidates a pending expired-target feedback update.
-Mounted action failures use this owner whether the target is local or remote. Local success paths release
-the owner just like remote observations; a successful expiry refresh never recreates a failed host row.
-Pending launches, not `answerShown`, suppress Hold reconciliation, so dismissal can restore Hold immediately.
-Launch acceptance revalidates current View/Control eligibility as well as source, generation and request.
-The accepted shell receives that revalidated metadata, including its current title and Control affordance.
-Every new launch intent advances the selection epoch, so a failed newer intent still supersedes an older
-resume. Creation establishes that epoch when its wizard opens; its launch handoff continues the same intent.
-Selected-source empty rendering also uses its own observation, with retained empty clocks ahead
-of neutral checking progress.
-Availability descriptors retain the exact successful observation instant separately from formatted time;
-All-hosts empty rendering compares those instants before claiming a shared clock.
+On startup the page fetches same-origin `GET /api/v1/client-config` (`cache: "no-store"`, `credentials: "same-origin"`, `redirect: "error"`, 4-second timeout, 32 KiB `MAX_CLIENT_CONFIG_BYTES` cap). A `404` from a pre-fleet gateway runs in local-only mode with opt-in in-page speech recognition (`speech.browserRecognition`) disabled and no error banner.
 
-Couch triage is a device-local presentation layer over authoritative metadata. **Hold for desk** and **Hide** persist under `localStorage` keys `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the bounded `(instanceId, requestId, heldAt)` and `(instanceId, generation, dismissedAt)` records (100 items / 512,000 bytes max). Existing v1 keys migrate to the local source and are removed only after the v2 write succeeds; records whose source is no longer configured or whose `sourceId` now maps to a different origin are dropped at bootstrap. Holding skips the ask in this device's rotation without clearing gateway attention, reducing the home pending count or app badge, or affecting another device, and Hold on a remote source never enumerates or closes home notifications even when `instanceId` collides. Active-shell Hold commits only after the next launch succeeds; a launch failure leaves the current ask in rotation and keeps its collaboration shell mounted while offering source-appropriate recovery.
+A malformed or failed response keeps the local directory usable, creates no remote sources, and shows `Fleet configuration unavailable` with **Try again** in the top banner unless a local transport fault takes precedence, retrying automatically after local snapshot recovery.
 
-Authoritative snapshots and upserts remove a held record when its exact ask changes or clears, and remove a dismissal when the session disappears, its generation changes, or it needs attention. Transport failures do not erase either record. Optional `busy` distinguishes sampled activity from idle/unknown, not successful completion. The PWA must not invent a Completed state or label local dismissal as Close or Exit. These bounded records contain no title, path, model, prompt, answer, transcript, or collaboration capability.
-An explicit Background alerts tray action enables background Web Push. Permission is never requested on load.
-The gateway sends strict Push v2 attention/clear and activity-stop envelopes with bounded identity and a
-bounded pending count. Private detail uses a fixed title with no body; Session (the default) adds
-bounded session/project labels. Preview falls back to Session because stock OMP supplies no ask
-preview. Visible text may persist in notification history, screenshots, or wearables. A tap never
-navigates an open window: the worker focuses the most recently focused one and posts it the
-notification's metadata-only data, and the page revalidates the exact current ask or generation
-in place, keeping a collaboration already open at the tapped authority. With no open window, or
-none that accepts within three seconds, it opens `/collab/:instanceId?request=:requestId`, which
-the app synchronously scrubs before the same revalidation (ADR-017 amendment). Valid taps use the
-ordinary generation-bound, no-store, in-memory launch flow; stale taps never launch. Background
-delivery remains best effort; see [COMPATIBILITY.md](COMPATIBILITY.md#platforms-and-browsers) for the qualified Android WebAPK and iPhone Home Screen app scope.
+For `local`, the page reads `GET /api/v1/sessions` and `GET /api/v1/events`. When `fleet.targets` configures up to seven remote hosts (eight sources total with `local`), the browser polls each remote `GET <origin>/api/v1/sessions` directly (`mode: "cors"`, `credentials: "omit"`, `cache: "no-store"`, `redirect: "error"`, 5-second timeout, 8 MiB response cap) on visible start and every 10 seconds while visible, with one in-flight request per source and jittered 1-to-30-second failure backoff.
 
-The registry alone detects known busy-to-idle edges on a continuing identity/generation. Retained
-polls remove only activity knowledge without extending TTL. Its private stop event shares the
-ordered dispatch queue but is never sent as a browser SSE event. A record-local revision marker
-invalidates stale queued delivery across busy, unknown, or identity transitions. Neither a previous
-nor current waiting sample may produce a stop. Stop taps use the exact instance/generation route
-and open View after fresh metadata; they never acquire Control. The shared per-instance
-notification tag and displayed-attention priority are specified in [ATTENTION_SPEC.md](ATTENTION_SPEC.md).
+The browser never opens remote `EventSource` streams or calls remote `client-config`, `health`, or `push` endpoints. In `fleet.ts`, sessions are keyed in page memory from `client-config` source `id` and `origin` values as `SourceKey = id + "\0" + origin` and `SessionRef = { sourceKey, instanceId, generation, requestId? }`, never concatenating `SourceKey` into `instanceId` on the wire.
 
-PWA upgrades activate immediately after the new content-hashed shell is cached. The shell includes
-the pinned collaboration-client module and stylesheet, and an idle directory warms the module
-import so a launch pays only for its capability request and relay connect; launch-time loading
-remains the fallback. Session-title Private Use Area symbols use a first-party-served Symbols Nerd
-Font Mono subset, split into content-hashed WOFF2 chunks by `unicode-range`; chunks are excluded
-from install precaching, downloaded only when a rendered glyph needs them, and served cache-first
-from the shell cache after their first successful fetch. Activation retires prior shell caches and
-claims clients but never navigates one: Chromium reports a client's creation URL, not the route the page later reached through the
-history API, so the worker cannot tell an idle directory from a pending launch or a live `/client/`
-collaboration (ADR-018 amendment). The page observes the controller change and reloads itself after
-one second only while no launch is pending, no routed notification awaits its snapshot, and no
-collaboration client is mounted. Otherwise the update applies when a failed launch returns to the
-directory or the user leaves collaboration. The no-store `/update/` bootstrap, which the new
-document synchronously scrubs to `/`, remains only for activations by earlier workers.
+The **Host** `<select>` filters the view without changing background polling: **All hosts** orders waiting sessions by when this browser first observed each exact request (avoiding cross-host clock skew), a single host uses `ask.since` FIFO, and directory rows show host labels only when multiple hosts are in view.
+
+#### Availability model
+
+`availability.ts` defines the pure eight-state source model (`loading`, `fresh`, `refreshing`, `stale`, `expired`, `unavailable`, `forbidden`, `withdrawn`). `fleet.ts` owns polling and the 35-second `stale`-to-`expired` grace window (retiring stale rows into a `Host unavailable` row), and `app.ts` arbitrates notices across the top banner, per-host rows (`#fleet-status` in `index.html`), and the open session's bottom triage bar ([Availability ownership](BRANDING.md#availability-ownership)):
+
+- The top banner owns device and local-gateway connectivity plus failed `client-config` bootstrap (with local transport faults taking precedence over bootstrap failure), while `#fleet-status` host rows name only independently failed remote sources.
+- Remote `403`, `404`, `409`, and transport launch failures stay on that remote source's host row without replacing an independent local banner; `Refresh host` checks the source's session list and never replays a capability `POST`.
+- A scheduled retry keeps an established local fault named even before the first snapshot, and hiding the page, expiring remote rows, or opening a remote session cannot clear that local fault or stop its retry chain; only a fresh local snapshot or a replacement local fault changes it, while bootstrap recovery updates the local source's label in place so accepted creation intents keep their origin-bound identity.
+- Going offline marks remote sources `stale` while preserving their observation clocks, grace timers, and scheduled reconnects (recovery never depends on an `online` event), whereas hiding or freezing aborts in-flight fetches without recording a failure.
+- Any local `403` on list, launch, creation, or embedded probe triggers one `withdrawn` transition that clears local rows and clocks, advances the SSE epoch, closes the stream, cancels local work, and ignores late pre-denial events until a fresh authorized snapshot arrives; a readable remote `403` clears that source's rows, disposes its open shell, and pauses automatic polling until foreground or online revalidation.
+- **All clear** and **No live sessions** require every source in scope to be `fresh` (plus current alert coverage for **All clear**). Availability descriptors store the exact observation instant alongside formatted hour-and-minute text: `withdrawn` invalidates the prior clock, **All hosts** shares an empty clock only when underlying observation instants match, and an independently observed empty remote source remains visible when local access is withdrawn.
+- Every launch or creation wizard open advances the selection epoch so a newer intent (even if it fails) supersedes an older resume, and accepted launches revalidate **View** or **Control** eligibility (`mode_unavailable` names the withdrawn mode instead of mounting) as well as source, generation, and `requestId`.
+- Denying, failing, or cancelling an **Open request** loading tray before the client mounts restores the directory snapshot without an extra fetch, except `pagehide`, which retains metadata-only resume intent so back-forward cache (`bfcache`) `pageshow` revalidates the target source's own freshness (even during local `403` withdrawal) and reacquires a fresh capability.
+- During **Next ask →** or **Hold → next** in the collaboration triage bar, the target owns failure notices across predecessor health or Hold updates until **Sessions**, explicit dismissal, a new launch, or a fresh target observation releases it; active in-flight launches suppress Hold reconciliation, and dismissing an expired-target notice restores **Hold → next** immediately.
+
+#### Local triage storage
+
+**Hold for desk** and **Hide** are device-local presentation layers persisted in `localStorage` under `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2` (at most 100 records and 512,000 characters each; full key inventory in [Browser storage](../apps/web/README.md#browser-storage)). Legacy `.v1` keys migrate to `sourceId: "local"` and are deleted only after the `.v2` write succeeds; records for removed or origin-rebound sources are pruned only after an authoritative bootstrap.
+
+Holding skips a request in this device's queue without clearing gateway attention, reducing the home `pendingAskCount` (Push v2) or `badge.count` (Push v3), or closing home notifications on a remote `instanceId` collision, and in-session **Hold → next** commits only after the next launch succeeds.
+
+Authoritative snapshots and upserts drop a held record when its `requestId` clears or changes and drop a dismissal when the session disappears, changes generation, or requires input, whereas transport failures preserve both; sampled `busy` never implies completion, and storage never holds titles, paths, models, prompts, transcripts, or capabilities.
+
+#### Background alerts and activity stops
+
+Web Push requires an explicit action in **Background alerts** and never prompts on page load. The home gateway sends Push v2 (`version: 2`) envelopes for local-only subscriptions and Push v3 (`version: 3`) envelopes when fleet notifications are enabled.
+
+**Private** sends a fixed title with no body, **Session** (default) adds session and project labels locally or `<host label> · <6-char instanceId suffix>` for remote fleet sources, and **Preview** falls back to **Session** because stock OMP publishes no prompt preview.
+
+`SessionRegistry` detects `busy: true` to `busy: false` edges on a continuing `instanceId` and `generation` (retained polls clear activity knowledge without extending TTL, and neither a prior nor current `inputRequired` sample can emit a stop).
+
+Activity-stop events share the ordered push dispatch queue with a record-local revision marker that cancels stale stops across busy, unknown, or identity transitions, are never broadcast over browser SSE, and always open read-only **View** on tap ([Attention and notification specification](ATTENTION_SPEC.md)).
+
+#### Shell updates and caching
+
+The service worker precaches the content-hashed application shell — including the pinned `collab-client` module, stylesheet, and upright Geist faces — while an idle directory preloads the client module so taps pay only for the capability `POST` and relay handshake.
+
+Session-title Private Use Area glyphs use first-party Symbols Nerd Font Mono WOFF2 chunks split by `unicode-range`, downloaded on demand with the italic Geist face and cached in the active shell cache after first fetch ([Service worker](../apps/web/README.md#service-worker)).
+
+Activating a new worker deletes prior shell caches and calls `clients.claim()` without navigating windows because Chromium reports a window client's initial URL rather than history-API routes such as `/client/` ([ADR-018](DECISIONS.md#adr-018--activate-pwa-upgrades-automatically-without-interrupting-live-collaboration)).
+
+Open pages listen for `controllerchange` and reload after 1 second only when no launch, routed notification, or collaboration shell is active, applying deferred updates once collaboration exits; `http.ts` and `app.ts` also scrub `no-store` `/update/` requests to `/` for pre-ADR-018 workers that navigated on upgrade.
 
 ### 1.5 Existing OMP collaboration client
 
-Reuse a pinned OMP `packages/collab-web` revision. Do not independently implement the transcript, tool cards, subagent controls, relay protocol, or cryptography.
+`packages/collab-client` embeds a pinned upstream OMP `packages/collab-web` source snapshot and `@oh-my-pi/pi-wire` dependency rather than reimplementing transcripts, tool cards, subagent controls, the relay protocol, or end-to-end encryption ([Embedded collaboration client](../packages/collab-client/README.md)).
 
-The embedded source and npm wire pin are `v18.12.6`, independently of the `v18.12.5` host baseline.
-The client vendors only the pure TypeScript pi-utils marked fork and math/list grammar, avoiding
-the pi-utils/native package closure. Upstream coalesces streaming commits per animation frame
-and parses only unfrozen Markdown tails; gateway windowing and memory-only bootstrap remain.
+The bundle vendors only the pure TypeScript `@oh-my-pi/pi-utils` Markdown and math/list helpers so `@oh-my-pi/pi-natives` never enters the browser build.
 
-Preferred integration:
+The PWA mounts `startCollabWithCapability` (`packages/collab-client/upstream/src/embed.ts`) in the same document on the gateway origin, keeping the capability in JavaScript memory only, disposing all references on exit, and returning to the directory on reload instead of reading URL fragments or history.
 
-1. expose a small upstreamable client bootstrap such as `startWithCapability(capability)` or a component prop;
-2. render or mount the client from the same PWA origin;
-3. keep the capability in JavaScript memory only;
-4. dispose of references when leaving the session;
-5. return to the directory on reload because the capability is intentionally not recoverable.
+Installed PWAs always use this same-document mount because standalone windows need not preserve `window.opener`; a same-origin child window with `MessageChannel` and `postMessage` transfer is valid only where an exact-origin opener exists.
 
-In a writable Control session, the same pinned client may collect up to four photos through the
-Photo action's explicit source panel. **Take photo** uses a dedicated file input with
-`capture="environment"`; **Choose existing** uses a separate image input without `capture` so
-Android never has to infer camera-versus-library intent from one control. It rejects source
-dimensions above an 8,192px edge or 20 megapixels, then decodes and canvas-re-encodes JPEG, PNG, or
-WebP input in volatile browser memory, stripping
-EXIF/location metadata while bounding each normalized JPEG to a 2,048px edge and 1 MiB. The
-composer passes an optional note plus those images through OMP's existing encrypted v3
-`prompt.images` frame directly to the host, then retains the draft until the host echoes the
-corresponding transcript entry. No gateway HTTP endpoint,
-registry record, service-worker route, URL, browser-storage record, or new relay protocol is added.
-The host and model provider receive the normalized prompt exactly as they would an image attached
-locally in OMP; ordinary OMP transcript/provider retention therefore still applies.
+In writable **Control** sessions, **Photo** exposes separate **Take photo** (`capture="environment"`) and **Choose existing** inputs for up to four JPEG, PNG, or WebP images, rejecting sources over 8,192 px per edge or 20 megapixels and canvas-re-encoding each in memory to an EXIF-free JPEG within 2,048 px and 1 MiB.
 
+Images travel with the optional text note over OMP's encrypted v3 `prompt.images` relay frame and stay staged in the composer until the host transcript echoes receipt, adding no gateway HTTP route, storage key, or unencrypted hop.
 
-`startCollabWithCapability` also accepts `probeGateway` and `browserRecognitionEnabled` on `CollabEmbedOptions`:
+`app.ts` passes two `CollabEmbedOptions` hooks to `startCollabWithCapability`:
 
-- **`probeGateway`:** replaces the default same-origin `GET /api/v1/health` recovery probe with a source-bound, coalesced `GET <source>/api/v1/sessions` check that resolves `"healthy"` only when the body parses as a valid session list, `"forbidden"` on a readable `403`, and `"unavailable"` on any other failure. On `"forbidden"`, `gatewayHealth.state` transitions to `"forbidden"` with no relay refresh and no automatic probe retry (a later visibility or online transition may probe once more). Non-embedded callers that omit `probeGateway` keep the default same-origin `/api/v1/health` probe.
-- **`browserRecognitionEnabled`:** reflects the hosting document's `speech.browserRecognition` setting ([ADR-037](DECISIONS.md#adr-037--speech-input-keyboard-dictation-baseline-and-opt-in-browser-speech-recognition)). OS keyboard dictation works in the composer `<textarea>` under the default `Permissions-Policy: microphone=()`. When `speech.browserRecognition: true` is configured on the home gateway, document HTML responses set `Permissions-Policy: microphone=(self)` and the composer enables an opt-in Web Speech (`SpeechRecognition` / `webkitSpeechRecognition`) microphone control in writable **Control** sessions only. Recognized text stays in a reviewable draft buffer until the user taps **Use text**, which inserts into the composer without sending; **Send** remains a separate explicit action.
-A same-origin child window plus `MessageChannel` is acceptable only when the browser preserves a distinct exact-origin opener: open `/client/` synchronously during the tap, fetch the capability in the opener, transfer it with a same-origin `postMessage`, and never put it into a URL or DOM attribute. Installed Android PWA launch must use the preferred same-document mount because Chrome may reuse the standalone window without an opener.
-
-The pinned client uses the in-memory bootstrap. Do not introduce a fragment-based compatibility
-path: fragments can remain in browser history before replacement and leak through screenshots or
-copied URLs. Reload intentionally returns to the metadata directory.
+- `probeGateway` replaces the client's default same-origin `GET /api/v1/health` probe with a coalesced `GET <source>/api/v1/sessions` check returning `"healthy"` on a valid session list, `"forbidden"` on a readable `403` (halting relay refresh and automatic probe retries), and `"unavailable"` otherwise.
+- `browserRecognitionEnabled` mirrors the home gateway's `speech.browserRecognition` setting ([ADR-037](DECISIONS.md#adr-037--speech-input-keyboard-dictation-baseline-and-opt-in-browser-speech-recognition)), switching document `Permissions-Policy` from `microphone=()` to `microphone=(self)` and enabling the opt-in Web Speech control in writable **Control** only, where **Use text** populates the composer draft and **Send** remains a separate action.
 
 ### 1.6 Relay
 
-**v1:** use OMP's existing encrypted collaboration relay. OMP seals collaboration payloads before the socket, and the gateway does not need to proxy WebSockets.
-
-**Optional hardened mode:** self-host OMP's content-blind relay on the desktop or tailnet. Keep it a separate opt-in deployment and validate long-lived WebSocket behavior, Android sleep/resume, network changes, and reconnects through the exact production proxy path before calling it supported.
+OMP's default encrypted collaboration relay is the only supported relay path: OMP seals collaboration frames end-to-end before they touch the WebSocket, and `omp-gatewayd` never proxies collaboration WebSockets. Self-hosted or custom-proxied relays are outside the supported deployment contract; see [Unsupported deployments](OPERATIONS.md#15-unsupported-deployments).
 
 ## 2. Runtime flow
 
 ### 2.1 Desktop login
 
-1. The OS starts `omp-gatewayd` as the current user.
-2. The daemon atomically creates or reads its private readiness token for CLI readiness proofs.
-3. It starts polling OMP’s discovery directory; no gateway publisher endpoint is created.
-4. It binds HTTP to loopback, for example `127.0.0.1:4317`.
-5. A persistent Tailscale Serve mapping exposes that loopback server privately over tailnet HTTPS.
+1. The OS login manager starts `omp-gatewayd` as the desktop user.
+2. The daemon atomically loads or creates its private `readiness-token` for CLI readiness challenges.
+3. It begins polling OMP's local discovery directory as a read-only client.
+4. It binds the HTTP server to loopback (for example `127.0.0.1:4317`).
+5. Persistent Tailscale Serve proxies tailnet HTTPS traffic to that loopback listener.
 
 ### 2.2 OMP process start
 
-1. Interactive OMP finishes creating the active session/context.
-2. If `collab.autoStart` is `view` or `control`, OMP’s controller starts collaboration.
-3. OMP publishes its discovery file and owner-only per-host query endpoint.
-4. The next gateway poll fetches a metadata snapshot and reconciles the process card.
-5. A changed registry revision emits metadata-only SSE, and the phone renders the card.
+1. Interactive `omp` initializes its session context and, when `collab.autoStart` is `view` or `control`, starts its collaboration controller.
+2. OMP writes its discovery JSON and binds its owner-only per-host query endpoint.
+3. The next `omp-gatewayd` poll queries `snapshot` and reconciles the session card in `SessionRegistry`.
+4. A changed registry revision broadcasts metadata-only SSE, and open **OMP Sessions** pages render the row.
 
-OMP’s snapshot supplies the boolean `inputRequired`, not prompt or response content. Each accepted
-false-to-true transition creates one opaque in-memory attention identity and receipt timestamp.
-Repeated true observations preserve that identity; false, removal, expiry, and generation
-replacement destroy it. The browser receives the boolean plus `ask.requestId` and `ask.since`;
-OMP remains unaware of this browser-routing metadata.
+OMP snapshots provide boolean `inputRequired` without prompt or answer text. Each `false`-to-`true` edge mints one opaque in-memory `ask.requestId` and `ask.since` timestamp, retained across consecutive `true` polls and discarded on `false`, removal, TTL expiry, or generation change.
 
 ### 2.3 Background attention push
 
-1. The user explicitly grants notification permission and subscribes through
-   `POST /api/v1/push/subscription`, choosing `private`, `session`, or `preview` detail.
-2. The gateway persists only the VAPID key pair, browser endpoint/keys, authenticated identity, and
-   detail choice in a private state file.
-3. A Control-capable attention transition builds an encrypted `attention` message at the selected
-   detail level; clear/removal builds `clear`. Neither contains a capability.
-4. The browser push service wakes the installed PWA's service worker even when no page is open.
-5. The worker tags one notification per instance, updates the app badge from the bounded pending
-   count, and closes that tag on `clear`.
-6. Tapping opens `/collab/:instanceId?request=:requestId`; the app fetches current authenticated
-   metadata and launches Control only when the exact request identity remains actionable.
+1. From **Background alerts**, the user taps **Enable background alerts** and posts the browser subscription and detail level (`private`, `session`, or `preview`) to `POST /api/v1/push/subscription`.
+2. `PushService` stores the VAPID key pair, subscription endpoint and keys, authenticated Tailscale login, and detail choice in `<stateDir>/push-state.json`; opting into **Settings → Hosts** also records recipient source selections in `<stateDir>/fleet-notifications.json`.
+3. Control-capable attention edges, clears, and activity-stop edges emit encrypted, capability-free Push v2 envelopes (`version: 2`, local-only devices) or Push v3 envelopes (`version: 3`, fleet-enabled devices covering local and selected remote sources).
+4. The browser push service wakes `service-worker.ts`, which persists ordering and tombstones in IndexedDB (`omp-notification-ordering`), tags one notification per source and instance, updates the app badge, and closes matching tags on `clear`.
+5. On `notificationclick` (`apps/web/src/service-worker.ts`), if a same-origin window client exists, the worker calls `client.focus()` and sends `omp-notification-route` via `postMessage` over a `MessageChannel`, waiting up to 3 seconds for `omp-notification-route-accepted` so the open page revalidates fresh metadata and switches or keeps the live session in place without navigating.
+6. With no open same-origin window or no acceptance within 3 seconds, the worker calls `clients.openWindow()` with `/collab/:instanceId?request=:requestId` (attention) or `/collab/:instanceId?activity=stopped&generation=:generation` (activity stop), appending `&source=:binding` for a remote fleet alert; on load, `app.ts` scrubs `/collab/...` to `/` before revalidating fresh metadata for **Control** or **View**.
 
 ### 2.4 View or Control launch
 
-1. The user taps **View** or **Control**.
-2. The shipped same-document client tracks the pending launch in page memory before loading its assets and requesting a capability. Full-screen View changes the URL to `/client/` at mount; Open request mounts inside the native tray and only Expand replaces the route with `/client/`, reparenting the same shell without remounting the client. Because service-worker activation claims clients without navigating them and the page defers its `controllerchange` reload while a launch, routed notification, or collaboration is active, a worker upgrade never interrupts an in-flight launch.
-3. The PWA performs a same-origin `POST /api/v1/sessions/:instanceId/launch` with the observed generation and desired mode.
-4. The gateway verifies Tailscale identity, application allowlist, Origin, fetch metadata, content type, rate limits, generation, freshness, and mode availability.
-5. The launch broker queries OMP for the exact generation and role, revalidates current state, and
-   returns exactly one capability in the no-store response without retaining it.
-6. The PWA passes the capability directly to the pinned collab client's in-memory bootstrap, optionally through a same-origin `MessageChannel`.
-7. The client connects directly to the relay encoded by OMP's parser.
-8. Leaving the client drops capability references and returns to the metadata directory. Reload does not reconnect automatically.
+1. The user taps a session row (**View**), **Open request**, or **Control**.
+2. `app.ts` records the launch intent in memory: full-screen launches switch to `/client/` on mount, whereas **Open request** mounts inside the native tray and updates the URL to `/client/` only when **Expand** promotes the live shell without remounting; `controllerchange` reloads wait until launches and sessions finish.
+3. The browser sends `POST <source>/api/v1/sessions/:instanceId/launch` (`no-store`) with the observed `generation`, `mode`, and optional `requestId`.
+4. The target gateway verifies Tailscale identity, `auth.allowedLogins`, `Origin`, Fetch Metadata, content type, rate limits, freshness, generation, and mode availability.
+5. `OmpLaunchResolver` queries OMP's `link` operation for that exact generation and mode, revalidates registry state, and returns one capability in the `no-store` JSON body without retaining it.
+6. `app.ts` passes the capability in memory to `startCollabWithCapability`, which connects directly to the relay encoded in the link; leaving or reloading drops all references and returns to the directory.
 
 ### 2.5 Session switch, resume, or branch
 
-OMP owns host replacement and generation changes. The gateway observes replacement snapshots and
-updates the existing process card. A launch carries the generation seen by the browser; OMP’s
-`link` operation rejects `stale_generation`, and the broker revalidates after querying. An old
-card never silently receives a replacement capability.
+OMP owns session replacement and increments `generation` before publishing the replacement snapshot. `omp-gatewayd` updates the existing `instanceId` card in place, and any launch carrying the superseded generation fails (`stale_generation` from OMP's `link` query, returned as HTTP `409 generation_mismatch`) rather than opening the newer session.
 
 ### 2.6 Crash and stale cleanup
 
-The daemon records successful observation time using a monotonic clock. A missing discovery entry
-or a host query failing with `ENOENT`/`ECONNREFUSED` removes the card. Other query failures retain
-an existing card until its TTL expires; the default is a 10-second poll interval and 35-second TTL.
-A connection closing after a response is normal: OMP serves one request per connection.
-
-Removal drops metadata before emitting SSE. There is no capability map to clear and no OMP-owned
-file or socket for the gateway to delete.
+`SessionRegistry` tracks observation age on a monotonic clock: missing discovery files or `ENOENT` / `ECONNREFUSED` socket errors remove the card immediately, while transient query errors retain it until `registry.ttlSeconds` (default 35 seconds) expires. Closing the per-host socket after one reply is normal OMP wire behavior, and card removal mutates memory before SSE emission without touching OMP-owned files.
 
 ## 3. Trust boundaries
 
@@ -386,174 +236,70 @@ flowchart TB
     PHONE <--> RELAY
 ```
 
-A malicious process running as the same desktop OS user is outside the intended threat boundary; it can generally read the user's files or interfere with OMP directly. OS permissions and per-host query tokens still reduce accidents and cross-user access but are not a sandbox against same-user malware.
+Processes running under the same OS user share the desktop security boundary and can read that user's files or query OMP directly; private directory modes and per-host tokens prevent cross-user access and accidental misuse rather than sandboxing same-user malware.
 
-A compromised or unlocked phone with valid tailnet identity is also capable of requesting sessions
-until the device is revoked. WebAuthn user verification is proposed in ADR-008 and not implemented;
-it is not an additional Control gate operators can rely on today.
-
-### Test-only Percy flow
-
-The advisory visual lane is outside the runtime architecture:
-
-`built dashboard + pinned client → loopback synthetic fixture + in-page relay stub → Chromium at
-each source viewport → installed @percy/dom serialization → exact-material/capability/identifier
-guards → Percy SDK → host-restricted, JavaScript-disabled discovery → advisory visual build`.
-
-The shared deterministic fixture also supplies README capture without changing its default
-content or ordering. Local visual validation checks all 21 state/project pairs and source/serialized geometry
-without starting Percy or passing credentials. Upload mode rechecks the exact SDK POST, requires
-a healthy session, all submissions and finalization, and never falls back. No live OMP, real
-transcript, production gateway, capability canary or third-party runtime asset belongs in this
-flow. Synthetic authority stays in source-context memory; serialized HTML/resources fail if it
-appears. Before uploading, a native-Node testing host runs the same 21 cases without a real token
-or vendor effects. A private pipe supplies a shared ephemeral synthetic authority; the retained
-fixture guard and both scanners check the exact redacted non-`ci` log candidate and reject a
-planted SDK-log canary. Percy uploads those redacted CLI logs with builds; the separate CI-log
-upload is disabled. These renders are not functional browser tests or signed-candidate qualification.
-See [BrowserStack](BROWSERSTACK.md) and ADR-035 for vendor-role and access policy.
-
-## Qualification attempt ownership
-
-The stable orchestrator retains schema-3 receipts and existing lane owners rather than introducing
-a workflow engine. New driver-bound executions identify the exact candidate, predecessor,
-orchestrator, policy, retained Mac and attempt. A completed attempt's job and exact receipt snapshot
-are immutable; only the candidate's working receipt advances. Consuming a retry removes the old
-failure authorization durably before admission or setup. Passed product proofs remain unchanged,
-while failed resource-owning lanes start on fresh epochs after current cleanup proof.
-Fresh unbound effectful campaigns require attempt zero. Later ordinals require the exact terminal-failed
-receipt digest or an immutable effect-free prior preflight outcome and digest, never just an execution
-file. Both routes consume authority durably before admission. Renewed admission failures belong to `campaign/admission`,
-preserving typed classifications without attaching a failure to a pending or previously passed lane.
-Execution source must match HEAD before admission or outcome writes; standalone bound `--preflight`
-accepts only attempt zero. Verified artifact identities are checked against the execution before
-replacing receipt fields, so a rejected candidate cannot corrupt later terminal persistence.
-
-Consumer failure does not cancel healthy siblings. The shared OMP host and relay tunnel live until
-their consumers settle; the tunnel stops before the independent publication lifecycle runs.
-Publication failure has a terminal timestamp, never an invented pass. Every normally returned
-campaign failure finalizes all started lanes and the campaign. Hard process death or failed storage
-remains an interrupted attempt, not authority to relaunch.
-Relay-stop failure belongs to `campaign/teardown`, not an already-passed publication proof. Finalization
-reconciles every typed lane owner with its terminal verdict before validating the complete graph.
-
-Execution cancellation carries a monotonic deadline to owned reads, subprocesses and waits. The
-owner aborts and awaits termination before cleanup; no timed-out promise is abandoned. Cleanup
-serializes per resource owner, not globally: Pixel restoration stays under its lease, Windows
-destruction does not queue behind unrelated Pixel work, and retained-Mac destructive cleanup waits
-for Mac consumers and their fixture restoration. A poisoned Pixel refuses subsequent measurements
-with collateral references to its originating failures, but always admits restoration under the same
-lease. Failed persistence cannot skip owned cleanup; `persistenceFailed` blocks a clean verdict.
-Later successful cleanup does not erase an earlier cleanup failure, its identity, or Pixel poisoning.
-A shared containment predicate rejects negative cleanup/reconciliation facts, persistence failures
-and remaining resources; the final receipt also consumes unsettled remote owners even when setup
-failed before a lane recorded its resource. Cleanup, retry and retirement use that same conservative
-boundary. Failed cloud or Push restoration retains its Mac fixture and owner records; other owners,
-including Windows VM destruction, remain independent.
-All mutating/lifecycle remote commands use `qualification-remote-owner.sh`, shared by TypeScript
-executors and the Mac shell wrapper. Uploads stream through an owned command rather than unowned
-`scp`; OMP PTYs foreground the registered process group. Shell-wrapper owner IDs are journaled before
-dispatch so losing the local wrapper cannot lose the remote fence. Cancellation uses a fresh bounded
-SSH command to terminate the whole group and await absence, not merely kill the local SSH client.
-Leader exit or a completion marker never proves that descendants have stopped. A detached reboot
-owner remains unresolved until a changed boot identity proves the old group cannot survive.
-A private cancellation tombstone fences delayed admission; unproved termination refuses later
-effects on that host, including destructive cleanup and tunnel startup, with `remote_unsettled`
-collateral referencing the original teardown root. Ordinary nonzero exits are reconciled too.
-Only explicitly bounded read-only admission probes bypass ownership; they create no owner files.
-
-Read-only admission is distinct from effectful rig readiness. After lease acquisition and verified
-candidate/predecessor bytes, readiness stages a disposable candidate/stock-OMP fixture, measures
-the real push path, and restores it before any full matrix fan-out. Its private receipt epoch owns
-the Pixel baseline sidecar; structured observations contain only bounded numbers and booleans.
-Manual attempt-zero readiness is diagnostic evidence, not a synthesized policy binding or automatic
-retry authorization.
-Failed or unresolved readiness is a failure-graph owner, never a passing receipt: its terminal
-summary must represent it, and unresolved restoration cannot coexist with proven cleanup.
-`restored` requires an explicit `baselineRestored: true`; passing campaigns also require terminal
-passed readiness. Every receipt write validates the full schema, and restarting lanes clears
-not-started reasons as well as stale failure evidence. Restarting a root invalidates the
-entire prior standalone failure graph before persistence, including dependent collateral.
-The Push owner retains its transient baseline for restoration, but the orchestrator's sidecar mirror
-advances only after its private durable write. Restoration attempts every owner even if every
-checkpoint fails; typed `persistenceFailed` evidence, cleanup identities and Pixel poisoning survive
-both later cleanup and final receipt writes. Failed cleanup persistence cannot report a restored
-baseline or manufacture retry authority. Effect-free Windows admission service failures use the
-actual `preflight`, `connection` or `output` producer steps; post-allocation steps cannot authorize
-receiptless retries.
-Readiness restoration is **not a byte-identical installation-state baseline**: uninstall removes
-the disposable service/staging but retains the gateway token and runtime activation history/current
-pointer. Those private states are neither captured/digest-compared nor isolated by this gate.
-Consequently the subsequent full Mac lifecycle follows a readiness candidate activation, not a
-pristine pre-readiness install. Installation-state isolation/restoration remains an explicit deferred
-P2; `baselineRestored` covers the captured Pixel baseline, service/Serve containment and staging only.
-Transport failures at an ordinary lane's explicit `cleanup` step do not authorize automatic retry.
-Private receipt, readiness-baseline and outcome persistence belongs to the POSIX Studio driver:
-file data and parent directories are fsynced; Windows refuses those writes before filesystem
-effects. Pure receipt/graph parsing and in-memory state-machine tests remain portable.
+An unlocked or compromised device with an allowlisted tailnet login can launch sessions until tailnet access or `auth.allowedLogins` is revoked. Passkey or WebAuthn step-up verification (explored in [ADR-008](DECISIONS.md#adr-008--optional-webauthn-gate-not-native-biometrics)) is not implemented; full threat-model invariants are in [Threat model](./SECURITY.md#3-threat-model).
 
 ## 4. Why not process scanning or terminal automation?
 
-Process enumeration can find PIDs but cannot safely attach OMP's browser collaboration protocol to an existing interactive context or recover a capability without reading process memory. Simulated keystrokes, terminal scraping, QR decoding, and clipboard monitoring are fragile and create additional secret channels.
+Process enumeration can locate PIDs, but it cannot attach OMP's encrypted collaboration protocol to a live session context or extract a capability without reading process memory. Keystroke injection, PTY or screen scraping, QR decoding, and clipboard polling are brittle and introduce uncontrolled secret channels.
 
-Mainline OMP exposes the supported discovery/query surface needed here. Consume it rather than
-private deep imports, process inspection, or a second collaboration controller.
+Stock OMP publishes the exact local discovery and per-launch link interface the gateway needs, including when `omp` runs inside Tern ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration), amended by [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)).
 
-The same discovery rule applies to Tern ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration), narrowly amended by [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)): an interactive `omp` process in a Tern pane publishes through stock OMP's local registry. The sole opt-in exception starts a new tab from administrator-approved `argv` and canonical working-copy choices, then uses `tern inspect --json` metadata for exact local block/pane and `omp_session_file` basename correlation. It never reads session-file contents, `tsp.ts` frames, or terminal content; it never injects keystrokes, focuses, or attaches to a pane. Tern IDs never become session identity, no general control surface is exposed, and a `ready` binding still requires ordinary generation-bound Control authorization.
+When `tern` session creation is enabled, the gateway starts a tab from administrator-authored `argv` and working-copy IDs and correlates `tern inspect --json` pane and `omp_session_file` basename metadata. It never reads session files, Tern Surface Protocol (`tsp.ts` in `@oh-my-pi/pi-wire`) frames, or terminal output, never injects keystrokes, and never substitutes Tern IDs for OMP's `(instanceId, generation)` identity.
 
 ## 5. Availability behavior
 
-- Gateway unavailable: OMP continues normally and its discovery publication remains independent. The
-  visible client measures the same-origin path with adaptive RTT timeouts and identifies a sustained
-  outage as `Gateway unavailable` without exposing session data.
-- Relay unavailable: cards remain visible. Passive host frames and optional encrypted idle probes
-  measure the browser-to-host path; two missed probes replace the socket, each connection handshake
-  is bounded to ten seconds, and sustained failure is identified as `Relay unavailable` without
-  exposing the capability.
-- Tailscale unavailable on the phone: there is no public fallback.
-- Desktop asleep or offline: a loaded shell retains the last authenticated metadata in volatile
-  memory, marks it stale with a freshness timestamp, and retries. Authorization denial clears it;
-  metadata is never an offline capability or a substitute for launch authorization.
-- Dashboard SSE silence: after 12 seconds the PWA closes the half-open stream and retries snapshots
-  without clearing last-known cards. Current request timeouts and retry bounds are documented in
-  [PROTOCOL.md](PROTOCOL.md#7-revisions-and-races).
-- Collaboration client radio transition: browser lifecycle/network signals trigger measurement rather
-  than declaring health. Hidden pages cancel relay probes. Foreground gateway recovery requires two
-  successful probes and replaces a potentially stale relay socket after the first success.
-- Terminal collaboration state: client recovery timers/listeners stop immediately; the ended status
-  and return action remain stable and receive no later path-health publications.
-- Gateway restart: it starts empty; polling discovers already-published mainline OMP hosts without
-  any OMP reconnect or per-session command. Restart a fork-era OMP process under mainline at cutover.
-- OMP crash: missing discovery, definitive endpoint failure, or TTL expiry removes the card.
-- Browser reload: returns to the directory; capability persistence is intentionally absent.
-- Browser background and restore: the collaboration client is disposed and its capability dropped on
-  `pagehide`, and the restored page relaunches the same session when the directory still lists it at
-  the same generation with the same access, falling back to the directory otherwise (ADR-029). The
-  capability is fetched again at resume time, never retained — which is why a reload, whose heap is
-  gone, still lands on the directory instead.
-- Browser push service unavailable or delivery delayed: the dashboard and collaboration paths continue normally; alerts are best effort and never bypass current-state validation.
+- Gateway unavailable: OMP collaboration and local discovery continue unaffected; an open session measures same-origin gateway reachability with adaptive RTT probes and reports `Gateway unavailable` without exposing session data.
+- Relay unavailable: directory cards stay visible, while open sessions probe the encrypted host channel (10-second handshake bound; two missed idle probes replace the socket) and report `Relay unavailable` without exposing the capability.
+- Tailscale unavailable on the client device: requests fail closed with no public fallback.
+- Host asleep or offline: a loaded page retains last-seen metadata in volatile memory, marks rows stale with their observation timestamp, and retries automatically; authorization denial (`403`) clears retained metadata immediately.
+- Directory SSE silence: after 12 seconds without frames or heartbeats, the page closes the stream and fetches a fresh snapshot without clearing retained cards ([Revisions and races](PROTOCOL.md#7-revisions-and-races)).
+- Radio or network transitions in an open session: lifecycle and network signals trigger probes rather than assuming health; hidden pages pause relay probes, and foreground gateway recovery requires two healthy checks and replaces the relay socket after the first.
+- Ended collaboration state: recovery timers and listeners stop immediately so the ended notice and return action stay stable.
+- Gateway restart: `omp-gatewayd` starts with an empty registry and rediscovers running OMP hosts on its first poll without OMP reconnects or `/collab` commands.
+- OMP crash or exit: missing discovery, `ENOENT` / `ECONNREFUSED`, or TTL expiry removes the card.
+- Browser reload vs `pagehide` / `pageshow`: reload drops the JavaScript heap and returns to the directory, whereas `pagehide` disposes the live client and drops its capability while keeping a metadata-only resume target so persisted `pageshow` revalidates the directory and requests a fresh capability when `(sourceKey, instanceId, generation)` and access match ([ADR-029](DECISIONS.md#adr-029--resume-a-backgrounded-session-by-relaunching-it-never-by-retaining-its-capability)).
+- Push delayed or unavailable: directory polling, SSE, and explicit launches work normally; Web Push is best-effort and never bypasses current-state revalidation.
 
 ## 6. Installation transactions
 
 ### 6.1 Staging, readiness proof, and activation
 
-`omp-gateway install` snapshots any existing `config.json`, validates the prior managed service and runtime, and refuses to proceed while an unmanaged service or an authenticated foreground listener occupies the prior or requested loopback endpoint. When upgrading an existing configuration, it preserves an omitted `--port`, `http.hostname`, `http.trustedDashboardOrigins`, `auth.trustIdentityWithoutTailnetDevice`, `registry` settings, explicitly authored `omp` overrides, `fleet`, and `speech` verbatim without freezing home-derived defaults into `config.json`, and avoids rewriting unchanged configuration bytes. It removes any retired `publisher-token` left in the private config directory. An unreadable or missing `readiness-token` is repaired only when the prior service is inactive and its loopback endpoint is unoccupied.
+`omp-gateway install` snapshots any existing `config.json`, validates any prior managed service and staged runtime, and refuses to proceed if an unmanaged service or authenticated foreground process occupies the prior or requested loopback port.
 
-The installer stages the runtime payload into `<stateDir>/installation/versions/<version>-<sha256-12>` and writes `installation.json` recording the version, full payload SHA-256 digest, and `"readinessProtocol": "instance-v1"`. Reinstalling an already-staged payload revalidates its manifest and content hash in place.
+Upgrades avoid rewriting unchanged configuration bytes, delete any pre-v0.3.0 `<configDir>/publisher-token` file, repair a missing or unreadable `readiness-token` only when the prior service is inactive and its port is free, and preserve authored configuration sections as listed in [Updates and rollback](OPERATIONS.md#10-updates-and-rollback).
 
-Unless `--no-start` is passed, `install` generates a one-time 256-bit base64url `--readiness-instance` nonce, writes and starts the current-user service with that argument, and polls `GET /api/v1/health` with `X-OMP-Readiness-Challenge` (15-second budget on Linux and macOS; 60-second budget on Windows to accommodate cold PowerShell ACL verification). The daemon proves readiness by returning an HMAC-SHA256 over `<challenge>\0<instance>` keyed by `readiness-token`; a generic `{"status":"ready"}` response or a prior process using the same token without the expected instance nonce is rejected. Only after readiness succeeds does the installer advance `installation/current.json` and append the version directory to `installation/history.json` (bounded to 64 entries and 4,096 bytes). If configuration, service registration, startup, readiness, or pointer activation fails, `install` restores the prior `config.json`, service definition, running state, and verified runtime.
+The installer stages the release payload into `<stateDir>/installation/versions/<version>-<sha256-12>` with `installation.json` (`version`, full payload SHA-256 digest, and `"readinessProtocol": "instance-v1"`), revalidating existing directories in place.
+
+Unless `--no-start` is passed, `install` mints a one-time 256-bit base64url `--readiness-instance` nonce, registers and starts the user service with that nonce, and polls `GET /api/v1/health` with `X-OMP-Readiness-Challenge` (15-second deadline on Linux and macOS; 60 seconds on Windows for cold PowerShell ACL checks), requiring an HMAC-SHA256 over `<challenge>\0<instance>` keyed by `readiness-token`.
+
+Only after that instance-bound readiness proof succeeds does `install` advance `<stateDir>/installation/current.json` and append to `installation/history.json` (bounded to 64 entries and 4,096 bytes). Any failure in configuration, service registration, startup, readiness, or pointer activation restores the prior `config.json`, service definition, running state, and verified runtime.
 
 ### 6.2 Staged-runtime pruning
 
-After a readiness-proven `install` commits `current.json` and `history.json`, `pruneSupersededRuntimes` removes superseded version directories under `<stateDir>/installation/versions`:
+After a readiness-proven `install` commits `current.json` and `history.json`, `pruneSupersededRuntimes` (`apps/gateway/src/installation.ts`) cleans superseded payloads under `<stateDir>/installation/versions`:
 
-- **Retention set:** the active runtime plus the two most recent **distinct** predecessors in `history.json` (three distinct activations total, so `A → B → A` consumes two slots, not three), the recorded predecessor selected by plain `rollback`, and any version directory referenced by the on-disk service definition in raw, XML-escaped, or JSON-escaped form.
-- **Eligibility and safety:** only entries under the private `versions` root matching a recognized `<version>-<hex12>` directory or `.prune-<uuid>` marker are touched. Foreign names, non-directories, symlinks (including inside a payload), and unreadable or invalid installation metadata are left alone.
-- **Two-phase removal and bounds:** each victim is first renamed inside `versions/` to `.prune-<uuid>` so it can never be selected as a rollback target, then recursively unlinked. Each pass inspects at most 4,096 `versions/` entries and at most 4,096 entries per payload across at most 32 directory levels; interrupted or oversized removals are finished by a subsequent readiness-proven install.
-- **Non-fatal accounting:** pruning never runs on a failed install, `install --no-start`, `rollback`, or `uninstall`. Cleanup errors are counted in `Staged runtimes: retained <n>, removed <n>, failed <n>` and never fail or revert a committed installation.
+- Retention keeps the active runtime, the two most recent distinct predecessors in `history.json` (three distinct activations total, so `A → B → A` occupies two slots), the predecessor plain `rollback` selects, and any directory referenced by the on-disk service definition in raw, XML-escaped, or JSON-escaped form.
+- Only `<version>-<hex12>` directories and `.prune-<uuid>` renamed directories directly under the private `versions` root are eligible; foreign names, non-directories, symlinks (including inside payloads), and invalid metadata are skipped.
+- Each victim is renamed to `.prune-<uuid>` inside `versions/` so `rollback` can never select it, then unlinked across at most 4,096 `versions/` entries, 4,096 entries per payload, and 32 directory levels.
+- Pruning never runs on failed installs, `install --no-start`, `rollback`, or `uninstall`; cleanup errors are counted in `Staged runtimes: retained <n>, removed <n>, failed <n>` without reverting a committed install.
 
 ### 6.3 Rollback, token rotation, and uninstall
 
-- **`rollback [--to <version-dir>]`:** resolves the previous distinct entry in `history.json` (or the requested retained directory), revalidates its manifest and payload digest, rewrites the user service definition, verifies authenticated loopback readiness when the service is active, and updates `current.json` and `history.json`. When rolling back to a retained runtime whose version is older than `FLEET_CONFIG_SINCE_VERSION` (`0.8.0`) while `http.trustedDashboardOrigins`, `fleet`, or `speech` is authored in `config.json`, `rollback` atomically writes the full authored document to `<configDir>/config.pre-rollback.json` (mode `0600`, refusing rollback if that backup file already exists) and rewrites `config.json` without those three keys before starting the target runtime. If the target fails readiness, `rollback` rebuilds the service definition from the unchanged `current.json` runtime and verifies its readiness before reporting failure.
-- **`rotate-readiness-token`:** verifies service ownership and the active runtime before atomically replacing `readiness-token` (refusing non-file paths or unsafe parent directories). If the active service cannot restart and prove readiness on the fresh token, the CLI stops the service fail-closed and keeps the fresh token rather than restoring the potentially exposed token.
-- **`uninstall [--no-stop]`:** derives the fixed current-user service definition path without parsing `config.json`, stops the service, and removes its autostart registration while preserving `config.json`, `readiness-token`, `push.json`, and staged runtimes. `--no-stop` is accepted only when the service is already inactive.
+- `rollback [--to <version-dir>]` resolves the previous distinct directory in `history.json` (or `--to`), revalidates its manifest and SHA-256 digest, backs up `config.json` to `<configDir>/config.pre-rollback.json`, and strips newer sections ([Roll back to a retained predecessor](UPGRADE_ROLLBACK.md#roll-back-to-a-retained-predecessor)). If readiness fails, it restores `config.json`, rebuilds the service from `current.json`, and re-proves readiness on the prior runtime.
+- `rotate-readiness-token` verifies service ownership and the active runtime, atomically writes a fresh `readiness-token` (refusing non-files or unsafe parent directories), and restarts the active service; if readiness fails on the new token, it stops the service fail-closed and keeps the new token rather than restoring the old one.
+- `uninstall [--no-stop]` derives the user service path without parsing `config.json`, stops the service (`--no-stop` is accepted only when already inactive), and removes autostart registration while leaving `config.json`, `readiness-token`, `push-state.json`, fleet and creation state files, and staged runtimes intact ([Paths](OPERATIONS.md#13-paths)).
+
+## Related documents
+
+<a id="test-only-percy-flow"></a>
+Synthetic visual-review serialization, 21-case geometry checks, and Percy log-redaction guards are documented in [Percy data flow](BROWSERSTACK.md#percy-data-flow).
+
+<a id="qualification-attempt-ownership"></a>
+Release campaign receipts, retry authority, readiness sidecars, and remote-owner cleanup fencing belong to the POSIX release driver and are documented in [Qualification attempt ownership](RELEASE.md#qualification-attempt-ownership).
+
+- [Wire and HTTP protocol](PROTOCOL.md) — discovery files, per-host socket queries, browser HTTP/SSE/CORS contracts, session creation, and Push v2 and v3 schemas.
+- [Security design and threat model](./SECURITY.md#1-security-objective) — assets, capability lifetime, tailnet and browser controls, and logging invariants.
+- [Mainline OMP integration](OMP_INTEGRATION.md) — stock OMP settings, discovery lifecycle, and running `omp` inside Tern.
+- [Architectural decisions](DECISIONS.md) — numbered ADRs recording the rationale behind each boundary.

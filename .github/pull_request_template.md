@@ -24,4 +24,4 @@
 
 - [ ] User/operations docs updated.
 - [ ] Compatibility lock/matrix updated when OMP integration changed.
-- [ ] `CHANGELOG.md` updated when user-visible.
+- [ ] `changelog.d/` fragment added when user-visible.

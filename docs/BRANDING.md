@@ -1,9 +1,6 @@
 # OMP Session Gateway — brand & UI spec
 
-Identity for `omp-session-gateway`: a consumer-grade companion to
-[oh-my-pi](https://github.com/can1357/oh-my-pi) for developers who already live in a terminal. It
-is visibly a *companion* and never copies upstream's mark. This file is the design source of truth;
-ADR-049 records the decision behind it.
+This specification gives contributors and designers the visual identity, voice, and interface rules for `omp-session-gateway`, an independent companion to [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) for developers working in a terminal. It is visibly a *companion* and never copies upstream's mark; [ADR-049](DECISIONS.md) records the decision behind it.
 
 The system is called **Signal**. Its one rule: the chassis is monochrome, and **color exists only
 as state**. Green is live. Amber is your turn. Red is denied. If a color would not change when the
@@ -12,7 +9,7 @@ state changed, it should not be a color.
 ## The mark: "Portal"
 
 An arch — a gateway, drawn as one continuous stroke — with a dot inside it: a live session on the
-other side of the boundary. Geometry (96×96 viewBox, optical centre 48,49):
+other side of the boundary. Geometry (96×96 viewBox, optical center 48,49):
 
 - arch `M25 80V47a23 23 0 0 1 46 0v33`, stroke 12, butt caps, no fill
 - dot `cx48 cy63 r9`
@@ -25,8 +22,7 @@ Rules:
   the live color of the surface it sits on. Never recolor the arch, add a fill, or round its feet.
 - The dot is the product-wide motif: every status badge, pulse and bullet is the same circle, and
   Geist's rounded-dot set (`ss08`) makes the punctuation agree with it.
-- In the app the mark reports: its dot is live while this device can reach the gateway and steps
-  back to neutral when it cannot, and the empty state draws it with nothing inside.
+- In the app the mark reports: its dot is live while this device can reach an authorized gateway and steps back to neutral `ink-4` when it cannot, and the empty state fills its dot in `ink-4`.
 - The Android status-bar badge is the same mark in solid white on transparent (`badge-96.png`).
 
 ## Color
@@ -75,7 +71,7 @@ words.
 States never depend on hue alone: active is a filled dot and at rest is a ring, a cached row's tile
 is a dashed outline, and every colored surface also carries its state in words.
 
-The retired palette's upstream-orange "kinship" dot is gone; companionship is stated in prose.
+The palette carries no upstream-orange accent; companionship with OMP is stated in prose.
 
 ## Type
 
@@ -131,7 +127,7 @@ Apply this style when rendering public copy, without rewriting stored release ev
 4. **Evidence and limits:** link [Compatibility](COMPATIBILITY.md) for supported and qualified
    platforms and known limits; separate synthetic product media from hardware evidence.
 
-README hierarchy: promise → demo → how it works → build and run → using it → private by design → supported platforms → docs.
+README hierarchy: promise → demo → how it works → get started → using it → private by design → supported platforms → docs.
 
 ## Asset inventory
 
@@ -210,71 +206,16 @@ answer is the largest thing on it.
   is omitted when the title already is the project, and the host appears first only while more than
   one host is in view. Waiting and held rows show project (and host); the hero shows project (and
   host), then the model slug.
-- Needs-you queue: under `Up next`, one hero card — tile, title and summary, the ask set as a
-  message bubble, then amber `Open request` beside a tonal `Options` (opening `This request` with
-  `Hold for desk`/`View transcript`). A view-only hero's `View transcript` is ink, because reading
-  does not take the wheel. `Then` rows carry their wait and a chevron; `On hold` rows carry
-  `Requeue`; working rows follow.
-- Working rows: the whole row is the View target (tile, title, metadata), with a quiet trailing
-  44px icon-only `Hide` control (eye-off, `ink-4` → `ink` on hover) with the explicit
-  `Hide … on this device` accessible name.
-- Collaboration shell: one header row at every width — Back, a 30px tile before the one-line
-  title, then Control and the connection state. On a phone Back is its icon alone. From 37rem up,
-  the session, its header row, and its triage bar share one centered column,
-  `min(100% − 2rem, 60rem)`: wide enough for the client's 900px transcript, with no empty frame
-  around it. The embedded client reads the gateway palette through `--gateway-*` tokens set on
-  the shell, so it follows the scheme; its selection, focus and Send are ink.
-- All clear: a left-aligned status (ringed live dot, `All clear`, one muted line), without
-  repeating live counts already present in the masthead; incomplete coverage uses a neutral ring
-  and numeric host coverage. Alert state appears only while background alerts are enabled;
-  otherwise a pill routes to Settings. Its sole delight moment is a same-scope queue → all-clear
-  arrival: the live ring expands to 2.5× and fades over the long token, the title rises 4px over
-  medium, and the copy follows 60ms later. The shell's answered check draws once over medium. No
-  arrival on load, scope change, or routine refresh; reduced motion shows only the final state
-  (ADR-042).
-- First run (ADR-042): three neutral trays — `Connected`, `Background alerts`,
-  `View or Control` — after the first authoritative directory render, never over
-  another tray. `Connected` draws the mark at 44px (the arch, then the session arriving in it) and
-  reuses the existing notification control; show only current host/session facts and the
-  explicit-action capability promise. Each step has one topic, a distinct height, a Next/Done
-  action in the header, heading focus and a 48px Close/Back control. A step has one primary action:
-  while alerts are off, `Enable background alerts` is primary and `Next` is tonal. Skip and Not now
-  are real exits/advances, not permission prompts. Resume the last step; completing or skipping
-  stays done. Noninteractive tray headings receive focus without an outline; interactive controls
-  retain their focus rings. The affiliation/build footer appears in Settings, not the introduction.
-
-- Settings trays: `Background alerts` contains the seven-state toggle and the build line;
-  enabled alerts expose an `Alert detail` row showing the current level, opening a child with the
-  three options. Options are cards with a drawn radio; the selected one is outlined in ink. Host
-  coverage uses ink switches.
-- Creation trays: visible `New session` actions in the toolbar and empty state lead through
-  Host, Project, Working copy, Profile, and review, one focused neutral panel at a time. Logical
-  Back replaces the native panel; every step keeps heading focus, a measured height distinct from
-  its neighbour, and 48px targets. `Create and open Control` names the authority explicitly and is
-  the flow's one amber action. Optional First task stays in memory and seeds the composer without
-  sending. Starting session shows three steps on a rail: `Starting in Tern`, `Waiting for OMP`,
-  `Opening Control`, with drawn green checks for completed steps, a pulsing live dot for the active
-  one (still under reduced motion), and muted future steps. Opening Control remains visible until
-  the shell mounts. Starting/Stopped watching/terminal copy distinguishes observing from stopping
-  the host command; `Check creation` never silently starts another operation. Unconfigured/older
-  hosts offer `Retry options`, not a dead Create.
-- Trays (ADR-041): one native host for secondary surfaces, one topic/action per panel,
-  concise title and one 48px leading Close/Back control. A tray **floats**: inset 8px from every
-  edge (more where a safe area asks), 32px radius, no border, over a plain scrim. Adjacent panels
-  differ by at least 24px, with measured height and content transitions using ADR-040's tokens.
-  Context sets the tone: a request tray carries amber on its grip; alerts, recovery and Undo are
-  neutral. Native modality preserves context and focus; the grip alone drags, content scrolls,
-  and the bottom clears the safe area. Undo is a compact non-modal polite status row: tile,
-  two-line copy and filled Undo action, without a heading, grip or countdown.
-  Open request grows from metadata/Connecting to the actual pinned client at about 72%
-  of the visual viewport. One header owns Close, session tile/title, connection dot and icon-only
-  Expand; the inner shell bar is hidden and its frame flattened until promotion. Expand grows
-  into the same full-screen session without remounting.
-- Status banner: a `surface-1` card with a leading ring, a title, detail and its actions. Loading
-  is a single muted line with a pulsing dot, never a card. Unauthorized uses a danger wash with a
-  filled dot and hides rows.
-- Empty state: the mark with nothing inside it, `No live sessions`, the `collab.autoStart` hint,
-  and an inverse-ink `New session`.
+- Needs-you queue: under `Up next`, one hero card — tile, title and summary, the ask set as a message bubble, then amber `Open request` beside a tonal `Options` button. A view-only hero's `View transcript` is ink, because reading does not take Control. `Then` rows carry their wait and a chevron; `On hold` rows carry `Requeue`; working rows follow ([Needs you](USAGE.md#needs-you)).
+- Working rows: the whole row is the View target (tile, title, metadata), with a quiet trailing 44px icon-only `Hide` control (eye-off, `ink-4` → `ink` on hover) and the explicit `Hide … on this device` accessible name ([Hold and hide](USAGE.md#hold-and-hide)).
+- Collaboration shell: one header row at every width — Back (icon alone on phones), a 30px tile before the one-line title, Control, and connection state. From 37rem up, the session, header, and triage bar share one `min(100% − 2rem, 60rem)` column for the 900px transcript; `--gateway-*` tokens theme the client and keep selection, focus, and Send in ink.
+- All clear: a left-aligned status (ringed live dot, `All clear`, one muted line) without repeating masthead counts; incomplete coverage uses a neutral ring and host coverage, and alert state appears when enabled or routes to Settings. On a same-scope queue → all-clear transition, the ring expands to 2.5× and fades over `--motion-long`, the title rises 4px over `--motion-medium`, copy follows 60ms later, and the answered check draws over `--motion-medium` (static under reduced motion, ADR-042).
+- First run (ADR-042): three neutral trays (`Connected` with a 44px arriving mark, `Background alerts`, `View or Control`) after the first authoritative directory render, never over another tray ([First run](USAGE.md#first-run)). Each step has a distinct height, heading focus without a ring, interactive focus rings, a 48px Close/Back control, and one primary action (`Enable background alerts` in inverse ink and tonal `Next` while alerts are off); the build footer stays in `Background alerts`.
+- Settings trays: `Background alerts` contains the seven-state toggle and the build line; `Alert detail` options are cards with a drawn radio whose selected card is outlined in ink; `Hosts` coverage uses ink switches. See [Background alerts](USAGE.md#background-alerts).
+- Creation trays: neutral single-topic panels with distinct heights, heading focus, and 48px targets, with `Create and open Control` as the one amber action ([Start a new session](USAGE.md#start-a-new-session)). Progress shows `Starting in Tern`, `Waiting for OMP`, and `Opening Control` with drawn green checks, a pulsing live dot (static under reduced motion), and muted future steps; unavailable or uncertain states use tonal `Retry options` or `Check creation` instead of a disabled button.
+- Trays (ADR-041): a tray **floats** inset 8px from every edge (or safe area), 32px radius, no border, over a plain scrim, with a 48px Close/Back control and >= 24px height step between adjacent panels ([Tray controller](../apps/web/README.md#trays)). Request grips are amber; alerts, recovery, and Undo (non-modal tile, two-line copy, inverse-ink `Undo`, no heading, grip, or countdown) are neutral; `Open request` uses ~72% visual viewport height and a flat frame until full-screen promotion.
+- Status banner: a `surface-1` card with a leading ring, a title, detail, and its actions. Loading is a single muted line with a pulsing dot, never a card. Unauthorized uses a danger wash with a filled dot and hides rows.
+- Empty state: the mark with its dot filled in `ink-4`, `No live sessions`, the `collab.autoStart` hint, and an inverse-ink `New session`.
 - Focus: 2px ink ring, 2px offset; modal trays focus the current panel heading.
 - Motion (ADR-040): only on user-initiated transitions and genuine state changes,
   never on routine refreshes. Directory ↔ session is a shared-axis slide with the
@@ -292,42 +233,14 @@ keeps the standing community/affiliation line.
 
 ### Availability ownership
 
-The banner owns device/local-gateway interruptions; host rows name only independently failed
-remote sources. Loading and foreground refresh are neutral, never warnings or Retry actions.
-Failed fleet bootstrap uses that same banner, not a second row; local transport failure takes
-precedence. Offline preserves remote observation clocks and expiry while recovery continues.
-An established fault stays named during a pending retry, even before the first snapshot.
-Remote launch denial belongs to its host row, never the device/local authorization banner.
-Hiding or opening a remote session is not local recovery. Remote expired-session and failed-launch
-feedback stays on that source; Refresh host checks its list without retrying a capability launch.
-Cross-host Next-ask failures name the target in the existing triage bar, not the healthy
-predecessor's connection chip, and offer Sessions to reach that host's list-only recovery.
-The target owns that notice through predecessor health and Hold updates. It has no expiry timer:
-Sessions, explicit dismissal, a new launch, or a successful target observation releases it.
-Its denial accent is red; non-auth target failures are neutral.
-Local targets follow the same ownership as remote targets, including in-session mode withdrawal.
-Successful expiry refresh ends the failure notice; dismissing it restores Hold without waiting for refresh.
-Withdrawing View or Control during a launch names the unavailable mode instead of opening it.
-Coverage aggregates `N of M hosts up to date` without repeating labels. Only complete coverage
-earns `Live · N` and `Live sessions`; incomplete coverage uses a neutral `Listed · N` pill and
-`Sessions`. Cached rows retain legible text, with dashed tile outlines, muted state badges, and
-`List as of {time}` metadata. Every availability clock formats the last successful observation
-with the same locale-aware hour/minute formatter, never the failed-check time.
-Multiple empty lists share an `as of` clock only when their underlying observation instants match,
-not merely because their formatted hour and minute happen to match.
+Notice ownership, target arbitration, and observation state transitions belong to [Availability model](ARCHITECTURE.md#availability-model). This section specifies their visual and copy treatment:
 
-An empty incomplete list explains that sessions may be missing; it never claims all clear.
-Access denial is red and has no Retry promise. A retained empty observation says `No sessions
-as of {time}`; an expired or authorization-withdrawn list does not claim it was empty.
-Withdrawal invalidates the old observation clock until a fresh authorized snapshot arrives.
-These observation distinctions apply to All hosts and single-host directories too.
-An independently observed remote empty list remains visible when local access is withdrawn.
-Quiet rechecks keep a retained empty observation's clock primary and checking progress secondary.
-In a session, reported health faults
-override neutral initial joining; the chip's name remains visible in request trays, and the
-triage bar supplies retry timing rather than repeating the fault. Creation keeps its
-single-topic steps; the explicit Create-and-Control action is amber, and unavailable creation
-offers recovery choices instead of a disabled primary action.
+- Initial loading and foreground refresh stay neutral, without warning colors or `Retry` actions; quiet rechecks keep a retained empty observation's clock primary and checking progress secondary.
+- Access denial (`403` / `forbidden`) uses `danger` red on the banner, remote host row, connection chip, and launch or triage notice, and never offers `Retry`; non-authorization faults stay neutral (`ink`, no state color).
+- Complete coverage earns the green `Live · N` pill, the `Live sessions` list subheading, and the ringed green dot on `All clear`. Incomplete coverage uses a neutral `Listed · N` pill, the `Sessions` list subheading, a neutral ring on `Host coverage incomplete`, and `N of M hosts up to date` without repeating host labels; an empty incomplete list states that sessions may be missing and never claims `All clear`.
+- Cached (stale) rows keep legible text with dashed tile outlines, muted state badges, and `List as of {time}` metadata; every availability clock formats the last successful observation with the same locale-aware hour-and-minute formatter, never a failed-check timestamp.
+- A retained empty observation renders `No sessions as of {time}`; an expired or authorization-withdrawn source renders `The previous session list was withdrawn.` or `No session list received yet.` instead of claiming the list was empty.
+- Inside an open session, reported health faults override neutral initial joining, the connection chip's label remains visible in request trays, and the triage bar carries retry timing (`Retrying in <N>s`, `Reconnecting automatically…`) rather than repeating the fault name.
 
 ## Relationship to upstream
 

@@ -1,35 +1,56 @@
 # Contributing
 
-Thank you for helping build OMP Session Gateway.
+This guide walks new contributors from cloning OMP Session Gateway, the companion to Oh My Pi (OMP), to merging a pull request through the merge queue.
 
 ## Start here
 
-Read `README.md`, `AGENTS.md`, `docs/DECISIONS.md`, and `docs/SECURITY.md` before changing behavior. Security properties are part of the product contract, not optional hardening work.
+Read `README.md`, `AGENTS.md`, [Architectural decisions](docs/DECISIONS.md), and [Security design and threat model](docs/SECURITY.md) before changing behavior. Security properties are part of the product contract, not optional hardening work.
 
-The gateway integrates with stock OMP `>= 18.1.20` through its native registry/controller.
-No fork, custom OMP build, or gateway-specific OMP plugin is required. Keep gateway policy and
-installers here; propose general-purpose controller/registry changes upstream. Read
-[OMP integration](docs/OMP_INTEGRATION.md) before changing that boundary.
+The gateway integrates with stock OMP `>= 18.1.20` through its native discovery registry and collaboration controller. No fork, custom OMP build, or gateway-specific OMP plugin is required; keep gateway policy and installers here, propose general-purpose controller or registry changes upstream, and read [Mainline OMP integration](docs/OMP_INTEGRATION.md) before changing that boundary.
 
-For ordinary installation, use the [published stable archive](docs/OPERATIONS.md#2-cli-and-daemon-installation).
-A source checkout is for development and is not signed-artifact qualification.
+For ordinary host installation, use the [published release archive](docs/OPERATIONS.md#2-cli-and-daemon-installation). A source checkout is for development and does not carry signed-release qualification ([Current claim](docs/COMPATIBILITY.md#current-claim)).
+
+Prerequisites: Git with commit signing enabled, Bun `1.4.4` (pinned in `package.json` and `mise.toml`), and GitHub CLI (`gh`) for pull-request and merge-queue commands.
+
+1. Confirm the pinned Bun version:
+
+   ```sh
+   bun --version
+   ```
+
+   The output must be `1.4.4`.
+
+2. Install locked dependencies from the repository root:
+
+   ```sh
+   bun install --frozen-lockfile
+   ```
+
+3. Run the repository check, typecheck, web build, unit and integration tests, and capability and identifier leak scans:
+
+   ```sh
+   bun run check
+   ```
+
+   All suites pass and finish with `capability leak scan passed` and `identifier leak scan passed`.
+
+Browser end-to-end and visual checks require Playwright browser binaries that `bun install` does not fetch. Run `bunx playwright install chromium` on a fresh checkout and after any `@playwright/test` version bump before running `bun run test:browser` or `bun run test:visual`, or browser launch fails with `Executable doesn't exist`.
+
+Run `bunx playwright install firefox webkit` as well before running `bun run test:browser:compat` ([How to run the suites](docs/TEST_PLAN.md#how-to-run-the-suites)).
 
 ## Build from source
 
-Use Bun 1.4.4 in this checkout. A source build does not inherit the signed release's qualification.
+After completing the first green check in [Start here](#start-here), run the gateway from your checkout in loopback-only development mode (run `bun run build` first whenever `apps/web` or `packages/collab-client` changes):
 
 ```sh
-bun install --frozen-lockfile
-bun run check
-
-# Loopback-only development mode
-bun apps/gateway/src/cli.ts serve \
-  --dev-localhost \
-  --port 4317 \
-  --origin http://127.0.0.1:4317
+bun apps/gateway/src/cli.ts serve --dev-localhost --port 4317 --origin http://127.0.0.1:4317
 ```
 
-For a source-based production install, run `bun run build`, then use the installation commands in `README.md` with `apps/gateway/src/cli.ts` instead of the archive's `.js` entry point. `bun run release:build` builds the deterministic Bun-runtime archive and checksum manifest; it does not qualify or publish that build.
+Open `http://127.0.0.1:4317` in a local browser on the same host. Seeing live sessions requires stock OMP `>= 18.1.20` with `omp config set collab.autoStart control` and a running `omp` process ([OMP configuration](docs/OPERATIONS.md#5-omp-configuration)); without one, the directory shows **No live sessions**.
+
+For a source-based local service install, satisfy [One-time prerequisites](docs/OPERATIONS.md#1-one-time-prerequisites), run `bun run build`, and run the commands in [CLI and daemon installation](docs/OPERATIONS.md#2-cli-and-daemon-installation) from the repository root with `apps/gateway/src/cli.ts` in place of the archive's `apps/gateway/src/cli.js` entry point.
+
+`bun run release:build` writes a deterministic Bun-runtime archive and SHA-256 manifest under `dist/release/` without qualifying or publishing that build.
 
 ## Repository layout
 
@@ -48,19 +69,11 @@ For a source-based production install, run `bun run build`, then use the install
 
 ## Development workflow
 
-1. Open or select a focused [GitHub issue](https://github.com/carrythroughsystems/omp-session-gateway/issues).
-2. Create a branch from `main`.
-3. Keep the change small enough to review and test.
-4. Add or update relevant behavioral, failure-mode, and secret-non-persistence tests; text-only
-   changes do not need new tests that merely assert wording.
-5. Use the pinned Bun 1.4.4 toolchain: `bun install --frozen-lockfile`, then `bun run check`.
-   For browser behavior, also run `bun run test:browser` and exercise the changed surface. That
-   lane needs Playwright's own Chromium build, which `bun install` does not fetch: run
-   `bunx playwright install chromium` on a fresh checkout, and again after a Playwright version
-   bump, or every case fails at browser launch with `Executable doesn't exist`. The cross-engine
-   `bun run test:browser:compat` lane also needs `bunx playwright install firefox webkit`.
-6. Open a pull request using the template and explain architecture/security impact. Report the
-   exact verification performed; repository checks do not qualify a host, relay, or physical phone.
+1. Select or open a focused [GitHub issue](https://github.com/carrythroughsystems/omp-session-gateway/issues), create a branch from `main`, and sign every commit on the branch.
+2. Keep the change small enough to review and test, and add or update behavioral, failure-mode, and secret-non-persistence tests ([Unit tests](docs/TEST_PLAN.md#1-unit-tests), [Secret-leak test harness](docs/TEST_PLAN.md#2-secret-leak-test-harness)); text-only changes do not need new tests that only assert wording.
+3. Run `bun run check`. When browser or embedded-client behavior changes, also run `bun run test:browser` (and `bun run test:browser:compat` for cross-engine changes) and exercise the changed surface ([How to run the suites](docs/TEST_PLAN.md#how-to-run-the-suites)).
+4. Add a `changelog.d/` fragment when user-, administrator-, or protocol-visible behavior changes ([Changelog entries](#changelog-entries)).
+5. Open a pull request using the repository template, explain architecture and security impact, and list the exact verification commands you ran; repository checks do not qualify a host, relay, or physical phone.
 
 Suggested branch names:
 
@@ -80,9 +93,9 @@ fix(web): reject stale launch generations
 
 ### Merging with the queue
 
-The [merge queue](docs/RELEASE.md#merge-queue-rollout-operator-only) is active on `main` (ruleset
-`main-merge-queue`, since 2026-10-31). Enqueue an ordinary PR after review, once all seven required
-checks pass on its reviewed head:
+`main` requires the GitHub merge queue (branch ruleset `main-merge-queue`) and signed commits. All seven required status checks must pass on the reviewed head: `implementation-checks`, `browser-notifications`, `portable-source (ubuntu-24.04)`, `portable-source (macos-latest)`, `portable-source (windows-latest)`, `browser-core`, and `windows-service-lifecycle`.
+
+Once review is approved and those checks pass, contributors with repository queue permission enqueue the pull request by substituting its number for `<number>` and reviewed commit SHA for `<reviewed-head-sha>` (fork contributors ask the reviewing maintainer to enqueue):
 
 ```sh
 pr_id=$(gh pr view <number> --repo carrythroughsystems/omp-session-gateway --json id --jq .id)
@@ -94,34 +107,27 @@ gh api graphql -f id="$pr_id" -f oid=<reviewed-head-sha> -f query='
   }'
 ```
 
-`gh pr merge` cannot enqueue here. On a queue branch it requests auto-merge, and this repository
-disables auto-merge: it fails with `Auto merge is not allowed for this repository`. Enqueueing
-does not prove the PR has merged. GitHub tests the latest `main` plus the PRs queued ahead of it
-with the same checks on `merge_group`, then squash-merges. Do not refresh every green branch
-just because another queued PR landed, and do not bypass the queue with an administrator flag.
-Sign all commits; queueing does not waive signature or review requirements.
+- Do not run `gh pr merge`: auto-merge is disabled on this repository, so `gh pr merge` requests auto-merge and fails with `Auto merge is not allowed for this repository`.
+- Enqueueing does not prove the pull request has merged; GitHub tests the latest `main` plus earlier queued entries with the same seven checks on the `merge_group` workflow event, then squash-merges.
+- Do not rebase or refresh a green branch solely because another queued pull request merged ahead of it.
+- Sign all commits, never bypass the queue with an administrator flag or role-based bypass, and never enqueue automated release pull requests.
 
-The release machine user uses a pinned direct REST squash merge with a queue-only exception.
-The founder selected the repository Maintain-role bypass described in the rollout; it applies
-to matching role holders, not only the bot. Contributors must not acquire that bypass or enqueue
-generated release PRs.
-During a release window, drain the queue and stop new enqueues until the release record
-lands: the approve receipt binds an exact tree and must not absorb unrelated changes.
+Direct release-bot merges and release-window queue pauses are maintainer procedures; see [Merge queue](docs/RELEASE.md#merge-queue).
 
 ## Security-sensitive contributions
 
-Never use real OMP collaboration links in code, tests, screenshots, recordings, issues, or pull requests. Generate conspicuous synthetic fixtures. Do not add telemetry, third-party browser assets, public listeners, or persistent capability storage.
+A **View** (read-only) or **Control** (writable) collaboration link is a bearer secret, called a capability in [Protocol contracts](docs/PROTOCOL.md); never use real OMP collaboration links in code, tests, screenshots, recordings, issues, or pull requests. Generate conspicuous synthetic fixtures ([Secret-leak test harness](docs/TEST_PLAN.md#2-secret-leak-test-harness)), and do not add telemetry, third-party browser assets, public listeners, or persistent capability storage.
 
 Changes touching any of the following require threat-model review and negative tests:
 
-- Tailscale identity/authentication;
+- Tailscale identity and authentication;
 - loopback binding and proxy trust;
-- IPC authentication or permissions;
-- capability parsing/delivery;
-- browser history/storage/service workers;
+- local IPC (Unix-socket or named-pipe query channel) authentication or permissions;
+- capability parsing and delivery;
+- browser history, storage, or service workers;
 - logging, diagnostics, tracing, or crash handling;
-- OMP session-generation lifecycle;
-- self-hosted relay support.
+- OMP session-generation lifecycle (`generation` is OMP's counter that changes when a session is replaced);
+- self-hosted collaboration relay support (OMP's encrypted WebSocket transport).
 
 ## Coding standards
 
@@ -131,7 +137,7 @@ Do not introduce a framework solely for convenience when a small maintained depe
 
 ## Documentation
 
-Update the relevant architecture, protocol, operations, compatibility, and security documents in the same pull request as a behavior change. Add an ADR entry to `docs/DECISIONS.md` when changing a previously accepted decision.
+Update [Architecture](docs/ARCHITECTURE.md), [Protocol contracts](docs/PROTOCOL.md), [Installation and operations](docs/OPERATIONS.md), [Compatibility](docs/COMPATIBILITY.md), and [Security design and threat model](docs/SECURITY.md) in the same pull request as a behavior change. Add an Architecture Decision Record (ADR) to [Architectural decisions](docs/DECISIONS.md) when changing an accepted decision.
 
 ## Changelog entries
 
@@ -140,16 +146,11 @@ Add one `changelog.d/<section>-<short-slug>.md` file per entry, using `added`, `
 `deprecated`, `removed`, `fixed`, or `security` and a lowercase, hyphen-separated slug.
 The file contains exactly one `- ` bullet, with any continuation lines indented two spaces,
 no blank lines, lines at most 100 characters, and a trailing LF newline.
-See [fragment rules and example](changelog.d/README.md). Release preparation collects and deletes
-fragments; contributors do not cut or recount release sections by hand. Test-only changes need
-no fragment.
+See [fragment rules and example](changelog.d/README.md). Release preparation collects and deletes fragments; contributors do not edit `CHANGELOG.md` release sections by hand. Test-only changes need no fragment.
 
 ## Governance
 
-The repository owner is the initial maintainer and final decision maker while the contributor base
-is small. Routine changes are decided through pull-request review; security disclosures follow
-[SECURITY.md](SECURITY.md). Maintainer roles may be added when sustained review, release, or
-security-response work makes them necessary.
+The repository owner is the initial maintainer and final decision maker while the contributor base is small. Routine changes are decided through pull-request review; security disclosures follow [Private vulnerability reporting](SECURITY.md). Maintainer roles may be added when sustained review, release, or security-response work requires them.
 
 ## Licensing
 

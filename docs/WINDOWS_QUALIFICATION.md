@@ -1,13 +1,171 @@
 # Windows qualification
 
-This runbook is for maintainers running Windows release qualification and reviewing the Windows host
-test lanes. For normal Windows installation, follow the
-[operations guide](OPERATIONS.md#2-cli-and-daemon-installation). Windows x86-64 build 26100 (Server
-2025) at interactive logon — from an Administrator or a standard account — is qualified in the
-current stable release (`v0.7.4`); see [Compatibility](COMPATIBILITY.md) and
-[Release status](RELEASE_STATUS.md).
+This runbook is for release maintainers running the disposable Windows Server 2025 qualification lane and reviewing the hosted Windows CI lanes for OMP Session Gateway, the companion to Oh My Pi (OMP).
 
-## Mainline Windows: tested evidence and the remaining delta — 2026-09-24
+For normal Windows installation, follow [CLI and daemon installation](OPERATIONS.md#2-cli-and-daemon-installation). For what is qualified in the latest release, see [Current claim](COMPATIBILITY.md#current-claim) and the [release ledger](RELEASE_STATUS.md). Throughout this runbook, `omp-gateway <command>` is shorthand for `bun apps/gateway/src/cli.js <command>` run from the extracted release archive.
+
+## Hosted CI lanes
+
+Stock mainline OMP `>= 18.1.20` with `collab.autoStart` ([Operator settings](OMP_INTEGRATION.md#1-operator-settings)) and plain `omp` is the host prerequisite. Three hosted `windows-latest` jobs gate source changes and upstream OMP compatibility:
+
+In these checks, a `generation` is OMP's counter that changes when a session is replaced so a stale card cannot open a newer session, and a **View** or **Control** link is a bearer secret, called a capability in the contracts.
+
+| Job | Triggers | Gates |
+|---|---|---|
+| `portable-source (windows-latest)` | `push` to `main`, `pull_request`, `merge_group`, `workflow_dispatch` | `bun run check:portable`: repository scan, typecheck, web build, portable tests, and `check:capability-leaks` plus `check:identifier-leaks`. |
+| `windows-service-lifecycle` | `pull_request`, `merge_group`, `workflow_dispatch` | Windows contract and ACL suites, plus Administrator and non-elevated standard-user scheduled-task lifecycle. |
+| `canary-windows` | Daily schedule (`08:23 UTC`), `workflow_dispatch`, `workflow_call`, canary/reader `pull_request` paths | Stock OMP named-pipe discovery, snapshot, stale-generation refusal, **View** and **Control** relay joins, `--continue`, and cleanup. |
+
+- `portable-source (windows-latest)` ([`.github/workflows/compatibility.yml`](../.github/workflows/compatibility.yml)) runs [`scripts/test-portable.ts`](../scripts/test-portable.ts), executing every tracked `*.test.ts` file except the six `win32` host-bound exclusions named there.
+- `windows-service-lifecycle` ([`.github/workflows/platform-qualification.yml`](../.github/workflows/platform-qualification.yml)) checks current-user scheduled-task `install`, `status`, cross-user `readiness-token` ACL denial, `rotate-readiness-token`, `--port 4318` reinstall, active `uninstall --no-stop` refusal, and `uninstall`.
+- The same `windows-service-lifecycle` job then creates a standard local account lacking `SeSecurityPrivilege` and verifies `install --no-start` (twice), `status`, direct startup of the registered task's command to readiness (because headless runners have no interactive logon session to fire `LogonTrigger`), and `uninstall`.
+- `canary-windows` ([`.github/workflows/upstream-canary.yml`](../.github/workflows/upstream-canary.yml), [`scripts/upstream-canary.ts`](../scripts/upstream-canary.ts)) gives OMP commands a 60-second bound with no retry, starts stock OMP in a hidden console, and checks `OmpHostReader` ([Discovery and per-host queries](OMP_INTEGRATION.md#2-discovery-and-per-host-queries)) named-pipe discovery and generation-1 `snapshot`.
+- It then verifies `stale-generation` link refusal, **View** and **Control** relay joins (echoing a **Control** prompt), `taskkill.exe /PID <pid> /T /F` replacement via `omp --continue` with prior-capability refusal, and `unregister` (confirming discovery cleanup after process exit).
+
+Windows registers the `OMP Session Gateway` scheduled task with `LogonTrigger` and `InteractiveToken`, starting `omp-gatewayd` at interactive logon rather than unattended boot. Hosted runners are destroyed at job end and cannot reboot into an interactive logon session or join a tailnet with a physical client, so every stable release runs the automated signed-artifact lane below on a disposable Windows Server 2025 VM.
+
+## Automated signed-artifact lane
+
+### Start the lane
+
+In a stable campaign, `scripts/stable-qualification.ts` calls `preflightWindows`, `runWindows`, `windowsNeedsCleanup`, and `cleanupWindows` from [`scripts/windows-stable-qualification.ts`](../scripts/windows-stable-qualification.ts).
+
+The orchestrator supplies verified `candidate` and `predecessor` archive paths, locked OMP pins, whole-object progress checkpointing, and the exclusive Pixel lease; the module never downloads substitute gateway bytes during a stable run and cannot mark a stable receipt passed on its own.
+
+For standalone development verification from the macOS controller, run:
+
+```sh
+export PATH="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4:$PATH"
+bun scripts/windows-stable-qualification.ts preflight
+bun scripts/windows-stable-qualification.ts artifacts --tag vX.Y.Z-prealpha.N
+bun scripts/windows-stable-qualification.ts run --tag vX.Y.Z-prealpha.N
+# Also safe after an interrupted controller; recovers ownership from the checkpoint epoch.
+bun scripts/windows-stable-qualification.ts cleanup
+```
+
+`artifacts` and `run` require `--tag vX.Y.Z-prealpha.N` matching `package.json`'s version (with optional `--previous-tag` matching `previousTag` in `STABLE_RELEASE.lock.json`) and verify both releases through the campaign's own argument parsing and release verification: signed tag, exact asset set, GitHub release state, checksums, GitHub attestations, and Sigstore bundles.
+
+Development state is stored privately under `~/.local/share/omp-session-gateway/qualification/dev/windows/` (`0700`: `identity.json`, `progress.json`, `evidence.json`, `creations-<tag>.json`, `assets/`, `source/`, and `source.tar.gz`). It records `claim: "tested-development-only"`, never candidate qualification, and a retained attempt resumes only for the tag it recorded.
+
+### Prerequisites and pins
+
+The controller must be macOS (`darwin`) with Bun `1.4.4`, FreeRDP `3.33.0` (`sdl-freerdp` supporting `/from-stdin` and `fingerprint:<hash>`), `pywinrm` `0.5.0` in `~/.local/share/omp-session-gateway/qualification/venv`, `cosign`, `shasum`, `adb`, and authenticated `gh` and `git` (with release tag-signing keys trusted) on `PATH`, plus one attached Android Pixel over `adb` (`tcp:9222` unowned, Chrome installed, connected to the tailnet).
+
+Export `OMP_STABLE_WINDOWS_LOGIN` set to that Pixel's user-owned tailnet login so the guest allowlist accepts the device during `pixel_verified`.
+
+Store credentials in private current-user (`0600`) files: the Vultr API token in `~/.vultr-apikey`, and a reusable pre-approved Tailscale join key (`tskey-auth-` carrying `tag:omp-session-gateway`) plus Tailscale API credential (`tskey-api-`, queried through `tailnet/-`) in `~/.ts-qual-authkey` (or `~/.ts-authkey-qual`) and `~/.ts-qual-apikey`.
+
+The tailnet must have MagicDNS, HTTPS certificates, and `tag:omp-session-gateway` access policy ([Tailnet access policy](OPERATIONS.md#4-tailnet-access-policy)); a Vultr API access-control rejection requires authorizing the operator's current `/32` IPv4 egress, never broadening access to all IPs.
+
+[`scripts/windows-qualification-pins.json`](../scripts/windows-qualification-pins.json) pins the Vultr target (`ewr`, `vc2-4c-8gb` with 4 vCPU and 8,192 MiB RAM, OS `2514` `Windows 2025 Standard x64`), Bun `1.4.4`, Tailscale `1.102.4` (`Tailscale Inc.` Authenticode signer), `pywinrm` `0.5.0`, FreeRDP `3.33.0`, and the stock OMP version, `sourceCommit`, `sourceTree`, and `pi_natives.win32-x64-baseline.node` tarball and binary SHA-256 digests.
+
+VM size is test-host capacity for building OMP from source, not part of the qualified Windows claim. Both preflight and portable tests reject any divergence from `UPSTREAM.lock.json`, so an upstream OMP refresh must update these Windows pins without changing the upstream lock schema.
+
+Each attempt generates a UUIDv4 `<epoch>` and labels its resources `omp-winqual-<epoch>`. Preflight checks operator `/32` egress (matching optional `OMP_STABLE_WINDOWS_OPERATOR_CIDR` when pinned), Vultr OS and plan availability, zero unreconciled `omp-winqual-*` resources, local tool versions, the attached Pixel, `tailnet/-` device listing, and archive digests (when `run` or a campaign supplies `identity`).
+
+Preflight also checks remaining per-tag creation allowance (`6` total VM creations in development mode, `4` in stable mode, one active VM at a time; provider quota metadata is unobservable).
+
+Every pre-existing instance and firewall ID outside the current `<epoch>` is added to `OMP_QUAL_PROTECTED_INSTANCES` and `OMP_QUAL_PROTECTED_FIREWALLS` for the attempt; the campaign or explicit development `run` is sufficient to provision without an extra opt-in environment variable.
+
+Guest access credentials (`default_password` and `standardUser`), infrastructure IDs, state digests, upload claims, and `pixelState` are stored only in the separate epoch vault `~/.local/share/omp-session-gateway/qualification/windows-vault/<epoch>.json` (`0700` parent, `0600` file), which is removed only after VM destruction and Pixel restoration.
+
+### Provisioning, admission, and guest staging
+
+Guest allocation, remote management, and toolchain staging enforce these bounds:
+
+- Allocation and admission share one 12-minute deadline persisted before firewall creation, creating one firewall and one VM labeled `omp-winqual-<epoch>` with TCP `3389` and `5985` open to the operator's `/32` only.
+- The allocation and execution deadline guard runs after awaited checkpoints and inventory reads and synchronously before each creation `POST`, firewall-rule `POST` (after ownership refetch), and creation-counter write, allocating failure IDs from the active execution.
+- WinRM (`scripts/windows-winrm.py`) uses port `5985` NTLM with `message_encryption='always'`, rejects `AllowUnencrypted` other than `'false'` on every `Administrator` call, and sends scripts and `64`-KiB base64 upload chunks over framed `stdin` rather than remote `argv` or environment.
+- Admission requires three consecutive read-only successes spanning at least 60 seconds: a transient (`infra_transient`) transport error resets both count and window, auth or helper errors and guest assertions abort immediately, and mutations are never retried during admission.
+- Each `transport` connectivity probe has at most 180 seconds, capped by the remaining combined deadline: on expiry the controller sends `SIGTERM`, the helper attempts command cleanup and shell closure, and after 5 seconds the controller sends `SIGKILL`, awaits exit, and drains both pipes.
+- Cancellation and positive-remainder guards run before persisting each `transportProbes` start record and synchronously before spawning (never clamping an exhausted budget to `1` ms), and guest dispatch re-checks the 3-hour resource lifetime (2 hours for `pixel_verified`, leaving the final hour for teardown) after vault/provider reads and the last checkpoint.
+- RDP (`sdl-freerdp`) reads the active `Remote Desktop` certificate SHA-256 over WinRM, pins `/cert:fingerprint:sha256:<hash>`, and passes the password via `/from-stdin:force` with no ignore/TOFU mode.
+- Before downloading tools into `C:\omp-winqual-<epoch>`, staging sets every active non-Tailscale adapter to `1.1.1.1` and `8.8.8.8`, clears the DNS cache, and verifies `github.com`, `pkgs.tailscale.com`, `registry.npmjs.org`, and `login.tailscale.com` resolve, failing as `name resolution failed: <host>` otherwise.
+- Tailscale joins via `tailscale up --unattended=true` (`--auth-key=file:... --accept-dns=true --ssh=false --timeout=120s`, deleting the key file in `finally`), verifying `tag:omp-session-gateway`, TUN mode up, Serve proxying HTTPS `443` to `http://127.0.0.1:4317`, and Funnel disabled.
+- For OMP, the runtime clones or fetches bare `can1357/oh-my-pi` into `dev/windows/source`, verifies `sourceCommit` and `sourceTree`, uploads and hash-checks `source.tar`, runs frozen Bun install (`bun-install`) and native Windows build (`omp-build`), writes `collab.autoStart: control` to `%USERPROFILE%\.omp\agent\config.yml`, and verifies `omp config get collab.autoStart --json` reads back `"control"` (because `omp config set` over WinRM can exit `0` without writing).
+
+### Phases in order
+
+A single `runWindows` execution steps through 30 checkpointed phases across the Administrator and standard-user accounts:
+
+1. Provisioning and toolchain staging (`intent_checkpointed`, `firewall_created`, `instance_created`, `transport_ready`, `toolchain_staged`): allocates the `omp-winqual-<epoch>` firewall and VM, proves the 3-sample / 60-second WinRM stability window, establishes an initial pinned RDP logon (`120`-second bound) that disconnects once `explorer.exe` runs, stages tools and verified archives, joins tagged TUN-mode Tailscale Serve, and builds locked stock OMP.
+2. Predecessor install and candidate upgrade (`predecessor_installed`, `candidate_upgraded`): installs the predecessor archive, upgrades to the candidate archive (`OMP_STABLE_WINDOWS_LOGIN` allowlist) with `config.json` and `readiness-token` SHA-256 digests unchanged and loopback-only binding, and checks pre-reboot `doctor`.
+3. Reboot and pre-login check (`reboot_requested`, `prelogin_verified`): reboots (`shutdown.exe /r /t 3 /f`) and records at least three pre-login samples over at least 30 seconds (`15`-second sleep) confirming an idle scheduled task with zero gateway processes and zero port-`4317` listeners.
+4. Post-login startup (`postlogin_ready`, `doctor_passed`): connects via pinned RDP so `LogonTrigger` starts the gateway automatically within 180 seconds (never manually started; requiring `status.ready`, `tailscaleConnected`, and `loopbackTrustSound`) and re-runs `doctor`.
+5. OMP publication (`omp_published`): starts the OMP fixture through an epoch-owned interactive scheduled task (`OMP Winqual <epoch>`, avoiding WinRS disconnect teardown) and verifies named-pipe publication (`\\.\pipe\...`), generation `1`, `200` `no-store` **View** and **Control** launches, and `409` (`generation_mismatch`) stale-generation refusals.
+6. Physical Pixel (`pixel_verified`): under the Pixel lease (`/tmp/omp-gw-pixel.lock` in development; orchestrator lease in campaigns), opens the Windows Serve origin in ordinary Chrome without touching the installed **OMP Sessions** WebAPK ([Device admission and one-time WebAPK setup](ANDROID.md#device-admission-and-one-time-webapk-setup)), verifies allowlisted identity, read-only **View**, writable **Control**, prompt acceptance, directory return, and baseline restoration.
+7. OMP revocation, rotation, rollback, restoration, and uninstall (`omp_revoked`, `readiness_rotated`, `predecessor_restored`, `candidate_restored`, `candidate_uninstalled`): stops the OMP tree (`taskkill.exe /PID <pid> /T /F`), observes revocation, runs `omp-gateway rotate-readiness-token`, rolls back to the history-selected predecessor (`omp-gateway rollback --to <version-dir>` from `installation/history.json`), reinstalls the candidate, and runs `omp-gateway uninstall` with state preserved.
+8. Standard-user preparation (`standard_user_prepared`): creates local user `ompstd<first-8-epoch-hex>` in `Remote Desktop Users` (`S-1-5-32-555`, never `Administrators`) with its password kept in the epoch vault and encrypted WinRM `stdin`, grants read-and-execute on staged `bun`, `candidate`, the OMP build directory, and the WinRM `RootSDDL` descriptor, and asserts via `whoami.exe` that its token lacks `BUILTIN\Administrators` (`S-1-5-32-544`, deny-only included) and `SeSecurityPrivilege`.
+9. Tailscale handover (`standard_tailnet_released`, `standard_tailnet_joined`, `standard_interactive_ready`): signs out the Administrator desktop (`90`-second bound), resets Serve and runs `tailscale logout`, deletes that tailnet node, joins a new tagged TUN node as the standard account (`origin` taken from the join), and establishes its first pinned RDP logon (`240`-second bound).
+10. Standard-user install and reboot (`standard_candidate_installed`, `standard_reboot_requested`, `standard_prelogin_verified`, `standard_postlogin_ready`): installs the candidate fresh as the standard account, reboots, checks at least three pre-login samples over 30 seconds, and logs on via pinned RDP for automatic `LogonTrigger` startup.
+11. Standard-user doctor, rotation, and uninstall (`standard_doctor_passed`, `standard_readiness_rotated`, `standard_candidate_uninstalled`, `evidence_complete`): runs `doctor` as the standard account (while `Administrator` reads WMI task, process, and listener state and `AllowUnencrypted`), rotates `readiness-token`, and uninstalls with private state preserved.
+
+Predecessor install, upgrade, rollback, OMP publication, and Pixel verification stay `Administrator`-only.
+
+After `install`, `rollback`, or `rotate-readiness-token`, each read-only `status` predicate polls every 2 seconds for up to 60 seconds without repeating the mutation, logs any read count past `1`, and fails as `status mismatch: <fields>` (alongside `native command failed: <step> exit <code>` and `name resolution failed: <host>`, the only guest error strings forwarded past `guest execution failed at line <N>: <Type>`).
+
+### What a pass records
+
+A passing run writes a bounded receipt and cleanup record without storing guest output or bearer secrets:
+
+- Receipt payload: `epoch`, verified `candidate` and `predecessor` (`tag`, `sourceCommit`, `archiveSha256`), `omp` and `bunVersion` pins, per-phase `timings`, metadata-only `transportProbes`, and `doctor` (`true`, `total`, `falseChecks`).
+- Receipt observations: `transportStabilitySamples`, `transportStabilityDurationMs`, `windowsBuild`, `cpus`, `memoryMiB`, pre-login counts and durations, `automaticStartMs`, launch status codes, Pixel flags, `standard*` fields, and `failedPhaseAttempts` (repair wait is excluded from phase time).
+- Tagged-node `doctor` result: following the [Debian identity convention](LINUX_QUALIFICATION.md#gap-3--denied-tailscale-identity) rather than an `N/N` claim, `identityAllowed`, `pwa`, and `sessionHealth` (`publisherHealth` on older predecessors) must be `false`, and `securityHeaders` may be `false` only when that `403` omits CSP.
+- Every other host check (including `loopbackTrustSound`, `serveMapping`, `funnelDisabled`, and `compatibility`) must be `true`, alongside `loopbackOnly`, `logonTrigger`, `interactivePrincipal`, and `logonTriggerScoped` (every task's `LogonTrigger` must name its installing account).
+- Cleanup result: cleanup returns `instancesRemaining: 0`, `firewallsRemaining: 0`, `tailnetDeleted: true`, `vaultRemoved: true`, `guestCleanupFailures`, and `guestCommandsSkipped`.
+- Settlement proof: cleanup also counts `omp-winqual-` devices in `tailnet/-` (`tailnetNodesRemaining`) and, whenever `pixel_verified` was reached, reads and checkpoints `pixelBaseline` (foreground, display, and keyguard state) in the restoring lease turn; the campaign orchestrator uses both as settlement proof after a failed campaign, never as a cleanup verdict (omitted if unreadable).
+
+### Operator recovery and cleanup
+
+Every run enforces independent resource containment and lock recovery across interruptions:
+
+- Independent containment: a 30-minute containment execution is created before preflight so primary cancellation or deadline expiry never disables teardown, and every VM must be destroyed within 4 hours of creation. Provider GETs retry transient `5xx` responses and network errors up to `5` attempts (`2, 4, 8, 16`-second backoff), and a missing resource or malformed listing page is final only when a second read 5 seconds later agrees.
+- Guest reconciliation: cleanup reconciles the vault-bound instance ID and `omp-winqual-<epoch>` inventory (recovering lost create responses by exact label without a vault; firewall-only vaults skip guest commands without raising `ownership_changed`).
+- Guest and provider teardown: confirmed VM absence skips guest commands; a live guest gets one 90-second reconnect before `stopOmp`, `uninstall`, `resetServe`, and `logout` (run as `standard` once `standard_tailnet_released` settled), and any failed reconnect or guest command skips remaining guest mutations and proceeds to `tailnetDelete`, `instances` (`180`-second poll), and `firewalls` (`180`-second poll) after ownership and protected-ID checks.
+- Cloud before Pixel: paid cloud deletion runs before acquiring the Pixel cleanup lease (`10`-minute restoration context), and guest command errors become diagnostic counts only after the owned VM is confirmed absent. Changed or protected owners, missing Pixel recovery state, `pixelUnrestored: true`, or any `omp-winqual-*` instance or firewall visible after a 5-second settling wait block completion, retain the vault, and forbid automatic campaign retry.
+- Vault retirement: once `cleanupRequired=false` is checkpointed (`retirementPending=true`), it never flips back to `true`; cleanup then unlinks the vault and commits `retirementPending: false`, and subsequent development `run` or `artifacts` calls finish any `retirementPending=true` vault removal before replacing `progress.json` or `identity.json`.
+- Development retention: stable interrupted attempts always clean up and require a fresh epoch. Only an initial development `run` failing with `product` / `assertion_failed` and known disposition (`confirmed` or `read_only`, never `unknown` or diagnostic text) after `transport_ready` inside the 3-hour lease retains the VM for repair (inspect credentials in `windows-vault/<epoch>.json` and guest build logs in `C:\omp-winqual-<epoch>\`).
+- Development resume: rerunning `run` skips settled phases and resumes only read-only phases (`transport_ready`, `prelogin_verified`, `doctor_passed`, `standard_prelogin_verified`, `standard_doctor_passed`, `evidence_complete`); rerunning `run` when the retained failure occurred in an unsettled mutating phase, or on any preflight error, cancellation, or deadline, enters independent containment and destroys the VM.
+- Development Pixel lock (`/tmp/omp-gw-pixel.lock`): automatic cleanup inherits its lease only after the original action settles and when the in-memory claim, `owner` file, `epoch`, and `process.pid` match.
+- Exited-owner lock recovery: explicit `cleanup` recovers an exited process (`ESRCH`) for the same `epoch` inside the cleanup deadline (capped at 60 minutes) via an exclusive `0600` `recovery-<claimHash>` fence (first 32 hexadecimal characters of SHA-256 of the stale `owner` claim) kept until restoration proof removes `/tmp/omp-gw-pixel.lock` (refused restoration retains the lock even without a vault).
+
+To recover a retained `/tmp/omp-gw-pixel.lock` after an interrupted development run:
+
+1. Stop the owning Windows development process and every other Pixel-driving lane; never remove a live or foreign owner's lock.
+2. Prefer `bun scripts/windows-stable-qualification.ts cleanup` with the original epoch's intact private vault.
+3. If the vault is intact but takeover was interrupted (its `recovery-<claimHash>` creator has exited or `owner` is missing), keep every Pixel-driving lane stopped, run `rm -rf /tmp/omp-gw-pixel.lock`, and immediately run `bun scripts/windows-stable-qualification.ts cleanup` before admitting another lane.
+4. If the vault is irrecoverably missing, manually reconcile the Pixel's foreground app, display, keyguard, ordinary Chrome pages, and `adb` `tcp:9222` forward (`adb forward --remove tcp:9222`), verify VM, firewall, and tailnet absence in Vultr and Tailscale independently, and only then run `rm -rf /tmp/omp-gw-pixel.lock`. Never record manual recovery as successful qualification.
+
+### Transport recovery and failure evidence
+
+WinRM probes, archive uploads, and subprocess timeouts follow closed classification and single-shot rules:
+
+- Helper failure taxonomy: `scripts/windows-winrm.py` reports closed `kind` (`transport`, `guest`, or `helper`), `stage` (`connection`, `command`, `output`, or `upload`), `condition`, `httpStatus`, and `disposition` (`not_started`, `read_only`, `confirmed`, or `unknown`) from exception types and status fields alone, never diagnostic text.
+- Failure classes: controller assertions classify as `product`; invalid credentials (`401`/`403` -> `authentication_failed`), import/encoding faults, malformed guest JSON, arbitrary guest failures, and unexplained `SIGTERM` exit `143` classify as `harness`; Pixel navigation/load errors at `pixel_verified` classify as `navigation_failed` (`harness`, `confirmed`), and other Pixel errors stay `unclassified_failure` (`unknown`).
+- Transient read-only transport errors: during declared read-only calls, recognized connection/reset/read timeouts and retryable HTTP statuses (`429`/`5xx` -> `retryable_service_failure`) classify as `infra_transient`.
+- Boot socket errors: refused connections (`ECONNREFUSED`, peer RST answering SYN) and resets report `connection_reset`, and unreachable hosts or networks (`EHOSTUNREACH`, `ENETUNREACH`, `EHOSTDOWN`) report `connection_timeout` (unwrapped from `urllib3` `NewConnectionError` inside `requests` `MaxRetryError`) so a booting guest is retried within the admission and reconnect budgets.
+- Deadlines and FreeRDP termination: only a controller command timeout on an in-flight read-only connection probe produces `probe_deadline`; an execution-clipped command timer produces `deadline_exceeded` (`controllerDeadline: true`, `exitCode`, `signal`, `timeoutMs`) and an expired budget poll produces `deadline_exceeded` (`controllerDeadline: true`, `timeoutMs`, `waitedMs`), while rejected started mutations re-check execution expiry and keep `unknown` disposition.
+- Non-retryable terminations: external cancellation and raw `SIGTERM` exit `143` never produce `probe_deadline`, lane failures never grant campaign retry authority, and FreeRDP (`sdl-freerdp`) arms cancellation before `stdin` write/end and sends `SIGTERM` (then `SIGKILL` after `5` seconds) and awaits exit on every failure.
+- Read-only reconnect budget: initial admission persists `transportStabilitySamples` and `transportStabilityDurationMs` before checkpointing (resumed admission reuses them only after reconnect; legacy boolean markers without counts must re-observe inside the 12-minute allocation window; completed admission never re-applies that allocation deadline).
+- Reconnect bounds: subsequent read-only calls, including cleanup, share a 90-second reconnect budget with 2, 4, 8, and 16 second delays and at most 5 calls, checking remaining time before each probe and after backoff and rejecting at-or-past-deadline results as `deadline_exceeded`.
+- Single-shot mutations: mutating guest actions, nested PowerShell commands, RDP logons, and uploads (`candidate.tar`, `predecessor.tar`, `source.tar`) record durable `started` and `complete` claims and are never replayed. Unsettled mutating phases (or legacy phases without claims) cannot resume, fresh upload authority exists only before `toolchain_staged` starts, completed uploads re-verify bytes, and upload completion never proves unpack, Tailscale join, build, or upgrade.
+- Upload reconciliation: only a recognized helper transport interruption reconciles an upload after read-only reconnect by opening the file with `FileShare.None` (proving its writer exited) before hashing SHA-256. Complete matching bytes are reused, partial files are deleted before failing as `mutation_unconfirmed` without re-streaming, and raw exits, controller kills, auth or helper faults, or locked writers stay terminal.
+- Redacted diagnostics: Python diagnostics strip source lines, redact request strings, auth headers, and URLs, replace altered frame names with `<redacted>` (which remains parseable), and keep exception `type` even when optional fields fail validation, attaching only to error causes and never typed failure records.
+- `transportProbes` telemetry: progress and receipts retain metadata-only `transportProbes` rows (`startedAt`, `timeoutMs`, and `firstResponseLatencyMs` from `WINRM_FIRST_RESPONSE` at `open_shell`, `signalAt`, `exitedAt`, and `exitCode` initialized to `null`, plus optional `killAt` and `controllerDeadline` when signaled); failed checkpoints refuse qualification, and older progress without `transportProbes` stays cleanable without rewriting.
+
+## Dated development evidence
+
+The dated records below retain development and discovery observations as written; they do not state current release qualification.
+
+### Incidents behind the lane rules
+
+These observations were recorded beside the rules they explain, and are kept as written:
+
+- VM plan (`vc2-4c-8gb`): "Through v0.7.0-prealpha.1 it used `vc2-2c-4gb`, where building stock OMP 18.4.2 from source peaks near 2.4 GiB of Bun private memory beside Windows itself; that build failed (`omp-build exit 1`) in two of the three stable attempts that reached it, as the Debian lane's OMP build was once killed on a 4 GiB host before it moved to 8 GiB. Vultr refused this Windows image on the High Performance `vhp-4c-8gb-amd` plan (HTTP 400)."
+- Public resolvers before guest downloads: "On 2026-10-02 the Vultr-assigned resolver answered SERVFAIL for the Tailscale names and their CloudFront target while `github.com` resolved, which failed two v0.7.2 campaign attempts with a bare `WebException` at the Tailscale MSI download."
+- Writing `collab.autoStart` to `config.yml` and reading it back: "Over WinRM, the compiled binary's `config set` can exit 0 without writing anything: in a v0.6.0-prealpha.3 development run its host started with auto-start off and never published."
+
+### Mainline Windows: tested evidence and the remaining delta — 2026-09-24
 
 Stock OMP `>= 18.1.20` is the current prerequisite; [PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). Configure only
 `collab.autoStart` and use plain `omp`.
@@ -47,336 +205,6 @@ rotation, upgrade, rollback, and uninstall, with TUN-mode Tailscale Serve and a 
 Hosted runners cannot reboot into a login session, so the automated signed-artifact lane below runs
 on a disposable Server 2025 VM for each stable release. Windows starts the gateway at interactive
 logon (`LogonTrigger`), not at unattended boot.
-
-## Automated signed-artifact lane
-
-`scripts/windows-stable-qualification.ts` exports `preflightWindows`, `runWindows`,
-`windowsNeedsCleanup`, and `cleanupWindows`. The stable orchestrator supplies the exact verified
-candidate and predecessor archive paths, the OMP lock identity, whole-object checkpointing, and
-the exclusive Pixel lease. This module never downloads substitute gateway bytes during a stable
-run and cannot mark a stable receipt passed on its own.
-
-The controller is the operator's Mac with Bun 1.4.4, FreeRDP 3.33.0 (`sdl-freerdp`), and pywinrm
-0.5.0 in `~/.local/share/omp-session-gateway/qualification/venv`. Keep the Vultr credential in
-the private `~/.vultr-apikey` file and the tagged Tailscale join credential and API
-credential in the existing private qualification files. Preflight checks current egress, provider
-image/plan availability, existing resources, tools, the attached device, and archive digests.
-All pre-existing instance and firewall IDs become protected for the attempt. A Vultr API access
-control rejection requires authorizing the operator's current `/32`; never broaden it to all IPs.
-The stable campaign (or explicit development `run`) is provisioning authority; there is no
-second environment-variable gate. The creation cap, positive ownership label and protected
-inventory snapshot remain mandatory. Tailscale inventory and cleanup use `tailnet/-`, binding
-every query to the API credential's own tailnet rather than a hard-coded account identifier.
-After its own teardown, cleanup also counts every tailnet device whose hostname or name starts
-with `omp-winqual-` (`tailnetNodesRemaining`). Once the physical client reached `pixel_verified`,
-a successful Pixel restore also reads the Pixel's baseline in the same lease turn and checkpoints
-it. Both are settlement proof for a failed campaign, never a cleanup verdict; an unreadable
-listing or device records nothing.
-
-The development commands are:
-
-```sh
-export PATH="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4:$PATH"
-bun scripts/windows-stable-qualification.ts preflight
-bun scripts/windows-stable-qualification.ts artifacts --tag vX.Y.Z-prealpha.N
-bun scripts/windows-stable-qualification.ts run --tag vX.Y.Z-prealpha.N
-# Also safe after an interrupted controller; recovers ownership from the checkpoint epoch.
-bun scripts/windows-stable-qualification.ts cleanup
-```
-
-`artifacts` and `run` take the campaign's candidate tag and pair it with the published stable
-predecessor, both through the campaign's own argument parsing and release verification: signed
-tag, exact asset set, GitHub release state, checksums, GitHub attestations, and Sigstore bundles.
-A development run therefore installs exactly the pre-release bytes a campaign would; the earlier
-stable-only pair never exercised a pre-release tag, which hid a version-derivation defect until a
-paid campaign. A retained attempt resumes only for the tag it recorded. Development
-state is private under `~/.local/share/omp-session-gateway/qualification/dev/windows/`; it is
-**tested evidence only**, never candidate qualification. The separate epoch vault has a `0700`
-parent and `0600` files. It is the only persisted location for guest access credentials and
-infrastructure identifiers, and is removed only after instance destruction.
-
-The lane creates one firewall and one Server 2025 Standard VM (`ewr`, `vc2-4c-8gb`: 4 vCPU,
-8 GiB). Through v0.7.0-prealpha.1 it used `vc2-2c-4gb`, where building stock OMP 18.4.2 from
-source peaks near 2.4 GiB of Bun private memory beside Windows itself; that build failed
-(`omp-build exit 1`) in two of the three stable attempts that reached it, as the Debian lane's OMP
-build was once killed on a 4 GiB host before it moved to 8 GiB. Vultr refused this Windows image
-on the High Performance `vhp-4c-8gb-amd` plan (HTTP 400). The VM's size is test-host capacity,
-not part of the qualified Windows claim. The firewall
-admits TCP 3389 and 5985 from the current operator `/32` only. WinRM uses authenticated NTLM with
-message encryption required and rejects `AllowUnencrypted`. Scripts and file payloads travel
-through framed stdin, not remote argv or environment. The active RDP certificate's SHA-256 is
-read over WinRM and explicitly pinned; RDP reads its password from stdin. No ignore/TOFU mode is
-used. The tagged Tailscale join uses a private guest file consumed via `--auth-key=file:...` and
-removed in `finally`. TUN-mode Serve targets loopback, with Funnel disabled.
-Windows uses `tailscale up --unattended=true` for machine-wide connectivity; authenticating
-with `login` alone did not establish the persistent backend in the development run.
-The guest does not rely on the provider's resolver: before its first download, toolchain staging
-sets every up adapter to `1.1.1.1` and `8.8.8.8`, clears the DNS cache, and proves `github.com`,
-`pkgs.tailscale.com`, `registry.npmjs.org` and `login.tailscale.com` resolve, failing as
-`name resolution failed: <host>` otherwise. On 2026-10-02 the Vultr-assigned resolver answered
-SERVFAIL for the Tailscale names and their CloudFront target while `github.com` resolved, which
-failed two v0.7.2 campaign attempts with a bare `WebException` at the Tailscale MSI download.
-Allocation and authenticated WinRM admission share one 12-minute deadline, durably set before
-firewall creation; firewall/VM creation and provider allocation consume that same budget.
-The same allocation-and-execution guard runs after awaited checkpoints/inventory reads and
-immediately before each creation POST and each firewall-rule POST after its ownership refetch;
-an expired budget cannot begin a new allocation or authorize another rule.
-Creation-counter persistence is also guarded before it can consume the local allowance.
-Admission and creation-cap refusals use the current execution's failure-ID allocator.
-Subsequent transport probes use bounded reconnect, not another allocation window. Admission requires
-three consecutive read-only successes spanning at least 60 seconds; a transport error resets
-both the count and window, while a guest assertion failure aborts immediately. The observed
-`transportStabilitySamples` and `transportStabilityDurationMs` are receipt facts. Mutations are
-not retried by this readiness boundary.
-
-Each authenticated probe has at most **180 seconds**, capped by the remaining combined deadline,
-to accommodate a fresh instance's first WinRM exchange. The controller sends SIGTERM at that bound;
-the helper independently attempts command cleanup and shell closure before exiting. If it does not
-exit within five seconds, the controller sends SIGKILL, awaits exit, and drains both pipes before
-reporting failure. A subprocess deadline remains a failed probe, not a successful observation or an
-automatic mutation retry.
-Cancellation and termination ownership are installed before the first asynchronous probe checkpoint.
-The execution and local command budget are checked again immediately before spawning, so cancellation
-or expiry during that checkpoint cannot start a helper. WinRM preparation, stability probes, and
-reconnects use one positive-remainder guard; an exhausted budget is never clamped to a 1-ms command.
-The final synchronous guest-dispatch guard also checks the resource lifetime after vault/provider
-reads and the last checkpoint, even when the provider returns an unchanged address. Cleanup uses
-its independent execution guard instead of the expired primary resource lifetime.
-
-### Transport recovery and failure evidence
-
-The helper reports a closed failure kind (`transport`, `guest`, or `helper`), stage
-(`connection`, `command`, `output`, or `upload`), recognized condition, HTTP status when present,
-and command disposition. Exception types and status fields supply classification; diagnostic
-messages never do. Controller-authored product assertions remain `product`. Invalid credentials,
-encoding/import failures, malformed guest JSON, arbitrary guest failures, and unexplained process
-exit 143 remain `harness`. A recognized connection/reset/read timeout or retryable HTTP status
-during a declared read-only operation is `infra_transient`. A refused connection, the peer's RST
-answering the SYN, reports `connection_reset`; an unreachable or down host or network reports
-`connection_timeout`. Both reach the helper as socket errors under urllib3's `NewConnectionError`
-inside requests' `MaxRetryError`, so a guest still booting toward its WinRM listener is retried
-within the admission and reconnect budgets instead of ending the lane. Only a controller-owned
-deadline while its read-only connection probe is pending produces `probe_deadline`. A timer
-clipped by the execution deadline retains controller origin but produces `deadline_exceeded`, not a transient
-probe failure; numeric exit/signal/timeout observations survive projection. Rejected, already-started
-mutations recheck execution expiry and retain unknown disposition. External cancellation and raw
-exit 143 cannot acquire probe-deadline authority. These are lane failure records, not campaign retry authority.
-
-After the unchanged initial authenticated stability window, read-only operations share a reconnect
-helper with delays of **2, 4, 8, and 16 seconds**, at most five calls, inside a **90-second**
-operational budget that includes time already spent executing probes. Process teardown remains
-mandatory on expiry. Cleanup uses this reconnect path, never another 12-minute allocation window.
-Mutating guest actions and upload streams are never replayed.
-Reconnect and readiness/RDP/allocation polls reject both successful and rejected observations at or
-after their local deadline. An in-budget rejection keeps its original classification; a late rejection
-reports controller expiry rather than whichever error the action happened to throw.
-Admission persists the actual stability sample count and duration before the phase checkpoint;
-a resumed admission reuses those observations only after reconnect. A legacy boolean marker
-without observations must re-observe the stability window within the original allocation budget.
-Validated completed admission is not subjected to that old allocation deadline again; it uses
-only the reconnect and current execution budgets. Reconnect checks remaining time before every
-probe, including after delayed backoff. Local/shared expiry is `deadline_exceeded`, never the
-last transient transport failure, with controller origin and numeric timeout/wait observations.
-
-An interrupted upload is reconciled by existence and SHA-256 after read-only connection recovery.
-Only a recognized helper-reported transport interruption permits that reconciliation; a raw process
-exit, controller kill, or otherwise unknown termination remains terminal even if matching bytes exist.
-The inspector must exclusively open the file, proving that its writer no longer owns it, before
-hashing or permitting removal. Complete matching bytes are reused; a partial file is removed only
-after that proof, and the failed upload remains terminal rather than starting another stream.
-Unknown writer disposition, authentication, or helper faults do not become successful recovery.
-Each upload records a private durable `started` claim before work and a `complete` checkpoint only
-after success. An incomplete claim refuses development re-entry in the same epoch; it cannot stream
-the upload again. A completed upload is reused only after checking its bytes again.
-Only a phase that has never entered staging grants fresh upload authority. Upload completion
-does not prove Tailscale join, unpack, build, or upgrade disposition. Every mutating guest
-action and its nested PowerShell commands have durable single-shot `started`/`complete`
-claims; RDP logons are claimed too. Unsettled mutating phases, including legacy phases
-without claims, cannot resume. Even a completed command claim is not permission to repeat
-the surrounding unsettled phase. Clean the retained epoch instead of manufacturing claims.
-Development repair may resume read-only phases without repeating completed mutations.
-Private helper diagnostics retain only the existing redacted, source-free exception context;
-typed failures contain closed codes and numeric/boolean observations, not that diagnostic text.
-A frame name that redaction would alter becomes `<redacted>`, which still parses, and the
-controller keeps the exception class even when another field is malformed. The physical
-client's navigation and page-load failures are typed `navigation_failed` (`harness`,
-`confirmed`) at `pixel_verified`; other Pixel failures remain `unclassified_failure` with
-unknown disposition.
-
-Read-only admission also reports remaining per-tag creation allowance. Provider quota metadata is
-explicitly marked unobservable; admission neither assumes unlimited capacity nor allocates a probe VM.
-
-The Windows progress and completed result retain `transportProbes`: one metadata-only row per
-authenticated probe, checkpointed at invocation start, first authenticated response, controller
-SIGTERM (if sent), and process exit. `startedAt`, `signalAt`, and `exitedAt` are UTC epoch
-milliseconds; `timeoutMs` records the applied bound and `exitCode` the subprocess outcome.
-New observations may additionally record `controllerDeadline` and the SIGKILL timestamp `killAt`.
-`firstResponseLatencyMs` measures from invocation start to the helper's first authenticated
-`open_shell` reply, not completion of the guest command or shell teardown. Unobserved events are
-`null`, so a timeout during teardown differs from no observed authenticated reply. Only the helper's
-fixed timestamp marker is consumed; no host, credential, argv, script, stdout or stderr is copied
-into these rows. Failed checkpoints refuse qualification. Historical immutable progress without
-this additive diagnostic field remains cleanable and is not rewritten to invent probe observations.
-
-An initial pinned RDP logon establishes the interactive session required by installation; the
-client then disconnects. The sequence is predecessor install → candidate upgrade with private-state digests unchanged →
-doctor → reboot → at least three pre-login samples over at least 30 seconds → pinned RDP login
-and automatic gateway LogonTrigger startup → doctor → stock OMP named-pipe discovery and
-View/Control/stale-generation launch checks → ordinary Chrome on the physical Pixel under the
-shared lease → owned OMP-tree stop and revocation → readiness rotation → history-selected
-rollback → candidate restoration → uninstall with private state preserved. The gateway's task
-is never manually started after reboot. An independently named, epoch-owned interactive task
-launches only the OMP fixture; it avoids WinRS destroying that console when its management shell
-disconnects. Measurement uses ordinary Chrome, without installing or replacing the Android
-WebAPK. Foreground activity, its owning launcher package, display and keyguard baseline are
-captured privately and restored before the Pixel lease is released. Restoration uses the
-existing app's launcher intent, not a non-exported Chrome activity; cleanup closes this epoch's
-ordinary Chrome pages and restores that baseline after a crash. A failed restore carries
-`pixelUnrestored: true` to fence the production lease. Development retains its exact-epoch lock
-until cleanup proves restoration; another lane's lock is never broken.
-Automatic development cleanup may inherit its own retained lease only after the original action
-settles and only when the in-memory claim, exact owner file, epoch and process still agree.
-Sharing a PID without that claim is not authority. A different live process remains excluded;
-explicit cleanup may recover the same epoch only after its previous process has exited. Acquisition
-and backoff use the fresh cleanup execution deadline, not a new independent one-hour wait. Release
-rechecks ownership after restoration proof, and an owner change blocks deletion.
-Every development retirement or cleanup invocation gets its own 30-minute containment owner.
-A refused restoration retains the lock even when the recovery vault is missing; absence of recovery
-state is not restoration proof. Concurrent exited-owner cleanups must exclusively claim the owner
-file before touching the device. A `recovery-<claimHash>` file inside the lock is an exclusive
-takeover fence, named by the first 32 hexadecimal characters of SHA-256 of the exact stale owner
-claim, not its PID. Only its creator may recheck and remove that stale owner, then exclusively
-create the new owner. The fence stays until the whole lock is retired, so a delayed contender
-cannot unlink the winner's live claim, while a later claim can still recover if a PID is reused.
-A crash before takeover completes deliberately retains the lock.
-
-**Retained-lock operator recovery.** First stop the owning Windows development process and every
-other Pixel-driving lane. Prefer explicit cleanup with the original epoch's intact private vault.
-
-- If the vault is intact but takeover was interrupted, explicit cleanup cannot acquire a lock
-  whose recovery-fence creator is no longer running or whose owner file is missing. With every
-  Pixel-driving lane stopped, remove `/tmp/omp-gw-pixel.lock` (`rm -rf /tmp/omp-gw-pixel.lock`) and
-  immediately rerun `bun scripts/windows-stable-qualification.ts cleanup` with that epoch's intact
-  vault, so restoration runs from its captured baseline. Do not admit another lane before cleanup
-  proves restoration.
-- If that vault is irrecoverably missing, manually reconcile the Pixel's foreground app, display,
-  keyguard, ordinary Chrome pages and debugging forward, and independently confirm the epoch's VM,
-  firewall and tailnet containment. Only after that reconciliation may the operator remove
-  `/tmp/omp-gw-pixel.lock` (`rm -rf /tmp/omp-gw-pixel.lock`) to admit another lane.
-
-Never remove a live or foreign owner's lock, and never record the manual escape as successful
-qualification.
-
-**Post-mutation status.** `install`, `rollback` and `rotate-readiness-token` return once the gateway
-proves readiness, but on this two-vCPU guest one immediate `status` read has still failed after them
-and the next read passed with nothing reinstalled (the 2026-09-24 predecessor install, the
-2026-09-29 candidate upgrade). Each read-only status predicate that follows a mutation therefore
-reads for up to 60 seconds, the product's own Windows readiness budget, before failing; the mutation
-is never repeated, and the controller logs every read past the first. A status that never settles
-fails as `status mismatch: <fields>`, naming only the predicate's fields. That and a native command's
-name and exit code are the only guest error text the WinRM adapter forwards.
-
-**Standard-user fresh install.** The same VM then proves the non-elevated path (#293, #294).
-After the Administrator's uninstall the lane creates `ompstd` plus the epoch's first eight hex
-digits: a local account in Remote Desktop Users, never Administrators, whose controller-generated
-password lives only in the epoch vault and reaches the guest only as encrypted WinRM input. It
-gets read and execute on the staged Bun, the candidate and the pinned OMP build (doctor probes
-`omp --version`), and on the WinRM listener's descriptor, because the WinRS shell the adapter
-uses is outside Remote Management Users. Nothing else in the staging root is readable to it. Only
-an administrator can read the listener's configuration, so the Administrator's calls, not the
-account's, verify on every call that unencrypted WinRM stays off. WMI refuses a standard
-account's network logon, so the account runs only the gateway and Tailscale CLIs; the
-Administrator observes its task, processes and listener.
-Through its own WinRM shell the lane requires a token with neither `BUILTIN\Administrators`,
-deny-only included, nor `SeSecurityPrivilege`. Tailscale serves one Windows user at a time, so
-the Administrator then hands it over the way a person would: its desktop signs out (a connected
-tray client refuses every other account), Serve resets, and `tailscale logout` deletes its
-unattended profile. The lane deletes that node, and the standard account joins as a new tagged
-node under the same hostname; the join's origin is authoritative. After a pinned RDP logon as the
-account, the candidate installs fresh → reboot → at least three pre-login samples → pinned RDP
-logon and automatic startup → the full doctor as the account → readiness rotation → uninstall
-with private state preserved. Every doctor and pre-login sample, for either account, requires the
-logon trigger to name the account the task runs as. These observations carry a `standard`
-prefix. Predecessor, upgrade, rollback, OMP and Pixel journeys stay Administrator-only, because
-v0.6.2 cannot install without elevation.
-
-**Tagged-node doctor result.** Follow the existing [Debian identity convention](LINUX_QUALIFICATION.md#gap-3--denied-tailscale-identity),
-not an N/N claim. The tagged host's self-probe through Serve has no user identity. Record the
-true/total split and the exact false set: `identityAllowed`, `pwa`, and `sessionHealth`
-(`publisherHealth` on older builds), plus `securityHeaders` only when that refused response
-actually omits CSP. Every other check must be true, including `loopbackTrustSound`,
-`serveMapping`, `funnelDisabled` and `compatibility`; missing host checks and additional failures
-are rejected. The allowed half comes from the user-owned Pixel: load the shell through this
-Windows Serve origin, find the fixture, and exercise View and Control. The node stays tagged.
-
-OMP is built from the exact locked stock source commit and tree, not a floating global package.
-A local bare checkout proves both Git objects; its exported source archive is hash-checked after
-encrypted upload. The guest performs a frozen Bun install and native Windows build, then writes
-`collab.autoStart: control` to the profile's `config.yml` and requires the built binary to read it
-back. Over WinRM, the compiled binary's `config set` can exit 0 without writing anything: in a
-v0.6.0-prealpha.3 development run its host started with auto-start off and never published.
-`scripts/windows-qualification-pins.json` binds the Windows native tarball/payload hashes to the
-OMP version, commit and tree and pins Bun/Tailscale artifacts. Both preflight and the portable
-tests reject divergence from `UPSTREAM.lock.json`; an upstream refresh must refresh these
-Windows pins too. No upstream lock/schema change is needed for the separate lane-owned pins.
-
-On a stable-campaign failure, cleanup first reconciles the exact vault-bound instance and its
-epoch-labelled inventory. Confirmed absence skips guest commands. A live guest gets one bounded
-reconnect before guest teardown, Serve reset and logout; failed reconnect skips those commands
-instead of spending four full command timeouts against an unreachable VM. Exact-label tailnet
-deletion, instance deletion, firewall deletion and vault removal still run. Once the Administrator has
-handed Tailscale over, the gateway uninstall, Serve reset and logout run as the standard account:
-Windows refuses the Administrator's Tailscale CLI while another account holds it. Each provider deletion
-refetches ownership and applies the positive prefix and protected-resource checks. Lost create
-responses are recoverable by the exact epoch-derived label even without a vault. Cleanup polls
-for deletion and requires zero `omp-winqual-*` instances and firewall groups account-wide.
-Guest-command failures become diagnostic counts only after the exact owned VM is confirmed gone.
-They never excuse failed firewall/tailnet absence, Pixel restoration, or safe vault-removal proofs.
-Instance and firewall IDs are retained privately so a changed ownership label cannot masquerade as
-absence. Changed/protected owners, missing Pixel recovery state, and unresolved absence remain
-blocking, retain recovery state, and prohibit automatic campaign retry. Paid infrastructure cleanup
-does not wait behind another lane's Pixel lease.
-Final instance/firewall inventories and every containment proof precede the durable cleanup-complete
-checkpoint, which precedes vault removal. A crash after unlink can therefore resume from committed
-completion without missing Pixel recovery state; a missing vault without that completion stays
-blocked. A failed guest command after reconnect skips the remaining guest mutations and proceeds
-directly to independent containment.
-A firewall-only vault does not imply a bound guest identity. Cleanup skips guest commands,
-destroys its owned firewall and any instance matching the epoch creation label, and does not
-turn the absent guest identity into an ownership-change veto. Foreign ownership still blocks.
-The final inventories are taken after a five-second settling interval, matching the provider
-lookup-absence policy. A firewall that becomes visible during that interval blocks completion
-and retains recovery state; cleanup must reconcile it before the epoch can be retired.
-Development `run`/`artifacts` also retire a cleanup-complete epoch's remaining vault before
-removing its old progress and replacing `identity.json`. Completed containment alone does not
-authorize overwriting the identity while its vault may still exist.
-Once `cleanupRequired=false` is committed it never flips back to true. Failures while
-rechecking containment or deleting the remaining vault keep `retirementPending=true`;
-retry retirement without attempting Pixel restoration from an already removed vault.
-Provider reads retry a transient 5xx. A lookup that answers missing, or a Vultr listing without its
-array, is final only when a second read five seconds later agrees: on 2026-09-29 one listing did so
-while the lane polled for allocation, failing an attempt whose VM was still booting.
-A stable interrupted attempt is reconciled, never blindly replayed; start a fresh epoch
-afterwards. For an initial development attempt only, a typed Windows `product`/`assertion_failed`
-failure with a known operation disposition after guest access may retain the VM for immediate
-repair inside its three-hour lease. Infrastructure/transient failures, authentication refusals,
-harness or unknown errors, unknown operation dispositions, and controller/probe expiry always enter
-containment; diagnostic text cannot authorize retention. Rerunning `run` resumes only read-only
-phases and skips completed phases. Any unsettled
-mutating phase refuses resume regardless of completed upload claims. `cleanup` is explicit
-after an abandoned attempt.
-Outer cancellation or deadline always runs containment, including development mode; only
-repairable code failures on an initial development attempt may retain the guest. Once retained
-progress is accepted, every failing re-entry—including mutation refusal and preflight failure—
-uses independent containment. That cleanup owner exists before preflight and receives a fresh
-cleanup deadline when containment begins. The runtime switches to that cleanup owner for provider,
-guest, helper, tailnet, and Pixel dispatch instead of capturing the failed primary's cancellation.
-FreeRDP ownership covers stdin write/end as well as readiness observation: cancellation is armed
-before input, and every failure terminates and awaits the child.
-Failed phase resumes are counted in evidence; repair time is not called successful phase time.
-Development resume is refused after three hours, and every VM must be destroyed within four
-hours of creation. The current development campaign permits six total VM creations, one at a
-time. Production failures retain their unconditional cleanup semantics.
 
 ### Development evidence — 2026-09-29: v0.7.0-prealpha.1
 

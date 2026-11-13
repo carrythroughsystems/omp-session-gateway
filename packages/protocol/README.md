@@ -1,20 +1,24 @@
 # `packages/protocol`
 
-Shared TypeScript types, strict runtime validators, and protocol constants for the stock OMP
-local discovery/query contract and the gateway browser API. Browser JSON Schemas live in `schemas/`;
-[PROTOCOL.md](../../docs/PROTOCOL.md) describes the complete boundary. The gateway is OMP's query
-client, not a publisher registry server.
+This package gives contributors the shared TypeScript types, strict runtime validators, JSON Schemas, and notification-ordering rules for the Oh My Pi (OMP) local host registry and the gateway browser API. Paths under `src/` and `test/` are relative to `packages/protocol/`; JSON Schemas are at the repository root under `schemas/` (`../../schemas/`), and [Wire and HTTP protocol](../../docs/PROTOCOL.md) defines every endpoint and frame.
 
-Enforced invariants:
+An OMP host (one running `omp` process) publishes its own discovery file and query socket; the gateway is OMP's query client, never a publisher registry server. A View or Control link is a bearer secret, called a capability in the contracts.
 
-- secret-bearing records are structurally distinct from browser-facing metadata;
-- OMP registry v1 input (discovery entries and snapshot/link replies) strictly validates consumed fields and tolerates additive unknown fields, while refusing forbidden prompt/answer keys in snapshots;
-- gateway browser API (`schemas/session-list.schema.json`, `schemas/launch-request.schema.json`, `schemas/launch-response.schema.json`, `schemas/sse-event.schema.json`, `schemas/client-config.schema.json`), fleet origin/source validators (`parseFleetOrigin`, `parseFleetSourceId`, `parseFleetLabel`, `parseClientConfigResponse`), and Push v2 envelopes are strict and reject unknown versions or unknown fields;
-- `parseJsonFrame` rejects duplicate JSON keys, NUL bytes, invalid UTF-8, oversized frames,
-  and JSON objects/arrays nested beyond 64 levels. Remote fleet session lists are an exception:
-  the PWA uses plain `JSON.parse` under an 8 MiB body cap, then validates the metadata shape,
-  without the shared parser's duplicate-key or nesting checks;
-- labels reject raw input over 2,048 UTF-16 units before NFC normalization and control/bidi stripping,
-  then enforce 256 code points for session labels or 64 for fleet labels;
-- capability wrappers cannot be serialized and redact string/inspector conversion; and
-- distinctive synthetic capability fixtures are covered by the repository leak scanner.
+## Module map
+
+- `src/secret.ts`: `SecretCapability` (`reveal()` only, non-serializable, redacted in `toString()` and Node `util.inspect`), `SecretSessionRecord`, and `ProtocolValidationError`.
+- `src/types.ts`: wire versions, byte and count bounds, and TypeScript types for OMP registry v1, the browser API, session creation, Push v2 (local Web Push) and Push v3 (fleet Web Push), and fleet notification HTTP and feed contracts.
+- `src/validation.ts`: `parseJsonFrame` and strict runtime parsers for OMP discovery and replies, browser and session-creation payloads, Push v2 and Push v3 messages, notification routes, and fleet grant and alert-feed messages (`src/index.ts` re-exports every module).
+- `src/fleet.ts` and `src/fleet-ordering.ts`: domain-separated SHA-256 source bindings, grant verifiers, and owner digests (`fleetSourceBinding`, `fleetGrantVerifier`, `fleetOwnerDigest`), plus the pure service-worker ordering reducer (`reduceFleetPush`, `reduceLegacyPush`, `reduceFleetReconcile`).
+
+## Enforced invariants
+
+- Secret-bearing records (`SecretSessionRecord` wrapping `SecretCapability`, and transient `LaunchResponse`) are structurally separate from browser-facing metadata (`SessionMetadata`).
+- Host registry validation (`schemas/omp-host-registry.schema.json`, `parseOmpDiscoveryEntry`, `parseOmpHostSnapshot`, `parseOmpSnapshotReply`, `parseOmpLinkReply`, `observedSessionFromSnapshot`) strictly validates consumed OMP registry fields, tolerates additive unknown fields, and refuses forbidden prompt or answer keys (`prompt`, `question`, `options`, `prefill`, `answer`, `requestId`, `count`) in snapshots.
+- Browser API schemas (`schemas/session-list.schema.json`, `schemas/launch-request.schema.json`, `schemas/launch-response.schema.json`, `schemas/sse-event.schema.json`, `schemas/client-config.schema.json`) and parsers (`parseSessionListResponse`, `parseLaunchRequest`, `parseLaunchResponse`, `parseSessionEvent`, `parseClientConfigResponse`, `parseFleetOrigin`, `parseFleetSourceId`, `parseFleetLabel`) reject unknown fields and unsupported versions.
+- Session-creation schemas (`schemas/session-creation-options.schema.json`, `schemas/session-creation-request.schema.json`, `schemas/session-creation-status.schema.json`) and parsers (`parseSessionCreationOptions`, `parseSessionCreationRequest`, `parseSessionCreationReceipt`, `parseSessionCreationStatus`) strictly validate every state-dependent payload.
+- Push and notification-route validators check Push v2 config, subscriptions, and envelopes (`parsePushConfigResponse`, `parsePushSubscriptionRequest`, `parsePushSubscriptionResponse`, `parsePushUnsubscribeRequest`, `parseAttentionPushMessage`), Push v3 and foreground reconciliation (`parseFleetPushMessage`, `parseFleetReconcileMessage`), and transient `/collab/` notification routes (`parseNotificationData`, `parseNotificationRoute`, `notificationRoutePath`).
+- Fleet grant, recipient, and feed validators (`parseFleetStatusRequest`, `parseFleetStatusResponse`, `parseFleetGrantCreateRequest`, `parseFleetGrantCreateResponse`, `parseFleetGrantActionRequest`, `parseFleetRecipientRequest`, `parseFleetRecipientResponse`, `parseFleetRecipientRemoveRequest`, `parseSourceGrantRequest`, `parseSourceGrantResponse`, `parseFleetBearer`, `parseFleetFeedEvent`) reject unknown keys, versions, and out-of-bound sizes.
+- `parseJsonFrame` rejects duplicate JSON keys, NUL bytes, invalid UTF-8, frames above 64 KiB (`MAX_FRAME_BYTES`), and JSON objects or arrays nested beyond 64 levels. Remote fleet session lists are an exception: `apps/web` parses them with plain `JSON.parse` under an 8 MiB body cap, then validates the metadata shape with `parseSessionListResponse` without duplicate-key or nesting checks.
+- Labels reject raw input over 2,048 UTF-16 units before NFC normalization and control or bidi stripping, then enforce 256 code points for session labels or 1 to 64 code points for fleet and creation labels (`parseFleetLabel`).
+- Capability wrappers throw on JSON serialization, redact string and inspector conversion, and pair with synthetic capability fixtures in `test/protocol.test.ts` and `test/session-creation.test.ts` checked by `scripts/check-capability-leaks.ts` (run package tests from the repository root with `bun test packages/protocol/test`, including `test/fleet.test.ts` and `test/fleet-ordering.test.ts`).

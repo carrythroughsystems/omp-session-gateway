@@ -1,136 +1,73 @@
 # Release process
 
-This document is the maintainer runbook for building, qualifying, promoting, and publishing OMP
-Session Gateway releases. If you are installing or updating a gateway, you only need
-[Verify a published build](#verify-a-published-build) and the
-[installation guide](OPERATIONS.md#2-cli-and-daemon-installation).
+This runbook is for maintainers who build, qualify, promote, publish, and smoke-test releases of OMP Session Gateway, the companion to Oh My Pi (OMP), and for anyone verifying a published release archive. If you are installing or updating a gateway, read [Verify a published build](#verify-a-published-build) and [CLI and daemon installation](OPERATIONS.md#2-cli-and-daemon-installation).
+
+- Procedure: [Pre-alpha, alpha, beta, and stable artifacts](#pre-alpha-alpha-beta-and-stable-artifacts) and [Mainline stable release procedure](#mainline-stable-release-procedure)
+- Driver: [Unattended release driver](#unattended-release-driver)
+- Gates: [Release gates](#release-gates) and [Qualification attempt ownership](#qualification-attempt-ownership)
+- Verification: [Post-release local installation smoke](#post-release-local-installation-smoke), [Default-relay soak qualification](#default-relay-soak-qualification), [Fleet CI runtime](#fleet-ci-runtime), [Build and keyless provenance](#build-and-keyless-provenance), [Verify a published build](#verify-a-published-build), [Versioning](#versioning), and [Release notes](#release-notes)
+- Records: [Dated rollout records](#dated-rollout-records)
 
 ## Pre-alpha, alpha, beta, and stable artifacts
 
-The repository builds Bun-runtime release candidates (`pre-alpha`) and promotes a candidate to
-`stable` (GitHub Latest) only after its signed archive passes the full hardware and device-cloud
-qualification matrix. For the current published release, supported platforms, and recorded lane
-receipts, see [Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md); for
-predecessor rollback boundaries, see [Upgrade and rollback](UPGRADE_ROLLBACK.md).
+The repository builds Bun-runtime release candidates (`pre-alpha`) and promotes a candidate to `stable` (GitHub Latest) only after its signed archive passes the hardware and device-cloud qualification matrix. For the latest release, supported platforms, and recorded lane receipts, see [Current claim](COMPATIBILITY.md#current-claim) and [Release status](RELEASE_STATUS.md); for predecessor rollback boundaries, see [Upgrade and rollback](UPGRADE_ROLLBACK.md).
 
 ## Mainline stable release procedure
 
-This sequence published v0.5.0 (#222–#225) and v0.5.1 (#227–#230). Each step is a separate effect;
-a candidate, a passed receipt, or an approved lock never promotes itself. Work from a clean checkout
-of `main` that matches `origin/main` (`qualify:stable` refuses detached or unpublished commits), with
-pinned Bun `1.4.4` first on `PATH`.
+Each step below is a separate effect; a candidate, a passed receipt, or an approved lock never promotes itself. Before starting, confirm a clean checkout of `main` matching `origin/main` (`qualify:stable` refuses detached or unpublished commits), place pinned Bun `1.4.4` first on `PATH`, drain the [merge queue](#merge-queue) and pause new enqueues until Step 6 lands, and verify that no [unattended release driver](#unattended-release-driver) campaign or smoke is active.
 
-The manual path requires an explicit maintainer decision for scope/publication, live qualification
-and installed-byte smoke. The standing routine driver below already has authority for these steps
-within its requested patch/minor release class and existing resource caps; it does not ask again per release.
+The manual path requires an explicit maintainer decision for scope, live qualification, promotion, publication, and published-byte smoke. The unattended driver holds standing routine authority for those steps within its requested `patch` or `minor` release class and resource caps, without per-release approval prompts.
 
-1. **Prepare the candidate.** One `chore(release): prepare X.Y.Z` PR bumps the version in the five
-   `package.json` files, `PRODUCT_VERSION` in `apps/gateway/src/diagnostics.ts` and
-   `scripts/build-release.ts`, and `GATEWAY_VERSION` in `apps/gateway/src/installation.ts`; cuts the
-   `CHANGELOG.md` section from `changelog.d/` fragments; generates the highlights and rollback text in
-   `scripts/release-text.json` (read by `.github/workflows/signed-release.yml`); and notes the preparation in the release ledger. After it
-   merges, push a signed annotated `vX.Y.Z-prealpha.1` tag on the merge commit and
-   [verify the published candidate](#verify-a-published-build).
-2. **Qualify it.** Run `bun run qualify:stable --tag vX.Y.Z-prealpha.1 --preflight`, which checks
-   admission prerequisites without effects, then the same command without `--preflight` (about an
-   hour; see [Release gates](#release-gates)). The droplet workflow takes only an exact candidate
-   tag. After a failure, fix the cause on `main`, keep the failed receipt unchanged, and archive it
-   only as the release gates allow before rerunning. Afterwards confirm that no qualification
-   droplet or ephemeral SSH key remains in the DigitalOcean account, and that no `omp-winqual-*`
-   instance, firewall group, or tailnet node remains.
-3. **Promote it.** One `chore(release): approve vX.Y.Z for stable promotion` PR sets
-   `STABLE_RELEASE.lock.json` from the passed receipt, records every lane and any failed attempt in
-   the ledger, moves the COMPATIBILITY release paragraph, the status page, and `site/llms.txt` to
-   "qualified; publication pending" wording, and writes the predecessor section of
-   [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md). Install and download surfaces link to the latest
-   release and name no version. `scripts/site-coherence.test.ts` fails while any of these disagree
-   with the stable lock. A clean
-   `OMP_RELEASE_CHANNEL=stable bun run release:build` of that tree must match every candidate
-   archive member by path, mode, and bytes, except `release-info.json`, `SBOM.spdx.json`,
-   `STABLE_RELEASE.lock.json`, and `schemas/stable-release.schema.json`:
-   `bun run release:compare -- <candidate archive> <candidate SHA-256> dist/release/omp-session-gateway-X.Y.Z-bun.tar`
-   refuses a candidate that is not the qualified digest and fails on any other difference. Before merging, run
-   `bun run check`, `bun scripts/release-policy.ts vX.Y.Z X.Y.Z STABLE_RELEASE.lock.json`, and
-   `bun run smoke:release -- --tag vX.Y.Z --plan`.
-4. **Publish.** Merge with the head pinned, confirm the merged tree equals the tested tree, and push
-   a signed annotated `vX.Y.Z` tag on the merge commit; `signed-release.yml` publishes it. Verify the
-   published build, confirm it is GitHub Latest, and reproduce its archive digest with a local
-   stable-channel build of the tag.
-5. **Smoke the published bytes.** Run the [post-release smoke](#post-release-local-installation-smoke)
-   with the verified digest.
-6. **Record the evidence.** One `docs(release): record vX.Y.Z publication and installed
-   verification` PR moves the COMPATIBILITY release paragraph, the status page, and `site/llms.txt`
-   to "published" and records the publication run, source, digest, and smoke result. Generate it
-   on current `main`, using the smoke completion date, not the release-preparation date.
+1. **Prepare the candidate.** Run `bun scripts/release-generate.ts prepare X.Y.Z --date YYYY-MM-DD` (append `--release-class minor` for a minor cut) and open one `chore(release): prepare X.Y.Z` pull request.
+   - Version and lock edits in `GENERATED_RELEASE_PATHS.prepare` (`scripts/release-policy.ts`): `package.json`, `apps/gateway/package.json`, `apps/web/package.json`, `packages/collab-client/package.json`, `packages/protocol/package.json`, `PRODUCT_VERSION` in `apps/gateway/src/diagnostics.ts` and `scripts/build-release.ts`, `GATEWAY_VERSION` in `apps/gateway/src/installation.ts`, and workspace versions in `bun.lock`.
+   - Release copy and ledger edits (16 files total): `CHANGELOG.md` assembled from `changelog.d/` fragments (deleting consumed fragments), `scripts/release-text.json` (generating `version`, `candidateTag`, `summary`, `highlights`, `stableRollback`, `changesToTest`, and `candidateRollback` while preserving `combinations` and `plannedBoundary`), `docs/RELEASE_STATUS.md`, `docs/ANDROID.md`, `docs/ATTENTION_SPEC.md`, `docs/LIFECYCLE_BRANCH_RESUME.md`, and `docs/BACKLOG.md`.
+   - Merge the pull request synchronously with a pinned head ([Merge queue](#merge-queue)), push a signed annotated `vX.Y.Z-prealpha.1` tag on the merge commit, and [verify the published candidate](#verify-a-published-build) with `TAG=vX.Y.Z-prealpha.1` (`gh release verify` applies only after the 24-hour lock window).
+2. **Qualify it.** Run `bun run qualify:stable --tag vX.Y.Z-prealpha.1 --preflight` (read-only admission) followed by `bun run qualify:stable --tag vX.Y.Z-prealpha.1` (about an hour; see [Release gates](#release-gates)).
+   - The Debian droplet workflow accepts only an exact candidate tag; after a failure, fix the cause on `main`, leave `~/.local/share/omp-session-gateway/qualification/<tag>/stable-qualification.json` unchanged, and move that `<tag>` directory aside without deleting it only as [Release gates](#release-gates) allow before rerunning.
+   - Afterwards confirm that no qualification droplet or ephemeral SSH key remains in the DigitalOcean account, and that no `omp-winqual-*` instance, firewall group, or tailnet node remains.
+3. **Promote it.** Run `bun scripts/release-generate.ts approve vX.Y.Z --date YYYY-MM-DD --receipt ~/.local/share/omp-session-gateway/qualification/vX.Y.Z-prealpha.1/stable-qualification.json --candidate-tag vX.Y.Z-prealpha.1` and open one `chore(release): approve vX.Y.Z for stable promotion` pull request.
+   - Approval updates the eight `GENERATED_RELEASE_PATHS.approve` files: `STABLE_RELEASE.lock.json`, `docs/RELEASE_STATUS.md` (recording all thirteen lanes and their attempt counts), `docs/UPGRADE_ROLLBACK.md`, `README.md` (`Exact qualified OMP` row), `docs/COMPATIBILITY.md` (`platforms`, `release`, and `qualification`), `site/llms.txt`, `site/status/index.html`, and `scripts/release-text.json` (`qualification` and `combinations`).
+   - Claim surfaces move to `vX.Y.Z is qualified for stable promotion; publication is pending.` while install and download surfaces link to the latest release without naming a version (`scripts/site-coherence.test.ts` fails on any disagreement with `STABLE_RELEASE.lock.json`).
+   - Build a clean stable archive (`OMP_RELEASE_CHANNEL=stable bun run release:build`) and run `bun run release:compare -- <candidate archive> <candidate SHA-256> dist/release/omp-session-gateway-X.Y.Z-bun.tar` using the verified Step 1 `omp-session-gateway-X.Y.Z-bun.tar` and its 64-hex SHA-256 from `SHA256SUMS`; every member must match except `release-info.json`, `SBOM.spdx.json`, `STABLE_RELEASE.lock.json`, and `schemas/stable-release.schema.json`.
+   - Before merging, run `bun run check`, `bun scripts/release-policy.ts vX.Y.Z X.Y.Z STABLE_RELEASE.lock.json`, and `bun run smoke:release -- --tag vX.Y.Z --plan`.
+4. **Publish.** Merge the approval PR synchronously with its head pinned ([Merge queue](#merge-queue)), confirm `git rev-parse <merge-sha>^{tree}` equals the tested tree, and push a signed annotated `vX.Y.Z` tag on the merge commit so `.github/workflows/signed-release.yml` publishes it. [Verify the published build](#verify-a-published-build), confirm it is GitHub Latest, and check out `vX.Y.Z` to reproduce its digest with `OMP_RELEASE_CHANNEL=stable bun run release:build`.
+5. **Smoke the published bytes.** Run [Post-release local installation smoke](#post-release-local-installation-smoke) with the verified archive digest, saving its JSON stdout as `<smoke-json>`.
+6. **Record the evidence.** On current `main`, run `bun scripts/release-generate.ts record vX.Y.Z --date YYYY-MM-DD --smoke <smoke-json> --status <status-json> --publication <publication-json>`, passing the UTC smoke completion date rather than the preparation date.
+   - `<status-json>` is the JSON stdout of `status` on the installed gateway (`apps/gateway/src/cli.js status`), and `<publication-json>` is `{ tag, sourceCommit, archiveSha256, runUrl, releaseUrl, publishedAt }` for the published release and `signed-release.yml` run (`scripts/release-generate.ts`).
+   - Open and merge `docs(release): record vX.Y.Z publication and installed verification`, updating the nine `GENERATED_RELEASE_PATHS.record` files (`docs/RELEASE_STATUS.md`, `docs/ANDROID.md`, `docs/ATTENTION_SPEC.md`, `docs/LIFECYCLE_BRANCH_RESUME.md`, `docs/BACKLOG.md`, `docs/COMPATIBILITY.md`, `site/llms.txt`, `site/status/index.html`, and `scripts/release-text.json`) to `Stable vX.Y.Z is published as immutable GitHub Latest.` with publication and smoke results.
 
-Every mainline release so far has renewed a founder-approved fresh 1,800-second relay check in
-place of the eight-hour gate. The orchestrator defaults to 1,800 seconds and rejects shorter
-checks; `OMP_STABLE_RELAY_SECONDS` may select 1,800–3,600 seconds. Eight-hour endurance is not
-rerun or claimed, and no historical eight-hour receipt transfers.
+Every mainline release renews a founder-approved fresh 1,800-second relay check in place of the eight-hour gate. The orchestrator defaults to 1,800 seconds and rejects shorter checks; `OMP_STABLE_RELAY_SECONDS` may select 1,800–3,600 seconds. Eight-hour endurance is not rerun or claimed, and no historical eight-hour receipt transfers.
 
 ## Unattended release driver
 
-The opt-in Studio driver makes every automated repository write as `alphastorm-release`.
-The weekly workflow or a manual dispatch starts a request. Under standing routine authority the
-release bot merges the generated exact-subject promotion PR; there is no per-release founder
-approval, Slack authority, button, or token. Slack may relay only the first line of a
-release-bot progress comment. The manual procedure above remains available, but must never overlap a driver
-campaign or smoke.
+The opt-in Studio driver executes automated repository writes as `alphastorm-release` after a weekly schedule or manual workflow dispatch opens a release request. Under standing routine authority — the pre-reviewed policy fingerprint in `scripts/release-policy.ts` covering routine `patch` and `minor` releases when no protected control path changed — the release bot merges the generated promotion pull request without per-release founder approval, Slack authority, buttons, or tokens.
+
+Slack may relay only the first line of a release-bot progress comment. Manual runs remain available, and must never overlap a driver campaign or smoke.
 
 ### Request, authority and gates
 
-`.github/workflows/release-request.yml` requests a release weekly on Mondays at 15:17 UTC
-(`17 15 * * 1`), resolving npm `latest` to one exact stock OMP version. A scheduled run succeeds
-without requesting anything when `UPSTREAM.lock.json` already equals or exceeds that version,
-or any open, non-PR issue authored by `github-actions[bot]` has the exact title
-`Upstream tracking: vX.Y.Z` (numeric version only). The reason appears in the step summary, and
-the canary and filing jobs do not run. After a green canary, a separate issue-read-only job checks
-for any such open request again before the filing job; if a request arrived in the meantime,
-it skips the filing job with a summary instead. The filing job stays skipped, not successful,
-so the driver cannot count the skip as an explicit re-request. Scheduled runs never request
-fixes-only releases. A newly filed weekly issue is consumed normally.
+`.github/workflows/release-request.yml` runs on Mondays at 15:17 UTC (`17 15 * * 1`) and resolves npm `latest` to one exact stock OMP version. A scheduled run exits cleanly without opening a request when `UPSTREAM.lock.json` equals or exceeds that version, or when an open non-PR issue authored by `github-actions[bot]` carries the title `Upstream tracking: vX.Y.Z` (numeric version only), recording the reason in the step summary and skipping the canary and filing jobs.
 
-Manual requests dispatch the workflow on `main` with `omp_version` (default `latest`) and
-`release_class` (`patch` by default, or explicit `minor`). Scheduled requests are always `patch`.
-It resolves the exact stock npm version, refuses a version below `UPSTREAM.lock.json`, and calls
-the existing Linux/Windows canary. A red canary retains its existing canary-issue reporting and
-opens no tracking issue. A green run opens or reuses `Upstream tracking: vX.Y.Z` with the
-`release-request` label, using `GITHUB_TOKEN` in a job that never checks out or executes PR code.
-Equality with the lock is a fixes-only request: it is still filed and Carrythrough does not start
-an order. Patch and minor requests keep the same exact upstream title, but minor requests carry
-the `release-minor` label and reuse only an issue of that class. Thus a minor request does not
-rebind an existing patch request. The issue body is for humans; the driver never parses it.
-A successful request job's `Request OMP vX.Y.Z` (patch) or `Request OMP vX.Y.Z (minor)` name and
-Actions run/attempt bind the version and class and identify explicit re-requests without issue
-edits. The filing step validates the created/reused issue URL, emits its numeric `tracking_issue`
-output, and a following successful step records `Record tracking issue #N` in the Actions jobs API.
-That exact number binds the run to the issue; current labels, timestamps and the human issue body
-are not attribution evidence. A missing, duplicate, failed or mismatched record grants no authority.
-A minor label without a matching successful filing job grants no authority. The selected
-class is persisted with the request; diagnostic re-requests cannot switch it, and completing a
-patch release does not close an outstanding minor request.
+After a green canary, an issue-read-only job checks again for an open tracking issue and skips the filing job if one arrived in the meantime; a skipped filing job is never treated as an explicit re-request. Scheduled runs never request fixes-only releases, and a filed weekly issue is consumed on the next tick.
 
-The driver derives the gateway target from the latest stable tag: `patch` increments the patch,
-while `minor` increments the minor and resets the patch to zero. No arbitrary version or major
-transition is accepted. For example, with published `v0.7.7`, use
-`gh workflow run release-request.yml --ref main -f omp_version=18.12.5 -f release_class=minor`
-to request `v0.8.0`; unpublished `v0.7.8-prealpha.N` tags remain immutable. Leave an older patch
-request open until the new minor request succeeds, then annotate/close it as superseded.
+Manual dispatches run on `main` with `omp_version` (default `latest`) and `release_class` (`patch` by default, or `minor`; scheduled runs are always `patch`). The workflow resolves the exact stock npm version, refuses any version below `UPSTREAM.lock.json`, and runs the Linux and Windows canary:
 
-`bun scripts/release-driver.ts plan` is read-only, including local state. It can use the existing
-read-only gh session before bot credentials are installed. `tick` advances at most one step:
-select the highest trusted open request, land the exact Carrythrough draft order, generate and
-merge prepare, sign/publish/verify the candidate, preflight and qualify, generate and locally check
-approve, check routine authority, merge as the release bot, sign/publish/verify stable (including rebuilt-digest equality), smoke
-with `--force-reinstall --rebuild-omp`, generate/merge record, and close fulfilled requests. A
-retried smoke finds the stable gateway already active from the failed attempt, and the record
-accepts only smoke evidence of an install, so every driver smoke reinstalls the published bytes.
-Each state transition posts exactly one reconciled bot comment:
-`release-driver: <state> — <detail>`, followed by links.
+- A failing canary keeps its canary-issue reporting and opens no tracking issue.
+- A passing canary opens or reuses `Upstream tracking: vX.Y.Z` with the `release-request` label using `GITHUB_TOKEN` in a job that never checks out or runs pull request code.
+- When `omp_version` equals `UPSTREAM.lock.json`, the workflow files a fixes-only request and Carrythrough (the automated upstream-pin delivery app, `carrythroughsystems[bot]`) opens no baseline pull request.
+- Minor requests use the same `Upstream tracking: vX.Y.Z` title, add the `release-minor` label, and reuse only a minor issue so they never rebind an existing patch request.
 
-An order must be authored by `carrythroughsystems[bot]` with GitHub type `Bot`,
-from this repository's `carrythrough/*` head into `main`, first observed as a draft. Only these
-paths, in this order, belong to the binding's ORDER_SCOPE:
+The issue body is for human readers and is never parsed by the driver. Authority comes from a successful filing job named `Request OMP vX.Y.Z` (patch) or `Request OMP vX.Y.Z (minor)` and its Actions `run:attempt`, where the filing step validates the issue URL, emits numeric `tracking_issue`, and a subsequent step records `Record tracking issue #N` in the Actions jobs API.
+
+Labels, timestamps, and issue text are not attribution evidence; missing, duplicate, failed, or mismatched records, or a `release-minor` label without a matching minor filing job, grant no authority. The persisted `release_class` cannot be switched by diagnostic re-requests, and completing a patch release leaves any open minor request intact.
+
+The driver computes the target version from the latest stable tag: `patch` increments the patch number, and `minor` increments the minor number and resets patch to `0` (arbitrary versions and major bumps are refused). With published `v0.7.7`, run `gh workflow run release-request.yml --ref main -f omp_version=18.12.5 -f release_class=minor` to request `v0.8.0`; `v0.7.8-prealpha.N` tags stay immutable, and an older patch issue stays open until the minor release finishes.
+
+`bun scripts/release-driver.ts plan` is read-only (including local state) and can use a read-only `gh` session before bot credentials are installed. Each `tick` invocation advances at most one transition along the [Mainline stable release procedure](#mainline-stable-release-procedure), landing an eligible Carrythrough draft order first and posting one reconciled bot comment formatted as `release-driver: <state> — <detail>` with links.
+
+During the smoke transition, `tick` passes `--force-reinstall --rebuild-omp` because a retried smoke finds the stable gateway active from the failed attempt and `record` demands install evidence. Once `record` merges, `close` closes fulfilled tracking requests.
+
+An upstream baseline **order** is a pull request authored by `carrythroughsystems[bot]` (GitHub type `Bot`) from this repository's `carrythrough/*` branch into `main`, first observed as a draft. Every changed file (including both names of any rename) must belong to the seven-file `ORDER_SCOPE` (`scripts/release-driver.ts`):
 
 1. `CHANGELOG.md`
 2. `UPSTREAM.lock.json`
@@ -140,166 +77,692 @@ paths, in this order, belong to the binding's ORDER_SCOPE:
 6. `docs/RELEASE_STATUS.md`
 7. `scripts/windows-qualification-pins.json`
 
-Both the current and previous filenames of a rename must be in scope. An out-of-scope order gets
-`held` and is never landed automatically. Multiple matching orders are ambiguous and wait.
-Every required GitHub Actions check must pass on the exact head: `implementation-checks`,
-`windows-service-lifecycle`, `browser-notifications`, `portable-source (ubuntu-24.04)`,
-`portable-source (macos-latest)`, `portable-source (windows-latest)`, and `browser-core`.
-Behind branches are updated before rechecking; merges use the synchronous REST merge endpoint
-with `merge_method=squash` and the exact head `sha` (the REST equivalent of `--match-head-commit`).
-The driver explicitly sets `commit_title` to the observed PR title plus ` (#N)` and
-`commit_message` to an empty string, independent of repository squash-message defaults.
-No driver push targets `main`. Strict branch protection and signed-commit requirements remain in
-force; GitHub supplies the signed squash merge. Auto-merge stays disabled.
+An out-of-scope order enters `held` and is never landed automatically; multiple matching orders wait as ambiguous. All seven `REQUIRED_CHECKS` must pass on the exact head (`implementation-checks`, `windows-service-lifecycle`, `browser-notifications`, `portable-source (ubuntu-24.04)`, `portable-source (macos-latest)`, `portable-source (windows-latest)`, and `browser-core`).
 
-The promotion PR remains the reviewable exact-subject artifact. Standing authority permits only
-the requested next patch or explicit next minor version, eligible upstream baseline orders, and fixes/performance fixes/reverts
-already reviewed by the configured maintainer. A maintainer merge remains sufficient. A bot-merged
-`fix`/`perf`/`revert` must change no authority path (including rename-from paths) and carry the
-configured maintainer's latest non-comment review as `APPROVED` at the exact PR head.
-The immutable tree of that approved head must also equal the landed squash's merge tree;
-approval of a different post-merge branch head cannot authorize the bytes already on main.
-Dismissed, superseded and stale-head reviews never count. The lead uses that maintainer identity;
-there is no separate lead identity or bot self-approval. Bot and maintainer logins must be distinct
-(case-insensitively); the runtime checks the bot-review branch before any maintainer-merge shortcut.
-The installed checkout is the separately
-reviewed setup baseline. Later source commits require an associated merged main PR in those
-classes or a bot-owned generated release record; unclassified/direct source commits refuse.
-Founder fixes must be squash-merged with an immutable `fix`, `perf` or `revert` merge-commit
-subject (optional Conventional Commit scope). Mutable PR titles never authorize a release.
-Rebase/multi-commit merges can leave commits without an exact associated PR merge SHA and are
-intentionally out of class: the typed hold names the first unreviewed commit. Resolve through
-the separately reviewed setup path, not by retitling a PR or relaxing the routine predicate.
+Behind branches are updated before rechecking, and merges call the synchronous REST merge endpoint (`merge_method=squash`, exact head `sha` matching `--match-head-commit`, `commit_title` set to `<observed PR title> (#N)`, and empty `commit_message`). No driver push targets `main`; GitHub creates the signed squash commit under strict branch protection with auto-merge disabled.
 
-Before bot merge the Studio durably pins candidate tag/source/digest, promotion head/tree and the
-installed-policy fingerprint. Its passed receipt must bind qualification, stable build, candidate
-runtime comparison, release-policy gate, smoke plan and local checks to that subject. All seven
-GitHub checks must pass on the same head. The legacy phase name "approval-required" evaluates
-this predicate; it no longer asks the founder. Only the configured release bot may merge this PR.
-Stable signing independently rereads merger, merge source/tree, evidence, current main and policy.
-Main movement between prepare and approval is a stale-source hold, never silent incorporation
-of newer work into the release. After approval and stable signing, `main` may move while publication,
-smoke and record finish; the published source and evidence stay pinned.
+The promotion pull request is the reviewable exact-subject artifact. Standing routine authority admits only the requested next `patch` or explicit next `minor` version, eligible `ORDER_SCOPE` orders, and `fix`, `perf`, or `revert` pull requests reviewed by the configured maintainer:
 
-A routine release cannot change its own authority. `ROUTINE_AUTHORITY_PATHS` in
-`scripts/release-policy.ts` is the explicit, reasoned authority list: request/selection and merge
-policy, driver installation/signing-key inputs, host/Pixel leases, signed-release and Pages
-publication workflows, release builders/generators/state/provenance/runtime comparison,
-campaign admission/receipt settlement, the `stable-lanes.ts` cleanup-predicate binding and evidence
-schemas, CODEOWNERS, release lock and all schemas.
-`AGENTS.md`/`CLAUDE.md` and tsconfig/bunfig/mise/other lock controls remain protected.
-`STABLE_RELEASE.lock.json` is admitted only as generated approval output, checked by the release
-policy gate; a fix touching it requires a separately installed baseline, not routine source admission.
-Package manifests
-at every depth are fingerprinted with only their top-level version omitted; root bun.lock omits only
-generated workspace versions. The manifest sweep found the root and four workspace package.json
-files, bunfig.toml, mise.toml and mise.lock; no npm/Yarn configuration, Deno, Python or Cargo
-install manifests are present. Lifecycle scripts and dependency/trusted-dependency changes remain
-controls, even in a newly added nested package. bunfig.toml and lifecycle-capable mise.toml at
-any depth are protected; mise.lock is covered by the lockfile rule. build-release.ts omits only its
-generated product-version literal. Both tracked modifications and untracked non-ignored files
-(including Bun-autoloaded .env/config inputs) make the installed checkout dirty and hold admission.
-Tests, synthetic fixtures, individual provisioning/qualification/device-cloud lanes, docs (including
-this runbook), and explicitly listed CI workflows without signing/publication are routine after
-the same source review. Their fixes need no founder merge or driver reinstall. The implementation
-table records each script's purpose; test and fixture rules are explicit. A classification test
-fails when any new script has no classification, and runtime treats unknown script/workflow paths
-as protected until classified. Narrowing paths does not remove any required check.
-Added/deleted control paths and rename-from paths cannot evade the comparison. The live main
-branch-protection attestation, configured bot/source-reviewer identities and required-check list also
-enter the fingerprint. The setup reviewer observed classic main protection: strict seven required
-checks; enforce_admins=true; stale-review dismissal=true; zero required approving reviews;
-code-owner/last-push approval=false; signed commits=true; linear history=false; force pushes and
-deletions=false; conversation resolution=true; restrictions=null. These exact admin-only facts are
-committed as ROUTINE_BRANCH_PROTECTION. At runtime the unprivileged bot rereads protected=true,
-protection enabled for everyone and the exact seven contexts from /branches/main, plus the merged
-commit verification.verified signature and PR merger metadata. A readable divergence holds. The
-bot cannot reread admin-only fields: they are attested, not claimed as freshly observed. Changing
-the attestation or an admin-only setting is the separately reviewed F3 setup path; never broaden
-the machine credential to administration access. Changing the installed-policy fingerprint requires the same separately
-reviewed one-time setup/installation path, never a release-bot self-upgrade.
+- A maintainer merge satisfies source review directly; a bot-merged `fix`, `perf`, or `revert` must touch no authority path (including rename-from paths) and carry the configured maintainer's latest non-comment review as `APPROVED` at the exact head whose tree equals the landed squash merge tree (dismissed, superseded, post-merge, and stale-head reviews never count).
+- Bot and maintainer logins must differ case-insensitively; there is no separate lead identity or bot self-approval, and runtime evaluates the bot-review branch before any maintainer-merge shortcut.
+- The installed Studio checkout is the reviewed setup baseline; later commits on `main` must trace to an associated merged pull request in those classes or a bot-owned generated release record, and direct or unclassified commits hold.
 
-Generated prepare/approve/record PRs must change only the exact per-kind `GENERATED_RELEASE_PATHS`
-set in scripts/release-policy.ts, including both rename filenames. Prepare may additionally delete
-valid `changelog.d/<section>-<short-slug>.md` fragments, never add, edit or rename them; this exception
-does not apply to approve or record, or to `changelog.d/README.md`. This is rechecked before merging
-and when classifying previous release records. Protected paths remain refused; prepare may change
-only the generated build-release.ts version literal, manifest versions and bun.lock workspace
-versions, proven by normalized control equality at the merge boundary. Existing PR/remote-branch
-checkpoints require a verified head signature and the configured bot as commit author before
-adoption. Bot PR authorship or a release-driver branch prefix alone grants no authority.
+Founder fixes must be squash-merged with an immutable `fix`, `perf` or `revert` merge-commit subject (optional Conventional Commit scope). Mutable PR titles never authorize a release, and rebase or multi-commit merges without an exact associated PR merge SHA hold with `out-of-class` naming the first unreviewed commit; resolve them via [Studio installation](#studio-installation-run-as-gwops-after-integration) rather than retitling or relaxing the predicate.
 
-Prepare and approve compare normalized controls against the pinned installed checkout. Record
-instead compares controls at its PR merge base with its head, in addition to the exact generated
-record file allowlist. Reviewed control changes already on `main` do not prevent documenting an
-immutable published release; a record PR that changes a control still holds with
-`generated-content-mismatch`. This does not advance the installed driver or authorize another release.
+Before merging `approve`, the driver durably pins the candidate tag, source commit, and archive digest, promotion head and tree, and policy fingerprint. Passed evidence must bind `qualification`, `stable-build`, `runtime-comparison`, `release-policy`, `smoke-plan`, and `local-checks` to that subject with all seven checks green on the same head; phase `approval-required` evaluates this predicate without asking the founder, and only `alphastorm-release` may merge `approve`.
 
-Record generation starts at the current `main` commit, not `stableCommit`. If GitHub reports the
-record PR BEHIND, `mergeable: false`, or DIRTY (`mergeable_state: dirty`), the driver regenerates
-on current `main` and force-updates only its owned record branch, using a lease pinned to the old
-head and a fresh bot-authored, bot-signed single commit. It never uses GitHub update-branch for
-records, even if the old checks have not passed. Unknown mergeability waits. Checks must pass on
-the replacement head; a saved merge intent for an older head is dropped and re-planned as usual.
-The old PR must still satisfy bot ownership/signature and generated-file/control checks before
-replacement. Source-keyed detached worktrees preserve local commit checkpoints across crashes.
-A pushed branch awaiting PR creation is adopted without checking it out under a newer main's
-checkpoint key; subsequent regeneration still starts from that newer main.
+Stable tag signing re-verifies the merger, merge source and tree, evidence, `main`, and policy. `main` movement between `prepare` and `approve` triggers a `stale-source` hold rather than absorbing newer commits, whereas `main` may advance after stable signing while publication, smoke, and `record` complete against the pinned stable commit.
 
-The record checkout is data only: generation calls the **installed** `runReleaseGenerate` in-process
-against its files, without installing dependencies or running the checkout's generator, imports or
-package lifecycle scripts. Main's code never gains the pinned driver's bot credentials this way.
-Every generator command verifies all release inputs are regular files at their exact canonical
-checkout paths before reading content; symlinked files or escaping parent directories stop generation.
-Prepare also rejects a symlinked `changelog.d`; writes and fragment deletions use only verified paths.
-Current CI tests historical generator fixtures and live claim coherence, not byte equality between
-live generated blocks and main's generator output. New marker/schema or coherence requirements can
-still make an older installed generator fail generation or PR checks. Keep those gates intact and
-reconcile manually under the pending release's pinned policy; never run main's code or advance the
-driver mid-release to bypass the incompatibility.
+A routine release cannot modify its own authority (`scripts/release-policy.ts`):
 
-ROUTINE_HOLD_REASONS in scripts/release-policy.ts enumerates authority-path-changed, policy-changed,
-out-of-class, stale-source, missing-evidence, head-tree-changed, unexpected-merger,
-pr-identity-changed, required-checks-missing, merge-tree-changed, merge-missing, merge-signature-missing and generated-content-mismatch. Pending required
-checks wait without an effect; other holds preserve the subject for operator review. A historical
-passed job without the exact evidence binding grants no authority.
+- Protected authority paths (`ROUTINE_AUTHORITY_PATHS` and control rules) cover `.github/CODEOWNERS`, `release-request.yml`, `signed-release.yml`, `pages.yml`, release policy/driver/generator/state/comparison/download/smoke/qualification/outcome/builder/evidence/provider-read scripts, host and Pixel leases, and `stable-lanes.ts`.
+- Additional protected controls cover `STABLE_RELEASE.lock.json` (admitted only as `approve` output, never in a routine fix), `schemas/*`, `AGENTS.md` (and any `CLAUDE.md` matched by the control filename rule), `tsconfig*.json`, `bunfig.toml`, `mise.toml`, and lockfiles other than `UPSTREAM.lock.json` and `bun.lock` (including `mise.lock`).
+- Manifest fingerprinting covers all five `package.json` files omitting only top-level `version`, `bun.lock` omitting only workspace versions, and `scripts/build-release.ts` omitting only `PRODUCT_VERSION` (lifecycle scripts and dependency or trusted-dependency edits remain protected controls even in added nested packages). Tracked edits or untracked non-ignored files (including Bun-autoloaded `.env` or config inputs) mark the Studio checkout dirty and hold admission.
+- Routine implementation paths (`ROUTINE_IMPLEMENTATION_PATHS`) cover listed non-signing CI workflows, individual lane scripts, `scripts/fixtures/*`, `scripts/*.test.{ts,py}`, application packages, and documentation (including `docs/RELEASE.md`) after normal source review without reinstalling the driver; unclassified `scripts/*` or `.github/*` paths fail repository tests and are treated as protected at runtime.
+- Branch-protection attestation (`ROUTINE_BRANCH_PROTECTION`) binds bot and reviewer logins, the seven `REQUIRED_CHECKS`, and attested admin-only `main` settings (`strict` checks, `enforce_admins=true`, `dismiss_stale_reviews=true`, `required_approving_review_count=0`, code-owner and last-push approval `false`, `required_signatures=true`, `required_linear_history=false`, force pushes and deletions `false`, `required_conversation_resolution=true`, `restrictions=null`).
+- At runtime the unprivileged bot rereads `protected=true`, `enforcement_level="everyone"`, the seven check contexts on `/branches/main`, commit `verification.verified`, and PR merger metadata, holding on any divergence; updating attested admin-only settings or the policy fingerprint requires the separately reviewed, job-free [Studio installation](#studio-installation-run-as-gwops-after-integration) setup path rather than granting admin scopes or self-upgrading.
 
-Prepare, approve and record use `scripts/release-generate.ts` with an explicit persisted
-`--date YYYY-MM-DD`; package/workspace versions and source constants are mechanical edits.
-The smoke worker writes ISO UTC `completedAt` in its passed result. `finish-smoke` requires that
-timestamp and persists it as `smokedAt` in its decision/state; record passes its UTC date to
-`release-generate.ts record --date`, including after delayed observation, regeneration or intent replay.
-Prepare and approve retain the preparation date. A manual record uses the actual smoke completion
-date and current `main`. There is no preparation-date fallback: installation is drained at `closed`,
-whose historical state needs no `smokedAt`; a new smoke transition supplies it before recording.
+Generated `prepare`, `approve`, and `record` pull requests may touch only their per-kind `GENERATED_RELEASE_PATHS` set (including both paths of a rename), and `prepare` may additionally delete valid `changelog.d/<section>-<short-slug>.md` fragments without touching `changelog.d/README.md`. Normalized control equality is rechecked at merge and on prior release records, and adopting a remote `release-driver/*` checkpoint requires a verified signature authored by `alphastorm-release`.
 
-Prepare reads every `changelog.d/` fragment, assembles the new `CHANGELOG.md` release section in
-Added, Changed, Deprecated, Removed, Fixed, Security order, and sorts filenames within each section.
-It deletes consumed fragments, keeps `## [Unreleased]` empty, and generates the entry count and
-singular/plural summary with the companion release text. Re-prepare keeps the existing release
-bullets in order and appends new, filename-sorted fragments to the corresponding sections before
-recounting; a superseding minor preparation folds the old patch cut the same way.
-Both operations are byte-deterministic for the same inputs and date.
-See [fragment authoring rules](../changelog.d/README.md); `README.md` is never consumed.
-Release prose lives in `scripts/release-text.json`, not in the workflow. The existing
-`site-coherence.test.ts` and `release-policy.ts` remain gates, not bypassable renderer assertions.
-The golden v0.7.4 fixtures use a sanitized real candidate receipt and compare generated surfaces
-with committed release history; the fixture notes describe the retained public evidence.
+`prepare` and `approve` compare normalized controls against the pinned Studio checkout, whereas `record` compares controls between its pull request merge base and head alongside `GENERATED_RELEASE_PATHS.record`. Reviewed control changes merged after stable signing therefore do not block `record`, while a `record` branch that alters a control holds with `generated-content-mismatch` without advancing the installed driver or authorizing a new release.
 
-`prepare X.Y.Z --release-class minor --date YYYY-MM-DD` uses the same next-minor predicate
-as selection and promotion. It may supersede an unqualified, unpublished next-patch preparation:
-the package/workspace/constants move to the next minor; that prepared CHANGELOG section and
-the pending fragments are folded into one new cut; the generator recounts all bullets and regenerates
-`release-text.json` together. When an unqualified/unpublished prepared section gains a bullet,
-count-only drift between its generated summary and companion metadata is safely recounted on
-the next prepare (including the 2026-10-22 27→28 case). Add new entries as fragments without
-editing `[Unreleased]` or hand-recounting either header. Every other summary byte, including baseline,
-predecessor and qualification disclaimer, must still match. Count drift on qualified/published preparations,
-unrelated versions, duplicate cuts and other edited summaries refuse. The requested candidate
-identity remains exact; the published stable lock, earlier changelog sections and OMP baseline
-stay unchanged.
-Installing this class-aware control change is the separately reviewed job-free Studio setup path,
-not a release-bot self-upgrade. No main changes may land between prepare and approve.
+`record` generation branches from current `main` rather than `stableCommit`. When GitHub reports the `record` pull request `BEHIND`, `mergeable: false`, or `DIRTY` (`mergeable_state: dirty`), the driver verifies bot ownership, signature, and generated-file rules on the open PR, regenerates on current `main`, and force-updates only that `record` branch with a lease on the old head and a single bot-signed commit (never GitHub `update-branch`).
+
+Unknown mergeability waits, and stale merge intents are dropped and re-planned once checks pass on the replacement head. Source-keyed detached worktrees retain commit checkpoints across crashes, and a pushed branch without a pull request is adopted without checking it out under a newer `main` key.
+
+The `record` worktree is treated strictly as data: the driver calls its own installed `runReleaseGenerate` in-process without running `bun install`, imports, or lifecycle scripts from `main`, keeping bot credentials isolated from unpinned `main` code. Every generator invocation verifies that all input and output paths (and `changelog.d` on `prepare`) are canonical regular files and directories inside the worktree without symlinks.
+
+Because CI checks historical generator fixtures (`v0.7.4` sanitized golden receipt) and `scripts/site-coherence.test.ts` rather than byte equality against an older installed driver, a schema or marker change on `main` can cause an older pinned generator to fail PR checks; reconcile manually under the release's pinned policy instead of advancing the driver mid-release.
+
+`ROUTINE_HOLD_REASONS` (`scripts/release-policy.ts`) defines thirteen typed holds: `authority-path-changed`, `policy-changed`, `out-of-class`, `stale-source`, `missing-evidence`, `head-tree-changed`, `unexpected-merger`, `pr-identity-changed`, `required-checks-missing`, `merge-tree-changed`, `merge-missing`, `merge-signature-missing`, and `generated-content-mismatch`. Incomplete checks wait without effects; other holds stop and preserve the subject for operator review.
+
+`prepare`, `approve`, and `record` require an explicit `--date YYYY-MM-DD`. `prepare` and `approve` reuse the persisted preparation date, whereas the smoke worker writes ISO UTC `completedAt` and `finish-smoke` persists `smokedAt` so `release-generate.ts record --date` always receives the UTC smoke completion date (including across delayed observation, regeneration, or replay, with no preparation-date fallback).
+
+`prepare` reads `changelog.d/` fragments ([fragment authoring rules](../changelog.d/README.md)), orders sections as `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, and `Security` with filenames sorted per section, deletes consumed fragments, leaves `## [Unreleased]` empty, and writes deterministic entry counts and summaries into `CHANGELOG.md` and `scripts/release-text.json`.
+
+Re-preparing an unpublished cut or superseding an unqualified next-patch cut with `prepare X.Y.Z --release-class minor --date YYYY-MM-DD` keeps existing bullets, folds in sorted new fragments, recounts bullets (including count-only header drift on an unqualified cut), and regenerates `scripts/release-text.json` while refusing edited summaries, qualified cuts, or duplicate cuts and leaving `STABLE_RELEASE.lock.json` and `UPSTREAM.lock.json` untouched. No `main` commits may land before `approve`.
+
+### Merge queue
+
+Branch ruleset `main-merge-queue` enforces a squash-only merge queue on `refs/heads/main` (`"grouping_strategy": "ALLGREEN"`, up to five entries built and merged together, 60-minute check response timeout) layered over classic branch protection (`strict: true`, `enforce_admins: true`, signed commits and conversation resolution required, force pushes, deletions, and auto-merge disabled; `ROUTINE_BRANCH_PROTECTION` in `scripts/release-policy.ts`).
+
+Every pull request head and `merge_group` commit must pass the seven `REQUIRED_CHECKS` in `scripts/release-policy.ts`: `implementation-checks`, `windows-service-lifecycle`, `browser-notifications`, `portable-source (ubuntu-24.04)`, `portable-source (macos-latest)`, `portable-source (windows-latest)`, and `browser-core`.
+
+Ordinary contributor pull requests merge through the queue: after review and once all seven checks pass on signed commits, enqueue the pull request with the GraphQL `enqueuePullRequest` mutation (`pullRequestId` and `expectedHeadOid`), as shown in [Merging with the queue](../CONTRIBUTING.md#merging-with-the-queue). GitHub validates the `merge_group` tree against `main` plus earlier queued entries and creates a signed squash commit; `gh pr merge` fails because repository auto-merge is disabled.
+
+Generated `prepare`, `approve`, and `record` pull requests merge directly without entering the queue. `alphastorm-release` holds the repository `Maintain` role, granting a pull-request-only bypass on `main-merge-queue` (`pull_requests_only`) while keeping classic branch protection, all seven checks, `strict` heads, and commit signatures in force.
+
+The driver calls the synchronous REST merge endpoint (`merge_method=squash`, exact `sha`, `commit_title="<observed PR title> (#N)"`, empty `commit_message`) and verifies `mergedBy` equals `alphastorm-release`.
+
+Prohibitions during normal development and release windows:
+
+- Never bypass the queue with an administrator flag, relax the seven required checks or signature rule, enable auto-merge, or grant the `Maintain` bypass role to ordinary contributors.
+- Never enqueue generated `prepare`, `approve`, or `record` pull requests; queuing could combine `approve` with another change or break direct bot-merger attribution.
+- Drain the merge queue before a release window and stop new enqueues until the `record` pull request merges, because unrelated `main` commits between `prepare` and `approve` trigger a `stale-source` hold.
+
+If `main-merge-queue` (ruleset `26248647`) rejects a valid direct bot merge, a repository owner can set `enforcement` to `"disabled"` on `repos/carrythroughsystems/omp-session-gateway/rulesets/26248647` and re-run `tick`; see [Merge queue rollout (operator only)](#merge-queue-rollout-operator-only) for the historical rollout audit.
+
+### Studio installation (run as gwops after integration)
+
+The `alphastorm-release` account is a repository collaborator with write access (`Maintain` role for the merge-queue bypass) and Studio SSH signing key `~/.ssh/omp-gateway-release-signing` (public half `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPnD0XsQMUDImQxiWVgU8IXM6XeMVxFgPvp9bOAl/5Gd`).
+
+The driver derives the bot's noreply tagger address from its numeric GitHub ID (default `339384828+alphastorm-release@users.noreply.github.com`) and runs `gh` and HTTPS `git` writes via `~/.config/gh-release-bot`, discarding ambient founder tokens and git identities.
+
+Prerequisites match the full campaign and smoke:
+
+- Retained macOS guest (`VirtualMac2,1`) running and reachable over SSH, attached Pixel with the **OMP Sessions** WebAPK installed, published predecessor installed on the Studio, and empty-password `~/Library/Keychains/omp-qualification.keychain-db` (unlocked by the driver before campaign Pixel work and before smoke).
+- Private mode-`0600` credential files owned by `gwops`: `~/.ssh/omp-gateway-release-signing`, `~/.vultr-apikey`, `~/.ts-qual-apikey`, `~/.ts-qual-authkey` (or `~/.ts-authkey-qual`), and `~/.local/state/omp-session-gateway/op-service-account.token`.
+- Pinned Darwin-arm64 Bun `1.4.4` at `~/.omp/lane-toolchain/bun-1.4.4/bin/bun` (seeded from the checksum-verified `oven-sh/bun` release; see [Bun 1.4.4 host preparation](#bun-144-host-preparation-before-the-next-campaign)), `/opt/homebrew/opt/openjdk@17/bin/java`, `adb`, `security`, `git`, `gh`, `cosign`, `shasum`, `ssh`, `scp`, `bash`, `python3`, `curl`, `tmux`, and `op` on the explicit Homebrew `PATH`, with older launchers drained while retaining receipts and `lease.sqlite`.
+
+Disable admission and unload the LaunchAgent before mutating the checkout, and stop after the inspection commands if any worker, `tmux` session, unsettled intent or outbox, or `lease.sqlite` owner is present. Finish or recover an active release on its existing policy first; never advance the checkout underneath an in-progress release or delete `lease.sqlite` to proceed.
+
+SSH to the Studio as the operator (for example `ssh gwops@studio.example.ts.net`) and run:
+```sh
+export PATH="$HOME/.omp/lane-toolchain/bun-1.4.4/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+state="$HOME/.local/state/omp-session-gateway/release-driver"
+install -d -m 700 "$state"
+touch "$state/disabled"
+if launchctl print "gui/$(id -u)/com.omp.gateway-release-driver" >/dev/null 2>&1; then
+  launchctl bootout "gui/$(id -u)/com.omp.gateway-release-driver"
+fi
+# Confirm no driver tick/worker or tmux job remains before touching the checkout.
+pgrep -fl 'release-driver|stable-qualification|post-release-smoke'
+tmux list-sessions
+# Inspect state/outbox and all job claims, retaining them; never fabricate completion.
+if test -f "$state/state.json"; then jq '{phase,candidate,intent,announcement}' "$state/state.json"; fi
+find "$state/jobs" -name '*.json' -type f -print
+if test -f "$HOME/.local/state/omp-session-gateway/release-host/lease.sqlite"; then
+  sqlite3 -readonly "$HOME/.local/state/omp-session-gateway/release-host/lease.sqlite" 'select * from campaign;'
+fi
+# STOP until active owners have completed and pending effects/outbox are reconciled.
+# Do not advance a checkout underneath a pending release; finish/recover it on its old policy.
+cd "$HOME/Development/omp-session-gateway"
+git fetch origin main
+git switch main
+git merge --ff-only origin/main
+bun install --frozen-lockfile
+GH_CONFIG_DIR="$HOME/.config/gh-release-bot" gh auth status
+# Must print alphastorm-release; do not copy the founder's gh configuration.
+GH_CONFIG_DIR="$HOME/.config/gh-release-bot" gh api user --jq .login
+bun scripts/release-driver.ts plan
+# One-time cleanup of checkouts retained by older driver versions; keep admission disabled.
+# Review wouldRemove paths, local branches and estimated bytes before applying.
+bun scripts/release-driver.ts prune
+OMP_RELEASE_DRY_RUN=0 bun scripts/release-driver.ts prune --apply
+bun --eval 'const template = await Bun.file("scripts/com.omp.gateway-release-driver.plist").text(); await Bun.write(process.env.HOME + "/Library/LaunchAgents/com.omp.gateway-release-driver.plist", template.replaceAll("@HOME@", process.env.HOME));'
+chmod 600 "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
+# Replace this documentation target with the retained guest's actual SSH target.
+/usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:OMP_STABLE_MAC_HOST gwqual@mac.example.ts.net' "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
+# The checked-in template is dry-run by default. Review the config and read-only plan first.
+plutil -lint "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
+# To arm after review, unload, change the explicit switch, and reload:
+launchctl bootout "gui/$(id -u)/com.omp.gateway-release-driver"
+/usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:OMP_RELEASE_DRY_RUN false' "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
+rm "$HOME/.local/state/omp-session-gateway/release-driver/disabled"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
+```
+
+The plist runs every 300 seconds and at load under `gwops` (`ProcessType` `Interactive`), sending `launchd` stdout and stderr to `/dev/null` while keeping a bounded 256-KiB private `driver.log` and per-job exit and diagnostic files without modifying gateway or VM LaunchAgents. Environment variables are `OMP_RELEASE_BOT_LOGIN`, `OMP_RELEASE_FOUNDER_LOGIN`, `OMP_RELEASE_GH_CONFIG_DIR`, `OMP_RELEASE_SIGNING_KEY`, `OMP_RELEASE_STATE_DIR` (absolute paths), and `OMP_RELEASE_DRY_RUN=1|true`.
+
+### Readiness and credential expiry
+
+Inspect driver readiness and state without mutating local files or GitHub:
+
+```sh
+bun scripts/release-driver.ts plan
+bun scripts/release-driver.ts status
+```
+
+`plan` reports readiness alongside its proposed next operation (and can read GitHub with an operator `gh` session while checking machine readiness against `OMP_RELEASE_GH_CONFIG_DIR`); `status` reports `phase`, `candidate`, unsettled `intent` or `announcement` outbox, typed `holdReason`, and any first unreviewed source commit.
+
+Readiness checks private file ownership and `0600` modes, required executables, pinned Darwin-arm64 Bun `1.4.4`, `OMP_STABLE_MAC_HOST` configuration and SSH reachability, one authorized `adb` device, bot login and `push` permission, writer-readable branch-protection contexts on `/branches/main` (admin-only fields come from `ROUTINE_BRANCH_PROTECTION`), `disabled` and `dry-run` switches, and `lease.sqlite`.
+
+Ordinary `tick` runs write sanitized `readiness.json` before admitting a request and leave requests unconsumed when any check is false, persisting no raw credentials, device serials, or HTTP headers.
+
+GitHub token expiry is read from response headers when present, whereas 1Password service-account, Tailscale, and Vultr expiry remain `unknown` without provider metadata; the driver never guesses validity or refreshes tokens.
+
+File presence and SSH reachability do not substitute for candidate `--preflight`, which checks cloud catalogs, Pixel PIN and WebAPK state, workflow secrets, and full guest readiness; resolve missing prerequisites, wrong bot login, or owned/unreadable `lease.sqlite` before arming without deleting an active lease.
+
+During Studio smoke runs, gateway `doctor` (`funnelDisabled`) and `smoke:release` scope their Tailscale Funnel check to the gateway's Serve authority: unrelated Studio Funnels may stay active without pausing them, whereas Funnel on the gateway origin, proxy or TCP routes to its loopback port, non-loopback gateway listeners, or unparseable Serve status fail closed.
+
+### Durable jobs, failures and kill switch
+
+Driver state lives under `~/.local/state/omp-session-gateway/release-driver/`. Atomic `state.json` writes sync file data before rename (and sync the parent directory on POSIX) to persist write intents, pinned PR and tag identities, and the comment outbox; SQLite `tick.sqlite` serializes `tick` invocations, and deterministic branch, tag, comment-marker, and `tmux` names reconcile provider writes accepted immediately before a crash (`plan` creates none of these).
+
+Bot-owned git worktrees live under `work/` so the operator checkout stays clean:
+
+- Once `close` is persisted, the driver prunes recognized `work/` checkouts from other versions and older `vX.Y.Z-rebuild` worktrees (`git worktree remove --force`, `git worktree prune`, and local `release-driver/...` branch deletion, leaving remote refs, tags, and the saved state's own version family intact until a later version closes; pruning errors log a bounded warning in `driver.log` without rolling back `close`).
+- Preview cleanup with `bun scripts/release-driver.ts prune` (`wouldRemove` paths, branches, logical `bytes` without following symlinks, and `kept` reasons), or run `OMP_RELEASE_DRY_RUN=0 bun scripts/release-driver.ts prune --apply` under the tick mutex; both refuse if armed without `disabled` while a `tmux` job runs, protect unsettled intents, non-terminal jobs, live sessions, symlinks, and paths outside `work/`, and leave `jobs/`, `state.json`, `readiness.json`, and `lease.sqlite` untouched.
+- State patches list deleted fields in an explicit `clear` array rather than `undefined` JSON properties, and campaigns run from a published `release-driver/*-campaign` branch pinned to the `prepare` merge commit so `main` movement cannot alter orchestrator code.
+
+Campaign, approve-check, and smoke workers run detached in named `tmux` sessions with a `started` claim, JSON result, and exit file under `jobs/`:
+
+- Campaign workers fsync the qualification child's exact last 262,144 bytes of stdout and stderr as immutable `0600` `qualification-out.log` and `qualification-err.log` (empty if qualification never started, separate from outer `out.log` and `err.log`) before writing exit and result files, while receipts live at `~/.local/share/omp-session-gateway/qualification/<candidate>/stable-qualification.json`.
+- Smoke workers fsync `0600` `smoke-out.log` and `smoke-err.log` (262,144 bytes each), write bounded `smoke-failure.json` on failure without altering `jobs/<job>/diagnostic.json` (the sanitized `{ failureSummary }` written on typed campaign failures) or retry authority, and retain per-stage Android logs under `smoke-logs/` so closed stage names such as `"Android Chrome"` preserve the child exception (never infer a cause from the stage name alone).
+- Raw child logs and error chains are private operator diagnostics; never copy them into issues or public comments.
+
+Qualification and smoke share `lease.sqlite` without deleting or stealing live or foreign owners. Missing workers, non-retryable device or cloud failures, and job specifications that disagree with their launch binding stop in `diagnostic-required` (recording `failedMain`, clearing the launch intent, and posting one diagnostic comment; raw timeouts or exit codes `75` and `143` alone never grant retry, and missing local `approve` workers resume only at the identical head, tree, and policy).
+
+Automatic same-issue re-selection after a fix lands on `main`:
+
+- Once `main` advances past `failedMain` (recorded from the candidate commit that ran rather than observation-time `main`), the driver re-selects the open tracking issue carrying the same OMP version, `release_class`, and API-recorded `Record tracking issue #N` filing `run:attempt` (revalidated even past the newest 100 workflow runs; older runs lacking `Record tracking issue #N` require one new `release-request.yml` dispatch, and closed issues cannot retry without a replacement request).
+- An unmerged `prepare` held on `stale-source` also re-selects once `main` moves (merged `prepare` PRs, other authority holds, and versions with an existing stable tag or newer GitHub Latest do not).
+- Re-selection appends `{candidate, reason, at, issue, preparePr, failedMain}` to `state.retired`, closes only the bot-owned unmerged `prepare` PR (dropping and replanning intents if an untracked orphan or `prealpha` tag appears), reserves the retired ordinal, and prepares the next unused `vX.Y.Z-prealpha.N` after rechecking source review, policy, and owner-verified lease cleanup ([Release gates](#release-gates)), without closing the tracking issue or modifying prior jobs or receipts.
+- Fulfilled issues record their filing identity at `close` and are never re-selected.
+
+If the 30-second 1Password `op whoami` probe times out (`host-fault`), run `brew reinstall --cask 1password-cli` (or invoke `op` through a hardlink to the same inode if macOS hangs on the installed path), verify `op --account my.1password.com --version`, and rerun the candidate's `--preflight` (`diagnostic-required` clears automatically only after `main` advances past `failedMain`, or via quiesced state retirement to `retired/`).
+
+When a fix changes protected release controls, complete the quiesced [Studio installation](#studio-installation-run-as-gwops-after-integration) review and move the old `state.json` to `retired/` only after confirming no unsettled intent or outbox, stable publication, active worker, or owned `lease.sqlite` row.
+
+To stop new driver admissions immediately (the emergency kill switch):
+
+```sh
+touch "$HOME/.local/state/omp-session-gateway/release-driver/disabled"
+launchctl bootout "gui/$(id -u)/com.omp.gateway-release-driver"
+```
+
+This unloads future ticks without killing an active campaign or smoke mid-cleanup. Inspect `jobs/*/spec.json`, `tmux list-sessions`, exit and result files, and the qualification receipt, and let active work finish or recover before rearming via [Studio installation](#studio-installation-run-as-gwops-after-integration); never delete `state.json`, a `started` claim, `tick.sqlite`, or `lease.sqlite`, and revoke the `alphastorm-release` credential immediately if the operator account is compromised.
+
+### Bounded device-cloud journey retries
+
+Before a cloud journey's first collaboration navigation, each attested directory visit allows up to 60 seconds for its service worker to settle (preventing `uncontrolled` stalls on TestingBot Galaxy S25 and S24 devices without altering the installed-shell readiness check).
+
+Within one `deviceCloud` lane run, each iPhone, iPad, or Samsung target may retry once after an ordinary post-attestation collaboration or Home Screen failure:
+
+- Only the failed target allocates a second device session; the candidate, retained-Mac fixture, live OMP generation, tunnels, Pixel lease, lane epoch, passed targets, and sibling lane receipts stay unchanged, and a second failure on the same target is terminal.
+- Before retrying, the first session must end, pass its live-link and media audit, and (for BrowserStack) complete `DELETE` and three-minute artifact-absence verification; unknown allocation outcomes, attestation mismatches, sink or audit hits, containment failures, and OMP generation changes never retry.
+- Schema-3 `progress.journeys[target]` and `resources` record attempts, outcomes, and session IDs without raw errors; `approve` binds each passing target to its final allocation and verifies audit counts across clean-audited allocations (`scripts/qualification-failure.ts` types `journey_failed` as `product`/`confirmed` at `<target>_verified` and `audit_failed` as `confirmed` or `read_only` at `records_audited`, and crashes run dirty-attempt cleanup without resetting budgets).
+
+Availability holds never use per-journey retries: an initial empty pool uses the hold rules below, while empty-pool availability after a failed first journey is a non-retryable mixed diagnostic failure.
+
+### Automatic same-candidate campaign retries
+
+Candidates with the version-1 execution and outcome contract bound retries via `campaignAttempt` (initial attempt `0`, plus retries `1` and `2`). Only validated infrastructure root failures and their collateral with verified cleanup, reconciled allocations, and zero unknown mutations qualify; product, harness, unknown, mixed, collateral-only, malformed, or dirty outcomes (including unexplained Push timeouts or raw Windows exit `143`) stop in `diagnostic-required`.
+
+Scheduling and predecessor-proof rules:
+
+- `schedule-campaign-retry` writes `retry-pending`, `retryNotBefore` (60 seconds before attempt 1, 120 seconds before attempt 2), and a bound `retryPlan` whose `nextAttempt` reserves the next ordinal (`campaignAttempt` advances on launch), binding candidate tag/source/digest, predecessor, orchestrator commit, policy, `macHost`, job/log digests (`out.log`, `err.log`, `qualification-out.log`, `qualification-err.log`), machine-outcome and failed-receipt digests, summary, restart lanes, and scope.
+- Before scheduling and before launch, the driver verifies the exited job, unchanged candidate and policy, absence of approval/publication/workers/foreign lease holders, matching subprocess and typed-outcome exit codes, and a non-empty restart set (preserving `failed-qualification.json` in the completed job directory; orphaned results without an exit file stop as diagnostic).
+- Attempts 1 and 2 consume predecessor authority durably before admission via `--retry-receipt-sha256` (campaign retries) or `--retry-outcome-file` plus `--retry-outcome-sha256` (effect-free preflight retries; standalone `--preflight` accepts attempt 0 only).
+- Passed product and `ompPublication` proofs stay intact while failed Push, Windows, or cloud lanes restart on fresh epochs, collateral publication restarts on an isolated OMP host, artifacts reverify, readiness reruns, and Mac cleanup reopens.
+- Ownership in `lease.sqlite` stays `qualification:<candidate>:<receipt path>` across attempts without calling lease clear (`recoverFailedCampaign()` in `scripts/release-driver-runtime.ts` runs only when retiring a candidate after a `main` fix). Jobs use `jobs/<issue>-<candidate>-campaign/` for attempt 0 and `jobs/<issue>-<candidate>-campaign-retry-<n>/` for retries, treating `started` as a hard no-relaunch fence and posting sanitized progress comments without raw errors or identifiers.
+
+After attempt 2 fails, `diagnostic-required` retains the exhaustion summary and lease; repair the failed owner and land a `main` fix so only new-candidate selection resets the retry budget. Update the driver across execution-format changes only through the drained [Studio installation](#studio-installation-run-as-gwops-after-integration) procedure (`retry-device-cloud` is refused on version-1 jobs, and old schema-3 receipts without version-1 outcomes never auto-retry).
+
+### Legacy device-cloud availability holds
+
+Only validated empty pinned-device pool observations count as availability; authentication, catalog, transport, attestation, exhausted journey-retry, audit, and cleanup errors remain diagnostic.
+
+On an availability-only failure, `qualify:stable` atomically writes a closed JSON outcome to `OMP_STABLE_OUTCOME_FILE` (`preflight-outcome.json` or `campaign-outcome.json` in the private job directory; stdout/stderr is never parsed as machine evidence) and exits `75`, recording `failed` with one to three schema-3 `availabilityHold` leaves (missing or invalid outcome files make exit `75` diagnostic).
+
+Before an allocation hold is resumable, sibling consumers must finish, the relay tunnel must stop, `ompPublication` lifecycle must pass, Windows must settle, and all resource and final Mac cleanups must pass (a preflight-only hold creates no cloud session, tunnel, fixture, or receipt and retries as a fresh campaign start).
+
+For legacy jobs without version-1 automatic retries, `infrastructure-held` waits for explicit operator authorization after checking equipment availability:
+
+```sh
+bun scripts/release-driver.ts status
+bun scripts/release-driver.ts retry-device-cloud --candidate <exact-prealpha-tag> --job-attempt <current-attempt>
+```
+
+`retry-device-cloud` takes the tick mutex, checks the held candidate/attempt, absence of unsettled intents/workers/approval/publication/foreign lease owners, unchanged policy and `macHost` from `spec.json`, and an eligible held receipt (`held-qualification.json` matching the working receipt) or preflight hold, then schedules one `jobs/<issue>-<candidate>-campaign-retry-<n>/` launch on the next non-dry-run tick (replaying a `spec.json`-only `tmux` failure only without `started` or `tmux`).
+
+For a manual campaign outside the driver, run from the candidate's orchestrator checkout with identical `OMP_STABLE_MAC_HOST`, predecessor, and receipt directory (`OMP_STABLE_QUALIFICATION_DIR` if overridden; see [Release gates](#release-gates)):
+
+```sh
+bun run qualify:stable -- --tag <exact-prealpha-tag> --resume-device-cloud
+```
+
+`--resume-device-cloud` rejects dirty, stale-cleanup, or mismatched-commit receipts before effects, clears and persists the old hold before admission, keeps passed Debian, macOS, Android, Push, Windows, relay, and `ompPublication` proofs, reverifies signatures, rebuilds the candidate gateway and OMP fixture, reopens Mac cleanup, and runs a fresh cloud epoch under `lease.sqlite` (ordinary errors exit `1`; see [Durable jobs, failures and kill switch](#durable-jobs-failures-and-kill-switch)).
+
+### Carrythrough checks-pod boundary
+
+`bun run check:order` validates `ORDER_SCOPE` pins, schemas, repository conventions, claim coherence, and release-ledger gates on Linux without physical devices or post-install network access. The checks pod requires a writable workspace (the rest of `/` and `$HOME` may stay read-only, with no Docker daemon, npm token, or devices), about 4 GiB RAM, and TCP `443` egress only during `bun install` or an intentional `scripts/upstream-pins.ts` refresh.
+
+`scripts/upstream-pins.ts` performs one GitHub commit read and one contents read per `relevantPaths` entry (using optional `GH_TOKEN`/`GITHUB_TOKEN` only for GitHub API calls), two `raw.githubusercontent.com` manifest reads, and six npm registry metadata and tarball reads verified locally with `tar`.
+
+## Release gates
+
+Recorded release decisions and lane measurements are in [Release status](RELEASE_STATUS.md); supported and qualified platform claims are in [Compatibility and support policy](COMPATIBILITY.md). Generated or signed artifacts never promote themselves.
+
+Every advertised release requires:
+
+- private vulnerability reporting and repository security controls enabled;
+- an exact mainline OMP commit, validated discovery and query contract, `collab-web` provenance, and license inventory;
+- all unit, integration, browser, type, build, and secret or identifier leak checks green;
+- advertised host installers qualified against the exact signed candidate;
+- loopback-only exposure plus positive and negative Tailscale identity and `Origin` evidence;
+- physical-client **View** and **Control**, stale-generation, session-lifecycle, and forbidden-sink evidence;
+- documented configuration, upgrade, rollback, cleanup, compatibility, and known limits; and
+- complete checksums, SPDX 2.3 SBOM, GitHub build attestations, Cosign Sigstore bundles, signed tag, and reproducible build verification.
+
+Stable publication requires `STABLE_RELEASE.lock.json` in the signed tag's tree to record passed candidate tag/source/digest, runtime-byte comparison, Debian, Virtualization.framework macOS guest (`VirtualMac2,1`, [ADR-033](DECISIONS.md#adr-033--retain-a-macos-virtual-machine-as-the-campaign-mac)), Windows host, physical Pixel, background Web Push, mainline OMP discovery/query/launch/revocation, provenance, and secret-sink evidence (no fork-era receipt satisfies a mainline lane).
+
+`.github/workflows/signed-release.yml` verifies that checked-out `HEAD` equals the event SHA, checks candidate ancestry and published candidate digest, requires a GitHub-verified signed annotated tag, and rechecks tag state before provenance generation, draft creation, and publication.
+
+[Issue #65](https://github.com/carrythroughsystems/omp-session-gateway/issues/65) remains a disclosed Android Chrome browser-process limitation: after 45 uninterrupted visible failure seconds, the shell surfaces retry and force-stop/reopen guidance without third-party probes or claiming JavaScript repaired Chrome.
+
+`bun run qualify:stable --tag "$TAG"` reverifies candidate and predecessor signatures and provenance, and runs Debian and macOS guest lifecycle, rollback, mainline OMP discovery/launch/revocation, Pixel acceptance and sinks, relay smoke, [Windows](WINDOWS_QUALIFICATION.md), [background Push](ANDROID.md#physical-background-push-lane), cloud devices ([ADR-032](DECISIONS.md#adr-032--qualify-iphone-ipad-and-android-browsers-on-real-cloud-devices-in-every-stable-campaign)), and cleanup.
+
+The orchestrator writes its private schema-3 receipt to `~/.local/share/omp-session-gateway/qualification/<tag>/stable-qualification.json`; retargeted scripts are not qualification evidence until every lane runs against the exact signed candidate.
+
+Predecessor verification in `scripts/post-release-smoke.ts` has one finite historical exception: `v0.7.5` (SHA-256 `171dec1a9902c934c99060b250f209cf627ce194d07da1412b35ad419c3ec57c`), verified via retained Cosign bundles under identity `https://github.com/alphastorm/omp-session-gateway/.github/workflows/signed-release.yml@refs/tags/v0.7.5` and issuer `https://token.actions.githubusercontent.com` (`githubAttestations: "historical-cosign"`, rechecked at `approve`).
+
+Its signed tag, six-asset set, Latest state, checksums, and archive digest remain mandatory; candidates, published-byte smokes, and all other predecessors require all three online GitHub build attestations, and attestation outages or digest mismatches fail closed.
+
+Before spending a full campaign after harness or lane changes, exercise affected lanes in development mode at the exact orchestrator tree under pinned Bun `1.4.4`:
+
+- Background Push: `OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development <published archive>`, where `OMP_PUSH_FIXTURE_BINARY` names the exact stock OMP entrypoint (`dist/cli.js` or binary) matching `UPSTREAM.lock.json` ([Physical background-Push lane](ANDROID.md#physical-background-push-lane)).
+- OMP session lifecycle: `bun scripts/omp-lifecycle-development.ts --omp <absolute path to stock OMP dist/cli.js>` ([OMP session lifecycle lane](LIFECYCLE_BRANCH_RESUME.md)).
+
+Required scenario coverage inside every stable campaign:
+
+- `androidPush` must pass `triage_verified` and `stale_taps_verified` after `clear_verified` and before `force_stop_verified` (including second-fixture cleanup; `replayed: true` proves physical delayed-tap metadata presentation after authoritative clear rather than network push delay).
+- `ompPublication` must record passed `evidence.lifecycle` (`newGeneration`, `fork`, and `resumed`): once live consumers settle (or only cloud availability held after releasing resources) and the relay tunnel stops, the Mac guest runs `/new`, `/fork` after two synthetic messages, stop/revocation, `--continue`, and stop/revocation.
+- Generation rotations require `+1` on the same `instanceId` with stale launches rejected and live **View**/**Control** returning `200` `no-store`, while resume requires a new `instanceId` at generation `1` (`/branch` rewind stays in the upstream canary, and interrupted steps rerun in full).
+- External-state lanes (`windows`, `androidPush`, `deviceCloud`) pair with epoch-bound cleanup lanes (`windowsCleanup`, `androidPushCleanup`, `deviceCloudCleanup`). Windows runs alongside Debian and macOS, whereas core Android, background Push, device cloud, and the Windows physical-client check serialize under the in-process Pixel lease (`deviceCloud` ends sessions and stops tunnels and fixtures inside its turn, and any lane that fails to restore the Pixel blocks subsequent Pixel consumers).
+
+Receipt resumption and dispatch safety:
+
+- Receipts resume only for the identical candidate tag, orchestrator commit, and `STABLE_RELEASE.lock.json` predecessor (mismatched `--previous-tag` or `OMP_STABLE_PREVIOUS_TAG` fails before effects; remove the override and rerun).
+- Before dispatching Debian, the orchestrator persists a UUID, sets `Stable qualification <uuid>` as the run name, and finds the run via the Actions API; if a persisted UUID is not discoverable, search Actions for `Stable qualification <uuid>` at that commit and resume once visible (move `~/.local/share/omp-session-gateway/qualification/<tag>/` aside only if API evidence proves no run exists and all Mac lanes have zero attempts; otherwise recover Mac cleanup first).
+- Before renewed Mac effects, the orchestrator reopens `cleanup` durably; resumed `relay` passes must cover the requested duration with coherent timestamps inside the recorded attempt (missing, shorter, or historical 60-second proofs fail before admission without auto-rerunning `relay`, while unfinished Mac cleanup runs).
+
+Never delete, rename, or replace `~/.local/state/omp-session-gateway/release-host/lease.sqlite` to unlock a campaign, because unlinking the file can create two live lock inodes. If the original command cannot resume recovery, stop all launchers and child processes, reconcile recorded host, device, and cloud state, and clear the `campaign` row only through an `EXCLUSIVE` SQLite transaction.
+
+Cross-process exclusion and owner-verified lease retirement:
+
+- Qualification and `smoke:release` acquire `~/.local/state/omp-session-gateway/release-host/lease.sqlite` under the Studio release account before reading/writing receipts or mutating hosts or devices (`--preflight` and `smoke:release -- --plan` stay read-only; changing `OMP_STABLE_QUALIFICATION_DIR` never bypasses the shared SQLite file, and manual `adb`/SSH or development scripts must not overlap a campaign).
+- SQLite `EXCLUSIVE` locking holds an OS lock across ownership and cleanup (1-second busy wait, never stolen by age or PID probes); process death releases the OS lock while keeping the committed owner row so only the exact campaign tag and receipt directory (or smoke repo/tag) can resume.
+- During landed-fix re-selection, the driver may clear its failed row in an `EXCLUSIVE` SQLite transaction (fsyncing `jobs/<failed-job>/lease-recovery.json` and stamping `clear-authorized` then `cleared`) only once the job exited, no workers or OS locks remain, Debian and all four cleanup lanes (`cleanup`, `windowsCleanup`, `androidPushCleanup`, `deviceCloudCleanup`) passed at matching epochs, all cloud sessions ended, audited, and deleted, and every owner proves `unresolvedMutation: false`:
+  - Windows: `windowsCleanup` reports zero `omp-winqual-` instances, firewall groups, and prefix-listed tailnet nodes (`tailnetNodesRemaining`), plus a verified Pixel baseline if `pixel_verified` was reached.
+  - Device cloud: all recorded sessions ended and passed audit, and `deviceCloudCleanup` counts zero `activeVendorSessions` (TestingBot attempt-build sessions plus BrowserStack running and queued sessions).
+  - Background Push: `androidPushCleanup` records a verified Pixel baseline (Airplane mode `0`, mobile data on, validated Wi-Fi, VPN up, and `GcmService` connected over Wi-Fi; captured inside the restoring Pixel lease turn).
+  - Readiness: `receipt.rigReadiness` for the matching `campaignAttempt` is `restored` with `baselineRestored: true`.
+
+Campaign prerequisites across the Studio controller, Mac guest, Pixel, and cloud accounts (`OMP_STABLE_*` overrides):
+
+- Controller tools and lock guards: `gh`, `cosign`, `adb`, repository workflow secrets, clean published `main` (`STABLE_RELEASE.lock.json` and `docs/RELEASE_STATUS.md` are hash-guarded and never edited by `qualify:stable`), and predecessor from `STABLE_RELEASE.lock.json` (`--previous-tag` and `OMP_STABLE_PREVIOUS_TAG` may only restate it).
+- Retained Mac guest (`VirtualMac2,1`, [ADR-033](DECISIONS.md#adr-033--retain-a-macos-virtual-machine-as-the-campaign-mac)): configure SSH target (`user@host` DNS or IPv4 without SSH flags) and expected `/usr/sbin/sysctl -n hw.model` before admission (the workstation stages verified rollback archives and Sigstore bundles so the guest needs no GitHub token, checks `UPSTREAM.lock.json` `sourceTree` and `liveOmpHosts`, and persists `macHost` in schema-3 receipts before first Mac effects):
+
+  ```sh
+  export OMP_STABLE_MAC_HOST=gwqual@mac.example.ts.net  # replace with the qualification guest
+  export OMP_STABLE_MAC_MODEL=VirtualMac2,1
+  unset OMP_STABLE_MAC_SUDO_PASSWORD_FILE
+  # OMP_STABLE_MAC_LOGIN defaults to alphastorm@github unless overridden.
+  ```
+
+- Mac guest login and toolchain: the SSH account (standard or admin; FileVault off if bare-metal) must auto-login to `gui/<uid>` Aqua after reboot so persistence records `yes` for `guest reboot changed` (`kern.bootsessionuuid`), `console login`, and `readiness token preserved` with green `doctor`.
+- Mac guest `PATH` and OMP: install Bun `1.4.4` in `~/.bun/bin`, stock OMP `>= 18.1.20` (`packageVersions["@oh-my-pi/pi-coding-agent"]` from `UPSTREAM.lock.json`) on `PATH`, and user-owned TUN-mode Tailscale (remote commands use `/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin` and explicit staged `cosign` paths).
+- Mac guest sudo: when `OMP_STABLE_MAC_SUDO_PASSWORD_FILE` is unset, the orchestrator passes empty `OMP_MAC_SUDO_PW` and `sudo -n` must allow `true`, `/usr/local/bin/tailscale` (or `PATH` fallback) `status --json`, `set --operator=<SSH account>`, `cert --cert-file <home>/omp-qual.crt --key-file <home>/omp-qual.key <tailnet DNS name>`, and `shutdown -r now` (bare-metal hosts such as `Mac14,3` may supply a `0600` single-line `OMP_STABLE_MAC_SUDO_PASSWORD_FILE` over SSH stdin).
+- Mac guest optional `reboot-guard`: on shared hosts, an owner-executable regular file `$HOME/.config/omp-qualification/reboot-guard` (validated without executing during `--preflight`) runs immediately before `shutdown -r now` and aborts persistence with `the host's reboot guard refused: <output>` (first 400 bytes) on nonzero exit.
+- Windows lane: `0600` `~/.vultr-apikey` (admitting the Studio's egress `/32`), `~/.ts-qual-apikey`, `~/.ts-qual-authkey` (or `~/.ts-authkey-qual`), and tools pinned in `scripts/windows-qualification-pins.json` ([Windows qualification](WINDOWS_QUALIFICATION.md)).
+- Pixel equipment: one USB-attached Pixel with Tailscale Doze exemption, Do Not Disturb off, hotspot/USB/Bluetooth tethering off, and the **OMP Sessions** WebAPK installed with notification permission granted for the Mac guest's origin ([Android qualification](ANDROID.md)).
+- Device-cloud lane: `/opt/homebrew/opt/openjdk@17/bin/java` (or `OMP_STABLE_JAVA`), cached pinned TestingBot tunnel jar under `~/.cache/omp-session-gateway/testingbot/`, and the read-only `0600` 1Password service-account token at `~/.local/state/omp-session-gateway/op-service-account.token` (bound by the release driver as `OMP_STABLE_OP_TOKEN_FILE`) with read access to `op://Centaur/TestingBot/key` and `op://Centaur/TestingBot/secret`.
+
+### Effectful rig readiness before fan-out
+
+`--preflight` is read-only admission (no phone subscription, fixture staging, or VM allocation, and standalone bound `--preflight` accepts attempt `0` only with `HEAD` matching execution source). An effectful campaign acquires `lease.sqlite`, verifies candidate and predecessor bytes (consuming retry authority first on attempts `1`–`2`), and runs the effectful rig-readiness gate before allocating a Windows VM or dispatching Debian:
+
+- Readiness requires an unoccupied Mac guest (no gateway service/listener and empty Serve/Funnel status), installs a disposable candidate gateway and stock-OMP fixture, checks bounded egress and `doctor`/loopback/Serve/Funnel invariants, and requires one locked-screen Pixel Web Push send, acknowledgement, lock-screen presentation, answer, and authoritative clear within 160 seconds.
+- Windows readiness reuses credential, image, plan, and toolchain admission, requiring remaining per-tag VM allowance and zero unreconciled resources while recording `quotaObservable: false` without probe VMs when provider quota metadata is unavailable.
+- Under the Pixel lease after radio-baseline capture, readiness inspects `dumpsys activity service GcmService` (10-second `adb` cap), running one `svc wifi disable` → 2-second pause → `svc wifi enable` cycle with up to 30 seconds (capped by execution deadline) if disconnected.
+- Malformed or duplicate GCM lines fail without cycling Wi-Fi, in-window disconnect fails as `gcm_disconnected` (`infra_transient`), and timeouts fail as harness deadlines (both stop in `diagnostic-required` without retry while restoring radios); schema-3 `gcmConnected` and `gcmRemedyApplied` booleans record on pass and fail, keeping censored samples only in the private cause chain.
+- Readiness reads `GET /api/v1/push/config` and requires `subscriptionCount === 1` on the disposable Mac gateway (`0` fails as missing prerequisite; `> 1` fails as `stale_subscriptions` without exposing endpoints or auto-deleting subscriptions) alongside positive matching `sendCount` and `ackCount`, presentation, and clear.
+
+To recover `stale_subscriptions`, keep the driver disabled and finish Pixel and Mac restoration first (`scripts/qualify-macos-host.sh omp-clean uninstall` removes the fixture and service while leaving `~/.local/state/omp-session-gateway/push-state.json` intact). Turn off notifications from known stale browsers (`DELETE /api/v1/push/subscription`) while the gateway runs, or reset all subscriptions on the stopped disposable Mac guest (`jq` required):
+
+```sh
+# Run as the retained Mac qualification user, only with the gateway stopped.
+# Preserve VAPID keys and every other private state field; print no state contents.
+(
+  set -eu
+  umask 077
+  state="$HOME/.local/state/omp-session-gateway/push-state.json"
+  test ! -e "$HOME/Library/LaunchAgents/omp-session-gateway.plist"
+  ! launchctl print "gui/$(id -u)/omp-session-gateway" >/dev/null 2>&1
+  ! lsof -nP -iTCP:4317 -sTCP:LISTEN >/dev/null 2>&1
+  test -f "$state" && test ! -L "$state"
+  temporary="$(mktemp "$state.reset.XXXXXX")"
+  trap 'rm -f "$temporary"' EXIT
+  jq '.subscriptions = []' "$state" > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$state"
+)
+```
+
+Next, stage the authorized candidate fixture, open only the Pixel's installed **OMP Sessions** WebAPK, toggle notifications off and on, and confirm `subscriptionCount === 1` before rearming (never rotate tokens or delete `lease.sqlite`, receipts, or driver state to bypass `stale_subscriptions`).
+
+Browser baseline capture and private error-chain diagnostics:
+
+- Before browser capture, the Push owner writes `rig-readiness/<epoch>/push-progress.json`; capture errors map to `browser_baseline_failed` with a closed substep (`wake`, `WebAPK`, CDP forward/connect, target inventory, attachment, execution context, navigation, or notification-state read), while cleanup errors and expired deadlines keep their own classifications.
+- The CLI writes redacted cause and `AggregateError` chains to private stderr (`qualification-err.log`) and `0600` `rig-readiness-logs/browser-substep.json` (substep, 4-KiB message, 16-KiB stack, CDP method or `null`, elapsed ms, `truncated: true` and `redacted: true` flags across the chain, picking the deepest CDP cause or earliest deepest leaf inside 256 KiB; see [Qualification logs and failure evidence](SECURITY.md#qualification-logs-and-failure-evidence)).
+
+Readiness state, restoration, and runaway ceilings:
+
+- `receipt.rigReadiness` records the attempt, private epoch, phase, observations, monotonic timings, and cleanup disposition: Pixel restoration runs before Mac service/staging removal, passing campaigns require terminal `restored` readiness (`baselineRestored: true`), checkpoint failures set `persistenceFailed` without skipping restoration owners, and unrestored Push/cloud fixtures keep their Mac directories and owner files.
+- `cleanupFailed` survives later resource destruction; Windows cleanup wraps transport errors as `windowsCleanup/containment/containment_unproven` (`operation: unknown`, `cleanupVerified: false`), and inline Windows Pixel restoration uses a fresh 10-minute owner.
+- Readiness uninstall removes the disposable service and staging while retaining `readiness-token` and `installation/{current,history}.json`, so `baselineRestored` attests the Pixel baseline, service/Serve containment, and staging rather than a pre-readiness installation-state snapshot.
+- Outer runaway ceilings: Windows 180 minutes, Push and device cloud 90 minutes each, Mac cleanup 90 minutes (two 10-minute scripts plus two 30-minute SSH owners require 80 minutes before margin), Windows readiness/Windows cleanup/cloud cleanup 30 minutes each, core Android 30 minutes, Push cleanup 15 minutes, relay `OMP_STABLE_RELAY_SECONDS` plus 5 minutes, and tunnel startup 90 seconds (1-second health reads).
+- Remote commands, shell wrappers, streamed uploads, and OMP PTYs register process groups through `scripts/qualification-remote-owner.sh` (journaled before dispatch; cancelled via a fresh SSH command awaiting group exit, or a changed boot UUID for detached reboot owners, recording `remote_unsettled` collateral and fencing host effects when unsettled; only bounded read-only admission probes omit owner files). Manual attempt-0 readiness stays diagnostic without synthesizing driver bindings.
+
+### BrowserStack device-cloud fallback
+
+Target-to-vendor policy, receipt attribution, and availability holds:
+
+- TestingBot is the sole iPhone vendor (including Home Screen Web Push), and TestingBot is tried first for iPad Safari and Samsung Chrome (Samsung-only with corroborated hardware model code), selecting BrowserStack immediately only when the eligible TestingBot free pool is empty before any primary write (never after a failure, and never running devices in parallel).
+- Device-cloud receipts record each target's vendor (`TestingBot` or `BrowserStack`), tunnel version (`4.9` or `8.9`), allocated model, and device-reported OS and browser versions (`cloud.vendor` is `"TestingBot"` when homogeneous or `"mixed"` with `cloud.tunnelVersion: "per-target"` when BrowserStack serves iPad or Samsung; mixed receipts never attribute BrowserStack devices to TestingBot, and legacy homogeneous receipts retain their summaries).
+- Shared-device availability is infrastructure rather than a product pass or defect; a valid pinned pool with no free eligible device produces a failed attempt with closed `availabilityHold` evidence and CLI exit code `75`, while auth, catalog, transport, audit, and cleanup failures remain diagnostic ([Legacy device-cloud availability holds](#legacy-device-cloud-availability-holds)).
+
+BrowserStack prerequisites (checked lazily only when fallback is needed; admission fails closed if absent):
+
+- Read-only 1Password service-account access to `op://Centaur/BrowserStack/username` and `op://Centaur/BrowserStack/access-key` alongside existing TestingBot/Java setup.
+- BrowserStack `Automate Mobile` with five group/team parallels, pinned to cutoff **2027-10-20 00:00 UTC** in `scripts/browserstack-pins.json` (Plan API omits expiry; renewal requires a reviewed pin update), plus Rosetta 2 on Apple silicon (`arch -x86_64 /usr/bin/true`).
+- Dedicated BrowserStack team-member key rotated on suspected exposure under the single-user orchestrator exception ([Real-device cloud qualification](SECURITY.md#real-device-cloud-qualification)): the lane writes the key to a `0600` `local.yml` inside an owned `0700` attempt directory, discards Local stdout/stderr, and reads only a `0600` readiness FIFO in memory because BrowserStack Local `8.9` re-spawns with `--key` in child `argv` (never capture Local debug output with a live key).
+
+#### Audit, cleanup recovery, and mixed-vendor development check
+
+Keep the original `0600` progress checkpoint (inside its `0700` directory; never publish it) and exact orchestrator checkout across cleanup and crash recovery:
+
+- Cleanup routes each known session by vendor, ends it, audits and `DELETE`s BrowserStack records, and verifies `404` on session JSON, all six log APIs, and every declared signed artifact (checkpointed before `DELETE`, including initial `404`s, within a three-minute absence window; delayed artifacts that serve content are fetched and scanned, and timeout leaves `recordRemoved: false` for `deviceCloudCleanup` retry).
+- After record absence passes, cleanup closes the loopback proxy, stops owned tunnels by process ancestry and canonical executable/cwd (if Local termination is unverified, key config is removed while preserving the workspace and `0600` PID/birth checkpoint; never-created directories clear only when process enumeration proves zero lineage), and removes the fixture and workspace (ambiguous creates stay dirty until reconciled in the vendor account, and unverified release sets `pixelUnrestored`).
+- Only whole JSON string values in duplicate-key-rejecting JSON containing one well-formed `http(s)://` URL (one case-insensitive `://`, hostname once, no comma; never object keys or plaintext logs) count as references; any other key or value containing `://` or a pinned artifact, dashboard, or documentation hostname fails closed.
+- `scripts/browserstack-pins.json` pins record-bound `browser_url`, `public_url`, `logs`, and `video_url` dashboard paths and queries plus the three `optimize_url` `/docs/` links (neither host is fetched, `/docs/` is excluded from the artifact census, and queried S3 artifacts require all six `X-Amz-*` parameters once each with `response-content-type` optional).
+- Every retained JSON body must pass raw, canonical, and four-pass fixpoint percent-decoded (literal malformed escapes; excess depth fails; one decoded `://` per URL) artifact and dashboard hostname censuses matching accepted reference counts, or fail with `unaccounted BrowserStack artifact reference`.
+- Durable incidents are checkpointed for audit hits, conflicting WebDriver IDs, pre-finalization URLs (`unbound retained reference`, no volatile queue), post-audit new origin+pathname objects (`post-audit retained reference`, deleted without late auditing), post-audit schema/census errors (`post-audit unvalidated record`, recovering whole-value pinned URLs from strict JSON while write errors halt), non-UTF-8/US-ASCII or repeated `charset` or `NUL` bytes, and unpinned `video_url` values.
+- Media indicators fail on running or finalized reads for non-empty screenshot/video/visual fields, `data:` or media-pattern keys, unquoted/quoted `:`/`=` text-log media keys excluding quoted placeholders, long raw image-base64 runs, or binary image/video byte signatures (boolean/text capability-flag echoes are ignored, and declared media stay unread).
+- Every retained response body (including rejected `DELETE`, signed-artifact errors, `200`s during absence polling, and `5xx` bodies before retry; XML/text `404`s and missing-object S3 `403`s are raw-scanned and hostname-censused without forcing JSON) is scanned raw and canonically before rejection; any incident runs `DELETE` and absence verification without clearing the incident or authorizing restoration.
+- Milestones `audited`, `recordRemovalStarted` (checkpointed before `DELETE` so crash recovery checks absence without re-sending `DELETE`, and post-`DELETE` `404`s keep prior audits), `recordDeleted`, and `recordRemoved` advance monotonically, normalizing legacy inventories to the last URL per origin/path and reporting closed codes plus removed-under-incident status.
+- Crash cleanup re-audits finalized surfaces only when live and fixture OMP generations match; otherwise it deletes records and increments `unauditedRecordsDeleted` without marking them audited.
+
+To run a non-qualifying mixed-vendor development check (private **Tested** evidence only; confirm no campaign, Pixel task, or Mac guest work overlaps, and put pinned Bun `1.4.4` first on `PATH`):
+
+```sh
+bun scripts/device-cloud-development.ts \
+  --identity "${DEVICE_CLOUD_IDENTITY:?private isolated identity JSON required}" \
+  --mac-host "${OMP_STABLE_MAC_HOST:?qualification user@host required}" \
+  --origin "${DEVICE_CLOUD_ORIGIN:?deployed candidate HTTPS origin required}" \
+  --session-label "${DEVICE_CLOUD_SESSION_LABEL:?isolated live OMP label required}" \
+  --mixed-vendors
+```
+
+`DEVICE_CLOUD_IDENTITY` (`ExternalLaneIdentity` in `scripts/device-cloud-development.ts`) must bind the verified candidate archive/digest, stock-OMP identity, and a fresh private `receiptRoot` containing `device-cloud-development`, with the candidate gateway, isolated OMP session, SSH fixture tools, both vendor accounts, Java, Rosetta 2, and single-user workstation boundary ready.
+
+Bounds are one attempt, at most three sequential sessions (TestingBot iPhone with Home Screen Push, BrowserStack iPad, and BrowserStack Samsung), zero creation retries, and no new allocations after 40 minutes while in-flight bounds finish, running full production audits and teardown on pass or fail.
+
+## Qualification attempt ownership
+
+The stable orchestrator retains schema-3 receipts and existing lane owners rather than introducing
+a workflow engine. New driver-bound executions identify the exact candidate, predecessor,
+orchestrator, policy, retained Mac and attempt. A completed attempt's job and exact receipt snapshot
+are immutable; only the candidate's working receipt advances. Consuming a retry removes the old
+failure authorization durably before admission or setup. Passed product proofs remain unchanged,
+while failed resource-owning lanes start on fresh epochs after current cleanup proof.
+Fresh unbound effectful campaigns require attempt zero. Later ordinals require the exact terminal-failed
+receipt digest or an immutable effect-free prior preflight outcome and digest, never just an execution
+file. Both routes consume authority durably before admission. Renewed admission failures belong to `campaign/admission`,
+preserving typed classifications without attaching a failure to a pending or previously passed lane.
+Execution source must match HEAD before admission or outcome writes; standalone bound `--preflight`
+accepts only attempt zero. Verified artifact identities are checked against the execution before
+replacing receipt fields, so a rejected candidate cannot corrupt later terminal persistence.
+
+Consumer failure does not cancel healthy siblings. The shared OMP host and relay tunnel live until
+their consumers settle; the tunnel stops before the independent publication lifecycle runs.
+Publication failure has a terminal timestamp, never an invented pass. Every normally returned
+campaign failure finalizes all started lanes and the campaign. Hard process death or failed storage
+remains an interrupted attempt, not authority to relaunch.
+Relay-stop failure belongs to `campaign/teardown`, not an already-passed publication proof. Finalization
+reconciles every typed lane owner with its terminal verdict before validating the complete graph.
+
+Execution cancellation carries a monotonic deadline to owned reads, subprocesses and waits. The
+owner aborts and awaits termination before cleanup; no timed-out promise is abandoned. Cleanup
+serializes per resource owner, not globally: Pixel restoration stays under its lease, Windows
+destruction does not queue behind unrelated Pixel work, and retained-Mac destructive cleanup waits
+for Mac consumers and their fixture restoration. A poisoned Pixel refuses subsequent measurements
+with collateral references to its originating failures, but always admits restoration under the same
+lease. Failed persistence cannot skip owned cleanup; `persistenceFailed` blocks a clean verdict.
+Later successful cleanup does not erase an earlier cleanup failure, its identity, or Pixel poisoning.
+A shared containment predicate rejects negative cleanup/reconciliation facts, persistence failures
+and remaining resources; the final receipt also consumes unsettled remote owners even when setup
+failed before a lane recorded its resource. Cleanup, retry and retirement use that same conservative
+boundary. Failed cloud or Push restoration retains its Mac fixture and owner records; other owners,
+including Windows VM destruction, remain independent.
+All mutating/lifecycle remote commands use `qualification-remote-owner.sh`, shared by TypeScript
+executors and the Mac shell wrapper. Uploads stream through an owned command rather than unowned
+`scp`; OMP PTYs foreground the registered process group. Shell-wrapper owner IDs are journaled before
+dispatch so losing the local wrapper cannot lose the remote fence. Cancellation uses a fresh bounded
+SSH command to terminate the whole group and await absence, not merely kill the local SSH client.
+Leader exit or a completion marker never proves that descendants have stopped. A detached reboot
+owner remains unresolved until a changed boot identity proves the old group cannot survive.
+A private cancellation tombstone fences delayed admission; unproved termination refuses later
+effects on that host, including destructive cleanup and tunnel startup, with `remote_unsettled`
+collateral referencing the original teardown root. Ordinary nonzero exits are reconciled too.
+Only explicitly bounded read-only admission probes bypass ownership; they create no owner files.
+
+Read-only admission is distinct from effectful rig readiness. After lease acquisition and verified
+candidate/predecessor bytes, readiness stages a disposable candidate/stock-OMP fixture, measures
+the real push path, and restores it before any full matrix fan-out. Its private receipt epoch owns
+the Pixel baseline sidecar; structured observations contain only bounded numbers and booleans.
+Manual attempt-zero readiness is diagnostic evidence, not a synthesized policy binding or automatic
+retry authorization.
+Failed or unresolved readiness is a failure-graph owner, never a passing receipt: its terminal
+summary must represent it, and unresolved restoration cannot coexist with proven cleanup.
+`restored` requires an explicit `baselineRestored: true`; passing campaigns also require terminal
+passed readiness. Every receipt write validates the full schema, and restarting lanes clears
+not-started reasons as well as stale failure evidence. Restarting a root invalidates the
+entire prior standalone failure graph before persistence, including dependent collateral.
+The Push owner retains its transient baseline for restoration, but the orchestrator's sidecar mirror
+advances only after its private durable write. Restoration attempts every owner even if every
+checkpoint fails; typed `persistenceFailed` evidence, cleanup identities and Pixel poisoning survive
+both later cleanup and final receipt writes. Failed cleanup persistence cannot report a restored
+baseline or manufacture retry authority. Effect-free Windows admission service failures use the
+actual `preflight`, `connection` or `output` producer steps; post-allocation steps cannot authorize
+receiptless retries.
+Readiness restoration is **not a byte-identical installation-state baseline**: uninstall removes
+the disposable service/staging but retains the gateway token and runtime activation history/current
+pointer. Those private states are neither captured/digest-compared nor isolated by this gate.
+Consequently the subsequent full Mac lifecycle follows a readiness candidate activation, not a
+pristine pre-readiness install. Installation-state isolation/restoration remains an explicit deferred
+P2; `baselineRestored` covers the captured Pixel baseline, service/Serve containment and staging only.
+Transport failures at an ordinary lane's explicit `cleanup` step do not authorize automatic retry.
+Private receipt, readiness-baseline and outcome persistence belongs to the POSIX release driver:
+file data and parent directories are fsynced; Windows refuses those writes before filesystem
+effects. Pure receipt/graph parsing and in-memory state-machine tests remain portable.
+
+## Post-release local installation smoke
+
+After `.github/workflows/signed-release.yml` publishes a stable release, run `smoke:release` (`scripts/post-release-smoke.ts`) from the matching release tooling checkout (`smoke:release` is not shipped inside the runtime archive) to verify the published archive on the Darwin-arm64 Studio operator account (`gwops`) and USB-attached physical Pixel. Signed-candidate qualification and earlier smokes never substitute for a published-byte run.
+
+Prerequisites before running `smoke:release`:
+
+- Run under pinned Bun `1.4.4` (`package.json` `packageManager`) with `gh`, `cosign`, `git`, `shasum`, `tar`, `plutil`, `tailscale`, `tmux`, and `adb` on `PATH` as `tailscaled`'s Studio operator, with an existing `tailscale-serve` gateway (`auth.allowedLogins` non-empty; on a fresh host, install the published predecessor first), private `config.json` and `readiness-token`, and the Pixel PIN in `~/Library/Keychains/omp-qualification.keychain-db`.
+- Connect one authorized `adb` device (disconnect others; no `OMP_ANDROID_SERIAL` override exists) with the **OMP Sessions** WebAPK installed for the Studio origin, tethering off, and the one-time Tailscale (`com.tailscale.ipn`) Doze exemption set ([Device admission and one-time WebAPK setup](ANDROID.md#device-admission-and-one-time-webapk-setup), checked read-only before downloads or host changes). Do Not Disturb and Bedtime may stay on because smoke does not test notifications.
+
+Preview bounded effects read-only (`--plan` claims no lease and makes no network, service, Tailscale, OMP, or Android changes), then run the smoke with the verified archive SHA-256:
+
+```sh
+bun run smoke:release -- --tag "$TAG" --plan
+bun run smoke:release -- --tag "$TAG" --archive-sha256 "$ARCHIVE_SHA256"
+```
+
+Optional flags are `--repo <owner/name>` (default `carrythroughsystems/omp-session-gateway`), `--force-reinstall` (reinstalls even when the active runtime already matches `$TAG` and `sourceCommit`; always passed by the release driver), and `--rebuild-omp` (runs `bun add --global --exact @oh-my-pi/pi-coding-agent@<pinned-version>` and prepends Bun's global bin to `PATH`).
+
+Under the shared `smoke:<repository>:<tag>` lock in `~/.local/state/omp-session-gateway/release-host/lease.sqlite`, `smoke:release` executes these steps in order:
+
+1. Downloads all six release assets, checks `SHA256SUMS`, confirms GitHub Latest state and API digests, verifies all three Cosign Sigstore bundles and three GitHub build attestations (honoring `HISTORICAL_RELEASE_TAGS` signer identity), checks local and GitHub verified annotated tags and `origin/main` ancestry, matches `--archive-sha256`, and validates `release-info.json`, `/assets/app.<hash>.js`, and `UPSTREAM.lock.json` (`>= 18.1.20` and Bun `1.4.4`).
+   - During publication, `signed-release.yml` also validates draft and published flags plus all six uploaded digests across `0`/`2`/`4`/`8`-second retries, deleting the draft or release if verification fails while leaving the signed tag for diagnosis and any already-public attestations or Rekor entries as failed-attempt provenance.
+2. Seeds or verifies `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun` (`0755`), then selects `omp` on `PATH` when its `realpath` resolves inside `@oh-my-pi/pi-coding-agent` or falls back to Bun's global install (installing the pinned version when absent or `--rebuild-omp` is set) so non-stock launchers such as Code Mode are never used, refusing before any gateway change unless stock mainline `>= 18.1.20` has readable `collab.autoStart`.
+3. Installs (when version, commit, LaunchAgent Bun path, or `--force-reinstall` requires it) through the persistent Bun executable, proves `config.json` and `readiness-token` remained byte-identical, ensures the gateway's Tailscale Serve HTTPS mapping while verifying all unrelated Serve mappings are unchanged, and requires `status` (`installed`, `active`, `ready`, `diverged: false`) and every `doctor` check to pass.
+4. Sets `collab.autoStart` to `control` (verified by read-back), creates `~/omp-post-release-<version>-<nonce>` with a `0600` `.omp-session-gateway-post-release-smoke` marker, and starts a detached `tmux` fixture using `scripts/omp-fixture.json` and `OMP_SKIP_SETUP=1` (must publish with a model within 90 seconds; non-eligible targets fail closed), then runs `android-collab-smoke.ts`, `android-leak-sweep.ts`, `android-acceptance.ts`, and WebAPK verification:
+   - Acceptance admits reachability when ICMP succeeds or, when host firewall stealth drops ICMP, when an owned Chrome/CDP disposable tab navigates top-level to credential-free `/api/v1/health` within 15 seconds (`2xx`, exact URL, `status` `ready` or `degraded`, `no-store`, service worker bypassed; `android-reachability` logs `satisfiedBy` as `icmp`, `https`, or `null` to private stderr, while qualification `--preflight` stays ICMP-only).
+   - Acceptance snapshots Airplane, Wi-Fi, and mobile-data state, polls `dumpsys connectivity` (`Current Networks:`, 5-second `adb` bound, up to 60 seconds) after each lock, Airplane, and forced-Doze cycle for a connected VPN agent, and on restoration restores radios, exits forced Doze, resets battery emulation, rechecks VPN, and runs the 15-second HTTPS `/api/v1/health` check (`AndroidTailnetRecoveryError` marks restoration failed; reconnect Tailscale manually on the Pixel if stopped).
+   - WebAPK verification wakes the display, dismisses the keyguard, sends `KEYCODE_HOME`, and launches the `org.chromium.webapk.*` package for the gateway host (re-dispatching at 10 seconds inside a 30-second focus deadline, with 20-second launcher and 5-second `dumpsys`/keyevent bounds plus 2-second kill grace; timeouts keep `topResumedActivity`, `topDisplayFocusedRootTask`, `mWakefulness`, and `isKeyguardShowing` up to 768 bytes each) and checks `/` or `/client/` within 30 seconds.
+5. Kills only the owned `tmux` session, waits for `/api/v1/sessions` revocation, removes the fixture directory only if `.omp-session-gateway-post-release-smoke` matches the run ID, copies `android-{collab,leaks,acceptance}-{out,err}.log` (up to 262,144 bytes each, `0600`) and on failure `failure.json` into `0700` `OMP_RELEASE_SMOKE_LOG_DIR` (`smoke-logs/` under the driver, or `~/.local/state/omp-session-gateway/post-release-smoke/`), and removes staging (kept intact if log copying fails).
+   - Leaves the stable gateway, `config.json`, `readiness-token`, persistent Bun, mainline OMP, Serve mappings, and WebAPK installed; if killed before cleanup, check `tmux` for `omp-post-release-*` and verify `~/<label>/.omp-session-gateway-post-release-smoke` before deleting anything.
+
+Record every published-byte smoke result, including any failed attempt, in [Release status](RELEASE_STATUS.md) with its source commit, archive digest, preservation, physical-client, and cleanup evidence.
+
+## Default-relay soak qualification
+
+This optional eight-hour lane is not a mainline release gate; each mainline release runs a founder-approved fresh 30-minute signed-candidate check instead, and only an actual 28,800-second run may be reported as eight-hour or bounded-memory-growth evidence (no fork-era result transfers).
+
+Keep a stock mainline OMP `>= 18.1.20` session and the gateway running, then exercise a read-only **View** client for the default eight hours:
+
+```sh
+OMP_GATEWAY_SOAK_PUBLIC_ORIGIN=https://gateway.example.ts.net \
+OMP_GATEWAY_SOAK_TAILSCALE_LOGIN=user@example.com \
+OMP_GATEWAY_SOAK_GATEWAY_PID="$(launchctl print "gui/$(id -u)/omp-session-gateway" | awk '$1 == "pid" && $2 == "=" {print $3; exit}')" \
+bun run qualify:relay-soak
+```
+
+The harness sends identity headers and receives the launch capability over a numeric loopback gateway origin, requires `no-store` metadata and launch responses, never prints the capability, and fails if the collaboration client disconnects or is not live at completion. Set `OMP_GATEWAY_SOAK_INSTANCE_ID` to pick one published session, or `OMP_GATEWAY_SOAK_SECONDS` (`>= 1`) for a shorter diagnostic run.
+
+When `OMP_GATEWAY_SOAK_GATEWAY_PID` is set (from `launchctl` on macOS as above, or `systemctl --user show --property MainPID --value omp-session-gateway` on Linux; never inferred from the listening port because loopback may be an SSH tunnel), the harness fails before launch if unsampleable or on gateway exit and samples RSS and CPU at relay start, every ~60 seconds, and at completion.
+
+The output JSON adds a `gateway` summary (sample count, start/end/min/max RSS in KiB, least-squares RSS trend in KiB/hour, and CPU seconds; set `OMP_GATEWAY_SOAK_SAMPLES` to a non-existent absolute path to stream `elapsed_s,rss_kib,cpu_s` CSV rows). Record the gateway commit, stock OMP commit, output JSON, host and browser versions, and date in [Release status](RELEASE_STATUS.md).
+
+## Fleet CI runtime
+
+Fleet CI is an optional external self-hosted shadow runner service (operated outside this repository) rather than a substitute for required GitHub-hosted checks or release qualification. Every job installs and verifies the `package.json` `packageManager` Bun version (`bun run check:repository` rejects self-hosted jobs that skip runtime setup or use a different Bun version).
+
+The fleet controller pins the complete workflow digest; after an intentional workflow edit, review and update that profile binding without rewriting historical qualification records. Validate the appliance and run a bounded shadow against a clean pushed commit rather than relying on a controller dry-run, bypassing workload guards, or replacing the shared runner image.
+
+## Build and keyless provenance
+
+`.github/workflows/signed-release.yml` accepts only commits reachable from `main` tagged with shapes matching the `package.json` version (positive integer `n`; `rc`, `stable`-suffixed, zero-indexed, cross-version, and unknown shapes fail before building):
+
+- `v<version>-prealpha.<n>` for internal engineering candidates;
+- `v<version>-alpha[.<n>]` for advertised alpha prereleases;
+- `v<version>-beta[.<n>]` for advertised beta prereleases;
+- `v<version>` for the stable GitHub Latest release; and
+- `provenance-test-v<version>.<n>` for provenance exercises.
+
+`scripts/release-policy.ts` is the sole tag classifier, mapping only bare `v<version>` to `stable`, non-prerelease, and GitHub Latest (all other shapes publish as prereleases with Latest disabled; `OMP_RELEASE_CHANNEL` selects only `release-info.json` channel text and rejects unknown values).
+
+The workflow runs `bun run check`, builds the deterministic archive, verifies its SHA-256 digest, publishes `actions/attest-build-provenance` GitHub attestations and keyless Cosign Sigstore bundles via GitHub Actions OIDC (no long-lived signing key exists), creates one complete draft, and publishes six assets:
+
+- `omp-session-gateway-<version>-bun.tar`;
+- `omp-session-gateway-<version>.spdx.json`;
+- `SHA256SUMS`;
+- `omp-session-gateway-<version>-bun.tar.sigstore.json`;
+- `omp-session-gateway-<version>.spdx.json.sigstore.json`; and
+- `SHA256SUMS.sigstore.json`.
+
+Repository **Settings → General → Features → Immutable releases** is required before tagging; confirm it prints `true`:
+
+```sh
+gh api repos/carrythroughsystems/omp-session-gateway/immutable-releases --jq .enabled
+```
+
+GitHub locks the release, assets, and tag and issues the immutable-release attestation after a 24-hour post-publication grace window; treat every published release as final immediately and cut a new tag to fix defects.
+
+For a local unsigned build, run `bun run check` and `bun run release:build`, which emits `dist/release/omp-session-gateway-<package-version>-bun.tar` (containing `SBOM.spdx.json` and zero source maps) plus external SPDX 2.3 SBOM and `SHA256SUMS` (set `OMP_RELEASE_CHANNEL` to `pre-alpha`, `alpha`, `beta`, or `stable` to reproduce a tag's `release-info.json` while all other members and the SBOM stay identical). Never upload source maps, logs, recordings, or unverified fixture diagnostics.
+
+## Verify a published build
+
+Install current GitHub CLI (`gh`) and Cosign releases, select the release tag, and download its assets into an empty directory:
+
+```sh
+REPO=carrythroughsystems/omp-session-gateway
+TAG="$(gh release view --repo "$REPO" --json tagName --jq .tagName)"
+WORKFLOW=signed-release.yml
+# Historical signing identity snapshot, captured 2026-10-09; newest: v0.7.5,
+# published 2026-10-08T16:38:49Z. Never infer the signer from a redirected URL.
+SIGNING_REPO="$REPO"
+case "$TAG" in
+  v0.7.5|v0.7.5-prealpha.2|v0.7.5-prealpha.1|v0.7.4|v0.7.4-prealpha.1|v0.7.3|v0.7.3-prealpha.1|v0.7.2|v0.7.2-prealpha.2|v0.7.2-prealpha.1|v0.7.1|v0.7.1-prealpha.1|v0.7.0|v0.7.0-prealpha.1|v0.6.3|v0.6.3-prealpha.2|v0.6.3-prealpha.1|v0.6.2|v0.6.2-prealpha.1|v0.6.1|v0.6.1-prealpha.1|v0.6.0|v0.6.0-prealpha.4|v0.6.0-prealpha.3|v0.6.0-prealpha.2|v0.6.0-prealpha.1|v0.5.3|v0.5.3-prealpha.1|v0.5.2|v0.5.2-prealpha.1|v0.5.1|v0.5.1-prealpha.1|v0.5.0|v0.5.0-prealpha.1|v0.4.2|v0.4.2-prealpha.1|v0.4.1|v0.4.1-prealpha.3|v0.4.1-prealpha.2|v0.4.1-prealpha.1|v0.4.0|v0.4.0-prealpha.1|v0.3.0|v0.3.0-prealpha.3|v0.3.0-prealpha.2|v0.3.0-prealpha.1|v0.2.1|v0.2.1-prealpha.2|v0.2.0|v0.2.0-prealpha.1|v0.1.0-prealpha.25|v0.1.0-prealpha.24|v0.1.0|v0.1.0-prealpha.23|v0.1.0-prealpha.22|v0.1.0-prealpha.21|v0.1.0-beta.1|v0.1.0-prealpha.20|v0.1.0-prealpha.19|v0.1.0-prealpha.18|v0.1.0-alpha.1|v0.1.0-alpha|provenance-test-v0.1.0.11|v0.1.0-prealpha.17|v0.1.0-prealpha.13|v0.1.0-prealpha.12|v0.1.0-prealpha.11|v0.1.0-prealpha.9|v0.1.0-prealpha.10|v0.1.0-prealpha.8|v0.1.0-prealpha.7|v0.1.0-prealpha.6|v0.1.0-prealpha.5|v0.1.0-prealpha.4|v0.1.0-prealpha.3|v0.1.0-prealpha.2|v0.1.0-prealpha.1|provenance-test-v0.1.0.10|provenance-test-v0.1.0.9|provenance-test-v0.1.0.8|provenance-test-v0.1.0.7|provenance-test-v0.1.0.6|provenance-test-v0.1.0.5)
+    SIGNING_REPO=alphastorm/omp-session-gateway ;;
+esac
+
+mkdir release-verification
+gh release download "$TAG" --repo "$REPO" --dir release-verification
+cd release-verification
+ARCHIVE="$(ls omp-session-gateway-*-bun.tar)"
+SBOM="$(ls omp-session-gateway-*.spdx.json)"
+```
+
+Without an explicit tag, `gh release view` selects GitHub Latest (always the qualified stable release). To verify a historical release, set `TAG` to that tag and `WORKFLOW` to its signing workflow (`v0.1.0-beta.1` used `release.yml`); downloads come from `carrythroughsystems/omp-session-gateway`, while certificates and attestations through `v0.7.5` keep `alphastorm/omp-session-gateway` (never add newer tags to that closed list or use wildcards, and read `ARCHIVE`/`SBOM` from disk).
+
+Verify the immutable-release attestation and all six assets (fails during the 24-hour pre-lock grace window or on an unattested file):
+
+```sh
+gh release verify "$TAG" --repo "$REPO"
+for asset in \
+  "$ARCHIVE" \
+  "$SBOM" \
+  SHA256SUMS \
+  "$ARCHIVE.sigstore.json" \
+  "$SBOM.sigstore.json" \
+  SHA256SUMS.sigstore.json
+do
+  gh release verify-asset "$TAG" "$asset" --repo "$REPO"
+done
+```
+
+Verify the archive checksum (`shasum -a 256 -c SHA256SUMS` on macOS):
+
+```sh
+sha256sum --check SHA256SUMS
+```
+
+On Windows, in PowerShell (prints `True`):
+
+```powershell
+$archive = Get-Item omp-session-gateway-*-bun.tar
+(Get-FileHash $archive -Algorithm SHA256).Hash -eq (Select-String -Path SHA256SUMS -SimpleMatch $archive.Name).Line.Split(' ')[0]
+```
+
+Verify GitHub build provenance against the exact signer repository, workflow, and tag ref:
+
+```sh
+for artifact in "$ARCHIVE" "$SBOM" SHA256SUMS
+do
+  gh attestation verify "$artifact" \
+    --repo "$SIGNING_REPO" \
+    --signer-workflow "$SIGNING_REPO/.github/workflows/$WORKFLOW" \
+    --source-ref "refs/tags/$TAG"
+done
+```
+
+Verify the independent Sigstore bundles against the GitHub Actions OIDC issuer and certificate identity:
+
+```sh
+CERTIFICATE_IDENTITY="https://github.com/$SIGNING_REPO/.github/workflows/$WORKFLOW@refs/tags/$TAG"
+for artifact in "$ARCHIVE" "$SBOM" SHA256SUMS
+do
+  cosign verify-blob \
+    --bundle "$artifact.sigstore.json" \
+    --certificate-identity "$CERTIFICATE_IDENTITY" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    "$artifact"
+done
+```
+
+Passing checksum, build-attestation, Cosign, and immutable-release checks prove archive integrity and origin (not host or client compatibility); continue with [CLI and daemon installation](OPERATIONS.md#2-cli-and-daemon-installation).
+
+## Versioning
+
+OMP Session Gateway uses Semantic Versioning:
+
+- breaking configuration, protocol, or security behavior increments the appropriate version component;
+- pre-`1.0` minor versions may introduce breaking changes when stated prominently in release notes; and
+- wire and HTTP protocol versions are explicit and never inferred from package versions alone.
+
+## Release notes
+
+Every release note includes:
+
+- release channel status (`pre-alpha`, `alpha`, `beta`, or `stable`);
+- compatible stock OMP versions and baseline commit;
+- security-relevant changes;
+- user-visible changes;
+- configuration or migration steps;
+- known limits and rollback instructions; and
+- acknowledgements without reporter-sensitive details.
+
+## Dated rollout records
+
+Everything below is a dated rollout or fork-era record kept as written for historical evidence.
 
 ### Merge queue rollout (operator only)
 
@@ -665,230 +1128,7 @@ checkout's `packageManager`, not from the release tag alone.
    This is explicit operator setup, never an automatic Tailscale or battery-policy remedy; see
    [Android device admission](ANDROID.md#device-admission-and-one-time-webapk-setup).
 
-### Studio installation (run as gwops after integration)
-
-The bot account is a repository collaborator with write access. Its registered Studio SSH signing
-key is `~/.ssh/omp-gateway-release-signing`; the key's public half is
-`ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPnD0XsQMUDImQxiWVgU8IXM6XeMVxFgPvp9bOAl/5Gd`.
-The driver reads the authenticated bot's numeric GitHub id and derives its noreply tagger address
-(default account: `339384828+alphastorm-release@users.noreply.github.com`). All gh and HTTPS git
-writes use `~/.config/gh-release-bot`; ambient founder tokens and git identities are discarded.
-Neither a token nor a private key belongs in the plist or repository.
-
-Prerequisites remain those of the full campaign/smoke above: retained guest running and reachable,
-Pixel and WebAPK ready, cloud credentials in their private files, predecessor installed, current
-`gh`/`cosign`/`tmux`/`adb`, and pinned Bun. The driver unlocks the empty-password
-`~/Library/Keychains/omp-qualification.keychain-db` before campaign Pixel work and before smoke.
-Non-login SSH needs the explicit Homebrew PATH. Install only after old manual launchers and their
-children are drained; retain their receipts and the shared release-host lease.
-
-SSH to the Studio as the operator (for example `ssh gwops@studio.example.ts.net`), then:
-Disable admission and unload the driver before any checkout mutation. Do not continue while a
-worker, detached job or host lease remains active: let it finish and retain its receipts. A failed
-owner requires its documented recovery; never delete the lease to make installation proceed.
-
-```sh
-export PATH="$HOME/.omp/lane-toolchain/bun-1.4.4/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-state="$HOME/.local/state/omp-session-gateway/release-driver"
-install -d -m 700 "$state"
-touch "$state/disabled"
-if launchctl print "gui/$(id -u)/com.omp.gateway-release-driver" >/dev/null 2>&1; then
-  launchctl bootout "gui/$(id -u)/com.omp.gateway-release-driver"
-fi
-# Confirm no driver tick/worker or tmux job remains before touching the checkout.
-pgrep -fl 'release-driver|stable-qualification|post-release-smoke'
-tmux list-sessions
-# Inspect state/outbox and all job claims, retaining them; never fabricate completion.
-if test -f "$state/state.json"; then jq '{phase,candidate,intent,announcement}' "$state/state.json"; fi
-find "$state/jobs" -name '*.json' -type f -print
-if test -f "$HOME/.local/state/omp-session-gateway/release-host/lease.sqlite"; then
-  sqlite3 -readonly "$HOME/.local/state/omp-session-gateway/release-host/lease.sqlite" 'select * from campaign;'
-fi
-# STOP until active owners have completed and pending effects/outbox are reconciled.
-# Do not advance a checkout underneath a pending release; finish/recover it on its old policy.
-cd "$HOME/Development/omp-session-gateway"
-git fetch origin main
-git switch main
-git merge --ff-only origin/main
-bun install --frozen-lockfile
-GH_CONFIG_DIR="$HOME/.config/gh-release-bot" gh auth status
-# Must print alphastorm-release; do not copy the founder's gh configuration.
-GH_CONFIG_DIR="$HOME/.config/gh-release-bot" gh api user --jq .login
-bun scripts/release-driver.ts plan
-# One-time cleanup of checkouts retained by older driver versions; keep admission disabled.
-# Review wouldRemove paths, local branches and estimated bytes before applying.
-bun scripts/release-driver.ts prune
-OMP_RELEASE_DRY_RUN=0 bun scripts/release-driver.ts prune --apply
-bun --eval 'const template = await Bun.file("scripts/com.omp.gateway-release-driver.plist").text(); await Bun.write(process.env.HOME + "/Library/LaunchAgents/com.omp.gateway-release-driver.plist", template.replaceAll("@HOME@", process.env.HOME));'
-chmod 600 "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
-# Replace this documentation target with the retained guest's actual SSH target.
-/usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:OMP_STABLE_MAC_HOST gwqual@mac.example.ts.net' "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
-# The checked-in template is dry-run by default. Review the config and read-only plan first.
-plutil -lint "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
-# To arm after review, unload, change the explicit switch, and reload:
-launchctl bootout "gui/$(id -u)/com.omp.gateway-release-driver"
-/usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:OMP_RELEASE_DRY_RUN false' "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
-rm "$HOME/.local/state/omp-session-gateway/release-driver/disabled"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.omp.gateway-release-driver.plist"
-```
-
-The template runs every 300 seconds and at load under the logged-in gwops user. It sends launchd
-stdout/stderr to `/dev/null`; the driver keeps a bounded 256-KiB private `driver.log` and per-job
-exit/diagnostic files. The account's existing gateway and VM LaunchAgents are not modified.
-Configuration is `OMP_RELEASE_BOT_LOGIN`, `OMP_RELEASE_FOUNDER_LOGIN`,
-`OMP_RELEASE_GH_CONFIG_DIR`, `OMP_RELEASE_SIGNING_KEY`, `OMP_RELEASE_STATE_DIR` (absolute
-paths), and `OMP_RELEASE_DRY_RUN=1|true`. Defaults match the paths above.
-
-### Readiness and credential expiry
-
-Both plan and status are read-only, including local state. Plan includes readiness alongside its
-proposed operation; status reports phase, candidate, pending intent/outbox, typed hold and the
-first unreviewed source commit when applicable. Readiness
-uses the dedicated machine account even when a plan uses an existing read-only gh session for
-repository reads. It checks private credential-file ownership/mode/presence, required tools,
-pinned Darwin-arm64 Bun, configured retained guest/SSH reachability, one authorized adb device,
-repository write identity, writer-readable branch-protection facts, disabled/dry-run switches and
-the shared lease. Admin-only facts use the installed attestation above, not inferred defaults. Normal ticks persist
-sanitized readiness.json before new-request admission; false prerequisites leave requests unconsumed.
-No raw credential, device serial or response header is persisted.
-
-GitHub credential expiry is reported from its response header when supplied. Service-account,
-Tailscale and Vultr expiry/validity remain explicitly unknown without supported metadata; the
-driver does not invent validity or refresh credentials. TestingBot catalog/device availability,
-Pixel PIN/WebAPK, workflow-secret validity and retained guest full preflight remain mandatory
-candidate preflight requirements. File presence/SSH reachability are not full-matrix qualification
-or zero-touch proof. Readiness lists unobserved checks explicitly. Resolve missing prerequisites,
-wrong bot identity or an unreadable/owned lease before arming; never delete the owning lease.
-
-The Funnel check is gateway-scoped: unrelated Mana/Studio Funnels stay live. Funnel on the gateway
-Serve authority, proxy/TCP routes to its backend, foreground gateway exposure, and unparseable
-relevant configuration refuse. Do not pause unrelated investor Funnels to pass smoke. Published-byte
-smoke still forces reinstall and checks every doctor result; public gateway exposure stays prohibited.
-
-### Durable jobs, failures and kill switch
-
-State lives under `~/.local/state/omp-session-gateway/release-driver/`: atomic/fsynced
-`state.json` contains the write intent, pinned PR/tag identities and comment outbox. Atomic JSON
-writes sync the file before rename on every platform and sync the parent directory on POSIX.
-Windows retains file sync and atomic rename without the unsupported directory fsync. A SQLite
-mutex excludes overlapping ticks. Deterministic release branches, tags, comment markers and tmux
-job ids reconcile a provider write accepted just before a process crash. Plan does not create any
-of these. Bot-owned worktrees under `work/` leave the operator checkout's working tree alone.
-After the `close` transition is durably saved, the driver prunes other releases' recognized
-`work/` checkouts and older `vX.Y.Z-rebuild` checkouts. Every candidate, retry and request family
-for the saved state's current version stays, including after close; it becomes eligible only
-after a later version is selected (automatic pruning waits for that release's close).
-Each removal runs `git worktree remove --force`,
-then `git worktree prune`, then deletes only the local `release-driver/...` branch it held.
-Remote branches and tags are unchanged. A pruning failure becomes a bounded tick warning in
-`driver.log`; it never undoes the saved close or prevents its progress comment.
-
-`bun scripts/release-driver.ts prune` previews that same cleanup without writing state, a mutex,
-logs or Git metadata. Its JSON lists `wouldRemove` paths, local branches and estimated logical
-`bytes` (symlinks are counted, not followed), plus `kept` paths and reasons.
-`bun scripts/release-driver.ts prune --apply` performs it under the tick mutex on the pinned
-Studio toolchain; `OMP_RELEASE_DRY_RUN` must be off. Both modes refuse while admission is armed
-(no `disabled` file) and any driver tmux job is alive. With admission disabled, unrelated cleanup
-is allowed, but a live job's checkout still stays. Pending intent references and non-terminal
-job specifications protect their checkouts even when no session survives; a result without its
-durable exit is not terminal. Missing state or an unreadable job/session inventory refuses cleanup.
-Unrecognized checkouts, work-directory symlinks and checkouts outside `work/` are never removed.
-Neither mode changes `jobs/` evidence, `state.json`, `readiness.json` or the release-host lease.
-
-Intent patches carry explicit `clear` field names for deletion, never `undefined` values that JSON
-would discard. One patch applicator handles first execution and persisted replay; a meta-test covers
-every patch-emitting operation and proves JSON round-trip equality and identical application.
-The candidate campaign uses a dedicated published `release-driver/*-campaign` branch pinned to
-the prepare merge, so unrelated movement of main cannot silently change the orchestrator source.
-
-Campaign, approve checks and smoke run detached in named tmux sessions with a start claim, JSON
-result and exit file under `jobs/`. Every campaign worker, including retries and preflight failures,
-retains the qualification child's exact stdout and stderr as immutable `qualification-out.log` and
-`qualification-err.log` in its private job directory (mode `0600`). Each file holds the last
-262,144 bytes across that job's preflight and campaign invocations, without trimming or re-encoding;
-both files are empty if qualification never starts. These files are fsynced before the exit and
-terminal result are written, on success and failure. The outer worker's `out.log`/`err.log` remain
-separate. Raw child output and error chains stay private: never copy these logs into tracking
-issues or announcements. The sanitized `diagnostic.json` contract is unchanged. Campaign receipts remain at
-`~/.local/share/omp-session-gateway/qualification/<candidate>/stable-qualification.json`.
-Smoke workers likewise retain immutable `smoke-out.log` and `smoke-err.log` (the last 262,144
-unmodified bytes per stream, mode `0600`) before publishing their exit/result, including empty
-files if the child never started. A failed smoke also retains the bounded original error/cause
-chain in `smoke-failure.json`; this private diagnostic does not grant retry authority or change
-`diagnostic.json`. Nested Android command output is retained separately in the job's private
-`smoke-logs/` directory, so a closed stage such as “Android Chrome” no longer loses the child
-exception. Never infer a product or rig cause from that stage alone.
-Qualification and smoke use their existing shared release-host lease (including its durable failed
-owner); the driver never deletes or replaces the database or steals a foreign/live owner.
-A missing worker or an ordinary/non-retryable device/cloud failure enters diagnostic-required.
-An immutable job specification that disagrees with its launch binding also stops in
-diagnostic-required for campaign (including attempt zero), approve-check and smoke jobs. The driver
-records `failedMain`, clears the launch intent and posts the diagnostic progress comment rather than
-re-planning the same immutable mismatch. After approval/publication, preserve the immutable release
-and reconcile manually.
-New-format, fully contained infrastructure failures use the bounded automatic retry contract below;
-neither a raw timeout nor exit 75/143 proves eligibility.
-A missing local approve-check
-worker can resume only at the same head/tree and policy; no device, cloud or publication action
-is replayed. Passed/failed results are never overwritten to invent a retry. The saved intent and
-outbox reconcile accepted bot merges and announcements after a crash; immutable tags never move.
-After a fix moves main beyond `failedMain`, the same still-open tracking issue with the same OMP
-version/class and recorded successful request run is automatically re-selected. The successful
-filing job must record that exact issue number; another older, relabeled or solely remaining open
-issue cannot inherit a run whose actual issue closed. The driver revalidates a recorded numeric
-`run:attempt` even if it has fallen out of the newest 100 runs.
-**Installation boundary:** older runs without the API-visible issue-number record, including
-already-stored numeric tokens, require one explicit successful dispatch of the updated request
-workflow for the same open issue/version/class. Legacy creation-time tokens are also insufficient.
-No historical run is backfilled or inferred from mutable metadata. Once bound to a recorded run,
-no new workflow dispatch, request closure, or manual selection retirement is required.
-If the kill switch delays consuming a failed campaign until after its fix landed, `failedMain`
-records the candidate commit that actually ran (or the selected source before candidate binding),
-not main at observation time. The next tick can therefore re-select; merely observing the candidate's
-own prepare merge does not count as a fix.
-An explicit new successful same-version/class request
-still works, including a replacement issue when the old issue closed. A closed issue alone cannot retry.
-An unmerged prepare held on `stale-source` also re-selects after main differs from its failed
-selection's source, including a hold before a prepare PR was created. Merged prepares and other
-authority holds do not take that shortcut. Observing the stable tag or a latest stable at or beyond
-the failed version vetoes re-selection in planning, without saving a new write intent.
-
-Re-selection appends `{candidate, reason, at, issue, preparePr, failedMain}` to `state.retired`,
-closes only the old bot-owned unmerged prepare PR with a reconciled bot comment, and prepares the
-next unused prealpha (retired untagged candidates also reserve their ordinal). It never closes
-the tracking request, rewrites old jobs/receipts, or silently incorporates a fix into an existing
-candidate. Source review, policy fingerprint and immutable-stable guards are rechecked before effects.
-After the authority walk and lease recovery, the open issue, unmerged orphan identity and stable
-tag/release absence are reread before closure and immediately before committing selection. The driver
-also refreshes the tag listing and recomputes the next candidate ordinal at each revalidation.
-If a newly visible prealpha reserves the planned ordinal, the old intent is dropped and replanned
-without changing the failed selection; an immutable tag is never reused for different bytes. Discovery
-also checks the deterministic old prepare branch when its number was not checkpointed. A newly
-visible orphan drops the obsolete intent before retirement, so the next tick durably pins its identity
-and audit entry before closing it. A moved subject drops its obsolete intent and
-preserves the failed selection; any already-recorded lease/PR retirement remains replay-safe.
-Closing a fulfilled request retains its recorded filing identity, and the closed state never
-re-selects that fulfilled issue even if a later GitHub listing still shows it open.
-The previous host lease must be absent or eligible for owner-verified cleanup retirement below.
-Follow [Release gates](#release-gates) for incomplete cleanup; a request is not permission to
-abandon cloud/device resources. Ordinary failed receipts stay unchanged. Public
-verification failures also leave the write intent for diagnosis; immutable tags are never moved.
-
-A 1Password identity-probe deadline is a host-fault diagnostic, not a wrong-account verdict.
-The probe kills its child after 30 seconds. If the installed macOS executable hangs, an operator
-can re-exec the same inode through a hardlink or run `brew reinstall --cask 1password-cli`;
-confirm `op --account my.1password.com --version` under the release account, then rerun the
-exact candidate's credential-bearing preflight. A passing manual preflight has no durable
-candidate-bound retry receipt and does not clear `diagnostic-required`. The retry gate compares
-main's SHA for inequality with `failedMain`, not changed paths or ancestry; separate source and
-policy authority still apply. Retain the failed job and receipts and land the reviewed fix;
-the existing open successful request suffices. If release controls change, the job-free setup review
-must also explicitly retire the failed selection's old policy binding: archive its state only
-after confirming no pending intent/outbox, stable publication, active job or owned host lease,
-then select the new request under the reviewed installed policy. Updating the checkout alone
-leaves the old binding and holds preparation. The next selection uses the next prealpha; never
-overwrite a completed campaign job or its evidence.
+### One-time #452 installation
 
 **One-time #452 installation after `v0.8.0-prealpha.3`:** this is an authority change, not an
 automatic retry across policy fingerprints. Keep the driver disabled while the founder merges
@@ -911,214 +1151,7 @@ automatic retry across policy fingerprints. Keep the driver disabled while the f
 4. Rearm through the reviewed setup procedure. Later failures under that policy can use automatic
    same-request re-selection; .3's old authority binding is intentionally not carried across.
 
-### Bounded device-cloud journey retries
-
-Before the collaboration journey's first navigation, each attested directory visit gets up to
-60 seconds for its release worker to settle, avoiding the TestingBot Galaxy S25/S24 `uncontrolled`
-stall observed in `v0.9.1-prealpha.4` without changing the journey's installed-shell readiness verdict.
-
-Within one `deviceCloud` invocation, each iPhone, iPad or Samsung journey may retry once after
-an ordinary post-attestation collaboration or Home Screen journey failure. Only that journey
-gets a fresh device session: the candidate, retained-Mac fixture, live OMP generation, tunnels,
-Pixel lease and lane epoch stay unchanged. Passed journeys and every other lane's receipts stay
-intact. A second failure is terminal; this is not a campaign restart or a resumable browser command.
-
-Before the retry, the first session must have ended, its finalized record must pass the live-link
-and media audit, and BrowserStack's record and signed artifacts must be verified removed. Unknown
-allocation outcomes, allocation identity failures, unsafe evidence, sink/audit failures and failed
-containment never retry. Generation changes also refuse rather than create new fixture evidence.
-Final release still ends every session and stops the tunnels/fixture before releasing the Pixel;
-`deviceCloudCleanup` remains bound to that same lane epoch, not a per-journey ordinal.
-
-Additive schema-3 `progress.journeys[target]` preserves both numbered attempts and closed outcomes
-(including the first failure's collaboration/Home Screen stage); raw errors never enter receipts.
-Resources carry the matching attempt ordinal, all session identities remain recorded, and aggregate
-audit counts include both attempts. Approval binds each final passing target to its allocation and
-derives total/per-vendor audit counts from every ended, clean-audited allocation, including retries;
-it does not assume three records or attribute a failed attempt to its successor's vendor.
-Successful evidence includes this journey history. A crash does
-not resume an interrupted journey or reset its retry budget: existing dirty-attempt cleanup applies.
-A failed journey on a recorded session is a typed `journey_failed` (`product`, `confirmed`) at the
-target's `<target>_verified` step, with its attempt ordinal; a retained-record audit verdict is
-`audit_failed` at `records_audited` (`confirmed` once a BrowserStack removal started, otherwise
-`read_only`). Neither is ever recorded with `operation: unknown`, and neither is retry-eligible.
-
-Availability holds are never automatically retried by this mechanism. An initial hold keeps the
-operator-authorized semantics below; availability encountered after an ordinary failed first
-journey remains a mixed diagnostic failure, not fresh availability-only authorization.
-
-### Automatic same-candidate campaign retries
-
-New candidates containing the version-1 execution/outcome implementation use `campaignAttempt`
-as the complete retry budget: initial attempt **0**, then retries **1** and **2**, never a third.
-Only validated infrastructure roots (and collateral pointing to those roots), with current
-cleanup, reconciled allocations and no unknown mutation, can authorize another attempt.
-Product, harness, unknown, mixed, collateral-only, malformed and dirty evidence stops immediately.
-An unexplained Push timeout or raw Windows exit 143 is not infrastructure evidence.
-
-`schedule-campaign-retry` persists `retry-pending`, a bound plan and `retryNotBefore` before
-advancement. The plan's `nextAttempt` reserves the next ordinal; `campaignAttempt` and execution
-stay bound to the failed job until launch creates or reconciles the next job. A diagnostic stop
-before launch therefore retains the correct failed-job cleanup/retirement authority.
-The first retry waits **60 seconds**, the second **120 seconds**; ticks before that
-deadline are idle. This is a minimum delay, not a change to the launchd tick interval. Each plan
-binds the failed/next ordinal, candidate tag/source/archive digest, predecessor, orchestrator
-commit, authority policy, retained Mac, immutable prior job digest (including `out.log`/`err.log`
-and `qualification-out.log`/`qualification-err.log`),
-the original machine-outcome byte digest, exact failed-receipt digest,
-closed failure summary, restart lanes and preflight/readiness/campaign scope.
-
-Before scheduling and before an unclaimed launch, the driver checks the completed job/result/exit,
-unchanged receipt bytes and candidate publication, unchanged reviewed authority, no approval or
-stable publication, no active candidate worker from any attempt, and no foreign/live host owner.
-Failed receipt bytes are preserved as `failed-qualification.json` in the completed job before the
-working receipt can advance. The job also retains its immutable specification, machine outcome,
-result and exit. The observed subprocess exit must equal the typed outcome's exit, receipt scope
-must agree, and receipt retries need a nonempty exact restart set. An unclassified worker failure
-cannot borrow a leftover typed outcome. The exit is committed before the terminal result; an
-orphaned result without an exit or live worker is diagnostic, not running. Never modify or delete
-these files to force recovery. Revalidation failure stops instead of refreshing backoff indefinitely.
-
-The next worker consumes the previous receipt's eligibility durably **before admission or setup**.
-An effect-free preflight retry instead supplies the exact prior private snapshot through
-`--retry-outcome-file` and `--retry-outcome-sha256`; receipt retries use
-`--retry-receipt-sha256`. Attempts 1–2 cannot start effectful work without one of these mutually
-exclusive, fully bound predecessor proofs. Standalone read-only `--preflight` is attempt-0-only
-and does not grant retry authority. Retry workers invoke only the authority-bound campaign
-command, which consumes the predecessor proof before renewed read-only admission.
-Passed qualification lanes and complete publication proofs are preserved byte-for-byte. Failed
-Push/Windows/cloud journeys restart on fresh resource epochs; unstarted lanes run normally.
-Incomplete collateral publication restarts the full lifecycle on an isolated OMP host. Artifacts
-are reverified without replacing a passed proof; readiness runs again and final Mac cleanup reopens
-before setup effects. No provider/guest mutation is blindly replayed.
-
-The release-host owner stays exactly `qualification:<candidate>:<receipt path>` across attempts.
-Automatic retry never calls lease clear: scheduling and unclaimed launch probe the existing
-SQLite OS lock without changing its row; the same owner later reacquires it. A live or
-foreign holder blocks work; final success clears ownership normally. `recoverFailedCampaign()`
-remains only for retiring a failed candidate after a source fix.
-
-Job names remain `jobs/<issue>-<candidate>-campaign/` for zero and
-`jobs/<issue>-<candidate>-campaign-retry-<n>/` thereafter. A spec-only tmux launch failure reuses
-the allocated ordinal and exact specification. Existing result, session and start fences are
-reconciled only after verifying that specification against the bound execution.
-A `started` claim is a hard no-relaunch fence even
-if tmux disappears; inspect and recover manually rather than deleting it. Intent/outbox replay
-does not allocate another attempt or duplicate issue comments. Attempt starts, failed-attempt
-scheduling, exhaustion and success are announced with fixed classes/reasons/lane names and numeric
-ordinal/timing/delay fields; raw errors, host/device identifiers and provider bodies are excluded.
-
-After attempt 2 fails, `diagnostic-required` retains the exhaustion summary and owning lease.
-Repair/reconcile the exact failed owner. The existing successful same-version request plus a main
-source fix can retire that candidate and select a new prealpha; **only new-candidate selection**
-resets the automatic budget. Approval, signing, provenance, runtime comparison, publication and
-published-byte smoke gates remain unchanged after eventual success.
-
-**Rollout:** re-pin only after disabling/unloading the driver and draining workers, intents and
-comment outboxes as described under Studio installation. Preserve state, jobs, receipts and both
-SQLite files; run offline checks and read-only plan/status on the reviewed pin, review dry-run
-before arming, and start a new candidate containing the new implementation. Never retarget an
-existing job to new orchestrator code. Old schema-3 receipts stay readable, but missing new
-execution/outcome evidence cannot authorize automatic retry. Rollback to an older driver requires
-draining all new-format work first. `retry-device-cloud` is refused for new-format jobs and cannot
-bypass their two-retry budget.
-
-### Legacy device-cloud availability holds
-
-Only validated no-free pinned-device observations are availability. Authentication, malformed
-catalogs, transport/queue ambiguity, allocation mismatch, exhausted journey retries, audit errors
-and failed cleanup remain diagnostic. The stable CLI exits 75 for an availability-only failure. The driver
-sets `OMP_STABLE_OUTCOME_FILE` to a distinct `preflight-outcome.json` or `campaign-outcome.json`
-inside the private job directory; the CLI atomically writes a closed JSON outcome there. Earlier
-human lane stdout/stderr is never parsed as machine evidence. Missing or invalid outcome files
-make exit 75 diagnostic. An allocation attempt remains `failed` with additive `availabilityHold`
-evidence containing the complete closed array of one to three hold leaves in schema 3.
-
-Before reporting a resumable allocation hold, all other consumers must finish, the relay tunnel
-must stop, the real OMP publication lifecycle must pass, Windows must settle, and every resource
-and final Mac cleanup must pass. A cleanup or lifecycle error combined with availability refuses
-resumption. A preflight-only hold creates no cloud session, tunnel, fixture or qualification
-receipt and may instead be retried as an effects-free campaign start.
-
-For legacy jobs only, the driver's `infrastructure-held` phase never retries automatically, even after devices become
-free or a later observation passes. First inspect the private completed job and receipt, confirm
-equipment availability, then authorize exactly the displayed candidate and attempt:
-
-```sh
-bun scripts/release-driver.ts status
-bun scripts/release-driver.ts retry-device-cloud --candidate <exact-prealpha-tag> --job-attempt <current-attempt>
-```
-
-The command takes the tick mutex and checks: exact held selection and attempt; no pending
-intent/outbox, active candidate worker, approve step or stable publication; unchanged reviewed
-source/control policy and Mac host from the immutable completed-worker specification, not the
-invoking CLI environment; a fully eligible held receipt or effects-free preflight hold; and no
-foreign release-host owner. It allocates no devices. The next ordinary tick launches one new
-job; repeating the authorization is refused. A dry-run configuration never authorizes a write.
-Both hold scopes persist that binding, and a scope mismatch is refused even if the receipt is
-otherwise eligible.
-
-Attempt zero keeps `jobs/<issue>-<candidate>-campaign/`; retries use
-`jobs/<issue>-<candidate>-campaign-retry-<n>/`, with matching unique tmux/worktree/branch names.
-Never remove or overwrite a completed job, its start claim, result, logs, exit file, or
-`held-qualification.json`. For allocation holds, that private immutable snapshot must still
-equal the working receipt when retry is authorized. The working receipt advances normally only
-in the new attempt.
-If tmux fails after writing the new specification, the next tick replays that same authorized
-job, directory and host binding while neither its worker start claim nor tmux session exists.
-It does not allocate another ordinal or overwrite the specification. A start claim is a hard
-no-relaunch fence even when the tmux session has disappeared.
-
-For an operator-owned eligible campaign outside the driver, use the same source, candidate,
-predecessor, Mac host and receipt directory explicitly:
-
-```sh
-bun run qualify:stable -- --tag <exact-prealpha-tag> --resume-device-cloud
-```
-
-This refuses ordinary, foreign, incomplete, stale-cleanup or dirty receipts before admission
-or receipt mutation. It reruns the whole cloud attempt on a new epoch, not an old browser session.
-Once eligibility is accepted, it clears and persists the old hold before any admission or setup.
-Only a newly validated all-hold failure can restore eligibility; an ordinary setup, teardown or
-protected-file failure exits 1 and leaves no hold authorization. Resume uses its own in-process
-preflight, not a separate driver preflight against stale authorization. A new admission-only hold
-on an existing eligible receipt remains receipt-scoped, with fresh preflight leaves and the same
-required passed proof and clean resources.
-Passed Debian, macOS lifecycle, Android, background Push, Windows, relay and OMP publication
-proof stay unchanged. Candidate/predecessor signatures, checksums and identity are reverified;
-the candidate gateway and a fresh isolated OMP fixture are reconstructed and launch readiness
-checked; final Mac cleanup reopens. Those setup/identity/cleanup steps are not repeated expensive
-qualification journeys. A changed orchestrator commit cannot resume this receipt. The original
-release-host owner remains until the exact campaign succeeds; never clear it to force a retry.
-
-To stop new work immediately:
-
-```sh
-touch "$HOME/.local/state/omp-session-gateway/release-driver/disabled"
-launchctl bootout "gui/$(id -u)/com.omp.gateway-release-driver"
-```
-
-This does not kill an already-running campaign or smoke, because killing it can interrupt cleanup.
-Inspect `jobs/*/spec.json`, each exact tmux session, exit/result files and the qualification receipt;
-drain or recover the owning job before rearming. Never remove `state.json`, the job start claim,
-or either SQLite file to force a retry. Revoke the bot credential to stop repository writes if the
-operator account is compromised; Slack has no credential or authority to pause/resume a release.
-
-### Carrythrough checks-pod boundary
-
-`bun run check:order` validates ORDER_SCOPE's pins/schema and existing repository/coherence/ledger
-gates on Linux, with no devices and no network after `bun install`. The pod needs a writable
-workspace but may keep the remaining root read-only, with about 4 GiB RAM and TCP 443 egress only
-for dependency installation and an intentional upstream pin refresh. `scripts/upstream-pins.ts`
-uses one GitHub commit lookup plus one GitHub contents lookup per `relevantPaths` entry; those
-API reads work unauthenticated within GitHub's public rate limit or use `GH_TOKEN`/`GITHUB_TOKEN`
-when supplied. Two source package manifests come from `raw.githubusercontent.com`, and six npm
-registry reads cover coding-agent/wire metadata and two native-platform metadata/tarball pairs.
-Only GitHub API requests receive that token. Native tarball integrity and payload hashes are
-verified locally with `tar`; npm credentials, devices, a Docker daemon and a writable home root
-are not prerequisites for the order check itself.
-
-## v0.3.0 qualification and promotion
+### v0.3.0 qualification and promotion
 
 
 **Fork-era record:** this section preserves the named v0.3.0 campaign, its commands, and its
@@ -1153,499 +1186,7 @@ Managed candidate upgrades retain hostname, omitted port, identity-trust, and re
 Continue supplying the production origin and allowlist on both installation and upgrade; unchanged
 configuration bytes are not rewritten.
 
-## Release gates
-
-The current decision and exact evidence live in RELEASE_STATUS.md; compatibility claims live in
-COMPATIBILITY.md. Generated or signed artifacts do not promote themselves.
-
-Every advertised release requires:
-
-- private vulnerability reporting and repository security controls enabled;
-- an exact mainline OMP commit, validated discovery/query contract, collab-web provenance, and
-  license inventory;
-- all automated unit, integration, browser, type, build, and secret/identifier-leak checks green;
-- advertised host installers qualified against the exact signed candidate;
-- loopback-only exposure plus positive and negative Tailscale identity/Origin evidence;
-- exact physical-client View/Control, stale-generation, lifecycle, and forbidden-sink evidence;
-- documented configuration, upgrade, rollback, cleanup, compatibility, and limitations; and
-- complete checksums, SBOM, GitHub attestations, Cosign bundles, signed tag, and reproducible build
-  verification.
-
-Stable publication additionally requires that the exact signed tag's tree contain a fully passed
-STABLE_RELEASE.lock.json candidate tag/source/archive digest, runtime-byte comparison, Debian,
-retained Mac14,3, Windows host, physical Pixel, background Web Push, mainline OMP discovery/query
-and launch/revocation, provenance, and secret-sink evidence. No fork-era receipt can stand in for
-one of these new candidate lanes.
-The workflow asserts checked-out HEAD equals the event SHA, checks candidate ancestry and the
-published candidate digest, requires a GitHub-verified signed annotated tag, and rechecks tag state
-before public provenance, draft creation, and promotion. Issue #65 remains a browser-process
-environment limitation: after 45 uninterrupted visible failure seconds, the loaded shell offers
-retry and force-stop/reopen help without a third-party probe or a claim that JavaScript repaired
-Chrome.
-
-The following command and its result are **fork-era v0.2.1 history**, run from that release’s
-clean, published Darwin-arm64 branch, not instructions for a mainline candidate:
-
-```sh
-bun run qualify:stable --tag v0.2.1-prealpha.2
-```
-
-For a selected mainline candidate, `bun run qualify:stable --tag "$TAG"` must re-verify signed
-assets and provenance for the candidate and its predecessor, exercise Debian and retained-Mac
-lifecycle, the exact predecessor, real mainline discovery/launch/revocation, physical Pixel
-acceptance and secret sinks, bounded relay smoke, the [Windows host lane](WINDOWS_QUALIFICATION.md),
-the [background Web Push lane](ANDROID.md), the real-device cloud lane (ADR-032), and cleanup. It
-writes a private receipt (schema 3) under
-`~/.local/share/omp-session-gateway/qualification/<tag>/stable-qualification.json`. Retargeted
-scripts are not qualification evidence until these lanes run against the exact candidate.
-
-The predecessor verifier has one finite, committed historical exception in
-`scripts/post-release-smoke.ts`: `v0.7.5`, archive SHA256
-`171dec1a9902c934c99060b250f209cf627ce194d07da1412b35ad419c3ec57c`.
-Its archive, SBOM and checksums must verify against their retained keyless Cosign bundles with
-certificate identity
-`https://github.com/alphastorm/omp-session-gateway/.github/workflows/signed-release.yml@refs/tags/v0.7.5`
-and OIDC issuer `https://token.actions.githubusercontent.com`. There is no long-lived public key.
-The signed tag, exact asset set, published Latest state, checksums and actual archive digest
-remain mandatory. This exception acknowledges absent historical build-provenance attestations;
-it does not create replacement provenance or qualify any candidate. The receipt records
-`githubAttestations: "historical-cosign"` and the pinned original signing identity, and approval
-rechecks that evidence against the same finite allowlist. Candidates, normal publication smoke,
-and every non-allowlisted predecessor still require all three online GitHub build attestations.
-A changed historical digest or failed Cosign verification fails closed; an attestation outage
-never selects the exception. Extending the list is a reviewed control-policy change, not a
-runtime override. Preserve failed campaign receipts and the host lease during recovery; a new
-orchestrator commit cannot resume or rewrite a receipt bound to the old commit.
-
-Before spending a campaign, prove changed or previously failing lanes end to end in development
-mode at the exact orchestrator tree. In particular, run the expanded Push lane with the pinned Bun:
-`bun scripts/android-push-qualification.ts development <published archive>` (with the matching
-`OMP_PUSH_FIXTURE_BINARY`), and run
-`bun scripts/omp-lifecycle-development.ts --omp <absolute path to stock OMP dist/cli.js>`.
-Follow the [Push procedure](ANDROID.md#physical-background-push-lane) and
-[lifecycle procedure](LIFECYCLE_BRANCH_RESUME.md). These are tested evidence, not qualification;
-a stable campaign must not be used to discover harness failures.
-
-Every campaign must pass `androidPush`'s `triage_verified` and `stale_taps_verified`
-after `clear_verified` and before `force_stop_verified`, including the second fixture's cleanup.
-Delayed taps re-present the original notification's metadata-only data after authoritative clear;
-`replayed: true` proves physical delayed-tap handling, not push delivery ordering or delay.
-`ompPublication` must also contain passed `evidence.lifecycle` with `newGeneration`, `fork`, and
-`resumed` observations. After all live-session users settle successfully (or only device-cloud
-availability failed with its resources released) and the relay tunnel
-stops, the Mac host runs `/new`, `/fork` after two synthetic messages, stop/revocation,
-`--continue`, and stop/revocation again. Rotations require generation + 1 on the same instance,
-stale launches rejected without capabilities, and live View/Control `200 no-store`; resume requires
-a new instance at generation 1 with the same label and working launches. Rewind is not
-gateway-visible and stays in the canary rather than this Mac step. Evidence is additive, the
-receipt schema stays 3, and an interrupted lifecycle step remains non-passed and reruns in full.
-
-The Windows, background Push, and device-cloud lanes own external state, so each has a cleanup lane
-(`windowsCleanup`, `androidPushCleanup`, `deviceCloudCleanup`) that runs after every attempt and
-passes only for the attempt epoch its lane recorded. A crash leaves a lane `running`, and a rerun may
-resume it; a caught failure is released before a new attempt begins, and a failed release stops the
-lane there. If admission fails while a recorded Windows VM exists, the command still destroys it.
-Windows runs beside the Debian and Mac lanes. The core Android lane, background Push, the
-device-cloud lane, and the Windows physical client take turns under the Pixel lease: the cloud lane's
-prompts and alert reach every push subscription on the candidate gateway, so it ends its sessions and
-stops its tunnel and fixture within its own turn, and `deviceCloudCleanup` has work only after an
-attempt stopped before that release finished. A lane that cannot restore the phone blocks every
-later one.
-
-The receipt resumes only for the same candidate, exact orchestrator commit, and configured rollback predecessor. A stale `OMP_STABLE_PREVIOUS_TAG` or mismatched `--previous-tag` is refused before effects; remove the override and rerun the documented command to resume cleanup and qualification. Before Debian dispatch, the command persists a UUID, supplies it as the workflow run name, and discovers the resulting run through the Actions API. An accepted dispatch that is not yet discoverable fails closed rather than creating a duplicate billed run. Before renewed Mac effects, the command reopens the durable cleanup lane so a later process can recover after a crash. Persisted failures are generic markers; diagnostic subprocess errors stay only in the active process output.
-
-A resumed relay pass must contain the existing live summary covering at least the requested
-duration, with coherent elapsed time and timestamps inside its recorded attempt and campaign.
-Missing, shorter, or stale proof fails overall qualification before admission or dispatch; it does
-not automatically rerun the relay lane. Recorded pending Mac cleanup still runs, while completed
-cleanup remains completed. A historical 60-second pass cannot satisfy this campaign.
-
-Qualification and published-byte smoke take one cross-process release-host lease before reading
-or replacing receipts, admission, dispatch, installation, or device effects. All campaigns must
-run under the same release account on the same host, using its local home filesystem. The fixed
-`~/.local/state/omp-session-gateway/release-host/lease.sqlite` is shared across tags, receipt
-directories, and checkouts; changing `OMP_STABLE_QUALIFICATION_DIR` cannot bypass exclusion.
-The existing in-process Pixel lease still orders lanes within the admitted campaign. Preflight
-and smoke `--plan` remain read-only and do not claim the lease.
-
-SQLite EXCLUSIVE locking retains an OS lock across the committed ownership record and all
-effects/cleanup. Each contended SQLite operation waits at most one second, then refuses, even
-for the same campaign. This acquisition wait is not a lease expiry. No timeout, PID
-probe, or lease age can steal a live lock. On process death the OS releases it, but the committed
-owner remains: rerun the exact qualification tag and receipt directory (or smoke repository/tag)
-to resume recovery. A different campaign is refused until the original command succeeds. A
-caught failure also retains ownership, including admission failures; correct the cause and rerun
-that command. This does not clean up orphaned child processes or remote resources by itself:
-inspect the existing receipt and recover its recorded resources before resuming after a crash,
-following the lane-specific recovery procedures.
-
-The driver's landed-fix re-selection has one bounded exception: it may clear its own failed
-campaign row after the immutable campaign job is failed and exited, every candidate worker is
-absent, and the exact candidate/source/digest/predecessor/host-bound receipt is failed and settled.
-Settlement is proved by that exited worker and absent processes under the host lock, not by the
-receipt's optional `completedAt` or stale primary-lane status. For example, prealpha.3 left
-`ompPublication` marked running after a consumer failed, despite passing every cleanup lane.
-Those bookkeeping fields are neither rewritten nor treated as permission to skip cleanup proof.
-Every recorded device-cloud allocation, including both sessions of a retried journey, must have
-ended and passed its retained-record audit. Missing ownership/audit proof, exposing links or media,
-lingering signed artifacts, incidents and unaudited deletions keep the maintainer stop even when
-`cleanupRequired` is false. BrowserStack records must also be verified removed. Aggregate audit
-counts must cover every recorded allocation; a local cleanup pass alone cannot settle vendor custody.
-All four cleanup lanes (`cleanup`, `windowsCleanup`, `androidPushCleanup`, `deviceCloudCleanup`)
-must have passed; external cleanup epochs must match their lane's last attempt and the lane
-implementations must report no remaining effects. Debian must also have passed, since a failed
-workflow is not proof that its cloud teardown succeeded. Pending/unstarted cleanup is not a pass.
-
-Containment settles a failure's effects only from its owner's proof, counts and booleans its own
-cleanup recorded for the same epoch. An untyped error stays `unclassified_failure` with
-`operation: unknown` at the phase its lane last checkpointed; a known outcome is never `unknown`.
-Any `unknown` failure, and any `confirmed` Windows, device-cloud, background-Push or readiness
-failure, leaves `unresolvedMutation` true unless that owner proves no residue:
-
-- **Windows:** `windowsCleanup` reports zero `omp-winqual-` instances, firewall groups and
-  tailnet nodes (`tailnetNodesRemaining`, a prefix-wide device listing), plus a verified Pixel
-  baseline once the physical client reached `pixel_verified`.
-- **Device cloud:** every recorded session ended and passed its audit, and `deviceCloudCleanup`
-  counts zero active vendor sessions (`activeVendorSessions`: TestingBot sessions of the attempt's
-  build, BrowserStack running and queued sessions).
-- **Background Push:** `androidPushCleanup` carries a verified Pixel baseline: Airplane mode off
-  (an explicit `0` setting), mobile data on, validated Wi‑Fi, VPN up and GCM connected over Wi‑Fi.
-- **Readiness:** the owner-bound readiness record (epoch present, same `campaignAttempt`) is
-  `restored` with `baselineRestored`.
-
-A Pixel baseline is read only after a complete restoration, inside the same Pixel lease turn, by
-whichever release did it (the lane's own or its cleanup lane's); it is checkpointed with that
-progress, so a cleanup with nothing left to restore reports it without waiting for the Pixel.
-
-An absent, failed or inconclusive sweep proves nothing and never fails its cleanup lane. The
-installed driver re-derives this proof from the receipt before clearing; a worker's containment
-claim alone is refused. Receipts written before these sweeps existed, such as v0.9.1-prealpha.3
-and .4, keep their maintainer stop.
-
-Inside an EXCLUSIVE SQLite transaction the driver rechecks the exact owner, revalidates cleanup,
-and fsyncs `jobs/<failed-job>/lease-recovery.json` with the old receipt digest before deleting
-only that owner row. The receipt records `clear-authorized` before the transaction commits and
-`cleared` after it; a crash between them leaves the durable authorization evidence. A live OS lock
-refuses even the same owner. No device or provider cleanup is guessed or performed by this clear.
-The old receipt and database inode remain intact. Missing, failed or stale cleanup, unproven
-residue, a foreign owner, or an active worker retains the maintainer recovery stop below; reconcile
-only the effects whose proof is missing before the exclusive owner-verified clear.
-
-Never delete, rename, or replace the lease database to unlock a campaign: that can create two
-live lock inodes. If the original command cannot recover, a maintainer must stop every launcher
-and child, reconcile the recorded host/device/cloud effects, and clear the campaign row through
-an exclusive SQLite transaction, not by unlinking the file. Drain older unguarded scripts before
-deploying this guard. It is cooperative exclusion for this release account, not a distributed
-lease or a fence against other users, manual adb/SSH, or standalone development qualification
-commands; those still must not overlap a release campaign.
-
-If a persisted Debian dispatch UUID is not discoverable, do not start a second process or delete the receipt blindly. Search Actions for the exact `Stable qualification <uuid>` title and orchestrator commit. Resume when that run appears. Only after API evidence proves no matching run exists and every Mac-related lane has zero attempts may the operator archive the entire private qualification directory and restart; otherwise recover the recorded Mac cleanup state first. Automatic redispatch is intentionally refused because an accepted-but-delayed workflow cannot be distinguished safely from a rejected request.
-
-Mac qualification receives the archive SHA-256 already verified by the orchestrator and rejects
-different bytes. The workstation verifies and stages rollback assets, including their Sigstore
-bundles, so the retained Mac needs no GitHub credential. Mainline source and toolchain pins come
-from `UPSTREAM.lock.json`; the OMP pin uses `sourceTree`, not a patched-tree assertion, and cleanup
-counts `liveOmpHosts`. Fork-era receipt fields remain historical and must not be relabeled as new
-mainline output.
-
-Prerequisites are `gh`, `cosign`, `adb`, the repository workflow secrets, one attached Pixel, and an explicitly configured Mac SSH target. Configure it before admission or a campaign:
-
-```sh
-export OMP_STABLE_MAC_HOST=gwqual@mac.example.ts.net  # replace with the qualification host
-export OMP_STABLE_MAC_MODEL=Mac17,14
-unset OMP_STABLE_MAC_SUDO_PASSWORD_FILE
-# OMP_STABLE_MAC_LOGIN remains alphastorm@github unless explicitly overridden.
-```
-
-`OMP_STABLE_MAC_HOST` must be `user@host` with a DNS name or IPv4 address, not SSH options,
-a port, or shell syntax. `OMP_STABLE_MAC_MODEL` is the exact expected `sysctl -n hw.model`
-identifier; admission and lifecycle evidence reject a different model. The receipt keeps schema 3
-and records the measured model and macOS version, without pinning the old host's OS or build.
-This target configuration is not qualification evidence for Mac17,14 or macOS 27.
-For the proposed Virtualization.framework target (ADR-033), replace the model with the guest's measured `hw.model`, not the physical host's; retain the old target for any outstanding cleanup.
-
-The SSH account may be standard or administrator and must log in automatically after a reboot:
-the persistence lane measures its per-user LaunchAgent returning at **console login**, not boot
-without a login. A pass requires a changed `kern.bootsessionuuid` (stable within one boot), the
-qualification account's `gui/<uid>` Aqua login domain after SSH returns, a recovered gateway
-listener and successful doctor, and an unchanged full SHA-256 readiness-token digest. The
-non-identifying `guest reboot changed`, `console login`, and `readiness token preserved` verdicts
-must all be `yes` and are recorded as booleans in the schema-3 Mac evidence.
-On a bare-metal automatic-login host, FileVault must be off. The account needs
-Bun 1.4.4 in `~/.bun/bin`, **stock OMP >=18.1.20 on PATH**, the lane's command-line tools, and a
-user-owned TUN-mode Tailscale node. Doctor checks OMP compatibility during install, before the
-`omp-build` lane creates its separate pinned fixture. Install the stock coding-agent package as
-the qualification account, using `packageVersions["@oh-my-pi/pi-coding-agent"]` from
-`UPSTREAM.lock.json`; both preflights print the exact `bun add --global --exact` command when
-OMP is missing or unsupported, and refuse before staging or running any lane.
-
-Remote commands use the fixed PATH
-`/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin`: system and
-admin-owned tools precede account-writable directories, and hardware probes call
-`/usr/sbin/sysctl` directly. Qualification does not provision these prerequisites or make the
-account an administrator. The rollback lane selects its staged Cosign by explicit executable
-path rather than putting `~/qual-tools` ahead of system tools.
-
-On a shared host, the qualification account may provide the optional, host-owned
-`$HOME/.config/omp-qualification/reboot-guard`. It must be a regular file with its owner's
-execute bit set and executable by that account. Both preflights validate only its presence,
-type and owner-execute permission; they never execute host-owned guard code. Persistence runs
-it without arguments on the fixed remote PATH only at the owned gate immediately before
-`shutdown -r now`. A missing guard leaves the existing commands unchanged. A present but
-invalid guard refuses preflight and names its exact path.
-
-The guard should be a read-only, prompt check of the host's own workload state: exit zero only
-when reboot is safe, or exit nonzero with a diagnostic explaining why it is not. Refusal reports
-`the host's reboot guard refused: <output>` using the first 400 bytes of combined stdout/stderr;
-the persistence lane fails and no shutdown is invoked. A busy executable guard does not refuse
-read-only admission. Do not put credentials in diagnostics. Qualification does not install
-the guard, know which other workloads run, wait for them, or reserve the host after a successful
-check. The host owner must coordinate workload starts to avoid a race after that check.
-
-With no `OMP_STABLE_MAC_SUDO_PASSWORD_FILE`, the orchestrator passes an empty
-`OMP_MAC_SUDO_PW` and the shell uses `sudo -n`. Narrow passwordless sudo must permit the
-lane's exact commands: `true`, Tailscale `status --json`, `set --operator=<SSH account>`,
-`cert --cert-file <home>/omp-qual.crt --key-file <home>/omp-qual.key <tailnet DNS name>`
-(the SSH account's home, never world-writable `/tmp`), and `shutdown -r now`. The lane runs
-`/usr/local/bin/tailscale` when that root-owned copy exists and falls back to PATH otherwise, so
-the grant can name a path no non-root account can rewrite. Tailscale Serve and cleanup run as
-the Tailscale operator without sudo.
-For a password-requiring host, set `OMP_STABLE_MAC_SUDO_PASSWORD_FILE` to a current-user-owned
-regular file with no group/other permissions (for example mode 0600); symlinks are refused.
-The file contains one nonempty password line, with an optional final newline. Its contents never
-enter argv or receipts and reach remote sudo only through the existing SSH-stdin framing.
-The former `omp-macqual-01` remains selectable using its actual `user@host`, `Mac14,3`,
-and that private password file; no cloud-provider lookup or credential is used for a Mac.
-Keep the same host/model configuration for the entire campaign, including resumed cleanup.
-Before the first Mac effect, the private schema-3 receipt persists its configured `macHost`.
-A resumed campaign refuses a different host before admission or any remote cleanup. Historical
-receipts with recorded Mac effects but no bound host cannot authorize automated cleanup: manually
-clean the original Mac's gateway, Tailscale Serve, OMP fixtures, and qualification artifacts using
-the original campaign checkout before starting a new campaign directory. A receipt with no Mac
-effects may still start unbound; a hardware-model admission refusal never creates cleanup work
-on an unowned host.
-
-The Windows lane also needs a mode-private `~/.vultr-apikey` whose API access control admits the operator's current egress `/32`, the tagged Tailscale join key and API key in the private qualification files, and the controller tools pinned in `scripts/windows-qualification-pins.json` ([WINDOWS_QUALIFICATION.md](WINDOWS_QUALIFICATION.md)). Background Push needs Do Not Disturb off on the Pixel, no hotspot, USB or Bluetooth tethering from it (the controller must not depend on the Pixel for its network), and the OMP Sessions app installed, with notification permission granted, for the retained Mac's origin, as one-time equipment ([ANDROID.md](ANDROID.md)). The device-cloud lane needs Java for the TestingBot tunnel (`/opt/homebrew/opt/openjdk@17/bin/java`, or `OMP_STABLE_JAVA`) and the read-only 1Password service-account token at `~/.local/state/alpha-founder/retained-host/op-service-account.token` (mode `0600`, or `OMP_STABLE_OP_TOKEN_FILE`), which must be able to read `op://Centaur/TestingBot/key` and `op://Centaur/TestingBot/secret`; the tunnel jar is downloaded once into `~/.cache/omp-session-gateway/testingbot/` and verified against its pinned SHA-256 before every use. Environment overrides are prefixed `OMP_STABLE_`. The rollback predecessor comes from `STABLE_RELEASE.lock.json`; `--previous-tag` and `OMP_STABLE_PREVIOUS_TAG` may only restate it.
-
-The orchestrator refuses a dirty or unpublished branch, rejects changed candidate or receipt identity, and hash-guards `STABLE_RELEASE.lock.json` plus `docs/RELEASE_STATUS.md`. It never edits either file, creates a stable tag, or publishes a stable release. Ledger approval and stable publication remain separate maintainer effects after the receipt is reviewed.
-
-### Effectful rig readiness before fan-out
-
-`--preflight` remains read-only admission: it does not subscribe a phone, stage a fixture, allocate
-a VM or claim delivery readiness. A new campaign admits, acquires the release-host lease, verifies
-candidate and predecessor bytes, then runs the separate readiness gate before Windows allocation
-or Debian workflow dispatch. Exact-authorized retries acquire the same owner and consume their
-working-receipt authorization before renewed admission; a foreign/live owner always refuses.
-Bound execution source must equal HEAD before any admission or outcome write. Standalone bound
-`--preflight` is attempt-zero only: authorized retries perform renewed admission inside the
-authority-consuming campaign command, not through a second standalone preflight.
-
-Readiness requires a clean retained-Mac baseline: no existing gateway service/listener and empty
-Serve/Funnel mappings. It refuses an occupied host rather than capturing and replaying arbitrary
-host configuration. It installs a disposable candidate gateway and pinned stock-OMP fixture,
-checks bounded required egress and candidate doctor/loopback/Serve/Funnel invariants, and performs
-one Private background/locked Pixel push through the actual tailnet/FCM send, acknowledgement and
-presentation path. Delivery must occur within 160 seconds; answer and authoritative clear must
-also pass. HTTP reachability alone does not prove FCM readiness.
-
-Before browser capture or the readiness ask, the Pixel owner reads `dumpsys activity service
-GcmService` under its lease and after checkpointing the original device/radio baseline. An already
-connected client proceeds without radio changes. A disconnected client gets exactly one
-`svc wifi disable`, two-second pause, `svc wifi enable` cycle, then at most 30 seconds to report
-connected. Individual ADB reads/changes are capped at ten seconds and the execution deadline
-still applies independently of that reconnect window: late output cannot replace an in-window
-observation. Each radio-cycle checkpoint is capped at 30 seconds or the remaining execution
-deadline, whichever is shorter, and observes cancellation. Until enable succeeds, a failed
-cycle reports its operation as unknown and existing Pixel cleanup restores the captured radios.
-No Tailscale, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is
-automatic. Any malformed or duplicate connection line, including a label-prefix suffix or
-case/spacing variant beside a valid line, fails as invalid evidence without cycling
-Wi-Fi. In-window disconnected evidence after the bound fails before any ask as `gcm_disconnected`
-(`infra_transient`); a command timeout or missing in-window proof remains a harness deadline
-failure. Neither grants another campaign attempt: the driver stops `diagnostic-required`.
-Normal Pixel/Mac restoration still runs, without opening a browser for notification cleanup when
-no browser baseline was captured. Keep the driver disabled, inspect its private cause diagnostic
-and reconcile the rig rather than extending delivery waits.
-
-Readiness observations carry `gcmConnected` and `gcmRemedyApplied` on success and every GCM
-failure, including cancellation, command errors and later readiness failures. The latter records
-whether the Wi-Fi cycle was attempted, even if disable or enable fails. These are additive schema-3 booleans:
-historical receipts may omit both, so no receipt-version bump is needed; new readiness requires
-both and an affirmative connected proof. They do not replace the actual Push presentation/clear
-gate or award qualification. Only a censored connection flag and allowlisted reconnect-alarm
-sample enter the private cause chain; the raw GCM dump never enters receipts or diagnostics.
-The successful Push action hands its censored diagnostic separately to the readiness owner,
-which retains its observations before post-action persistence or outer deadline enforcement.
-A later checkpoint, deadline or restoration failure therefore keeps both GCM booleans in typed
-failure evidence and the sample only in the private cause chain.
-
-Before issuing its ask, readiness reads the authenticated `GET /api/v1/push/config` recipient count.
-The disposable rig must have exactly one eligible subscription, belonging to its prepared Pixel.
-More than one produces the harness refusal `stale_subscriptions` with `subscriptionCount`; zero
-refuses admission as a missing prerequisite. This read exposes no endpoints, keys or identities, and
-the harness never guesses which subscription is stale or deletes someone else's subscription.
-Push telemetry separately accepts legitimate fan-out only when every send for the fixture's request
-alias is acknowledged, and records finite integer `subscriptionCount` (largest recipient cohort),
-`sendCount` and `ackCount` observations from the final complete telemetry snapshot. A passed receipt
-requires positive matching send/ack counts and affirmative Pixel reachability, send, acknowledgement,
-presentation and clear observations. Provider acceptance and a posted notification record cannot
-replace the owned lock-screen presentation check or authoritative clear.
-
-To recover a `stale_subscriptions` refusal, keep the driver disabled and first finish Pixel/Mac
-restoration. `qualify-macos-host.sh omp-clean uninstall` removes the fixture and service, **not**
-the retained gateway-global `push-state.json`. If the known old browsers are available, use each
-browser's notification-off control while the gateway is running; it uses the authenticated
-`DELETE /api/v1/push/subscription` path for that browser's endpoint. Do not remove an unknown endpoint
-automatically. If stale browsers are unavailable, the operator may explicitly reset **all**
-subscriptions on this disposable retained Mac after proving its gateway is stopped (`jq` required):
-
-```sh
-# Run as the retained Mac qualification user, only with the gateway stopped.
-# Preserve VAPID keys and every other private state field; print no state contents.
-(
-  set -eu
-  umask 077
-  state="$HOME/.local/state/omp-session-gateway/push-state.json"
-  test ! -e "$HOME/Library/LaunchAgents/omp-session-gateway.plist"
-  ! launchctl print "gui/$(id -u)/omp-session-gateway" >/dev/null 2>&1
-  ! lsof -nP -iTCP:4317 -sTCP:LISTEN >/dev/null 2>&1
-  test -f "$state" && test ! -L "$state"
-  temporary="$(mktemp "$state.reset.XXXXXX")"
-  trap 'rm -f "$temporary"' EXIT
-  jq '.subscriptions = []' "$state" > "$temporary"
-  chmod 600 "$temporary"
-  mv "$temporary" "$state"
-)
-```
-
-Then prepare the next authorized candidate fixture, open only the retained Pixel's installed PWA,
-and explicitly disable/re-enable notifications to register its current subscription. Confirm the
-authenticated count is exactly one before authorizing another readiness attempt. This is operator
-reconciliation, not an automatic retry or qualification pass; do not rotate credentials or clear the
-driver's lease, receipts or state to bypass the refusal.
-
-The Push owner persists `push-progress.json` before browser baseline capture. Capture failures are
-typed `browser_baseline_failed` with a bounded browser substep (wake, WebAPK, CDP forward/connect,
-target inventory, attachment, execution context, navigation or notification-state read), rather than
-an unclassified raw CDP error. Cleanup/containment failures retain their stronger disposition.
-Expired execution deadlines retain deadline attribution rather than becoming browser baseline errors.
-The stable CLI now writes the cause/AggregateError chain and stacks to its private stderr, retained
-by the release driver as `qualification-err.log`. Readiness also writes an exclusive mode-0600
-`rig-readiness-logs/browser-substep.json` containing the failed substep, error message, CDP method
-(or null) and elapsed milliseconds before restoration. These are operator diagnostics only:
-identifier/capability redaction applies, arbitrary error properties are excluded, and neither file
-is receipt evidence or a public release artifact. Inspect both when the receipt names only a typed
-browser failure; a diagnostic write failure preserves the original error rather than replacing it.
-Lane/readiness remapping preserves private causes. A concurrent browser deadline remains a sibling
-typed failure, while diagnostic-retention errors remain cause-only and do not add receipt failures.
-Private messages are limited to 4 KiB and stacks to 16 KiB; oversized fields are withheld before
-scanning, with `truncated: true`. Redaction is flagged with `redacted: true`. The complete compact
-stderr diagnostic and browser file each stay within the driver's 256-KiB retention ceiling, with
-an explicit terminal marker when the cause graph exceeds its byte budget.
-The browser file selects the deepest retained CDP cause, or the deepest non-synthesized leaf
-when there is no CDP cause (equal-depth leaves keep the earlier primary failure), and carries redaction/truncation flags
-from the entire chain, including omitted siblings. Ordinary errors remain privately reachable
-through deadline, persistence and containment conversions. Nested readiness failures receive the
-same lane remapping and final delivery counters as single failures. These mode-0600 diagnostics
-are not a general body sanitizer: producer-authored messages remain an authorship boundary;
-inspect them before sharing, as described in `docs/SECURITY.md`.
-
-Windows readiness reuses credential, inventory, image, plan and toolchain admission and requires
-remaining per-tag creation allowance with no unreconciled qualification resources. Unsupported
-provider quota metadata is explicitly `quotaObservable: false`; no probe VM is allocated and no
-unlimited quota is inferred.
-
-`receipt.rigReadiness` records the attempt, private owner epoch, closed phase, observations,
-monotonic timings and cleanup disposition. The epoch's private
-`rig-readiness/<epoch>/push-progress.json` retains the Push owner's validated baseline for recovery,
-not logs or posted evidence. Pixel restoration precedes Mac teardown, including on failure. The
-disposable service and staging are removed before the normal Mac upgrade/reboot/rollback lifecycle;
-readiness never counts as a qualification pass. An unresolved restore blocks same-candidate eligibility.
-Passing receipts require readiness itself to be terminal and restored. A poisoned Pixel still
-admits serialized restoration. Failed checkpoint storage does not skip cleanup, but records
-`persistenceFailed` and prevents retry eligibility; failed log preparation never publishes a log owner.
-The Push owner retains its transient baseline, while the orchestrator's mirror advances only after
-a durable sidecar write. Even a failed initial checkpoint or repeated restore checkpoint failures
-cannot skip subsequent restoration owners. Failed cleanup persistence cannot claim baseline
-restoration; terminal write failures preserve the original typed cleanup identity and Pixel poisoning.
-Preflight/admission outcome publication and campaign terminal persistence retain both the original
-qualification failure and any publication failure as aggregate siblings, including private causes.
-Later successful cleanup does not erase earlier cleanup failures. Negative cleanup/reconciliation
-facts, remaining resources, persistence failure or any unsettled remote owner block containment,
-same-candidate eligibility and automatic retirement. Unrestored cloud/Push fixtures retain their
-Mac directory and owner records rather than being destroyed by unrelated Mac teardown.
-Windows cleanup wraps transport errors as `windowsCleanup/containment/containment_unproven`
-with `operation: unknown` and `cleanupVerified: false`, retaining the original typed error only
-as a private cause. Pixel-lease-projected restoration failures already carry negative cleanup
-evidence and retain their original IDs, so dependent refusals keep their collateral origins.
-Its optional private `cleanupFailed` progress fact survives later successful
-resource destruction and is returned in cleanup evidence; it is independent of `cleanupRequired`,
-which may clear after resources are contained. Inline Windows Pixel restoration has a fresh
-ten-minute owner and the campaign's failure allocator, rather than the cancelled primary owner.
-It uses the same fresh-owner policy as the supervisor's thirty-minute containment.
-
-**Deferred installation-state limitation (P2):** readiness uninstall retains the gateway token and
-runtime activation history/current pointer. This gate does not capture, digest-compare or isolate
-those private states, so the subsequent full Mac lifecycle starts after readiness activated the
-candidate. `baselineRestored` proves the captured Pixel baseline, service/Serve containment and
-staging restoration—not byte-identical pre-readiness installation state.
-
-Outer runaway ceilings do not replace product assertions: Windows 180 minutes, Push/cloud 90
-minutes, core Android 30 minutes, relay configured duration plus five minutes, Windows/cloud
-cleanup 30 minutes, and Push cleanup 15 minutes. Mac cleanup uses **90 minutes**, not the proposed
-30: its existing two 10-minute scripts plus two 30-minute SSH owners require 80 minutes before
-margin. None of those existing bounds is shortened. Cancellation aborts owned work and awaits
-termination before cleanup; healthy sibling lanes are not terminated.
-Tunnel startup uses bounded one-second health reads within a 90-second owner ceiling. Windows
-readiness has a 30-minute outer ceiling and uses the same receipt failure allocator; provider read
-and absence-confirmation cancellation remain distinct from retryable transport timeouts. Remote
-fixture cancellation terminates the recorded remote process group via a fresh bounded SSH owner.
-If termination cannot be proved, later effects on that host refuse instead of racing cleanup.
-The shared Bash fence covers direct execution, shell wrappers, streamed uploads and OMP PTYs,
-not just fixture commands, and records `remote_unsettled` collateral against the original teardown
-root. The wrapper journals each owner before dispatch. Private command-owner records survive
-leader exit until separate whole-group settlement; a `done` marker alone is insufficient. Detached
-reboot owners require a changed boot identity, and early-admission cancellation tombstones remain
-fenced. Only bounded read-only admission probes bypass owner files. Relay-stop failure never
-overwrites a preserved publication pass; publication write failure still stamps terminal evidence.
-
-Manual attempt-zero readiness remains diagnostic and does not fabricate driver policy bindings.
-Fresh unbound effectful campaigns require attempt zero. Later ordinals require the driver's exact
-execution and either a terminal-failed prior receipt digest or the private immutable prior preflight
-outcome (`--retry-outcome-file` plus `--retry-outcome-sha256`). Receiptless authority must be infra-only,
-effect-free and exactly bound to the preceding ordinal and unchanged subject; it is consumed under
-the lease before renewed admission. Renewed admission failures are campaign-owned, not failures of
-already-passed product lanes. A
-completed failed job's snapshot, logs, outcome, result and exit file remain immutable. Passed
-qualification proofs are reused without rewriting them. These tooling changes are not evidence
-that any particular signed candidate or live rig has passed.
-
-### BrowserStack device-cloud fallback
-
-The fixed policy is TestingBot-only iPhone (including Home Screen/background Web Push), and
-TestingBot-first iPad Safari/Samsung Chrome with immediate BrowserStack selection only when the
-eligible TestingBot free pool is empty. There is no fallback after a primary write or failure and
-no parallel device execution. A catalog is not a reservation. Each target's evidence names its
-actual vendor, exact allocated model, device-reported OS/browser and tunnel version.
-
-Keep the existing TestingBot token/Java prerequisites. BrowserStack additionally needs the same
-read-only service account to read `op://Centaur/BrowserStack/username` and
-`op://Centaur/BrowserStack/access-key`, Automate Mobile with five group/team parallels, and Rosetta 2
-on Apple Silicon (`arch -x86_64 /usr/bin/true` must succeed). Credentials, entitlement checks and
-Local startup are lazy: a wholly TestingBot attempt does not depend on BrowserStack. The fallback
-fails admission clearly when required Rosetta/credentials/entitlement are absent. Its maintained
-cutoff is **2027-10-20 00:00 UTC**, conservatively derived from the plan's end date; the Plan API
-does not report expiry. Renewal requires a reviewed pin update, not an environment bypass.
-
-Use a dedicated BrowserStack team-member key for qualification and rotate it on suspected
-exposure. The single-user orchestrator exception in
-[Security](SECURITY.md#real-device-cloud-qualification) is mandatory: the lane writes the key only
-to a 0600 `local.yml` in an owned 0700 attempt directory and passes the filename, but Local 8.9
-re-spawns itself with the key in its child argv. Same-user processes already can read the service
-account token. Local stdout/stderr are discarded; a 0600 FIFO supplies only the fixed readiness
-marker in memory. Never capture Local debug output with a real key.
-
-#### Sourced contract matrix — observed 2026-10-20
+### Sourced contract matrix — observed 2026-10-20
 
 The public-page probes below are **Tested**, not qualification or a capability-opening journey.
 Documentation is distinguished from live observations; no claim covers vendor-internal retention.
@@ -1703,136 +1244,6 @@ was exercised. Local-only probes also proved private config modes and crash reco
 The iPad generation is the vendor's allocation report, not an independent Safari hardware
 identifier: Safari corroborates tablet family and version. Samsung's Chrome model code adds
 independent browser-reported hardware corroboration. Neither observation broadens qualification.
-
-#### Recovery and the remaining mixed development journey
-
-Keep the original private progress and exact orchestrator checkout. Cleanup routes each known
-session by vendor, ends it, inspects/removes BrowserStack records, verifies absence, closes the
-proxy, stops only owned tunnels, and removes config/workspace. The checkpoint is 0600 inside a
-0700 directory; never publish it. All declared signed references are checkpointed before DELETE,
-including ones initially returning 404, and removed from progress only after verified absence.
-A crash-era saved clean flag cannot authorize lingering signed URLs: normal and fresh-process
-cleanup both require disappearance within the three-minute absence bound. A delayed artifact is
-fetched and scanned if it starts serving content. Exhaustion leaves `recordRemoved` false and
-cleanup dirty; retry through `deviceCloudCleanup`, retaining the original progress.
-Only a whole JSON string value containing one well-formed absolute HTTP(S) URL is a reference:
-one case-insensitive `://`, its hostname exactly once, and no comma; keys are never references.
-Any other key/value containing `://` or a pinned artifact/dashboard/documentation hostname fails closed.
-Every retained JSON body must pass independent raw/canonical artifact/dashboard hostname censuses whose counts equal
-accepted reference occurrences, including duplicates; mismatches are `unaccounted BrowserStack
-artifact reference` failures, not permission to guess delimiters or follow nested URLs.
-The census additionally checks canonical text percent-decoded to a fixpoint within four passes
-(malformed escapes stay literal; excess depth fails closed), requires one decoded `://` per
-reference.
-The capability-free BrowserStack probes on 2026-10-20 pin `browser_url`, `public_url`, `logs` and
-`video_url` to the observed record-bound dashboard paths and exact query grammars, plus
-only the three observed time-breakdown components' `optimize_url` documentation links under
-`/docs/`, with neither host fetched and documentation excluded from the artifact census.
-An unreviewed real URL remains a diagnostic requiring evidence and a reviewed pin update, never
-runtime loosening; fixed audit/parser causes are available in memory while progress/receipts stay generic.
-A pre-build/pre-finalization reference persists an `unbound retained reference` incident and fails
-closed immediately, with no volatile pending list; later clean metadata permits deletion and
-absence checks but neither normal nor fresh crash cleanup clears the incident or authorizes restoration.
-A new artifact object (origin plus pathname) first declared after auditing, even in the pre-DELETE GET, atomically
-checkpoints its inventory plus a `post-audit retained reference` incident and receives only
-deletion/absence verification rather than late auditing, including after a crash; keys also use
-value media classification and any `data:`/media-pattern key fails closed.
-Recovery normalizes old signature inventories to the last URL per origin/path identity without
-clearing incidents, ignores boolean/text capability-flag echoes as media, and reports only closed
-installed-shell codes and an explicit removed-under-incident status when deletion succeeds.
-Every BrowserStack record-audit failure persists an incident through deletion and crash recovery,
-nested media containers and long raw image-signature runs remain media despite ignored capability
-echoes, queried artifacts require all six reviewed `X-Amz-*` keys exactly once with only
-`response-content-type` optional, and conflicting WebDriver session ids fail regardless of capabilities shape.
-Any finalized `video_url` outside the mandatory pinned session-bound dashboard presentation is
-an incident, and text logs also inspect unquoted/single-quoted media keys and `=` assignments
-without mistaking quoted placeholder brackets for retained containers.
-A running-session media hit survives clean finalization and still blocks restoration after
-verified deletion, and every non-media-labelled retained body is byte-signature checked under the
-same bound before decoding/text scanning while declared image/video bodies remain unread media hits.
-A retained body declaring any charset other than UTF-8/US-ASCII, repeating its charset parameter,
-or decoding with a NUL is an unreviewed text encoding: an incident that still deletes the record
-but never restores.
-Post-audit validation/schema/census errors atomically checkpoint a `post-audit unvalidated record`
-incident with safely recoverable pinned-origin whole-value URLs from strict JSON and still proceed
-through DELETE and bounded record/log/artifact absence checks, never heuristic recovery of malformed
-JSON or restoration approval; a checkpoint-write failure still stops effects.
-When inventory is missing, first verify record/all-six-log absence before reporting it unavailable;
-XML/text artifact 404 bodies and the reviewed media-403 denial are raw-scanned and hostname-censused
-as absence evidence without forcing JSON unless their Content-Type declares it.
-The `audited`, `recordRemovalStarted`, `recordDeleted`, and `recordRemoved` milestones are monotonic.
-The private `recordRemovalStarted` claim is durable before dispatching DELETE. A fresh cleanup
-runtime never replays a claimed DELETE, even after a lost response; it performs the existing
-bounded record/log/artifact absence checks and fails if absence cannot be verified. A retry after
-API deletion keeps its earlier audit; a 404 does not invent an unaudited deletion. Response bodies
-from every retained surface, before or after the audit and whatever their HTTP status, are scanned
-before rejection: raw first, then strict canonical JSON and reference discovery for declared JSON.
-This includes rejected DELETE bodies, signed-artifact errors and transient 5xx bodies before a GET
-retry, as well as responses received while waiting for API absence. A capability hit persists an
-incident before the original status/format error is thrown or the retry proceeds. Image/video
-bodies stay unread and report media; plan/catalog/Local-download transport bodies are not retained
-surfaces.
-Fresh cleanup re-audits finalized raw surfaces against the live links only if the persisted live
-and fixture generation identities still match. Otherwise it still deletes for confidentiality,
-reports `unauditedRecordsDeleted`, and never calls those records audited. A detected link/media
-hit or unverifiable required surface persists an incident even after deletion; stop and handle
-that incident rather than clearing progress or authorizing another campaign.
-If Local termination is unverified, cleanup removes its key config but preserves the working
-directory and private PID/birth checkpoint needed to identify remaining processes; it does not
-claim restoration. Discovery uses process ancestry and canonical executable/cwd, never argv names.
-Cleanup keeps both the fixture and workspace while any record or tunnel release remains unverified;
-it also keeps the workspace after fixture-stop failure. Local download/directory preparation occurs
-before tunnel intent is checkpointed. A missing never-created directory is safely idempotent only
-when process enumeration proves no matching executable lineage; otherwise cleanup stays dirty.
-An unidentified create stays dirty; reconcile that attempt's exact vendor/build in the account
-before any new attempt, never guess an ID, discard progress or retry creation blindly. Failure to
-restore any resource/checkpoint sets `pixelUnrestored` and blocks later Pixel lanes.
-
-After the lead confirms no campaign, Pixel operation or retained-Mac use overlaps, select the
-verified Bun 1.4.4 binary on `PATH` (not a newer workstation Bun), then run:
-
-```sh
-bun scripts/device-cloud-development.ts \
-  --identity "${DEVICE_CLOUD_IDENTITY:?private isolated identity JSON required}" \
-  --mac-host "${OMP_STABLE_MAC_HOST:?qualification user@host required}" \
-  --origin "${DEVICE_CLOUD_ORIGIN:?deployed candidate HTTPS origin required}" \
-  --session-label "${DEVICE_CLOUD_SESSION_LABEL:?isolated live OMP label required}" \
-  --mixed-vendors
-```
-
-The identity must bind the verified candidate archive/digest, exact stock-OMP identity and a
-fresh private `receiptRoot` containing `device-cloud-development`; the live candidate gateway,
-isolated published OMP session, SSH fixture tools, both vendor accounts, Java, Rosetta and the
-single-user workstation boundary must already be ready. Bounds: one attempt, at most three
-sequential sessions (TestingBot iPhone with Home Screen Push; BrowserStack iPad and Samsung),
-no session-creation retries, and no new allocations after 40 minutes. In-flight provider-command
-and session bounds still apply; 40 minutes is not a wall-clock kill deadline. Production audits
-and release run on failure too. Results are private **Tested** evidence, never qualification.
-This command has not been run by the public-page probe work.
-
-## Post-release local installation smoke
-
-From the matching release tooling checkout, run
-`bun run smoke:release -- --tag "$TAG" --archive-sha256 "$ARCHIVE_SHA256"` with the exact verified
-public digest. The runtime archive does not contain this maintainer script. Use the release’s
-Bun/source pins and stock OMP `>= 18.1.20`; require readiness-token/config preservation, mainline
-discovery and launch/revocation, physical Android recovery/isolation, and owned-fixture cleanup.
-Signed-candidate qualification and prior release smokes do not substitute for a published-byte run.
-
-The smoke host is now the Studio operator account, with the gateway at the Studio's own tailnet
-origin and the Pixel attached to the Studio. That account must be tailscaled's operator. The smoke
-is an upgrade smoke and requires an existing installed gateway and Tailscale Serve configuration;
-on a fresh host, install the published predecessor first. The smoke installs Bun's global stock
-OMP itself; no separate manual stock-OMP installation is required.
-
-The attached Pixel must have the one-time Tailscale Doze exemption described in
-[host preparation](#bun-144-host-preparation-before-the-next-campaign). The smoke's shared
-read-only admission checks the exact allowlist entry before downloads or host/device mutation;
-it never applies the exemption automatically.
-
-Every release's published-byte result, including any failed first attempt, is recorded in the
-[release ledger](RELEASE_STATUS.md) with its source, digest, preservation, physical-client, and
-cleanup evidence.
 
 ### Fork-era post-release smoke procedure
 
@@ -1990,233 +1401,3 @@ validation still fails, it deletes the draft; if post-publication tag or release
 still fails, it deletes the release. The signed tag remains for operator diagnosis. Private live
 rehearsal proved publication/deletion compensation. Already-public attestation or Rekor records are
 not removed and remain failed-attempt provenance.
-
-## Default-relay soak qualification
-
-This optional long-duration lane is not a mainline release gate; each release has used a
-founder-approved fresh 30-minute signed-candidate check instead. Only an actual eight-hour run may
-be reported as eight-hour evidence.
-
-Keep a stock mainline OMP `>= 18.1.20` host and the gateway running, then exercise a view-only client for the default
-eight hours:
-
-```sh
-OMP_GATEWAY_SOAK_PUBLIC_ORIGIN=https://gateway.example.ts.net \
-OMP_GATEWAY_SOAK_TAILSCALE_LOGIN=user@example.com \
-OMP_GATEWAY_SOAK_GATEWAY_PID="$(launchctl print "gui/$(id -u)/omp-session-gateway" | awk '$1 == "pid" && $2 == "=" {print $3; exit}')" \
-bun run qualify:relay-soak
-```
-
-The harness sends identity headers and receives the launch capability only through a numeric loopback
-gateway origin, requires `no-store` metadata and launch responses, never prints the capability, and
-fails if the collaboration client ends or is not live at completion. Set
-`OMP_GATEWAY_SOAK_INSTANCE_ID` to select one published session. `OMP_GATEWAY_SOAK_SECONDS` may shorten
-a diagnostic run to at least one second, but only the default 28,800-second duration qualifies the
-long-lived relay scenario.
-
-The harness also measures the gateway process named by `OMP_GATEWAY_SOAK_GATEWAY_PID`: take it from
-the service manager, as above on macOS, or with
-`systemctl --user show --property MainPID --value omp-session-gateway` on Linux. It never infers the
-process from the listening port, because a loopback origin may be a tunnel whose listener is not the
-gateway, such as the stable lane's SSH forward. With a PID, it fails before launching if that process
-cannot be sampled. Inside the window it reads the process's resident memory and CPU time when the
-relay goes live, about every 60 seconds, and at completion, and it fails if the gateway process exits.
-The output JSON adds a `gateway` summary: sample count, start/end/min/max RSS in KiB, the
-least-squares RSS trend in KiB per hour, and CPU seconds inside the window. Without a PID it takes no
-gateway measurement and adds no `gateway` summary. Set `OMP_GATEWAY_SOAK_SAMPLES` to an absolute path,
-which requires a PID, to append every sample to a new CSV (`elapsed_s,rss_kib,cpu_s`) as it is taken;
-the harness refuses an existing file.
-
-Record the gateway commit, exact mainline OMP commit, output JSON, host/browser versions, and date in
-`RELEASE_STATUS.md`. Bounded memory growth may be claimed only from an actual eight-hour run's
-samples, never from a shorter diagnostic. Eight-hour endurance is **not rerun or claimed** by any
-mainline release. A passed 30-minute candidate check does not establish bounded memory growth; no
-fork-era long-window result transfers to the changed host/query/client baseline.
-
-## Fleet CI runtime
-
-Fleet CI is optional shadow verification, not a substitute for required GitHub-hosted checks or
-release qualification. Each job installs and verifies the `packageManager` Bun version; the
-shared appliance image is not the repository runtime contract. `bun run check:repository` rejects
-jobs that skip runtime setup on self-hosted runners or select a different Bun version.
-
-The fleet controller pins the complete workflow digest. After an intentional workflow change,
-review and update that profile binding without rewriting historical qualification evidence.
-A successful controller dry-run does not prove host readiness; validate the configured appliance
-and run a bounded shadow against the exact clean, pushed checkpoint. Do not bypass workload guards
-or replace the shared runner image merely to satisfy this repository's Bun pin.
-
-## Build and keyless provenance
-
-The release workflow accepts only tags matching the current package.json version:
-
-- v<version>-prealpha.<n> for an internal engineering artifact;
-- v<version>-alpha[.<n>] for the advertised alpha shape;
-- v<version>-beta[.<n>] for the advertised beta shape;
-- the exact bare v<version> for the stable GitHub Latest shape; and
-- provenance-test-v<version>.<n> for a provenance exercise.
-
-The integer n must be positive. Release-candidate, rc, stable-suffixed, zero-indexed, cross-version,
-and all unknown shapes fail before artifact creation. The tagged commit must be reachable from main.
-
-scripts/release-policy.ts is the sole tag classifier. It maps only the bare version to stable,
-non-prerelease, and Latest; alpha, beta, pre-alpha, and provenance shapes remain prereleases and
-not-Latest. The validated channel selects release-info.json qualification; it cannot author or
-widen the claim, and every unknown OMP_RELEASE_CHANNEL fails the build.
-
-.github/workflows/signed-release.yml runs bun run check, builds the deterministic archive,
-checks its SHA-256 digest, and then uses GitHub Actions OIDC for both provenance systems:
-
-- `actions/attest-build-provenance` publishes GitHub build attestations for the archive,
-  deterministic SPDX 2.3 SBOM, and `SHA256SUMS`;
-- Cosign signs all three files keylessly and writes a Sigstore bundle beside each one; and
-- no repository signing key or long-lived signing secret exists.
-
-The workflow creates one complete draft, uploads every asset, then publishes once. Stable is published as a non-prerelease and explicitly marked Latest; every other channel is published as a prerelease with Latest disabled:
-
-- `omp-session-gateway-<version>-bun.tar`;
-- `omp-session-gateway-<version>.spdx.json`;
-- `SHA256SUMS`;
-- `omp-session-gateway-<version>-bun.tar.sigstore.json`;
-- `omp-session-gateway-<version>.spdx.json.sigstore.json`; and
-- `SHA256SUMS.sigstore.json`.
-
-The repository's **Settings → General → Features → Immutable releases** setting is
-enabled and required before tagging. A maintainer can confirm it without using a signing
-secret:
-
-```sh
-gh api repos/carrythroughsystems/omp-session-gateway/immutable-releases --jq .enabled
-```
-
-It must print `true`. GitHub applies a 24-hour grace period after publication before
-locking the release, assets, and tag and issuing the immutable-release attestation. Treat
-the release as final at publication; publish a new tag to correct it.
-
-Run `bun run check` and `bun run release:build` for a local unsigned build. The builder
-emits `dist/release/omp-session-gateway-<package-version>-bun.tar`, a deterministic SPDX 2.3 dependency
-inventory, and `SHA256SUMS`; the archive also contains `SBOM.spdx.json` and no source maps.
-For a byte-exact rebuild of an advertised tag, set OMP_RELEASE_CHANNEL to that tag's channel. Valid
-values are pre-alpha (default), alpha, beta, and stable; every other value fails. The channel moves
-release-info.json and nothing else: every other archive member and the SBOM stay byte-identical
-across channels. This runtime-neutral Bun archive is not a substitute for qualified host operation.
-
-Do not upload source maps, logs, test recordings, or diagnostics that might contain
-fixture capabilities unless the leak scanner has verified them.
-
-## Verify a published build
-
-Install current GitHub CLI and Cosign releases, choose the tag, and download into an empty
-directory:
-
-```sh
-REPO=carrythroughsystems/omp-session-gateway
-TAG="$(gh release view --repo "$REPO" --json tagName --jq .tagName)"
-WORKFLOW=signed-release.yml
-# Historical signing identity snapshot, captured 2026-10-09; newest: v0.7.5,
-# published 2026-10-08T16:38:49Z. Never infer the signer from a redirected URL.
-SIGNING_REPO="$REPO"
-case "$TAG" in
-  v0.7.5|v0.7.5-prealpha.2|v0.7.5-prealpha.1|v0.7.4|v0.7.4-prealpha.1|v0.7.3|v0.7.3-prealpha.1|v0.7.2|v0.7.2-prealpha.2|v0.7.2-prealpha.1|v0.7.1|v0.7.1-prealpha.1|v0.7.0|v0.7.0-prealpha.1|v0.6.3|v0.6.3-prealpha.2|v0.6.3-prealpha.1|v0.6.2|v0.6.2-prealpha.1|v0.6.1|v0.6.1-prealpha.1|v0.6.0|v0.6.0-prealpha.4|v0.6.0-prealpha.3|v0.6.0-prealpha.2|v0.6.0-prealpha.1|v0.5.3|v0.5.3-prealpha.1|v0.5.2|v0.5.2-prealpha.1|v0.5.1|v0.5.1-prealpha.1|v0.5.0|v0.5.0-prealpha.1|v0.4.2|v0.4.2-prealpha.1|v0.4.1|v0.4.1-prealpha.3|v0.4.1-prealpha.2|v0.4.1-prealpha.1|v0.4.0|v0.4.0-prealpha.1|v0.3.0|v0.3.0-prealpha.3|v0.3.0-prealpha.2|v0.3.0-prealpha.1|v0.2.1|v0.2.1-prealpha.2|v0.2.0|v0.2.0-prealpha.1|v0.1.0-prealpha.25|v0.1.0-prealpha.24|v0.1.0|v0.1.0-prealpha.23|v0.1.0-prealpha.22|v0.1.0-prealpha.21|v0.1.0-beta.1|v0.1.0-prealpha.20|v0.1.0-prealpha.19|v0.1.0-prealpha.18|v0.1.0-alpha.1|v0.1.0-alpha|provenance-test-v0.1.0.11|v0.1.0-prealpha.17|v0.1.0-prealpha.13|v0.1.0-prealpha.12|v0.1.0-prealpha.11|v0.1.0-prealpha.9|v0.1.0-prealpha.10|v0.1.0-prealpha.8|v0.1.0-prealpha.7|v0.1.0-prealpha.6|v0.1.0-prealpha.5|v0.1.0-prealpha.4|v0.1.0-prealpha.3|v0.1.0-prealpha.2|v0.1.0-prealpha.1|provenance-test-v0.1.0.10|provenance-test-v0.1.0.9|provenance-test-v0.1.0.8|provenance-test-v0.1.0.7|provenance-test-v0.1.0.6|provenance-test-v0.1.0.5)
-    SIGNING_REPO=alphastorm/omp-session-gateway ;;
-esac
-
-mkdir release-verification
-gh release download "$TAG" --repo "$REPO" --dir release-verification
-cd release-verification
-ARCHIVE="$(ls omp-session-gateway-*-bun.tar)"
-SBOM="$(ls omp-session-gateway-*.spdx.json)"
-```
-
-Without a tag, `gh release view` resolves the current GitHub Latest release, which is always the
-qualified stable. To verify a historical artifact, set `TAG` to it and use its matching signing
-workflow: for example, `v0.1.0-beta.1` used `release.yml`, not `signed-release.yml`. Do not
-substitute today’s workflow identity for a historical receipt. Repository downloads use the new
-owner, but signed certificates and attestation source repositories never change on transfer.
-The closed historical tag list above selects the old signing identity only for releases already
-published when this cutover was prepared; every other tag requires the new owner. Do not add
-future tags to that list or replace exact workflow/tag/issuer pins with a wildcard.
-Asset names carry the package version, not the tag: a candidate tagged `vX.Y.Z-prealpha.N`
-downloads `omp-session-gateway-X.Y.Z-bun.tar`, so the names are read from the fresh directory.
-
-Verify the immutable release attestation and every release asset. A failure means the release is not yet immutable or the downloaded asset is
-not part of the attested release:
-
-```sh
-gh release verify "$TAG" --repo "$REPO"
-for asset in \
-  "$ARCHIVE" \
-  "$SBOM" \
-  SHA256SUMS \
-  "$ARCHIVE.sigstore.json" \
-  "$SBOM.sigstore.json" \
-  SHA256SUMS.sigstore.json
-do
-  gh release verify-asset "$TAG" "$asset" --repo "$REPO"
-done
-```
-
-Verify the archive checksum (`shasum -a 256 -c SHA256SUMS` is the macOS equivalent):
-
-```sh
-sha256sum --check SHA256SUMS
-```
-
-On Windows, in PowerShell (prints `True`):
-
-```powershell
-$archive = Get-Item omp-session-gateway-*-bun.tar
-(Get-FileHash $archive -Algorithm SHA256).Hash -eq (Select-String -Path SHA256SUMS -SimpleMatch $archive.Name).Line.Split(' ')[0]
-```
-
-Verify GitHub build provenance against the exact repository, workflow, and tag ref:
-
-```sh
-for artifact in "$ARCHIVE" "$SBOM" SHA256SUMS
-do
-  gh attestation verify "$artifact" \
-    --repo "$SIGNING_REPO" \
-    --signer-workflow "$SIGNING_REPO/.github/workflows/$WORKFLOW" \
-    --source-ref "refs/tags/$TAG"
-done
-```
-
-Verify the independent Sigstore bundles against the GitHub Actions OIDC issuer and exact
-workflow-ref certificate identity:
-
-```sh
-CERTIFICATE_IDENTITY="https://github.com/$SIGNING_REPO/.github/workflows/$WORKFLOW@refs/tags/$TAG"
-for artifact in "$ARCHIVE" "$SBOM" SHA256SUMS
-do
-  cosign verify-blob \
-    --bundle "$artifact.sigstore.json" \
-    --certificate-identity "$CERTIFICATE_IDENTITY" \
-    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    "$artifact"
-done
-```
-
-Successful checksum, build-attestation, Cosign, and immutable-release checks establish
-integrity and origin. They do not by themselves establish host/client compatibility or complete
-the release qualification gates above. Continue with the
-[verified-archive installation steps](OPERATIONS.md#2-cli-and-daemon-installation).
-
-## Versioning
-
-Use Semantic Versioning:
-
-- breaking configuration/protocol/security behavior increments the appropriate version;
-- pre-1.0 minor versions may contain breaking changes but must state them prominently;
-- protocol versions are explicit and not inferred solely from package versions.
-
-## Release notes
-
-Every release note should include:
-
-- status (experimental/alpha/beta/stable);
-- compatible OMP versions/commits;
-- security-relevant changes;
-- user-visible changes;
-- configuration or migration steps;
-- known issues and rollback instructions; and
-- acknowledgements without exposing reporter-sensitive details.
