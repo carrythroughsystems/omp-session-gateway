@@ -49,7 +49,7 @@ Development state is stored privately under `~/.local/share/omp-session-gateway/
 
 ### Prerequisites and pins
 
-The controller must be macOS (`darwin`) with Bun `1.4.4`, FreeRDP `3.33.0` (`sdl-freerdp` supporting `/from-stdin` and `fingerprint:<hash>`), `pywinrm` `0.5.0` in `~/.local/share/omp-session-gateway/qualification/venv`, `cosign`, `shasum`, `adb`, and authenticated `gh` and `git` (with release tag-signing keys trusted) on `PATH`, plus one attached Android Pixel over `adb` (`tcp:9222` unowned, Chrome installed, connected to the tailnet).
+The controller must be macOS (`darwin`) with Bun `1.4.4`, FreeRDP `3.33.1` (`sdl-freerdp` supporting `/from-stdin` and `fingerprint:<hash>`), `pywinrm` `0.5.0` in `~/.local/share/omp-session-gateway/qualification/venv`, `cosign`, `shasum`, `adb`, and authenticated `gh` and `git` (with release tag-signing keys trusted) on `PATH`, plus one attached Android Pixel over `adb` (`tcp:9222` unowned, Chrome installed, connected to the tailnet).
 
 Export `OMP_STABLE_WINDOWS_LOGIN` set to that Pixel's user-owned tailnet login so the guest allowlist accepts the device during `pixel_verified`.
 
@@ -57,7 +57,7 @@ Store credentials in private current-user (`0600`) files: the Vultr API token in
 
 The tailnet must have MagicDNS, HTTPS certificates, and `tag:omp-session-gateway` access policy ([Tailnet access policy](OPERATIONS.md#4-tailnet-access-policy)); a Vultr API access-control rejection requires authorizing the operator's current `/32` IPv4 egress, never broadening access to all IPs.
 
-[`scripts/windows-qualification-pins.json`](../scripts/windows-qualification-pins.json) pins the Vultr target (`ewr`, `vc2-4c-8gb` with 4 vCPU and 8,192 MiB RAM, OS `2514` `Windows 2025 Standard x64`), Bun `1.4.4`, Tailscale `1.102.4` (`Tailscale Inc.` Authenticode signer), `pywinrm` `0.5.0`, FreeRDP `3.33.0`, and the stock OMP version, `sourceCommit`, `sourceTree`, and `pi_natives.win32-x64-baseline.node` tarball and binary SHA-256 digests.
+[`scripts/windows-qualification-pins.json`](../scripts/windows-qualification-pins.json) pins the Vultr target (`ewr`, `vc2-4c-8gb` with 4 vCPU and 8,192 MiB RAM, OS `2514` `Windows 2025 Standard x64`), Bun `1.4.4`, Tailscale `1.102.4` (`Tailscale Inc.` Authenticode signer), `pywinrm` `0.5.0`, FreeRDP `3.33.1`, and the stock OMP version, `sourceCommit`, `sourceTree`, and `pi_natives.win32-x64-baseline.node` tarball and binary SHA-256 digests.
 
 VM size is test-host capacity for building OMP from source, not part of the qualified Windows claim. Both preflight and portable tests reject any divergence from `UPSTREAM.lock.json`, so an upstream OMP refresh must update these Windows pins without changing the upstream lock schema.
 

@@ -11,7 +11,7 @@
   "tailscaleSha256": "80eb007e39dfebe17299fa1a09c79a8e1d934f76e0246c0817ebe3af675b7ef6",
   "tailscalePublisher": "Tailscale Inc.",
   "pywinrmVersion": "0.5.0",
-  "freerdpVersion": "3.33.0",
+  "freerdpVersion": "3.33.1",
   "omp": {
     "version": "18.20.0",
     "sourceCommit": "c308970263ae13744ea15ab67302e3dac840e266",
