@@ -26,6 +26,7 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "@oh-my-pi/pi-wire";
+import { takeAutoRejoin } from "@oh-my-pi/pi-wire";
 import type { ConnectionPhase, PathHealth } from "../embed-contract";
 import { importRoomKey } from "./codec";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
@@ -153,6 +154,8 @@ export class GuestClient {
 	#noticeSeq = 0;
 	#everConnected = false;
 	#welcomed = false;
+	#everWelcomed = false;
+	#autoRejoins: number[] = [];
 	#welcomeTimer: Timer | null = null;
 	#snapshotProgressTimer: Timer | null = null;
 	#gatewayHealth: PathHealth = INITIAL_PATH_HEALTH;
@@ -366,7 +369,8 @@ export class GuestClient {
 			state: "checking",
 			retryAt: null,
 		};
-		this.#armWelcomeTimer();
+		if (this.#everWelcomed) this.#armRejoinTimer();
+		else this.#armWelcomeTimer();
 		this.#socket.send({
 			t: "hello",
 			proto: COLLAB_PROTO,
@@ -376,6 +380,39 @@ export class GuestClient {
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
 		this.#commit();
+	}
+
+	/** Rejoin a shed guest within upstream's snapshot budget, without replacing the transport. */
+	#rejoin(message: string): void {
+		if (!takeAutoRejoin(this.#autoRejoins)) {
+			this.#end(message);
+			return;
+		}
+		this.#clearSnapshotProgressTimer();
+		this.#pendingSnapshot = null;
+		// A shed peer is no longer a dialog recipient. Do not replay an old answer;
+		// the host re-poses any still-pending requests with its new snapshot.
+		this.#pendingUiResponse = null;
+		this.#clearUiRequests();
+		this.#phase = "reconnecting";
+		this.#socket.send({
+			t: "hello",
+			proto: COLLAB_PROTO,
+			name: this.#name,
+			...(this.#writeToken === undefined ? {} : { writeToken: this.#writeToken }),
+		});
+		this.#armRejoinTimer();
+		this.#commit();
+	}
+
+	/** A post-join hello the host never welcomes retries through the same rejoin budget. */
+	#armRejoinTimer(): void {
+		this.#clearWelcomeTimer();
+		this.#welcomeTimer = setTimeout(() => {
+			this.#welcomeTimer = null;
+			if (this.#phase === "live" || this.#phase === "ended") return;
+			this.#rejoin("timed out waiting for the host's welcome");
+		}, WELCOME_TIMEOUT_MS);
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
@@ -495,6 +532,7 @@ export class GuestClient {
 				this.#readOnly = this.#writeToken === undefined || frame.readOnly === true;
 				this.#restorePendingUiRequest();
 				this.#welcomed = true;
+				this.#everWelcomed = true;
 				this.#socket.markRoomWelcomed();
 				this.#clearWelcomeTimer();
 				if (frame.entryCount === 0) {
@@ -609,6 +647,12 @@ export class GuestClient {
 				this.#end(frame.reason);
 				return; // #end already committed
 			case "error":
+				if (frame.resync) {
+					// A hello awaiting welcome is already covered by its timer.
+					if (this.#phase === "ended" || this.#welcomeTimer !== null) break;
+					this.#rejoin(frame.message);
+					return;
+				}
 				if (!this.#welcomed) {
 					// Pre-welcome errors are the host's targeted reply to our
 					// hello (e.g. protocol mismatch): no welcome will follow.

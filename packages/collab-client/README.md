@@ -1,15 +1,16 @@
 # `packages/collab-client`
 
-Pinned integration of OMP's existing `packages/collab-web` source at tag `v18.18.0`, commit
-`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`. The upstream collab package remains version
-`16.3.6`; `@oh-my-pi/pi-wire` is pinned exactly to `18.18.0`. The collaboration protocol and
-relay framing are unchanged; the wire barrel's unrelated TSP runtime is not bundled.
+Pinned integration of OMP's existing `packages/collab-web` source at tag `v18.20.0`, commit
+`c308970263ae13744ea15ab67302e3dac840e266`, tree `ba890953dd69eb4bf73bb7233bbe50ccfacd6912`.
+The upstream collab package remains version `16.3.6`; `@oh-my-pi/pi-wire` is pinned exactly
+to `18.20.0`. The protocol version and relay framing are unchanged; additive `error.resync`
+and `select.approval` fields retain the same hello/response shapes. Unrelated TSP is not bundled.
 
 These are browser-client provenance pins, independent of both the minimum supported OMP host
 version (`>= 18.1.20`) and the root `UPSTREAM.lock.json` engineering host baseline.
 The gateway consumes the native registry and controller in stock OMP `>= 18.1.20` without a fork,
 custom OMP build, or gateway-specific OMP plugin, while this package pins the embedded browser
-client at `v18.18.0`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
+client at `v18.20.0`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
 deployment scope.
 
 ## Source drift report and refresh
@@ -92,7 +93,15 @@ updates only the ordinary composer text: never Ask input, never a prompt submiss
 an overwrite. Reconnects, Ask transitions, clearing the draft, and rerenders do not seed again.
 The shell binds and clears its holder on disposal; no draft enters storage or gateway requests.
 
-The 18.18.0 refresh adopts pi-wire's shared envelope functions, the pure byte-buffer helper,
+The 18.20.0 refresh adds upstream's same-transport resync rejoin (three automatic
+rejoins per five minutes), a bounded post-join welcome retry, HTML-form Ask results
+and named task/step rendering. Resync clears the shed peer's old dialog response;
+ordinary transport reconnect still retains it until acknowledgement. Form HTML is
+reduced to text outlines, never mounted. Older question cards and task fields remain
+supported by a named local patch. `socket.test.ts` and `tool-render.test.ts` cover
+these differences; all seven helper blobs are unchanged from the previous import.
+
+The preceding 18.18.0 refresh adopted pi-wire's shared envelope functions, the pure byte-buffer helper,
 upstream wait-list rendering with a small older-singleton/timeout/empty adapter, job-intent labels
 with command fallback, and exact-width Markdown code-span closers. The live bash view deliberately
 renders command/output text without interpreting shell-trace string or byte-array fields.
@@ -130,7 +139,7 @@ transcript remains independent. The `wait` renderer and the retained hub-family 
 
 LaTeX delimiters render through KaTeX `0.18.5` as native MathML with `trust: false`; no KaTeX
 stylesheet, font URL, or remote asset is emitted. The browser bundle vendors the seven pure
-TypeScript marked-fork, list-continuation, math-grammar and byte-buffer sources from pi-utils `18.18.0`,
+TypeScript marked-fork, list-continuation, math-grammar and byte-buffer sources from pi-utils `18.20.0`,
 including its source-context and `startFrom` hooks. This replaces npm `marked` without installing
 pi-utils or pi-natives. Original Marked/Markdown and fork licences are retained in
 `licenses/pi-utils-marked/LICENSE`. Rejected currency openers and half-streamed delimiters keep

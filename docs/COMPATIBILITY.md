@@ -119,7 +119,7 @@ Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi
 ([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
 plain `omp`. The current engineering baseline is `v18.20.0` (`UPSTREAM.lock.json`) and the
 qualified host baseline is recorded in the release-generated matrix below, while the independent
-embedded browser client pin is `v18.18.0` (wire `18.18.0`).
+embedded browser client pin is `v18.20.0` (wire `18.20.0`).
 Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
 fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
 gateway update.
@@ -133,9 +133,12 @@ within a bounded rejoin budget. Select requests can carry optional `approval`
 metadata without changing their response shape. Ask tool results now describe HTML
 forms and task calls use name/agent/task/steps fields. These browser-client changes
 belong to a separate reviewed refresh, not the host-only baseline procedure.
-The Linux rewind canary's old success-text matcher does not recognize upstream's
-`Rewound N turns` status. A source-pin update alone does not settle that live
-canary or qualify a release; the published matrix below is unchanged.
+The separately refreshed embedded client handles resync, HTML-form Ask and named
+task/step results, while retaining older supported host rendering and its local
+View, acknowledgement and recovery protections. The Linux rewind canary matcher
+now recognizes upstream's positive `Rewound N turns` status as well as the old
+status; deterministic matcher tests do not settle the live lifecycle canary or
+qualify a release. The published matrix below is unchanged.
 
 v18.18.0 (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, tree
 `cc847a53faf634167bde0ae8c12cb1d6ef38a412`) keeps those contracts unchanged from v18.17.0:

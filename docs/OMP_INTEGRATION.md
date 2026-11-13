@@ -13,7 +13,7 @@ requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact login allowlist, and th
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
 | Engineering host baseline | `v18.20.0` (`c308970263ae13744ea15ab67302e3dac840e266`) | Exact OMP source and tree (`ba890953dd69eb4bf73bb7233bbe50ccfacd6912`) in `UPSTREAM.lock.json`; source pin, not new qualification |
-| Embedded browser client | `v18.18.0` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.18.0`) | Independent provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); shared wire envelopes, wait-list/legacy-result rendering, job-intent labels and exact-width Markdown code spans. Seven exact pure TypeScript helpers are vendored, without pi-utils/pi-natives or export-only omp-stats. |
+| Embedded browser client | `v18.20.0` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.20.0`) | Independent commit/tree provenance in [`packages/collab-client`](../packages/collab-client/README.md); bounded resync rejoin, HTML-form Ask and named task/step rendering with older-host fallbacks. Seven byte-unchanged pure TypeScript helpers are vendored, without pi-utils/pi-natives or export-only omp-stats. |
 | Gateway runtime | Bun `1.4.4` | Required runtime for the CLI, daemon, and release archives |
 
 For the current published release and its qualified hardware matrix, see

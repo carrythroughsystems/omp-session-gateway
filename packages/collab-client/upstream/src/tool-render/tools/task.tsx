@@ -11,7 +11,21 @@ interface TaskItemView {
 	id: string | null;
 	description: string | null;
 	assignment: string | null;
+	agent: string | null;
+	steps: string[];
 	isolated: boolean;
+}
+
+/** Current name/task/steps fields, with older supported host fields kept as fallbacks. */
+function taskItem(entry: Record<string, unknown>, agent: string | null): TaskItemView {
+	return {
+		id: str(entry.name) ?? str(entry.id),
+		description: str(entry.description),
+		assignment: str(entry.task) ?? str(entry.assignment),
+		agent: str(entry.agent) ?? agent,
+		steps: Array.isArray(entry.steps) ? entry.steps.filter(step => typeof step === "string") : [],
+		isolated: entry.isolated === true,
+	};
 }
 
 function taskItems(args: Record<string, unknown>): TaskItemView[] {
@@ -20,22 +34,12 @@ function taskItems(args: Record<string, unknown>): TaskItemView[] {
 		const items: TaskItemView[] = [];
 		for (const entry of raw) {
 			if (!isRecord(entry)) continue;
-			items.push({
-				id: str(entry.id),
-				description: str(entry.description),
-				assignment: str(entry.assignment),
-				isolated: entry.isolated === true,
-			});
+			items.push(taskItem(entry, str(args.agent)));
 		}
 		return items;
 	}
-	const flat: TaskItemView = {
-		id: str(args.id),
-		description: str(args.description),
-		assignment: str(args.assignment),
-		isolated: args.isolated === true,
-	};
-	return flat.id || flat.description || flat.assignment ? [flat] : [];
+	const flat = taskItem(args, str(args.agent));
+	return flat.id || flat.description || flat.assignment || flat.steps.length > 0 ? [flat] : [];
 }
 
 /** "Anna.Bob" nesting → "Anna>Bob" breadcrumb (mirrors the TUI's formatTaskId). */
@@ -64,11 +68,12 @@ function resultStatus(res: Record<string, unknown>): { label: string; tone: "ok"
 }
 
 function Summary({ args }: ToolRenderProps): ReactNode {
-	const agent = str(args.agent);
 	const resume = str(args.resume);
 	const tasks = taskItems(args);
+	const agents = new Set(tasks.map(t => t.agent));
+	const agent = agents.size === 1 ? tasks[0]?.agent : str(args.agent);
 	const first = tasks.length > 0 ? tasks[0] : null;
-	const label = first ? (first.description ?? first.id) : null;
+	const label = first ? (first.description ?? first.id ?? first.assignment ?? first.steps[0]) : null;
 	return (
 		<>
 			{agent && <Badge tone="accent">{agent}</Badge>}
@@ -227,10 +232,17 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 									)
 								}
 							>
+								{t.agent && <Badge>{t.agent}</Badge>}{" "}
+								{t.steps.length > 0 && (
+									<Badge>{`${t.steps.length} ${t.steps.length === 1 ? "step" : "steps"}`}</Badge>
+								)}{" "}
 								{t.isolated && <Badge>isolated</Badge>}{" "}
 								{t.description && <span>{truncate(normalizeWs(t.description), 120)}</span>}
 							</Row>
 							{t.assignment && <Output text={t.assignment} maxLines={6} title="assignment" />}
+							{t.steps.map((step, n) => (
+								<Output key={n} text={step} maxLines={4} title={`step ${n + 1}/${t.steps.length}`} />
+							))}
 						</div>
 					))}
 				</div>

@@ -46,6 +46,80 @@ describe("tool result image safety", () => {
 });
 
 describe("tool renderers across supported OMP releases", () => {
+  test("renders HTML-form answers and selected-option notes without mounting HTML", () => {
+    const html = render({
+      name: "ask",
+      args: { html: '<form><legend>Ship &amp; test?</legend><input name="ship"><script>alert(1)</script></form>' },
+      result: { content: [], details: {
+        answers: [{ name: "ship", question: "Ship & test?", answer: "<img src=x onerror=alert(1)>" }],
+        notes: [
+          { name: "ship", question: "Ship & test?", option: "Yes", text: "after review" },
+          { name: "other", question: "Ship & test?", option: "No", text: "must not leak" },
+          { name: 3, question: "Ship & test?", option: "No", text: "malformed note" },
+        ],
+        timedOut: true,
+      } },
+    });
+    expect(html).toContain("Ship &amp; test?");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).toContain("after review");
+    expect(html).toContain("auto-selected after timeout");
+    expect(html).not.toContain("must not leak");
+    expect(html).not.toContain("malformed note");
+    expect(html).not.toContain("<form");
+    expect(html).not.toContain("<input");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<img");
+  });
+
+  test("renders pending form outlines as text and preserves malformed-result fallback", () => {
+    const pending = render({
+      name: "ask", args: { html: '<form><legend>Choose &amp; review</legend><input name="a"><input name="a"><textarea name="b"></textarea><input type="hidden" name="secret"></form>' },
+      running: true,
+    });
+    expect(pending).toContain("Choose &amp; review");
+    expect(pending).toContain("2 fields");
+    expect(pending).not.toContain("<form");
+    expect(pending).not.toContain("<textarea");
+    const failed = render({
+      name: "ask", args: { html: "<form></form>" },
+      result: { content: [{ type: "text", text: "form unavailable" }], details: { answers: [{ question: null }] } },
+    });
+    expect(failed).toContain("form unavailable");
+  });
+
+  test("retains older question cards and task assignments", () => {
+    const ask = render({
+      name: "ask",
+      args: { questions: [{ id: "ship", question: "Legacy question", options: [{ label: "Legacy answer" }] }] },
+      result: { content: [], details: { answers: [{ id: "ship", selected: ["Legacy answer"] }] } },
+    });
+    expect(ask).toContain("Legacy question");
+    expect(ask).toContain("Legacy answer");
+    const task = render({
+      name: "task", args: { agent: "legacy-agent", tasks: [{ id: "old-task", description: "Old description", assignment: "Old assignment" }] },
+    });
+    expect(task).toContain("legacy-agent");
+    expect(task).toContain("old-task");
+    expect(task).toContain("Old description");
+    expect(task).toContain("Old assignment");
+  });
+
+  test("renders named tasks and ordered steps", () => {
+    const html = render({
+      name: "task", args: { tasks: [
+        { name: "Refresh", agent: "worker", task: "Import source", steps: ["Review patches", "Run proofs"] },
+        { name: "Review", agent: "reviewer", task: "Inspect result", steps: [null, 3] },
+      ] },
+    });
+    for (const text of ["Refresh", "worker", "Import source", "2 steps", "Review patches", "Run proofs", "reviewer", "Inspect result"]) {
+      expect(html).toContain(text);
+    }
+    expect(html.indexOf("Review patches")).toBeLessThan(html.indexOf("Run proofs"));
+    expect(html).toContain("step 1/2");
+    expect(html).toContain("step 2/2");
+  });
+
   test("renders eval printed views once and preserves their surrounding text order", () => {
     const html = render({
       name: "eval", args: { language: "py", code: "print(result)" },
