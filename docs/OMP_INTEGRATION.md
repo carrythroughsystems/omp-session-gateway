@@ -1,45 +1,33 @@
 # Mainline OMP integration
 
+This guide tells integrators and contributors what OMP Session Gateway requires from stock Oh My Pi (OMP), how discovery, snapshot polling, capability brokering, and Tern session creation work, and where the integration boundary sits.
+
 ## Supported prerequisite
 
-Use stock mainline OMP `>= 18.1.20`. The integration is native to stock OMP: no fork, custom OMP
-build, or gateway-specific OMP plugin is required. The separately installed gateway consumes OMP's
-local registry; it does not patch OMP, import private controller APIs, or install a second OMP
-executable. Releases earlier than `18.1.20` lack this registry and are unsupported. Deployment
-requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact login allowlist, and the one-time
-`collab.autoStart` setting below.
+Stock mainline OMP `>= 18.1.20` is the only OMP prerequisite: no fork, custom OMP build, gateway-specific OMP plugin, or second OMP executable is used. The gateway consumes OMP's local registry without patching OMP or importing private controller APIs; releases earlier than `18.1.20` lack this registry and are unsupported.
+
+Production deployment requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact login allowlist (`auth.allowedLogins`; [Installation and operations](OPERATIONS.md)), and the one-time `collab.autoStart` setting below.
 
 | Surface | Pin or contract | Notes |
 |---|---|---|
-| Stock mainline OMP host | `>= 18.1.20` | Minimum host version supplying the native local registry (`collab.autoStart`) |
-| Engineering host baseline | `v18.18.0` (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`) | Exact OMP source and tree (`cc847a53faf634167bde0ae8c12cb1d6ef38a412`) in `UPSTREAM.lock.json` |
-| Embedded browser client | `v18.18.0` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.18.0`) | Independent provenance pin in [`packages/collab-client`](../packages/collab-client/README.md); shared wire envelopes, wait-list/legacy-result rendering, job-intent labels and exact-width Markdown code spans. Seven exact pure TypeScript helpers are vendored, without pi-utils/pi-natives or export-only omp-stats. |
-| Gateway runtime | Bun `1.4.4` | Required runtime for the CLI, daemon, and release archives |
+| Stock mainline OMP host | `>= 18.1.20` | Minimum OMP version supplying the native local registry (`collab.autoStart`). |
+| Engineering host baseline | `v18.18.0` (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`) | Exact OMP commit and Git tree (`cc847a53faf634167bde0ae8c12cb1d6ef38a412`) in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json) ([Baseline review record](UPSTREAM_STRATEGY.md#baseline-review-record)). |
+| Embedded browser client | Provenance pin in [`packages/collab-client`](../packages/collab-client/README.md) | Independent `collab-web` source, `@oh-my-pi/pi-wire` dependency, and vendored `pi-utils` helper provenance. |
+| Gateway runtime | Bun `1.4.4` | Required runtime for `omp-gateway` (the CLI), `omp-gatewayd` (the daemon), and release archives. |
 
-For the current published release and its qualified hardware matrix, see
-[Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md).
+For the latest release and its qualified hardware matrix, see [Current claim](COMPATIBILITY.md#current-claim) and [Release status](RELEASE_STATUS.md).
 
 ## Additive activity compatibility
 
-Under registry v1, the gateway validates the fields it reads and ignores unknown additive fields
-(ADR-028). Any snapshot naming prompt, question, options, prefill, answer, requestId, or count is
-refused. The minimum host version stayed unchanged when the engineering baseline later moved to
-v18.18.0.
+Under registry v1 ([Protocol](PROTOCOL.md)), the gateway validates only the fields it reads and ignores unknown additive fields ([ADR-028](DECISIONS.md#adr-028--consume-mainline-omp-discovery-and-resolve-capabilities-only-at-launch)). Any snapshot naming `prompt`, `question`, `options`, `prefill`, `answer`, `requestId`, or `count` is refused as a privacy violation.
 
-Hosts from OMP `18.2.9` onward (upstream
-[PR #12844](https://github.com/can1357/oh-my-pi/pull/12844)) may include optional boolean `busy`
-(`session.isStreaming`): `true` while running a turn, `false` while idle, and unknown when omitted
-or `null`. Older hosts remain visible in the same directory with unknown activity. `busy` is not
-proof of successful task completion or process exit.
+OMP hosts (one running `omp` process per collaboration entry) at `18.2.9` or newer ([PR #12844](https://github.com/can1357/oh-my-pi/pull/12844)) emit optional boolean `busy` (OMP's `session.isStreaming` state): `true` while running a turn, `false` while idle, and unknown when omitted or `null`. OMP `18.1.20`–`18.2.8` hosts appear in the directory with unknown activity; `busy` is not proof of task completion or process exit.
 
-Known `busy` activity is projected into browser metadata and drives opt-in activity-stop alerts
-through the existing Push v2 channel. Older hosts remain unknown and do not produce stop alerts.
-See [ATTENTION_SPEC.md](ATTENTION_SPEC.md#activity-stop-notifications) for the exact trigger and
-View-only tap semantics; no extra OMP setting is needed.
+Known `busy` activity appears in browser metadata and drives opt-in activity-stop alerts over Web Push v2 for local subscriptions and Web Push v3 for fleet notifications (where the home gateway sends alerts for selected remote hosts; [Fleet notifications](PROTOCOL.md#fleet-notifications)). Hosts with unknown activity do not trigger stop alerts; see [Activity-stop notifications](ATTENTION_SPEC.md#activity-stop-notifications) for trigger and read-only **View** tap rules (**Control** is writable).
 
 ## 1. Operator settings
 
-The only required OMP setting is:
+Set `collab.autoStart` once in OMP so interactive sessions publish automatically:
 
 ```sh
 omp config set collab.autoStart control
@@ -47,7 +35,7 @@ omp config set collab.autoStart control
 omp config set collab.autoStart view
 ```
 
-Equivalent settings:
+Equivalent settings JSON:
 
 ```jsonc
 {
@@ -57,104 +45,123 @@ Equivalent settings:
 }
 ```
 
-Start participating interactive sessions with plain `omp`. OMP owns automatic collaboration
-startup after session initialization and publishes its own local discovery entry. The gateway
-discovers the host on its next poll, whether OMP or the gateway started first. Manual collaboration
-commands remain OMP’s responsibility and require no gateway integration hook.
+Start participating interactive sessions with plain `omp`. OMP starts collaboration after session initialization and writes its local discovery entry; the gateway discovers the OMP host on its next poll regardless of start order. Manual collaboration commands stay owned by OMP and need no gateway hook.
 
-OMP publishes only after its relay opens the room. From OMP `18.5.1` onward, an automatic start
-whose relay is unreachable or times out retries immediately and then backs off from 1 to 60
-seconds, and the recovered room still publishes generation 1. A relay that refuses the room is not
-retried. Earlier `18.1.20`–`18.5.0` releases make one startup attempt: if it fails, the session
-shows `Collab auto-start failed` and stays out of the session list until `/collab`, a session
-switch, or a restart.
+OMP publishes only after its relay opens the room. On OMP `18.5.1` and newer, an automatic start whose relay is unreachable or times out retries immediately and backs off from 1 to 60 seconds, publishing generation 1 (OMP's counter that increments when a session is replaced) once recovered; a room refusal is not retried. OMP `18.1.20`–`18.5.0` makes one startup attempt and shows `Collab auto-start failed` until `/collab`, a session switch, or a restart.
 
-Enabling `collab.autoStart` or upgrading the `omp` executable on disk applies to newly started
-`omp` processes; already-running sessions keep their loaded process state until restarted. Manual
-`/collab` prints bearer capabilities to the terminal, so do not run it in a recorded or supervised
-session.
+Changing `collab.autoStart` or upgrading `omp` on disk affects new `omp` processes; running sessions keep their loaded state until restarted. A **View** or **Control** link is a bearer secret, called a capability in the contracts: manual `/collab` prints capabilities to the terminal, so do not run it in a recorded or supervised session.
 
 ## 2. Discovery and per-host queries
 
-OMP owns `~/.omp/run/collab-hosts`. `PI_CONFIG_DIR` replaces the `.omp` directory name relative
-to the home directory. The gateway can select another directory through `omp.discoveryDir`.
-Every publication consists of a private discovery file and an owner-only query endpoint.
+OMP owns `~/.omp/run/collab-hosts` (`%USERPROFILE%\.omp\run\collab-hosts` on Windows; `PI_CONFIG_DIR` replaces the `.omp` directory name relative to the home directory), and the gateway can read an alternate path via `omp.discoveryDir`. Every publication consists of a private `<entryId>.json` discovery file and an owner-only query endpoint.
 
-`OmpHostReader` reads the file’s version, instance identity, PID, endpoint, creation time, and
-per-host query token. It uses the published endpoint verbatim: long socket paths may be relocated
-under `/tmp/omp-collab-<hash>` before v18.10.2 and under the owner-only `/tmp/omp-<euid>` from
-v18.10.2 ([`a608a9ca07`](https://github.com/can1357/oh-my-pi/commit/a608a9ca07c9443634e80d877d61c602099dab91)),
-which also leaves a `<entryId>.sock.bind.lock` file beside each socket and names Windows pipes
-`\\.\pipe\omp-<entryId>-<hash>`. Discovery files are written once, so file timestamps do not
-represent metadata freshness. The gateway only reads them and never repairs or removes them. A
-killed host's file stays until an OMP listing (`omp collab list`) prunes it. Because each file's
-timestamp is its publication time, the gateway reads unknown publications newest first and skips
-unchanged files whose endpoint already proved dead, so leftovers cannot displace a new session.
+`OmpHostReader` (`apps/gateway/src/omp-registry.ts`) reads the discovery file's `version`, `instanceId`, `pid`, `endpoint`, `createdAt`, and per-host query `token`, and connects to the published endpoint verbatim ([Protocol](PROTOCOL.md)).
 
-Queries are newline-framed JSON, one request and response per connection. `snapshot` returns
-metadata, while `link` resolves one exact generation and role on an explicit launch. The complete
-file, snapshot, operation, and error-code contracts are in [PROTOCOL.md](PROTOCOL.md).
+Upstream relocates overlong POSIX socket paths under `/tmp/omp-collab-<hash>` before `v18.10.2` and under owner-only `/tmp/omp-<euid>` (the effective Unix user ID) from `v18.10.2` ([`a608a9ca07`](https://github.com/can1357/oh-my-pi/commit/a608a9ca07c9443634e80d877d61c602099dab91)), which also creates `<entryId>.sock.bind.lock` beside each Unix socket and names Windows pipes `\\.\pipe\omp-<entryId>-<hash>`.
 
-OMP also provides `omp collab list [--json]` and
-`omp collab link <instanceId|pid> [--view] [--json]`. The latter deliberately outputs a bearer
-capability: do not capture it in logs, files, fixtures, diagnostics, or issue reports. The gateway
-queries the endpoint directly and never shells out to a link-printing command.
+Discovery files are written once at publication time and never modified by the gateway. A killed OMP host's file stays on disk until `omp collab list` prunes it, so within its bounded per-round scan (`registry.maxSessions`, default `100`) the gateway reads unknown publications newest first and skips unchanged files whose endpoint proved dead, preventing leftovers from displacing newer sessions.
+
+Queries use newline-framed JSON authenticated by the discovery file's `token`, one request and response per connection: `snapshot` returns metadata, and `link` resolves one exact generation and access mode (`view` or `control`) on launch ([Protocol](PROTOCOL.md)).
+
+OMP also ships `omp collab list [--json]` and `omp collab link <instanceId|pid> [--view] [--json]`; `omp collab link` prints a capability, so never capture its output in logs, files, fixtures, or diagnostics, and the gateway never shells out to it.
 
 ### Isolated-HOME execution hosts
 
-An isolated OMP HOME is supported without a new adapter. Run OMP and its local gateway as the
-**same OS uid on the execution host**. Configure `collab.autoStart` inside that HOME, then set the
-gateway's absolute `omp.discoveryDir` to `<isolated-HOME>/.omp/run/collab-hosts`. The gateway may
-have its own HOME/XDG configuration root; only the explicit discovery path needs to agree.
-`PI_CONFIG_DIR`, if used, must be accounted for on the OMP side too.
+To run OMP under an isolated `HOME`, run OMP and `omp-gatewayd` as the **same OS uid on the execution host**, set `collab.autoStart` inside the isolated `HOME`, and point the gateway's absolute `omp.discoveryDir` at `<isolated-HOME>/.omp/run/collab-hosts` (adjusting `.omp` if `PI_CONFIG_DIR` is set). The gateway may keep its own `HOME` and XDG configuration root; only `omp.discoveryDir` must match.
 
-For example, with an operator-owned private `/private/tmp/omp-example-home`:
+For example, with a private `/private/tmp/omp-example-home` (`0700`):
 
 ```sh
 HOME=/private/tmp/omp-example-home omp config set collab.autoStart control
 HOME=/private/tmp/omp-example-home omp
 ```
 
-Set the gateway's existing configuration field before starting it:
+Set `omp.discoveryDir` in `config.json` before starting the gateway:
 
 ```json
 { "omp": { "discoveryDir": "/private/tmp/omp-example-home/.omp/run/collab-hosts" } }
 ```
 
-Keep the HOME and discovery directory private (`0700`); OMP owns and removes its discovery
-files and query endpoints. The reader refuses symlinks, a different uid, or group/other access
-on the directory, file or POSIX socket (`apps/gateway/src/omp-registry.ts`). Do not broaden ACLs
-to let another service account in, copy discovery files/tokens, or derive socket paths from
-filenames. Run the local gateway under the OMP uid instead. A gateway selects one discovery root;
-independent roots can use independent local gateways and the existing browser-direct federation.
-There is no filesystem transport across machines, Tern scraper, capability-copy service or proxy.
+Keep the isolated `HOME` and discovery directory private (`0700`, with `0600` POSIX files and sockets). `OmpHostReader` refuses symlinks, foreign uids, and group or other permissions on the directory, discovery file, or POSIX socket (`apps/gateway/src/omp-registry.ts`); never widen ACLs, copy discovery files or tokens, or derive socket paths from filenames.
 
-The runnable developer proof uses the installed stock native executable or a stock `dist/cli.js`,
-not a replacement OMP build:
+Each gateway reads one discovery root, and separate roots use separate local gateways with browser-direct federation ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)).
+
+Verify an isolated-`HOME` stock OMP binary locally with the lifecycle development harness:
 
 ```sh
 bun install --frozen-lockfile
 bun run build
 bun scripts/omp-lifecycle-development.ts \
   --omp /opt/homebrew/bin/omp \
-  --isolated-home --expect-version 18.12.6
+  --isolated-home --expect-version <omp-version>
 ```
 
-The script creates a fresh private HOME, sets and reads back `collab.autoStart=control`, starts a
-real loopback development gateway with the explicit path, and observes publication and owner/mode
-metadata. An ephemeral headless Chromium context attaches the real embedded client through the
-stock relay as read-only View, then upgrades to writable Control, both before and after an owned
-OMP process restart. No model prompt is sent in this mode. The owned fixture exits through
-OMP's ordinary `/quit` command, awaiting controller shutdown before the PTY bridge closes.
-It requires both card revocation and OMP-owned discovery-file removal on each stop **before**
-any stale-publication pruning. It stops
-only its owned children and removes its private root after OMP has removed all publications.
-Terminal output, discovery contents, launch capabilities, browser logs, screenshots, traces,
-recordings and HAR are never captured. Output is bounded facts and a fixed failure phase.
-Without the opt-in mode/version override, the existing lifecycle command still requires the
-engineering baseline from `UPSTREAM.lock.json`.
+On macOS, pass an absolute `--omp` binary path and replace `<omp-version>` with the three-part version from `omp --version`; omitting `--expect-version <omp-version>` requires `packageVersion` from `UPSTREAM.lock.json` (`scripts/omp-lifecycle-development.ts`).
 
-#### Observed isolated-HOME proof — 2026-10-23
+The harness creates a private `HOME`, sets `collab.autoStart=control`, runs a loopback gateway against that `omp.discoveryDir`, attaches the embedded client in **View** and **Control** across an owned `/quit` restart, and verifies card revocation and OMP-owned file removal without capturing terminal output, capabilities, screenshots, or traces; see [Observed isolated-HOME proof — 2026-10-23](#observed-isolated-home-proof--2026-10-23).
+
+## 3. Polling and lifecycle
+
+`startHostPoller` (`apps/gateway/src/omp-registry.ts`) coalesces concurrent polls and reconciles observed snapshots with retained hosts. `registry.heartbeatSeconds` sets the poll interval (default `10` seconds) and `registry.ttlSeconds` sets retention for unreachable hosts (default `35` seconds, greater than twice `heartbeatSeconds`; [Gateway configuration reference](OPERATIONS.md#14-gateway-configuration-reference)).
+
+Only `ENOENT` and `ECONNREFUSED` prove a queried OMP host dead. Timeouts, `EMFILE`, `EACCES`, and wire errors such as `snapshot_unavailable` retain an observed card until TTL expiry, while entries removed from the discovery directory drop on the next poll. Stopping or restarting `omp-gatewayd` does not interrupt OMP publication or require an OMP reconnect.
+
+OMP's `instanceId` keys each session card, and `generation` identifies session replacement (`PID` alone is unsafe because PIDs are reused). The gateway projects `sessionName`, the basename of `cwd` (`cwdLabel`), and `model` (`provider/id`) into bounded labels, and turns boolean `inputRequired` into an opaque gateway `ask.requestId` and receipt timestamp without prompt text or option counts.
+
+Auto-titled sessions on OMP `18.8.1` and newer format `sessionName` as `<icon> <CODE>: <title>` within the gateway's 256-code-point label bound.
+
+## 4. Per-launch capability broker
+
+`OmpLaunchResolver` (`apps/gateway/src/omp-registry.ts`) checks the requested `generation`, mode (`view` or `control`), and optional `requestId` against current registry metadata, queries `link` on that OMP host, and revalidates metadata before returning the capability. The gateway never stores or caches capabilities in disk or memory state.
+
+Launch refusals distinguish `generation_mismatch` (HTTP `409`), `request_mismatch` (`409`), `missing` (`404`), and `mode_unavailable` (HTTP 409 when the OMP host does not share the requested mode; [Protocol](PROTOCOL.md)). Capabilities exist only in the transient query/response and active browser memory, and gateway log fields are numeric or boolean only ([Security §11](SECURITY.md#11-logging-diagnostics-and-test-artifacts)).
+
+## 5. Gateway configuration and readiness
+
+`omp.discoveryDir` defaults to `~/.omp/run/collab-hosts` (or `~/<PI_CONFIG_DIR>/run/collab-hosts`), and `omp.queryTimeoutMs` defaults to 1,500 ms (`1500` in JSON; [Gateway configuration reference](OPERATIONS.md#14-gateway-configuration-reference)).
+
+The gateway's private `readiness-token` authenticates managed loopback readiness checks only and is never sent to OMP. `omp-gateway doctor` checks that `omp` on `PATH` is `>= 18.1.20` (`compatibility`), that `omp.discoveryDir` is absent or safely readable (`discoveryReadable`), and that observed hosts are healthy (`sessionHealth`; [`doctor` and diagnostics bundle](OPERATIONS.md#12-doctor-and-diagnostics-bundle)).
+
+## 6. Client and qualification boundary
+
+The gateway embeds the pinned `collab-web` client ([`packages/collab-client`](../packages/collab-client/README.md)) with same-page in-memory capability bootstrap ([Protocol §5](PROTOCOL.md#5-in-memory-collab-client-bootstrap)).
+
+Its embed contract exposes `loading: { received, total } | null` snapshot counters for the shell's connection chip and optional `takeInitialPromptDraft()`, which drains a volatile first-task draft once into an empty composer in live writable **Control** without auto-sending or reapplying on reconnect. Photo attachments travel over OMP's encrypted `{ t: "prompt", text, images }` relay frames and never pass through the gateway HTTP server or service worker.
+
+Unit and integration checks for discovery, polling, and launch brokering are in `apps/gateway/test/omp-registry.test.ts` (for an example upstream tag-diff check, see [18.12.5 → 18.12.6 discovery/collaboration contract delta](#18125--18126-discoverycollaboration-contract-delta-2026-10-23)).
+
+Release qualification exercises stock OMP publication, **View** and **Control** launches and refusals, session replacement and stop, gateway restart, transient query faults, and capability non-persistence; see [Test plan](TEST_PLAN.md), [Current claim](COMPATIBILITY.md#current-claim), and [Release status](RELEASE_STATUS.md).
+
+## Running OMP inside Tern
+
+Tern is a terminal environment where stock OMP runs, not a separate discovery integration ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration)); [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) adds only opt-in process creation and metadata-only adoption:
+
+- **Terminal-independent discovery:** stock OMP `>= 18.1.20` started inside a Tern pane, tab, or window publishes under `~/.omp/run/collab-hosts` (or `~/<PI_CONFIG_DIR>/run/collab-hosts`) whenever `collab.autoStart` is `control` or `view` under the same OS user as `omp-gatewayd` ([Developer-workstation smoke](#developer-workstation-smoke-2026-10-22)).
+- **Identity and mirroring:** gateway session identity is OMP's `instanceId` and `generation`. Multiple Tern windows or panes mirroring one `omp` process share one OMP discovery entry and appear as one row in **OMP Sessions** (the browser app); Tern block IDs are recorded only in `<stateDir>/session-creations.json`.
+- **Remote Tern panes:** an `omp` process in a Tern pane on another machine is discovered by `omp-gatewayd` on that execution host and reached on that host's app or via browser-direct federation ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)), never by inspecting local terminal windows.
+- **Browser launch semantics:** tapping **View** or **Control** mounts the embedded `collab-web` client in the browser rather than focusing or typing into a native Tern pane.
+  Native **Open in Tern** handoff is unsupported on Android because Tern Android (`so.stencil.tern`) declares only `MAIN`/`LAUNCHER` without `VIEW`, `BROWSABLE`, URL schemes, or App Links ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143); [Pixel installed-build inventory](#pixel-installed-build-inventory-2026-10-24)). Desktop native handoff is **Deferred** ([Status vocabulary](COMPATIBILITY.md#status-vocabulary); `/Applications/Tern.app` registers `tern` for pairing only).
+- **Default has no Tern dependency:** when `tern` is omitted from `config.json`, installation, `doctor`, discovery polling, and session launches never probe or require Tern. No Tern discovery adapter, pane scraper, general terminal control API, or reader for OMP's Tern Surface Protocol (`tsp.ts`) wire surface is used.
+
+### Opt-in creation and adoption
+
+Administrator configuration, path/profile bounds, and `tern.window` setup are in [Tern session creation](OPERATIONS.md#9-tern-session-creation); the phone flow is in [Start a new session](USAGE.md#start-a-new-session).
+
+On the OMP side, `profile.env` supplies only the `tern` CLI child's environment and does not cross Tern's GUI-server RPC boundary into the spawned pane. OMP inside Tern's pane environment must therefore already resolve the configuration root that publishes to `omp.discoveryDir` and have `collab.autoStart` set to `control` (`view`-only sessions appear in the directory but cannot complete **Control** adoption).
+
+During creation (`apps/gateway/src/tern-cli.ts`, `apps/gateway/src/tern-creation.ts`), `omp-gatewayd` runs `[executable, "new", "tab", "--json", "--keep-open", "--cwd", path, "--", ...profile.argv]` — printing `{"block": <uint64>}` — and polls `tern inspect --json`, which returns `sessions[].tabs[].blocks[]` (`id`) and `panes[]` (`pane` and `omp_session_file` named `<ISO-timestamp>_<sessionId>.jsonl`; [Pixel installed-build inventory](#pixel-installed-build-inventory-2026-10-24)).
+
+When `tern.window` is configured (`""` for the first window or `"2"`–`"999"`), `omp-gatewayd` inserts `["--window", KEY]` after `"new", "tab"` and after `"inspect", "--json"` on every inspection without fallback or selector-free retry.
+
+The parser decodes unsigned 64-bit IDs losslessly, rejects remote host tags at bit 56 or above, requires a 1:1 `block === blocks[].id === panes[].pane` match, and matches the `[A-Za-z0-9-]+` `sessionId` token in `basename(omp_session_file)` (without `.jsonl`) against a post-spawn OMP discovery round without opening the JSONL file.
+
+Once one fresh host binding is authorized for `control` in `SessionRegistry` (`apps/gateway/src/registry.ts`), creation reaches `ready` (`{ instanceId, generation }`) for an ordinary **Control** launch ([Session creation state machine](PROTOCOL.md#session-creation-state-machine)).
+
+## Dated observations
+
+The sections below are dated development and device observations and are kept as written.
+
+### Observed isolated-HOME proof — 2026-10-23
 
 The exact command above passed on the macOS Apple-silicon developer workstation with the
 installed stock native OMP `18.12.6` and Bun `1.4.0` (71.65 seconds). The real gateway consumed
@@ -229,93 +236,6 @@ change is benign or release-qualified. `UPSTREAM.lock.json` remains at `v18.12.5
 bump is a separate control change with its normal review and qualification. The independent
 embedded client pin remains unchanged too.
 
-## 3. Polling and lifecycle
-
-`startHostPoller` coalesces concurrent rounds and reconciles observed metadata with retained
-hosts. `registry.heartbeatSeconds` is the poll interval (default 10 seconds);
-`registry.ttlSeconds` defaults to 35 seconds and must exceed twice that interval.
-
-Only `ENOENT`/`ECONNREFUSED` proves a queried host dead. Timeouts, `EMFILE`, `EACCES`, and
-wire errors such as `snapshot_unavailable` retain a previously observed card until TTL expiry.
-A host absent from discovery is removed; a reply followed by socket close is normal query framing.
-A stopped gateway has no effect on OMP publication, and restarting it requires no OMP reconnect.
-
-OMP’s instance identity keys the process card. Generation changes identify host replacement; PID
-alone is unsafe because PIDs are reused. The gateway maps `sessionName`, `cwd`, and model
-metadata to bounded browser labels, with basename-only paths by default. `inputRequired` is a
-boolean, not a prompt or answer. The gateway derives its own opaque attention identity and receipt
-time for browser routing; mainline OMP does not supply previews or option counts.
-From 18.8.1, OMP writes a generated session title in the card form `<icon> <CODE>: <title>`
-(upstream `355b5d9685529d337875d7d387ef53b1f32e7a72`), so an auto-titled session's `sessionName`
-label may begin with an emoji or Nerd Fonts glyph and a short capitalized code. The field stays a
-string within the gateway's label bound.
-
-## 4. Per-launch capability broker
-
-`OmpLaunchResolver` authorizes the requested generation, role, and optional attention request
-identity against current metadata, fetches a link from that OMP host, and revalidates before
-release. The gateway never stores or caches a capability, including in its memory-only registry.
-
-HTTP list/SSE and launch shapes remain unchanged. Launch refusal includes `generation_mismatch`,
-`request_mismatch`, `missing`, and `mode_unavailable`; the last becomes HTTP 409 when the host
-no longer shares the requested role. Capabilities remain confined to transient query/response and
-active client memory and never appear in logs or diagnostics. Gateway log fields are numeric or
-boolean only.
-
-## 5. Gateway configuration and readiness
-
-`omp.discoveryDir` defaults to the OMP directory above; `omp.queryTimeoutMs` defaults to 1500.
-The gateway’s `readiness-token` proves managed loopback readiness only and is not sent to OMP.
-`doctor` checks that `omp` on PATH reports at least `18.1.20` (`compatibility`), verifies discovery
-is absent or safely readable (`discoveryReadable`), and reports `sessionHealth`.
-
-## 6. Client and qualification boundary
-
-The gateway embeds the pinned OMP `collab-web` integration with in-memory capability bootstrap. Its
-embed contract publishes only `loading: { received, total } | null` snapshot counters for the
-gateway's joining/reconnecting chip and accepts an optional one-shot `takeInitialPromptDraft()`
-callback that drains a memory-only first-task draft once into an empty ordinary composer in live
-writable Control (with a healthy relay, no active Ask, and no photo draft or pending send), without
-auto-sending or reapplying on reconnect. The photo composer uses existing encrypted v3 image
-prompts; it does not add a gateway media endpoint or alter the discovery/query contract.
-
-Behavioral coverage for the registry reader and broker lives in
-`apps/gateway/test/omp-registry.test.ts`. Release qualification exercises the stock OMP binary,
-View/Control launch and refusal, host replacement and stop, gateway restart, transient query
-failures, capability non-persistence, and the client/relay path; see [TEST_PLAN.md](TEST_PLAN.md),
-[COMPATIBILITY.md](COMPATIBILITY.md), and [RELEASE_STATUS.md](RELEASE_STATUS.md).
-
-## Running OMP inside Tern
-
-Tern remains a terminal execution environment with OMP-native discovery ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration)); [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) permits only opt-in creation of a new OMP process and metadata-only adoption:
-
-- **Terminal-independent discovery:** stock OMP `>= 18.1.20` started inside a Tern pane, tab, or window publishes its discovery file and query endpoint under `~/.omp/run/collab-hosts` (or `~/.<PI_CONFIG_DIR>/run/collab-hosts`) whenever `collab.autoStart` is `control` or `view`, using the same OS user and configuration root as `omp-gatewayd`.
-- **Identity and mirroring:** gateway session identity remains OMP's `instanceId` and `generation`. Only an explicitly requested creation reads lossless local Tern block/pane IDs for exact correlation; the confirmed block ID is recorded only in the private operation ledger, never used as session identity. Multiple Tern windows or panes mirroring a single `omp` process still correspond to one OMP discovery entry and render one session row in **OMP Sessions**.
-- **Remote Tern panes:** an `omp` process running inside a Tern pane on a remote machine is discovered by the gateway running on that execution host (and accessed either on that host's PWA or through browser-direct federation under [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)), never by inspecting local terminal windows on the viewing workstation.
-- **Browser launch semantics:** tapping **View** or **Control** in **OMP Sessions** always mounts the embedded OMP `collab-web` client in the browser; it never focuses, attaches to, or sends keystrokes to a native Tern pane.
-- **Default has no Tern dependency:** without an authored `tern` section, installation, `doctor`, discovery polling, and existing launches never probe or require Tern. Configured creation failure disables only creation. No Tern discovery adapter, general control surface, `tsp.ts` reader, or pane scraping is permitted; engineering and embedded-client pins are unchanged.
-
-### Opt-in creation and adoption
-
-Configure the optional `tern` section on the **execution host** ([Operations setup](OPERATIONS.md#opt-in-tern-session-creation)). In **OMP Sessions**, **New session** walks through **Host** (when multiple sources exist) → **Project** → **Working copy** (when multiple exist) → **Profile** → **Create and open Control**, with an optional memory-only **First task** draft that seeds the empty Control composer once without auto-sending.
-
-Without `tern.window`, the daemon executes `[executable, "new", "tab", "--json", "--keep-open", "--cwd", path, "--", ...profile.argv]` and polls `tern inspect --json` serially. It decodes unsigned 64-bit IDs losslessly, rejects remote host tags at bit 56 or above, requires an exact 1:1 `block === blocks[].id === panes[].pane` match, and matches the complete `[A-Za-z0-9-]+` `sessionId` token in `basename(omp_session_file)` (minus `.jsonl`) against a post-spawn OMP discovery round without opening the JSONL file. Once a single fresh host binding passes `registry.authorizeLaunch(instanceId, generation, "control")`, status becomes `ready` with `{ instanceId, generation }`, and the browser refreshes the source and runs the ordinary Control launch.
-
-For deliberate targeting on Tern `0.9.12` (`e498b49`), add `"window": "2"` beside
-`"executable"` in the [full configuration example](OPERATIONS.md#setup-steps). Optional
-`tern.window` accepts exactly `""` (first window) or decimal strings `"2"` through `"999"`.
-The daemon inserts `["--window", KEY]` after `"new", "tab"` and after `"inspect", "--json"`
-for **every** inspect, including availability, the pre-spawn baseline, adoption, and doctor.
-Missing slots fail preflight before spawn; nonzero spawn exits remain `outcome_unknown`,
-and a window closed during adoption leads to `started_unavailable` at the deadline.
-There is never a retry without the selector or fallback to another window. Window keys are
-reassignable **slots**, not persistent identities; keep the intended window stable.
-Read-only `0.9.12` inspection reconfirmed matching block/pane IDs and `omp_session_file`
-on existing OMP panes; it does not qualify effectful targeted creation.
-
-With the selector absent, Tern's existing default selection is unchanged (normally the
-**first window**); all creations use `--keep-open`. `profile.env` is the complete environment of the `tern` CLI child and is not assumed to cross Tern's GUI-server RPC boundary into the pane, so OMP's Tern pane environment must already publish into `omp.discoveryDir` with `collab.autoStart = control`. Closing or backgrounding the browser stops watching without stopping the daemon operation or Tern tab; `started_unavailable` and `outcome_unknown` never auto-retry. Native **Open in Tern** handoff is out of scope on every platform: Android Tern `0.9.5` is upstream-blocked ([tern-sdk #143](https://github.com/stencil-hq/tern-sdk/issues/143)) and desktop handoff is deferred.
-
 ### Pixel installed-build inventory (2026-10-24)
 
 Read-only device and desktop CLI probes on 2026-10-24 recorded:
@@ -340,4 +260,3 @@ Running stock OMP inside Tern with two-gateway federation and speech UI was **sm
   - stopping the remote gateway produced `Remote: Cannot reach this host from this app.` with **Retry** and `Host coverage incomplete — Unavailable: Remote` while home rows stayed usable;
   - the keyboard-dictation help (`Use your keyboard's microphone key to dictate into this box. iPhone: Settings → General → Keyboard → Enable Dictation. Dictation never sends — tap Send when the text is right.`) and the opt-in speech flow (`Your browser or OS may send audio to its speech provider before any OMP prompt is sent.` disclosure → **Start** → listening with interim/final text → **Stop** → editable review → **Use text** filled the draft while **Send** stayed separate and nothing was sent) worked in the real bundle using a fake `SpeechRecognition` constructor injected before load (no microphone was used).
 - **Not exercised and still pending:** any phone or installed PWA, the HTTPS Tailscale Serve path (identity headers and real CORS over Serve), Wi-Fi/cellular transitions, session replacement (`/new`, `/fork`), reconnect, and shutdown while inside Tern beyond closing the panes, native browser speech recognition on any device, and Pixel or iPhone keyboard dictation. Issue [#380](https://github.com/carrythroughsystems/omp-session-gateway/issues/380)'s installed-iPhone acceptance is therefore not satisfied yet; see [TEST_PLAN.md](TEST_PLAN.md#g-tern-multi-host-federation-and-speech-input-acceptance-matrix).
-

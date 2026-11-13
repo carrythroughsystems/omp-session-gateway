@@ -1,403 +1,262 @@
-# Android client strategy
+# Android client: physical qualification and strategy
 
-This runbook and specification is for maintainers running physical Android release qualification and
-reviewing the OMP Sessions PWA client contract. In the current stable release (`v0.7.4`), both the
-Pixel 10 Pro (Android 17, Chrome 154) physical client lane and the Pixel background Web Push lane
-(including specialized triage and delayed taps) are qualified; see [Compatibility](COMPATIBILITY.md)
-and [Release status](RELEASE_STATUS.md).
+This runbook is for release maintainers running physical Pixel qualification lanes and for contributors reviewing the Android client strategy for OMP Session Gateway, the companion to Oh My Pi (OMP). Both the physical browser-recovery and collaboration lane and the physical background-Push lane run on a USB-attached Pixel in every release campaign; see [Current claim](COMPATIBILITY.md#current-claim) and [Release status](RELEASE_STATUS.md).
 
-## Decision: PWA first
-
-Current hosts use stock mainline OMP `>= 18.1.20` with `collab.autoStart` alone: no fork, custom
-OMP build, or gateway-specific OMP plugin. Install the gateway separately and retain Bun 1.4.4,
-TUN-mode Tailscale Serve, and exact login allowlisting. The gateway polls OMP metadata and fetches
-a capability per explicit launch without storing it; Android HTTP/SSE and in-memory client
-bootstrap are unchanged. Physical-client qualification on the Pixel 10 Pro (Android 17, Chrome 154)
-covers View read-only, Control writable, prompt acceptance, return to the directory, same-page
-unlock/Airplane/Doze recovery, and seven clean, detectable forbidden capability sinks, while the
-dedicated Push lane below covers background Web Push, triage, and delayed taps; see the
-[release ledger](RELEASE_STATUS.md). Fork-era results remain historical; none transfers to mainline.
-
-The existing OMP collaboration client is already a browser application and includes the core live-control experience. The Android deliverable should therefore be the OMP Sessions PWA that launches the existing client, not a new native implementation of the collaboration protocol.
-
-Benefits:
-
-- one UI/protocol implementation across desktop and Android;
-- immediate compatibility with OMP's encrypted link format and future UI updates;
-- no Android release cycle for ordinary web changes;
-- secure HTTPS origin through the tailnet;
-- home-screen installation and standalone display;
-- lower risk of cryptographic/protocol divergence.
-
-## PWA requirements
-
-- responsive layout for a narrow phone viewport;
-- web app manifest with `display: standalone`;
-- maskable and standard icons generated specifically for this project;
-- theme/background colors chosen by the implementer;
-- minimal service worker caching only versioned static shell files;
-- loaded-shell transport status that marks the last authenticated metadata stale and retains it only in page memory; authorization failure clears it;
-- explicitly enabled Push v2 background alerts with per-device Private/Session/Preview detail, capability-free payloads, exact-request and generation revalidation, and one-tap Control; delivery remains best effort and is qualified on the Pixel 10 Pro by the dedicated Push lane below;
-- Android back behavior: collab client returns to the session directory, with no secret-bearing history entry;
-- account for the virtual keyboard and `visualViewport` behavior in the embedded/pinned collab-web build;
-- test Chrome stable and at least one Chromium-based alternative if supported.
-
-Do not cache API responses or collab client navigations. A PWA does not need to be an offline copy of sensitive runtime state.
-
-Navigation always bypasses the service worker, so a cold installed-PWA launch while fully offline
-is intentionally unavailable and may remain on the browser's OS splash until connectivity returns.
-An already loaded dashboard receives metadata-free SSE heartbeats every 5 seconds. After 12 seconds
-of silence it closes the stream and marks the last authenticated cards stale; it does not clear
-them or persist them to storage. Initial snapshot requests use a 4-second timeout, recovery requests
-20 seconds. Retry delays use the upper half of 1/2/4/8/16/30-second caps. These are current runtime
-bounds; the runtime differs from ADR-016's original recovery policy (see the current audit note in
-[DECISIONS.md](DECISIONS.md#current-implementation-audit--2026-09-14)).
-
-While a collaboration session is visible, adaptive same-origin gateway probes run every 15 seconds
-when healthy and every 2 seconds when suspect. Hidden pages cancel idle and pending relay probes.
-Browser lifecycle and network-change signals trigger remeasurement rather than proving
-connectivity. Optional encrypted idle relay probes require host support; ordinary host frames
-provide passive liveness. See [ARCHITECTURE.md](ARCHITECTURE.md#5-availability-behavior).
-
-Push v2 carries bounded identity, a pending-ask count, and the chosen presentation detail;
-attention includes the observed generation, while clear targets the exact request. Private uses
-`OMP session needs attention` with no body. Session (the default) includes bounded session/project
-labels; Preview currently falls back to Session because stock OMP supplies no preview. Visible
-text can persist in Android notification history, screenshots, and wearables. No capability,
-transcript, prompt, option, or answer enters these payloads. Activity-stop alerts (since v0.5.0) use a
-fixed activity title and observed generation, no request ID, and the same privacy levels. Their tap
-opens View after authenticated same-generation validation, never Control. Physical background-Push
-qualification is covered by the dedicated lane below.
-
-Permission is requested only from the explicit Settings action. The worker replaces one
-notification per instance, closes only the matching request on clear, and updates the app badge.
-A tap never navigates an open window: in the WebAPK a live `/client/` page reports `/`, and a
-navigation reloaded it. The worker focuses the open page and hands it the notification data, and the
-page launches Control in place only after current authenticated metadata confirms that exact ask; a
-tap for the collaboration already open keeps it. With no open page, the tap opens
-`/collab/:instanceId?request=:requestId` and the app scrubs the route first. The launch POST also
-revalidates generation. Physical background qualification must cover a closed PWA, lock-screen
-detail, tap-to-Control, a tap during an open collaboration, stale/cleared notifications,
-force-stop, permission revocation, lock/resume, battery policy, and Wi-Fi/cellular transitions.
-Passed core Android smoke does not qualify this background-alert matrix.
+A **View** or **Control** link is a bearer secret, called a capability in the contracts, that opens one session (a running interactive `omp` process shared for collaboration) without storing the secret in URLs, browser storage, or notifications.
 
 ## Browser-process recovery and physical qualification
 
-Issue [#65](https://github.com/alphastorm/omp-session-gateway/issues/65) establishes a failure
-outside the PWA: Android retained a working default route while Chrome failed the gateway and an
-unrelated public origin, then stopped answering through its own DevTools socket. Force-stopping and
-reopening Chrome restored networking. The dashboard therefore keeps bounded retries and accurate
-path status, then opens recovery guidance already present in the loaded shell after 45 uninterrupted
-seconds of visible failure. It does not add a public connectivity probe, reload loop, cache-busting
-URL, extra EventSource, or outage-time navigation; none can restart Chrome's network service.
+Run [`scripts/android-acceptance.ts`](../scripts/android-acceptance.ts) and its sibling physical-client scripts to qualify session discovery, launch authorization, same-page lock/Airplane/Doze recovery, live **View** and **Control** collaboration, and capability-sink cleanliness over USB `adb` and the Chrome DevTools Protocol (CDP).
 
-The physical-device driver defaults to stable Chrome. Alternate channels require explicit package,
-activity, and DevTools socket selection:
+Before running the lane, confirm these prerequisites:
 
-    OMP_ANDROID_BROWSER_PACKAGE=com.chrome.canary \
-    OMP_ANDROID_BROWSER_ACTIVITY=com.chrome.canary/com.google.android.apps.chrome.Main \
-    OMP_ANDROID_DEVTOOLS_SOCKET=localabstract:chrome_devtools_remote \
-    bun scripts/android-acceptance.ts "$ORIGIN" "$DISPOSABLE_SESSION_LABEL"
+- Run `bun install --frozen-lockfile` with Bun `1.4.4` on `PATH`, and ensure local `adb` TCP port `9222` is free.
+- Complete the one-time Tailscale (`com.tailscale.ipn`) Doze allowlist, connect Wi-Fi on the Pixel, turn off hotspot, USB, and Bluetooth tethering, and confirm the Pixel reaches the gateway's Tailscale Serve HTTPS origin (`$ORIGIN`, with no trailing slash or path, such as `https://host.example.ts.net`, and the Pixel's login in `auth.allowedLogins`); see [Device admission and one-time WebAPK setup](#device-admission-and-one-time-webapk-setup). Do Not Disturb may stay on during this lane.
+- Connect one USB-authorized Pixel (`adb devices`) and store its 4–16-digit numeric lock-screen PIN in macOS Keychain under the device's `adb` serial (keep `-w` last so `security` prompts interactively instead of placing the PIN in shell history or `argv`):
 
-Lock/resume qualification uses a dedicated numeric device PIN from macOS Keychain. Store it under
-the attached device's ADB serial; keep `-w` last so `security` prompts instead of placing the PIN in
-shell history or argv:
+  ```sh
+  security add-generic-password -a '<adb-serial>' -s 'omp-session-gateway.android-qualification-pin' -U -w
+  ```
 
-    security add-generic-password -a '<adb-serial>' -s 'omp-session-gateway.android-qualification-pin' -U -w
+  Never pass the PIN through an environment variable, command argument, file, log, receipt, or CI secret. Pattern unlock is unsupported because `adb`'s single swipe command cannot reproduce arbitrary multi-segment patterns.
+- On the gateway host, start one fresh disposable interactive `omp` session (`collab.autoStart` set to `control`) in a uniquely named working directory whose basename is `$DISPOSABLE_SESSION_LABEL` (`cwdLabel`; the smoke and leak-sweep scripts require one match). [`scripts/acceptance-target.ts`](../scripts/acceptance-target.ts) refuses labels matching `soak`, `relay`, `monorepo`, `dotfiles`, or `alpha-founder`, and refuses sessions older than 30 minutes without `--disposable-target`.
 
-The value must contain 4–16 decimal digits. The harness reads it directly into process memory,
-reveals the primary PIN bouncer with one bounded non-secret swipe, and writes digit keyevents to one
-interactive `adb shell` stdin stream. It authenticates once, requires
-`isKeyguardShowing=false`, and redacts every credential-path failure. Never pass the PIN through an
-environment variable, command argument, file, log, receipt, or CI secret. Pattern unlock is not a
-supported qualification setup: ADB's single swipe command cannot reproduce arbitrary multi-segment
-patterns without weakening the physical lock/resume gate.
+1. Run the physical acceptance and recovery matrix against `"$ORIGIN"` and `"$DISPOSABLE_SESSION_LABEL"`:
 
-Acceptance captures airplane, Wi-Fi and mobile-data state after admission and before device
-mutation. On success or failure it restores and reads back that exact baseline, then exits forced
-Doze and resets battery emulation; a phone that started with mobile data off finishes with it off.
-Push and acceptance share the Wi-Fi-validation-before-mobile-data sequence. Every restoration step
-is attempted, and restoration failures are reported alongside, never instead of, the phase failure.
-A killed process cannot run restoration; inspect and restore the device before another attempt.
+   ```sh
+   bun scripts/android-acceptance.ts "$ORIGIN" "$DISPOSABLE_SESSION_LABEL"
+   ```
 
-After each lock/resume, Airplane and forced-Doze cycle's rendered recovery measurement, acceptance
-requires the tailnet VPN to return: poll the live `Current Networks:` list from
-`dumpsys connectivity` for a connected VPN for up to 60 seconds at one-second intervals, with
-five-second adb read bounds. No Chrome tab is opened, DevTools forward changed or page visibility
-disturbed between the measured cycles. Private recovery evidence contains only VPN/HTTPS booleans
-and timings, with `httpsProbed: false` mid-journey. ICMP can remain false when the host drops ping;
-it does not decide VPN recovery.
-After the measured journey is over, restoration repeats the VPN check after restoring the radio
-baseline, exiting forced Doze and resetting battery emulation, then proves the tailnet path with
-one owned top-level `/api/v1/health` HTTPS navigation. The health probe has a 15-second execution
-deadline and the same URL, HTTP-status, body and owned cleanup checks as admission. A lost path
-raises `AndroidTailnetRecoveryError`, including as a restoration failure, so later smoke/qualification
-stages cannot run on the disconnected device.
+   The driver defaults to stable Chrome (`com.android.chrome`, `com.android.chrome/com.google.android.apps.chrome.Main`, and `localabstract:chrome_devtools_remote`, forwarded on local TCP port `9222`). Alternate Chromium channels require `OMP_ANDROID_BROWSER_PACKAGE`, optional `OMP_ANDROID_BROWSER_ACTIVITY`, and explicit `OMP_ANDROID_DEVTOOLS_SOCKET`:
 
-The qualification Pixel must exempt Tailscale from Doze through the
-[one-time operator setup](#device-admission-and-one-time-webapk-setup) below. Without that exemption,
-forced Doze can terminate the VPN and leave it offline after exit. If the VPN has already stopped,
-**reconnect Tailscale on the Pixel** before replaying a failed journey.
-No Tailscale/VPN, airplane-mode, DNS, exit-node, firewall or battery-policy remedy is automatic.
-The path proof observes connectivity and navigates only its disposable health tab; it changes
-none of those device settings.
+   ```sh
+   OMP_ANDROID_BROWSER_PACKAGE=com.chrome.canary \
+   OMP_ANDROID_BROWSER_ACTIVITY=com.chrome.canary/com.google.android.apps.chrome.Main \
+   OMP_ANDROID_DEVTOOLS_SOCKET=localabstract:chrome_devtools_remote \
+   bun scripts/android-acceptance.ts "$ORIGIN" "$DISPOSABLE_SESSION_LABEL"
+   ```
 
-Every acceptance record includes the package name, Android package version, complete
-Browser.getVersion result, launch activity, and DevTools socket. Before recording evidence, the
-driver reads the forwarded endpoint's Android-Package, Browser, and loopback WebSocket URL and
-requires package, version, host, and port to match the selected browser and local ADB forward;
-Browser.getVersion must agree again after CDP connects. A Canary result applies only to that exact
-build and socket. Do not claim #65 resolved until the Stable control reproduces and the selected
-Canary completes the recorded cycle gate.
+2. Run the collaboration journey and capability-sink sweep against the same disposable session (as the `android` lane in [`scripts/stable-qualification.ts`](../scripts/stable-qualification.ts) does; pass `--expected-app-asset /assets/app.<hash>.js` to pin an expected build asset, or `--disposable-target` to override the 30-minute age check):
 
-## Launch UX
+   ```sh
+   bun scripts/android-collab-smoke.ts "$ORIGIN" "$DISPOSABLE_SESSION_LABEL"
+   bun scripts/android-leak-sweep.ts "$ORIGIN" "$DISPOSABLE_SESSION_LABEL"
+   ```
 
-Shipped card behavior:
+`android-acceptance.ts` runs seven ordered stages (`ANDROID_ACCEPTANCE_STAGES` in [`scripts/android-stages.ts`](../scripts/android-stages.ts)):
 
-- working rows open **View**;
-- waiting rows open **Control** when available and **View** otherwise; the hero names these actions **Open request** and **View transcript**;
-- request-specific Control launches carry the exact opaque ask identity as well as the generation;
-- mount the pinned collab client in the current standalone PWA document through its in-memory capability bootstrap;
-- do not depend on `window.open`/`window.opener` in an installed Android PWA because Chrome may reuse the standalone window;
-- the documented separate-page `MessageChannel` alternative is not the shipped path and is suitable only for an ordinary browser context preserving an exact same-origin opener;
-- never put the capability in a URL, DOM attribute, clipboard, or persistent state;
-- show a short, non-sensitive error if the generation changed, the process ended, or the requested
-  role is no longer shared (`mode_unavailable`);
-- never show or copy the raw link by default.
+1. `target preflight`: rejects protected labels before any network call, then reads `GET /api/v1/sessions` to confirm the target is published and eligible.
+2. `Android Chrome`: checks device preconditions and gateway reachability, captures the radio baseline (`wifi_on`, `mobile_data` or active-SIM `mobile_data<N>`, and `airplane_mode_on`), wakes and unlocks the display (`isKeyguardShowing=false` via one `adb shell` stdin stream), starts Chrome out of `CACHED_EMPTY`, and requires the forwarded `/json/version` metadata (`Android-Package`, `Browser`, `ws://127.0.0.1:9222/devtools/browser…`) and `Browser.getVersion` to match the selected package.
+3. `authorization matrix`: opens an owned tab at `<origin>/`, exercises `POST /api/v1/sessions/:instanceId/launch` for live **View** (`200`), live **Control** (`200`), stale **View** (`generation + 5`, `409`), stale **Control** (`generation + 5`, `409`), invalid `generation` (`0`), and an unknown session (`404`) with `Cache-Control: no-store`, and records `baselineReady` and `pageTimeOrigin`.
+4. `lock resume`: locks the screen (`keyevent 26`) for 20 seconds, wakes and unlocks the phone, brings the owned tab to the foreground (`document.visibilityState === "visible"`), measures same-page directory recovery within 36 seconds without issuing competing fetches, and polls `Current Networks:` in `dumpsys connectivity` up to 60 seconds (1-second intervals, 5-second `adb` read bound; `httpsProbed: false` mid-journey; ICMP does not decide VPN recovery) for a connected VPN.
+5. `airplane recovery`: enables Airplane mode, requires a rendered outage status banner (`outageBanner: true`) across up to twelve 5-second probes, disables Airplane mode, measures same-page recovery within 160 seconds plus a 10-second settled recheck, and verifies VPN recovery without opening tabs or disturbing DevTools forwards.
+6. `doze recovery`: unplugs battery emulation and forces deep Doze (`dumpsys deviceidle force-idle`) for 20 seconds, exits Doze and resets battery emulation, measures same-page recovery within 48 seconds, and verifies VPN recovery.
+7. `verdict` (after restoration): restores and reads back the exact radio baseline (enabling mobile data only after Wi-Fi validates within 45 seconds when both started on, so a phone that started with mobile data off finishes with it off), exits Doze and resets battery emulation, proves public DNS resolution (`android.clients.google.com`), and proves the tailnet path with VPN presence plus one owned 15-second `/api/v1/health` HTTPS navigation (`AndroidTailnetRecoveryError` on failure).
+
+A passing `android-acceptance.ts` run prints JSON with `serial`, `packageName`, `androidPackageVersion`, `browserVersion`, `devtoolsSocket`, `browserActivity`, `authorization`, `baselineReady: true`, `appAsset`, `samePage: true`, `unlockMs`, `outageBanner: true`, `airplaneRecoveredMs`, `airplaneDeviceReachableMs`, and `dozeRecoveredMs`, and exits `0`.
+
+`android-collab-smoke.ts` records `viewReadOnly: true`, `controlWritable: true`, `promptAccepted: true`, and `returnedToDirectory: true`. `android-leak-sweep.ts` plants a synthetic secret across all seven browser sinks (`localStorage`, `sessionStorage`, `cookie`, `cacheBody`, `indexedDB`, `locationHash`, `historyState`), requires `planted 7, detected 7` with zero residue, and verifies a real **View** capability is absent from all seven sinks, resource timings, and the DOM.
+
+Every restoration step runs after success or failure, and restoration errors are reported alongside any phase failure rather than replacing it; if the process is killed before restoration runs, inspect and restore the Pixel's radios, Doze state, and Tailscale VPN before replaying.
+
+Chrome on Android can wedge its network service after a radio transition while Android retains a working route and Chrome stops answering its DevTools socket until force-stopped and reopened ([#65](https://github.com/carrythroughsystems/omp-session-gateway/issues/65)).
+
+**OMP Sessions** keeps bounded retries and opens **Troubleshooting** in the loaded shell after 45 uninterrupted seconds of visible failure ([When something looks wrong](USAGE.md#when-something-looks-wrong)), without public probes, reload loops, cache-busting URLs, extra `EventSource` streams, or outage-time navigations.
+
+A Canary result applies only to that exact package, build, and socket; do not treat `#65` as resolved unless Stable reproduces the failure and the selected Canary completes the recorded cycle gate.
 
 ## Physical background-Push lane
 
-`scripts/android-push-qualification.ts` is the background-Push lane, separate from the existing
-ordinary-Chrome View/Control smoke. Its exported preflight is read-only. Stable qualification
-supplies the signed candidate identity, exact OMP pins, retained Mac Serve origin, a host executor,
-and the shared `pixel()` lease. The host executor runs argv; fixture operations do not assume the
-fixture is a local child process. Stage `push-qualification-fixture.ts`, `omp-fixture.ts`,
-`omp-fixture.json`, and `fixtures/push-qualification-extension.ts` together in the configured
-scripts directory. Both a pinned native OMP executable and a Bun JavaScript entrypoint are accepted.
+Run [`scripts/android-push-qualification.ts`](../scripts/android-push-qualification.ts) (with fleet phases in [`scripts/android-push-fleet.ts`](../scripts/android-push-fleet.ts)) to qualify background Web Push v2 (home gateway, the gateway that serves the installed app) and Push v3 (fleet notifications, where the home gateway sends alerts for selected remote hosts, called sources) on the physical Pixel.
 
-The fixture explicitly loads one qualification extension while retaining `--no-extensions` and
-`--no-skills`. A private one-process `--config` overlay sets `collab.autoStart: control`; the
-operator's `~/.omp/agent/config.yml` is never changed. The public initial extension command owns
-the control loop. `ctx.ui.select` publishes an authoritative ask, a held `before_agent_start`
-publishes known busy activity, and command-context `newSession()` replaces generation N with N+1
-without replacing the instance. Preparation is aborted before provider transport: only a synthetic
-model key is used. Control files are owner-only, epoch-bound, monotonically sequenced, and outside
-OMP discovery. No terminal injection, private OMP import, or discovery-file editing is involved.
-The fixture host needs Python 3 with `os.forkpty`, checked with the exact Bun, OMP, and staged
-extension pins through the host executor before fixture creation. Device admission has no local
-fixture requirement. An owned, detached holder keeps the PTY open and reads/discards its output; it never
-writes terminal input. Graceful fixture stop is followed, when needed, by signals to the verified
-holder process group, with a final command-line check for surviving owned OMP processes. No tmux
-or Homebrew installation is needed. The local fixture was observed published idle and then absent
-after cleanup with this holder. Separate local holder smokes used a stop-refusing child: TERM
-cleanup took 10.343 s; with TERM ignored, KILL/HUP cleanup took 20.569 s. Both observed terminal
-stdin/stdout, no surviving owned processes, and removal of the owned root.
+Only `bun run qualify:stable` ([Mainline stable release procedure](RELEASE.md#mainline-stable-release-procedure), [`scripts/stable-qualification.ts`](../scripts/stable-qualification.ts), and [`scripts/stable-lanes.ts`](../scripts/stable-lanes.ts)) qualifies a signed candidate.
 
-Read-only preflight accepts only the origin; candidate identity is bound at run and cleanup.
-The retained-Mac adapter injects the fixture executor, base, Bun, OMP binary, and staged scripts
-directory. Its `gatewayLogsDiscarded` callback probes that host through SSH; the default probe
-remains the local LaunchAgent. Pixel adb/CDP, Keychain access, the driver Bun pin, and the expected
-extension-source hash remain local to the controller.
+Its read-only `preflightAndroidPush` checks only the HTTPS origin, while `runAndroidPushReadiness`, `runAndroidPush`, and `cleanupAndroidPush` bind the candidate tag, commit, archive SHA-256, [`UPSTREAM.lock.json`](../UPSTREAM.lock.json) pins, retained-Mac Serve origin, SSH executor, and shared `pixel()` lease.
+
+To run a local development check against an already installed macOS gateway without modifying or rotating it outside the restored fleet phases, confirm these prerequisites first:
+
+- `~/Library/LaunchAgents/omp-session-gateway.plist` is installed (with `StandardOutPath` and `StandardErrorPath` at `/dev/null`) in `tailscale-serve` mode behind a portless HTTPS `http.publicOrigin`, matches `$PUBLISHED_ARCHIVE`'s `version` and `sourceCommit` in `release-info.json`, has empty `fleet.targets` and `notifications`, has no `~/.local/state/omp-session-gateway/fleet-notifications.json`, and leaves Serve port `10443` and loopback port `14318` free.
+- Workspace dependencies are installed (`bun install --frozen-lockfile`) with Bun `1.4.4` on `PATH`, the host has `python3` with `os.forkpty` and the pinned stock OMP binary or `dist/cli.js` (`OMP_PUSH_FIXTURE_BINARY` in [`scripts/android-push-runtime.ts`](../scripts/android-push-runtime.ts), matching `UPSTREAM.lock.json`), and the Pixel satisfies [Device admission and one-time WebAPK setup](#device-admission-and-one-time-webapk-setup) (including the USB/Keychain PIN above).
+
+1. Run the full development matrix, or pass `development-step` with one step name (`fleet-identity`, `legacy-head-identity`, `coordinator-restart`, `revocation`, `fleet-sinks`, `fleet-restoration`, or `legacy-tail`; every step runs `fleet_enrolled` first, `fleet-identity` adds `stale_taps_verified` and the three `fleet_*_verified` detail phases, `legacy-head-identity` runs the nine local head phases plus those three detail phases, and `legacy-tail` restores `fleet` before the six tail phases):
+
+   ```sh
+   OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development "$PUBLISHED_ARCHIVE"
+   # Run one focused fleet or legacy slice during development:
+   OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development-step fleet-identity "$PUBLISHED_ARCHIVE"
+   ```
+
+2. If a development run was interrupted while holding the release-host lease (`~/.local/state/omp-session-gateway/release-host/lease.sqlite`) or Pixel lock (`/tmp/omp-gw-pixel.lock`), resume cleanup after the owner process exits:
+
+   ```sh
+   OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts cleanup "$PUBLISHED_ARCHIVE"
+   ```
+
+A passing run returns `{ epoch, binding, passed: true, platform: { android, browser, webApk: true, dndOff: true }, ompVersion, bunVersion, phases, cleanup }`. Local development runs add `development: true, qualified: false` and write `0600` `progress.json` and `tested-evidence.json` under `~/.local/share/omp-session-gateway/qualification/dev/androidPush/` (archiving any already-restored `progress.json` bound to another candidate, origin, or OMP pin as `progress-<epoch>-restored.json`).
+
+Fixture operations execute `argv` through a host executor rather than assuming a local child process. On a remote host (`~/qual-tools/push/scripts` on the retained Mac), stage all seven `PUSH_FIXTURE_FILES` ([`scripts/stable-lanes.ts`](../scripts/stable-lanes.ts)) in `scripts`: `push-qualification-fixture.ts`, `omp-fixture.ts`, `omp-fixture.json`, `fixtures/push-qualification-extension.ts`, `fleet-push-fixture.ts`, `capability-leak-rules.ts`, and `identifier-leak-rules.ts`.
+
+[`scripts/push-qualification-fixture.ts`](../scripts/push-qualification-fixture.ts) accepts either a native stock OMP binary or a Bun JavaScript entrypoint. A detached `python3` `os.forkpty()` holder keeps the PTY open and discards output without writing terminal input (no `tmux` or Homebrew is needed).
+
+The holder starts OMP with `--no-extensions`, `--no-skills`, a synthetic model key, a private `--config <root>/fixture.yml` overlay (`collab.autoStart: control`, leaving `~/.omp/agent/config.yml` untouched), `--extension <scripts>/fixtures/push-qualification-extension.ts`, and `/push-qualification`.
+
+Owner-only (`0600`), epoch-bound, monotonically sequenced control files (`owner`, `command.json`, `ack.json`) outside OMP discovery drive each transition without terminal injection, private OMP imports, or discovery-file edits: `ctx.ui.select` publishes an input request, a held `before_agent_start` publishes `busy: true`, and `newSession()` increments `generation` on the same `instanceId` before any provider transport.
+
+Graceful `stop` escalates `SIGTERM` and `SIGKILL` to the verified holder process group if needed, checks `ps` for surviving `fixture.yml` or `hold.py` processes, and deletes the owned root.
+
+For the fleet phases, [`scripts/fleet-push-fixture.ts`](../scripts/fleet-push-fixture.ts) `fsync`s `owner.json` before mutating host state, starts a disposable `Qualification source` gateway (`push-qualification`) on `127.0.0.1:14318` behind `tailscale serve --bg --https=10443`, enrolls it on the home gateway (`Qualification home`), and restores `config.json`, the LaunchAgent, and Tailscale Serve on `restore`.
+
+Pixel `adb`/CDP, Keychain access, and the controller Bun pin remain local to the workstation driving the phone (`gatewayLogsDiscarded` inspects the retained Mac over SSH or the local LaunchAgent).
 
 ### Device admission and one-time WebAPK setup
 
-Before the first qualification campaign or published-byte smoke, exempt Tailscale (`com.tailscale.ipn`)
-from Doze on the qualification Pixel. Tailscale recommends unrestricted battery use; the acceptance
-journey's forced-Doze cycle otherwise can kill the VPN and strand later stages off the tailnet.
-This is one-time operator equipment setup, not a harness remedy: select **Settings → Apps →
-Tailscale → Battery → Unrestricted**, or explicitly run:
+Complete the persistent equipment steps once per Pixel and origin (with the USB-authorized Pixel and macOS Keychain PIN from above) before running any qualification campaign or post-release smoke:
 
-```sh
-adb shell dumpsys deviceidle whitelist +com.tailscale.ipn
-adb shell dumpsys deviceidle whitelist
-```
+1. Exempt Tailscale (`com.tailscale.ipn`) from Doze so forced-Doze cycles cannot kill the tailnet VPN. Select **Settings → Apps → Tailscale → Battery → Unrestricted**, or run:
 
-Verify the readback includes `user,com.tailscale.ipn,<uid>` or `system,com.tailscale.ipn,<uid>`,
-where `<uid>` is decimal digits. Shared admission reads this allowlist before device mutations;
-qualification preflight stays read-only, and published-byte smoke refuses before release downloads
-or host changes. Missing, malformed or similar-package entries do not satisfy it, and an unreadable
-probe also refuses. The harness never adds the exemption or changes battery policy automatically.
+   ```sh
+   adb shell dumpsys deviceidle whitelist +com.tailscale.ipn
+   adb shell dumpsys deviceidle whitelist
+   ```
 
-Turn Do Not Disturb off manually for the complete notification qualification window. Stable
-orchestrator admission reads `zen_mode` immediately after device selection, before provider lookup
-or any lane. The Push lane also checks it at admission and each notification phase rechecks it;
-a Bedtime schedule reactivating DND fails the phase. Missing, invalid or unreadable DND state
-refuses notification qualification. Android acceptance/recovery and post-release smoke do not
-exercise notifications, so their admission deliberately permits DND on.
-The lane never changes DND or its schedules. Real sessions may continue publishing: ownership is
-bound to NotificationManager's package, topic/tag, key, and post/update time, never a count of
-similarly titled lock-screen rows. A new or updated unowned record re-arms the affected phase
-**once**, recording `rearmCount: 1` and `rearmReason: "unowned_notification_overlap"`. A second
-overlap fails. Missing required events are never retried. Unowned notifications are never dismissed;
-ambiguous UI attribution still fails closed. Tap probes use Session detail to locate the fixture's
-unique synthetic project label after checking its OS record.
-Presentation and privacy checks are limited to that record's observed Android notification-content
-subtree; text from an unrelated shade row is not attributed to the fixture.
+   Confirm the output contains `user,com.tailscale.ipn,<uid>` or `system,com.tailscale.ipn,<uid>` (`<uid>` decimal digits). Shared admission checks this allowlist read-only (including before post-release smoke downloads or mutates anything) and never changes battery policy automatically; if the VPN has stopped, reconnect Tailscale on the Pixel before replaying.
 
-Turn off the Pixel's hotspot, USB and Bluetooth tethering too, and keep the controller on its own
-network. The lane switches Airplane mode, Wi-Fi and mobile data, which disconnects every tethered
-client; a controller on the Pixel's hotspot loses WinRM, SSH and the gateway origin mid-campaign.
-The stable orchestrator checks `dumpsys tethering` immediately after selecting the device, before
-provider lookup or any lane admission. Android acceptance, post-release smoke and the Push lane
-repeat the shared, lane-selected preconditions at their own admission. Post-release smoke checks
-before release download or host mutation. An unavailable or unrecognized probe refuses safely too.
-This is an admission snapshot: keep tethering off for the entire run.
+2. Install one **OMP Sessions** WebAPK (`org.chromium.webapk.*`) for the exact portless HTTPS origin under test (an app installed for a developer Mac does not qualify the retained Mac's origin):
 
-Before initial acceptance navigation, the Pixel must resolve and reach the **configured gateway
-origin's hostname** over its own network path. A read-only `ping -c 1 -W 2` probe runs during
-campaign admission once the retained Mac origin is known, repeats in the lease holder before
-starting the acceptance child, and runs in standalone acceptance before Chrome or radio effects.
-An unknown host or packet loss raises `AndroidReachabilityPreconditionError` (`unreachable`)
-with a Tailscale/DNS/routing prerequisite diagnostic; adb transport failure is separately named
-`adb-transport`. No automatic VPN login/connect or network-setting mutation is performed.
-A parent-side read-only refusal does not poison the Pixel lease; failures of a child that actually
-ran retain the existing conservative restoration guard. DNS/ICMP reachability does **not** prove
-HTTPS, browser or CDP health, and it is only an admission snapshot, not a later recovery guarantee.
+   ```sh
+   export PATH="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4:$PATH"
+   bun scripts/android-webapk.ts setup "$ORIGIN"
+   ```
 
-The origin must already have granted notification permission before the run. The lane never accepts
-a permission prompt as part of admission. For its negative window, it retains a browser-only CDP
-connection holding an origin-scoped denial while the WebAPK task is closed. Chrome removes this
-override when the connection closes. Restoration first rewarms the browser, closes the override
-connection, verifies the real granted preference, and requires fresh delivery. No global permission
-reset or Android runtime-permission mutation is used. Local adb forwards 9237 and 9238 are reserved
-for the lane; preflight refuses occupied mappings. Interrupted cleanup removes only matching
-device/stock-Chrome mappings, including an orphaned denial connection's listener.
+   [`scripts/android-webapk.ts`](../scripts/android-webapk.ts) is idempotent and separate from lane run or cleanup: it acquires `/tmp/omp-gw-pixel.lock`, opens `"$ORIGIN"`, taps Chrome's `universal_install` menu item (scrolling Chrome's virtualized menu when needed) and install confirmations (`option_text_install` and `positive_button`), verifies package ownership, closes the WebAPK task, and restores wake/keyguard state before releasing the lock.
 
-The lane requires exactly one installed OMP Sessions WebAPK for the **origin under test**. An app
-installed for the developer Mac does not qualify the retained Mac's origin. Equipment setup is a
-separate explicit operation, never part of lane run or cleanup:
+   Reopen **OMP Sessions** on the Pixel once after `setup` finishes, open **Settings**, and tap **Enable background alerts** so notification permission is `"granted"`.
 
-```sh
-export PATH="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4:$PATH"
-bun scripts/android-webapk.ts setup "$ORIGIN"
-```
+   If native UI cleanup fails during `setup`, it retains `/tmp/omp-gw-pixel.lock` with `pixelUnrestored: true` (close any open Chrome menu or dialog on the phone, verify the PID in `/tmp/omp-gw-pixel.lock/owner` has exited, and remove `/tmp/omp-gw-pixel.lock`, never deleting another active owner's lock). Neither `setup` nor the Push lane ever uninstalls apps or clears Chrome or WebAPK data.
 
-Setup uses the browser's Install app UI and verifies Android package ownership; it is bounded and
-idempotent. Chrome's native `universal_install` action identifies the install entry without
-assuming a fixed "Install app" caption. Bounded UI observations wait for each control; the optional
-Install/Create shortcut sheet and the final Install confirmation are separate transitions. Setup
-closes its own menu/dialog on failure and retains the lease if native UI restoration fails, even
-when that failure is nested in an aggregate with the setup error. The
-retained-origin install completed in 52.675 s on Chrome 153.0.8010.52; its authorized notification
-grant and subscription persisted across disconnect, with the equipment baseline restored and
-the lease released. Obtain authorization before installing for another origin. The installed app is
-persistent qualification equipment: the lane never uninstalls apps or clears Chrome/WebAPK data.
-Development device mutations acquire `/tmp/omp-gw-pixel.lock` atomically. A lease is released only
-after restoring its baseline; never remove another lane's lock. The PIN remains in Keychain and is
-read only by `android-device.ts`, never echoed or copied into configuration.
-Display wake checks keyguard state before sending MENU/dismiss events. On an unlocked Pixel those
-events open Chrome's application menu instead of unlocking anything, intercepting subsequent
-touches. The helper preserves the unlocked page and authenticates only a still-visible keyguard.
-Notification-tap authentication also rechecks keyguard state while observing each bouncer and
-before revealing or entering the PIN. A keyguard that dismisses during a UI snapshot is already
-authenticated; the lane proceeds without waiting for a vanished input field or typing into the
-destination page. A missing or ambiguous credential surface still fails while the keyguard is shown.
+Before each Push run, confirm these admission conditions (read-only parent refusals do not poison the Pixel lease):
+
+- Do Not Disturb is off (`settings get global zen_mode` equals `0`): checked by the campaign orchestrator at device selection, at Push admission, and before and after every notification phase (a Bedtime schedule re-enabling DND fails the phase; acceptance and post-release smoke permit DND on).
+- Wi-Fi is connected, an active SIM has cellular data enabled (required for `network_verified` to pass without `blocked: "cellular_path_unavailable"`), hotspot, USB, and Bluetooth tethering are off (`dumpsys tethering` reports `Upstream wanted: false`), and the controller is on its own network so radio transitions cannot disconnect SSH, WinRM, or the gateway origin.
+- The Pixel resolves and answers `ping -c 1 -W 2` to the gateway origin's hostname (`AndroidReachabilityPreconditionError` distinguishes `unreachable` from `adb-transport`; DNS/ICMP reachability is an admission snapshot, not proof of HTTPS or CDP health).
+- Origin notification permission is already `"granted"`, local `adb` TCP ports `9237` and `9238` are unoccupied (interrupted cleanup removes only matching device and Chrome forwards), and no unrelated session is waiting, held, or hidden in this device's directory (use **Requeue** and **Show all** in the WebAPK if needed before `triage_verified`).
+
+For `permission_verified`, a browser-only CDP connection on `tcp:9237` holds an origin-scoped denial while the WebAPK task is closed; Chrome drops the override when that connection closes, and restoration rewarms Chrome, closes the override, verifies `"granted"`, and requires fresh delivery without touching Android runtime permissions.
+
+Unrelated sessions may keep publishing during the lane: ownership binds to `NotificationManager`'s package, topic/tag digest, key, and post/update timestamp, and UI checks inspect only that notification's subtree (locating the fixture's unique synthetic project label under **Session** detail for taps).
+
+On local Push v2 phases, one unowned notification post or update re-arms the phase once (`rearmCount: 1`, `rearmReason: "unowned_notification_overlap"`), settling owned requests, waiting for open attention clears (never activity-stop tags, which have no clear), and dismissing remaining owned notices. Fleet phases and second overlaps fail closed, and missing required events are never retried.
+
+Display wake (`wakeAndroidDisplay` in [`scripts/android-device.ts`](../scripts/android-device.ts)) checks `isKeyguardShowing` before sending `MENU` (`keyevent 82`, which opens Chrome's app menu on an unlocked Pixel), taps `AlternateBouncerView`'s scrim when the standalone fingerprint bouncer holds focus, and proceeds without typing into the page if the keyguard dismisses during observation.
 
 ### Matrix and evidence
 
-- Closed-PWA Private, Session, and Preview delivery; one notification across repeated current
-  samples; Preview must equal Session detail for the pinned OMP contract.
-- Actual lock-screen presentation observed through in-memory UIAutomator output; no screenshots
-  or XML files. Notification dumps are read with `adb exec-out` and reduced to booleans/counts.
-- Current attention tap revalidates the request and generation before Control; stop tap opens View
-  only; same-instance stale-generation tap scrubs to `/` without a launch request.
-- Authoritative clear, followed by a fresh request retained across repeated current samples.
-- After `clear_verified` and before `force_stop_verified`, `triage_verified` starts a second
-  owned fixture host and exercises FIFO, Hold for desk, requeue, held-queue presentation, stale
-  hold release, Hide/Undo within five seconds, Undo expiry, attention restoration, and Show all.
-  Held asks stay in `N waiting · M held` and in the gateway's authoritative count; only the held
-  ask's notification closes. Holding both shows `Queue clear · N on hold`, not all-clear. Hidden
-  rows stay in `Live · N`. All triage actions must send zero non-GET requests to the gateway.
-  No other session may be waiting for input or hidden in this device-local directory: ordering,
-  Hold, and Show all act on the whole directory. The phase fails closed with that precondition
-  message rather than changing unrelated sessions.
-- `stale_taps_verified` then covers an ask resolved on the desktop, a newer ask re-armed on the
-  same generation, a replacement generation with its own ask, and a host that is gone. Every tap
-  must scrub its route before any API request, fetch metadata, make zero launch requests, and
-  show the expired/changed notice. Authoritative clear already removes the original notification,
-  so the lane re-presents its original metadata-only data through the app's service-worker
-  registration and taps it from the lock screen. The result records `replayed: true`: this proves
-  delayed-tap handling on the physical Pixel, not Web Push delivery ordering or delay. Two gateway
-  pushes would replace or close a replay on the same tag, so the lane orders around them. Launching
-  the app re-saves its subscription, and the gateway then re-sends every current ask, so the lane
-  opens and settles the app before each newer ask, and the runtime refuses a replay over a newer
-  ask while the app is closed. Removing a host with an open ask sends that ask's clear, so the lane
-  waits for it to land before re-presenting the gone host's request.
-- Browser force-stop records delivery while stopped or suppression until relaunch; both variants
-  still require a fresh post-relaunch delivery.
-- Origin-permission denial suppresses notifications; restoring permission must permit a fresh
-  delivery within the 160-second recovery window; its clear and ordinary deliveries retain the
-  steady-state minute. Lock/resume and forced Doze record observed behavior, not a delivery guarantee: forced
-  Doze records delivery during Doze, delivery within a minute of exit, or a push the push service
-  still holds (`undelivered_after_doze_exit`); privacy checks apply to anything that arrives. Doze
-  is the last delivery phase, after the network transitions: afterwards the phone's frozen browser
-  can defer pushes until it runs again, so the lane then resumes the app once and requires the
-  settled ask's notification to clear.
-- Real Wi-Fi and cellular tailnet delivery, Airplane suppression, and bounded recovery. Missing
-  working cellular data is a named blocked sub-phase, never substituted with Wi-Fi. Airplane
-  suppression and Wi-Fi recovery are still exercised; the missing cellular result prevents a pass.
-  Every radio change gives Play Services a fresh push socket, which can deliver what it held and
-  then die silently until it reconnects, so each ask or clear after a change must arrive within the
-  160-second recovery window rather than the steady-state minute. Leaving Airplane mode, the lane
-  enables mobile data only after Wi-Fi validates: otherwise mobile data validates first, the socket
-  opens there, and once Wi-Fi becomes the default network it holds every push until its next
-  heartbeat (18.6 minutes on the 2026-09-29 run), which failed that attempt's post-recovery clear.
-  Leaving Airplane after the cellular sub-phase can stall Play Services' path through the Tailscale
-  VPN over Wi-Fi for minutes: on 2026-11-06 it stalled for 11.5 minutes and affected 4 of 13
-  faithful cellular → Airplane → Wi-Fi cycles. A Wi-Fi re-association did not clear it; a VPN
-  reconnect did.
-  Before each Wi-Fi delivery wait, and when cleanup restores Wi-Fi, the lane waits up to 15 seconds
-  for the push socket to connect on Wi-Fi with the VPN present. Otherwise it reconnects the
-  Tailscale VPN once and waits up to 45 seconds. Cleanup fails if the VPN is not back; the delivery
-  wait remains the verdict.
-- A positive control proves the seven historical browser sinks plus notification title/body/data
-  are detectable; real launch material stays in page memory during the sweep. URL/history, DOM,
-  and resource timings are included. On macOS, `plutil` must confirm both LaunchAgent streams are
-  `/dev/null`; evidence records `gatewayLogsDiscarded: true`, not a fictional clean empty log scan.
+`ANDROID_PUSH_PHASES` ([`scripts/android-push-qualification.ts`](../scripts/android-push-qualification.ts) and [`scripts/android-push-fleet.ts`](../scripts/android-push-fleet.ts)) executes in this order:
 
-One foreign-notification overlap permits one recorded phase re-arm; repeated interference or
-ambiguous ownership fails closed. Re-arm settles owned asks and waits only for pending attention
-clears, then dismisses remaining owned notices. An activity-stop notice has no authoritative clear,
-so waiting for its tag to empty would time out instead of re-arming.
+1. `baseline_captured` and `subscription_ready`: captures the ten-boolean `PushDeviceBaseline` and `PushBrowserBaseline`, starts the `primary` fixture, records `notificationTopicDigest`, and sets **Private** detail.
+2. `private_verified`, `session_verified`, and `preview_verified`: verifies closed-WebAPK delivery on a locked screen for each detail level (**Preview** equals **Session** for stock OMP), confirms lock-screen presentation via in-memory UIAutomator output (`adb exec-out`, reduced to booleans and counts with no screenshots or XML files), checks zero duplicate reposts across a 21-second window, and verifies authoritative clear.
+3. `attention_tap_verified`, `activity_stop_verified`, `stale_generation_verified`, and `clear_verified`: verifies locked attention tap revalidation into writable **Control** (route scrubbed before network, answered with Select and Send), activity-stop delivery after two `busy: true` polls opening read-only **View** only, same-`instanceId` `generation + 1` stale tap failing closed with zero launches, and authoritative clear followed by fresh-request retention across repeated samples.
+4. `triage_verified`: starts `secondary` (`secondaryNotificationTopicDigest`) and verifies arrival-order queueing, **Hold for desk** (closing only the held notification while keeping `N waiting · M held` and gateway counts unchanged), **Requeue**, holding both (`Queue clear · N on hold — handle at desk`), stale-hold release, **Hide** with **Undo** within 5 seconds and after expiry (`Live · N` unchanged), unhide on attention, and **Show all** (`mutations: 0`).
+5. `stale_taps_verified`: re-presents metadata-only notifications (`replayed: true`) through the service worker and taps them from the lock screen for a desktop-resolved request, a re-armed request on the same generation (opening and settling the app before the newer request so subscription re-save does not overwrite the replay), a `generation + 1` replacement, and a stopped `secondary` host (waiting for its removal clear first), requiring route scrubbing, zero launches, and the expired notice.
+6. Fleet Push v3 phases ([`scripts/android-push-fleet.ts`](../scripts/android-push-fleet.ts)):
+   - `fleet_enrolled`, `fleet_private_verified`, `fleet_session_verified`, and `fleet_preview_verified`: enrolls `Qualification source` in **Settings → Hosts** (`Covered`) and verifies concurrent home and remote delivery across **Private**, **Session**, and **Preview** with 21-second deduplication and armed worker badge checks (`setAppBadge` / `clearAppBadge` observed inside the push wake).
+   - `fleet_race_verified`, `fleet_taps_verified`, and `fleet_stale_taps_verified`: checks concurrent clear/replacement races and badge counts, live **Control** taps for home and remote requests, and replayed remote stale taps (resolved, `generation + 1`, and stopped source).
+   - `fleet_outage_verified`, `fleet_restart_verified`, and `fleet_revocation_verified`: checks `source-down` / `source-up` stale retention and incomplete-coverage badge markers, `coordinator-down` / `coordinator-up` restart reconciliation (clearing a resolved remote request and re-alerting an open local request once with zero repeats across 35 seconds), and source revocation (`unauthorized`, notification cleared, zero launches).
+   - `fleet_sinks_verified` and `fleet_restored`: verifies capability-free `push-state.json`, `fleet-notifications.json`, `notification-grants.json`, and `doctor --bundle` archives on both gateways, then revokes grants, stops the source and remote fixture, and restores Tailscale Serve and the home LaunchAgent.
+7. `force_stop_verified`, `permission_verified`, and `lock_resume_verified`: force-stops `com.android.chrome` and records `delivered_while_force_stopped` or `suppressed_until_relaunch` plus fresh post-relaunch delivery; holds origin permission denial for 30 seconds with zero deliveries, restores permission, and requires fresh delivery within the 160-second recovery window (ordinary steady-state waits use 60 seconds); and verifies locked delivery and resume clear.
+8. `network_verified`: checks Wi-Fi delivery/clear, cellular tailnet delivery/clear (missing cellular data records `blocked: "cellular_path_unavailable"` and sets `evidence_complete.passed` to `false`), 30-second Airplane suppression, and Wi-Fi recovery within 160 seconds. Leaving Airplane enables mobile data only after Wi-Fi validates, and Wi-Fi waits check up to 15 seconds for `GcmService` on Wi-Fi with the VPN up before reconnecting the VPN once and waiting up to 45 seconds.
+9. `doze_verified`, `forbidden_sinks_verified`, and `evidence_complete`: runs forced Doze last, recording `delivered_during_doze`, `delivered_after_doze_exit`, or `undelivered_after_doze_exit` ([ADR-031](DECISIONS.md#adr-031--qualify-a-windows-host-and-pixel-background-web-push-in-every-stable-campaign)), opens the WebAPK once to clear the settled request, and checks ten sinks, `gatewayStructuredLogsSafe: true`, and `gatewayLogsDiscarded: true` (`plutil` `/dev/null`).
 
 <!-- release-generate:campaign:start -->
 The v0.11.0 campaign qualified these scenarios only for its recorded candidate and devices. Each later candidate must pass them again on its exact signed bytes; historical evidence does not transfer. See the [release ledger](RELEASE_STATUS.md).
 <!-- release-generate:campaign:end -->
 
-The complete checkpoint precedes effects and contains only an attempt UUID, identity binding hash,
-closed phase, baseline booleans/preferences, an opaque SHA-256 notification-topic binding, and bounded
-observations. The binding permits cleanup even after the fixture publication disappears; no raw topic
-or instance identifier is checkpointed. `secondaryNotificationTopicDigest` binds the second host's
-notifications; older progress parses with it absent. `phaseElapsedMs` records
-checkpoint-to-checkpoint time, including any explicitly recorded re-arm.
-Raw OS notification keys, tags, and content remain transient. Cleanup attempts every step
-even after failure: settle the owned ask, exit forced Doze/reset battery emulation, restore radios,
-stop both owned fixture hosts, remove both topics' notifications, wait until the app has dropped
-their device-local Hold/Hide records, restore subscription/detail/origin
-permission, and restore WebAPK task and display/keyguard state. Stopping the producer before
-notification and subscription cleanup ensures that cleanup also follows fixture shutdown.
-A failed cleanup remains cleanup-required;
-it never becomes a passing receipt. Its error carries `pixelUnrestored: true`, poisoning the shared
-stable-campaign Pixel lease; an ordinary phase failure followed by successful cleanup does not.
-The private development cleanup command can recover its own retained lease only after the recorded
-owner process has exited; live owners and other lanes remain untouched. Chrome and WebAPK runtime
-notification-permission booleans are observed before and after, but never changed by the lane.
+Each checkpoint precedes effects and stores only the attempt `epoch` UUID, SHA-256 identity `binding`, closed `phase`, `cleanupRequired`, boolean `device` and `browser` baselines, SHA-256 topic digests (`notificationTopicDigest`, `secondaryNotificationTopicDigest`, and optional `remoteNotificationTopicDigest`, without raw topics or instance IDs), optional `fleetPrepared`, bounded scalar `results` (`phaseElapsedMs` and delivery timings), and post-restoration `pixelBaseline`.
 
-For a development run against an already installed gateway, provide the matching published archive
-and exact pinned OMP executable. The command does not install, restart, reconfigure, or rotate the
-gateway. Run with the pinned Bun. Restored development progress bound to another candidate,
-origin, or OMP pin is archived automatically; unfinished cleanup must still be recovered:
+Raw OS notification keys, tags, and content stay in memory only. Cleanup attempts every `CLEANUP_STEPS` entry even after failure: `fixtureAsk` (settling open requests), `doze` (exiting Doze and resetting battery emulation), `network` (restoring radios and Wi-Fi push transport), `fleet` (restoring home `config.json`, LaunchAgent, and Serve when `fleetPrepared` is `true`), `fixture` (stopping `primary` and `secondary` OMP hosts), `notifications`, `browser`, and `task`.
 
-```sh
-OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development "$PUBLISHED_ARCHIVE"
-# Resume cleanup after an interrupted development attempt:
-OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts cleanup "$PUBLISHED_ARCHIVE"
-```
+Failed cleanup keeps `cleanupRequired: true`, never becomes a passing receipt, and sets `pixelUnrestored: true`, poisoning the shared campaign Pixel lease (an ordinary phase failure followed by clean restoration does not). Chrome and WebAPK Android runtime notification-permission booleans are observed before and after, never mutated.
 
-Private checkpoints and tested evidence live under
-`~/.local/share/omp-session-gateway/qualification/dev/androidPush/` with mode `0600`. They are
-explicitly development evidence, never a stable receipt. Only the lead-owned `qualify:stable`
-integration may qualify the exact signed candidate.
+## Client strategy
+
+### Decision: PWA first
+
+Hosts run stock mainline OMP `>= 18.1.20` with `collab.autoStart` alone behind `omp-gatewayd` (Bun `1.4.4`, TUN-mode Tailscale Serve, and exact login allowlisting; [Mainline OMP integration](OMP_INTEGRATION.md)), and the gateway resolves capabilities per launch without storing them ([Current claim](COMPATIBILITY.md#current-claim)).
+
+Because the upstream OMP collaboration client is already a browser application providing live **View** and **Control**, the Android client is the **OMP Sessions** Progressive Web App (PWA) mounting that pinned client rather than a separate native protocol implementation:
+
+- one UI and protocol implementation across desktop and Android;
+- immediate compatibility with OMP's encrypted collaboration link format and client updates;
+- no Android app-store release cycle for web changes;
+- tailnet HTTPS origin isolation;
+- standalone home-screen installation (WebAPK);
+- no risk of cryptographic or wire-protocol divergence.
+
+### PWA requirements
+
+- responsive layout for narrow phone viewports, accounting for the virtual keyboard and `visualViewport` in the pinned `collab-web` client;
+- web app manifest (`manifest.webmanifest`) with `display: standalone`, `#000000` splash `background_color` and `theme_color`, project-specific standard and maskable icons, and document `theme-color` metadata (`#000000` dark, `#f4f4f2` light) under the monochrome **Signal** system ([Color](BRANDING.md#color) and [ADR-049](DECISIONS.md#adr-049--signal-a-monochrome-system-in-which-color-is-state));
+- minimal service worker precaching only versioned static shell assets ([Shell updates and caching](ARCHITECTURE.md#shell-updates-and-caching)), never API responses or collaboration navigations;
+- volatile in-memory directory staleness and adaptive session reachability probes that clear retained metadata immediately on `403` ([Availability model](ARCHITECTURE.md#availability-model), [Availability behavior](ARCHITECTURE.md#5-availability-behavior), and [Current implementation audit](DECISIONS.md#current-implementation-audit--2026-09-14) on `ADR-016`);
+- opt-in capability-free Web Push v2 (home gateway) and Push v3 (fleet notifications; [ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator)) with per-device **Private**, **Session**, and **Preview** detail levels, read-only **View** taps for activity stops, and exact-request and generation revalidation before **Control** ([Needs-attention and notification detail contract](ATTENTION_SPEC.md) and [Background alerts](USAGE.md#background-alerts));
+- Android Back returning from an open collaboration session to the directory without leaving a secret-bearing history entry;
+- qualification on stable Chrome on Android, with alternate Chromium channels selectable via environment variables.
+
+Top-level navigations bypass the service worker, so launching the installed PWA cold while offline stays unavailable on the OS splash screen until tailnet connectivity returns rather than caching sensitive runtime state.
+
+In an installed WebAPK, a live `/client/` collaboration document reports `/` to the service worker, so navigating an open window on notification tap reloads and drops the live session.
+
+The service worker therefore focuses an open window and hands the notification route over `postMessage` for in-place metadata revalidation, opening `/collab/:instanceId` (scrubbed to `/` before any network call) only when no window accepts ([Background attention push](ARCHITECTURE.md#23-background-attention-push)). Passing core Android browser smoke does not qualify the background-Push matrix.
+
+### Launch UX
+
+User-facing directory actions (**Open request**, **View transcript**, **View**, and **Control**) and `mode_unavailable` / expired-generation notices are specified in [Needs you](USAGE.md#needs-you) and [View and Control](USAGE.md#view-and-control). On Android, standalone PWA launch follows four architectural constraints ([Existing OMP collaboration client](ARCHITECTURE.md#15-existing-omp-collaboration-client)):
+
+- mount the pinned collaboration client in the current standalone document via its in-memory capability bootstrap (`startCollabWithCapability`), carrying both `generation` and any request-specific `requestId`;
+- never depend on `window.open` or `window.opener`, because Chrome on Android may reuse the standalone WebAPK window (a separate-page `MessageChannel` bootstrap applies only to ordinary browser tabs preserving an exact same-origin opener);
+- never place a capability in a URL, DOM attribute, clipboard, browser history, or storage;
+- never display or copy the raw collaboration link by default.
+
+### Optional passkey/biometric gate
+
+WebAuthn step-up protection for **Control** is proposed in [ADR-008](DECISIONS.md#adr-008--optional-webauthn-gate-not-native-biometrics) and is **Deferred** ([Deployment dependency matrix](COMPATIBILITY.md#deployment-dependency-matrix)); there is no passkey configuration key or enrollment flow.
+
+Device lock, narrow tailnet access policy, and revocation are the active controls ([Lost phone and user presence](SECURITY.md#10-lost-phone-and-user-presence)), and any future gate would use browser-managed WebAuthn rather than a native protocol client.
+
+### When to add a Trusted Web Activity
+
+A Trusted Web Activity (TWA) is the preferred native package wrapper if the project later needs:
+
+- Google Play Store distribution;
+- a branded launcher and splash screen;
+- verified Android App Links;
+- managed-device enterprise deployment;
+- a thin native bridge for scoped OS features.
+
+A TWA must load the same tailnet HTTPS PWA verified with Digital Asset Links and keep all protocol and cryptographic logic out of the Android wrapper.
+
+### When a fully native app might be justified
+
+Reconsider a native UI only if the Web Push path proves inadequate for required delivery or OS integration. Even then, prefer a native or TWA shell that embeds the web collaboration client rather than reimplementing the OMP wire protocol.
+
+### Why not a generic WebView wrapper?
+
+A custom `WebView` wrapper takes on cookie and storage policy, navigation, browser-engine updates, security patching, and OS integration. A TWA uses the user's Chrome engine with verified site ownership, and the plain PWA avoids an Android wrapper altogether; a `WebView` wrapper offers no advantage over the PWA.
+
+## Dated development observations
+
+The sections below are dated development observations and are kept as written.
+
+### Measurements behind the lane rules
+
+These measurements were recorded beside the rules they explain, and are kept as written:
+
+- Fixture holder cleanup: "Separate local holder smokes used a stop-refusing child: TERM cleanup took 10.343 s; with TERM ignored, KILL/HUP cleanup took 20.569 s. Both observed terminal stdin/stdout, no surviving owned processes, and removal of the owned root."
+- One-time WebAPK setup: "The retained-origin install completed in 52.675 s on Chrome 153.0.8010.52; its authorized notification grant and subscription persisted across disconnect, with the equipment baseline restored and the lease released."
+- Mobile data only after Wi-Fi validates: otherwise the push socket opens on mobile data and, once Wi-Fi becomes the default network, "holds every push until its next heartbeat (18.6 minutes on the 2026-09-29 run), which failed that attempt's post-recovery clear."
+- Radio restoration after the cellular sub-phase: "Leaving Airplane after the cellular sub-phase can stall Play Services' path through the Tailscale VPN over Wi-Fi for minutes: on 2026-11-06 it stalled for 11.5 minutes and affected 4 of 13 faithful cellular → Airplane → Wi-Fi cycles. A Wi-Fi re-association did not clear it; a VPN reconnect did."
+
+### Development observations — 2026-10-01 and 2026-09-25
 
 Development observations on 2026-10-01, for the triage and delayed-tap phases: the runs used the
 pinned Bun **1.4.0**, the installed **v0.7.1** gateway, stock OMP **18.4.8** fixtures, and the
@@ -661,30 +520,3 @@ Pro (Android 17 `CP3A.260905.009`, Chrome 153.0.8010.53, retained-origin WebAPK 
 Cleanup passed for the same epoch with device, browser, and fixture restored, and the lease was
 released. The passive trace kept 1,298 rows with zero drops. This is **development-tested**
 evidence for the lane and the no-Topic gateway, not stable qualification.
-
-## Optional passkey/biometric gate
-
-WebAuthn Control protection is proposed in ADR-008, not implemented in v0.4.0. There is no
-`controlProtection = "passkey"` setting or enrollment flow to enable today. Device lock, narrow
-tailnet policy, and prompt revocation remain the available controls. A future implementation could
-use browser-managed passkey/biometric verification without introducing a native protocol client.
-
-## When to add a Trusted Web Activity
-
-A TWA is the preferred “native package” if the project later needs:
-
-- Play Store distribution;
-- a branded launcher/splash experience;
-- verified Android App Links;
-- managed-device deployment;
-- a thin native bridge for carefully scoped features.
-
-The TWA should load the same owned HTTPS PWA and be verified with Digital Asset Links. Do not put protocol/crypto logic in the Android wrapper.
-
-## When a fully native app might be justified
-
-Only reconsider a native UI if the qualified Web Push path proves inadequate for required delivery or OS integration. Even then, prefer a native/TWA shell that reuses the web collaboration client rather than independently implementing the OMP wire protocol.
-
-## Why not a generic WebView wrapper?
-
-A custom WebView creates more responsibility for cookie/storage policy, navigation, updates, security patching, and platform integration. TWA uses the user's browser engine and verified site ownership, while the plain PWA is simpler still. A WebView wrapper offers no meaningful v1 advantage.

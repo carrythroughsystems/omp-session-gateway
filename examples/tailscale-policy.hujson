@@ -1,5 +1,5 @@
 // Template only. Merge carefully into the existing tailnet policy.
-// Replace the login and ensure the desktop gateway node owns tag:omp-session-gateway.
+// Replace the login and assign tag:omp-session-gateway to each gateway host (add a home-to-source HTTPS grant if using section 8 fleet notifications).
 // Keep the phone user-owned, not tagged; retain the gateway exact-login allowlist.
 // Match tcp:443 to the configured Serve HTTPS port, never the loopback backend port.
 // Review overlapping grants AND legacy ACLs; a narrower grant does not override them.
@@ -24,7 +24,7 @@
 // This selects Android + stable Tailscale, not a unique phone or a compliance guarantee.
 // Preserve any existing defaultSrcPosture requirements: explicit srcPosture replaces them.
 // Check reported phone attributes and validate the merged policy in the admin console
-// policy preview, then test allowed and denied devices (see docs/OPERATIONS.md section 6).
+// policy preview, then test allowed and denied devices (see docs/OPERATIONS.md section 4).
 // Posture syntax and limits: https://tailscale.com/kb/1288/device-posture
 /*
 {

@@ -10,13 +10,13 @@
 
 **Every live OMP session. One private page, in any modern browser.**
 
-Keep using [Oh My Pi](https://github.com/can1357/oh-my-pi) in your terminal. OMP Session Gateway lists your collaboration-enabled sessions, shows which need you, and opens OMP's own encrypted **View** or **Control** client from your phone — no QR scans, copied links, or per-session setup.
+Keep using [Oh My Pi](https://github.com/can1357/oh-my-pi) in your terminal. OMP Session Gateway lists your collaboration-enabled sessions, shows which need you, and opens OMP's own encrypted **View** or **Control** client from your phone — no QR scans or per-session link copying.
 
 <img src="docs/media/omp-session-gateway-demo.gif" alt="Four live OMP sessions listed automatically in the private Sessions directory; a fifth appears on its own; when sessions start waiting for input the directory switches to Needs you and promotes the oldest request; Open request opens OMP's encrypted collaboration client on that exact request, which stays connected." width="900">
 
 <sub>Synthetic product demo captured from the built app and pinned collaboration client (<a href="docs/media/README.md">capture provenance</a> · <a href="docs/media/omp-session-gateway-demo.mp4">MP4</a>).</sub>
 
-**[Get started](#build-and-run)** · **[Docs](docs/README.md)** · **[Security](docs/SECURITY.md)** · **[Compatibility](docs/COMPATIBILITY.md)** · **[Latest release](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest)**
+**[Get started](#get-started)** · **[Docs](docs/README.md)** · **[Security](docs/SECURITY.md)** · **[Compatibility](docs/COMPATIBILITY.md)** · **[Latest release](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest)**
 
 [![CI][ci-badge]][ci]
 [![Releases][release-badge]][releases]
@@ -44,9 +44,9 @@ Works with stock [OMP 18.1.20+](https://github.com/can1357/oh-my-pi/releases/tag
 >
 </div>
 
-1. **Discover automatically** — Every collaboration-enabled `omp` process appears in **OMP Sessions** on the next 10-second discovery poll, with no per-session command, QR code, or copied link.
-2. **The oldest ask first** — When any session waits for input, **Needs you** shows which session is waiting and promotes the oldest ask; the prompt itself stays in OMP.
-3. **One tap to the real session** — Tapping **Open request** or **View** opens OMP's own encrypted collaboration client on that exact request — the link is fetched when you tap and never stored.
+1. **Discover automatically.** Every collaboration-enabled `omp` process on the host appears in **OMP Sessions**, the gateway's web app, on the next 10-second discovery poll. There is no per-session command, QR code, or link to copy.
+2. **The oldest request first.** When a session waits for input, **Needs you** names it and puts the oldest request at the top. The prompt itself stays in OMP.
+3. **One tap to the real session.** **Open request** opens OMP's own encrypted collaboration client on that exact request in **Control**; a tap on any live session opens it read-only in **View**. The link is fetched when you tap and is never stored.
 
 <details>
 <summary>Screens</summary>
@@ -66,14 +66,15 @@ Works with stock [OMP 18.1.20+](https://github.com/can1357/oh-my-pi/releases/tag
 
 </details>
 
-## Build and run
+<a id="build-and-run"></a>
+## Get started
 
 You need:
 
 - the [latest stable release](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest)
-- **Bun 1.4.4** at a persistent path
+- **Bun 1.4.4** at a path that stays put; the background service runs `bun` from it
 - stock **OMP 18.1.20 or later**
-- Tailscale on the host and the phone — TUN-mode client on the host, Serve over tailnet HTTPS, **never Funnel**
+- Tailscale on the host and on your phone: a TUN-mode client on the host, and Serve over tailnet HTTPS, **never Funnel**
 
 ### 1. Enable collaboration once in OMP
 
@@ -86,38 +87,44 @@ Start participating sessions with plain `omp` after changing this setting; alrea
 
 ### 2. Install the gateway
 
-Download and [verify the published archive](docs/RELEASE.md#verify-a-published-build). If you are upgrading from v0.3.0 or earlier, stop and uninstall that release with its own CLI first following [Upgrade and rollback](docs/UPGRADE_ROLLBACK.md). Then, from the download directory:
+Download the archive and [verify it](docs/RELEASE.md#verify-a-published-build). If the host still runs v0.3.0 or earlier, [uninstall that release with its own CLI first](docs/UPGRADE_ROLLBACK.md#recover-across-the-v030-boundary). Then, from the download directory, install the gateway with the host's Tailscale HTTPS address and your Tailscale login:
 
 ```sh
 tar -xf omp-session-gateway-*-bun.tar
 cd omp-session-gateway-*-bun
 bun apps/gateway/src/cli.js install \
-  --origin https://host.tailnet.ts.net \
+  --origin https://host.example.ts.net \
   --allow you@example.com
 bun apps/gateway/src/cli.js serve-guidance
 ```
 
-On Windows PowerShell, use the [PowerShell steps in Operations](docs/OPERATIONS.md#2-cli-and-daemon-installation) instead (one line per command, no `\` continuations). Run the Tailscale Serve command printed by `serve-guidance` and grant your login HTTPS access to the host in your tailnet policy ([example](examples/tailscale-policy.hujson)), then check the installation:
+On Windows, use the [PowerShell steps in Operations](docs/OPERATIONS.md#2-cli-and-daemon-installation): one line per command, no `\` continuations.
+
+Run the Tailscale Serve command that `serve-guidance` prints, grant your login HTTPS access to the host in your tailnet policy ([example](examples/tailscale-policy.hujson)), then check the installation:
 
 ```sh
 bun apps/gateway/src/cli.js doctor
 ```
 
-To build or run from a source checkout instead of the release archive, see [CONTRIBUTING.md](CONTRIBUTING.md#build-from-source).
+`doctor` exits non-zero when a check fails; [Troubleshooting by symptom](docs/OPERATIONS.md#troubleshooting-by-symptom) covers the common causes. To run from a source checkout instead of the release archive, see [Build from source](CONTRIBUTING.md#build-from-source).
 
 ### 3. Open OMP Sessions on your phone
 
-Open your configured HTTPS address from your allowlisted Tailscale device and add **OMP Sessions** to your Home Screen. Setup is one-time: new sessions appear within 10 seconds, [Operations](docs/OPERATIONS.md) covers service management and updates, and [Troubleshooting by symptom](docs/OPERATIONS.md#troubleshooting-by-symptom) covers common issues.
+Open the HTTPS address on a phone signed in to Tailscale with the login you allowed, and add **OMP Sessions** to your Home Screen. The first launch walks through three short trays: **Connected**, **Background alerts**, and **View or Control**.
+
+Setup is one-time: each new `omp` session appears within 10 seconds. [Using OMP Sessions](docs/USAGE.md) covers the app; [Installation and operations](docs/OPERATIONS.md) covers updates and service management.
 
 ## Using it
 
-- **[All clear](docs/USAGE.md#the-directory) vs [Needs you](docs/USAGE.md#needs-you)** — **All clear** lists active sessions when none are waiting; **Needs you** queues waiting sessions in FIFO order and promotes the oldest ask.
-- **[Open request vs View transcript](docs/USAGE.md#view-and-control)** — **Open request** opens OMP's encrypted client in Control mode; **View transcript** (or **View** on any row) opens it read-only, and answers show `Sending…` until OMP acknowledges them.
-- **[Hold for desk and Hide](docs/USAGE.md#hold-and-hide)** — **Hold for desk** defers the current ask on this device and advances to the next one; **Hide** removes a non-waiting row on this device with **Undo** and **Show all**.
-- **[Background alerts](docs/USAGE.md#background-alerts)** — Opt in from the Settings sheet and choose **Private**, **Session**, or **Preview** detail; when a host that publishes `busy` goes idle, tapping its stop alert opens **View**.
-- **[Alerts from other hosts](docs/USAGE.md#alerts-from-other-hosts)** — After enabling [fleet notification sources and coordinators](docs/OPERATIONS.md#fleet-notification-home-setup), turn remote hosts on in **Settings → Hosts** so the always-on gateway serving the app sends their input-request and stop alerts with each host's label and a six-character session suffix.
-- **[Multiple hosts, dictation, and Tern](docs/USAGE.md#multiple-hosts-all-hosts-and-host-picker)** — Poll up to 7 additional gateways from one PWA with reciprocal `fleet.targets` and `http.trustedDashboardOrigins` ([Multi-host setup](docs/OPERATIONS.md#multi-host-setup)), use OS keyboard dictation or opt-in `speech.browserRecognition` in **Control** where **Use text** never auto-sends ([Dictation and speech input](docs/USAGE.md#dictation-and-speech-input)), and run stock OMP inside Tern panes with `collab.autoStart` ([Running OMP inside Tern](docs/OMP_INTEGRATION.md#running-omp-inside-tern)).
-- **[New sessions in Tern](docs/OPERATIONS.md#opt-in-tern-session-creation)** — Opt in on the host running OMP and Tern to start a new OMP session from approved project, working-copy, and profile choices and open it in **Control**, with join/reconnect progress in the connection status chip and an optional memory-only **First task** draft that never auto-sends.
+- **[The directory](docs/USAGE.md#the-directory) and [Needs you](docs/USAGE.md#needs-you)** — Live sessions are listed under **All clear**. When any session waits for input, the app switches to **Needs you** and puts the oldest request first.
+- **[View and Control](docs/USAGE.md#view-and-control)** — Tap a live session to read along in **View**; tap **Open request** to answer in **Control**. You can attach photos, and a reply shows `Sending…` until OMP confirms it.
+- **[Hold and hide](docs/USAGE.md#hold-and-hide)** — **Hold for desk** sets a request aside on this device and moves to the next one. **Hide** takes a session that is not waiting off this device's list.
+- **[Background alerts](docs/USAGE.md#background-alerts)** — Opt in per device and choose **Private**, **Session**, or **Preview** detail. An input-request alert opens **Control**; an alert that a turn finished opens **View**.
+- **[Multiple hosts](docs/USAGE.md#multiple-hosts)** — One installed app lists and opens sessions on up to eight hosts once an administrator [connects them](docs/OPERATIONS.md#7-multiple-hosts).
+- **[Alerts from other hosts](docs/USAGE.md#alerts-from-other-hosts)** — The home gateway, the one that serves the installed app, sends alerts for each remote host you switch on, after [administrator setup](docs/OPERATIONS.md#8-alerts-from-other-hosts).
+- **[Dictation](docs/USAGE.md#dictation-and-speech-input)** — Dictate with your keyboard's microphone key, or with an optional in-page recognizer that an administrator enables. **Use text** fills the composer and never sends.
+- **[New sessions](docs/USAGE.md#start-a-new-session)** — Where an administrator has [enabled it](docs/OPERATIONS.md#9-tern-session-creation), start a new `omp` session in Tern from approved project, working-copy, and profile choices. An optional **First task** draft is placed in the composer and never sent for you.
+- **Light and dark** — The app follows your device's appearance. Color marks state only: green for live, amber for waiting on you, red for access denied.
 
 <div align="center">
 <img
@@ -125,19 +132,21 @@ Open your configured HTTPS address from your allowlisted Tailscale device and ad
   alt="OMP Sessions Alert detail tray with per-device Private, Session, and Preview notification levels, Session selected as the default, and a note that the gateway builds each payload at the chosen level"
   width="300"
 ><br>
-<sub>Per-device notification detail, opened from Background alerts in the Settings tray. Full guide: <a href="docs/USAGE.md">docs/USAGE.md</a>.</sub>
+<sub>Per-device notification detail in the <strong>Alert detail</strong> tray, opened from the <strong>Background alerts</strong> tray. Full guide: <a href="docs/USAGE.md">Using OMP Sessions</a>.</sub>
 </div>
 
 ## Private by design
 
-- **Loopback-only daemon** — `omp-gatewayd` binds to `127.0.0.1` (and optionally `::1`), never to a public interface.
-- **Tailscale Serve to an exact login allowlist** — Requests arrive only through TUN-mode Tailscale Serve from a Tailscale login on your allowlist; Funnel is never enabled.
-- **Per-tap, memory-only capabilities** — View and Control links are fetched from OMP only when you tap, handed to the client once, and never stored, logged, or cached.
-- **Metadata-only directory and alerts** — Session lists, live events, and push notifications carry bounded session metadata only, never collaboration links or prompts.
-- **No transcript storage, telemetry, or third-party assets** — OMP's embedded `collab-web` client connects through OMP's encrypted relay; the gateway stores no transcripts and loads no external scripts.
-- **Stale sessions cannot be opened** — Every launch checks that the session is still the one you tapped; replaced or exited sessions fail closed instead of opening something newer.
+- **Loopback-only daemon** — `omp-gatewayd` binds to `127.0.0.1` and optionally `::1`, never to a network interface.
+- **Tailscale Serve and an exact login allowlist** — Requests arrive only over tailnet HTTPS through TUN-mode Tailscale Serve, from a Tailscale login on your allowlist. Funnel is never enabled.
+- **Links fetched per tap and kept in memory** — A View or Control link is a bearer secret. It is fetched from OMP only when you tap, handed to the client once, and never stored, logged, or cached.
+- **Metadata-only directory and alerts** — Session lists, live events, and alerts carry bounded session metadata only, never collaboration links or prompts.
+- **No transcript storage, telemetry, or third-party assets** — OMP's own browser client connects through OMP's encrypted relay. The gateway stores no transcripts, sends no telemetry, and loads no external scripts.
+- **Stale sessions cannot be opened** — Every launch checks that the session is still the one you tapped. A replaced or exited session fails closed instead of opening something newer.
+- **Other hosts are reached directly** — With several hosts, your browser talks to each exact trusted origin itself; no gateway proxies another. Alerts from other hosts carry identifiers only, never titles, paths, previews, or links.
+- **Session creation is opt-in and bounded** — Starting a session uses only the project, working-copy, and profile choices an administrator approved, and an uncertain start is never retried automatically.
 
-Read the full [threat model](docs/SECURITY.md) or [report a vulnerability privately](SECURITY.md).
+Read the [security model](docs/SECURITY.md) or [report a vulnerability privately](SECURITY.md).
 
 ## Supported platforms
 
@@ -156,31 +165,27 @@ Every row is **supported**: tested in CI on each change, bug reports accepted. *
 [TestingBot](https://testingbot.com) supports this project with free real-device testing through its open-source program.
 
 This project is tested with BrowserStack.
-The [Percy visual-review scope](docs/BROWSERSTACK.md#percy-scope) is advisory and synthetic-only,
-separate from functional browser tests and release device qualification.
 
 ### Known limits
 
-- **Tailscale TUN mode is required** — Userspace networking hides peer identities behind loopback, so the gateway refuses requests; if `doctor` reports `loopbackTrustSound: false`, switch Tailscale to TUN mode rather than bypassing auth.
-- **Never enable Tailscale Funnel** — There is no supported public-Internet path; expose the gateway only over tailnet HTTPS with Tailscale Serve.
-- **Starts at login on macOS and Windows** — The macOS LaunchAgent and Windows scheduled task start after interactive login, not at unattended boot; sign in on the host after a reboot before opening sessions from your phone.
-- **Android radio changes can wedge Chrome** — Switching between Wi-Fi and cellular can stall Chrome's network stack ([#65](https://github.com/carrythroughsystems/omp-session-gateway/issues/65)); the app retries and, after 45 seconds of visible failure, opens built-in steps to force-stop and reopen Chrome.
-- **Single-user workstation only** — Local accounts on the same machine can reach loopback directly; deploy only on a workstation you control, not a shared shell host.
-- **No self-hosted or proxied relay** — Only Tailscale Serve and OMP's default end-to-end-encrypted relay are supported; keep the default relay configuration.
-- **Preview alert detail falls back to Session** — OMP host snapshots do not yet include a bounded prompt preview, so **Preview** sends the session and project name; choose **Private** if you want no session labels on your lock screen.
+- **Tailscale TUN mode is required.** Userspace networking hides peer identities behind loopback, so the gateway refuses requests. If `doctor` reports `loopbackTrustSound: false`, switch Tailscale to TUN mode rather than bypassing the check.
+- **Tailnet only.** Expose the gateway only through Tailscale Serve over tailnet HTTPS. Never enable Tailscale Funnel; there is no supported public-Internet path.
+- **Default relay only.** Sessions connect through OMP's default end-to-end-encrypted relay. Self-hosted and proxied relays are unsupported.
+- **Starts at login on macOS and Windows.** The service starts when you sign in, not at unattended boot. After a reboot, sign in on the host before opening sessions from your phone.
+- **Single-user workstation only.** Local accounts on the same machine can reach loopback directly. Deploy on a workstation you control, not a shared host.
+- **Android radio changes can stall Chrome.** Switching between Wi-Fi and cellular can stall Chrome's network stack ([#65](https://github.com/carrythroughsystems/omp-session-gateway/issues/65)). The app retries and, after 45 seconds of visible failure, offers **Troubleshooting** with the steps to force-stop and reopen the browser.
+- **Preview detail shows what Session shows.** Stock OMP does not publish a prompt preview, so both levels send the session title and folder name. Choose **Private** to keep session names off your lock screen.
+- **Alerts from other hosts depend on the home gateway.** It sends every alert, so it has to stay awake and reachable. A remote host's alert shows only the host label and a six-character session suffix.
+- **Starting sessions in Tern has run end to end only on Apple silicon macOS.** Linux and Windows hosts are covered by unit tests only.
 
 ## Documentation
 
-Browse the full [documentation index](docs/README.md):
-
-- [Usage](docs/USAGE.md) — everyday screens, buttons, triage actions, and background alerts
-- [Operations](docs/OPERATIONS.md) — install, Tailscale Serve, tailnet policy, updates, lost-phone revocation, and troubleshooting
-- [Upgrade and rollback](docs/UPGRADE_ROLLBACK.md) — predecessor compatibility and recovery steps
-- [Compatibility](docs/COMPATIBILITY.md) — supported platforms, hardware-qualified combinations, and limits
-- [Security](docs/SECURITY.md) — threat model, trust boundaries, and secret-handling invariants
-- [Architecture](docs/ARCHITECTURE.md) — daemon, discovery reader, PWA shell, and launch handoff
-- [Protocol](docs/PROTOCOL.md) — OMP discovery/query and browser HTTP/SSE contracts
-- [Changelog](CHANGELOG.md) — release-by-release changes
+- [Using OMP Sessions](docs/USAGE.md) — install on your phone, triage requests, open **View** and **Control**, use multiple hosts and alerts, and start sessions
+- [Installation and operations](docs/OPERATIONS.md) — host setup, Tailscale Serve, access policy, optional multi-host and Tern configuration, updates, and `doctor`
+- [Upgrade and rollback](docs/UPGRADE_ROLLBACK.md) — update in place, roll back to a previous installed version, and restore saved settings
+- [Compatibility](docs/COMPATIBILITY.md) — supported platforms, hardware-qualified combinations, and status definitions
+- [Security model](docs/SECURITY.md) — threat model, trust boundaries, and capability-handling invariants
+- [Documentation index](docs/README.md) — architecture, wire contracts, package guides, qualification runbooks, and release records
 
 <a id="how-it-compares"></a>
 

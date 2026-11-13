@@ -1,177 +1,64 @@
 # `packages/collab-client`
 
-Pinned integration of OMP's existing `packages/collab-web` source at tag `v18.18.0`, commit
-`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`. The upstream collab package remains version
-`16.3.6`; `@oh-my-pi/pi-wire` is pinned exactly to `18.18.0`. The collaboration protocol and
-relay framing are unchanged; the wire barrel's unrelated TSP runtime is not bundled.
+This package tells contributors how OMP Session Gateway embeds and verifies Oh My Pi's (OMP's) browser collaboration client, checks upstream source drift, and bounds client-side speech and photo inputs.
 
-These are browser-client provenance pins, independent of both the minimum supported OMP host
-version (`>= 18.1.20`) and the root `UPSTREAM.lock.json` engineering host baseline.
-The gateway consumes the native registry and controller in stock OMP `>= 18.1.20` without a fork,
-custom OMP build, or gateway-specific OMP plugin, while this package pins the embedded browser
-client at `v18.18.0`. See [OMP_INTEGRATION.md](../../docs/OMP_INTEGRATION.md) for integration and
-deployment scope.
+It vendors a live-runtime subset of upstream `packages/collab-web` at tag `v18.18.0` (commit `b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, upstream `@oh-my-pi/collab-web` package version `16.3.6`) with `@oh-my-pi/pi-wire` pinned to `18.18.0` (`package.json`) and Bun `1.4.4` (`upstream/UPSTREAM.json`). Collaboration framing and relay envelopes match upstream; `@oh-my-pi/pi-wire`'s Tern Surface Protocol (`tsp.ts`) runtime is not bundled.
+
+These browser-client provenance pins are tracked independently of both the minimum supported OMP host version (`>= 18.1.20`) and the root `UPSTREAM.lock.json` engineering host baseline; see [Mainline OMP integration](../../docs/OMP_INTEGRATION.md). Paths below starting with `package.json`, `upstream/`, or `test/` are relative to `packages/collab-client/`; paths starting with `.github/`, `scripts/`, or `licenses/` are relative to the repository root.
 
 ## Source drift report and refresh
 
-The daily **Upstream OMP canary** inspects browser-client sources independently of the host
-canary and host pin, including when `UPSTREAM.lock.json` already equals npm `latest`; a release
-request's reusable canary call skips the inspection, so drift never blocks a release request.
-`@oh-my-pi/collab-web`'s unchanged package version is not evidence of unchanged source.
-For a local read-only observation, run `bun scripts/client-drift.ts`; an optional `GH_TOKEN`
-authenticates its GitHub API reads (in CI, the job's `contents: read` / `issues: read` token).
-Nothing is installed or executed from upstream.
+The daily **Upstream OMP canary** (`08:23 UTC` in `.github/workflows/upstream-canary.yml`) inspects browser-client sources against npm `latest` of `@oh-my-pi/pi-coding-agent` independently of the host pin, including when `UPSTREAM.lock.json` equals `latest`; reusable release-request canary calls skip this job so drift never blocks a release request.
 
-Download the run's `client-drift-report` artifact (`client-drift-report.json`):
+Because upstream keeps `@oh-my-pi/collab-web` at `16.3.6`, package version equality never proves unchanged source. For a local read-only check from the repository root, run `bun scripts/client-drift.ts` (prints the JSON report to `stdout`); optional `GH_TOKEN` authenticates GitHub API and issue reads (in CI, `contents: read` and `issues: read`), and nothing from upstream is installed or executed.
 
-- `release` identifies the exact tag, commit and tree for the observed stable npm `latest`;
-  `embedded` identifies this package's independently verified tag/commit.
-- `hostPin` is the engineering host baseline for context, not a skip condition or client pin.
-- `changes` lists every relevant changed upstream path and `oldBlob`/`newBlob` Git hashes;
-  `null` means a file was added or removed. Complete package trees include non-`src` files, but
-  omit exactly the documented `excludedEntrypoints` (including retained-but-unbundled entries).
-- `changedHelpers` compares each helper from its own provenance commit/blob, names its
-  `vendoredPath`, and records its old/new blobs. Helpers do not inherit the collab-web source pin.
-- `patchOverlaps` names active patch ids and their overlapping `files`, including changed
-  helper vendored paths. Patch files retain their `src/` prefix relative to `upstream/`.
-- `refreshScope` is the sorted smallest set of changed relevant upstream files.
-  `issueAction` is the tested create/update/none decision consumed as inert data by a separate,
-  checkout-free issue writer. API/shape/truncation/provenance errors fail inspection, not
-  a successful empty report.
+The workflow's `client-drift-report` artifact (`client-drift-report.json`) records:
 
-Direct scheduled/manual runs on `main` file or update only
-`Embedded client drift: <embedded tag> → <release tag>` with the `client-drift` label.
-An existing release request does not suppress or absorb this issue. Repeated observations
-update the open issue for that release commit (or exact title and label), not a new copy.
-No relevant change leaves existing issues unchanged; nothing auto-closes. The writer serializes
-effects and refuses a stale plan if an issue arrived or changed after inspection; rerun the
-read-only inspection to reconcile it. PR and reusable release-request runs only inspect.
-No drift report or issue requests, prepares, qualifies or ships a release, or changes a frozen
-candidate.
+- `release` and `embedded`: `{ tag, commit, tree }` for stable `@oh-my-pi/pi-coding-agent` npm `latest` versus `{ tag, commit }` from `upstream/UPSTREAM.json`.
+- `hostPin`: `{ tag, commit, version }` from root `UPSTREAM.lock.json` for context, never used as a skip condition.
+- `changes`: every changed path in `packages/collab-web/**` (excluding `excludedEntrypoints`) and in vendored helper `sourcePath`s, with `oldBlob` and `newBlob` Git SHA-1 hashes (`null` for added or removed files).
+- `changedHelpers`: each vendored helper compared against its own recorded upstream commit and blob hash, with its `vendoredPath`.
+- `patchOverlaps`: active local patch IDs whose `files` overlap changed upstream or helper paths (`src/`-prefixed relative to `upstream/`).
+- `refreshScope` and `issueAction`: the sorted changed upstream paths and the `create`/`update`/`none` decision consumed via `GITHUB_OUTPUT` by the workflow's separate checkout-free issue-writer job (API, truncation, or provenance errors fail inspection).
 
-For a refresh, review `refreshScope` at the exact reported commits, including additions and
-deletions; do not copy the whole package or restore excluded entrypoints. Reconcile each
-overlapping active patch against its purpose, removal condition and regression proof. Copy
-changed helpers from their recorded upstream paths without installing pi-utils/pi-natives.
-Update source/helper provenance, blob hashes, active/retired patch records and affected proofs
-together; adjust the independent wire dependency only if the reviewed refresh needs it. Keep
-the host baseline and release state unchanged unless separately authorized. Run the focused
-client/provenance/bundle tests and repository checks, then have the refresh reviewed as an
-implementation PR. The report is an intake aid, not proof of compatibility or qualification.
+Direct scheduled or manual runs on `main` create or update `Embedded client drift: <embedded tag> → <release tag>` with the `client-drift` label, deduplicated by release commit or exact title and label, without auto-closing issues or mutating release state. PR and release-request runs inspect only.
+
+To refresh this package, copy only `refreshScope` paths at the reported commits into `upstream/` without copying the whole upstream package or restoring excluded entrypoints, and reconcile overlapping active patches against their purpose, `removeWhen` condition, and regression proofs (moving superseded patches to `localPatches.retired`).
+
+Copy changed helpers from their recorded upstream paths without installing `@oh-my-pi/pi-utils` or `@oh-my-pi/pi-natives`, update `upstream/UPSTREAM.json` (`tag`, `commit`, `observedAt`, helper Git blob hashes, and patch records) and `package.json` (`@oh-my-pi/pi-wire` when needed) together, and run `test/vendor-provenance.test.ts` and repository checks as an implementation PR.
 
 ## Embedded integration
 
-The local patch passes the capability directly into the root `App` component. The installed PWA
-mounts that component in its current document so Android standalone navigation does not depend on
-`window.opener`. Embedded gateway mode suppresses the client's competing header, rail, connect
-screen, and lifecycle overlays while retaining its transcript, tool cards, agent drill-down, and
-sole composer; an active Ask uses that composer rather than a duplicate shell control. OMP's
-π artwork is excluded: `OmpMark.tsx` is not vendored, and HeaderBar/ConnectScreen do not import or
-render it, and the web build rejects its SVG path if it re-enters the bundle. Capabilities remain
-in client memory, and leaving or reloading returns to the gateway
-without writing them into a URL, DOM attribute, browser storage, or service-worker cache.
-Foreground, BFCache restore, online, and Network Information transitions replace a potentially
-stale relay transport. A metadata-free same-origin health probe forces one replacement after an
-observed gateway outage recovers; established guests retain bounded relay room recovery.
+`upstream/src/embed.ts` (`startCollabWithCapability`) is the sole production client entrypoint (`upstream/src/embed-contract.ts`). It mounts `App` (`upstream/src/app.tsx`) in the current document with an in-memory capability (**View** or **Control** link) so navigation never depends on `window.opener` and capabilities never enter URLs, DOM attributes, storage, or caches; leaving or reloading returns to [the directory](../../docs/USAGE.md#the-directory).
 
-Embedded recovery probes the launching gateway through an injected selected-source callback and
-treats a readable authorization loss as terminal for automatic recovery, allowing a fresh probe
-only on foreground, pageshow, or online transitions. Non-embedded callers retain the same-origin
-health probe.
+Embedded mode (`CollabEmbedOptions.shellOwnsLifecycle: true`) hides upstream's standalone header, agent rail, connect screen, and lifecycle overlays while keeping its transcript, tool cards, agent drawer, and single composer (used for both prompts and active host Ask requests).
 
-The embed state includes required `loading: { received, total } | null` snapshot counters,
-without transcript entries. The gateway's sole chip displays **Joining session…** before the
-first live connection or **Reconnecting…** afterward, with a floored, clamped percentage only
-for valid positive totals. Existing authorization, ended, and sustained-outage messaging keeps
-priority; unchanged copy does not repeat live-region announcements.
+`UPSTREAM.json.excludedEntrypoints` (`upstream/UPSTREAM.json`) records excluded standalone bootstrap (`src/main.tsx`), OMP's π mark (`src/components/shell/OmpMark.tsx`), and offline HTML export and trace viewers (including retained-but-unbundled `src/tool-render/standalone.tsx`), relative to upstream `sourcePath`; bundle-input tests in `test/vendor-provenance.test.ts` enforce this boundary.
 
-An optional `takeInitialPromptDraft()` callback drains a shell-owned volatile first-task draft.
-Composer calls it once only in live writable Control with a healthy relay, no active Ask, an
-empty ordinary text draft, and no photo draft, photo preparation, or pending photo send. It
-updates only the ordinary composer text: never Ask input, never a prompt submission, and never
-an overwrite. Reconnects, Ask transitions, clearing the draft, and rerenders do not seed again.
-The shell binds and clears its holder on disposal; no draft enters storage or gateway requests.
+Foreground, `pageshow`, `online`, and Network Information transitions replace stale relay sockets. When `CollabEmbedOptions.probeGateway` is supplied, recovery probes the selected gateway (`"healthy"` on a valid session list, `"unavailable"` on transport or server failure, and `"forbidden"` on a readable `403`, which stops automatic relay refresh and probe retries until a foreground or online transition); non-embedded callers fall back to same-origin `GET /api/v1/health`.
 
-The 18.18.0 refresh adopts pi-wire's shared envelope functions, the pure byte-buffer helper,
-upstream wait-list rendering with a small older-singleton/timeout/empty adapter, job-intent labels
-with command fallback, and exact-width Markdown code-span closers. The live bash view deliberately
-renders command/output text without interpreting shell-trace string or byte-array fields.
-App, Composer, Transcript, client and socket retain their gateway adaptations; their upstream
-sources did not change between these pins.
+`CollabEmbedState.loading` publishes `{ received, total } | null` snapshot counters without transcript payloads so the shell renders connection progress ([View and Control](../../docs/USAGE.md#view-and-control)).
 
-This is a live-runtime selection, not a copy of the whole upstream package. `embed.ts` remains
-the only production client entry. `UPSTREAM.json.excludedEntrypoints` records standalone bootstrap,
-HTML export/trace entrypoints and artwork exclusions with reasons. The retained upstream
-`tool-render/standalone.tsx` is not bundled; export-only `omp-stats`, pi-utils and pi-natives are
-not installed. A production-bundle input test enforces this boundary.
+Optional `CollabEmbedOptions.takeInitialPromptDraft` drains a shell-bounded volatile first-task draft (capped by the host shell at 8,000 code points and 32 KiB) once into an empty `Composer.tsx` input in live writable **Control** when the relay is healthy, no Ask is active, and no photo draft or send is in flight; reconnects, rerenders, and disposal never reapply or persist it ([Protocol §5](../../docs/PROTOCOL.md#5-in-memory-collab-client-bootstrap)).
 
-The preceding 18.12.6 refresh brought upstream render coalescing and streaming-tail Markdown parsing
-([#14728](https://github.com/can1357/oh-my-pi/pull/14728)), linear-time Markdown/math lexing
-([#13961](https://github.com/can1357/oh-my-pi/pull/13961),
-[#14667](https://github.com/can1357/oh-my-pi/pull/14667)), idle agent-drawer polling shutdown,
-and the eval renderer's printed table/JSON/Markdown views. Streaming updates publish at most
-once per animation frame; other frames flush synchronously. Memoized Composer/HeaderBar props
-remain stable across unrelated stream updates, including gateway Ask/photo/speech inputs.
-Snapshot chunks buffer inside upstream's guest replica and publish once
-on the final chunk or promised entry count, with live entries appended after the snapshot and
-finished stream ghosts cleared even when their entries arrive mid-snapshot. The transcript stays
-mounted and the last published rows remain visible during resynchronization, replacing the local
-first-paint hold. Upstream's separate committed-tool scan avoids rescanning the full transcript on
-each streamed token.
+The codec and tool renderers use `@oh-my-pi/pi-wire` shared envelope functions, the vendored `asStrictBytes` byte-buffer helper, `wait` message-list rendering with an adapter for older single-message/null/empty host results, job-intent labels with command fallback, `eval` table/JSON/Markdown views, and retained hub-family tool cards (`hub`, `irc`, `job`, `await`, `poll`, `cancel_job`).
 
-The local explicit `Show earlier` window remains: newest 150 entries initially, 300 more per tap,
-with an anchored oldest entry and scroll position. Unlike upstream's automatic near-top expansion
-and tail re-windowing, this retains an expanded window across live appends and reconnects, and
-pairs tool results across the entire retained history. Initial and recovered `live` transitions
-still return the main transcript to its tail without discarding that window. A monotonic live
-epoch preserves this edge even when React batches recovery with the first streamed commit; the compact agent
-transcript remains independent. The `wait` renderer and the retained hub-family renderers
-(`hub`, `irc`, `job`, `await`, `poll`, `cancel_job`) support older host releases.
+Live bash cards render command, text, image, and status output while ignoring `details.trace` string or byte-array fields.
 
-LaTeX delimiters render through KaTeX `0.18.5` as native MathML with `trust: false`; no KaTeX
-stylesheet, font URL, or remote asset is emitted. The browser bundle vendors the seven pure
-TypeScript marked-fork, list-continuation, math-grammar and byte-buffer sources from pi-utils `18.18.0`,
-including its source-context and `startFrom` hooks. This replaces npm `marked` without installing
-pi-utils or pi-natives. Original Marked/Markdown and fork licences are retained in
-`licenses/pi-utils-marked/LICENSE`. Rejected currency openers and half-streamed delimiters keep
-their existing semantics, now supplied by upstream rather than a local npm-parser adapter.
-Markdown links in both settled and streaming blocks use the same browser URL parser
-before the HTTP(S)/mailto allowlist, rejecting control-character-obfuscated unsafe schemes while
-retaining relative links and fragments. All runtime assets remain first-party.
+Streaming updates publish at most once per animation frame while non-streaming frames flush synchronously, with memoized `Composer` and `HeaderBar` props, separate committed-tool scanning, and idle agent-drawer polling shutdown. Guest-replica snapshots buffer until the final chunk or promised entry count, keeping the last published rows visible during resynchronization and clearing finished stream ghosts.
 
-Both text stacks fall back to `"Symbols Nerd Font Mono"` immediately before their generic family.
-The gateway's self-hosted, unicode-range-limited face supplies only Private Use Area glyphs (for
-example, icons printed by `ls`/`eza`); ordinary text stays on system fonts. The client defines no
-font face and loads no fonts of its own.
+`upstream/src/components/transcript/Transcript.tsx` renders the newest 150 entries (`TRANSCRIPT_WINDOW`) and reveals 300 more per **Show earlier** tap (`TRANSCRIPT_WINDOW_STEP`), pinning the oldest visible entry and scroll offset across live appends and reconnects while pairing tool results across the full retained history. Bottom-lock holds within 40 px of the tail, and a monotonic `liveEpoch` returns the main transcript to the latest message on connect and reconnect.
 
-Control sessions expose the existing OMP v3 `prompt.images` path as a phone-first photo action.
-The Photo action opens an explicit two-choice panel: **Take photo** invokes a rear-camera capture
-input, while **Choose existing** opens the ordinary photo library/file picker. The browser rejects
-source dimensions above an 8,192px edge or 20 megapixels and normalizes up to four JPEG, PNG, or
-WebP inputs to metadata-free JPEGs with a 2,048px edge and 1 MiB per-image cap. Volatile previews
-stay available until the host echoes the sent transcript entry; a lost send retains the exact
-draft for bounded retry. The gateway HTTP service and service worker never receive media.
-Removing, acknowledged sending, or leaving drops preview references; the normalized image then
-follows ordinary OMP transcript and model-provider handling on the host. View links remain
-read-only at every mutating client method, and pointer capture protects mobile composer actions.
+Markdown and math rendering (`upstream/src/components/transcript/Markdown.tsx`, `math.ts`) uses KaTeX `0.18.5` native MathML (`trust: false`, math dimensions capped at 100 em, no KaTeX CSS or remote fonts) and seven pure TypeScript helpers vendored from `@oh-my-pi/pi-utils` `18.18.0` under `upstream/src/vendor/pi-utils/` (licenses in `licenses/pi-utils-marked/LICENSE`).
 
-Control text composers offer dismissible keyboard-dictation guidance independently of the optional
-browser recognizer. When explicitly enabled by the gateway, live Control prompt and free-text Ask
-drafts offer gesture-only browser speech after a document-scoped disclosure: the browser or OS may
-send audio to its speech provider. Capture is bounded to two minutes, 128 result segments, 8,000
-code points, and 32 KiB of UTF-8 text. Start/stop watchdogs finalize only a review buffer; **Use text**
-edits the bound draft at its current selection, and **Send** remains a separate explicit action.
-Generation, Ask identity, destination, liveness, pending-response, and page lifecycle changes discard
-the recording. No audio is persisted or sent to the gateway; browser support is feature-detected,
-not a claim of physical-device qualification or on-device recognition.
+Links and image sources in settled and streaming blocks pass through browser URL parsing and `http:`/`https:` (plus `mailto:` for links) allowlists, and text stacks fall back to the gateway's self-hosted `"Symbols Nerd Font Mono"` face for Private Use Area glyphs (such as icons printed by `ls` or `eza`) only.
 
-`upstream/UPSTREAM.json` schema version 1 records exact source paths, versions, commits and helper
-Git blob hashes with Bun `1.4.4`. `localPatches.active` and `localPatches.retired` contain records
-with stable `id`, `purpose`, `files`, `proof`, `upstreamStatus` and `removeWhen` fields. Patch
-`files` and additional-source `vendoredPath` are relative to `upstream/`; each proof names a
-repository-relative test `file` and its literal `case` title (or parameterized title template).
-`excludedEntrypoints` paths are relative to the upstream `sourcePath`, with `vendored` distinguishing
-retained-but-unbundled files from omitted files. `test/vendor-provenance.test.ts` checks helper
-bytes, proof references and the live bundle graph without fetching upstream or installing helpers.
-`upstream/LICENSE` preserves the upstream license. The build remains a narrow integration; it does not fork the
-collaboration protocol or transcript UI.
+In writable **Control** sessions, `upstream/src/lib/photo-attachment.ts` validates and normalizes photos before `Composer.tsx` and `GuestClient.sendPrompt` (`upstream/src/lib/client.ts`) send them in encrypted `{ t: "prompt", text, images }` relay frames without touching the gateway HTTP server or service worker ([View and Control](../../docs/USAGE.md#view-and-control)).
+
+The browser accepts up to four JPEG, PNG, or WebP attachments (24 MiB max source file, 8,192 px max edge, 20 megapixels) and normalizes each to a metadata-free JPEG within a 2,048 px edge and 1 MiB cap, retaining volatile previews for bounded retry until the host echoes the entry or the user removes or leaves it; **View** capabilities reject every mutating client method.
+
+Composer speech input (`upstream/src/lib/speech-recognition.ts`, `upstream/src/components/shell/SpeechInput.tsx`) pairs keyboard-dictation help with opt-in gesture-started Web Speech (`SpeechRecognition` / `webkitSpeechRecognition` in a secure context when `CollabEmbedOptions.browserRecognitionEnabled` is `true`; [Dictation and speech input](../../docs/USAGE.md#dictation-and-speech-input)).
+
+The recognizer runs with `lang` set to `navigator.language` (falling back to `en-US`), `continuous = true`, `interimResults = true`, one alternative (`maxAlternatives = 1`), and no automatic restart. Capture enforces a 10 s start watchdog, a 120 s (two-minute) recording limit, a 5 s stop watchdog, and review-buffer caps of 128 result segments, 8,000 Unicode code points, and 32 KiB of UTF-8 text; generation, Ask, liveness, or lifecycle changes discard active capture, and no audio is stored or sent to the gateway.
+
+`upstream/UPSTREAM.json` schema version 1 records source paths, versions, commits, helper blob hashes, `excludedEntrypoints`, and `localPatches.active` / `localPatches.retired` (`id`, `purpose`, `files`, `proof`, `upstreamStatus`, `removeWhen`), while `upstream/LICENSE` retains the upstream license. `test/vendor-provenance.test.ts` verifies helper bytes, regression proof test titles, and the production bundle graph offline.

@@ -1,86 +1,98 @@
-# Branch and saved-session resume lane
+# OMP session lifecycle lane
 
-This runbook is for maintainers running OMP session lifecycle qualification and reviewing the
-automated upstream canary stages. Each stable release qualifies the `new-generation`, `fork`, and
-`--continue` transitions on the Mac guest, and the Linux and Windows upstream canaries exercise them
-daily; see [Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md).
+This runbook is for release maintainers running session lifecycle qualification and reviewing the daily upstream canary for OMP Session Gateway, the companion to Oh My Pi (OMP). It covers how the gateway follows a session (one running interactive `omp` process shared for collaboration) through `/new`, `/fork`, `/branch`, and `--continue`.
+
+Each release campaign qualifies `/new`, `/fork`, and `--continue` on the retained Mac guest, while the upstream canary exercises stock OMP daily on Linux and Windows; see [Current claim](COMPATIBILITY.md#current-claim) and [Release status](RELEASE_STATUS.md).
 
 ## Mainline lifecycle coverage
 
-The gateway consumes stock OMP `>= 18.1.20` with `collab.autoStart` alone. It reads OMP-owned
-discovery, polls metadata, and resolves an exact generation/role only at launch, without storing
-capabilities or writing discovery files. The executable lanes below cover lifecycle transitions.
+The gateway requires stock mainline OMP `>= 18.1.20` with `collab.autoStart` alone ([Mainline OMP integration](OMP_INTEGRATION.md)). It reads OMP-owned discovery — the private `<entryId>.json` files and per-process query endpoints that OMP writes and removes under `~/.omp/run/collab-hosts` (`%USERPROFILE%\.omp\run\collab-hosts` on Windows) — without writing or deleting discovery files.
+
+A **View** or **Control** link is a bearer secret, called a capability in the contracts. On each poll the gateway reads metadata including `generation` (OMP's counter that changes when a session is replaced, so a stale card cannot open a newer session), and resolves an exact generation and mode (**View** or **Control**) only on launch without storing capabilities.
+
 <!-- release-generate:campaign:start -->
 The v0.11.0 campaign qualified these scenarios only for its recorded candidate and devices. Each later candidate must pass them again on its exact signed bytes; historical evidence does not transfer. See the [release ledger](RELEASE_STATUS.md).
 <!-- release-generate:campaign:end -->
 
 ### Stock OMP semantics
 
-Upstream source and real stock 18.4.8 runs establish these distinctions. A guest snapshot replicates
-every session entry, including sibling branches, so transcript content cannot prove a rewind.
+Stock OMP separates commands that replace the active session from commands that navigate branches inside one session file. Because a collaboration guest snapshot replicates every entry in the session file, including sibling branches, transcript contents alone cannot prove an in-session rewind.
 
-| Command | Session effect | Gateway-visible change | Where tested |
+| Command | Session effect | Gateway-visible change | Exercised by |
 |---|---|---|---|
-| `/new` | Switches to a new session | Same instance, generation + 1 | POSIX canary; Mac lifecycle development runner |
-| `/fork` | Immediately copies the current session to a new file with the same entries; no selector, despite the command description | Same instance, generation + 1 | POSIX canary; Mac lifecycle development runner |
-| `/branch` (alias `/rewind`) | Opens `Rewind · pick the point to continue from` and rewinds inside the same session file | Same instance and generation; no gateway-visible change | POSIX canary |
-| `/tree` | Navigates branches within the session | No new session or generation implied by branch navigation | Upstream source semantics; not a separate stage in these lanes |
-| Stop, then relaunch with `--continue` in the same working directory | Resumes the saved session in a new process | Old instance gone; new instance at generation 1 | POSIX canary; daily `canary-windows` lane; Mac lifecycle development runner |
+| `/new` | Starts a new session | Same `instanceId`, `generation + 1` | POSIX `canary`; retained-Mac lane; Mac development runner |
+| `/fork` | Copies the session to a new file immediately, with no selector | Same `instanceId`, `generation + 1` | POSIX `canary`; retained-Mac lane; Mac development runner |
+| `/branch` (alias `/rewind`) | Opens `↶ Rewind · pick the point to continue from` and rewinds in place | Same `instanceId` and `generation` | POSIX `canary` |
+| `/tree` | Navigates branches inside the active session | Same `instanceId` and `generation` | Upstream source review ([Baseline review record](UPSTREAM_STRATEGY.md#baseline-review-record)) |
+| Exit, then `omp --continue` in the same directory | Resumes the saved session in a new process | Old `instanceId` gone; new `instanceId` at `generation` `1` | POSIX `canary`; `canary-windows`; retained-Mac lane; Mac development runner |
 
 ### Daily upstream canary
 
-[`scripts/upstream-canary.ts`](../scripts/upstream-canary.ts) runs from the
-[canary workflow](../.github/workflows/upstream-canary.yml) on its daily schedule, by
-`workflow_dispatch`, and on pull requests touching the canary. Its ordered stages are `prepare`,
-`publish`, `snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`,
-`branch-rewind`, `continue`, and `unregister`. The `prepare` pre-flight stage resolves the installed
-package manifest version, checks the running Bun against `engines.bun`, verifies the stock binary,
-and queries its version before any lifecycle stage. Pre-flight failures retain the resolved
-manifest version in the report.
+The [upstream canary workflow](../.github/workflows/upstream-canary.yml) runs [`scripts/upstream-canary.ts`](../scripts/upstream-canary.ts) daily at `08:23` UTC, on `workflow_dispatch` (`omp_version`, default `latest`), through `workflow_call` (requiring an exact `omp_version`), and on pull requests touching the canary, drift check, upstream pins, OMP fixture, or `apps/gateway/src/omp-registry.ts`.
 
-On POSIX the tmux host accepts the real slash commands. `new-generation` and `fork` each require
-the same instance and generation + 1; once that generation is visible, old-generation View and
-Control queries must be refused and fresh links must work. The fork View transcript must retain
-both earlier synthetic prompts. `branch-rewind` requires an anchored
-in-memory terminal status, `Rewound to selected point`, plus unchanged instance/generation and
-working links. The terminal status is never printed. `continue` requires the old instance gone,
-a new instance at generation 1, old links refused or gone, and a fresh View transcript containing
-a prompt sent before the stop. `unregister` checks host exit and revocation.
+Scheduled `canary` or `canary-windows` failures on `main` open or update the `upstream-canary` issue without copying raw logs (`inspect-client-drift` separately manages `client-drift` issues; [Source drift report and refresh](../packages/collab-client/README.md#source-drift-report-and-refresh)). Review the run's step summary (`requestedOmpVersion`, `resolvedOmpVersion`, `bunVersion`, `bunEngine`, `failedStage`, and stage statuses) and re-run with `workflow_dispatch` after fixing or pinning.
 
-Windows uses a hidden console without keystroke transport. It runs `continue` but marks exactly
-`new-generation`, `fork`, and `branch-rewind` as `skipped`. The strict platform projection rejects
-any other successful skip pattern; summary JSON includes `platform`. These skips are not passed
-transitions.
+Before running the canary locally, run `bun install --frozen-lockfile` in the repository, install Bun matching `engines.bun` in the target OMP package (`1.4.4` in CI), stage `@oh-my-pi/pi-coding-agent` in an isolated directory (`bun add --exact "@oh-my-pi/pi-coding-agent@<version>"`) so its `package.json` sits two directories above `dist/cli.js`, and ensure `tmux` (Linux and macOS) or `powershell.exe` and `taskkill.exe` (Windows) are on `PATH`.
 
-```sh
-bun scripts/upstream-canary.ts --omp <binary>
-```
+1. Run the canary against the staged OMP entrypoint ([`scripts/omp-fixture.ts`](../scripts/omp-fixture.ts) supplies a synthetic model key and `OMP_SKIP_SETUP=1`, so no live provider credentials are needed; pass `--model <provider/id>` only to test an alternate model ID during diagnosis):
+
+   ```sh
+   bun scripts/upstream-canary.ts --omp <path-to-stock-omp-dist/cli.js>
+   ```
+
+2. Confirm stdout prints one JSON summary (`ompVersion`, `platform`, `stages`, `durationMs`, `discoveryFileRemoved`, and optional `failedStage`) and exits `0`. A failure prints `<failedStage>: <reason>` on stderr and exits `1`.
+
+The script executes 11 stages in order (`CANARY_STAGES`):
+
+1. `prepare`: reads `version` and `engines.bun` from OMP's `package.json`, checks the running Bun version, creates a `0700` temporary root and private `HOME`, and verifies `omp --version` is stock mainline `>= 18.1.20` (retaining the manifest version in the report on pre-flight failure).
+2. `publish`: sets `collab.autoStart` to `control` in the private `HOME`, verifies `omp config get collab.autoStart --json` read-back, starts an interactive OMP fixture (`env -i` in `tmux` on POSIX, or a hidden PowerShell console on Windows), and waits up to 90 seconds for `<HOME>/.omp/run/collab-hosts` to publish the PID's discovery file.
+3. `snapshot`: queries `snapshot` through `OmpHostReader` and requires `generation` `1`, `access: "control"`, and the expected fixture model.
+4. `stale-generation`: queries `link` for `generation + 1` in `view` mode and requires `refused`.
+5. `view`: resolves a `view` capability and connects the embedded `GuestClient`, requiring `phase === "live"` and `readOnly === true`.
+6. `control`: resolves a `control` capability, connects `GuestClient` (`readOnly === false`), submits a synthetic prompt marker, and waits up to 30 seconds for the live transcript to settle with that prompt.
+7. `new-generation` (*POSIX only*): submits `/new` in `tmux`, waits for the same `instanceId` at `generation + 1`, verifies prior-generation `view` and `control` link queries return `refused`, resolves a fresh `control` capability, and connects a fresh **View** `GuestClient`.
+8. `fork` (*POSIX only*): submits two synthetic prompts, submits `/fork`, requires `generation + 1` on the same `instanceId` with prior-generation `view` and `control` refused, and checks that the fresh **View** transcript retains both prompts.
+9. `branch-rewind` (*POSIX only*): submits `/branch`, selects the earlier prompt in `↶ Rewind · pick the point to continue from`, confirms the anchored status line `Rewound to selected point` in memory without printing terminal output, verifies `instanceId` and `generation` stay unchanged, resolves fresh `control` and **View** capabilities, and clears the restored draft before submitting a new prompt.
+10. `continue`: stops the OMP process, waits up to 30 seconds for exit and revocation (`gone` or entry removed), relaunches OMP with `--continue` in the same working directory, requires a new `instanceId` at `generation` `1` with prior capabilities returning `refused` or `gone`, and confirms a fresh **View** transcript retains the pre-stop prompt.
+11. `unregister`: stops all started OMP processes, verifies their discovery entries are removed or `gone`, runs `omp collab list` if needed so OMP prunes any dead file, and removes the empty discovery directory and temporary root.
+
+On Windows (`platform: "windows"`), the hidden console has no keystroke transport and stops with `taskkill.exe /PID <pid> /T /F`, closing its named pipe. The runner executes `continue` and `unregister` while marking `new-generation`, `fork`, and `branch-rewind` as `skipped`; `parseCanarySummary` rejects any other skip pattern on Windows, and skipped stages are not passed transitions.
 
 ### Retained-Mac stable lane
 
-After every lane using the campaign live session has settled successfully and the relay tunnel
-has stopped, `ompPublication` in [`stable-qualification.ts`](../scripts/stable-qualification.ts)
-runs the shared [`omp-lifecycle-qualification.ts`](../scripts/omp-lifecycle-qualification.ts)
-step: `/new`, two synthetic messages, `/fork`, stop and revocation, `--continue` relaunch, then
-stop and revocation again. Keystrokes go to the existing `ssh -tt` stdin, not a production
-gateway input path. Each rotation requires the same instance and generation + 1, stale launch
-POSTs returning `409 generation_mismatch` without a capability, and current View/Control launches
-returning `200 no-store`. Resume requires a new instance at generation 1, the same label, and
-live launches returning `200`. Rewind is excluded because it is not gateway-visible.
+Before a release campaign, rehearse the lifecycle step locally on macOS (`darwin`) with [`scripts/omp-lifecycle-development.ts`](../scripts/omp-lifecycle-development.ts).
 
-Evidence is additive at `ompPublication.evidence.lifecycle`, with `newGeneration`, `fork`, and
-`resumed` records containing booleans/counts only. The receipt schema stays 3. An interrupted step
-leaves the lane non-passed, and the whole lifecycle reruns on resume. Prove the step before a
-campaign with the development entry point:
+Prerequisites are `bun install --frozen-lockfile`, Bun `1.4.4`, `python3` (for `pty.fork`), built web assets at `apps/web/dist/index.html`, an absolute path to a stock OMP binary or `dist/cli.js` matching `packageVersion` in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json), and `bunx playwright install chromium` when passing `--isolated-home`.
 
-```sh
-bun scripts/omp-lifecycle-development.ts --omp <absolute path to stock OMP dist/cli.js>
-```
+1. Build the web bundle if `apps/web/dist/index.html` is missing ([Build from source](../CONTRIBUTING.md#build-from-source)):
 
-The development runner uses an isolated loopback gateway in `dev-localhost` mode, private discovery
-and OMP HOME directories, and a Python `pty.fork` host with PTY stdin and stdout/stderr discarded
-to `/dev/null`, matching the campaign `ssh -tt` wrapper. It prints only evidence JSON and removes
-everything it started. It does not qualify the retained Mac or a signed candidate.
+   ```sh
+   bun run build
+   ```
+
+2. Run the local lifecycle development runner:
+
+   ```sh
+   bun scripts/omp-lifecycle-development.ts --omp <absolute-path-to-stock-omp-or-dist/cli.js>
+   ```
+
+   Add `--isolated-home` (and optional `--expect-version <X.Y.Z>`, valid only with `--isolated-home`) to verify the isolated-`HOME` discovery seam, headless Chromium **View** and **Control** attachment, `/quit` restart, and OMP-owned file removal instead ([Isolated-HOME execution hosts](OMP_INTEGRATION.md#isolated-home-execution-hosts)).
+
+3. Confirm stdout prints JSON containing `newGeneration`, `fork`, and `resumed` (or `passed: true`, `isolatedHome: true`, `discovery`, `initial`, `restart`, `revocation`, and `cleanup` under `--isolated-home`) with exit code `0`. Failures print `{"passed":false,"reason":...,"cleanup":{"stopped":...,"privateRootRemoved":...}}` and exit `1`.
+
+The development runner starts an isolated loopback gateway in `dev-localhost` mode on an ephemeral port (never `4317`) under `/tmp/omp-lifecycle-dev-*`, drives OMP through a Python `pty.fork` bridge with stdout and stderr discarded to `/dev/null`, prunes dead publications via `omp collab list`, and deletes its temporary root. Its output is local tested evidence only and does not qualify the retained Mac or a signed candidate.
+
+During `bun run qualify:stable` ([Mainline stable release procedure](RELEASE.md#mainline-stable-release-procedure)), [`scripts/stable-qualification.ts`](../scripts/stable-qualification.ts) verifies initial `generation` `1` publication and launch contracts on the campaign's live session before starting `android`, `androidPush`, `deviceCloud`, and `relay` (`android` and `relay` share that session, while `androidPush` and `deviceCloud` run separate OMP fixtures).
+
+Once all four concurrent lanes settle and the relay tunnel stops, `ompPublication` runs `runOmpLifecycle` ([`scripts/omp-lifecycle-qualification.ts`](../scripts/omp-lifecycle-qualification.ts)) over the existing `ssh -tt` stdin pipe (not a production gateway input path) with terminal output discarded:
+
+1. Confirm the published session is at `generation` `1` on `GET /api/v1/sessions`.
+2. Send `/new` and require the same `instanceId` at `generation + 1`, stale **View** and **Control** `POST /api/v1/sessions/:instanceId/launch` requests returning HTTP `409` (`generation_mismatch`, `Cache-Control: no-store`) without a capability, and live **View** and **Control** launches returning HTTP `200` with `Cache-Control: no-store`.
+3. Send two synthetic messages (3-second settle each) and `/fork`, then repeat the `generation + 1`, `409`, and `200` `no-store` checks.
+4. Stop the OMP process, wait up to 45 seconds for the card to disappear from `GET /api/v1/sessions`, relaunch with `--continue`, and require a new `instanceId` at `generation` `1` with the same `cwdLabel` and `200` `no-store` **View** and **Control** launches.
+5. Stop the resumed process and verify the card disappears from `GET /api/v1/sessions`.
+
+`/branch` is excluded because in-file rewinds produce no gateway-visible change. Additive boolean and count evidence is recorded at `lanes.ompPublication.evidence.lifecycle` (`newGeneration`, `fork`, and `resumed`; receipt schema `3`). An interrupted or failed step leaves `ompPublication` non-passed (`"running"` or `"failed"`), so resuming `qualify:stable` reruns the complete lifecycle sequence.
 
 ### Tested evidence — 2026-10-01
 

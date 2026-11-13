@@ -1,76 +1,82 @@
 # `apps/gateway`
 
-Implementation of the `omp-gateway` CLI and per-user `omp-gatewayd` daemon.
+This package implements the `omp-gateway` CLI and the per-user `omp-gatewayd` daemon; use this guide to find the module, command, state file, or test suite that owns each gateway behavior. The daemon reads the collaboration discovery directory published by stock Oh My Pi (OMP) `>= 18.1.20` under Bun `1.4.4` behind TUN-mode Tailscale Serve; for host installation, multi-host setup, fleet notifications, speech, and Tern session creation, see [Installation and operations](../../docs/OPERATIONS.md).
 
-Stock OMP `>= 18.1.20` supplies the collaboration controller and local registry natively. This
-separately installed gateway reads that registry; no fork, custom OMP build, or gateway-specific
-OMP plugin is required. Enable `collab.autoStart` once, then start plain `omp`. Deployment still
-requires Bun 1.4.4 and TUN-mode Tailscale Serve; see [OMP integration](../../docs/OMP_INTEGRATION.md).
+## Module map
 
-Implemented modules:
+| Module | Responsibility | Contract or guide |
+|---|---|---|
+| `src/auth.ts` | Loopback peer check, second-hop proxy detection, Serve login allowlist, `Origin` guards, and feed topology admission | [Tailnet authorization](../../docs/SECURITY.md#8-tailnet-authorization) |
+| `src/cli.ts` | `omp-gateway` and `omp-gatewayd` entrypoint, option parsing, `runServe` wiring, and transactional lifecycle commands | [CLI and daemon installation](../../docs/OPERATIONS.md#2-cli-and-daemon-installation) |
+| `src/config.ts` | Strict `config.json` validation, `readiness-token` lifecycle, private POSIX/Windows ACL file I/O, and rollback key removal | [Gateway configuration reference](../../docs/OPERATIONS.md#14-gateway-configuration-reference) |
+| `src/diagnostics.ts` | Deterministic tar builder for redacted `omp-gateway-diagnostics.tar` support archives (`doctor.json` and `manifest.json`) | [`doctor` and diagnostics bundle](../../docs/OPERATIONS.md#12-doctor-and-diagnostics-bundle) |
+| `src/doctor.ts` | Read-only host, service, TUN/Serve, allowlist, asset, OMP version, relay, and conditional Tern/fleet state checks | [`doctor` and diagnostics bundle](../../docs/OPERATIONS.md#12-doctor-and-diagnostics-bundle) |
+| `src/fleet-coordinator.ts` | Home-gateway fleet notification coordinator, source SSE pullers, epoch/sequence state, reconciliation, and Push v3 fan-out | [Fleet notification coordinator](../../docs/ARCHITECTURE.md#fleet-notification-coordinator) |
+| `src/fleet-source.ts` | Remote-source notification grant verifier persistence and identifier-only `GET /api/v1/notification-feed` SSE stream | [Fleet notification source](../../docs/ARCHITECTURE.md#fleet-notification-source) |
+| `src/http-policy.ts` | Document and API security headers, `no-store` cache control, `Permissions-Policy`, and cross-origin route/preflight rules | [Cross-origin access](../../docs/PROTOCOL.md#cross-origin-access) |
+| `src/http.ts` | Loopback HTTP server, rate limiter, metadata list/SSE, per-launch capability broker, Web Push, fleet, and creation routes | [`omp-gatewayd`](../../docs/ARCHITECTURE.md#13-omp-gatewayd) |
+| `src/installation.ts` | Payload staging under `installation/versions/`, `current.json` pointer activation, `history.json`, and predecessor pruning | [Installation transactions](../../docs/ARCHITECTURE.md#6-installation-transactions) |
+| `src/logger.ts` | Numeric/boolean-only `SafeLogger` with rate limiting and bounded schema-validated `QualificationLogSink` rotation | [Logging, diagnostics, and test artifacts](../../docs/SECURITY.md#11-logging-diagnostics-and-test-artifacts) |
+| `src/omp-registry.ts` | Read-only OMP discovery directory reader, coalesced `startHostPoller`, and per-launch `OmpLaunchResolver` IPC client | [Host poller and launch broker](../../docs/ARCHITECTURE.md#12-host-poller-and-launch-broker) |
+| `src/push.ts` | VAPID key pair management, owner-bound Web Push subscription storage, endpoint pacing, and Push v2 delivery | [Background attention push](../../docs/ARCHITECTURE.md#23-background-attention-push) |
+| `src/registry.ts` | In-memory metadata-only `SessionRegistry`, monotonic TTL reconciliation, generation/request launch checks, and event fan-out | [Host poller and launch broker](../../docs/ARCHITECTURE.md#12-host-poller-and-launch-broker) |
+| `src/service.ts` | Per-user `systemd`, macOS `LaunchAgent`, and Windows `OMP Session Gateway` scheduled-task rendering and ownership checks | [CLI and daemon installation](../../docs/OPERATIONS.md#2-cli-and-daemon-installation) |
+| `src/static.ts` | Symlink-rejecting loader for built **OMP Sessions** assets (`apps/web/dist/`) and immutable `/assets/*` cache headers | [Shell updates and caching](../../docs/ARCHITECTURE.md#shell-updates-and-caching) |
+| `src/tailnet.ts` | OS interface table inspection for Tailscale kernel TUN device presence and locally bound tailnet addresses | [Network exposure](../../docs/SECURITY.md#4-network-exposure) |
+| `src/tern-cli.ts` | Lossless bigint JSON tokenizer and bounded `tern inspect --json` and `tern new tab` subprocess wrapper | [Opt-in Tern session creation](../../docs/OPERATIONS.md#opt-in-tern-session-creation) |
+| `src/tern-creation.ts` | Serialized session creation state machine, capability-free ledger persistence, crash recovery, and OMP discovery adoption | [Session creation state machine](../../docs/PROTOCOL.md#session-creation-state-machine) |
 
-- strict configuration and private gateway-only readiness token;
-- read-only OMP discovery, endpoint ownership/permission checks, and per-host query authentication;
-- bounded snapshot polling and generation-bound, just-in-time link queries to OMP-owned endpoints;
-- schema validation and protocol versioning;
-- metadata-only in-memory registry; no capability store or cache;
-- generation and poll/TTL reconciliation;
-- loopback-only HTTP server;
-- Tailscale Serve identity middleware and exact allowlist;
-- metadata list, SSE, just-in-time launch, generic local health, and redacted local diagnostics;
-- static PWA and pinned collab-web asset serving;
-- `serve`, `install`, `uninstall`, `status`, `doctor`, and `rotate-readiness-token` commands;
-- systemd-user, LaunchAgent, and Windows current-user integration;
-- privacy-safe structured logging.
+## Commands
 
-## Optional multi-host dashboard and speech
+In the source checkout, run `bun apps/gateway/src/cli.ts <command>` (`src/installation.ts` bundles it into `apps/gateway/src/cli.js` for staged and release archives, and `cli.ts` treats `argv[1]` basename `omp-gatewayd` with no arguments as `serve`).
 
-Old configurations remain local-only: `http.trustedDashboardOrigins` defaults to `[]`,
-`fleet.targets` to `[]`, and `speech.browserRecognition` to `false`. `fleet.label` defaults to the
-first DNS label of `http.publicOrigin` (or the loopback address for development).
+Commands that serve or stage web assets (`serve`, `install`, `doctor`) expect `apps/web/dist/` from `bun run build` at the repository root ([Build from source](../../CONTRIBUTING.md#build-from-source)); for operator usage, see [CLI and daemon installation](../../docs/OPERATIONS.md#2-cli-and-daemon-installation).
 
-Configure both sides in the private `config.json`; there are no new install flags:
+| Command | Operator options | Internal or qualification options |
+|---|---|---|
+| `serve` | `--dev-localhost`, `--port`, `--origin` | `--readiness-instance`, `--qualification-log-dir` |
+| `install` | `--origin`, `--allow`, `--port`, `--no-start` | `--qualification-log-dir` |
+| `uninstall` | `--no-stop` | — |
+| `rollback` | `--to` | `--qualification-log-dir` |
+| `status` | — | — |
+| `doctor` | `--bundle`, `--output` | — |
+| `rotate-readiness-token` | — | `--qualification-log-dir` |
+| `serve-guidance` | — | — |
+| `help` (`--help`) | — | — |
 
-```json
-{
-  "http": {
-    "trustedDashboardOrigins": ["https://dashboard.example.ts.net"]
-  },
-  "fleet": {
-    "label": "Studio",
-    "targets": [
-      { "id": "remote", "label": "Remote host", "origin": "https://remote.example.ts.net" }
-    ]
-  },
-  "speech": { "browserRecognition": false }
-}
+## State files
+
+All gateway-owned files use private owner-only permissions (`0600` on POSIX; protected user plus `SYSTEM` DACL on Windows). For OS directory locations, see [Paths](../../docs/OPERATIONS.md#13-paths).
+
+| File or directory | Base directory | Owning module |
+|---|---|---|
+| `config.json`, `readiness-token` | `<configDir>` | `src/config.ts` |
+| `config.pre-rollback.json` | `<configDir>` | `src/cli.ts`, `src/config.ts` |
+| `omp-session-gateway.service` / `omp-session-gateway.plist` / `omp-session-gateway-task.xml` | OS user service path (`<configDir>` on Windows) | `src/service.ts` |
+| `installation/current.json`, `installation/history.json`, `installation/versions/<version>-<digest>/` | `<stateDir>` | `src/installation.ts` |
+| `push-state.json` | `<stateDir>` | `src/push.ts` |
+| `notification-grants.json` | `<stateDir>` | `src/fleet-source.ts` |
+| `fleet-notifications.json` | `<stateDir>` | `src/fleet-coordinator.ts` |
+| `session-creations.json` | `<stateDir>` | `src/tern-creation.ts` |
+
+## Tests
+
+Seventeen of the 19 modules in `src/` have a matching `<module>.test.ts` file under `apps/gateway/test/`, while `src/auth.ts` and `src/http-policy.ts` are covered by `http.test.ts` and `security-mutations.test.ts`.
+
+`apps/gateway/test/` also includes `fleet-two-gateway.test.ts`, `ci-workflow.test.ts`, shared helpers in `test-support.ts`, and JSON fixtures in `test/fixtures/`. Four POSIX-specific suites (`ci-workflow.test.ts`, `cli.test.ts`, `doctor.test.ts`, and `push.test.ts`) are excluded on Windows in `scripts/test-portable.ts`.
+
+Run a single test file from the repository root with an explicit `./` path:
+
+```sh
+bun test ./apps/gateway/test/config.test.ts
 ```
 
-This is a partial configuration example: keep the existing listener/public-origin and authentication
-settings. A dashboard lists each target in `fleet.targets`; each target must separately list the
-dashboard's exact origin in `http.trustedDashboardOrigins` **and** allow the user's Tailscale login in
-`auth.allowedLogins`. Browser requests go directly to the target: no gateway proxy, shared login,
-remote SSE, or remote push subscription is created. Alerts remain scoped to each installed host.
-Targets are limited to seven and trusted dashboards to eight, with canonical HTTPS origins, no
-duplicates or local-origin collisions. Development gateways may additionally use canonical
-`http://127.0.0.1:<port>` or `http://[::1]:<port>` origins.
+For full suite and qualification coverage, see [Test plan](../../docs/TEST_PLAN.md).
 
-Restart the gateway after editing its configuration and **reload the PWA** to load the new host list
-or speech setting. Keyboard dictation works with speech recognition disabled. Enabling
-`speech.browserRecognition` permits the opt-in in-page recognizer on Control sessions only; reviewing
-and using recognized text is separate from Send. Recognition availability and audio processing depend
-on the browser and its speech provider.
+## Boundaries
 
-Install/reinstall preserves authored fleet and speech settings. A rollback to a retained runtime
-older than `0.8.0` first atomically saves the full authored bytes to owner-only
-`config.pre-rollback.json`, then removes `http.trustedDashboardOrigins`, `fleet`, and `speech` from
-`config.json` before starting that runtime. An existing backup refuses the rollback rather than being
-overwritten. To restore those options, install `0.8.0` or newer first, replace `config.json` with the
-backup, restart the gateway, and reload the PWA. A failed rollback restores the original configuration
-before repairing the current service.
-
-Windows x86-64 build 26100 at interactive logon is qualified for the latest release; supported
-platforms, automated test coverage, and exact qualified combinations and evidence are in
-[Compatibility](../../docs/COMPATIBILITY.md#platforms-and-browsers).
-
-Do not implement a relay in this package for v1. Do not add a persistent session database.
+- No collaboration relay or proxy: the gateway serves metadata and pinned `collab-web` assets (`bun run build` populates `apps/web/dist/`) and never runs a WebSocket relay or server-side session proxy.
+- No persistent session database: `SessionRegistry` holds non-secret metadata in memory only; daemon startup begins empty and repopulates on the next OMP discovery poll.
+- No capability store or cache: a **View** or **Control** link is a bearer secret, called a capability in the contracts; the gateway fetches it from OMP only on an explicit launch POST, returns it once with `Cache-Control: no-store, max-age=0`, and never caches or persists it.
+- Read-only OMP discovery and narrow Tern boundary: the gateway never writes, renames, or unlinks files in `omp.discoveryDir`, never scrapes terminals or session transcripts, and invokes Tern only for opt-in `new tab` creation and read-only `inspect --json` adoption.
+- Numeric and boolean logs only: `SafeLogger` rejects string fields so titles, paths, logins, tokens, and capabilities cannot enter logs.
