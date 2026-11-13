@@ -5,7 +5,7 @@
   "type": "module",
   "dependencies": {
     "@omp-session-gateway/protocol": "workspace:*",
-    "web-push": "3.6.7"
+    "web-push": "4.0.0"
   },
   "scripts": {
     "test": "bun test",
